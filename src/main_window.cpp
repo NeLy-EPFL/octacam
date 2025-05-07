@@ -2,38 +2,42 @@
 
 #include <QApplication>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsScene>
 #include <QGraphicsView>
-#include <QSplitter>
+#include <QMdiArea>
+#include <QMdiSubWindow>
+#include <QVBoxLayout>
+#include <QWidget>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) { setupUi(7); }
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) { setupUi(8); }
 
 MainWindow::~MainWindow() {}
 
 void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
   setWindowTitle("huitacam");
 
-  if (n_rows < 0 && n_cols < 0) {
-    throw std::invalid_argument("Either n_rows or n_cols must be set");
-  } else if (n_cols <= 0) {
-    n_cols = (n_views + n_rows - 1) / n_rows;
-  } else {
-    n_rows = (n_views + n_cols - 1) / n_cols;
+  QMdiArea *mdi_area = new QMdiArea(this);
+  setCentralWidget(mdi_area);
+
+  for (int i = 0; i < n_views; ++i) {
+    auto *sub_window = new QMdiSubWindow(mdi_area);
+    auto *widget = new QWidget(mdi_area);
+    auto *layout = new QVBoxLayout(widget);
+    auto *view = new QGraphicsView(widget);
+    view->setScene(new QGraphicsScene(view));
+    auto *pixmap_item = new QGraphicsPixmapItem();
+    pixmap_item->setPixmap(
+        QPixmap::fromImage(QImage(640, 480, QImage::Format_Grayscale8)));
+    layout->addWidget(view);
+    sub_window->setWidget(widget);
+    sub_window->setWindowTitle(QString("Camera %1").arg(i + 1));
+    mdi_area->addSubWindow(sub_window);
   }
+}
 
-  QSplitter *splitter = new QSplitter(Qt::Orientation::Horizontal, this);
-  setCentralWidget(splitter);
-
-  for (auto i = 0; i < n_cols; ++i) {
-    auto *splitter_i = new QSplitter(Qt::Orientation::Vertical, splitter);
-    splitter->addWidget(splitter_i);
-    for (auto j = 0; j < n_rows; ++j) {
-      if (i * n_rows + j >= n_views) {
-        break;
-      }
-      auto *view = new QGraphicsView(splitter_i);
-      view->setScene(new QGraphicsScene(view));
-      auto pixmap_item = new QGraphicsPixmapItem();
-      splitter_i->addWidget(view);
-    }
+void MainWindow::resizeEvent(QResizeEvent *event) {
+  QMainWindow::resizeEvent(event);
+  if (auto mdi_area = qobject_cast<QMdiArea *>(centralWidget())) {
+    mdi_area->tileSubWindows();
   }
 }

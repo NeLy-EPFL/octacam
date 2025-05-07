@@ -1,10 +1,9 @@
 #include "camera.h"
 #include "main_window.h"
 #include <CLI/CLI.hpp>
+#include <QApplication>
 #include <iostream>
 #include <string>
-#include <QApplication>
-#include "main_window.h"
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"huitacam"};
@@ -20,6 +19,6 @@ int main(int argc, char **argv) {
   QApplication qapp(argc, argv);
   MainWindow main_window;
   main_window.setWindowTitle("huitacam");
-  main_window.show();
+  main_window.showMaximized();
   return qapp.exec();
 }
