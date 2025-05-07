@@ -1,5 +1,6 @@
 #pragma once
 #include <QBitmap>
+#include <atomic>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -19,8 +20,6 @@ public:
     std::lock_guard<std::mutex> lock(mtx);
     QImage image(static_cast<const uchar *>(data), width, height,
                  QImage::Format_Grayscale8);
-    std::cout << "FrameForDisplay::get_bitmap() " << "width: " << width
-              << " height: " << height << " size: " << size << std::endl;
     return QPixmap::fromImage(image);
   }
   void set_data(const uint8_t *new_data) {
@@ -54,6 +53,7 @@ public:
   explicit Camera(IPylonDevice *device);
   ~Camera();
   Camera(Camera &&other);
+  void stop() { stop_preview = true; }
   void grab(int n_frames);
   void preview();
   std::string get_serial_number() const;
@@ -63,6 +63,7 @@ public:
 private:
   std::unique_ptr<CBaslerUniversalInstantCamera> camera;
   FrameForDisplay frame_for_display;
+  std::atomic<bool> stop_preview{false};
 };
 
 class CameraSystem {

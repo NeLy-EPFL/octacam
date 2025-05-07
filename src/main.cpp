@@ -2,8 +2,10 @@
 #include "main_window.h"
 #include <CLI/CLI.hpp>
 #include <QApplication>
+#include <chrono>
 #include <iostream>
 #include <string>
+#include <thread>
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"huitacam"};

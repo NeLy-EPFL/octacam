@@ -40,7 +40,7 @@ void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
 
   QTimer *timer = new QTimer(this);
   connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
-  timer->start(1000); // 30 FPS
+  timer->start(1000 / 30);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {

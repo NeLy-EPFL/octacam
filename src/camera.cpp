@@ -9,7 +9,10 @@ Camera::Camera(IPylonDevice *device)
   camera->Open();
 }
 
-Camera::~Camera() {}
+Camera::~Camera() {
+  stop_preview = true;
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+}
 
 Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
@@ -21,10 +24,8 @@ std::string Camera::get_serial_number() const {
 
 void Camera::preview() {
   std::thread preview_thread([this]() {
-    camera->StartGrabbing();
-    while (camera->IsGrabbing()) {
-      // sleep for 0.1 seconds
-      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    camera->StartGrabbing(GrabStrategy_LatestImageOnly);
+    while (camera->IsGrabbing() and !stop_preview) {
       CGrabResultPtr ptrGrabResult;
       camera->RetrieveResult(5000, ptrGrabResult,
                              TimeoutHandling_ThrowException);
@@ -41,6 +42,7 @@ void Camera::preview() {
                   << std::endl;
       }
     }
+    camera->StopGrabbing();
   });
   preview_thread.detach();
 }
