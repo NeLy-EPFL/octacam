@@ -44,6 +44,8 @@ void Camera::grab(int n_frames) {
 
 void Camera::load_config(const std::string &config) {
   CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+  frame_for_display.set_size(camera->Width.GetValue(),
+                             camera->Height.GetValue());
 }
 
 CameraSystem::CameraSystem() {
