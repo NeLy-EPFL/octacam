@@ -15,15 +15,18 @@ using namespace Pylon;
 class FrameForDisplay {
 public:
   ~FrameForDisplay() { delete[] data; }
-  QBitmap get_bitmap() {
+  QPixmap get_pixmap() {
     std::lock_guard<std::mutex> lock(mtx);
     QImage image(static_cast<const uchar *>(data), width, height,
                  QImage::Format_Grayscale8);
-    return QBitmap::fromImage(image);
+    std::cout << "FrameForDisplay::get_bitmap() " << "width: " << width
+              << " height: " << height << " size: " << size << std::endl;
+    return QPixmap::fromImage(image);
   }
   void set_data(const uint8_t *new_data) {
     if (mtx.try_lock()) {
       std::copy(new_data, new_data + size, data);
+      mtx.unlock();
     }
   }
 
@@ -53,7 +56,8 @@ public:
   Camera(Camera &&other);
   void grab(int n_frames);
   void preview();
-  std::string get_serial_number();
+  std::string get_serial_number() const;
+  QPixmap get_pixmap() { return frame_for_display.get_pixmap(); }
   void load_config(const std::string &config);
 
 private:
@@ -72,8 +76,8 @@ public:
   auto begin() { return cameras.begin(); }
   auto end() { return cameras.end(); }
 
-  auto begin() const { return cameras.begin(); }
-  auto end() const { return cameras.end(); }
+  // auto begin() const { return cameras.begin(); }
+  // auto end() const { return cameras.end(); }
 
 private:
   PylonAutoInitTerm autoInitTerm;

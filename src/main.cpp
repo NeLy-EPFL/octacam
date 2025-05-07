@@ -19,6 +19,9 @@ int main(int argc, char **argv) {
     std::cout << "Camera serial number: " << camera.get_serial_number()
               << std::endl;
   }
+  for (auto &camera : camera_system) {
+    camera.preview();
+  }
 
   QApplication qapp(argc, argv);
   MainWindow main_window(camera_system);

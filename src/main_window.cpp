@@ -10,7 +10,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-MainWindow::MainWindow(const CameraSystem &camera_system, QWidget *parent)
+MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
     : QMainWindow(parent), camera_system(camera_system) {
   setupUi(8);
 }
@@ -30,8 +30,8 @@ void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
     auto *view = new QGraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
-    pixmap_item->setPixmap(
-        QPixmap::fromImage(QImage(640, 480, QImage::Format_Grayscale8)));
+    pixmap_items.push_back(pixmap_item);
+    view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
     sub_window->setWidget(widget);
     sub_window->setWindowTitle(QString("Camera %1").arg(i + 1));
@@ -39,11 +39,20 @@ void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
   }
 
   QTimer *timer = new QTimer(this);
+  connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
+  timer->start(1000); // 30 FPS
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
   if (auto mdi_area = qobject_cast<QMdiArea *>(centralWidget())) {
     mdi_area->tileSubWindows();
+  }
+}
+
+void MainWindow::update_frames() {
+  int i = 0;
+  for (auto &camera : camera_system) {
+    pixmap_items[i++]->setPixmap(camera.get_pixmap());
   }
 }

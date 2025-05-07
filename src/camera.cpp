@@ -1,5 +1,8 @@
 #include "camera.h"
+#include <chrono>
 #include <fstream>
+#include <iostream>
+#include <thread>
 
 Camera::Camera(IPylonDevice *device)
     : camera(std::make_unique<CBaslerUniversalInstantCamera>(device)) {
@@ -12,25 +15,34 @@ Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
 }
 
-std::string Camera::get_serial_number() {
+std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
 void Camera::preview() {
-  camera->StartGrabbing();
-  while (camera->IsGrabbing()) {
-    CGrabResultPtr ptrGrabResult;
-    camera->RetrieveResult(5000, ptrGrabResult, TimeoutHandling_ThrowException);
-    if (ptrGrabResult->GrabSucceeded()) {
-      intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
-      const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-      frame_for_display.set_data(pImageBuffer);
-    } else {
-      std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                << std::dec << " " << ptrGrabResult->GetErrorDescription()
-                << std::endl;
+  std::thread preview_thread([this]() {
+    camera->StartGrabbing();
+    while (camera->IsGrabbing()) {
+      // sleep for 0.1 seconds
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      CGrabResultPtr ptrGrabResult;
+      camera->RetrieveResult(5000, ptrGrabResult,
+                             TimeoutHandling_ThrowException);
+      if (ptrGrabResult->GrabSucceeded()) {
+        intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
+        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
+        frame_for_display.set_data(pImageBuffer);
+        std::cout << "Camera context: " << cameraContextValue
+                  << " Width: " << ptrGrabResult->GetWidth()
+                  << " Height: " << ptrGrabResult->GetHeight() << std::endl;
+      } else {
+        std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+                  << std::dec << " " << ptrGrabResult->GetErrorDescription()
+                  << std::endl;
+      }
     }
-  }
+  });
+  preview_thread.detach();
 }
 
 void Camera::grab(int n_frames) {
