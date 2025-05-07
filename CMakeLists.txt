@@ -15,6 +15,10 @@ FetchContent_MakeAvailable(CLI11)
 
 find_package(OpenCV REQUIRED)
 find_package(pylon REQUIRED)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
 add_executable(huitacam)
 target_sources(huitacam
@@ -22,12 +26,17 @@ target_sources(huitacam
         src/main.cpp
         src/camera.cpp
         src/camera.h
+        src/main_window.cpp
+        src/main_window.h
 )
 target_link_libraries(huitacam
     PRIVATE
         CLI11::CLI11
         pylon::pylon
         opencv_videoio
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
 )
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
