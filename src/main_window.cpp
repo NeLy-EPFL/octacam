@@ -24,8 +24,7 @@ void MainWindow::setupUi() {
   setCentralWidget(mdi_area);
 
   for (auto &camera : camera_system) {
-    auto *sub_window = new QMdiSubWindow(mdi_area);
-    auto *widget = new QWidget(mdi_area);
+    auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
     auto *view = new GraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
@@ -34,9 +33,12 @@ void MainWindow::setupUi() {
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
-    sub_window->setWidget(widget);
+    auto sub_window =
+        mdi_area->addSubWindow(widget, Qt::WindowMinMaxButtonsHint);
+    QPixmap pixmap{1, 1};
+    pixmap.fill(Qt::transparent);
+    sub_window->setWindowIcon(QIcon{pixmap});
     sub_window->setWindowTitle(QString(camera.get_serial_number().c_str()));
-    mdi_area->addSubWindow(sub_window);
   }
 
   QTimer *timer = new QTimer(this);
