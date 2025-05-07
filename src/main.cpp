@@ -18,10 +18,6 @@ int main(int argc, char **argv) {
   camera_system.load_config(config_dir);
 
   for (auto &camera : camera_system) {
-    std::cout << "Camera serial number: " << camera.get_serial_number()
-              << std::endl;
-  }
-  for (auto &camera : camera_system) {
     camera.preview();
   }
 

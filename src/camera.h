@@ -77,8 +77,8 @@ public:
   auto begin() { return cameras.begin(); }
   auto end() { return cameras.end(); }
 
-  // auto begin() const { return cameras.begin(); }
-  // auto end() const { return cameras.end(); }
+  auto begin() const { return cameras.begin(); }
+  auto end() const { return cameras.end(); }
 
 private:
   PylonAutoInitTerm autoInitTerm;

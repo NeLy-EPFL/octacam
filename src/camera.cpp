@@ -33,11 +33,8 @@ void Camera::preview() {
         intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.set_data(pImageBuffer);
-        std::cout << "Camera context: " << cameraContextValue
-                  << " Width: " << ptrGrabResult->GetWidth()
-                  << " Height: " << ptrGrabResult->GetHeight() << std::endl;
       } else {
-        std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+        std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
                   << std::dec << " " << ptrGrabResult->GetErrorDescription()
                   << std::endl;
       }
@@ -65,7 +62,7 @@ void Camera::grab(int n_frames) {
                            ptrGrabResult->GetWidth(), CV_8UC1,
                            (void *)pImageBuffer));
     } else {
-      std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+      std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
                 << std::dec << " " << ptrGrabResult->GetErrorDescription()
                 << std::endl;
     }

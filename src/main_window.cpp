@@ -12,29 +12,30 @@
 
 MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
     : QMainWindow(parent), camera_system(camera_system) {
-  setupUi(8);
+  setupUi();
 }
 
 MainWindow::~MainWindow() {}
 
-void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
+void MainWindow::setupUi() {
   setWindowTitle("huitacam");
 
   QMdiArea *mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);
 
-  for (int i = 0; i < n_views; ++i) {
+  for (auto &camera : camera_system) {
     auto *sub_window = new QMdiSubWindow(mdi_area);
     auto *widget = new QWidget(mdi_area);
     auto *layout = new QVBoxLayout(widget);
-    auto *view = new QGraphicsView(widget);
+    auto *view = new GraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
+    pixmap_item->setPixmap(camera.get_pixmap());
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
     sub_window->setWidget(widget);
-    sub_window->setWindowTitle(QString("Camera %1").arg(i + 1));
+    sub_window->setWindowTitle(QString(camera.get_serial_number().c_str()));
     mdi_area->addSubWindow(sub_window);
   }
 
@@ -45,8 +46,11 @@ void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
+  int i = 0;
   if (auto mdi_area = qobject_cast<QMdiArea *>(centralWidget())) {
     mdi_area->tileSubWindows();
+    // views[i]->fitInView(pixmap_items[i], Qt::KeepAspectRatio);
+    ++i;
   }
 }
 
