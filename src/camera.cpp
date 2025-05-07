@@ -16,6 +16,23 @@ std::string Camera::get_serial_number() {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
+void Camera::preview() {
+  camera->StartGrabbing();
+  while (camera->IsGrabbing()) {
+    CGrabResultPtr ptrGrabResult;
+    camera->RetrieveResult(5000, ptrGrabResult, TimeoutHandling_ThrowException);
+    if (ptrGrabResult->GrabSucceeded()) {
+      intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
+      const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
+      frame_for_display.set_data(pImageBuffer);
+    } else {
+      std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+                << std::dec << " " << ptrGrabResult->GetErrorDescription()
+                << std::endl;
+    }
+  }
+}
+
 void Camera::grab(int n_frames) {
   int width = camera->Width.GetValue();
   int height = camera->Height.GetValue();

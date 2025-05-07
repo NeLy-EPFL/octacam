@@ -6,10 +6,14 @@
 #include <QGraphicsView>
 #include <QMdiArea>
 #include <QMdiSubWindow>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) { setupUi(8); }
+MainWindow::MainWindow(const CameraSystem &camera_system, QWidget *parent)
+    : QMainWindow(parent), camera_system(camera_system) {
+  setupUi(8);
+}
 
 MainWindow::~MainWindow() {}
 
@@ -33,6 +37,8 @@ void MainWindow::setupUi(int n_views, int n_rows, int n_cols) {
     sub_window->setWindowTitle(QString("Camera %1").arg(i + 1));
     mdi_area->addSubWindow(sub_window);
   }
+
+  QTimer *timer = new QTimer(this);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {

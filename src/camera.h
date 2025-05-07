@@ -52,6 +52,7 @@ public:
   ~Camera();
   Camera(Camera &&other);
   void grab(int n_frames);
+  void preview();
   std::string get_serial_number();
   void load_config(const std::string &config);
 
@@ -67,6 +68,12 @@ public:
 
   void record(int n_frames);
   void load_config(const std::string &directory);
+
+  auto begin() { return cameras.begin(); }
+  auto end() { return cameras.end(); }
+
+  auto begin() const { return cameras.begin(); }
+  auto end() const { return cameras.end(); }
 
 private:
   PylonAutoInitTerm autoInitTerm;

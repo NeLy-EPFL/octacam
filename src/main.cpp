@@ -14,10 +14,14 @@ int main(int argc, char **argv) {
   CLI11_PARSE(app, argc, argv);
   CameraSystem camera_system;
   camera_system.load_config(config_dir);
-  camera_system.record(10);
+
+  for (auto &camera : camera_system) {
+    std::cout << "Camera serial number: " << camera.get_serial_number()
+              << std::endl;
+  }
 
   QApplication qapp(argc, argv);
-  MainWindow main_window;
+  MainWindow main_window(camera_system);
   main_window.setWindowTitle("huitacam");
   main_window.showMaximized();
   return qapp.exec();
