@@ -46,11 +46,8 @@ void MainWindow::setupUi() {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
-  int i = 0;
   if (auto mdi_area = qobject_cast<QMdiArea *>(centralWidget())) {
     mdi_area->tileSubWindows();
-    // views[i]->fitInView(pixmap_items[i], Qt::KeepAspectRatio);
-    ++i;
   }
 }
 
