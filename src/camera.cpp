@@ -17,11 +17,11 @@ QPixmap FrameForDisplay::retrieve_as_pixmap() {
 }
 
 void FrameForDisplay::store_frame(const uint8_t *new_data) {
-  if (mtx.try_lock()) {
+  std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+  if (lock.owns_lock()) {
     if (retrieved) {
       std::copy(new_data, new_data + size, data);
     }
-    mtx.unlock();
   }
 }
 
