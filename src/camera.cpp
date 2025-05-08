@@ -1,19 +1,83 @@
 #include "camera.h"
+#include <chrono>
 #include <fstream>
+#include <future>
+#include <iostream>
+#include <thread>
+
+FrameForDisplay::~FrameForDisplay() { delete[] data; }
+
+QPixmap FrameForDisplay::retrieve_as_pixmap() {
+  std::lock_guard<std::mutex> lock(mtx);
+  QImage image(static_cast<const uchar *>(data), width, height,
+               QImage::Format_Grayscale8);
+  auto pixmap = QPixmap::fromImage(image);
+  retrieved = true;
+  return pixmap;
+}
+
+void FrameForDisplay::store_frame(const uint8_t *new_data) {
+  std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
+  if (lock.owns_lock() && retrieved) {
+    std::copy(new_data, new_data + size, data);
+  }
+}
+
+void FrameForDisplay::update_size(int new_width, int new_height) {
+  std::lock_guard<std::mutex> lock(mtx);
+  if (width != new_width || height != new_height) {
+    delete[] data;
+    width = new_width;
+    height = new_height;
+    size = width * height;
+    data = new uint8_t[size];
+  }
+}
 
 Camera::Camera(IPylonDevice *device)
     : camera(std::make_unique<CBaslerUniversalInstantCamera>(device)) {
   camera->Open();
 }
 
-Camera::~Camera() {}
+Camera::~Camera() { stop_preview(); }
 
 Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
 }
 
-std::string Camera::get_serial_number() {
+std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
+}
+
+QPixmap Camera::get_pixmap() { return frame_for_display.retrieve_as_pixmap(); }
+
+void Camera::start_preview() {
+  stop_preview_flag = false;
+  preview_future = std::async(std::launch::async, [this]() {
+    camera->StartGrabbing(GrabStrategy_LatestImageOnly);
+    while (camera->IsGrabbing() && !stop_preview_flag) {
+      CGrabResultPtr ptrGrabResult;
+      camera->RetrieveResult(5000, ptrGrabResult,
+                             TimeoutHandling_ThrowException);
+      if (ptrGrabResult->GrabSucceeded()) {
+        intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
+        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
+        frame_for_display.store_frame(pImageBuffer);
+      } else {
+        std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+                  << std::dec << ptrGrabResult->GetErrorDescription()
+                  << std::endl;
+      }
+    }
+    camera->StopGrabbing();
+  });
+}
+
+void Camera::stop_preview() {
+  stop_preview_flag = true;
+  if (preview_future.valid()) {
+    preview_future.get();
+  }
 }
 
 void Camera::grab(int n_frames) {
@@ -34,8 +98,8 @@ void Camera::grab(int n_frames) {
                            ptrGrabResult->GetWidth(), CV_8UC1,
                            (void *)pImageBuffer));
     } else {
-      std::cout << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                << std::dec << " " << ptrGrabResult->GetErrorDescription()
+      std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
+                << std::dec << ptrGrabResult->GetErrorDescription()
                 << std::endl;
     }
   }
@@ -43,7 +107,11 @@ void Camera::grab(int n_frames) {
 }
 
 void Camera::load_config(const std::string &config) {
-  CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+  if (!config.empty()) {
+    CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+  }
+  frame_for_display.update_size(camera->Width.GetValue(),
+                                camera->Height.GetValue());
 }
 
 CameraSystem::CameraSystem() {
@@ -57,7 +125,7 @@ CameraSystem::CameraSystem() {
   }
 }
 
-CameraSystem::~CameraSystem() {}
+CameraSystem::~CameraSystem() = default;
 
 void CameraSystem::record(int n_frames) {
   std::vector<std::thread> grab_threads;
@@ -74,13 +142,24 @@ void CameraSystem::load_config(const std::string &directory) {
     auto serial_number = camera.get_serial_number();
     std::string config_file = directory + "/" + serial_number + ".pfs";
     std::ifstream file(config_file);
-    if (!file) {
-      std::cerr << "Config file not found: " << config_file << std::endl;
-      continue;
+    if (file) {
+      std::cout << "Loading config for camera: " << serial_number << std::endl;
+      std::string content((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+      camera.load_config(content);
+    } else {
+      camera.load_config("");
+      std::cerr << "Warning: config file not found at" << config_file
+                << std::endl;
     }
-    std::cout << "Loading config for camera: " << serial_number << std::endl;
-    std::string content((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-    camera.load_config(content);
   }
+}
+
+std::vector<Camera>::iterator CameraSystem::begin() { return cameras.begin(); }
+std::vector<Camera>::iterator CameraSystem::end() { return cameras.end(); }
+std::vector<Camera>::const_iterator CameraSystem::begin() const {
+  return cameras.begin();
+}
+std::vector<Camera>::const_iterator CameraSystem::end() const {
+  return cameras.end();
 }
