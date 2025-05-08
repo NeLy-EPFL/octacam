@@ -17,15 +17,16 @@ using namespace Pylon;
 class FrameForDisplay {
 public:
   ~FrameForDisplay();
-  QPixmap get_pixmap();
-  void set_data(const uint8_t *new_data);
-  void set_size(int new_width, int new_height);
+  QPixmap retrieve_as_pixmap();
+  void store_frame(const uint8_t *new_data);
+  void update_size(int new_width, int new_height);
 
 private:
   int width = 0;
   int height = 0;
   size_t size = 0;
   uint8_t *data = nullptr;
+  bool retrieved = true;
   std::mutex mtx;
 };
 

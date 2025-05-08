@@ -7,21 +7,25 @@
 
 FrameForDisplay::~FrameForDisplay() { delete[] data; }
 
-QPixmap FrameForDisplay::get_pixmap() {
+QPixmap FrameForDisplay::retrieve_as_pixmap() {
   std::lock_guard<std::mutex> lock(mtx);
   QImage image(static_cast<const uchar *>(data), width, height,
                QImage::Format_Grayscale8);
-  return QPixmap::fromImage(image);
+  auto pixmap = QPixmap::fromImage(image);
+  retrieved = true;
+  return pixmap;
 }
 
-void FrameForDisplay::set_data(const uint8_t *new_data) {
+void FrameForDisplay::store_frame(const uint8_t *new_data) {
   if (mtx.try_lock()) {
-    std::copy(new_data, new_data + size, data);
+    if (retrieved) {
+      std::copy(new_data, new_data + size, data);
+    }
     mtx.unlock();
   }
 }
 
-void FrameForDisplay::set_size(int new_width, int new_height) {
+void FrameForDisplay::update_size(int new_width, int new_height) {
   std::lock_guard<std::mutex> lock(mtx);
   if (width != new_width || height != new_height) {
     delete[] data;
@@ -47,7 +51,7 @@ std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
-QPixmap Camera::get_pixmap() { return frame_for_display.get_pixmap(); }
+QPixmap Camera::get_pixmap() { return frame_for_display.retrieve_as_pixmap(); }
 
 void Camera::start_preview() {
   stop_preview_flag = false;
@@ -60,7 +64,7 @@ void Camera::start_preview() {
       if (ptrGrabResult->GrabSucceeded()) {
         intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-        frame_for_display.set_data(pImageBuffer);
+        frame_for_display.store_frame(pImageBuffer);
       } else {
         std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
                   << std::dec << ptrGrabResult->GetErrorDescription()
@@ -106,8 +110,8 @@ void Camera::grab(int n_frames) {
 
 void Camera::load_config(const std::string &config) {
   CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
-  frame_for_display.set_size(camera->Width.GetValue(),
-                             camera->Height.GetValue());
+  frame_for_display.update_size(camera->Width.GetValue(),
+                                camera->Height.GetValue());
 }
 
 CameraSystem::CameraSystem() {
