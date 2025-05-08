@@ -12,12 +12,21 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
+
+GraphicsView::~GraphicsView() = default;
+
+void GraphicsView::resizeEvent(QResizeEvent *event) {
+  QGraphicsView::resizeEvent(event);
+  fitInView(scene()->itemsBoundingRect(), Qt::KeepAspectRatio);
+}
+
 MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
     : QMainWindow(parent), camera_system(camera_system) {
   setupUi();
 }
 
-MainWindow::~MainWindow() {}
+MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
   setWindowTitle("huitacam");

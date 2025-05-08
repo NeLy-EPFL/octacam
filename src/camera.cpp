@@ -4,6 +4,33 @@
 #include <iostream>
 #include <thread>
 
+FrameForDisplay::~FrameForDisplay() { delete[] data; }
+
+QPixmap FrameForDisplay::get_pixmap() {
+  std::lock_guard<std::mutex> lock(mtx);
+  QImage image(static_cast<const uchar *>(data), width, height,
+               QImage::Format_Grayscale8);
+  return QPixmap::fromImage(image);
+}
+
+void FrameForDisplay::set_data(const uint8_t *new_data) {
+  if (mtx.try_lock()) {
+    std::copy(new_data, new_data + size, data);
+    mtx.unlock();
+  }
+}
+
+void FrameForDisplay::set_size(int new_width, int new_height) {
+  std::lock_guard<std::mutex> lock(mtx);
+  if (width != new_width || height != new_height) {
+    delete[] data;
+    width = new_width;
+    height = new_height;
+    size = width * height;
+    data = new uint8_t[size];
+  }
+}
+
 Camera::Camera(IPylonDevice *device)
     : camera(std::make_unique<CBaslerUniversalInstantCamera>(device)) {
   camera->Open();
@@ -18,9 +45,13 @@ Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
 }
 
+void Camera::stop() { stop_preview = true; }
+
 std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
+
+QPixmap Camera::get_pixmap() { return frame_for_display.get_pixmap(); }
 
 void Camera::preview() {
   std::thread preview_thread([this]() {
@@ -63,7 +94,7 @@ void Camera::grab(int n_frames) {
                            (void *)pImageBuffer));
     } else {
       std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                << std::dec << " " << ptrGrabResult->GetErrorDescription()
+                << std::dec << ptrGrabResult->GetErrorDescription()
                 << std::endl;
     }
   }
@@ -87,7 +118,7 @@ CameraSystem::CameraSystem() {
   }
 }
 
-CameraSystem::~CameraSystem() {}
+CameraSystem::~CameraSystem() = default;
 
 void CameraSystem::record(int n_frames) {
   std::vector<std::thread> grab_threads;
@@ -113,4 +144,13 @@ void CameraSystem::load_config(const std::string &directory) {
                         std::istreambuf_iterator<char>());
     camera.load_config(content);
   }
+}
+
+std::vector<Camera>::iterator CameraSystem::begin() { return cameras.begin(); }
+std::vector<Camera>::iterator CameraSystem::end() { return cameras.end(); }
+std::vector<Camera>::const_iterator CameraSystem::begin() const {
+  return cameras.begin();
+}
+std::vector<Camera>::const_iterator CameraSystem::end() const {
+  return cameras.end();
 }

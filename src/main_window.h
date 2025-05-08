@@ -8,14 +8,11 @@ class GraphicsView : public QGraphicsView {
   Q_OBJECT
 
 public:
-  explicit GraphicsView(QWidget *parent = nullptr) : QGraphicsView(parent) {}
-  ~GraphicsView() override = default;
+  explicit GraphicsView(QWidget *parent = nullptr);
+  ~GraphicsView() override;
 
 protected:
-  void resizeEvent(QResizeEvent *event) override {
-    QGraphicsView::resizeEvent(event);
-    fitInView(scene()->itemsBoundingRect(), Qt::KeepAspectRatio);
-  }
+  void resizeEvent(QResizeEvent *event) override;
 };
 
 class MainWindow : public QMainWindow {
