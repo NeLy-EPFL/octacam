@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include <QApplication>
+#include <QDockWidget>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
@@ -44,6 +45,14 @@ void MainWindow::setupUi() {
   QTimer *timer = new QTimer(this);
   connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
   timer->start(1000 / 30);
+
+  QDockWidget *right_dock = new QDockWidget(this);
+  right_dock->setAllowedAreas(Qt::RightDockWidgetArea);
+  QWidget *dock_content = new QWidget(right_dock);
+  QVBoxLayout *dock_layout = new QVBoxLayout(dock_content);
+  dock_content->setLayout(dock_layout);
+  right_dock->setWidget(dock_content);
+  addDockWidget(Qt::RightDockWidgetArea, right_dock);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
