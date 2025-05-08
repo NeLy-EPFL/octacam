@@ -1,6 +1,7 @@
 #include "camera.h"
 #include <chrono>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <thread>
 
@@ -36,16 +37,11 @@ Camera::Camera(IPylonDevice *device)
   camera->Open();
 }
 
-Camera::~Camera() {
-  stop_preview = true;
-  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-}
+Camera::~Camera() { stop_preview(); }
 
 Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
 }
-
-void Camera::stop() { stop_preview = true; }
 
 std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
@@ -53,10 +49,11 @@ std::string Camera::get_serial_number() const {
 
 QPixmap Camera::get_pixmap() { return frame_for_display.get_pixmap(); }
 
-void Camera::preview() {
-  std::thread preview_thread([this]() {
+void Camera::start_preview() {
+  stop_preview_flag = false;
+  preview_future = std::async(std::launch::async, [this]() {
     camera->StartGrabbing(GrabStrategy_LatestImageOnly);
-    while (camera->IsGrabbing() and !stop_preview) {
+    while (camera->IsGrabbing() && !stop_preview_flag) {
       CGrabResultPtr ptrGrabResult;
       camera->RetrieveResult(5000, ptrGrabResult,
                              TimeoutHandling_ThrowException);
@@ -66,13 +63,19 @@ void Camera::preview() {
         frame_for_display.set_data(pImageBuffer);
       } else {
         std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                  << std::dec << " " << ptrGrabResult->GetErrorDescription()
+                  << std::dec << ptrGrabResult->GetErrorDescription()
                   << std::endl;
       }
     }
     camera->StopGrabbing();
   });
-  preview_thread.detach();
+}
+
+void Camera::stop_preview() {
+  stop_preview_flag = true;
+  if (preview_future.valid()) {
+    preview_future.get();
+  }
 }
 
 void Camera::grab(int n_frames) {

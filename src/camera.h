@@ -1,6 +1,7 @@
 #pragma once
 #include <QBitmap>
 #include <atomic>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -33,9 +34,9 @@ public:
   explicit Camera(IPylonDevice *device);
   ~Camera();
   Camera(Camera &&other);
-  void stop();
   void grab(int n_frames);
-  void preview();
+  void start_preview();
+  void stop_preview();
   std::string get_serial_number() const;
   QPixmap get_pixmap();
   void load_config(const std::string &config);
@@ -43,7 +44,8 @@ public:
 private:
   std::unique_ptr<CBaslerUniversalInstantCamera> camera;
   FrameForDisplay frame_for_display;
-  std::atomic<bool> stop_preview{false};
+  std::atomic<bool> stop_preview_flag{false};
+  std::future<void> preview_future;
 };
 
 class CameraSystem {

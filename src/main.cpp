@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
   camera_system.load_config(config_dir);
 
   for (auto &camera : camera_system) {
-    camera.preview();
+    camera.start_preview();
   }
 
   QApplication qapp(argc, argv);
