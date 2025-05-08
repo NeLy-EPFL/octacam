@@ -18,10 +18,8 @@ QPixmap FrameForDisplay::retrieve_as_pixmap() {
 
 void FrameForDisplay::store_frame(const uint8_t *new_data) {
   std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
-  if (lock.owns_lock()) {
-    if (retrieved) {
-      std::copy(new_data, new_data + size, data);
-    }
+  if (lock.owns_lock() && retrieved) {
+    std::copy(new_data, new_data + size, data);
   }
 }
 
@@ -142,14 +140,14 @@ void CameraSystem::load_config(const std::string &directory) {
     auto serial_number = camera.get_serial_number();
     std::string config_file = directory + "/" + serial_number + ".pfs";
     std::ifstream file(config_file);
-    if (!file) {
+    if (file) {
+      std::cout << "Loading config for camera: " << serial_number << std::endl;
+      std::string content((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+      camera.load_config(content);
+    } else {
       std::cerr << "Config file not found: " << config_file << std::endl;
-      continue;
     }
-    std::cout << "Loading config for camera: " << serial_number << std::endl;
-    std::string content((std::istreambuf_iterator<char>(file)),
-                        std::istreambuf_iterator<char>());
-    camera.load_config(content);
   }
 }
 
