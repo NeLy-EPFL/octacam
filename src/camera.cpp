@@ -107,7 +107,9 @@ void Camera::grab(int n_frames) {
 }
 
 void Camera::load_config(const std::string &config) {
-  CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+  if (!config.empty()) {
+    CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+  }
   frame_for_display.update_size(camera->Width.GetValue(),
                                 camera->Height.GetValue());
 }
@@ -146,7 +148,9 @@ void CameraSystem::load_config(const std::string &directory) {
                           std::istreambuf_iterator<char>());
       camera.load_config(content);
     } else {
-      std::cerr << "Config file not found: " << config_file << std::endl;
+      camera.load_config("");
+      std::cerr << "Warning: config file not found at" << config_file
+                << std::endl;
     }
   }
 }
