@@ -7,6 +7,7 @@
 #include <QGraphicsView>
 #include <QMdiArea>
 #include <QMdiSubWindow>
+#include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -53,6 +54,10 @@ void MainWindow::setupUi() {
   dock_content->setLayout(dock_layout);
   right_dock->setWidget(dock_content);
   addDockWidget(Qt::RightDockWidgetArea, right_dock);
+  right_dock->setMinimumWidth(400);
+
+  auto *record_button = new QPushButton("Start recording", right_dock);
+  dock_layout->addWidget(record_button);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
