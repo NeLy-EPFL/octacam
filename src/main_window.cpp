@@ -81,6 +81,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
+  camera_system.trigger_once();
   for (auto [pixmap_item, pixmap] :
        std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
     if (pixmap) {

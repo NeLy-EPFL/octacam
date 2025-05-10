@@ -57,6 +57,8 @@ std::string Camera::get_serial_number() const {
 
 void Camera::start_preview() {
   future = std::async(std::launch::async, [this]() {
+    camera->TriggerSource.SetValue(
+        Basler_UniversalCameraParams::TriggerSource_Software);
     camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
     while (camera->IsGrabbing() && !system.stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
@@ -83,6 +85,7 @@ void Camera::load_config(const std::string &config) {
   }
   frame_for_display.update_size(camera->Width.GetValue(),
                                 camera->Height.GetValue());
+  camera->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
 }
 
 CameraSystem::CameraSystem() {
