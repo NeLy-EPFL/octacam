@@ -8,7 +8,6 @@
 #include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QPushButton>
-#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <ranges>
@@ -54,9 +53,14 @@ void MainWindow::setupUi() {
 
   update_frames();
 
-  auto *timer = new QTimer(this);
-  connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
-  timer->start(1000 / 30);
+  trigger_timer = new QTimer(this);
+  trigger_timer->setTimerType(Qt::PreciseTimer);
+  connect(trigger_timer, &QTimer::timeout, this, &MainWindow::trigger_once);
+  trigger_timer->start(1000 / 30);
+
+  auto *display_timer = new QTimer(this);
+  connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
+  display_timer->start(1000 / 30);
 
   auto *right_dock = new QDockWidget(this);
   right_dock->setAllowedAreas(Qt::RightDockWidgetArea);
@@ -80,8 +84,9 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
   }
 }
 
+void MainWindow::trigger_once() { camera_system.trigger_once(); }
+
 void MainWindow::update_frames() {
-  camera_system.trigger_once();
   for (auto [pixmap_item, pixmap] :
        std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
     if (pixmap) {

@@ -3,6 +3,7 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QMainWindow>
+#include <QTimer>
 
 class GraphicsView : public QGraphicsView {
   Q_OBJECT
@@ -27,6 +28,7 @@ protected:
 
 private slots:
   void update_frames();
+  void trigger_once();
   void on_record_button_clicked();
 
 private:
@@ -34,4 +36,5 @@ private:
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
   std::vector<QGraphicsView *> views;
+  QTimer *trigger_timer;
 };
