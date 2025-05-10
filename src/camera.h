@@ -35,7 +35,8 @@ public:
   ~Camera();
   Camera(Camera &&other);
   void start_preview();
-  void stop_preview();
+  void start_record(int n_frames);
+  void abort_record();
   std::string get_serial_number() const;
   std::optional<QPixmap> get_pixmap();
   void load_config(const std::string &config);
@@ -45,6 +46,7 @@ private:
   FrameForDisplay frame_for_display;
   std::atomic<bool> stop_flag{false};
   std::future<void> future;
+  void stop();
 };
 
 class CameraSystem {

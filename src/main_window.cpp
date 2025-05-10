@@ -68,6 +68,8 @@ void MainWindow::setupUi() {
   right_dock->setMinimumWidth(400);
 
   auto *record_button = new QPushButton("Start recording", right_dock);
+  connect(record_button, &QPushButton::clicked, this,
+          &MainWindow::on_record_button_clicked);
   dock_layout->addWidget(record_button);
 }
 
@@ -83,6 +85,19 @@ void MainWindow::update_frames() {
        std::views::zip(camera_system, pixmap_items)) {
     if (auto pixmap = camera.get_pixmap()) {
       pixmap_item->setPixmap(*pixmap);
+    }
+  }
+}
+
+void MainWindow::on_record_button_clicked() {
+  auto *button = qobject_cast<QPushButton *>(sender());
+  if (button) {
+    if (button->text() == "Start recording") {
+      button->setText("Stop recording");
+      // camera_system.start_recording();
+    } else {
+      button->setText("Start recording");
+      // camera_system.stop_recording();
     }
   }
 }

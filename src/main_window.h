@@ -27,6 +27,7 @@ protected:
 
 private slots:
   void update_frames();
+  void on_record_button_clicked();
 
 private:
   void setupUi();

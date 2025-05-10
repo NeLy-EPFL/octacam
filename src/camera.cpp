@@ -43,7 +43,7 @@ Camera::Camera(Pylon::IPylonDevice *device)
   camera->Open();
 }
 
-Camera::~Camera() { stop_preview(); }
+Camera::~Camera() { stop(); }
 
 Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
@@ -77,10 +77,14 @@ void Camera::start_preview() {
   });
 }
 
-void Camera::stop_preview() {
-  stop_flag = true;
-  if (future.valid()) {
-    future.get();
+void Camera::start_record(int n_frames) {}
+
+void Camera::stop() {
+  if (!stop_flag) {
+    stop_flag = true;
+    if (future.valid()) {
+      future.get();
+    }
   }
 }
 
