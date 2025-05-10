@@ -31,6 +31,7 @@ private:
 
 class Camera {
 public:
+  friend class CameraSystem;
   explicit Camera(Pylon::IPylonDevice *device);
   ~Camera();
   Camera(Camera &&other);
@@ -38,7 +39,6 @@ public:
   void start_record(int n_frames);
   void abort_record();
   std::string get_serial_number() const;
-  std::optional<QPixmap> get_pixmap();
   void load_config(const std::string &config);
 
 private:
@@ -53,9 +53,8 @@ class CameraSystem {
 public:
   explicit CameraSystem();
   ~CameraSystem();
-
-  void record(int n_frames);
   void load_config(const std::string &directory);
+  std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();
   std::vector<Camera>::iterator end();

@@ -53,10 +53,6 @@ std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
-std::optional<QPixmap> Camera::get_pixmap() {
-  return frame_for_display.retrieve_as_pixmap();
-}
-
 void Camera::start_preview() {
   stop_flag = false;
   future = std::async(std::launch::async, [this]() {
@@ -77,7 +73,7 @@ void Camera::start_preview() {
   });
 }
 
-void Camera::start_record(int n_frames) {}
+void Camera::start_record(int n_frames) { stop(); }
 
 void Camera::stop() {
   if (!stop_flag) {
@@ -126,6 +122,15 @@ void CameraSystem::load_config(const std::string &directory) {
                 << std::endl;
     }
   }
+}
+
+std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
+  std::vector<std::optional<QPixmap>> pixmaps;
+  pixmaps.reserve(cameras.size());
+  for (auto &camera : cameras) {
+    pixmaps.push_back(camera.frame_for_display.retrieve_as_pixmap());
+  }
+  return pixmaps;
 }
 
 std::vector<Camera>::iterator CameraSystem::begin() { return cameras.begin(); }

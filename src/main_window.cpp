@@ -81,9 +81,9 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  for (auto [camera, pixmap_item] :
-       std::views::zip(camera_system, pixmap_items)) {
-    if (auto pixmap = camera.get_pixmap()) {
+  for (auto [pixmap_item, pixmap] :
+       std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
+    if (pixmap) {
       pixmap_item->setPixmap(*pixmap);
     }
   }
