@@ -9,10 +9,9 @@
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"huitacam"};
-  std::string config_dir;
+  std::string config_dir = "./";
   app.add_option("-c,--config-dir", config_dir, "Config directory")
-      ->check(CLI::ExistingDirectory)
-      ->required();
+      ->check(CLI::ExistingDirectory);
   CLI11_PARSE(app, argc, argv);
   CameraSystem camera_system;
   camera_system.load_config(config_dir);

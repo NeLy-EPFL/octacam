@@ -44,8 +44,8 @@ void MainWindow::setupUi() {
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
-    auto sub_window =
-        mdi_area->addSubWindow(widget, Qt::WindowMinMaxButtonsHint);
+    auto sub_window = mdi_area->addSubWindow(
+        widget, Qt::WindowMinMaxButtonsHint | Qt::WindowTitleHint);
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
