@@ -46,7 +46,6 @@ private:
   void start_record(int n_frames);
   void load_config(const std::string &config);
   void abort_record();
-  void stop();
 };
 
 class CameraSystem {
@@ -55,6 +54,7 @@ public:
   ~CameraSystem();
   void load_config(const std::string &directory);
   void start_preview();
+  void start_record(int n_frames);
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();
@@ -65,4 +65,5 @@ public:
 private:
   Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
+  void stop();
 };

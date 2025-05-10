@@ -43,7 +43,7 @@ Camera::Camera(Pylon::IPylonDevice *device)
   camera->Open();
 }
 
-Camera::~Camera() { stop(); }
+Camera::~Camera() = default;
 
 Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
   other.camera = nullptr;
@@ -73,16 +73,7 @@ void Camera::start_preview() {
   });
 }
 
-void Camera::start_record(int n_frames) { stop(); }
-
-void Camera::stop() {
-  if (!stop_flag) {
-    stop_flag = true;
-    if (future.valid()) {
-      future.get();
-    }
-  }
-}
+void Camera::start_record(int n_frames) {}
 
 void Camera::load_config(const std::string &config) {
   if (!config.empty()) {
@@ -104,7 +95,7 @@ CameraSystem::CameraSystem() {
   }
 }
 
-CameraSystem::~CameraSystem() = default;
+CameraSystem::~CameraSystem() { stop(); }
 
 void CameraSystem::load_config(const std::string &directory) {
   for (auto &camera : cameras) {
@@ -130,6 +121,12 @@ void CameraSystem::start_preview() {
   }
 }
 
+void CameraSystem::start_record(int n_frames) {
+  for (auto &camera : cameras) {
+    camera.start_record(n_frames);
+  }
+}
+
 std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
   std::vector<std::optional<QPixmap>> pixmaps;
   pixmaps.reserve(cameras.size());
@@ -146,4 +143,16 @@ std::vector<Camera>::const_iterator CameraSystem::begin() const {
 }
 std::vector<Camera>::const_iterator CameraSystem::end() const {
   return cameras.end();
+}
+
+void CameraSystem::stop() {
+  for (auto &camera : cameras) {
+    camera.stop_flag = true;
+  }
+
+  for (auto &camera : cameras) {
+    if (camera.future.valid()) {
+      camera.future.get();
+    }
+  }
 }
