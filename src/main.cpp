@@ -15,11 +15,7 @@ int main(int argc, char **argv) {
   CLI11_PARSE(app, argc, argv);
   CameraSystem camera_system;
   camera_system.load_config(config_dir);
-
-  for (auto &camera : camera_system) {
-    camera.start_preview();
-  }
-
+  camera_system.start_preview();
   QApplication qapp(argc, argv);
   MainWindow main_window(camera_system);
   main_window.setWindowTitle("huitacam");

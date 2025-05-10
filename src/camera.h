@@ -35,17 +35,17 @@ public:
   explicit Camera(Pylon::IPylonDevice *device);
   ~Camera();
   Camera(Camera &&other);
-  void start_preview();
-  void start_record(int n_frames);
-  void abort_record();
   std::string get_serial_number() const;
-  void load_config(const std::string &config);
 
 private:
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
   FrameForDisplay frame_for_display;
   std::atomic<bool> stop_flag{false};
   std::future<void> future;
+  void start_preview();
+  void start_record(int n_frames);
+  void load_config(const std::string &config);
+  void abort_record();
   void stop();
 };
 
@@ -54,6 +54,7 @@ public:
   explicit CameraSystem();
   ~CameraSystem();
   void load_config(const std::string &directory);
+  void start_preview();
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();

@@ -124,6 +124,12 @@ void CameraSystem::load_config(const std::string &directory) {
   }
 }
 
+void CameraSystem::start_preview() {
+  for (auto &camera : cameras) {
+    camera.start_preview();
+  }
+}
+
 std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
   std::vector<std::optional<QPixmap>> pixmaps;
   pixmaps.reserve(cameras.size());
