@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <ranges>
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
 
@@ -40,9 +41,6 @@ void MainWindow::setupUi() {
     auto *view = new GraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
-    if (auto pixmap = camera.get_pixmap()) {
-      pixmap_item->setPixmap(*pixmap);
-    }
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
@@ -54,14 +52,16 @@ void MainWindow::setupUi() {
     sub_window->setWindowTitle(QString(camera.get_serial_number().c_str()));
   }
 
-  QTimer *timer = new QTimer(this);
+  update_frames();
+
+  auto *timer = new QTimer(this);
   connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
   timer->start(1000 / 30);
 
-  QDockWidget *right_dock = new QDockWidget(this);
+  auto *right_dock = new QDockWidget(this);
   right_dock->setAllowedAreas(Qt::RightDockWidgetArea);
-  QWidget *dock_content = new QWidget(right_dock);
-  QVBoxLayout *dock_layout = new QVBoxLayout(dock_content);
+  auto *dock_content = new QWidget(right_dock);
+  auto *dock_layout = new QVBoxLayout(dock_content);
   dock_content->setLayout(dock_layout);
   right_dock->setWidget(dock_content);
   addDockWidget(Qt::RightDockWidgetArea, right_dock);
@@ -79,12 +79,10 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  int i = 0;
-  for (auto &camera : camera_system) {
-    std::optional<QPixmap> pixmap = camera.get_pixmap();
-    if (pixmap) {
-      pixmap_items[i]->setPixmap(*pixmap);
+  for (auto [camera, pixmap_item] :
+       std::views::zip(camera_system, pixmap_items)) {
+    if (auto pixmap = camera.get_pixmap()) {
+      pixmap_item->setPixmap(*pixmap);
     }
-    ++i;
   }
 }
