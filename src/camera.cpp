@@ -7,35 +7,39 @@
 
 FrameForDisplay::~FrameForDisplay() { delete[] data; }
 
-QPixmap FrameForDisplay::retrieve_as_pixmap() {
+std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
   std::lock_guard<std::mutex> lock(mtx);
-  QImage image(static_cast<const uchar *>(data), width, height,
+  if (retrieved) {
+    return std::nullopt;
+  }
+  QImage image(static_cast<const uint8_t *>(data), width, height,
                QImage::Format_Grayscale8);
   auto pixmap = QPixmap::fromImage(image);
   retrieved = true;
   return pixmap;
 }
 
-void FrameForDisplay::store_frame(const uint8_t *new_data) {
+void FrameForDisplay::store_frame(const uint8_t *data) {
   std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
   if (lock.owns_lock() && retrieved) {
-    std::copy(new_data, new_data + size, data);
+    std::copy(data, data + size, this->data);
+    retrieved = false;
   }
 }
 
-void FrameForDisplay::update_size(int new_width, int new_height) {
+void FrameForDisplay::update_size(int width, int height) {
   std::lock_guard<std::mutex> lock(mtx);
-  if (width != new_width || height != new_height) {
+  if (this->width != width || this->height != height) {
     delete[] data;
-    width = new_width;
-    height = new_height;
-    size = width * height;
+    this->width = width;
+    this->height = height;
+    size = this->width * this->height;
     data = new uint8_t[size];
   }
 }
 
-Camera::Camera(IPylonDevice *device)
-    : camera(std::make_unique<CBaslerUniversalInstantCamera>(device)) {
+Camera::Camera(Pylon::IPylonDevice *device)
+    : camera(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)) {
   camera->Open();
 }
 
@@ -49,18 +53,18 @@ std::string Camera::get_serial_number() const {
   return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
-QPixmap Camera::get_pixmap() { return frame_for_display.retrieve_as_pixmap(); }
+std::optional<QPixmap> Camera::get_pixmap() {
+  return frame_for_display.retrieve_as_pixmap();
+}
 
 void Camera::start_preview() {
-  stop_preview_flag = false;
-  preview_future = std::async(std::launch::async, [this]() {
-    camera->StartGrabbing(GrabStrategy_LatestImageOnly);
-    while (camera->IsGrabbing() && !stop_preview_flag) {
-      CGrabResultPtr ptrGrabResult;
-      camera->RetrieveResult(5000, ptrGrabResult,
-                             TimeoutHandling_ThrowException);
+  stop_flag = false;
+  future = std::async(std::launch::async, [this]() {
+    camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
+    while (camera->IsGrabbing() && !stop_flag) {
+      Pylon::CGrabResultPtr ptrGrabResult;
+      camera->RetrieveResult(Pylon::INFINITE, ptrGrabResult);
       if (ptrGrabResult->GrabSucceeded()) {
-        intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
       } else {
@@ -74,68 +78,33 @@ void Camera::start_preview() {
 }
 
 void Camera::stop_preview() {
-  stop_preview_flag = true;
-  if (preview_future.valid()) {
-    preview_future.get();
+  stop_flag = true;
+  if (future.valid()) {
+    future.get();
   }
-}
-
-void Camera::grab(int n_frames) {
-  int width = camera->Width.GetValue();
-  int height = camera->Height.GetValue();
-  std::string filename = get_serial_number() + ".mp4";
-  auto writer =
-      cv::VideoWriter(filename, cv::VideoWriter::fourcc('a', 'v', 'c', '1'), 30,
-                      cv::Size(width, height), false);
-  camera->StartGrabbing();
-  CGrabResultPtr ptrGrabResult;
-  for (int i = 0; i < n_frames; ++i) {
-    camera->RetrieveResult(5000, ptrGrabResult, TimeoutHandling_ThrowException);
-    if (ptrGrabResult->GrabSucceeded()) {
-      intptr_t cameraContextValue = ptrGrabResult->GetCameraContext();
-      const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-      writer.write(cv::Mat(ptrGrabResult->GetHeight(),
-                           ptrGrabResult->GetWidth(), CV_8UC1,
-                           (void *)pImageBuffer));
-    } else {
-      std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                << std::dec << ptrGrabResult->GetErrorDescription()
-                << std::endl;
-    }
-  }
-  camera->StopGrabbing();
 }
 
 void Camera::load_config(const std::string &config) {
   if (!config.empty()) {
-    CFeaturePersistence::LoadFromString(config.c_str(), &camera->GetNodeMap());
+    Pylon::CFeaturePersistence::LoadFromString(config.c_str(),
+                                               &camera->GetNodeMap());
   }
   frame_for_display.update_size(camera->Width.GetValue(),
                                 camera->Height.GetValue());
 }
 
 CameraSystem::CameraSystem() {
-  CTlFactory &tlFactory = CTlFactory::GetInstance();
-  DeviceInfoList_t devices_;
-  if (tlFactory.EnumerateDevices(devices_) == 0) {
+  auto &tlFactory = Pylon::CTlFactory::GetInstance();
+  Pylon::DeviceInfoList_t devices;
+  if (tlFactory.EnumerateDevices(devices) == 0) {
     std::cerr << "No camera present." << std::endl;
   }
-  for (size_t i = 0; i < devices_.size(); ++i) {
-    cameras.emplace_back(tlFactory.CreateDevice(devices_[i]));
+  for (size_t i = 0; i < devices.size(); ++i) {
+    cameras.emplace_back(tlFactory.CreateDevice(devices[i]));
   }
 }
 
 CameraSystem::~CameraSystem() = default;
-
-void CameraSystem::record(int n_frames) {
-  std::vector<std::thread> grab_threads;
-  for (auto &camera : cameras) {
-    grab_threads.emplace_back([&camera, n_frames]() { camera.grab(n_frames); });
-  }
-  for (auto &thread : grab_threads) {
-    thread.join();
-  }
-}
 
 void CameraSystem::load_config(const std::string &directory) {
   for (auto &camera : cameras) {

@@ -40,7 +40,9 @@ void MainWindow::setupUi() {
     auto *view = new GraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
-    pixmap_item->setPixmap(camera.get_pixmap());
+    if (auto pixmap = camera.get_pixmap()) {
+      pixmap_item->setPixmap(*pixmap);
+    }
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
@@ -79,6 +81,10 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::update_frames() {
   int i = 0;
   for (auto &camera : camera_system) {
-    pixmap_items[i++]->setPixmap(camera.get_pixmap());
+    std::optional<QPixmap> pixmap = camera.get_pixmap();
+    if (pixmap) {
+      pixmap_items[i]->setPixmap(*pixmap);
+    }
+    ++i;
   }
 }

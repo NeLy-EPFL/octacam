@@ -1,52 +1,50 @@
 #pragma once
-#include <QBitmap>
+#include <QPixmap>
 #include <atomic>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <opencv2/videoio.hpp>
+#include <optional>
 #include <pylon/BaslerUniversalInstantCamera.h>
 #include <pylon/PylonIncludes.h>
 #include <string>
 #include <thread>
 #include <vector>
 
-using namespace Pylon;
-
 class FrameForDisplay {
 public:
   ~FrameForDisplay();
-  QPixmap retrieve_as_pixmap();
-  void store_frame(const uint8_t *new_data);
-  void update_size(int new_width, int new_height);
+  std::optional<QPixmap> retrieve_as_pixmap();
+  void store_frame(const uint8_t *data);
+  void update_size(int width, int height);
 
 private:
   int width = 0;
   int height = 0;
   size_t size = 0;
   uint8_t *data = nullptr;
-  bool retrieved = true;
+  bool retrieved = false;
   std::mutex mtx;
 };
 
 class Camera {
 public:
-  explicit Camera(IPylonDevice *device);
+  explicit Camera(Pylon::IPylonDevice *device);
   ~Camera();
   Camera(Camera &&other);
-  void grab(int n_frames);
   void start_preview();
   void stop_preview();
   std::string get_serial_number() const;
-  QPixmap get_pixmap();
+  std::optional<QPixmap> get_pixmap();
   void load_config(const std::string &config);
 
 private:
-  std::unique_ptr<CBaslerUniversalInstantCamera> camera;
+  std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
   FrameForDisplay frame_for_display;
-  std::atomic<bool> stop_preview_flag{false};
-  std::future<void> preview_future;
+  std::atomic<bool> stop_flag{false};
+  std::future<void> future;
 };
 
 class CameraSystem {
@@ -63,6 +61,6 @@ public:
   std::vector<Camera>::const_iterator end() const;
 
 private:
-  PylonAutoInitTerm autoInitTerm;
+  Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
 };
