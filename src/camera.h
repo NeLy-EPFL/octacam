@@ -29,18 +29,20 @@ private:
   std::mutex mtx;
 };
 
+class CameraSystem;
+
 class Camera {
 public:
   friend class CameraSystem;
-  explicit Camera(Pylon::IPylonDevice *device);
+  explicit Camera(Pylon::IPylonDevice *device, const CameraSystem &system);
   ~Camera();
   Camera(Camera &&other);
   std::string get_serial_number() const;
 
 private:
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
+  const CameraSystem &system;
   FrameForDisplay frame_for_display;
-  std::atomic<bool> stop_flag{false};
   std::future<void> future;
   void start_preview();
   void start_record(int n_frames);
@@ -50,11 +52,13 @@ private:
 
 class CameraSystem {
 public:
+  friend class Camera;
   explicit CameraSystem();
   ~CameraSystem();
   void load_config(const std::string &directory);
   void start_preview();
   void start_record(int n_frames);
+  void trigger_once();
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();
@@ -66,4 +70,5 @@ private:
   Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
   void stop();
+  std::atomic<bool> stop_flag{false};
 };

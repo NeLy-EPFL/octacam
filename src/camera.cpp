@@ -38,14 +38,16 @@ void FrameForDisplay::update_size(int width, int height) {
   }
 }
 
-Camera::Camera(Pylon::IPylonDevice *device)
-    : camera(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)) {
+Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
+    : camera(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
+      system(system) {
   camera->Open();
 }
 
 Camera::~Camera() = default;
 
-Camera::Camera(Camera &&other) : camera(std::move(other.camera)) {
+Camera::Camera(Camera &&other)
+    : camera(std::move(other.camera)), system(other.system) {
   other.camera = nullptr;
 }
 
@@ -54,10 +56,9 @@ std::string Camera::get_serial_number() const {
 }
 
 void Camera::start_preview() {
-  stop_flag = false;
   future = std::async(std::launch::async, [this]() {
     camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
-    while (camera->IsGrabbing() && !stop_flag) {
+    while (camera->IsGrabbing() && !system.stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera->RetrieveResult(Pylon::INFINITE, ptrGrabResult);
       if (ptrGrabResult->GrabSucceeded()) {
@@ -91,7 +92,7 @@ CameraSystem::CameraSystem() {
     std::cerr << "No camera present." << std::endl;
   }
   for (size_t i = 0; i < devices.size(); ++i) {
-    cameras.emplace_back(tlFactory.CreateDevice(devices[i]));
+    cameras.emplace_back(tlFactory.CreateDevice(devices[i]), *this);
   }
 }
 
@@ -122,8 +123,15 @@ void CameraSystem::start_preview() {
 }
 
 void CameraSystem::start_record(int n_frames) {
+  stop();
   for (auto &camera : cameras) {
     camera.start_record(n_frames);
+  }
+}
+
+void CameraSystem::trigger_once() {
+  for (auto &camera : cameras) {
+    camera.camera->ExecuteSoftwareTrigger();
   }
 }
 
@@ -146,10 +154,7 @@ std::vector<Camera>::const_iterator CameraSystem::end() const {
 }
 
 void CameraSystem::stop() {
-  for (auto &camera : cameras) {
-    camera.stop_flag = true;
-  }
-
+  stop_flag = true;
   for (auto &camera : cameras) {
     if (camera.future.valid()) {
       camera.future.get();
