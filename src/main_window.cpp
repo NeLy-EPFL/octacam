@@ -5,10 +5,13 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
+#include <QGridLayout>
+#include <QIntValidator>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QPushButton>
-#include <QVBoxLayout>
 #include <QWidget>
 #include <ranges>
 
@@ -67,19 +70,35 @@ void MainWindow::setupUi() {
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start(33);
 
-  auto *right_dock = new QDockWidget(this);
-  right_dock->setAllowedAreas(Qt::RightDockWidgetArea);
-  auto *dock_content = new QWidget(right_dock);
-  auto *dock_layout = new QVBoxLayout(dock_content);
-  dock_content->setLayout(dock_layout);
-  right_dock->setWidget(dock_content);
-  addDockWidget(Qt::RightDockWidgetArea, right_dock);
-  right_dock->setMinimumWidth(400);
+  auto *dock = new QDockWidget(this);
+  dock->setAllowedAreas(Qt::RightDockWidgetArea);
+  dock->setMinimumWidth(200);
+  addDockWidget(Qt::RightDockWidgetArea, dock);
 
-  auto *record_button = new QPushButton("Start recording", right_dock);
+  auto *dock_content = new QWidget(dock);
+  dock->setWidget(dock_content);
+
+  auto *dock_layout = new QGridLayout(dock_content);
+  dock_content->setLayout(dock_layout);
+
+  dock_layout->addWidget(new QLabel("Duration (s):"), 0, 0);
+  auto *duration_input = new QLineEdit(dock_content);
+  duration_input->setValidator(new QIntValidator(0, 2147483647, this));
+  duration_input->setText("30");
+  dock_layout->addWidget(duration_input, 0, 1);
+
+  dock_layout->addWidget(new QLabel("FPS:"), 1, 0);
+  auto *fps_input = new QLineEdit(dock_content);
+  fps_input->setValidator(new QIntValidator(0, 2147483647, this));
+  fps_input->setText("100");
+  dock_layout->addWidget(fps_input, 1, 1);
+
+  auto *record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
-  dock_layout->addWidget(record_button);
+  dock_layout->addWidget(record_button, 2, 0, 1, 2);
+
+  dock_layout->setRowStretch(3, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
