@@ -61,11 +61,11 @@ void MainWindow::setupUi() {
   display_trigger_timer = new QTimer(this);
   connect(display_trigger_timer, &QTimer::timeout, this,
           &MainWindow::trigger_once);
-  display_trigger_timer->start(1000 / 30);
+  display_trigger_timer->start(33);
 
   auto *display_timer = new QTimer(this);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
-  display_timer->start(1000 / 30);
+  display_timer->start(33);
 
   auto *right_dock = new QDockWidget(this);
   right_dock->setAllowedAreas(Qt::RightDockWidgetArea);

@@ -68,8 +68,7 @@ void Camera::start_preview() {
     camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
     while (camera->IsGrabbing() && !stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
-      camera->RetrieveResult(1000 / 33, ptrGrabResult,
-                             Pylon::TimeoutHandling_Return);
+      camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
