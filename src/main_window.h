@@ -10,6 +10,7 @@
 #include <QPlainTextEdit>
 #include <QTimer>
 #include <filesystem>
+#include <regex>
 
 class DirectoryEdit : public QPlainTextEdit {
   Q_OBJECT
@@ -33,6 +34,39 @@ public:
     QDir dir(inputPath);
     QString absPath = dir.absolutePath().replace('\\', '/');
     QPlainTextEdit::setPlainText(absPath);
+  }
+
+  void increment() {
+    std::string input = toPlainText().toStdString();
+
+    std::regex pattern("\\d{3}"); // Match exactly three digits
+    std::sregex_iterator begin(input.begin(), input.end(), pattern);
+    std::sregex_iterator end;
+    std::smatch lastMatch;
+
+    // Find the last match
+    for (std::sregex_iterator it = begin; it != end; ++it) {
+      lastMatch = *it; // Update the last match
+    }
+
+    // Check if a match was found
+    if (!lastMatch.empty()) {
+      std::string matchedNumber = lastMatch.str(); // Get the matched number
+      int number = std::stoi(matchedNumber);       // Convert to integer
+      number += 1;                                 // Increment by 1
+
+      // Convert back to a zero-padded string
+      std::ostringstream oss;
+      oss << std::setw(3) << std::setfill('0') << number;
+      std::string incrementedNumber = oss.str();
+
+      // Replace the last match in the original string
+      std::string result = input;
+      result.replace(lastMatch.position(), lastMatch.length(),
+                     incrementedNumber);
+
+      setPlainText(QString::fromStdString(result));
+    }
   }
 
 protected:

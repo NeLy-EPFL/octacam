@@ -176,6 +176,8 @@ void MainWindow::on_record_button_clicked() {
       display_trigger_timer->start(33);
       button->setEnabled(true);
 
+      save_dir_edit->increment();
+
       fps_edit->setEnabled(true);
       duration_edit->setEnabled(true);
       save_dir_edit->setEnabled(true);
