@@ -160,6 +160,10 @@ void MainWindow::on_record_button_clicked() {
 
       if (!success) {
         button->setEnabled(true);
+
+        fps_edit->setEnabled(true);
+        duration_edit->setEnabled(true);
+        save_dir_edit->setEnabled(true);
         return;
       }
 
