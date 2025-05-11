@@ -58,7 +58,6 @@ public:
   void load_config(const std::string &directory);
   void start_preview();
   void start_record();
-  void abort_record();
   void trigger_once();
   std::vector<std::optional<QPixmap>> get_pixmaps();
 

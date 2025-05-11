@@ -62,38 +62,31 @@ std::string Camera::get_serial_number() const {
 
 void Camera::start_preview() {
   stop_flag = false;
+  this->camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
   future = std::async(std::launch::async, [this]() {
-    camera->TriggerSource.SetValue(
-        Basler_UniversalCameraParams::TriggerSource_Software);
-    camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
+    while (!this->stop_flag && this->camera->IsGrabbing()) {
+      Pylon::CGrabResultPtr ptrGrabResult;
+      camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
+      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
+        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
+        this->frame_for_display.store_frame(pImageBuffer);
+      }
+    }
+    this->camera->StopGrabbing();
+  });
+}
+
+void Camera::start_record() {
+  stop_flag = false;
+  camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
+  future = std::async(std::launch::async, [this]() {
     while (camera->IsGrabbing() && !stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
-      }
-    }
-    camera->StopGrabbing();
-  });
-}
-
-void Camera::start_record() {
-  future = std::async(std::launch::async, [this]() {
-    // camera->TriggerSource.SetValue(
-    //     Basler_UniversalCameraParams::TriggerSource_Software);
-    camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
-    while (camera->IsGrabbing() && !stop_flag) {
-      Pylon::CGrabResultPtr ptrGrabResult;
-      camera->RetrieveResult(Pylon::INFINITE, ptrGrabResult);
-      if (ptrGrabResult->GrabSucceeded()) {
-        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-        frame_for_display.store_frame(pImageBuffer);
         std::cout << "Frame saved" << std::endl;
-      } else {
-        std::cerr << "Error: " << std::hex << ptrGrabResult->GetErrorCode()
-                  << std::dec << ptrGrabResult->GetErrorDescription()
-                  << std::endl;
       }
     }
     camera->StopGrabbing();
@@ -108,6 +101,8 @@ void Camera::load_config(const std::string &config) {
   frame_for_display.update_size(camera->Width.GetValue(),
                                 camera->Height.GetValue());
   camera->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
+  camera->TriggerSource.SetValue(
+      Basler_UniversalCameraParams::TriggerSource_Software);
 }
 
 CameraSystem::CameraSystem() {
@@ -142,6 +137,7 @@ void CameraSystem::load_config(const std::string &directory) {
 }
 
 void CameraSystem::start_preview() {
+  stop();
   for (auto &camera : cameras) {
     camera.start_preview();
   }
@@ -154,11 +150,11 @@ void CameraSystem::start_record() {
   }
 }
 
-void CameraSystem::abort_record() { stop(); }
-
 void CameraSystem::trigger_once() {
   for (auto &camera : cameras) {
+    // if (camera.camera->IsGrabbing()) {
     camera.camera->ExecuteSoftwareTrigger();
+    // }
   }
 }
 

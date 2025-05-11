@@ -104,13 +104,19 @@ void MainWindow::on_record_button_clicked() {
   auto *button = qobject_cast<QPushButton *>(sender());
   if (button) {
     if (button->text() == "Start recording") {
+      button->setEnabled(false);
       button->setText("Abort recording");
       display_trigger_timer->stop();
       camera_system.start_record();
-      record_trigger_timer->start(1000 / 30);
+      record_trigger_timer->start(33);
+      button->setEnabled(true);
     } else {
-      camera_system.abort_record();
+      button->setEnabled(false);
       button->setText("Start recording");
+      record_trigger_timer->stop();
+      camera_system.start_preview();
+      display_trigger_timer->start(33);
+      button->setEnabled(true);
     }
   }
 }
