@@ -55,6 +55,11 @@ void MainWindow::setupUi() {
 
   update_frames();
 
+  record_stop_timer = new QTimer(this);
+  record_stop_timer->setTimerType(Qt::PreciseTimer);
+  record_stop_timer->setSingleShot(true);
+  connect(record_stop_timer, &QTimer::timeout, this, &MainWindow::stop_record);
+
   record_trigger_timer = new QTimer(this);
   record_trigger_timer->setTimerType(Qt::PreciseTimer);
   connect(record_trigger_timer, &QTimer::timeout, this,
@@ -158,6 +163,9 @@ void MainWindow::on_record_button_clicked() {
       record_trigger_timer->setInterval(
           1000 / std::stoi(fps_edit->text().toStdString()));
 
+      record_stop_timer->setInterval(
+          std::stoi(duration_edit->text().toStdString()) * 1000);
+
       if (!success) {
         button->setEnabled(true);
 
@@ -170,7 +178,8 @@ void MainWindow::on_record_button_clicked() {
       display_trigger_timer->stop();
       camera_system.start_record();
       record_trigger_timer->start();
-      button->setText("Abort recording");
+      record_stop_timer->start();
+      button->setText("Stop recording");
       button->setEnabled(true);
     } else {
       stop_record();
@@ -179,6 +188,7 @@ void MainWindow::on_record_button_clicked() {
 }
 
 void MainWindow::stop_record() {
+  record_stop_timer->stop();
   record_button->setEnabled(false);
   record_trigger_timer->stop();
   camera_system.start_preview();

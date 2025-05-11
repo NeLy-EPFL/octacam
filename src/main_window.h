@@ -120,6 +120,7 @@ private:
   QPushButton *record_button;
   QTimer *display_trigger_timer;
   QTimer *record_trigger_timer;
+  QTimer *record_stop_timer;
   QLineEdit *duration_edit;
   QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;
