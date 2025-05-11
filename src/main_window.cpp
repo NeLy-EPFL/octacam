@@ -73,6 +73,7 @@ void MainWindow::setupUi() {
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
   dock->setMinimumWidth(200);
+  dock->setMaximumWidth(300);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
   auto *dock_content = new QWidget(dock);
@@ -93,12 +94,18 @@ void MainWindow::setupUi() {
   fps_input->setText("100");
   dock_layout->addWidget(fps_input, 1, 1);
 
+  dock_layout->addWidget(new QLabel("Save directory:"), 2, 0);
+  auto *save_dir_input = new DirectoryEdit(dock_content);
+  save_dir_input->setText("~/data/TL/250511/fly1/001/");
+  save_dir_input->setFixedHeight(fontMetrics().height() * 4);
+  dock_layout->addWidget(save_dir_input, 2, 1);
+
   auto *record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
-  dock_layout->addWidget(record_button, 2, 0, 1, 2);
+  dock_layout->addWidget(record_button, 3, 0, 1, 2);
 
-  dock_layout->setRowStretch(3, 1);
+  dock_layout->setRowStretch(4, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {

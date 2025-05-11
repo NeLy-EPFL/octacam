@@ -3,8 +3,26 @@
 #include "camera.h"
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
+#include <QKeyEvent>
 #include <QMainWindow>
+#include <QTextEdit>
 #include <QTimer>
+
+class DirectoryEdit : public QTextEdit {
+  Q_OBJECT
+
+public:
+  explicit DirectoryEdit(QWidget *parent = nullptr) : QTextEdit(parent) {}
+
+protected:
+  void keyPressEvent(QKeyEvent *event) override {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+      event->ignore();
+      return;
+    }
+    QTextEdit::keyPressEvent(event);
+  }
+};
 
 class GraphicsView : public QGraphicsView {
   Q_OBJECT
