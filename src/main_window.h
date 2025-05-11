@@ -1,4 +1,5 @@
 #pragma once
+
 #include "camera.h"
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
@@ -33,9 +34,9 @@ private slots:
 
 private:
   void setupUi();
+
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
-  std::vector<QGraphicsView *> views;
   QTimer *display_trigger_timer;
   QTimer *record_trigger_timer;
 };

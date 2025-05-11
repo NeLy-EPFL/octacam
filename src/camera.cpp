@@ -1,4 +1,5 @@
 #include "camera.h"
+
 #include <chrono>
 #include <fstream>
 #include <future>
@@ -152,9 +153,7 @@ void CameraSystem::start_record() {
 
 void CameraSystem::trigger_once() {
   for (auto &camera : cameras) {
-    // if (camera.camera->IsGrabbing()) {
     camera.camera->ExecuteSoftwareTrigger();
-    // }
   }
 }
 

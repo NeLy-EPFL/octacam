@@ -1,4 +1,5 @@
 #pragma once
+
 #include <QPixmap>
 #include <atomic>
 #include <future>
@@ -40,14 +41,15 @@ public:
   std::string get_serial_number() const;
 
 private:
+  void start_preview();
+  void start_record();
+  void load_config(const std::string &config);
+
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
   const CameraSystem &system;
   FrameForDisplay frame_for_display;
   std::atomic<bool> stop_flag{false};
   std::future<void> future;
-  void start_preview();
-  void start_record();
-  void load_config(const std::string &config);
 };
 
 class CameraSystem {
@@ -55,6 +57,7 @@ public:
   friend class Camera;
   explicit CameraSystem();
   ~CameraSystem();
+
   void load_config(const std::string &directory);
   void start_preview();
   void start_record();
