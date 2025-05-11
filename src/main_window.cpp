@@ -37,7 +37,7 @@ void MainWindow::setupUi() {
   QMdiArea *mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);
 
-  for (auto &camera : camera_system) {
+  for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
     auto *view = new GraphicsView(widget);
