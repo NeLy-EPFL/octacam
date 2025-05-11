@@ -53,10 +53,15 @@ void MainWindow::setupUi() {
 
   update_frames();
 
-  trigger_timer = new QTimer(this);
-  trigger_timer->setTimerType(Qt::PreciseTimer);
-  connect(trigger_timer, &QTimer::timeout, this, &MainWindow::trigger_once);
-  trigger_timer->start(1000 / 30);
+  record_trigger_timer = new QTimer(this);
+  record_trigger_timer->setTimerType(Qt::PreciseTimer);
+  connect(record_trigger_timer, &QTimer::timeout, this,
+          &MainWindow::trigger_once);
+
+  display_trigger_timer = new QTimer(this);
+  connect(display_trigger_timer, &QTimer::timeout, this,
+          &MainWindow::trigger_once);
+  display_trigger_timer->start(1000 / 30);
 
   auto *display_timer = new QTimer(this);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
@@ -99,11 +104,13 @@ void MainWindow::on_record_button_clicked() {
   auto *button = qobject_cast<QPushButton *>(sender());
   if (button) {
     if (button->text() == "Start recording") {
-      button->setText("Stop recording");
-      // camera_system.start_recording();
+      button->setText("Abort recording");
+      display_trigger_timer->stop();
+      camera_system.start_record();
+      record_trigger_timer->start(1000 / 30);
     } else {
+      camera_system.abort_record();
       button->setText("Start recording");
-      // camera_system.stop_recording();
     }
   }
 }

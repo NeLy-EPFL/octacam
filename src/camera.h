@@ -43,11 +43,11 @@ private:
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
   const CameraSystem &system;
   FrameForDisplay frame_for_display;
+  std::atomic<bool> stop_flag{false};
   std::future<void> future;
   void start_preview();
-  void start_record(int n_frames);
+  void start_record();
   void load_config(const std::string &config);
-  void abort_record();
 };
 
 class CameraSystem {
@@ -57,7 +57,8 @@ public:
   ~CameraSystem();
   void load_config(const std::string &directory);
   void start_preview();
-  void start_record(int n_frames);
+  void start_record();
+  void abort_record();
   void trigger_once();
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
@@ -65,10 +66,9 @@ public:
   std::vector<Camera>::iterator end();
   std::vector<Camera>::const_iterator begin() const;
   std::vector<Camera>::const_iterator end() const;
+  void stop();
 
 private:
   Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
-  void stop();
-  std::atomic<bool> stop_flag{false};
 };

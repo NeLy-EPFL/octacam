@@ -36,5 +36,6 @@ private:
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
   std::vector<QGraphicsView *> views;
-  QTimer *trigger_timer;
+  QTimer *display_trigger_timer;
+  QTimer *record_trigger_timer;
 };
