@@ -5,6 +5,7 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMainWindow>
 #include <QPlainTextEdit>
 #include <QTimer>
@@ -82,5 +83,7 @@ private:
   std::vector<QGraphicsPixmapItem *> pixmap_items;
   QTimer *display_trigger_timer;
   QTimer *record_trigger_timer;
+  QLineEdit *duration_edit;
+  QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;
 };

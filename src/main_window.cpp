@@ -8,7 +8,6 @@
 #include <QGridLayout>
 #include <QIntValidator>
 #include <QLabel>
-#include <QLineEdit>
 #include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QMessageBox>
@@ -84,16 +83,16 @@ void MainWindow::setupUi() {
   dock_content->setLayout(dock_layout);
 
   dock_layout->addWidget(new QLabel("Duration (s):"), 0, 0);
-  auto *duration_input = new QLineEdit(dock_content);
-  duration_input->setValidator(new QIntValidator(0, 2147483647, this));
-  duration_input->setText("30");
-  dock_layout->addWidget(duration_input, 0, 1);
+  duration_edit = new QLineEdit(dock_content);
+  duration_edit->setValidator(new QIntValidator(0, 2147483647, this));
+  duration_edit->setText("30");
+  dock_layout->addWidget(duration_edit, 0, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), 1, 0);
-  auto *fps_input = new QLineEdit(dock_content);
-  fps_input->setValidator(new QIntValidator(0, 2147483647, this));
-  fps_input->setText("100");
-  dock_layout->addWidget(fps_input, 1, 1);
+  fps_edit = new QLineEdit(dock_content);
+  fps_edit->setValidator(new QIntValidator(0, 2147483647, this));
+  fps_edit->setText("100");
+  dock_layout->addWidget(fps_edit, 1, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), 2, 0);
   save_dir_edit = new DirectoryEdit(dock_content);
@@ -131,6 +130,11 @@ void MainWindow::on_record_button_clicked() {
   if (button) {
     if (button->text() == "Start recording") {
       button->setEnabled(false);
+
+      fps_edit->setEnabled(false);
+      duration_edit->setEnabled(false);
+      save_dir_edit->setEnabled(false);
+
       std::string save_dir = save_dir_edit->toPlainText().toStdString();
 
       bool success{false};
@@ -151,15 +155,18 @@ void MainWindow::on_record_button_clicked() {
                                   QString::fromStdString(save_dir));
       }
 
+      record_trigger_timer->setInterval(
+          1000 / std::stoi(fps_edit->text().toStdString()));
+
       if (!success) {
         button->setEnabled(true);
         return;
       }
 
-      button->setText("Abort recording");
       display_trigger_timer->stop();
       camera_system.start_record();
-      record_trigger_timer->start(33);
+      record_trigger_timer->start();
+      button->setText("Abort recording");
       button->setEnabled(true);
     } else {
       button->setEnabled(false);
@@ -168,6 +175,10 @@ void MainWindow::on_record_button_clicked() {
       camera_system.start_preview();
       display_trigger_timer->start(33);
       button->setEnabled(true);
+
+      fps_edit->setEnabled(true);
+      duration_edit->setEnabled(true);
+      save_dir_edit->setEnabled(true);
     }
   }
 }
