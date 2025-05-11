@@ -136,9 +136,13 @@ void MainWindow::on_record_button_clicked() {
       bool success{false};
 
       if (std::filesystem::exists(save_dir)) {
-        QMessageBox::critical(this, "Error",
-                              "Could not create directory: " +
-                                  QString::fromStdString(save_dir));
+        auto reply = QMessageBox::question(
+            this, "Warning",
+            "Directory exists and data might be overwritten. Continue?",
+            QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+          success = true;
+        }
       } else if (std::filesystem::create_directories(save_dir)) {
         success = true;
       } else {
