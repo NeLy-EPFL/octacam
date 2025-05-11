@@ -11,7 +11,6 @@
 #include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QMessageBox>
-#include <QPushButton>
 #include <QWidget>
 #include <ranges>
 
@@ -64,7 +63,8 @@ void MainWindow::setupUi() {
   display_trigger_timer = new QTimer(this);
   connect(display_trigger_timer, &QTimer::timeout, this,
           &MainWindow::trigger_once);
-  display_trigger_timer->start(33);
+  display_trigger_timer->setInterval(33);
+  display_trigger_timer->start();
 
   auto *display_timer = new QTimer(this);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
@@ -99,7 +99,7 @@ void MainWindow::setupUi() {
   save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
   dock_layout->addWidget(save_dir_edit, 2, 1);
 
-  auto *record_button = new QPushButton("Start recording", dock);
+  record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
   dock_layout->addWidget(record_button, 3, 0, 1, 2);
@@ -173,18 +173,20 @@ void MainWindow::on_record_button_clicked() {
       button->setText("Abort recording");
       button->setEnabled(true);
     } else {
-      button->setEnabled(false);
-      button->setText("Start recording");
-      record_trigger_timer->stop();
-      camera_system.start_preview();
-      display_trigger_timer->start(33);
-      button->setEnabled(true);
-
-      save_dir_edit->increment();
-
-      fps_edit->setEnabled(true);
-      duration_edit->setEnabled(true);
-      save_dir_edit->setEnabled(true);
+      stop_record();
     }
   }
+}
+
+void MainWindow::stop_record() {
+  record_button->setEnabled(false);
+  record_trigger_timer->stop();
+  camera_system.start_preview();
+  display_trigger_timer->start();
+  save_dir_edit->increment();
+  fps_edit->setEnabled(true);
+  duration_edit->setEnabled(true);
+  save_dir_edit->setEnabled(true);
+  record_button->setText("Start recording");
+  record_button->setEnabled(true);
 }

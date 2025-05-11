@@ -8,6 +8,7 @@
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QTimer>
 #include <filesystem>
 #include <regex>
@@ -109,12 +110,14 @@ private slots:
   void update_frames();
   void trigger_once();
   void on_record_button_clicked();
+  void stop_record();
 
 private:
   void setupUi();
 
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
+  QPushButton *record_button;
   QTimer *display_trigger_timer;
   QTimer *record_trigger_timer;
   QLineEdit *duration_edit;
