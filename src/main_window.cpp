@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QMdiArea>
 #include <QMdiSubWindow>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QWidget>
 #include <ranges>
@@ -95,10 +96,9 @@ void MainWindow::setupUi() {
   dock_layout->addWidget(fps_input, 1, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), 2, 0);
-  auto *save_dir_input = new DirectoryEdit(dock_content);
-  save_dir_input->setText("~/data/TL/250511/fly1/001/");
-  save_dir_input->setFixedHeight(fontMetrics().height() * 4);
-  dock_layout->addWidget(save_dir_input, 2, 1);
+  save_dir_edit = new DirectoryEdit(dock_content);
+  save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
+  dock_layout->addWidget(save_dir_edit, 2, 1);
 
   auto *record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
@@ -131,6 +131,27 @@ void MainWindow::on_record_button_clicked() {
   if (button) {
     if (button->text() == "Start recording") {
       button->setEnabled(false);
+      std::string save_dir = save_dir_edit->toPlainText().toStdString();
+
+      bool success{false};
+
+      if (std::filesystem::exists(save_dir)) {
+        QMessageBox::critical(this, "Error",
+                              "Could not create directory: " +
+                                  QString::fromStdString(save_dir));
+      } else if (std::filesystem::create_directories(save_dir)) {
+        success = true;
+      } else {
+        QMessageBox::critical(this, "Error",
+                              "Could not create directory: " +
+                                  QString::fromStdString(save_dir));
+      }
+
+      if (!success) {
+        button->setEnabled(true);
+        return;
+      }
+
       button->setText("Abort recording");
       display_trigger_timer->stop();
       camera_system.start_record();

@@ -87,7 +87,6 @@ void Camera::start_record() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
-        std::cout << "Frame saved" << std::endl;
       }
     }
     camera->StopGrabbing();
