@@ -78,13 +78,13 @@ void MainWindow::setupUi() {
 
   dock_layout->addWidget(new QLabel("Duration (s):"), 0, 0);
   duration_edit = new QLineEdit(dock_content);
-  duration_edit->setValidator(new QIntValidator(0, 2147483647, this));
+  duration_edit->setValidator(new QIntValidator(0, 359999, this));
   duration_edit->setText("30");
   dock_layout->addWidget(duration_edit, 0, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), 1, 0);
   fps_edit = new QLineEdit(dock_content);
-  fps_edit->setValidator(new QIntValidator(0, 2147483647, this));
+  fps_edit->setValidator(new QIntValidator(0, 1000, this));
   fps_edit->setText("100");
   dock_layout->addWidget(fps_edit, 1, 1);
 
@@ -100,7 +100,7 @@ void MainWindow::setupUi() {
 
   status_label = new QLabel(dock_content);
   status_label->setText("");
-  status_label->setAlignment(Qt::AlignCenter); // Center-align the label
+  status_label->setAlignment(Qt::AlignCenter);
   dock_layout->addWidget(status_label, 4, 0, 1, 2);
 
   dock_layout->setRowStretch(5, 1);
@@ -125,14 +125,11 @@ void MainWindow::update_frames() {
 void MainWindow::update_record() {
   if (camera_system.trigger_timer.is_running()) {
     auto remaining_time_s = record_duration_s - record_current_time_s;
-    double percept = 100.0 * record_current_time_s / record_duration_s;
     status_label->setText(
-        QString("Remaing time: %1:%2:%3 (%4%5)")
+        QString("Remaing time: %1:%2:%3")
             .arg(remaining_time_s / 3600, 2, 10, QChar('0'))
             .arg((remaining_time_s % 3600) / 60, 2, 10, QChar('0'))
-            .arg(remaining_time_s % 60, 2, 10, QChar('0'))
-            .arg(percept, 0, 'f', 1)
-            .arg("%"));
+            .arg(remaining_time_s % 60, 2, 10, QChar('0')));
     record_current_time_s += 1;
   } else {
     stop_record();
@@ -155,10 +152,12 @@ void MainWindow::on_record_button_clicked() {
       bool success{false};
 
       if (std::filesystem::exists(save_dir)) {
-        auto reply = QMessageBox::question(
-            this, "Warning",
-            "Directory exists and data might be overwritten. Continue?",
-            QMessageBox::Yes | QMessageBox::No);
+        auto reply =
+            QMessageBox::question(this, "Warning",
+                                  ("Directory already exists: " + save_dir +
+                                   "\nData might be overwritten. Continue?")
+                                      .c_str(),
+                                  QMessageBox::Yes | QMessageBox::No);
         if (reply == QMessageBox::Yes) {
           success = true;
         }
