@@ -30,7 +30,8 @@ public:
     std::tm *now_tm = std::localtime(&now_time_t);
     char date_str[7];
     std::strftime(date_str, sizeof(date_str), "%y%m%d", now_tm);
-    QString defaultPath = QString("~/data/TL/%1/fly1/001").arg(date_str);
+    QString defaultPath =
+        QString("~/data/TL/%1-dfd_g8m/Fly1/001-neck").arg(date_str);
     setPlainText(defaultPath);
   }
 
