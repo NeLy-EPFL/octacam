@@ -100,8 +100,21 @@ void Camera::start_record() {
       get_serial_number() + ".avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
       30, cv::Size(camera->Width.GetValue(), camera->Height.GetValue()), false);
 
+  if (!opened) {
+    std::cerr << "Failed to open video writer" << std::endl;
+    return;
+  }
+
   stop_flag = false;
   camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
+  auto ready =
+      camera->WaitForFrameTriggerReady(1000, Pylon::TimeoutHandling_Return);
+
+  if (!ready) {
+    std::cerr << "Failed to start grabbing" << std::endl;
+    return;
+  }
+
   future = std::async(std::launch::async, [this]() {
     while (camera->IsGrabbing() && !stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
