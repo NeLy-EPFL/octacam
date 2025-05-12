@@ -81,8 +81,8 @@ public:
   std::vector<Camera>::const_iterator end() const;
 
 private:
-  PreciseTimer trigger_timer;
-  void stop();
   Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
+  PreciseTimer trigger_timer;
+  void stop();
 };

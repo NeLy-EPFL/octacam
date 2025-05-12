@@ -119,10 +119,9 @@ private:
   void start_record();
   void stop_record();
 
-  QMdiArea *mdi_area;
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
-  QTimer *display_timer;
+  QMdiArea *mdi_area;
   QTimer *record_progress_timer;
   QPushButton *record_button;
   QLineEdit *duration_edit;

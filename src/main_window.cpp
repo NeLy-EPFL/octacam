@@ -55,7 +55,7 @@ void MainWindow::setup_ui() {
 
   update_frames();
 
-  display_timer = new QTimer(this);
+  auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
   display_timer->setInterval(33);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);

@@ -69,10 +69,9 @@ Camera::Camera(Camera &&other)
     : camera(std::move(other.camera)), system(other.system),
       video_writer(std::move(other.video_writer)),
       frame_for_display(std::move(other.frame_for_display)),
-      stop_flag(other.stop_flag.load()), // Transfer stop_flag state
-      future(std::move(other.future)) {  // Transfer future
+      stop_flag(other.stop_flag.load()), future(std::move(other.future)) {
   other.camera = nullptr;
-  other.stop_flag = true; // Ensure the moved-from object is stopped
+  other.stop_flag = true;
 }
 
 std::string Camera::get_serial_number() const {
