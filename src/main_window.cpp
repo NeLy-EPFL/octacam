@@ -8,7 +8,6 @@
 #include <QGridLayout>
 #include <QIntValidator>
 #include <QLabel>
-#include <QMdiArea>
 #include <QMdiSubWindow>
 #include <QMessageBox>
 #include <QWidget>
@@ -25,16 +24,16 @@ void GraphicsView::resizeEvent(QResizeEvent *event) {
 
 MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
     : QMainWindow(parent), camera_system(camera_system) {
-  setupUi();
+  setup_ui();
 }
 
 MainWindow::~MainWindow() = default;
 
-void MainWindow::setupUi() {
+void MainWindow::setup_ui() {
   camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
   setWindowTitle("huitacam");
 
-  QMdiArea *mdi_area = new QMdiArea(this);
+  mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);
 
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
@@ -56,11 +55,14 @@ void MainWindow::setupUi() {
 
   update_frames();
 
-  auto *display_timer = new QTimer(this);
+  display_timer = new QTimer(this);
+  display_timer->setTimerType(Qt::CoarseTimer);
+  display_timer->setInterval(33);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
-  display_timer->start(33);
+  display_timer->start();
 
   record_progress_timer = new QTimer(this);
+  record_progress_timer->setTimerType(Qt::CoarseTimer);
   connect(record_progress_timer, &QTimer::timeout, this,
           &MainWindow::update_record_progress);
   record_progress_timer->setInterval(1000);
@@ -115,7 +117,7 @@ void MainWindow::setupUi() {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
-  if (auto mdi_area = qobject_cast<QMdiArea *>(centralWidget())) {
+  if (mdi_area) {
     mdi_area->tileSubWindows();
   }
 }

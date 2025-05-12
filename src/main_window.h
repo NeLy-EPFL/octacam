@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMdiArea>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTimer>
@@ -114,12 +115,14 @@ private slots:
   void on_record_button_clicked();
 
 private:
-  void setupUi();
+  void setup_ui();
   void start_record();
   void stop_record();
 
+  QMdiArea *mdi_area;
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
+  QTimer *display_timer;
   QTimer *record_progress_timer;
   QPushButton *record_button;
   QLineEdit *duration_edit;
