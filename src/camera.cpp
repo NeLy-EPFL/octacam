@@ -94,10 +94,12 @@ void Camera::start_preview() {
   });
 }
 
-void Camera::start_record() {
-  auto opened = video_writer->open(
-      get_serial_number() + ".avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
-      30, cv::Size(camera->Width.GetValue(), camera->Height.GetValue()), false);
+void Camera::start_record(const std::string &save_path, const double &fps,
+                          const std::string &fourcc) {
+  auto fourcc_int =
+      cv::VideoWriter::fourcc(fourcc[0], fourcc[1], fourcc[2], fourcc[3]);
+  auto size = cv::Size(camera->Width.GetValue(), camera->Height.GetValue());
+  auto opened = video_writer->open(save_path, fourcc_int, fps, size, false);
 
   if (!opened) {
     std::cerr << "Failed to open video writer" << std::endl;
@@ -196,10 +198,13 @@ void CameraSystem::start_preview() {
   }
 }
 
-void CameraSystem::start_record() {
+void CameraSystem::start_record(const std::string &save_dir, const double &fps,
+                                const std::string &fourcc) {
   stop();
   for (auto &camera : cameras) {
-    camera.start_record();
+    auto save_path =
+        std::filesystem::path(save_dir) / (camera.get_serial_number() + ".avi");
+    camera.start_record(save_path.string(), fps, fourcc);
   }
 }
 

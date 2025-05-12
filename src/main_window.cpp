@@ -200,7 +200,7 @@ void MainWindow::start_record() {
   auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
 
   camera_system.stop_software_trigger();
-  camera_system.start_record();
+  camera_system.start_record(save_dir, fps, "MJPG");
   camera_system.start_software_trigger(interval, duration);
   update_record_progress();
   record_progress_timer->start();

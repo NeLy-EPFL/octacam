@@ -47,7 +47,8 @@ public:
 
 private:
   void start_preview();
-  void start_record();
+  void start_record(const std::string &save_path, const double &fps,
+                    const std::string &fourcc);
   void load_config(const std::string &config);
   void trigger_once();
 
@@ -67,7 +68,8 @@ public:
 
   void load_config(const std::string &directory);
   void start_preview();
-  void start_record();
+  void start_record(const std::string &save_dir, const double &fps,
+                    const std::string &fourcc);
   void start_software_trigger(std::chrono::nanoseconds interval,
                               std::chrono::nanoseconds duration);
   void start_software_trigger(std::chrono::nanoseconds interval);
