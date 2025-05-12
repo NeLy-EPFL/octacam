@@ -69,7 +69,7 @@ public:
   void load_config(const std::string &directory);
   void start_preview();
   void start_record(const std::string &save_dir, const double &fps,
-                    const std::string &fourcc);
+                    const std::string &fourcc, const std::string &extension);
   void start_software_trigger(std::chrono::nanoseconds interval,
                               std::chrono::nanoseconds duration);
   void start_software_trigger(std::chrono::nanoseconds interval);

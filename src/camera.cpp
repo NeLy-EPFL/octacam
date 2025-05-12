@@ -199,11 +199,12 @@ void CameraSystem::start_preview() {
 }
 
 void CameraSystem::start_record(const std::string &save_dir, const double &fps,
-                                const std::string &fourcc) {
+                                const std::string &fourcc,
+                                const std::string &extension) {
   stop();
   for (auto &camera : cameras) {
-    auto save_path =
-        std::filesystem::path(save_dir) / (camera.get_serial_number() + ".avi");
+    auto save_path = std::filesystem::path(save_dir) /
+                     (camera.get_serial_number() + "." + extension);
     camera.start_record(save_path.string(), fps, fourcc);
   }
 }
