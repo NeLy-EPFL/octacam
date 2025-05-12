@@ -11,6 +11,7 @@
 #include <QMdiSubWindow>
 #include <QMessageBox>
 #include <QWidget>
+#include <cstdlib>
 #include <ranges>
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
@@ -62,13 +63,11 @@ void MainWindow::setup_ui() {
   display_timer->start();
 
   record_countdown_timer = new QTimer(this);
-  record_countdown_timer->setTimerType(Qt::CoarseTimer);
   connect(record_countdown_timer, &QTimer::timeout, this,
           &MainWindow::update_record_countdown);
   record_countdown_timer->setInterval(1000);
 
   check_record_started_timer = new QTimer(this);
-  check_record_started_timer->setTimerType(Qt::CoarseTimer);
   connect(check_record_started_timer, &QTimer::timeout, this,
           &MainWindow::check_record_started);
   check_record_started_timer->setInterval(100);
@@ -162,13 +161,18 @@ void MainWindow::check_record_started() {
 }
 
 void MainWindow::update_record_countdown() {
-  if (record_remaing_time_s >= 0) {
-    status_label->setText(
-        QString("Remaing time: %1:%2:%3")
-            .arg(record_remaing_time_s / 3600, 2, 10, QChar('0'))
-            .arg((record_remaing_time_s % 3600) / 60, 2, 10, QChar('0'))
-            .arg(record_remaing_time_s % 60, 2, 10, QChar('0')));
-    record_remaing_time_s -= 1;
+  if (record_remaing_time_ms >= 0) {
+    std::div_t result = std::div(record_remaing_time_ms, 3'600'000);
+    auto hours = result.quot;
+    result = std::div(result.rem, 60'000);
+    auto minutes = result.quot;
+    auto seconds = result.rem / 1000;
+
+    status_label->setText(QString("Remaing time: %1:%2:%3")
+                              .arg(hours, 2, 10, QChar(' '))
+                              .arg(minutes, 2, 10, QChar('0'))
+                              .arg(seconds, 2, 10, QChar('0')));
+    record_remaing_time_ms -= record_countdown_timer->interval();
   } else {
     stop_record();
     status_label->setText("Recording finished");
@@ -223,7 +227,7 @@ void MainWindow::start_record() {
 
   auto fps = std::stoi(fps_edit->text().toStdString());
   auto duration_s = std::stoi(duration_edit->text().toStdString());
-  record_remaing_time_s = duration_s;
+  record_remaing_time_ms = duration_s * 1000;
   auto interval = std::chrono::nanoseconds(1000000000) / fps;
   auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
   auto video_writer_info = video_writer_combo->currentText().toStdString();
@@ -238,7 +242,7 @@ void MainWindow::start_record() {
     // Handle other video writer types if needed
   }
 
-  bool use_software_trigger = trigger_source_combo->currentText() == "Software";
+  bool use_software_trigger = trigger_source_combo->currentText() == "software";
 
   camera_system.stop_software_trigger();
 

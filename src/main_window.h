@@ -134,5 +134,5 @@ private:
   QLabel *status_label;
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
-  int record_remaing_time_s;
+  int record_remaing_time_ms;
 };
