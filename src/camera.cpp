@@ -204,6 +204,18 @@ void CameraSystem::start_record() {
   }
 }
 
+void CameraSystem::start_software_trigger(std::chrono::nanoseconds interval,
+                                          std::chrono::nanoseconds duration) {
+  trigger_timer.start(interval, duration);
+}
+void CameraSystem::start_software_trigger(std::chrono::nanoseconds interval) {
+  trigger_timer.start(interval);
+}
+void CameraSystem::stop_software_trigger() { trigger_timer.stop(); }
+bool CameraSystem::is_software_trigger_running() const {
+  return trigger_timer.is_running();
+}
+
 std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
   std::vector<std::optional<QPixmap>> pixmaps;
   pixmaps.reserve(cameras.size());

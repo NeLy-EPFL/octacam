@@ -31,7 +31,7 @@ MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
-  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
+  camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
   setWindowTitle("huitacam");
 
   QMdiArea *mdi_area = new QMdiArea(this);
@@ -60,9 +60,10 @@ void MainWindow::setupUi() {
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start(33);
 
-  record_timer = new QTimer(this);
-  connect(record_timer, &QTimer::timeout, this, &MainWindow::update_record);
-  record_timer->setInterval(1000);
+  record_progress_timer = new QTimer(this);
+  connect(record_progress_timer, &QTimer::timeout, this,
+          &MainWindow::update_record_progress);
+  record_progress_timer->setInterval(1000);
 
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
@@ -93,17 +94,23 @@ void MainWindow::setupUi() {
   save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
   dock_layout->addWidget(save_dir_edit, 2, 1);
 
+  dock_layout->addWidget(new QLabel("Trigger source:"), 3, 0);
+  auto *trigger_source_combo = new QComboBox(dock_content);
+  trigger_source_combo->addItem("Software");
+  trigger_source_combo->addItem("External");
+  dock_layout->addWidget(trigger_source_combo, 3, 1);
+
   record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
-  dock_layout->addWidget(record_button, 3, 0, 1, 2);
+  dock_layout->addWidget(record_button, 4, 0, 1, 2);
 
   status_label = new QLabel(dock_content);
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
-  dock_layout->addWidget(status_label, 4, 0, 1, 2);
+  dock_layout->addWidget(status_label, 5, 0, 1, 2);
 
-  dock_layout->setRowStretch(5, 1);
+  dock_layout->setRowStretch(6, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
@@ -122,8 +129,8 @@ void MainWindow::update_frames() {
   }
 }
 
-void MainWindow::update_record() {
-  if (camera_system.trigger_timer.is_running()) {
+void MainWindow::update_record_progress() {
+  if (camera_system.is_software_trigger_running()) {
     auto remaining_time_s = record_duration_s - record_current_time_s;
     status_label->setText(
         QString("Remaing time: %1:%2:%3")
@@ -138,75 +145,84 @@ void MainWindow::update_record() {
 }
 
 void MainWindow::on_record_button_clicked() {
-  auto *button = qobject_cast<QPushButton *>(sender());
-  if (button) {
-    if (button->text() == "Start recording") {
-      button->setEnabled(false);
-
-      fps_edit->setEnabled(false);
-      duration_edit->setEnabled(false);
-      save_dir_edit->setEnabled(false);
-
-      std::string save_dir = save_dir_edit->toPlainText().toStdString();
-
-      bool success{false};
-
-      if (std::filesystem::exists(save_dir)) {
-        auto reply =
-            QMessageBox::question(this, "Warning",
-                                  ("Directory already exists: " + save_dir +
-                                   "\nData might be overwritten. Continue?")
-                                      .c_str(),
-                                  QMessageBox::Yes | QMessageBox::No);
-        if (reply == QMessageBox::Yes) {
-          success = true;
-        }
-      } else if (std::filesystem::create_directories(save_dir)) {
-        success = true;
-      } else {
-        QMessageBox::critical(this, "Error",
-                              "Could not create directory: " +
-                                  QString::fromStdString(save_dir));
-      }
-      if (!success) {
-        button->setEnabled(true);
-
-        fps_edit->setEnabled(true);
-        duration_edit->setEnabled(true);
-        save_dir_edit->setEnabled(true);
-        return;
-      }
-
-      camera_system.trigger_timer.stop();
-      camera_system.start_record();
-      auto fps = std::stoi(fps_edit->text().toStdString());
-      auto duration_s = std::stoi(duration_edit->text().toStdString());
-      record_current_time_s = 0;
-      record_duration_s = duration_s;
-      auto interval = std::chrono::nanoseconds(1000000000) / fps;
-      auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
-      camera_system.trigger_timer.start(interval, duration);
-      update_record();
-      record_timer->start();
-      button->setText("Stop recording");
-      button->setEnabled(true);
+  auto *record_button = qobject_cast<QPushButton *>(sender());
+  if (record_button) {
+    if (record_button->text() == "Start recording") {
+      start_record();
     } else {
       stop_record();
     }
   }
 }
 
-void MainWindow::stop_record() {
-  record_timer->stop();
-  camera_system.trigger_timer.stop();
+void MainWindow::start_record() {
   record_button->setEnabled(false);
+  fps_edit->setEnabled(false);
+  duration_edit->setEnabled(false);
+  save_dir_edit->setEnabled(false);
+
+  std::string save_dir = save_dir_edit->toPlainText().toStdString();
+
+  bool success{false};
+
+  if (std::filesystem::exists(save_dir)) {
+    auto msg = QString("Directory already exists: %1\nData might be "
+                       "overwritten. Continue?")
+                   .arg(QString::fromStdString(save_dir));
+    auto reply = QMessageBox::question(this, "Warning", msg,
+                                       QMessageBox::Yes | QMessageBox::No);
+    if (reply == QMessageBox::Yes) {
+      success = true;
+    }
+  } else if (std::filesystem::create_directories(save_dir)) {
+    success = true;
+  } else {
+    auto msg = QString("Could not create directory: %1")
+                   .arg(QString::fromStdString(save_dir));
+    QMessageBox::critical(this, "Error", msg);
+  }
+
+  if (!success) {
+    save_dir_edit->setEnabled(true);
+    duration_edit->setEnabled(true);
+    fps_edit->setEnabled(true);
+    record_button->setEnabled(true);
+    return;
+  }
+
+  auto fps = std::stoi(fps_edit->text().toStdString());
+  auto duration_s = std::stoi(duration_edit->text().toStdString());
+  record_current_time_s = 0;
+  record_duration_s = duration_s;
+  auto interval = std::chrono::nanoseconds(1000000000) / fps;
+  auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
+
+  camera_system.stop_software_trigger();
+  camera_system.start_record();
+  camera_system.start_software_trigger(interval, duration);
+  update_record_progress();
+  record_progress_timer->start();
+
+  record_button->setText("Stop recording");
+  record_button->setEnabled(true);
+}
+
+void MainWindow::stop_record() {
+  record_button->setEnabled(false);
+
+  record_progress_timer->stop();
+  camera_system.stop_software_trigger();
+
   camera_system.start_preview();
-  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
+  camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
   save_dir_edit->increment();
-  fps_edit->setEnabled(true);
-  duration_edit->setEnabled(true);
+
   save_dir_edit->setEnabled(true);
+  duration_edit->setEnabled(true);
+  fps_edit->setEnabled(true);
+
   record_button->setText("Start recording");
   record_button->setEnabled(true);
+
   status_label->setText("Recording stopped");
 }

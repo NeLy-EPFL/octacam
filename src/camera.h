@@ -68,16 +68,21 @@ public:
   void load_config(const std::string &directory);
   void start_preview();
   void start_record();
+  void start_software_trigger(std::chrono::nanoseconds interval,
+                              std::chrono::nanoseconds duration);
+  void start_software_trigger(std::chrono::nanoseconds interval);
+  void stop_software_trigger();
+  bool is_software_trigger_running() const;
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();
   std::vector<Camera>::iterator end();
   std::vector<Camera>::const_iterator begin() const;
   std::vector<Camera>::const_iterator end() const;
-  void stop();
-  PreciseTimer trigger_timer;
 
 private:
+  PreciseTimer trigger_timer;
+  void stop();
   Pylon::PylonAutoInitTerm autoInitTerm;
   std::vector<Camera> cameras;
 };

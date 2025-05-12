@@ -1,6 +1,7 @@
 #pragma once
 
 #include "camera.h"
+#include <QComboBox>
 #include <QDir>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
@@ -109,16 +110,17 @@ protected:
 
 private slots:
   void update_frames();
-  void update_record();
+  void update_record_progress();
   void on_record_button_clicked();
-  void stop_record();
 
 private:
   void setupUi();
+  void start_record();
+  void stop_record();
 
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
-  QTimer *record_timer;
+  QTimer *record_progress_timer;
   QPushButton *record_button;
   QLineEdit *duration_edit;
   QLineEdit *fps_edit;
