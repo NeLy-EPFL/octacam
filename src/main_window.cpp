@@ -42,6 +42,8 @@ void MainWindow::setup_ui() {
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
     auto *view = new GraphicsView(widget);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
     pixmap_items.push_back(pixmap_item);
@@ -126,6 +128,21 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(status_label, row++, 0, 1, 2);
 
   dock_layout->setRowStretch(row++, 1);
+
+  auto rotate_all_button = new QPushButton("Rotate all displays", dock);
+  connect(rotate_all_button, &QPushButton::clicked, this, [this]() {
+    for (auto pixmap_item : pixmap_items) {
+      pixmap_item->setTransformOriginPoint(
+          pixmap_item->boundingRect().center());
+      pixmap_item->setRotation(pixmap_item->rotation() + 90);
+      auto view =
+          qobject_cast<GraphicsView *>(pixmap_item->scene()->views().first());
+      if (view) {
+        view->fitInView(pixmap_item->sceneBoundingRect(), Qt::KeepAspectRatio);
+      }
+    }
+  });
+  dock_layout->addWidget(rotate_all_button, row++, 0, 1, 2);
 
   input_widgets.push_back(duration_edit);
   input_widgets.push_back(fps_edit);
