@@ -105,8 +105,8 @@ void MainWindow::setup_ui() {
 
   dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
   trigger_source_combo = new QComboBox(dock_content);
-  trigger_source_combo->addItem("Software");
-  trigger_source_combo->addItem("External");
+  trigger_source_combo->addItem("software");
+  trigger_source_combo->addItem("external");
   dock_layout->addWidget(trigger_source_combo, row++, 1);
 
   dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
