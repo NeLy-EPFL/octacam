@@ -111,7 +111,8 @@ protected:
 
 private slots:
   void update_frames();
-  void update_record_progress();
+  void check_record_started();
+  void update_record_countdown();
   void on_record_button_clicked();
 
 private:
@@ -122,13 +123,14 @@ private:
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
   QMdiArea *mdi_area;
-  QTimer *record_progress_timer;
+  QTimer *record_countdown_timer;
+  QTimer *check_record_started_timer;
   QPushButton *record_button;
   QLineEdit *duration_edit;
   QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;
   QLabel *status_label;
   QComboBox *video_writer_combo;
-  int record_current_time_s;
-  int record_duration_s;
+  QComboBox *trigger_source_combo;
+  int record_remaing_time_s;
 };

@@ -56,6 +56,7 @@ private:
   std::unique_ptr<VideoWriter> video_writer;
   const CameraSystem &system;
   FrameForDisplay frame_for_display;
+  std::atomic<bool> started{false};
   std::atomic<bool> stop_flag{false};
   std::future<void> future;
 };
@@ -74,7 +75,7 @@ public:
                               std::chrono::nanoseconds duration);
   void start_software_trigger(std::chrono::nanoseconds interval);
   void stop_software_trigger();
-  bool is_software_trigger_running() const;
+  bool all_cameras_started() const;
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();

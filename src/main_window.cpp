@@ -61,11 +61,17 @@ void MainWindow::setup_ui() {
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start();
 
-  record_progress_timer = new QTimer(this);
-  record_progress_timer->setTimerType(Qt::CoarseTimer);
-  connect(record_progress_timer, &QTimer::timeout, this,
-          &MainWindow::update_record_progress);
-  record_progress_timer->setInterval(1000);
+  record_countdown_timer = new QTimer(this);
+  record_countdown_timer->setTimerType(Qt::CoarseTimer);
+  connect(record_countdown_timer, &QTimer::timeout, this,
+          &MainWindow::update_record_countdown);
+  record_countdown_timer->setInterval(1000);
+
+  check_record_started_timer = new QTimer(this);
+  check_record_started_timer->setTimerType(Qt::CoarseTimer);
+  connect(check_record_started_timer, &QTimer::timeout, this,
+          &MainWindow::check_record_started);
+  check_record_started_timer->setInterval(100);
 
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
@@ -98,7 +104,7 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(save_dir_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
-  auto *trigger_source_combo = new QComboBox(dock_content);
+  trigger_source_combo = new QComboBox(dock_content);
   trigger_source_combo->addItem("Software");
   trigger_source_combo->addItem("External");
   dock_layout->addWidget(trigger_source_combo, row++, 1);
@@ -138,15 +144,25 @@ void MainWindow::update_frames() {
   }
 }
 
-void MainWindow::update_record_progress() {
-  if (camera_system.is_software_trigger_running()) {
-    auto remaining_time_s = record_duration_s - record_current_time_s;
+void MainWindow::check_record_started() {
+  if (camera_system.all_cameras_started()) {
+    check_record_started_timer->stop();
+    record_countdown_timer->start();
+    update_record_countdown();
+    record_countdown_timer->start();
+    record_button->setText("Stop recording");
+    record_button->setEnabled(true);
+  }
+}
+
+void MainWindow::update_record_countdown() {
+  if (record_remaing_time_s >= 0) {
     status_label->setText(
         QString("Remaing time: %1:%2:%3")
-            .arg(remaining_time_s / 3600, 2, 10, QChar('0'))
-            .arg((remaining_time_s % 3600) / 60, 2, 10, QChar('0'))
-            .arg(remaining_time_s % 60, 2, 10, QChar('0')));
-    record_current_time_s += 1;
+            .arg(record_remaing_time_s / 3600, 2, 10, QChar('0'))
+            .arg((record_remaing_time_s % 3600) / 60, 2, 10, QChar('0'))
+            .arg(record_remaing_time_s % 60, 2, 10, QChar('0')));
+    record_remaing_time_s -= 1;
   } else {
     stop_record();
     status_label->setText("Recording finished");
@@ -201,8 +217,7 @@ void MainWindow::start_record() {
 
   auto fps = std::stoi(fps_edit->text().toStdString());
   auto duration_s = std::stoi(duration_edit->text().toStdString());
-  record_current_time_s = 0;
-  record_duration_s = duration_s;
+  record_remaing_time_s = duration_s;
   auto interval = std::chrono::nanoseconds(1000000000) / fps;
   auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
   auto video_writer_info = video_writer_combo->currentText().toStdString();
@@ -217,24 +232,25 @@ void MainWindow::start_record() {
     // Handle other video writer types if needed
   }
 
+  bool use_software_trigger = trigger_source_combo->currentText() == "Software";
+
   camera_system.stop_software_trigger();
 
   if (!fourcc.empty()) {
     camera_system.start_record(save_dir, fps, fourcc, extension);
   }
 
-  camera_system.start_software_trigger(interval, duration);
-  update_record_progress();
-  record_progress_timer->start();
+  if (use_software_trigger) {
+    camera_system.start_software_trigger(interval, duration);
+  }
 
-  record_button->setText("Stop recording");
-  record_button->setEnabled(true);
+  check_record_started_timer->start();
 }
 
 void MainWindow::stop_record() {
   record_button->setEnabled(false);
 
-  record_progress_timer->stop();
+  record_countdown_timer->stop();
   camera_system.stop_software_trigger();
 
   camera_system.start_preview();

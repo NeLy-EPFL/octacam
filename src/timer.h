@@ -14,7 +14,6 @@ public:
              std::chrono::nanoseconds duration);
   void start(std::chrono::nanoseconds interval);
   void stop();
-  bool is_running() const;
 
 private:
   void run();

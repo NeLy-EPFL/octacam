@@ -30,8 +30,6 @@ void PreciseTimer::stop() {
   }
 }
 
-bool PreciseTimer::is_running() const { return running_; }
-
 void PreciseTimer::run() {
   auto next_time = std::chrono::steady_clock::now();
   auto end_time = next_time + duration_;

@@ -107,6 +107,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
   }
 
   stop_flag = false;
+  started = false;
   camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
   auto ready =
       camera->WaitForFrameTriggerReady(1000, Pylon::TimeoutHandling_Return);
@@ -117,17 +118,22 @@ void Camera::start_record(const std::string &save_path, const double &fps,
   }
 
   future = std::async(std::launch::async, [this]() {
+    bool started_ = false;
     while (camera->IsGrabbing() && !stop_flag) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-        frame_for_display.store_frame(pImageBuffer);
         bool written = video_writer->write(
             cv::Mat(camera->Height.GetValue(), camera->Width.GetValue(),
                     CV_8UC1, (void *)pImageBuffer));
         if (!written) {
           std::cerr << "Frame dropped" << std::endl;
+        }
+        frame_for_display.store_frame(pImageBuffer);
+        if (!started_) {
+          started_ = true;
+          started = true;
         }
       }
     }
@@ -217,8 +223,11 @@ void CameraSystem::start_software_trigger(std::chrono::nanoseconds interval) {
   trigger_timer.start(interval);
 }
 void CameraSystem::stop_software_trigger() { trigger_timer.stop(); }
-bool CameraSystem::is_software_trigger_running() const {
-  return trigger_timer.is_running();
+
+bool CameraSystem::all_cameras_started() const {
+  return std::all_of(cameras.begin(), cameras.end(), [](const Camera &camera) {
+    return camera.started.load();
+  });
 }
 
 std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
