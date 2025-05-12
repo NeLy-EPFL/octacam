@@ -126,6 +126,12 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(status_label, row++, 0, 1, 2);
 
   dock_layout->setRowStretch(row++, 1);
+
+  input_widgets.push_back(duration_edit);
+  input_widgets.push_back(fps_edit);
+  input_widgets.push_back(save_dir_edit);
+  input_widgets.push_back(trigger_source_combo);
+  input_widgets.push_back(video_writer_combo);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
@@ -182,9 +188,10 @@ void MainWindow::on_record_button_clicked() {
 
 void MainWindow::start_record() {
   record_button->setEnabled(false);
-  fps_edit->setEnabled(false);
-  duration_edit->setEnabled(false);
-  save_dir_edit->setEnabled(false);
+
+  for (auto widget : input_widgets) {
+    widget->setEnabled(false);
+  }
 
   std::string save_dir = save_dir_edit->toPlainText().toStdString();
 
@@ -208,10 +215,9 @@ void MainWindow::start_record() {
   }
 
   if (!success) {
-    save_dir_edit->setEnabled(true);
-    duration_edit->setEnabled(true);
-    fps_edit->setEnabled(true);
-    record_button->setEnabled(true);
+    for (auto widget : input_widgets) {
+      widget->setEnabled(true);
+    }
     return;
   }
 
@@ -257,9 +263,9 @@ void MainWindow::stop_record() {
   camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
   save_dir_edit->increment();
 
-  save_dir_edit->setEnabled(true);
-  duration_edit->setEnabled(true);
-  fps_edit->setEnabled(true);
+  for (auto widget : input_widgets) {
+    widget->setEnabled(true);
+  }
 
   record_button->setText("Start recording");
   record_button->setEnabled(true);

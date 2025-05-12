@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTimer>
+#include <QVector>
 #include <filesystem>
 #include <regex>
 
@@ -121,7 +122,8 @@ private:
   void stop_record();
 
   CameraSystem &camera_system;
-  std::vector<QGraphicsPixmapItem *> pixmap_items;
+  QVector<QGraphicsPixmapItem *> pixmap_items;
+  QVector<QWidget *> input_widgets;
   QMdiArea *mdi_area;
   QTimer *record_countdown_timer;
   QTimer *check_record_started_timer;
