@@ -80,6 +80,7 @@ void MainWindow::setup_ui() {
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
   dock->setMinimumWidth(200);
   dock->setMaximumWidth(300);
+  dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
   auto *dock_content = new QWidget(dock);
