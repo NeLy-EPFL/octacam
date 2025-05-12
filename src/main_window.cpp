@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QDockWidget>
+#include <QFrame>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
@@ -129,26 +130,125 @@ void MainWindow::setup_ui() {
 
   dock_layout->setRowStretch(row++, 1);
 
-  auto rotate_all_button = new QPushButton("Rotate all displays", dock);
-  connect(rotate_all_button, &QPushButton::clicked, this, [this]() {
-    for (auto pixmap_item : pixmap_items) {
-      pixmap_item->setTransformOriginPoint(
-          pixmap_item->boundingRect().center());
-      pixmap_item->setRotation(pixmap_item->rotation() + 90);
-      auto view =
-          qobject_cast<GraphicsView *>(pixmap_item->scene()->views().first());
-      if (view) {
-        view->fitInView(pixmap_item->sceneBoundingRect(), Qt::KeepAspectRatio);
-      }
-    }
-  });
-  dock_layout->addWidget(rotate_all_button, row++, 0, 1, 2);
+  auto *h_line = new QFrame(dock_content);
+  h_line->setFrameShape(QFrame::HLine);
+  h_line->setFrameShadow(QFrame::Sunken);
+  dock_layout->addWidget(h_line, row++, 0, 1, 2);
+
+  auto rotate_widget = new QWidget(dock);
+  rotate_widget->setContentsMargins(0, 0, 0, 0);
+  rotate_widget->setLayout(new QHBoxLayout(rotate_widget));
+  rotate_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  dock_layout->addWidget(rotate_widget, row, 0, 2, 2);
+
+  rotate_widget->layout()->addWidget(new QLabel("Rotate:"));
+
+  auto rotate_control_widget = new QWidget(rotate_widget);
+  rotate_control_widget->setContentsMargins(0, 0, 0, 0);
+  rotate_control_widget->setLayout(new QVBoxLayout(rotate_control_widget));
+  rotate_control_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_widget->layout()->addWidget(rotate_control_widget);
+
+  auto rotate_buttons_widget = new QWidget(rotate_control_widget);
+  rotate_buttons_widget->setContentsMargins(0, 0, 0, 0);
+  rotate_buttons_widget->setLayout(new QHBoxLayout(rotate_buttons_widget));
+  rotate_buttons_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_control_widget->layout()->addWidget(rotate_buttons_widget);
+
+  auto rotate_ccw_button = new QPushButton("↺", dock);
+  rotate_buttons_widget->layout()->addWidget(rotate_ccw_button);
+  connect(rotate_ccw_button, &QPushButton::clicked, this,
+          &MainWindow::rotate_displays);
+
+  auto rotate_cw_button = new QPushButton("↻", dock);
+  rotate_buttons_widget->layout()->addWidget(rotate_cw_button);
+  connect(rotate_cw_button, &QPushButton::clicked, this,
+          &MainWindow::rotate_displays);
+
+  auto reset_rotation_button = new QPushButton("Reset", dock);
+  rotate_buttons_widget->layout()->addWidget(reset_rotation_button);
+  connect(reset_rotation_button, &QPushButton::clicked, this,
+          &MainWindow::rotate_displays);
+
+  auto rotate_which_widget = new QWidget(rotate_control_widget);
+  rotate_which_widget->setContentsMargins(0, 0, 0, 0);
+  rotate_which_widget->setLayout(new QHBoxLayout(rotate_which_widget));
+  rotate_which_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_control_widget->layout()->addWidget(rotate_which_widget);
+
+  rotate_selected_button = new QRadioButton("Selected", rotate_which_widget);
+  rotate_which_widget->layout()->addWidget(rotate_selected_button);
+
+  rotate_all_button = new QRadioButton("All", rotate_which_widget);
+  rotate_which_widget->layout()->addWidget(rotate_all_button);
+
+  rotate_all_button->setChecked(true);
 
   input_widgets.push_back(duration_edit);
   input_widgets.push_back(fps_edit);
   input_widgets.push_back(save_dir_edit);
   input_widgets.push_back(trigger_source_combo);
   input_widgets.push_back(video_writer_combo);
+}
+
+void MainWindow::rotate_displays() {
+  auto *rotate_button = qobject_cast<QPushButton *>(sender());
+  if (!rotate_button) {
+    return;
+  }
+
+  if (rotate_all_button->isChecked()) {
+    for (auto pixmap_item : pixmap_items) {
+      if (rotate_button->text() == "↺") {
+        pixmap_item->setTransformOriginPoint(
+            pixmap_item->boundingRect().center());
+        pixmap_item->setRotation(pixmap_item->rotation() - 90);
+      } else if (rotate_button->text() == "↻") {
+        pixmap_item->setTransformOriginPoint(
+            pixmap_item->boundingRect().center());
+        pixmap_item->setRotation(pixmap_item->rotation() + 90);
+      } else if (rotate_button->text() == "Reset") {
+        pixmap_item->setRotation(0);
+      }
+      auto view =
+          qobject_cast<GraphicsView *>(pixmap_item->scene()->views().first());
+      if (view) {
+        view->fitInView(pixmap_item->sceneBoundingRect(), Qt::KeepAspectRatio);
+      }
+    }
+    return;
+  }
+
+  auto active_sub_window = mdi_area->currentSubWindow();
+  if (!active_sub_window) {
+    return;
+  }
+
+  QGraphicsView *view =
+      active_sub_window->widget()->findChild<QGraphicsView *>();
+  if (!view) {
+    return;
+  }
+  QGraphicsScene *scene = view->scene();
+  if (!scene) {
+    return;
+  }
+
+  for (auto item : scene->items()) {
+    if (!item) {
+      continue;
+    }
+    if (rotate_button->text() == "↺") {
+      item->setTransformOriginPoint(item->boundingRect().center());
+      item->setRotation(item->rotation() - 90);
+    } else if (rotate_button->text() == "↻") {
+      item->setTransformOriginPoint(item->boundingRect().center());
+      item->setRotation(item->rotation() + 90);
+    } else if (rotate_button->text() == "Reset") {
+      item->setRotation(0);
+    }
+    view->fitInView(item->sceneBoundingRect(), Qt::KeepAspectRatio);
+  }
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {

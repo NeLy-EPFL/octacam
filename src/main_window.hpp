@@ -14,6 +14,7 @@
 #include <QMdiArea>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QTimer>
 #include <QVector>
 
@@ -113,6 +114,7 @@ protected:
   void resizeEvent(QResizeEvent *event) override;
 
 private slots:
+  void rotate_displays();
   void update_frames();
   void check_record_started();
   void update_record_countdown();
@@ -136,5 +138,7 @@ private:
   QLabel *status_label;
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
+  QRadioButton *rotate_selected_button;
+  QRadioButton *rotate_all_button;
   int record_remaing_time_ms;
 };
