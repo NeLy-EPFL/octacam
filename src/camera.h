@@ -15,9 +15,13 @@
 #include <thread>
 #include <vector>
 
+#include "video_writer.h"
+
 class FrameForDisplay {
 public:
+  FrameForDisplay();
   ~FrameForDisplay();
+  FrameForDisplay(FrameForDisplay &&other);
   std::optional<QPixmap> retrieve_as_pixmap();
   void store_frame(const uint8_t *data);
   void update_size(int width, int height);
@@ -48,6 +52,7 @@ private:
   void trigger_once();
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
+  std::unique_ptr<VideoWriter> video_writer;
   const CameraSystem &system;
   FrameForDisplay frame_for_display;
   std::atomic<bool> stop_flag{false};

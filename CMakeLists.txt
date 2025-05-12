@@ -30,6 +30,8 @@ target_sources(huitacam
         src/main_window.h
         src/timer.cpp
         src/timer.h
+        src/video_writer.cpp
+        src/video_writer.h
 )
 target_link_libraries(huitacam
     PRIVATE

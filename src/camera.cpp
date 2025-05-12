@@ -7,7 +7,19 @@
 #include <iostream>
 #include <thread>
 
+FrameForDisplay::FrameForDisplay() = default;
+
 FrameForDisplay::~FrameForDisplay() { delete[] data; }
+
+FrameForDisplay::FrameForDisplay(FrameForDisplay &&other)
+    : data(other.data), width(other.width), height(other.height),
+      size(other.size), retrieved(other.retrieved) {
+  other.data = nullptr;
+  other.width = 0;
+  other.height = 0;
+  other.size = 0;
+  other.retrieved = true;
+}
 
 std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
   std::lock_guard<std::mutex> lock(mtx);
@@ -42,7 +54,7 @@ void FrameForDisplay::update_size(int width, int height) {
 
 Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
     : camera(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
-      system(system) {
+      video_writer(std::make_unique<OpencvVideoWriter>(20)), system(system) {
   camera->Open();
 }
 
@@ -54,8 +66,13 @@ Camera::~Camera() {
 }
 
 Camera::Camera(Camera &&other)
-    : camera(std::move(other.camera)), system(other.system) {
+    : camera(std::move(other.camera)), system(other.system),
+      video_writer(std::move(other.video_writer)),
+      frame_for_display(std::move(other.frame_for_display)),
+      stop_flag(other.stop_flag.load()), // Transfer stop_flag state
+      future(std::move(other.future)) {  // Transfer future
   other.camera = nullptr;
+  other.stop_flag = true; // Ensure the moved-from object is stopped
 }
 
 std::string Camera::get_serial_number() const {
@@ -79,6 +96,10 @@ void Camera::start_preview() {
 }
 
 void Camera::start_record() {
+  auto opened = video_writer->open(
+      get_serial_number() + ".avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'),
+      30, cv::Size(camera->Width.GetValue(), camera->Height.GetValue()), false);
+
   stop_flag = false;
   camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
   future = std::async(std::launch::async, [this]() {
@@ -88,9 +109,16 @@ void Camera::start_record() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
+        bool written = video_writer->write(
+            cv::Mat(camera->Height.GetValue(), camera->Width.GetValue(),
+                    CV_8UC1, (void *)pImageBuffer));
+        if (!written) {
+          std::cerr << "Frame dropped" << std::endl;
+        }
       }
     }
     camera->StopGrabbing();
+    video_writer->close();
   });
 }
 
