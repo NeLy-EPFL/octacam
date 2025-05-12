@@ -1,6 +1,7 @@
 #include "camera.h"
 
 #include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <future>
 #include <iostream>
@@ -87,7 +88,6 @@ void Camera::start_record() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
-        // std::cout << "frame saved" << std::endl;
       }
     }
     camera->StopGrabbing();
@@ -133,7 +133,8 @@ CameraSystem::~CameraSystem() { trigger_timer.stop(); }
 void CameraSystem::load_config(const std::string &directory) {
   for (auto &camera : cameras) {
     auto serial_number = camera.get_serial_number();
-    std::string config_file = directory + "/" + serial_number + ".pfs";
+    std::filesystem::path config_file =
+        std::filesystem::path(directory) / (serial_number + ".pfs");
     std::ifstream file(config_file);
     if (file) {
       std::cout << "Loading config for camera: " << serial_number << std::endl;
@@ -142,7 +143,7 @@ void CameraSystem::load_config(const std::string &directory) {
       camera.load_config(content);
     } else {
       camera.load_config("");
-      std::cerr << "Warning: config file not found at" << config_file
+      std::cerr << "Warning: config file not found at " << config_file
                 << std::endl;
     }
   }
