@@ -28,6 +28,8 @@ target_sources(huitacam
         src/camera.h
         src/main_window.cpp
         src/main_window.h
+        src/timer.cpp
+        src/timer.h
 )
 target_link_libraries(huitacam
     PRIVATE

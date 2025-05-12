@@ -5,12 +5,14 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
+#include <QGridLayout>
+#include <QIntValidator>
+#include <QLabel>
 #include <QMdiArea>
 #include <QMdiSubWindow>
-#include <QPushButton>
-#include <QTimer>
-#include <QVBoxLayout>
+#include <QMessageBox>
 #include <QWidget>
+#include <ranges>
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
 
@@ -29,44 +31,79 @@ MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
+  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
   setWindowTitle("huitacam");
 
   QMdiArea *mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);
 
-  for (auto &camera : camera_system) {
+  for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
     auto *view = new GraphicsView(widget);
     view->setScene(new QGraphicsScene(view));
     auto *pixmap_item = new QGraphicsPixmapItem();
-    pixmap_item->setPixmap(camera.get_pixmap());
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
-    auto sub_window =
-        mdi_area->addSubWindow(widget, Qt::WindowMinMaxButtonsHint);
+    auto sub_window = mdi_area->addSubWindow(
+        widget, Qt::WindowMinMaxButtonsHint | Qt::WindowTitleHint);
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
     sub_window->setWindowTitle(QString(camera.get_serial_number().c_str()));
   }
 
-  QTimer *timer = new QTimer(this);
-  connect(timer, &QTimer::timeout, this, &MainWindow::update_frames);
-  timer->start(1000 / 30);
+  update_frames();
 
-  QDockWidget *right_dock = new QDockWidget(this);
-  right_dock->setAllowedAreas(Qt::RightDockWidgetArea);
-  QWidget *dock_content = new QWidget(right_dock);
-  QVBoxLayout *dock_layout = new QVBoxLayout(dock_content);
+  auto *display_timer = new QTimer(this);
+  connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
+  display_timer->start(33);
+
+  record_timer = new QTimer(this);
+  connect(record_timer, &QTimer::timeout, this, &MainWindow::update_record);
+  record_timer->setInterval(1000);
+
+  auto *dock = new QDockWidget(this);
+  dock->setAllowedAreas(Qt::RightDockWidgetArea);
+  dock->setMinimumWidth(200);
+  dock->setMaximumWidth(300);
+  addDockWidget(Qt::RightDockWidgetArea, dock);
+
+  auto *dock_content = new QWidget(dock);
+  dock->setWidget(dock_content);
+
+  auto *dock_layout = new QGridLayout(dock_content);
   dock_content->setLayout(dock_layout);
-  right_dock->setWidget(dock_content);
-  addDockWidget(Qt::RightDockWidgetArea, right_dock);
-  right_dock->setMinimumWidth(400);
 
-  auto *record_button = new QPushButton("Start recording", right_dock);
-  dock_layout->addWidget(record_button);
+  dock_layout->addWidget(new QLabel("Duration (s):"), 0, 0);
+  duration_edit = new QLineEdit(dock_content);
+  duration_edit->setValidator(new QIntValidator(0, 359999, this));
+  duration_edit->setText("30");
+  dock_layout->addWidget(duration_edit, 0, 1);
+
+  dock_layout->addWidget(new QLabel("FPS:"), 1, 0);
+  fps_edit = new QLineEdit(dock_content);
+  fps_edit->setValidator(new QIntValidator(0, 1000, this));
+  fps_edit->setText("100");
+  dock_layout->addWidget(fps_edit, 1, 1);
+
+  dock_layout->addWidget(new QLabel("Save directory:"), 2, 0);
+  save_dir_edit = new DirectoryEdit(dock_content);
+  save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
+  dock_layout->addWidget(save_dir_edit, 2, 1);
+
+  record_button = new QPushButton("Start recording", dock);
+  connect(record_button, &QPushButton::clicked, this,
+          &MainWindow::on_record_button_clicked);
+  dock_layout->addWidget(record_button, 3, 0, 1, 2);
+
+  status_label = new QLabel(dock_content);
+  status_label->setText("");
+  status_label->setAlignment(Qt::AlignCenter);
+  dock_layout->addWidget(status_label, 4, 0, 1, 2);
+
+  dock_layout->setRowStretch(5, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
@@ -77,8 +114,99 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  int i = 0;
-  for (auto &camera : camera_system) {
-    pixmap_items[i++]->setPixmap(camera.get_pixmap());
+  for (auto [pixmap_item, pixmap] :
+       std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
+    if (pixmap) {
+      pixmap_item->setPixmap(*pixmap);
+    }
   }
+}
+
+void MainWindow::update_record() {
+  if (camera_system.trigger_timer.is_running()) {
+    auto remaining_time_s = record_duration_s - record_current_time_s;
+    status_label->setText(
+        QString("Remaing time: %1:%2:%3")
+            .arg(remaining_time_s / 3600, 2, 10, QChar('0'))
+            .arg((remaining_time_s % 3600) / 60, 2, 10, QChar('0'))
+            .arg(remaining_time_s % 60, 2, 10, QChar('0')));
+    record_current_time_s += 1;
+  } else {
+    stop_record();
+    status_label->setText("Recording finished");
+  }
+}
+
+void MainWindow::on_record_button_clicked() {
+  auto *button = qobject_cast<QPushButton *>(sender());
+  if (button) {
+    if (button->text() == "Start recording") {
+      button->setEnabled(false);
+
+      fps_edit->setEnabled(false);
+      duration_edit->setEnabled(false);
+      save_dir_edit->setEnabled(false);
+
+      std::string save_dir = save_dir_edit->toPlainText().toStdString();
+
+      bool success{false};
+
+      if (std::filesystem::exists(save_dir)) {
+        auto reply =
+            QMessageBox::question(this, "Warning",
+                                  ("Directory already exists: " + save_dir +
+                                   "\nData might be overwritten. Continue?")
+                                      .c_str(),
+                                  QMessageBox::Yes | QMessageBox::No);
+        if (reply == QMessageBox::Yes) {
+          success = true;
+        }
+      } else if (std::filesystem::create_directories(save_dir)) {
+        success = true;
+      } else {
+        QMessageBox::critical(this, "Error",
+                              "Could not create directory: " +
+                                  QString::fromStdString(save_dir));
+      }
+      if (!success) {
+        button->setEnabled(true);
+
+        fps_edit->setEnabled(true);
+        duration_edit->setEnabled(true);
+        save_dir_edit->setEnabled(true);
+        return;
+      }
+
+      camera_system.trigger_timer.stop();
+      camera_system.start_record();
+      auto fps = std::stoi(fps_edit->text().toStdString());
+      auto duration_s = std::stoi(duration_edit->text().toStdString());
+      record_current_time_s = 0;
+      record_duration_s = duration_s;
+      auto interval = std::chrono::nanoseconds(1000000000) / fps;
+      auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
+      camera_system.trigger_timer.start(interval, duration);
+      update_record();
+      record_timer->start();
+      button->setText("Stop recording");
+      button->setEnabled(true);
+    } else {
+      stop_record();
+    }
+  }
+}
+
+void MainWindow::stop_record() {
+  record_timer->stop();
+  camera_system.trigger_timer.stop();
+  record_button->setEnabled(false);
+  camera_system.start_preview();
+  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
+  save_dir_edit->increment();
+  fps_edit->setEnabled(true);
+  duration_edit->setEnabled(true);
+  save_dir_edit->setEnabled(true);
+  record_button->setText("Start recording");
+  record_button->setEnabled(true);
+  status_label->setText("Recording stopped");
 }
