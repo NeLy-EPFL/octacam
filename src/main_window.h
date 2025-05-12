@@ -5,6 +5,7 @@
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QPlainTextEdit>
@@ -122,4 +123,7 @@ private:
   QLineEdit *duration_edit;
   QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;
+  QLabel *status_label;
+  int record_current_time_s;
+  int record_duration_s;
 };

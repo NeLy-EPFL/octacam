@@ -98,7 +98,12 @@ void MainWindow::setupUi() {
           &MainWindow::on_record_button_clicked);
   dock_layout->addWidget(record_button, 3, 0, 1, 2);
 
-  dock_layout->setRowStretch(4, 1);
+  status_label = new QLabel(dock_content);
+  status_label->setText("");
+  status_label->setAlignment(Qt::AlignCenter); // Center-align the label
+  dock_layout->addWidget(status_label, 4, 0, 1, 2);
+
+  dock_layout->setRowStretch(5, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
@@ -119,8 +124,19 @@ void MainWindow::update_frames() {
 
 void MainWindow::update_record() {
   if (camera_system.trigger_timer.is_running()) {
+    auto remaining_time_s = record_duration_s - record_current_time_s;
+    double percept = 100.0 * record_current_time_s / record_duration_s;
+    status_label->setText(
+        QString("Remaing time: %1:%2:%3 (%4%5)")
+            .arg(remaining_time_s / 3600, 2, 10, QChar('0'))
+            .arg((remaining_time_s % 3600) / 60, 2, 10, QChar('0'))
+            .arg(remaining_time_s % 60, 2, 10, QChar('0'))
+            .arg(percept, 0, 'f', 1)
+            .arg("%"));
+    record_current_time_s += 1;
   } else {
     stop_record();
+    status_label->setText("Recording finished");
   }
 }
 
@@ -164,11 +180,14 @@ void MainWindow::on_record_button_clicked() {
 
       camera_system.trigger_timer.stop();
       camera_system.start_record();
-      camera_system.trigger_timer.start(
-          std::chrono::nanoseconds(1000000000 /
-                                   std::stoi(fps_edit->text().toStdString())),
-          std::chrono::nanoseconds(1000000000) *
-              std::stoi(duration_edit->text().toStdString()));
+      auto fps = std::stoi(fps_edit->text().toStdString());
+      auto duration_s = std::stoi(duration_edit->text().toStdString());
+      record_current_time_s = 0;
+      record_duration_s = duration_s;
+      auto interval = std::chrono::nanoseconds(1000000000) / fps;
+      auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
+      camera_system.trigger_timer.start(interval, duration);
+      update_record();
       record_timer->start();
       button->setText("Stop recording");
       button->setEnabled(true);
@@ -190,4 +209,5 @@ void MainWindow::stop_record() {
   save_dir_edit->setEnabled(true);
   record_button->setText("Start recording");
   record_button->setEnabled(true);
+  status_label->setText("Recording stopped");
 }

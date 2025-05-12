@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
   QApplication qapp(argc, argv);
   MainWindow main_window(camera_system);
   main_window.setWindowTitle("huitacam");
-  main_window.showMaximized();
+  main_window.showNormal();
 
   return qapp.exec();
 }
