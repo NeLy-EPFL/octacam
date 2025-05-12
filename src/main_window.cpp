@@ -78,41 +78,48 @@ void MainWindow::setup_ui() {
 
   auto *dock_layout = new QGridLayout(dock_content);
   dock_content->setLayout(dock_layout);
+  int row = 0;
 
-  dock_layout->addWidget(new QLabel("Duration (s):"), 0, 0);
+  dock_layout->addWidget(new QLabel("Duration (s):"), row, 0);
   duration_edit = new QLineEdit(dock_content);
   duration_edit->setValidator(new QIntValidator(0, 359999, this));
   duration_edit->setText("30");
-  dock_layout->addWidget(duration_edit, 0, 1);
+  dock_layout->addWidget(duration_edit, row++, 1);
 
-  dock_layout->addWidget(new QLabel("FPS:"), 1, 0);
+  dock_layout->addWidget(new QLabel("FPS:"), row, 0);
   fps_edit = new QLineEdit(dock_content);
   fps_edit->setValidator(new QIntValidator(0, 1000, this));
   fps_edit->setText("100");
-  dock_layout->addWidget(fps_edit, 1, 1);
+  dock_layout->addWidget(fps_edit, row++, 1);
 
-  dock_layout->addWidget(new QLabel("Save directory:"), 2, 0);
+  dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
   save_dir_edit = new DirectoryEdit(dock_content);
   save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
-  dock_layout->addWidget(save_dir_edit, 2, 1);
+  dock_layout->addWidget(save_dir_edit, row++, 1);
 
-  dock_layout->addWidget(new QLabel("Trigger source:"), 3, 0);
+  dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
   auto *trigger_source_combo = new QComboBox(dock_content);
   trigger_source_combo->addItem("Software");
   trigger_source_combo->addItem("External");
-  dock_layout->addWidget(trigger_source_combo, 3, 1);
+  dock_layout->addWidget(trigger_source_combo, row++, 1);
+
+  dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
+  auto *video_writer_combo = new QComboBox(dock_content);
+  video_writer_combo->addItem("opencv MJPG avi");
+  video_writer_combo->addItem("opencv AVC1 mp4");
+  dock_layout->addWidget(video_writer_combo, row++, 1);
 
   record_button = new QPushButton("Start recording", dock);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
-  dock_layout->addWidget(record_button, 4, 0, 1, 2);
+  dock_layout->addWidget(record_button, row++, 0, 1, 2);
 
   status_label = new QLabel(dock_content);
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
-  dock_layout->addWidget(status_label, 5, 0, 1, 2);
+  dock_layout->addWidget(status_label, row++, 0, 1, 2);
 
-  dock_layout->setRowStretch(6, 1);
+  dock_layout->setRowStretch(row++, 1);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
