@@ -1,6 +1,8 @@
 #pragma once
 
-#include "camera.h"
+#include <filesystem>
+#include <regex>
+
 #include <QComboBox>
 #include <QDir>
 #include <QGraphicsPixmapItem>
@@ -14,8 +16,8 @@
 #include <QPushButton>
 #include <QTimer>
 #include <QVector>
-#include <filesystem>
-#include <regex>
+
+#include "camera.hpp"
 
 class DirectoryEdit : public QPlainTextEdit {
   Q_OBJECT

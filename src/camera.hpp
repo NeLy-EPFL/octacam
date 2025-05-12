@@ -1,21 +1,22 @@
 #pragma once
 
-#include "timer.h"
-#include <QPixmap>
 #include <atomic>
 #include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <opencv2/videoio.hpp>
 #include <optional>
-#include <pylon/BaslerUniversalInstantCamera.h>
-#include <pylon/PylonIncludes.h>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "video_writer.h"
+#include <QPixmap>
+#include <opencv2/videoio.hpp>
+#include <pylon/BaslerUniversalInstantCamera.h>
+#include <pylon/PylonIncludes.h>
+
+#include "timer.hpp"
+#include "video_writer.hpp"
 
 class FrameForDisplay {
 public:

@@ -1,12 +1,12 @@
 #pragma once
 
-#include <opencv2/opencv.hpp>
-
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <thread>
+
+#include <opencv2/opencv.hpp>
 
 class VideoWriter {
 public:

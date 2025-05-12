@@ -1,5 +1,4 @@
-#include "timer.h"
-#include <iostream>
+#include "timer.hpp"
 
 PreciseTimer::PreciseTimer(std::function<void()> callback)
     : callback_(callback), interval_{10000000}, running_{false} {}

@@ -1,4 +1,4 @@
-#include "video_writer.h"
+#include "video_writer.hpp"
 
 OpencvVideoWriter::OpencvVideoWriter(size_t maxQueueSize)
     : running_(false), isOpen_(false), maxQueueSize_(maxQueueSize) {}

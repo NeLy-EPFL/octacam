@@ -1,12 +1,13 @@
-#include <CLI/CLI.hpp>
-#include <QApplication>
 #include <chrono>
 #include <iostream>
 #include <string>
 #include <thread>
 
-#include "camera.h"
-#include "main_window.h"
+#include <CLI/CLI.hpp>
+#include <QApplication>
+
+#include "camera.hpp"
+#include "main_window.hpp"
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"huitacam"};

@@ -1,4 +1,7 @@
-#include "main_window.h"
+#include "main_window.hpp"
+
+#include <cstdlib>
+#include <ranges>
 
 #include <QApplication>
 #include <QDockWidget>
@@ -11,8 +14,6 @@
 #include <QMdiSubWindow>
 #include <QMessageBox>
 #include <QWidget>
-#include <cstdlib>
-#include <ranges>
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
 

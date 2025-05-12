@@ -25,13 +25,13 @@ target_sources(huitacam
     PRIVATE
         src/main.cpp
         src/camera.cpp
-        src/camera.h
+        src/camera.hpp
         src/main_window.cpp
-        src/main_window.h
+        src/main_window.hpp
         src/timer.cpp
-        src/timer.h
+        src/timer.hpp
         src/video_writer.cpp
-        src/video_writer.h
+        src/video_writer.hpp
 )
 target_link_libraries(huitacam
     PRIVATE
