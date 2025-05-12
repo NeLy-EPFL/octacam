@@ -128,6 +128,7 @@ private:
   QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;
   QLabel *status_label;
+  QComboBox *video_writer_combo;
   int record_current_time_s;
   int record_duration_s;
 };

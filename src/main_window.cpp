@@ -104,7 +104,7 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(trigger_source_combo, row++, 1);
 
   dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
-  auto *video_writer_combo = new QComboBox(dock_content);
+  video_writer_combo = new QComboBox(dock_content);
   video_writer_combo->addItem("opencv MJPG avi");
   video_writer_combo->addItem("opencv AVC1 mp4");
   dock_layout->addWidget(video_writer_combo, row++, 1);
@@ -205,9 +205,24 @@ void MainWindow::start_record() {
   record_duration_s = duration_s;
   auto interval = std::chrono::nanoseconds(1000000000) / fps;
   auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
+  auto video_writer_info = video_writer_combo->currentText().toStdString();
+
+  std::string fourcc = "";
+  std::string extension = "";
+
+  if (video_writer_info.starts_with("opencv")) {
+    fourcc = video_writer_info.substr(7, 4);
+    extension = video_writer_info.substr(12, 3);
+  } else {
+    // Handle other video writer types if needed
+  }
 
   camera_system.stop_software_trigger();
-  camera_system.start_record(save_dir, fps, "MJPG", "avi");
+
+  if (!fourcc.empty()) {
+    camera_system.start_record(save_dir, fps, fourcc, extension);
+  }
+
   camera_system.start_software_trigger(interval, duration);
   update_record_progress();
   record_progress_timer->start();
