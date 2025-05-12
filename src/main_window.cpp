@@ -31,6 +31,7 @@ MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setupUi() {
+  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
   setWindowTitle("huitacam");
 
   QMdiArea *mdi_area = new QMdiArea(this);
@@ -55,25 +56,13 @@ void MainWindow::setupUi() {
 
   update_frames();
 
-  record_stop_timer = new QTimer(this);
-  record_stop_timer->setTimerType(Qt::PreciseTimer);
-  record_stop_timer->setSingleShot(true);
-  connect(record_stop_timer, &QTimer::timeout, this, &MainWindow::stop_record);
-
-  record_trigger_timer = new QTimer(this);
-  record_trigger_timer->setTimerType(Qt::PreciseTimer);
-  connect(record_trigger_timer, &QTimer::timeout, this,
-          &MainWindow::trigger_once);
-
-  display_trigger_timer = new QTimer(this);
-  connect(display_trigger_timer, &QTimer::timeout, this,
-          &MainWindow::trigger_once);
-  display_trigger_timer->setInterval(33);
-  display_trigger_timer->start();
-
   auto *display_timer = new QTimer(this);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start(33);
+
+  record_timer = new QTimer(this);
+  connect(record_timer, &QTimer::timeout, this, &MainWindow::update_record);
+  record_timer->setInterval(1000);
 
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
@@ -119,14 +108,19 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
   }
 }
 
-void MainWindow::trigger_once() { camera_system.trigger_once(); }
-
 void MainWindow::update_frames() {
   for (auto [pixmap_item, pixmap] :
        std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
     if (pixmap) {
       pixmap_item->setPixmap(*pixmap);
     }
+  }
+}
+
+void MainWindow::update_record() {
+  if (camera_system.trigger_timer.is_running()) {
+  } else {
+    stop_record();
   }
 }
 
@@ -159,13 +153,6 @@ void MainWindow::on_record_button_clicked() {
                               "Could not create directory: " +
                                   QString::fromStdString(save_dir));
       }
-
-      record_trigger_timer->setInterval(
-          1000 / std::stoi(fps_edit->text().toStdString()));
-
-      record_stop_timer->setInterval(
-          std::stoi(duration_edit->text().toStdString()) * 1000);
-
       if (!success) {
         button->setEnabled(true);
 
@@ -175,10 +162,14 @@ void MainWindow::on_record_button_clicked() {
         return;
       }
 
-      display_trigger_timer->stop();
+      camera_system.trigger_timer.stop();
       camera_system.start_record();
-      record_trigger_timer->start();
-      record_stop_timer->start();
+      camera_system.trigger_timer.start(
+          std::chrono::nanoseconds(1000000000 /
+                                   std::stoi(fps_edit->text().toStdString())),
+          std::chrono::nanoseconds(1000000000) *
+              std::stoi(duration_edit->text().toStdString()));
+      record_timer->start();
       button->setText("Stop recording");
       button->setEnabled(true);
     } else {
@@ -188,11 +179,11 @@ void MainWindow::on_record_button_clicked() {
 }
 
 void MainWindow::stop_record() {
-  record_stop_timer->stop();
+  record_timer->stop();
+  camera_system.trigger_timer.stop();
   record_button->setEnabled(false);
-  record_trigger_timer->stop();
   camera_system.start_preview();
-  display_trigger_timer->start();
+  camera_system.trigger_timer.start(std::chrono::nanoseconds(33000000));
   save_dir_edit->increment();
   fps_edit->setEnabled(true);
   duration_edit->setEnabled(true);

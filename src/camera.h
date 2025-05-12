@@ -1,5 +1,6 @@
 #pragma once
 
+#include "timer.h"
 #include <QPixmap>
 #include <atomic>
 #include <future>
@@ -44,6 +45,7 @@ private:
   void start_preview();
   void start_record();
   void load_config(const std::string &config);
+  void trigger_once();
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
   const CameraSystem &system;
@@ -61,7 +63,6 @@ public:
   void load_config(const std::string &directory);
   void start_preview();
   void start_record();
-  void trigger_once();
   std::vector<std::optional<QPixmap>> get_pixmaps();
 
   std::vector<Camera>::iterator begin();
@@ -69,6 +70,7 @@ public:
   std::vector<Camera>::const_iterator begin() const;
   std::vector<Camera>::const_iterator end() const;
   void stop();
+  PreciseTimer trigger_timer;
 
 private:
   Pylon::PylonAutoInitTerm autoInitTerm;

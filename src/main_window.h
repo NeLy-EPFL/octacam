@@ -108,7 +108,7 @@ protected:
 
 private slots:
   void update_frames();
-  void trigger_once();
+  void update_record();
   void on_record_button_clicked();
   void stop_record();
 
@@ -117,10 +117,8 @@ private:
 
   CameraSystem &camera_system;
   std::vector<QGraphicsPixmapItem *> pixmap_items;
+  QTimer *record_timer;
   QPushButton *record_button;
-  QTimer *display_trigger_timer;
-  QTimer *record_trigger_timer;
-  QTimer *record_stop_timer;
   QLineEdit *duration_edit;
   QLineEdit *fps_edit;
   DirectoryEdit *save_dir_edit;

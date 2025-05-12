@@ -87,7 +87,7 @@ void Camera::start_record() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
         frame_for_display.store_frame(pImageBuffer);
-        std::cout << "frame saved" << std::endl;
+        // std::cout << "frame saved" << std::endl;
       }
     }
     camera->StopGrabbing();
@@ -106,7 +106,18 @@ void Camera::load_config(const std::string &config) {
       Basler_UniversalCameraParams::TriggerSource_Software);
 }
 
-CameraSystem::CameraSystem() {
+void Camera::trigger_once() {
+  // if (camera->IsGrabbing()) {
+  camera->ExecuteSoftwareTrigger();
+  // }
+}
+
+CameraSystem::CameraSystem()
+    : trigger_timer([this]() {
+        for (auto &c : cameras) {
+          c.trigger_once();
+        }
+      }) {
   auto &tlFactory = Pylon::CTlFactory::GetInstance();
   Pylon::DeviceInfoList_t devices;
   if (tlFactory.EnumerateDevices(devices) == 0) {
@@ -117,7 +128,7 @@ CameraSystem::CameraSystem() {
   }
 }
 
-CameraSystem::~CameraSystem() = default;
+CameraSystem::~CameraSystem() { trigger_timer.stop(); }
 
 void CameraSystem::load_config(const std::string &directory) {
   for (auto &camera : cameras) {
@@ -148,12 +159,6 @@ void CameraSystem::start_record() {
   stop();
   for (auto &camera : cameras) {
     camera.start_record();
-  }
-}
-
-void CameraSystem::trigger_once() {
-  for (auto &camera : cameras) {
-    camera.camera->ExecuteSoftwareTrigger();
   }
 }
 
