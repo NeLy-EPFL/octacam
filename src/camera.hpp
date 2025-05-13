@@ -62,6 +62,8 @@ private:
                     const std::string &fourcc);
   void load_config(const std::string &config);
   void trigger_once();
+  inline void store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult);
+  inline void update_fps(size_t n_frames = 6);
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera_;
   std::unique_ptr<VideoWriter> video_writer_;
@@ -71,6 +73,7 @@ private:
   std::atomic<bool> stop_flag_{false};
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
+  std::atomic<double> resulting_fps_{0.0};
 };
 
 class CameraSystem {

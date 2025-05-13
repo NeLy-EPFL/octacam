@@ -118,31 +118,74 @@ std::string Camera::get_serial_number() const {
   return std::string(camera_->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
+inline void Camera::update_fps(size_t window_size) {
+  if (timestamps_.size() < 2 || window_size < 1) {
+    resulting_fps_ = 0.0;
+    return;
+  }
+
+  size_t last_index = timestamps_.size() - 1;
+  size_t start_index =
+      (last_index > window_size) ? last_index - window_size : 0;
+  size_t actual_window_size = last_index - start_index;
+  uint64_t delta_ns = timestamps_[last_index] - timestamps_[start_index];
+
+  if (delta_ns == 0) {
+    resulting_fps_ = 0.0;
+    return;
+  }
+
+  resulting_fps_ = static_cast<double>(actual_window_size * 1e9) /
+                   static_cast<double>(delta_ns);
+}
+
+inline void
+Camera::store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult) {
+  uint64_t timestamp = ptrGrabResult->GetTimeStamp();
+  if (timestamp == 0) {
+    auto now = std::chrono::high_resolution_clock::now();
+    timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch())
+                    .count();
+  }
+  timestamps_.push_back(timestamp);
+}
+
 void Camera::start_preview() {
+  stop_flag_ = false;
   if (!camera_) {
     return;
   }
-  stop_flag_ = false;
+  timestamps_.clear();
   camera_->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
   future_ = std::async(std::launch::async, [this]() {
-    while (!this->stop_flag_ && this->camera_ && this->camera_->IsGrabbing()) {
+    while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
                               Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
+        store_timestamp(ptrGrabResult);
+
         const auto *pImageBuffer =
             static_cast<const uint8_t *>(ptrGrabResult->GetBuffer());
-        auto stored = this->frame_for_display_.store_frame(pImageBuffer);
+
+        auto stored = frame_for_display_.store_frame(pImageBuffer);
+        if (stored) {
+          update_fps();
+        }
       }
     }
-    if (this->camera_) {
-      this->camera_->StopGrabbing();
+    if (camera_) {
+      camera_->StopGrabbing();
     }
   });
 }
 
 void Camera::start_record(const std::string &save_path, const double &fps,
                           const std::string &fourcc_str) {
+  stop_flag_ = false;
+  started_ = false;
+
   if (!camera_ || !video_writer_) {
     return;
   }
@@ -158,8 +201,6 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     return;
   }
 
-  stop_flag_ = false;
-  started_ = false;
   camera_->StartGrabbing(Pylon::GrabStrategy_OneByOne);
   bool ready = camera_->WaitForFrameTriggerReady(TRIGGER_READY_TIMEOUT_MS,
                                                  Pylon::TimeoutHandling_Return);
@@ -173,11 +214,12 @@ void Camera::start_record(const std::string &save_path, const double &fps,
 
   future_ = std::async(std::launch::async, [this]() {
     bool local_started_flag = false;
-    while (this->camera_ && camera_->IsGrabbing() && !stop_flag_) {
+    while (camera_ && camera_->IsGrabbing() && !stop_flag_) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
                               Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
+        store_timestamp(ptrGrabResult);
         const auto *pImageBuffer =
             static_cast<const uint8_t *>(ptrGrabResult->GetBuffer());
         bool written = video_writer_->write(
@@ -187,17 +229,22 @@ void Camera::start_record(const std::string &save_path, const double &fps,
           std::cerr << "Frame dropped for camera " << get_serial_number()
                     << '\n';
         }
+        timestamps_.push_back(ptrGrabResult->GetTimeStamp());
         auto stored = frame_for_display_.store_frame(pImageBuffer);
+        if (stored) {
+          update_fps();
+        }
+
         if (!local_started_flag) {
           local_started_flag = true;
           started_ = true;
         }
       }
     }
-    if (this->camera_) {
+    if (camera_) {
       camera_->StopGrabbing();
     }
-    if (this->video_writer_) {
+    if (video_writer_) {
       video_writer_->close();
     }
   });
