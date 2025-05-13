@@ -37,7 +37,7 @@ private:
   int height_ = 0;
   size_t size_ = 0;
   std::unique_ptr<uint8_t[]> data_;
-  std::atomic<bool> retrieved_{false};
+  bool retrieved_{false};
   std::mutex mtx_;
 };
 

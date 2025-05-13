@@ -9,7 +9,7 @@
 #include <thread>
 
 namespace {
-constexpr int GRAB_TIMEOUT_MS = 1000;
+constexpr int GRAB_TIMEOUT_MS = 100;
 constexpr int TRIGGER_READY_TIMEOUT_MS = 1000;
 } // namespace
 
@@ -19,7 +19,7 @@ FrameForDisplay::~FrameForDisplay() = default;
 
 FrameForDisplay::FrameForDisplay(FrameForDisplay &&other) noexcept
     : width_(other.width_), height_(other.height_), size_(other.size_),
-      data_(std::move(other.data_)), retrieved_(other.retrieved_.load()) {
+      data_(std::move(other.data_)), retrieved_(other.retrieved_) {
   other.width_ = 0;
   other.height_ = 0;
   other.size_ = 0;
@@ -36,7 +36,7 @@ FrameForDisplay &FrameForDisplay::operator=(FrameForDisplay &&other) noexcept {
     height_ = other.height_;
     size_ = other.size_;
     data_ = std::move(other.data_);
-    retrieved_ = other.retrieved_.load();
+    retrieved_ = other.retrieved_;
 
     other.width_ = 0;
     other.height_ = 0;
@@ -48,7 +48,7 @@ FrameForDisplay &FrameForDisplay::operator=(FrameForDisplay &&other) noexcept {
 
 std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
   std::lock_guard<std::mutex> lock(mtx_);
-  if (retrieved_.load()) {
+  if (retrieved_) {
     return std::nullopt;
   }
   if (!data_) {
@@ -63,7 +63,7 @@ std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
 
 void FrameForDisplay::store_frame(const uint8_t *raw_data_ptr) {
   std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
-  if (lock.owns_lock() && retrieved_.load()) {
+  if (lock.owns_lock() && retrieved_) {
     if (data_ && size_ > 0) {
       std::copy(raw_data_ptr, raw_data_ptr + size_, data_.get());
       retrieved_ = false;
