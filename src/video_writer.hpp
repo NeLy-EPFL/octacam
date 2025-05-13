@@ -25,8 +25,8 @@ public:
 
   OpencvVideoWriter(const OpencvVideoWriter &) = delete;
   OpencvVideoWriter &operator=(const OpencvVideoWriter &) = delete;
-  OpencvVideoWriter(OpencvVideoWriter &&) = default;
-  OpencvVideoWriter &operator=(OpencvVideoWriter &&) = default;
+  OpencvVideoWriter(OpencvVideoWriter &&) = delete;
+  OpencvVideoWriter &operator=(OpencvVideoWriter &&) = delete;
 
   bool open(const std::string &filename, int fourcc, double fps,
             cv::Size frameSize, bool isColor = true) override;

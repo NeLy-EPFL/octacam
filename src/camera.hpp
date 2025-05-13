@@ -26,7 +26,7 @@ public:
   FrameForDisplay(const FrameForDisplay &) = delete;
   FrameForDisplay &operator=(const FrameForDisplay &) = delete;
   FrameForDisplay(FrameForDisplay &&other) noexcept;
-  FrameForDisplay &operator=(FrameForDisplay &&other) noexcept;
+  FrameForDisplay &operator=(FrameForDisplay &&other) = delete;
 
   std::optional<QPixmap> retrieve_as_pixmap();
   bool store_frame(const uint8_t *data);
@@ -67,7 +67,6 @@ private:
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera_;
   std::unique_ptr<VideoWriter> video_writer_;
-  const CameraSystem &system_;
   FrameForDisplay frame_for_display_;
   std::atomic<bool> started_{false};
   std::atomic<bool> stop_flag_{false};

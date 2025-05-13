@@ -26,26 +26,6 @@ FrameForDisplay::FrameForDisplay(FrameForDisplay &&other) noexcept
   other.retrieved_ = true;
 }
 
-FrameForDisplay &FrameForDisplay::operator=(FrameForDisplay &&other) noexcept {
-  if (this != &other) {
-    std::lock(mtx_, other.mtx_);
-    std::lock_guard<std::mutex> lhs_lock(mtx_, std::adopt_lock);
-    std::lock_guard<std::mutex> rhs_lock(other.mtx_, std::adopt_lock);
-
-    width_ = other.width_;
-    height_ = other.height_;
-    size_ = other.size_;
-    data_ = std::move(other.data_);
-    retrieved_ = other.retrieved_;
-
-    other.width_ = 0;
-    other.height_ = 0;
-    other.size_ = 0;
-    other.retrieved_ = true;
-  }
-  return *this;
-}
-
 std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
   std::lock_guard<std::mutex> lock(mtx_);
   if (retrieved_) {
@@ -89,8 +69,8 @@ void FrameForDisplay::update_size(int new_width, int new_height) {
 
 Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
     : camera_(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
-      video_writer_(std::make_unique<OpencvVideoWriter>(20)), system_(system),
-      started_(false), stop_flag_(false) {
+      video_writer_(std::make_unique<OpencvVideoWriter>(20)), started_(false),
+      stop_flag_(false) {
   camera_->Open();
 }
 
@@ -103,11 +83,12 @@ Camera::~Camera() {
 
 Camera::Camera(Camera &&other) noexcept
     : camera_(std::move(other.camera_)),
-      video_writer_(std::move(other.video_writer_)), system_(other.system_),
+      video_writer_(std::move(other.video_writer_)),
       frame_for_display_(std::move(other.frame_for_display_)),
       started_(other.started_.load()), stop_flag_(other.stop_flag_.load()),
       future_(std::move(other.future_)),
-      timestamps_(std::move(other.timestamps_)) {
+      timestamps_(std::move(other.timestamps_)),
+      resulting_fps_(other.resulting_fps_.load()) {
   other.stop_flag_ = true;
 }
 
