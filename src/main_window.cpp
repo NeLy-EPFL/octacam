@@ -298,10 +298,11 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  for (auto [pixmap_item, pixmap] :
-       std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
-    if (pixmap) {
-      pixmap_item->setPixmap(*pixmap);
+  for (auto [pixmap_item, pixmap_fps_opt] :
+       std::views::zip(pixmap_items, camera_system.get_pixmaps_and_fps())) {
+    if (pixmap_item && pixmap_fps_opt) {
+      auto [pixmap, fps] = *pixmap_fps_opt;
+      pixmap_item->setPixmap(pixmap);
     }
   }
 }

@@ -326,11 +326,18 @@ bool CameraSystem::all_cameras_started() const {
       [](const Camera &camera) { return camera.started_.load(); });
 }
 
-std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
-  std::vector<std::optional<QPixmap>> pixmaps_vec;
+std::vector<std::optional<std::pair<QPixmap, double>>>
+CameraSystem::get_pixmaps_and_fps() {
+  std::vector<std::optional<std::pair<QPixmap, double>>> pixmaps_vec;
   pixmaps_vec.reserve(cameras_.size());
   for (auto &camera : cameras_) {
-    pixmaps_vec.push_back(camera.frame_for_display_.retrieve_as_pixmap());
+    auto pixmap_opt = camera.frame_for_display_.retrieve_as_pixmap();
+    if (pixmap_opt) {
+      pixmaps_vec.emplace_back(
+          std::make_pair(*pixmap_opt, camera.resulting_fps_.load()));
+    } else {
+      pixmaps_vec.emplace_back(std::nullopt);
+    }
   }
   return pixmaps_vec;
 }

@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <QPixmap>
@@ -95,7 +96,7 @@ public:
   void start_software_trigger(std::chrono::nanoseconds interval);
   void stop_software_trigger();
   bool all_cameras_started() const;
-  std::vector<std::optional<QPixmap>> get_pixmaps();
+  std::vector<std::optional<std::pair<QPixmap, double>>> get_pixmaps_and_fps();
 
   std::vector<Camera>::iterator begin();
   std::vector<Camera>::iterator end();
