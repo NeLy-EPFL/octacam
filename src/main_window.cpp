@@ -301,6 +301,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::update_frames() {
   for (auto [pixmap_item, pixmap] :
        std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
+    std::cout << pixmap->width() << "x" << pixmap->height() << std::endl;
     if (pixmap) {
       pixmap_item->setPixmap(*pixmap);
     }
