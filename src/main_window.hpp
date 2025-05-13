@@ -1,6 +1,6 @@
 #pragma once
 
-#include <array> // For std::array
+#include <array>
 #include <filesystem>
 #include <regex>
 
@@ -28,8 +28,6 @@ public:
   explicit DirectoryEdit(QWidget *parent = nullptr) : QPlainTextEdit(parent) {
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
-    // std::localtime is not thread-safe but generally okay in GUI constructors
-    // on main thread
     std::tm *now_tm = std::localtime(&now_time_t);
     std::array<char, 7> date_str_arr;
     std::strftime(date_str_arr.data(), date_str_arr.size(), "%y%m%d", now_tm);
@@ -38,7 +36,6 @@ public:
     setPlainText(defaultPath);
   }
 
-  // Rule of Five: Make non-copyable (Qt objects usually managed by parent)
   DirectoryEdit(const DirectoryEdit &) = delete;
   DirectoryEdit &operator=(const DirectoryEdit &) = delete;
   DirectoryEdit(DirectoryEdit &&) = delete;
@@ -108,8 +105,6 @@ class GraphicsView : public QGraphicsView {
 public:
   explicit GraphicsView(QWidget *parent = nullptr);
   ~GraphicsView() override;
-
-  // Rule of Five: Make non-copyable
   GraphicsView(const GraphicsView &) = delete;
   GraphicsView &operator=(const GraphicsView &) = delete;
   GraphicsView(GraphicsView &&) = delete;
@@ -124,9 +119,7 @@ class MainWindow : public QMainWindow {
 
 public:
   explicit MainWindow(CameraSystem &camera_system, QWidget *parent = nullptr);
-  ~MainWindow() override; // Marked override
-
-  // Rule of Five: Make non-copyable
+  ~MainWindow() override;
   MainWindow(const MainWindow &) = delete;
   MainWindow &operator=(const MainWindow &) = delete;
   MainWindow(MainWindow &&) = delete;
@@ -162,5 +155,5 @@ private:
   QComboBox *trigger_source_combo;
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
-  std::chrono::milliseconds record_remaining_time_; // Use std::chrono type
+  std::chrono::milliseconds record_remaining_time_;
 };

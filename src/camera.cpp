@@ -1,6 +1,6 @@
 #include "camera.hpp"
 
-#include <algorithm> // For std::copy
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -8,13 +8,12 @@
 #include <iostream>
 #include <thread>
 
-// Named constants
 namespace {
-constexpr int GRAB_TIMEOUT_MS = 33; // Example, adjust as needed
+constexpr int GRAB_TIMEOUT_MS = 1000;
 constexpr int TRIGGER_READY_TIMEOUT_MS = 1000;
 } // namespace
 
-FrameForDisplay::FrameForDisplay() : retrieved_(true) {}
+FrameForDisplay::FrameForDisplay() : retrieved_(false) {}
 
 FrameForDisplay::~FrameForDisplay() = default;
 
@@ -83,7 +82,6 @@ void FrameForDisplay::update_size(int new_width, int new_height) {
     } else {
       data_.reset();
     }
-    retrieved_ = true;
   }
 }
 
@@ -225,10 +223,8 @@ void Camera::load_config(const std::string &config_str) {
   if (!camera_) {
     return;
   }
-  if (!config_str.empty()) {
-    Pylon::CFeaturePersistence::LoadFromString(config_str.c_str(),
-                                               &camera_->GetNodeMap());
-  }
+  Pylon::CFeaturePersistence::LoadFromString(config_str.c_str(),
+                                             &camera_->GetNodeMap());
   frame_for_display_.update_size(camera_->Width.GetValue(),
                                  camera_->Height.GetValue());
   camera_->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);

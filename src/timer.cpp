@@ -1,8 +1,7 @@
 #include "timer.hpp"
 
 PreciseTimer::PreciseTimer(std::function<void()> callback)
-    : callback_(std::move(callback)), interval_{10000000}, running_{false} {
-} // Use std::move for callback
+    : callback_(std::move(callback)), interval_{10000000}, running_{false} {}
 
 PreciseTimer::~PreciseTimer() { stop(); }
 
@@ -12,9 +11,9 @@ void PreciseTimer::start(std::chrono::nanoseconds interval,
     return;
   }
   interval_ = interval;
-  total_duration_ = duration; // Set total_duration_
+  duration_ = duration;
   running_ = true;
-  thread_ = std::thread(&PreciseTimer::run_loop, this);
+  thread_ = std::thread(&PreciseTimer::run_until, this);
 }
 
 void PreciseTimer::start(std::chrono::nanoseconds interval) {
@@ -22,9 +21,8 @@ void PreciseTimer::start(std::chrono::nanoseconds interval) {
     return;
   }
   interval_ = interval;
-  total_duration_.reset(); // Clear total_duration_ for indefinite run
   running_ = true;
-  thread_ = std::thread(&PreciseTimer::run_loop, this);
+  thread_ = std::thread(&PreciseTimer::run_indefinite, this);
 }
 
 void PreciseTimer::stop() {
@@ -34,21 +32,25 @@ void PreciseTimer::stop() {
   }
 }
 
-void PreciseTimer::run_loop() {
+void PreciseTimer::run_indefinite() {
   auto next_time = std::chrono::steady_clock::now();
-  std::optional<std::chrono::time_point<std::chrono::steady_clock>> end_time;
-
-  if (total_duration_) {
-    end_time = next_time + *total_duration_;
-  }
 
   while (running_) {
-    if (end_time && next_time >= *end_time) {
-      break;
-    }
     next_time += interval_;
     callback_();
     std::this_thread::sleep_until(next_time);
   }
-  running_ = false; // Ensure running_ is set to false when loop exits
+  running_ = false;
+}
+
+void PreciseTimer::run_until() {
+  auto next_time = std::chrono::steady_clock::now();
+  auto end_time = next_time + duration_;
+
+  while (running_ && next_time < end_time) {
+    next_time += interval_;
+    callback_();
+    std::this_thread::sleep_until(next_time);
+  }
+  running_ = false;
 }

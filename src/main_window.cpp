@@ -13,10 +13,10 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QIntValidator>
-#include <QLabel> // Add missing includes for QLabel and other related classes
+#include <QLabel>
 #include <QLineEdit>
 #include <QMdiArea>
-#include <QMdiSubWindow> // Include QMdiSubWindow to resolve incomplete type error
+#include <QMdiSubWindow>
 #include <QMessageBox>
 #include <QPixmap>
 #include <QPushButton>
@@ -26,9 +26,8 @@
 #include <QVBoxLayout>
 #include <cstdlib>
 #include <ranges>
-#include <stdexcept> // For std::stoi exceptions
+#include <stdexcept>
 
-// Named constants for magic numbers
 namespace {
 constexpr std::chrono::nanoseconds DEFAULT_PREVIEW_INTERVAL_NS(33'000'000);
 constexpr int DISPLAY_TIMER_INTERVAL_MS = 33;
@@ -41,7 +40,7 @@ constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
 constexpr int FPS_MIN = 0;
 constexpr int FPS_MAX = 1000;
 constexpr int DURATION_MIN_S = 0;
-constexpr int DURATION_MAX_S = 359999; // Almost 100 hours
+constexpr int DURATION_MAX_S = 359999;
 
 constexpr long long MS_IN_HOUR = 3'600'000LL;
 constexpr long long MS_IN_MINUTE = 60'000LL;
@@ -153,7 +152,7 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
   video_writer_combo = new QComboBox(dock_content);
   video_writer_combo->addItem("opencv MJPG avi");
-  video_writer_combo->addItem("opencv AVC1 mp4");
+  video_writer_combo->addItem("opencv avc1 mp4");
   dock_layout->addWidget(video_writer_combo, row++, 1);
 
   record_button = new QPushButton("Start recording", dock);
@@ -246,7 +245,7 @@ void MainWindow::rotate_displays() {
   } else if (button_text == "Reset") {
     reset_rotation = true;
   } else {
-    return; // Unknown button
+    return;
   }
 
   if (rotate_all_button->isChecked()) {
@@ -301,7 +300,6 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 void MainWindow::update_frames() {
   for (auto [pixmap_item, pixmap] :
        std::views::zip(pixmap_items, camera_system.get_pixmaps())) {
-    std::cout << pixmap->width() << "x" << pixmap->height() << std::endl;
     if (pixmap) {
       pixmap_item->setPixmap(*pixmap);
     }
@@ -328,11 +326,10 @@ void MainWindow::update_record_countdown() {
     current_ms %= MS_IN_MINUTE;
     auto seconds = current_ms / MS_IN_SECOND;
 
-    status_label->setText(
-        QString("Remaining time: %1:%2:%3")
-            .arg(hours, 2, 10, QChar(' ')) // Keep space for hours if preferred
-            .arg(minutes, 2, 10, QChar('0'))
-            .arg(seconds, 2, 10, QChar('0')));
+    status_label->setText(QString("Remaining time: %1:%2:%3")
+                              .arg(hours, 2, 10, QChar(' '))
+                              .arg(minutes, 2, 10, QChar('0'))
+                              .arg(seconds, 2, 10, QChar('0')));
     record_remaining_time_ -=
         std::chrono::milliseconds(record_countdown_timer->interval());
   } else {
@@ -384,7 +381,7 @@ void MainWindow::start_record() {
     for (auto *widget : input_widgets) {
       widget->setEnabled(true);
     }
-    record_button->setEnabled(true); // Re-enable button if setup fails
+    record_button->setEnabled(true);
     return;
   }
 
@@ -420,8 +417,8 @@ void MainWindow::start_record() {
   std::string fourcc_str;
   std::string extension_str;
 
-  if (video_writer_info.rfind("opencv ", 0) == 0) {    // starts_with
-    std::string details = video_writer_info.substr(7); // Remove "opencv "
+  if (video_writer_info.rfind("opencv ", 0) == 0) {
+    std::string details = video_writer_info.substr(7);
     size_t space_pos = details.find(' ');
     if (space_pos != std::string::npos) {
       fourcc_str = details.substr(0, space_pos);
