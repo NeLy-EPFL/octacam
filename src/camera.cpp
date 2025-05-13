@@ -61,14 +61,16 @@ std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
   return pixmap;
 }
 
-void FrameForDisplay::store_frame(const uint8_t *raw_data_ptr) {
+bool FrameForDisplay::store_frame(const uint8_t *raw_data_ptr) {
   std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
   if (lock.owns_lock() && retrieved_) {
     if (data_ && size_ > 0) {
       std::copy(raw_data_ptr, raw_data_ptr + size_, data_.get());
       retrieved_ = false;
+      return true;
     }
   }
+  return false;
 }
 
 void FrameForDisplay::update_size(int new_width, int new_height) {
@@ -148,7 +150,7 @@ void Camera::start_preview() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         const auto *pImageBuffer =
             static_cast<const uint8_t *>(ptrGrabResult->GetBuffer());
-        this->frame_for_display_.store_frame(pImageBuffer);
+        auto stored = this->frame_for_display_.store_frame(pImageBuffer);
       }
     }
     if (this->camera_) {
@@ -203,7 +205,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
           std::cerr << "Frame dropped for camera " << get_serial_number()
                     << '\n';
         }
-        frame_for_display_.store_frame(pImageBuffer);
+        auto stored = frame_for_display_.store_frame(pImageBuffer);
         if (!local_started_flag) {
           local_started_flag = true;
           started_ = true;

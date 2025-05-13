@@ -23,12 +23,10 @@ public:
   OpencvVideoWriter(size_t maxQueueSize = 30);
   ~OpencvVideoWriter();
 
-  // Rule of Five: Make non-copyable
   OpencvVideoWriter(const OpencvVideoWriter &) = delete;
   OpencvVideoWriter &operator=(const OpencvVideoWriter &) = delete;
-  OpencvVideoWriter(OpencvVideoWriter &&) = default; // Or implement custom move
-  OpencvVideoWriter &
-  operator=(OpencvVideoWriter &&) = default; // Or implement custom move
+  OpencvVideoWriter(OpencvVideoWriter &&) = default;
+  OpencvVideoWriter &operator=(OpencvVideoWriter &&) = default;
 
   bool open(const std::string &filename, int fourcc, double fps,
             cv::Size frameSize, bool isColor = true) override;

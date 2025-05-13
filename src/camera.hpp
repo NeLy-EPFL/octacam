@@ -29,7 +29,7 @@ public:
   FrameForDisplay &operator=(FrameForDisplay &&other) noexcept;
 
   std::optional<QPixmap> retrieve_as_pixmap();
-  void store_frame(const uint8_t *data);
+  bool store_frame(const uint8_t *data);
   void update_size(int width, int height);
 
 private:
