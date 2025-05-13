@@ -24,7 +24,9 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QResizeEvent>
+#include <QSizePolicy>
 #include <QTimer>
+#include <QToolBar>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -85,6 +87,19 @@ void MainWindow::setup_ui() {
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
+
+    auto *tool_bar = new QToolBar(widget);
+    layout->addWidget(tool_bar);
+
+    auto *spacer = new QWidget();
+    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    tool_bar->addWidget(spacer);
+
+    auto *fps_label = new QLabel("0 fps", widget);
+    fps_label->setAlignment(Qt::AlignRight);
+    fps_labels.push_back(fps_label);
+    tool_bar->addWidget(fps_label);
+
     auto *view = new GraphicsView(widget);
     view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -93,13 +108,13 @@ void MainWindow::setup_ui() {
     pixmap_items.push_back(pixmap_item);
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
+
     auto sub_window = mdi_area->addSubWindow(
         widget, Qt::WindowMinMaxButtonsHint | Qt::WindowTitleHint);
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
     auto title = QString::fromStdString(camera.get_serial_number());
-    window_titles_.push_back(title);
     sub_window->setWindowTitle(title);
   }
 
@@ -314,15 +329,12 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  for (auto [pixmap_item, pixmap_fps_opt, sub_window, title] :
-       std::views::zip(pixmap_items, camera_system.get_pixmaps_and_fps(),
-                       mdi_area->subWindowList(), window_titles_)) {
+  for (auto [pixmap_item, pixmap_fps_opt, label] : std::views::zip(
+           pixmap_items, camera_system.get_pixmaps_and_fps(), fps_labels)) {
     if (pixmap_item && pixmap_fps_opt) {
       auto [pixmap, fps] = *pixmap_fps_opt;
       pixmap_item->setPixmap(pixmap);
-
-      auto new_title = title + QString(" | %1 fps").arg(fps, 6, 'f', 2);
-      sub_window->setWindowTitle(new_title);
+      label->setText(QString("%1 fps").arg(fps, 6, 'f', 2));
     }
   }
 }

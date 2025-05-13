@@ -6,7 +6,7 @@
 
 #include <QComboBox>
 #include <QDir>
-#include <QDoubleSpinBox> // Added include
+#include <QDoubleSpinBox>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QKeyEvent>
@@ -159,5 +159,5 @@ private:
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;
-  QVector<QString> window_titles_;
+  QVector<QLabel *> fps_labels;
 };
