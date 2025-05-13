@@ -8,6 +8,7 @@
 #include <QFrame>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
+#include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -88,7 +89,9 @@ void MainWindow::setup_ui() {
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
-    sub_window->setWindowTitle(QString(camera.get_serial_number().c_str()));
+    auto title = QString::fromStdString(camera.get_serial_number());
+    window_titles_.push_back(title);
+    sub_window->setWindowTitle(title);
   }
 
   update_frames();
@@ -298,11 +301,15 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  for (auto [pixmap_item, pixmap_fps_opt] :
-       std::views::zip(pixmap_items, camera_system.get_pixmaps_and_fps())) {
+  for (auto [pixmap_item, pixmap_fps_opt, sub_window, title] :
+       std::views::zip(pixmap_items, camera_system.get_pixmaps_and_fps(),
+                       mdi_area->subWindowList(), window_titles_)) {
     if (pixmap_item && pixmap_fps_opt) {
       auto [pixmap, fps] = *pixmap_fps_opt;
       pixmap_item->setPixmap(pixmap);
+
+      auto new_title = title + QString(" | %1 fps").arg(fps, 6, 'f', 2);
+      sub_window->setWindowTitle(new_title);
     }
   }
 }

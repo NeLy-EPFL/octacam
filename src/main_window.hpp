@@ -16,6 +16,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QString>
 #include <QTimer>
 #include <QVector>
 
@@ -156,4 +157,5 @@ private:
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;
+  QVector<QString> window_titles_;
 };
