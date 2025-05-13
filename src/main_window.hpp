@@ -6,6 +6,7 @@
 
 #include <QComboBox>
 #include <QDir>
+#include <QDoubleSpinBox> // Added include
 #include <QGraphicsPixmapItem>
 #include <QGraphicsView>
 #include <QKeyEvent>
@@ -135,7 +136,7 @@ private slots:
   void check_record_started();
   void update_record_countdown();
   void on_record_button_clicked();
-  void on_fps_edit_text_changed(const QString &text);
+  void on_fps_value_changed(double value); // Changed slot signature
 
 private:
   void setup_ui();
@@ -150,7 +151,7 @@ private:
   QTimer *check_record_started_timer;
   QPushButton *record_button;
   QLineEdit *duration_edit;
-  QLineEdit *fps_edit;
+  QDoubleSpinBox *fps_edit; // Changed type from QLineEdit*
   DirectoryEdit *save_dir_edit;
   QLabel *status_label;
   QComboBox *video_writer_combo;

@@ -64,7 +64,7 @@ private:
   void load_config(const std::string &config);
   void trigger_once();
   inline void store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult);
-  inline void update_fps(size_t n_frames = 6);
+  inline void update_resulting_fps(size_t n_frames = 6);
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera_;
   std::unique_ptr<VideoWriter> video_writer_;

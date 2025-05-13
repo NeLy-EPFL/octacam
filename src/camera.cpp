@@ -99,7 +99,7 @@ std::string Camera::get_serial_number() const {
   return std::string(camera_->GetDeviceInfo().GetSerialNumber().c_str());
 }
 
-inline void Camera::update_fps(size_t window_size) {
+inline void Camera::update_resulting_fps(size_t window_size) {
   if (timestamps_.size() < 2 || window_size < 1) {
     resulting_fps_ = 0.0;
     return;
@@ -152,7 +152,7 @@ void Camera::start_preview() {
 
         auto stored = frame_for_display_.store_frame(pImageBuffer);
         if (stored) {
-          update_fps();
+          update_resulting_fps();
         }
       }
     }
@@ -170,6 +170,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
   if (!camera_ || !video_writer_) {
     return;
   }
+  timestamps_.clear();
   auto fourcc_int = cv::VideoWriter::fourcc(fourcc_str[0], fourcc_str[1],
                                             fourcc_str[2], fourcc_str[3]);
   auto frame_size =
@@ -210,10 +211,9 @@ void Camera::start_record(const std::string &save_path, const double &fps,
           std::cerr << "Frame dropped for camera " << get_serial_number()
                     << '\n';
         }
-        timestamps_.push_back(ptrGrabResult->GetTimeStamp());
         auto stored = frame_for_display_.store_frame(pImageBuffer);
         if (stored) {
-          update_fps();
+          update_resulting_fps();
         }
 
         if (!local_started_flag) {

@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFrame>
 #include <QGraphicsPixmapItem>
@@ -39,9 +40,9 @@ constexpr int DOCK_MIN_WIDTH = 200;
 constexpr int DOCK_MAX_WIDTH = 300;
 constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
 
-constexpr int FPS_MIN = 0;
-constexpr int FPS_DEFAULT = 100;
-constexpr int FPS_MAX = 1000;
+constexpr double FPS_MIN = 0.01;
+constexpr double FPS_DEFAULT = 100.0;
+constexpr double FPS_MAX = 1000;
 constexpr int DURATION_MIN_S = 0;
 constexpr int DURATION_MAX_S = 359999;
 
@@ -70,7 +71,7 @@ MainWindow::~MainWindow() = default;
 
 inline std::chrono::nanoseconds fps_to_ns(double fps) {
   return std::chrono::nanoseconds(
-      static_cast<long long>(std::round(1e9 / fps)));
+      static_cast<long long>(std::round(1.0e9 / fps)));
 }
 
 void MainWindow::setup_ui() {
@@ -143,11 +144,13 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(duration_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), row, 0);
-  fps_edit = new QLineEdit(dock_content);
-  fps_edit->setValidator(new QIntValidator(FPS_MIN, FPS_MAX, this));
-  fps_edit->setText(QString::number(FPS_DEFAULT));
-  connect(fps_edit, &QLineEdit::textChanged, this,
-          &MainWindow::on_fps_edit_text_changed);
+  fps_edit = new QDoubleSpinBox(dock_content);
+  fps_edit->setRange(FPS_MIN, FPS_MAX);
+  fps_edit->setValue(FPS_DEFAULT);
+  fps_edit->setDecimals(2);
+  fps_edit->setSingleStep(1.0);
+  connect(fps_edit, &QDoubleSpinBox::valueChanged, this,
+          &MainWindow::on_fps_value_changed);
   dock_layout->addWidget(fps_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
@@ -367,11 +370,9 @@ void MainWindow::on_record_button_clicked() {
   }
 }
 
-void MainWindow::on_fps_edit_text_changed(const QString &text) {
-  bool ok;
-  int fps = text.toInt(&ok);
-  if (ok && fps > 0) {
-    camera_system.set_software_trigger_frequency(fps);
+void MainWindow::on_fps_value_changed(double value) {
+  if (value > 1e-6) {
+    camera_system.set_software_trigger_frequency(value);
   }
 }
 
@@ -411,22 +412,23 @@ void MainWindow::start_record() {
     return;
   }
 
-  int fps_val = 0;
+  double fps_val = fps_edit->value();
   int duration_s_val = 0;
   try {
-    fps_val = std::stoi(fps_edit->text().toStdString());
     duration_s_val = std::stoi(duration_edit->text().toStdString());
   } catch (const std::invalid_argument &ia) {
-    QMessageBox::critical(this, "Error",
-                          QString("Invalid number format: %1").arg(ia.what()));
+    QMessageBox::critical(
+        this, "Error",
+        QString("Invalid number format for duration: %1").arg(ia.what()));
     for (auto *widget : input_widgets) {
       widget->setEnabled(true);
     }
     record_button->setEnabled(true);
     return;
   } catch (const std::out_of_range &oor) {
-    QMessageBox::critical(this, "Error",
-                          QString("Number out of range: %1").arg(oor.what()));
+    QMessageBox::critical(
+        this, "Error",
+        QString("Duration number out of range: %1").arg(oor.what()));
     for (auto *widget : input_widgets) {
       widget->setEnabled(true);
     }
