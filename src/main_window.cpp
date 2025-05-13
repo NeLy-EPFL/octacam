@@ -1,20 +1,54 @@
 #include "main_window.hpp"
 
-#include <cstdlib>
-#include <ranges>
-
-#include <QApplication>
+#include <QChar>
+#include <QComboBox>
+#include <QDir>
 #include <QDockWidget>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QIcon>
 #include <QIntValidator>
-#include <QLabel>
-#include <QMdiSubWindow>
+#include <QLabel> // Add missing includes for QLabel and other related classes
+#include <QLineEdit>
+#include <QMdiArea>
+#include <QMdiSubWindow> // Include QMdiSubWindow to resolve incomplete type error
 #include <QMessageBox>
-#include <QWidget>
+#include <QPixmap>
+#include <QPushButton>
+#include <QRadioButton>
+#include <QResizeEvent>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <cstdlib>
+#include <ranges>
+#include <stdexcept> // For std::stoi exceptions
+
+// Named constants for magic numbers
+namespace {
+constexpr std::chrono::nanoseconds DEFAULT_PREVIEW_INTERVAL_NS(33'000'000);
+constexpr int DISPLAY_TIMER_INTERVAL_MS = 33;
+constexpr int RECORD_COUNTDOWN_TIMER_INTERVAL_MS = 1000;
+constexpr int CHECK_RECORD_STARTED_TIMER_INTERVAL_MS = 100;
+constexpr int DOCK_MIN_WIDTH = 200;
+constexpr int DOCK_MAX_WIDTH = 300;
+constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
+
+constexpr int FPS_MIN = 0;
+constexpr int FPS_MAX = 1000;
+constexpr int DURATION_MIN_S = 0;
+constexpr int DURATION_MAX_S = 359999; // Almost 100 hours
+
+constexpr long long MS_IN_HOUR = 3'600'000LL;
+constexpr long long MS_IN_MINUTE = 60'000LL;
+constexpr long long MS_IN_SECOND = 1000LL;
+
+constexpr std::chrono::nanoseconds NS_IN_SECOND(1'000'000'000);
+} // namespace
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
 
@@ -33,7 +67,7 @@ MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
 MainWindow::~MainWindow() = default;
 
 void MainWindow::setup_ui() {
-  camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
+  camera_system.start_software_trigger(DEFAULT_PREVIEW_INTERVAL_NS);
   setWindowTitle("huitacam");
 
   mdi_area = new QMdiArea(this);
@@ -62,24 +96,25 @@ void MainWindow::setup_ui() {
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
-  display_timer->setInterval(33);
+  display_timer->setInterval(DISPLAY_TIMER_INTERVAL_MS);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start();
 
   record_countdown_timer = new QTimer(this);
   connect(record_countdown_timer, &QTimer::timeout, this,
           &MainWindow::update_record_countdown);
-  record_countdown_timer->setInterval(1000);
+  record_countdown_timer->setInterval(RECORD_COUNTDOWN_TIMER_INTERVAL_MS);
 
   check_record_started_timer = new QTimer(this);
   connect(check_record_started_timer, &QTimer::timeout, this,
           &MainWindow::check_record_started);
-  check_record_started_timer->setInterval(100);
+  check_record_started_timer->setInterval(
+      CHECK_RECORD_STARTED_TIMER_INTERVAL_MS);
 
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
-  dock->setMinimumWidth(200);
-  dock->setMaximumWidth(300);
+  dock->setMinimumWidth(DOCK_MIN_WIDTH);
+  dock->setMaximumWidth(DOCK_MAX_WIDTH);
   dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
@@ -92,19 +127,21 @@ void MainWindow::setup_ui() {
 
   dock_layout->addWidget(new QLabel("Duration (s):"), row, 0);
   duration_edit = new QLineEdit(dock_content);
-  duration_edit->setValidator(new QIntValidator(0, 359999, this));
+  duration_edit->setValidator(
+      new QIntValidator(DURATION_MIN_S, DURATION_MAX_S, this));
   duration_edit->setText("30");
   dock_layout->addWidget(duration_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), row, 0);
   fps_edit = new QLineEdit(dock_content);
-  fps_edit->setValidator(new QIntValidator(0, 1000, this));
+  fps_edit->setValidator(new QIntValidator(FPS_MIN, FPS_MAX, this));
   fps_edit->setText("100");
   dock_layout->addWidget(fps_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
   save_dir_edit = new DirectoryEdit(dock_content);
-  save_dir_edit->setFixedHeight(fontMetrics().height() * 4);
+  save_dir_edit->setFixedHeight(fontMetrics().height() *
+                                SAVE_DIR_EDIT_HEIGHT_FACTOR);
   dock_layout->addWidget(save_dir_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
@@ -193,27 +230,38 @@ void MainWindow::setup_ui() {
 }
 
 void MainWindow::rotate_displays() {
-  auto *rotate_button = qobject_cast<QPushButton *>(sender());
-  if (!rotate_button) {
+  auto *button_sender = qobject_cast<QPushButton *>(sender());
+  if (!button_sender) {
     return;
   }
 
+  const QString button_text = button_sender->text();
+  int angle_delta = 0;
+  bool reset_rotation = false;
+
+  if (button_text == "↺") {
+    angle_delta = -90;
+  } else if (button_text == "↻") {
+    angle_delta = 90;
+  } else if (button_text == "Reset") {
+    reset_rotation = true;
+  } else {
+    return; // Unknown button
+  }
+
   if (rotate_all_button->isChecked()) {
-    for (auto pixmap_item : pixmap_items) {
-      if (rotate_button->text() == "↺") {
-        pixmap_item->setTransformOriginPoint(
-            pixmap_item->boundingRect().center());
-        pixmap_item->setRotation(pixmap_item->rotation() - 90);
-      } else if (rotate_button->text() == "↻") {
-        pixmap_item->setTransformOriginPoint(
-            pixmap_item->boundingRect().center());
-        pixmap_item->setRotation(pixmap_item->rotation() + 90);
-      } else if (rotate_button->text() == "Reset") {
+    for (auto *pixmap_item : pixmap_items) {
+      if (!pixmap_item)
+        continue;
+      if (reset_rotation) {
         pixmap_item->setRotation(0);
+      } else {
+        pixmap_item->setTransformOriginPoint(
+            pixmap_item->boundingRect().center());
+        pixmap_item->setRotation(pixmap_item->rotation() + angle_delta);
       }
-      auto view =
-          qobject_cast<GraphicsView *>(pixmap_item->scene()->views().first());
-      if (view) {
+      if (auto *view = qobject_cast<GraphicsView *>(
+              pixmap_item->scene()->views().first())) {
         view->fitInView(pixmap_item->sceneBoundingRect(), Qt::KeepAspectRatio);
       }
     }
@@ -225,28 +273,19 @@ void MainWindow::rotate_displays() {
     return;
   }
 
-  QGraphicsView *view =
-      active_sub_window->widget()->findChild<QGraphicsView *>();
-  if (!view) {
-    return;
-  }
-  QGraphicsScene *scene = view->scene();
-  if (!scene) {
+  auto *view = active_sub_window->widget()->findChild<GraphicsView *>();
+  if (!view || !view->scene()) {
     return;
   }
 
-  for (auto item : scene->items()) {
-    if (!item) {
+  for (auto *item : view->scene()->items()) {
+    if (!item)
       continue;
-    }
-    if (rotate_button->text() == "↺") {
-      item->setTransformOriginPoint(item->boundingRect().center());
-      item->setRotation(item->rotation() - 90);
-    } else if (rotate_button->text() == "↻") {
-      item->setTransformOriginPoint(item->boundingRect().center());
-      item->setRotation(item->rotation() + 90);
-    } else if (rotate_button->text() == "Reset") {
+    if (reset_rotation) {
       item->setRotation(0);
+    } else {
+      item->setTransformOriginPoint(item->boundingRect().center());
+      item->setRotation(item->rotation() + angle_delta);
     }
     view->fitInView(item->sceneBoundingRect(), Qt::KeepAspectRatio);
   }
@@ -280,18 +319,21 @@ void MainWindow::check_record_started() {
 }
 
 void MainWindow::update_record_countdown() {
-  if (record_remaing_time_ms >= 0) {
-    std::div_t result = std::div(record_remaing_time_ms, 3'600'000);
-    auto hours = result.quot;
-    result = std::div(result.rem, 60'000);
-    auto minutes = result.quot;
-    auto seconds = result.rem / 1000;
+  if (record_remaining_time_.count() >= 0) {
+    long long current_ms = record_remaining_time_.count();
+    auto hours = current_ms / MS_IN_HOUR;
+    current_ms %= MS_IN_HOUR;
+    auto minutes = current_ms / MS_IN_MINUTE;
+    current_ms %= MS_IN_MINUTE;
+    auto seconds = current_ms / MS_IN_SECOND;
 
-    status_label->setText(QString("Remaing time: %1:%2:%3")
-                              .arg(hours, 2, 10, QChar(' '))
-                              .arg(minutes, 2, 10, QChar('0'))
-                              .arg(seconds, 2, 10, QChar('0')));
-    record_remaing_time_ms -= record_countdown_timer->interval();
+    status_label->setText(
+        QString("Remaining time: %1:%2:%3")
+            .arg(hours, 2, 10, QChar(' ')) // Keep space for hours if preferred
+            .arg(minutes, 2, 10, QChar('0'))
+            .arg(seconds, 2, 10, QChar('0')));
+    record_remaining_time_ -=
+        std::chrono::milliseconds(record_countdown_timer->interval());
   } else {
     stop_record();
     status_label->setText("Recording finished");
@@ -312,11 +354,11 @@ void MainWindow::on_record_button_clicked() {
 void MainWindow::start_record() {
   record_button->setEnabled(false);
 
-  for (auto widget : input_widgets) {
+  for (auto *widget : input_widgets) {
     widget->setEnabled(false);
   }
 
-  std::string save_dir = save_dir_edit->toPlainText().toStdString();
+  const std::string save_dir = save_dir_edit->toPlainText().toStdString();
 
   bool success{false};
 
@@ -338,39 +380,70 @@ void MainWindow::start_record() {
   }
 
   if (!success) {
-    for (auto widget : input_widgets) {
+    for (auto *widget : input_widgets) {
       widget->setEnabled(true);
     }
+    record_button->setEnabled(true); // Re-enable button if setup fails
     return;
   }
 
-  auto fps = std::stoi(fps_edit->text().toStdString());
-  auto duration_s = std::stoi(duration_edit->text().toStdString());
-  record_remaing_time_ms = duration_s * 1000;
-  auto interval = std::chrono::nanoseconds(1000000000) / fps;
-  auto duration = std::chrono::nanoseconds(1000000000) * duration_s;
-  auto video_writer_info = video_writer_combo->currentText().toStdString();
-
-  std::string fourcc = "";
-  std::string extension = "";
-
-  if (video_writer_info.starts_with("opencv")) {
-    fourcc = video_writer_info.substr(7, 4);
-    extension = video_writer_info.substr(12, 3);
-  } else {
-    // Handle other video writer types if needed
+  int fps_val = 0;
+  int duration_s_val = 0;
+  try {
+    fps_val = std::stoi(fps_edit->text().toStdString());
+    duration_s_val = std::stoi(duration_edit->text().toStdString());
+  } catch (const std::invalid_argument &ia) {
+    QMessageBox::critical(this, "Error",
+                          QString("Invalid number format: %1").arg(ia.what()));
+    for (auto *widget : input_widgets) {
+      widget->setEnabled(true);
+    }
+    record_button->setEnabled(true);
+    return;
+  } catch (const std::out_of_range &oor) {
+    QMessageBox::critical(this, "Error",
+                          QString("Number out of range: %1").arg(oor.what()));
+    for (auto *widget : input_widgets) {
+      widget->setEnabled(true);
+    }
+    record_button->setEnabled(true);
+    return;
   }
 
-  bool use_software_trigger = trigger_source_combo->currentText() == "software";
+  record_remaining_time_ = std::chrono::seconds(duration_s_val);
+  const auto interval = NS_IN_SECOND / fps_val;
+  const auto duration_ns = NS_IN_SECOND * duration_s_val;
+  const auto video_writer_info =
+      video_writer_combo->currentText().toStdString();
+
+  std::string fourcc_str;
+  std::string extension_str;
+
+  if (video_writer_info.rfind("opencv ", 0) == 0) {    // starts_with
+    std::string details = video_writer_info.substr(7); // Remove "opencv "
+    size_t space_pos = details.find(' ');
+    if (space_pos != std::string::npos) {
+      fourcc_str = details.substr(0, space_pos);
+      extension_str = details.substr(space_pos + 1);
+    }
+  }
+
+  const bool use_software_trigger =
+      trigger_source_combo->currentText() == "software";
 
   camera_system.stop_software_trigger();
 
-  if (!fourcc.empty()) {
-    camera_system.start_record(save_dir, fps, fourcc, extension);
+  if (!fourcc_str.empty() && fourcc_str.length() == 4 &&
+      !extension_str.empty()) {
+    camera_system.start_record(save_dir, fps_val, fourcc_str, extension_str);
+  } else {
+    QMessageBox::warning(this, "Warning",
+                         "Could not parse video writer format. Recording may "
+                         "not use specified FOURCC/extension.");
   }
 
   if (use_software_trigger) {
-    camera_system.start_software_trigger(interval, duration);
+    camera_system.start_software_trigger(interval, duration_ns);
   }
 
   check_record_started_timer->start();
@@ -380,13 +453,14 @@ void MainWindow::stop_record() {
   record_button->setEnabled(false);
 
   record_countdown_timer->stop();
+  check_record_started_timer->stop();
   camera_system.stop_software_trigger();
 
   camera_system.start_preview();
-  camera_system.start_software_trigger(std::chrono::nanoseconds(33000000));
+  camera_system.start_software_trigger(DEFAULT_PREVIEW_INTERVAL_NS);
   save_dir_edit->increment();
 
-  for (auto widget : input_widgets) {
+  for (auto *widget : input_widgets) {
     widget->setEnabled(true);
   }
 

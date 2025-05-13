@@ -22,18 +22,23 @@ class FrameForDisplay {
 public:
   FrameForDisplay();
   ~FrameForDisplay();
-  FrameForDisplay(FrameForDisplay &&other);
+
+  FrameForDisplay(const FrameForDisplay &) = delete;
+  FrameForDisplay &operator=(const FrameForDisplay &) = delete;
+  FrameForDisplay(FrameForDisplay &&other) noexcept;
+  FrameForDisplay &operator=(FrameForDisplay &&other) noexcept;
+
   std::optional<QPixmap> retrieve_as_pixmap();
   void store_frame(const uint8_t *data);
   void update_size(int width, int height);
 
 private:
-  int width = 0;
-  int height = 0;
-  size_t size = 0;
-  uint8_t *data = nullptr;
-  bool retrieved = false;
-  std::mutex mtx;
+  int width_ = 0;
+  int height_ = 0;
+  size_t size_ = 0;
+  std::unique_ptr<uint8_t[]> data_;
+  std::atomic<bool> retrieved_{true};
+  std::mutex mtx_;
 };
 
 class CameraSystem;
@@ -43,7 +48,12 @@ public:
   friend class CameraSystem;
   explicit Camera(Pylon::IPylonDevice *device, const CameraSystem &system);
   ~Camera();
-  Camera(Camera &&other);
+
+  Camera(const Camera &) = delete;
+  Camera &operator=(const Camera &) = delete;
+  Camera(Camera &&other) noexcept;
+  Camera &operator=(Camera &&other) noexcept;
+
   std::string get_serial_number() const;
 
 private:
@@ -53,13 +63,13 @@ private:
   void load_config(const std::string &config);
   void trigger_once();
 
-  std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera;
-  std::unique_ptr<VideoWriter> video_writer;
-  const CameraSystem &system;
-  FrameForDisplay frame_for_display;
-  std::atomic<bool> started{false};
-  std::atomic<bool> stop_flag{false};
-  std::future<void> future;
+  std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera_;
+  std::unique_ptr<VideoWriter> video_writer_;
+  const CameraSystem &system_;
+  FrameForDisplay frame_for_display_;
+  std::atomic<bool> started_{false};
+  std::atomic<bool> stop_flag_{false};
+  std::future<void> future_;
 };
 
 class CameraSystem {
@@ -67,6 +77,11 @@ public:
   friend class Camera;
   explicit CameraSystem();
   ~CameraSystem();
+
+  CameraSystem(const CameraSystem &) = delete;
+  CameraSystem &operator=(const CameraSystem &) = delete;
+  CameraSystem(CameraSystem &&) = delete;
+  CameraSystem &operator=(CameraSystem &&) = delete;
 
   void load_config(const std::string &directory);
   void start_preview();
@@ -85,8 +100,8 @@ public:
   std::vector<Camera>::const_iterator end() const;
 
 private:
-  Pylon::PylonAutoInitTerm autoInitTerm;
-  std::vector<Camera> cameras;
-  PreciseTimer trigger_timer;
+  Pylon::PylonAutoInitTerm auto_init_term_;
+  std::vector<Camera> cameras_;
+  PreciseTimer trigger_timer_;
   void stop();
 };
