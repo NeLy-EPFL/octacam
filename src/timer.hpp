@@ -16,17 +16,16 @@ public:
   PreciseTimer(PreciseTimer &&) = delete;
   PreciseTimer &operator=(PreciseTimer &&) = delete;
 
-  void start(std::chrono::nanoseconds interval,
-             std::chrono::nanoseconds duration);
-  void start(std::chrono::nanoseconds interval);
+  void set_frequency(const double &hz);
+  void start(std::chrono::nanoseconds duration);
+  void start();
   void stop();
 
 private:
   void run_indefinite();
-  void run_until();
+  void run_until(std::chrono::nanoseconds duration);
   std::function<void()> callback_;
-  std::chrono::nanoseconds interval_;
-  std::chrono::nanoseconds duration_;
+  std::atomic<std::chrono::nanoseconds> interval_;
   std::atomic<bool> running_;
   std::thread thread_;
 };

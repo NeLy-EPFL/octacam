@@ -25,13 +25,14 @@
 #include <QResizeEvent>
 #include <QTimer>
 #include <QVBoxLayout>
+
+#include <cmath>
 #include <cstdlib>
 #include <ranges>
 #include <stdexcept>
 
 namespace {
-constexpr std::chrono::nanoseconds DEFAULT_PREVIEW_INTERVAL_NS(33'000'000);
-constexpr int DISPLAY_TIMER_INTERVAL_MS = 33;
+constexpr int REFRESH_INTERVAL_MS = 33;
 constexpr int RECORD_COUNTDOWN_TIMER_INTERVAL_MS = 1000;
 constexpr int CHECK_RECORD_STARTED_TIMER_INTERVAL_MS = 100;
 constexpr int DOCK_MIN_WIDTH = 200;
@@ -39,6 +40,7 @@ constexpr int DOCK_MAX_WIDTH = 300;
 constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
 
 constexpr int FPS_MIN = 0;
+constexpr int FPS_DEFAULT = 100;
 constexpr int FPS_MAX = 1000;
 constexpr int DURATION_MIN_S = 0;
 constexpr int DURATION_MAX_S = 359999;
@@ -66,8 +68,14 @@ MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
 
 MainWindow::~MainWindow() = default;
 
+inline std::chrono::nanoseconds fps_to_ns(double fps) {
+  return std::chrono::nanoseconds(
+      static_cast<long long>(std::round(1e9 / fps)));
+}
+
 void MainWindow::setup_ui() {
-  camera_system.start_software_trigger(DEFAULT_PREVIEW_INTERVAL_NS);
+  camera_system.set_software_trigger_frequency(FPS_DEFAULT);
+  camera_system.start_software_trigger();
   setWindowTitle("huitacam");
 
   mdi_area = new QMdiArea(this);
@@ -98,7 +106,7 @@ void MainWindow::setup_ui() {
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
-  display_timer->setInterval(DISPLAY_TIMER_INTERVAL_MS);
+  display_timer->setInterval(REFRESH_INTERVAL_MS);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start();
 
@@ -137,7 +145,9 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(new QLabel("FPS:"), row, 0);
   fps_edit = new QLineEdit(dock_content);
   fps_edit->setValidator(new QIntValidator(FPS_MIN, FPS_MAX, this));
-  fps_edit->setText("100");
+  fps_edit->setText(QString::number(FPS_DEFAULT));
+  connect(fps_edit, &QLineEdit::textChanged, this,
+          &MainWindow::on_fps_edit_text_changed);
   dock_layout->addWidget(fps_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
@@ -357,6 +367,14 @@ void MainWindow::on_record_button_clicked() {
   }
 }
 
+void MainWindow::on_fps_edit_text_changed(const QString &text) {
+  bool ok;
+  int fps = text.toInt(&ok);
+  if (ok && fps > 0) {
+    camera_system.set_software_trigger_frequency(fps);
+  }
+}
+
 void MainWindow::start_record() {
   record_button->setEnabled(false);
 
@@ -417,7 +435,6 @@ void MainWindow::start_record() {
   }
 
   record_remaining_time_ = std::chrono::seconds(duration_s_val);
-  const auto interval = NS_IN_SECOND / fps_val;
   const auto duration_ns = NS_IN_SECOND * duration_s_val;
   const auto video_writer_info =
       video_writer_combo->currentText().toStdString();
@@ -449,7 +466,7 @@ void MainWindow::start_record() {
   }
 
   if (use_software_trigger) {
-    camera_system.start_software_trigger(interval, duration_ns);
+    camera_system.start_software_trigger(duration_ns);
   }
 
   check_record_started_timer->start();
@@ -463,7 +480,7 @@ void MainWindow::stop_record() {
   camera_system.stop_software_trigger();
 
   camera_system.start_preview();
-  camera_system.start_software_trigger(DEFAULT_PREVIEW_INTERVAL_NS);
+  camera_system.start_software_trigger();
   save_dir_edit->increment();
 
   for (auto *widget : input_widgets) {

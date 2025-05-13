@@ -311,13 +311,14 @@ void CameraSystem::start_record(const std::string &save_dir_str,
   }
 }
 
-void CameraSystem::start_software_trigger(std::chrono::nanoseconds interval,
-                                          std::chrono::nanoseconds duration) {
-  trigger_timer_.start(interval, duration);
+void CameraSystem::set_software_trigger_frequency(const double &hz) {
+  trigger_timer_.set_frequency(hz);
 }
-void CameraSystem::start_software_trigger(std::chrono::nanoseconds interval) {
-  trigger_timer_.start(interval);
+
+void CameraSystem::start_software_trigger(std::chrono::nanoseconds duration) {
+  trigger_timer_.start(duration);
 }
+void CameraSystem::start_software_trigger() { trigger_timer_.start(); }
 void CameraSystem::stop_software_trigger() { trigger_timer_.stop(); }
 
 bool CameraSystem::all_cameras_started() const {

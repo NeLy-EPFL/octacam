@@ -135,6 +135,7 @@ private slots:
   void check_record_started();
   void update_record_countdown();
   void on_record_button_clicked();
+  void on_fps_edit_text_changed(const QString &text);
 
 private:
   void setup_ui();

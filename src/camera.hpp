@@ -91,9 +91,9 @@ public:
   void start_preview();
   void start_record(const std::string &save_dir, const double &fps,
                     const std::string &fourcc, const std::string &extension);
-  void start_software_trigger(std::chrono::nanoseconds interval,
-                              std::chrono::nanoseconds duration);
-  void start_software_trigger(std::chrono::nanoseconds interval);
+  void set_software_trigger_frequency(const double &hz);
+  void start_software_trigger(std::chrono::nanoseconds duration);
+  void start_software_trigger();
   void stop_software_trigger();
   bool all_cameras_started() const;
   std::vector<std::optional<std::pair<QPixmap, double>>> get_pixmaps_and_fps();
