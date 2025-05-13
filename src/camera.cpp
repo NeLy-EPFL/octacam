@@ -106,27 +106,9 @@ Camera::Camera(Camera &&other) noexcept
       video_writer_(std::move(other.video_writer_)), system_(other.system_),
       frame_for_display_(std::move(other.frame_for_display_)),
       started_(other.started_.load()), stop_flag_(other.stop_flag_.load()),
-      future_(std::move(other.future_)) {
+      future_(std::move(other.future_)),
+      timestamps_(std::move(other.timestamps_)) {
   other.stop_flag_ = true;
-}
-
-Camera &Camera::operator=(Camera &&other) noexcept {
-  if (this != &other) {
-    stop_flag_ = true;
-    if (future_.valid()) {
-      future_.wait();
-    }
-
-    camera_ = std::move(other.camera_);
-    video_writer_ = std::move(other.video_writer_);
-    frame_for_display_ = std::move(other.frame_for_display_);
-    started_ = other.started_.load();
-    stop_flag_ = other.stop_flag_.load();
-    future_ = std::move(other.future_);
-
-    other.stop_flag_ = true;
-  }
-  return *this;
 }
 
 std::string Camera::get_serial_number() const {

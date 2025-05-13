@@ -52,7 +52,7 @@ public:
   Camera(const Camera &) = delete;
   Camera &operator=(const Camera &) = delete;
   Camera(Camera &&other) noexcept;
-  Camera &operator=(Camera &&other) noexcept;
+  Camera &operator=(Camera &&other) = delete;
 
   std::string get_serial_number() const;
 
@@ -70,6 +70,7 @@ private:
   std::atomic<bool> started_{false};
   std::atomic<bool> stop_flag_{false};
   std::future<void> future_;
+  std::vector<uint64_t> timestamps_;
 };
 
 class CameraSystem {
