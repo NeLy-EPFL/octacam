@@ -266,7 +266,23 @@ CameraSystem::CameraSystem()
     spdlog::info("Found {} camera(s).", n_devices);
   }
   cameras_.reserve(n_devices);
-  for (size_t i = 0; i < devices.size(); ++i) {
+
+  std::vector<std::string> serial_numbers;
+
+  for (auto &device_info : devices) {
+    serial_numbers.push_back(
+        std::string(device_info.GetSerialNumber().c_str()));
+  }
+
+  // argsort serial_numbers
+  std::vector<size_t> indices(serial_numbers.size());
+  std::iota(indices.begin(), indices.end(), 0);
+  std::sort(indices.begin(), indices.end(),
+            [&serial_numbers](size_t i1, size_t i2) {
+              return serial_numbers[i1] < serial_numbers[i2];
+            });
+
+  for (auto i : indices) {
     cameras_.emplace_back(tlFactory.CreateDevice(devices[i]), *this);
   }
 }
