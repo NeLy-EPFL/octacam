@@ -26,7 +26,10 @@ Ensure you have the following installed:
    ```
 3. Create a build directory, configure the project, and build it:
    ```bash
-   mkdir -p build && cd build && cmake --build .
+   mkdir -p build \
+      && cd build \
+      && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O3 -flto -march=native" .. \
+      && cmake --build .
    ```
 
 ## Usage
