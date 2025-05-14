@@ -11,11 +11,12 @@
 
 #include "camera.hpp"
 #include "main_window.hpp"
+#include "parser.hpp"
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"octacam"};
-  std::string config_dir = "./";
-  app.add_option("config-dir", config_dir, "Config directory")
+  std::string config_dir_str = "./";
+  app.add_option("config-dir", config_dir_str, "Config directory")
       ->check(CLI::ExistingDirectory);
   std::string log_level = "info";
   app.add_option("-l,--log-level", log_level, "Log level")
@@ -40,10 +41,41 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  config_dir = std::filesystem::canonical(config_dir).string();
-  spdlog::info("Config directory: {}", config_dir);
+  auto config_dir = std::filesystem::canonical(config_dir_str);
+  spdlog::info("Using config directory: {}", config_dir.string());
 
-  CameraSystem camera_system;
+  auto config_path = config_dir / "octacam_config.yml";
+  if (!std::filesystem::exists(config_path)) {
+    config_path = config_dir / "octacam_config.yaml";
+  }
+
+  OctacamConfig config;
+  bool config_exists = std::filesystem::exists(config_path);
+
+  if (config_exists) {
+    config = parse_config(config_path.string());
+  }
+
+  std::vector<std::string> requested_serial_numbers;
+  for (const auto &camera_config : config.camera_configs) {
+    requested_serial_numbers.push_back(camera_config.serial_number);
+  }
+
+  if (requested_serial_numbers.empty()) {
+    if (config_exists) {
+      spdlog::info("No cameras found in octacam config file. All detected "
+                   "cameras will be used.");
+    } else {
+      spdlog::info("octacam config file not found at {}. ",
+                   config_path.string());
+      spdlog::info("All detected cameras will be used.");
+    }
+  } else {
+    spdlog::info("Found {} camera(s) in octacam config file",
+                 requested_serial_numbers.size());
+  }
+
+  CameraSystem camera_system(requested_serial_numbers);
 
   auto n_cameras = camera_system.get_camera_count();
 
@@ -51,7 +83,7 @@ int main(int argc, char **argv) {
     spdlog::warn("No cameras found. Exiting.");
     return 1;
   } else {
-    spdlog::info("Found {} camera(s)", n_cameras);
+    spdlog::info("Opened {} camera(s)", n_cameras);
   }
 
   camera_system.load_config(config_dir);

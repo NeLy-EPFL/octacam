@@ -203,7 +203,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
   });
 }
 
-void Camera::load_config(const std::string &config_str) {
+void Camera::load_params(const std::string &config_str) {
   if (!camera_) {
     return;
   }
@@ -220,7 +220,8 @@ void Camera::trigger_once() {
   }
 }
 
-CameraSystem::CameraSystem()
+CameraSystem::CameraSystem(
+    const std::vector<std::string> &requested_serial_numbers)
     : trigger_timer_([this]() {
         for (auto &cam : cameras_) {
           cam.trigger_once();
@@ -234,24 +235,32 @@ CameraSystem::CameraSystem()
     return;
   }
 
-  cameras_.reserve(n_devices);
+  spdlog::info("Detected {} camera(s)", n_devices);
 
-  std::vector<std::string> serial_numbers;
-  serial_numbers.reserve(n_devices);
+  std::vector<std::string> detected_serial_numbers;
 
   for (auto &device : devices) {
-    serial_numbers.push_back(std::string(device.GetSerialNumber().c_str()));
+    detected_serial_numbers.push_back(
+        std::string(device.GetSerialNumber().c_str()));
   }
 
-  // argsort serial_numbers
-  std::vector<size_t> indices(serial_numbers.size());
-  std::iota(indices.begin(), indices.end(), 0);
-  std::sort(indices.begin(), indices.end(),
-            [&serial_numbers](size_t i1, size_t i2) {
-              return serial_numbers[i1] < serial_numbers[i2];
-            });
+  std::vector<std::string> final_serial_numbers;
 
-  for (auto i : indices) {
+  if (requested_serial_numbers.empty()) {
+    final_serial_numbers = detected_serial_numbers;
+    std::sort(final_serial_numbers.begin(), final_serial_numbers.end());
+  } else {
+    final_serial_numbers = requested_serial_numbers;
+  }
+
+  for (auto serial_number : final_serial_numbers) {
+    size_t i = std::find(detected_serial_numbers.begin(),
+                         detected_serial_numbers.end(), serial_number) -
+               detected_serial_numbers.begin();
+    if (i >= detected_serial_numbers.size()) {
+      spdlog::warn("Camera with serial number {} not found", serial_number);
+      continue;
+    }
     cameras_.emplace_back(tl_factory.CreateDevice(devices[i]), *this);
   }
 }
@@ -261,20 +270,19 @@ CameraSystem::~CameraSystem() {
   stop();
 }
 
-void CameraSystem::load_config(const std::string &directory_str) {
+void CameraSystem::load_config(const std::filesystem::path &directory) {
   for (auto &camera : cameras_) {
     auto serial_number = camera.get_serial_number();
-    std::filesystem::path config_file_path =
-        std::filesystem::path(directory_str) / (serial_number + ".pfs");
-    std::ifstream file_stream(config_file_path);
+    auto config_path = directory / (serial_number + ".pfs");
+    std::ifstream file_stream(config_path);
     if (file_stream) {
-      spdlog::info("Loading config for camera: {}", serial_number);
+      spdlog::info("Loading parameters for camera: {}", serial_number);
       std::string content_str((std::istreambuf_iterator<char>(file_stream)),
                               std::istreambuf_iterator<char>());
-      camera.load_config(content_str);
+      camera.load_params(content_str);
     } else {
-      camera.load_config("");
-      spdlog::warn("Config file not found at {}", config_file_path.string());
+      camera.load_params("");
+      spdlog::warn("Parameters file not found at {}", config_path.string());
     }
   }
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -57,7 +58,7 @@ private:
   void start_preview();
   void start_record(const std::string &save_path, const double &fps,
                     const std::string &fourcc);
-  void load_config(const std::string &config);
+  void load_params(const std::string &config);
   void trigger_once();
   inline void store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult);
   inline void update_resulting_fps(size_t n_frames = 6);
@@ -76,7 +77,7 @@ private:
 class CameraSystem {
 public:
   friend class Camera;
-  explicit CameraSystem();
+  explicit CameraSystem(const std::vector<std::string> &serial_numbers);
   ~CameraSystem();
 
   CameraSystem(const CameraSystem &) = delete;
@@ -84,7 +85,7 @@ public:
   CameraSystem(CameraSystem &&) = delete;
   CameraSystem &operator=(CameraSystem &&) = delete;
 
-  void load_config(const std::string &directory);
+  void load_config(const std::filesystem::path &directory);
   void start_preview();
   void start_record(const std::string &save_dir, const double &fps,
                     const std::string &fourcc, const std::string &extension);
