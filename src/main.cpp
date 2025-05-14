@@ -61,26 +61,12 @@ int main(int argc, char **argv) {
     requested_serial_numbers.push_back(camera_config.serial_number);
   }
 
-  if (requested_serial_numbers.empty()) {
-    if (config_exists) {
-      spdlog::info("No cameras found in octacam config file. All detected "
-                   "cameras will be used.");
-    } else {
-      spdlog::info("octacam config file not found at {}. ",
-                   config_path.string());
-      spdlog::info("All detected cameras will be used.");
-    }
-  } else {
-    spdlog::info("Found {} camera(s) in octacam config file",
-                 requested_serial_numbers.size());
-  }
-
   CameraSystem camera_system(requested_serial_numbers);
 
   auto n_cameras = camera_system.get_camera_count();
 
   if (n_cameras <= 0) {
-    spdlog::warn("No cameras found. Exiting.");
+    spdlog::warn("No cameras opened. Exiting.");
     return 1;
   } else {
     spdlog::info("Opened {} camera(s)", n_cameras);

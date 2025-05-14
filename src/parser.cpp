@@ -1,12 +1,27 @@
 #include "parser.hpp"
 
 #include <ctime>
+#include <filesystem>
 
 #include <spdlog/spdlog.h>
 
 OctacamConfig parse_config(const std::string &file_path) {
-  YAML::Node file = YAML::LoadFile(file_path);
+  int n_cameras = 0;
   OctacamConfig ret;
+  YAML::Node file;
+
+  if (!std::filesystem::exists(file_path)) {
+    spdlog::info("octacam config file not found at {}. ", file_path);
+    spdlog::info("All detected cameras will be used.");
+    goto label;
+  }
+
+  try {
+    file = YAML::LoadFile(file_path);
+  } catch (const YAML::ParserException &e) {
+    spdlog::error("Failed to parse octacam config file: {}", e.what());
+    goto label;
+  }
 
   if (file["gui"].IsDefined()) {
     if (!file["gui"].IsMap()) {
@@ -36,39 +51,28 @@ OctacamConfig parse_config(const std::string &file_path) {
     }
   }
 
-  char buffer[1000];
-  time_t now = std::time(nullptr);
-  std::strftime(buffer, sizeof(buffer), ret.gui_config.save_directory.c_str(),
-                std::localtime(&now));
-
-  std::string save_directory = std::string(buffer);
-
-  spdlog::info("Using save directory: {}", save_directory);
-
   if (!file["cameras"].IsDefined()) {
-    return ret;
+    goto label;
   }
 
   if (!file["cameras"].IsSequence()) {
     spdlog::warn(
         "Ignoring \"cameras\" in octacam config as it is not a sequence");
-    return ret;
+    goto label;
   }
-
-  int count = 0;
 
   for (const auto &src : file["cameras"]) {
     CameraConfig dst;
     if (!src["serial_number"].IsDefined()) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its "
                    "\"serial_number\" is absent",
-                   count);
+                   n_cameras);
       continue;
     }
     dst.serial_number = src["serial_number"].as<std::string>();
 
     bool is_serial_number_unique = true;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < n_cameras; i++) {
       if (dst.serial_number == ret.camera_configs[i].serial_number) {
         is_serial_number_unique = false;
         break;
@@ -77,7 +81,7 @@ OctacamConfig parse_config(const std::string &file_path) {
     if (!is_serial_number_unique) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its "
                    "\"serial_number\" is not unique",
-                   count);
+                   n_cameras);
       continue;
     }
 
@@ -86,7 +90,7 @@ OctacamConfig parse_config(const std::string &file_path) {
     }
 
     bool is_name_unique = true;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < n_cameras; i++) {
       if (dst.name == ret.camera_configs[i].name) {
         is_name_unique = false;
         break;
@@ -95,7 +99,7 @@ OctacamConfig parse_config(const std::string &file_path) {
     if (!is_name_unique) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its \"name\" is "
                    "not unique",
-                   count);
+                   n_cameras);
       continue;
     }
 
@@ -109,8 +113,23 @@ OctacamConfig parse_config(const std::string &file_path) {
       dst.rotation_deg = src["rotation_deg"].as<double>();
     }
     ret.camera_configs.push_back(dst);
-    count++;
+    n_cameras++;
   }
+
+  if (n_cameras == 0) {
+    spdlog::info("No cameras found in octacam config file. All detected "
+                 "cameras will be used.");
+    goto label;
+  }
+
+  spdlog::info("Found {} camera(s) in octacam config file",
+               ret.camera_configs.size());
+
+label:
+  char buffer[1000];
+  time_t now = std::time(nullptr);
+  std::strftime(buffer, sizeof(buffer), ret.gui_config.save_directory.c_str(),
+                std::localtime(&now));
 
   return ret;
 }
