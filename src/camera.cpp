@@ -8,6 +8,8 @@
 #include <iostream>
 #include <thread>
 
+#include <spdlog/spdlog.h>
+
 namespace {
 constexpr int GRAB_TIMEOUT_MS = 100;
 constexpr int TRIGGER_READY_TIMEOUT_MS = 1000;
@@ -179,7 +181,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
       video_writer_->open(save_path, fourcc_int, fps, frame_size, false);
 
   if (!opened) {
-    std::cerr << "Failed to open video writer for: " << save_path << '\n';
+    spdlog::error("Failed to open video writer for: {}", save_path);
     return;
   }
 
@@ -188,8 +190,8 @@ void Camera::start_record(const std::string &save_path, const double &fps,
                                                  Pylon::TimeoutHandling_Return);
 
   if (!ready) {
-    std::cerr << "Failed to start grabbing for recording on camera "
-              << get_serial_number() << '\n';
+    spdlog::error("Failed to start grabbing for recording on camera {}",
+                  get_serial_number());
     video_writer_->close();
     return;
   }
@@ -208,8 +210,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
             cv::Mat(camera_->Height.GetValue(), camera_->Width.GetValue(),
                     CV_8UC1, const_cast<uint8_t *>(pImageBuffer)));
         if (!written) {
-          std::cerr << "Frame dropped for camera " << get_serial_number()
-                    << '\n';
+          spdlog::warn("Frame dropped for camera {}", get_serial_number());
         }
         auto stored = frame_for_display_.store_frame(pImageBuffer);
         if (stored) {
@@ -258,10 +259,13 @@ CameraSystem::CameraSystem()
       }) {
   Pylon::CTlFactory &tlFactory = Pylon::CTlFactory::GetInstance();
   Pylon::DeviceInfoList_t devices;
-  if (tlFactory.EnumerateDevices(devices) == 0) {
-    std::cerr << "No camera present." << '\n';
+  auto n_devices = tlFactory.EnumerateDevices(devices);
+  if (n_devices == 0) {
+    spdlog::warn("No camera present.");
+  } else {
+    spdlog::info("Found {} camera(s).", n_devices);
   }
-  cameras_.reserve(devices.size());
+  cameras_.reserve(n_devices);
   for (size_t i = 0; i < devices.size(); ++i) {
     cameras_.emplace_back(tlFactory.CreateDevice(devices[i]), *this);
   }
@@ -279,14 +283,13 @@ void CameraSystem::load_config(const std::string &directory_str) {
         std::filesystem::path(directory_str) / (serial_number + ".pfs");
     std::ifstream file_stream(config_file_path);
     if (file_stream) {
-      std::cout << "Loading config for camera: " << serial_number << '\n';
+      spdlog::info("Loading config for camera: {}", serial_number);
       std::string content_str((std::istreambuf_iterator<char>(file_stream)),
                               std::istreambuf_iterator<char>());
       camera.load_config(content_str);
     } else {
       camera.load_config("");
-      std::cerr << "Warning: config file not found at " << config_file_path
-                << '\n';
+      spdlog::warn("Config file not found at {}", config_file_path.string());
     }
   }
 }

@@ -13,6 +13,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(CLI11)
 
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.15.3
+)
+FetchContent_MakeAvailable(spdlog)
+
 find_package(OpenCV REQUIRED)
 find_package(pylon REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
@@ -41,6 +48,7 @@ target_link_libraries(huitacam
         Qt6::Core
         Qt6::Gui
         Qt6::Widgets
+        spdlog::spdlog
 )
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
