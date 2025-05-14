@@ -136,9 +136,12 @@ Camera::store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult) {
 
 void Camera::start_preview() {
   stop_flag_ = false;
-  if (!camera_) {
+  if (!camera_ || !camera_->IsOpen()) {
     return;
   }
+  camera_->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
+  camera_->TriggerSource.SetValue(
+      Basler_UniversalCameraParams::TriggerSource_Software);
   timestamps_.clear();
   camera_->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
   future_ = std::async(std::launch::async, [this]() {
@@ -169,7 +172,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
   stop_flag_ = false;
   started_ = false;
 
-  if (!camera_ || !video_writer_) {
+  if (!camera_ || !camera_->IsOpen() || !video_writer_) {
     return;
   }
   timestamps_.clear();
@@ -240,9 +243,7 @@ void Camera::load_config(const std::string &config_str) {
                                              &camera_->GetNodeMap());
   frame_for_display_.update_size(camera_->Width.GetValue(),
                                  camera_->Height.GetValue());
-  camera_->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
-  camera_->TriggerSource.SetValue(
-      Basler_UniversalCameraParams::TriggerSource_Software);
+  original_trigger_source_ = camera_->TriggerSource.GetValue();
 }
 
 void Camera::trigger_once() {
@@ -260,11 +261,11 @@ CameraSystem::CameraSystem()
   Pylon::CTlFactory &tl_factory = Pylon::CTlFactory::GetInstance();
   Pylon::DeviceInfoList_t devices;
   auto n_devices = tl_factory.EnumerateDevices(devices);
+
   if (n_devices == 0) {
-    spdlog::warn("No camera present.");
-  } else {
-    spdlog::info("Found {} camera(s).", n_devices);
+    return;
   }
+
   cameras_.reserve(n_devices);
 
   std::vector<std::string> serial_numbers;
@@ -346,6 +347,19 @@ bool CameraSystem::all_cameras_started() const {
       [](const Camera &camera) { return camera.started_.load(); });
 }
 
+void CameraSystem::set_trigger_source(const bool &use_software_trigger) {
+  for (auto &camera : cameras_) {
+    if (camera.camera_ && camera.camera_->IsOpen()) {
+      if (use_software_trigger) {
+        camera.camera_->TriggerSource.SetValue(
+            Basler_UniversalCameraParams::TriggerSource_Software);
+      } else {
+        camera.camera_->TriggerSource.SetValue(camera.original_trigger_source_);
+      }
+    }
+  }
+}
+
 std::vector<std::optional<std::pair<QPixmap, double>>>
 CameraSystem::get_pixmaps_and_fps() {
   std::vector<std::optional<std::pair<QPixmap, double>>> pixmaps_vec;
@@ -361,6 +375,8 @@ CameraSystem::get_pixmaps_and_fps() {
   }
   return pixmaps_vec;
 }
+
+int CameraSystem::get_camera_count() const { return cameras_.size(); }
 
 std::vector<Camera>::iterator CameraSystem::begin() { return cameras_.begin(); }
 std::vector<Camera>::iterator CameraSystem::end() { return cameras_.end(); }

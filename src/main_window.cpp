@@ -344,7 +344,6 @@ void MainWindow::check_record_started() {
     update_record_countdown();
     record_countdown_timer->start();
     record_button->setText("Stop recording");
-    record_button->setEnabled(true);
   }
 }
 
@@ -447,6 +446,10 @@ void MainWindow::start_record() {
 
   camera_system.stop_software_trigger();
 
+  if (!use_software_trigger) {
+    camera_system.set_trigger_source(false);
+  }
+
   if (!fourcc_str.empty() && fourcc_str.length() == 4 &&
       !extension_str.empty()) {
     camera_system.start_record(save_dir, fps_val, fourcc_str, extension_str);
@@ -456,11 +459,15 @@ void MainWindow::start_record() {
                          "not use specified FOURCC/extension.");
   }
 
+  status_label->setText("Waiting for first trigger...");
+  record_button->setText("Abort recording");
+
   if (use_software_trigger) {
     camera_system.start_software_trigger(duration_ns);
   }
 
   check_record_started_timer->start();
+  record_button->setEnabled(true);
 }
 
 void MainWindow::stop_record() {
@@ -478,8 +485,12 @@ void MainWindow::stop_record() {
     widget->setEnabled(true);
   }
 
+  if (record_button->text() == "Abort recording") {
+    status_label->setText("Recording aborted");
+  } else {
+    status_label->setText("Recording stopped");
+  }
+
   record_button->setText("Start recording");
   record_button->setEnabled(true);
-
-  status_label->setText("Recording stopped");
 }

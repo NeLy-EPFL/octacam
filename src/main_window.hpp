@@ -189,7 +189,7 @@ private slots:
   void check_record_started();
   void update_record_countdown();
   void on_record_button_clicked();
-  void on_fps_value_changed(double value); // Changed slot signature
+  void on_fps_value_changed(double value);
 
 private:
   void setup_ui();

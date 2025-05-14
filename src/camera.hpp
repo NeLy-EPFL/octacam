@@ -74,6 +74,7 @@ private:
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
   std::atomic<double> resulting_fps_{0.0};
+  Basler_UniversalCameraParams::TriggerSourceEnums original_trigger_source_;
 };
 
 class CameraSystem {
@@ -95,8 +96,10 @@ public:
   void start_software_trigger(std::chrono::nanoseconds duration);
   void start_software_trigger();
   void stop_software_trigger();
+  void set_trigger_source(const bool &use_software_trigger);
   bool all_cameras_started() const;
   std::vector<std::optional<std::pair<QPixmap, double>>> get_pixmaps_and_fps();
+  int get_camera_count() const;
 
   std::vector<Camera>::iterator begin();
   std::vector<Camera>::iterator end();

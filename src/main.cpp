@@ -44,6 +44,16 @@ int main(int argc, char **argv) {
   spdlog::info("Config directory: {}", config_dir);
 
   CameraSystem camera_system;
+
+  auto n_cameras = camera_system.get_camera_count();
+
+  if (n_cameras <= 0) {
+    spdlog::warn("No cameras found. Exiting.");
+    return 1;
+  } else {
+    spdlog::info("Found {} camera(s)", n_cameras);
+  }
+
   camera_system.load_config(config_dir);
   camera_system.start_preview();
 
