@@ -1,182 +1,44 @@
-# HuitaCam
-
-
-
-
-
-
-HuitaCam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple Basler cameras. It is designed to be fast, easy to use, and maintainable.
-
-
-
-
+# octacam
+octacam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple Basler cameras. It is designed to be fast, easy to use, and maintainable.
 
 ## Features
-
-
-- **Support >7 cameras**: Despite the name, HuitaCam can support more than 8 cameras.
-
-
-- **Preview all cameras**: HuitaCam can preview all cameras while recording. 
-
-
-- **Direct video saving**
-
-
-
-
+- Support >7 cameras (8 is not the limit despite the name)
+- See live updates of all cameras while recording. 
+- Save frames directly to videos
 
 ## Installation
-
-
-
-
-
 ### Prerequisites
-
-
-
-
-
 Ensure you have the following installed:
-
-
-- C++ compiler with C++23 support
-
-
-- CMake 3.28 or higher.
-
-
+- C++ compiler with C++20 support (e.g., g++ 11 or higher)
+- CMake 3.19 or higher.
 - Git.
 
-
-
-
-
 ### Build Instructions
-
-
-
-
-
 1. Install OpenCV, Qt6, and Basler Pylon SDK.
-
-
    ```bash
-
-
-    sudo apt-get install libopencv-dev qt6-base-dev
-
-
+    sudo apt-get install libopencv-dev qt6-base-dev libxkbcommon-dev
     ```
-
-
     For the Basler Pylon SDK, follow the instructions on the [Basler website](https://www.baslerweb.com/en/support/downloads/software-downloads/).
-
-
-
-
-
-1. Clone the repository:
-
-
+2. Clone the repository:
    ```bash
-
-
-   git clone https://github.com/NeLy-EPFL/huitacam.git
-
-
-   cd huitacam
-
-
+   git clone https://github.com/NeLy-EPFL/octacam.git
+   cd octacam
    ```
-
-
-
-
-
-2. Create a build directory and configure the project:
-
-
+3. Create a build directory, configure the project, and build it:
    ```bash
-
-
-   mkdir build
-
-
-   cd build
-
-
-   cmake ..
-
-
+   mkdir -p build && cd build && cmake --build .
    ```
-
-
-
-
-
-3. Build the project:
-
-
-   ```bash
-
-
-   cmake --build .
-
-
-   ```
-
-
-
-
 
 ## Usage
-
-
-
-
-
 After building the project, you can run the executable with the following command:
-
-
 ```bash
-
-
-./huitacam <config_dir>
-
-
+./octacam <config_dir>
 ```
-
-
 where `<config_dir>` is the path to the configuration directory containing the `.pfs` Basler camera configuraion files.
 
-
-
-
-
 For a complete list of options, run:
-
-
 ```bash
-
-
-./huitacam --help
-
-
+./octacam --help
 ```
-
-
-
-
-
 ### Code Style
-
-
-
-
-
-- Follow modern C++ best practices.
-
-
 - Use `clang-format` for consistent code formatting.

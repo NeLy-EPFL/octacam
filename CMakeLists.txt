@@ -1,10 +1,12 @@
-cmake_minimum_required(VERSION 3.28)
-project(huitacam VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.19)
+project(octacam VERSION 0.1.0 LANGUAGES CXX)
+
+# Set CMP0144 policy to NEW to avoid warnings about <PACKAGENAME>_ROOT variables
+cmake_policy(SET CMP0144 NEW)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# set(CMAKE_BUILD_TYPE Debug)
 
 include(FetchContent)
 FetchContent_Declare(
@@ -28,8 +30,8 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-add_executable(huitacam)
-target_sources(huitacam
+add_executable(octacam)
+target_sources(octacam
     PRIVATE
         src/main.cpp
         src/camera.cpp
@@ -41,7 +43,7 @@ target_sources(huitacam
         src/video_writer.cpp
         src/video_writer.hpp
 )
-target_link_libraries(huitacam
+target_link_libraries(octacam
     PRIVATE
         CLI11::CLI11
         pylon::pylon

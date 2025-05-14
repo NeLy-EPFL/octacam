@@ -80,7 +80,7 @@ inline std::chrono::nanoseconds fps_to_ns(double fps) {
 void MainWindow::setup_ui() {
   camera_system.set_software_trigger_frequency(FPS_DEFAULT);
   camera_system.start_software_trigger();
-  setWindowTitle("huitacam");
+  setWindowTitle("octacam");
 
   mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);

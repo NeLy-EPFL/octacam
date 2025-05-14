@@ -13,7 +13,7 @@
 #include "main_window.hpp"
 
 int main(int argc, char **argv) {
-  auto app = CLI::App{"huitacam"};
+  auto app = CLI::App{"octacam"};
   std::string config_dir = "./";
   app.add_option("config-dir", config_dir, "Config directory")
       ->check(CLI::ExistingDirectory);
@@ -26,7 +26,7 @@ int main(int argc, char **argv) {
   try {
     auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     auto logger =
-        std::make_shared<spdlog::logger>("huitacam_logger", console_sink);
+        std::make_shared<spdlog::logger>("octacam_logger", console_sink);
     logger->set_level(spdlog::level::from_str(log_level));
     // Set a custom pattern to hide timestamp and logger name
     // %^ and %$ are for color start and end
@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
 
   QApplication qapp(argc, argv);
   MainWindow main_window(camera_system);
-  main_window.setWindowTitle("huitacam");
+  main_window.setWindowTitle("octacam");
   main_window.showNormal();
 
   return qapp.exec();
