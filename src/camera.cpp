@@ -257,9 +257,9 @@ CameraSystem::CameraSystem()
           cam.trigger_once();
         }
       }) {
-  Pylon::CTlFactory &tlFactory = Pylon::CTlFactory::GetInstance();
+  Pylon::CTlFactory &tl_factory = Pylon::CTlFactory::GetInstance();
   Pylon::DeviceInfoList_t devices;
-  auto n_devices = tlFactory.EnumerateDevices(devices);
+  auto n_devices = tl_factory.EnumerateDevices(devices);
   if (n_devices == 0) {
     spdlog::warn("No camera present.");
   } else {
@@ -268,10 +268,10 @@ CameraSystem::CameraSystem()
   cameras_.reserve(n_devices);
 
   std::vector<std::string> serial_numbers;
+  serial_numbers.reserve(n_devices);
 
-  for (auto &device_info : devices) {
-    serial_numbers.push_back(
-        std::string(device_info.GetSerialNumber().c_str()));
+  for (auto &device : devices) {
+    serial_numbers.push_back(std::string(device.GetSerialNumber().c_str()));
   }
 
   // argsort serial_numbers
@@ -283,7 +283,7 @@ CameraSystem::CameraSystem()
             });
 
   for (auto i : indices) {
-    cameras_.emplace_back(tlFactory.CreateDevice(devices[i]), *this);
+    cameras_.emplace_back(tl_factory.CreateDevice(devices[i]), *this);
   }
 }
 
