@@ -327,12 +327,15 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  for (auto [pixmap_item, pixmap_fps_opt, label] : std::views::zip(
-           pixmap_items, camera_system.get_pixmaps_and_fps(), fps_labels)) {
-    if (pixmap_item && pixmap_fps_opt) {
-      auto [pixmap, fps] = *pixmap_fps_opt;
+  auto pixmaps_and_fps = camera_system.get_pixmaps_and_fps();
+  for (size_t i = 0; i < pixmap_items.size(); ++i) {
+    auto *pixmap_item = pixmap_items[i];
+    auto *fps_label = fps_labels[i];
+
+    if (pixmap_item && i < pixmaps_and_fps.size()) {
+      auto [pixmap, fps] = *pixmaps_and_fps[i];
       pixmap_item->setPixmap(pixmap);
-      label->setText(QString("%1 fps").arg(fps, 6, 'f', 2));
+      fps_label->setText(QString("%1 fps").arg(fps, 6, 'f', 2));
     }
   }
 }
