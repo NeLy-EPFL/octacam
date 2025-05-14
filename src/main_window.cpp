@@ -327,15 +327,23 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void MainWindow::update_frames() {
-  auto pixmaps_and_fps = camera_system.get_pixmaps_and_fps();
-  for (size_t i = 0; i < pixmap_items.size(); ++i) {
+  auto mats_and_fps = camera_system.get_mats_and_fps();
+  for (size_t i = 0; i < mats_and_fps.size(); ++i) {
     auto *pixmap_item = pixmap_items[i];
     auto *fps_label = fps_labels[i];
 
-    if (pixmap_item && i < pixmaps_and_fps.size()) {
-      auto [pixmap, fps] = *pixmaps_and_fps[i];
+    if (pixmap_item && i < mats_and_fps.size()) {
+      auto [mat, fps] = mats_and_fps[i];
+      if (!mat) {
+        continue;
+      }
+      cv::Mat frame = mat->clone();
+      QImage image(frame.data, frame.cols, frame.rows,
+                   static_cast<int>(frame.step[0]), QImage::Format_Grayscale8);
+      QPixmap pixmap = QPixmap::fromImage(image);
       pixmap_item->setPixmap(pixmap);
       fps_label->setText(QString("%1 fps").arg(fps, 6, 'f', 2));
+      delete mat;
     }
   }
 }

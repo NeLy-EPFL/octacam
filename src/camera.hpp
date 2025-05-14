@@ -26,19 +26,15 @@ public:
 
   FrameForDisplay(const FrameForDisplay &) = delete;
   FrameForDisplay &operator=(const FrameForDisplay &) = delete;
-  FrameForDisplay(FrameForDisplay &&other) noexcept;
+  FrameForDisplay(FrameForDisplay &&other) : mat_(other.mat_) {
+    other.mat_ = nullptr;
+  }
   FrameForDisplay &operator=(FrameForDisplay &&other) = delete;
-
-  std::optional<QPixmap> retrieve_as_pixmap();
-  bool store_frame(const uint8_t *data);
-  void update_size(int width, int height);
+  cv::Mat *pop();
+  bool push(const cv::Mat &frame);
 
 private:
-  int width_ = 0;
-  int height_ = 0;
-  size_t size_ = 0;
-  std::unique_ptr<uint8_t[]> data_;
-  bool retrieved_{false};
+  cv::Mat *mat_ = nullptr;
   std::mutex mtx_;
 };
 
@@ -98,7 +94,7 @@ public:
   void stop_software_trigger();
   void set_trigger_source(const bool &use_software_trigger);
   bool all_cameras_started() const;
-  std::vector<std::optional<std::pair<QPixmap, double>>> get_pixmaps_and_fps();
+  std::vector<std::pair<cv::Mat *, double>> get_mats_and_fps();
   int get_camera_count() const;
 
   std::vector<Camera>::iterator begin();

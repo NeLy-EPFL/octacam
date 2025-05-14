@@ -15,58 +15,27 @@ constexpr int GRAB_TIMEOUT_MS = 100;
 constexpr int TRIGGER_READY_TIMEOUT_MS = 1000;
 } // namespace
 
-FrameForDisplay::FrameForDisplay() : retrieved_(false) {}
+FrameForDisplay::FrameForDisplay() = default;
 
 FrameForDisplay::~FrameForDisplay() = default;
 
-FrameForDisplay::FrameForDisplay(FrameForDisplay &&other) noexcept
-    : width_(other.width_), height_(other.height_), size_(other.size_),
-      data_(std::move(other.data_)), retrieved_(other.retrieved_) {
-  other.width_ = 0;
-  other.height_ = 0;
-  other.size_ = 0;
-  other.retrieved_ = true;
-}
-
-std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
+cv::Mat *FrameForDisplay::pop() {
   std::lock_guard<std::mutex> lock(mtx_);
-  if (retrieved_) {
-    return std::nullopt;
+  if (mat_) {
+    cv::Mat *temp = mat_;
+    mat_ = nullptr;
+    return temp;
   }
-  if (!data_) {
-    return std::nullopt;
-  }
-  QImage image(static_cast<const uint8_t *>(data_.get()), width_, height_,
-               QImage::Format_Grayscale8);
-  auto pixmap = QPixmap::fromImage(image);
-  retrieved_ = true;
-  return pixmap;
+  return nullptr;
 }
 
-bool FrameForDisplay::store_frame(const uint8_t *raw_data_ptr) {
+bool FrameForDisplay::push(const cv::Mat &frame) {
   std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
-  if (lock.owns_lock() && retrieved_) {
-    if (data_ && size_ > 0) {
-      std::copy(raw_data_ptr, raw_data_ptr + size_, data_.get());
-      retrieved_ = false;
-      return true;
-    }
+  if (lock.owns_lock() && mat_ == nullptr) {
+    mat_ = new cv::Mat(frame.clone());
+    return true;
   }
   return false;
-}
-
-void FrameForDisplay::update_size(int new_width, int new_height) {
-  std::lock_guard<std::mutex> lock(mtx_);
-  if (width_ != new_width || height_ != new_height) {
-    width_ = new_width;
-    height_ = new_height;
-    size_ = static_cast<size_t>(width_) * height_;
-    if (size_ > 0) {
-      data_ = std::make_unique<uint8_t[]>(size_);
-    } else {
-      data_.reset();
-    }
-  }
 }
 
 Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
@@ -152,10 +121,10 @@ void Camera::start_preview() {
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         store_timestamp(ptrGrabResult);
 
-        const auto *pImageBuffer =
-            static_cast<const uint8_t *>(ptrGrabResult->GetBuffer());
-
-        auto stored = frame_for_display_.store_frame(pImageBuffer);
+        void *pImageBuffer = ptrGrabResult->GetBuffer();
+        auto stored = frame_for_display_.push(
+            cv::Mat(camera_->Height.GetValue(), camera_->Width.GetValue(),
+                    CV_8UC1, pImageBuffer));
         if (stored) {
           update_resulting_fps();
         }
@@ -207,15 +176,14 @@ void Camera::start_record(const std::string &save_path, const double &fps,
                               Pylon::TimeoutHandling_Return);
       if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
         store_timestamp(ptrGrabResult);
-        const auto *pImageBuffer =
-            static_cast<const uint8_t *>(ptrGrabResult->GetBuffer());
-        bool written = video_writer_->write(
-            cv::Mat(camera_->Height.GetValue(), camera_->Width.GetValue(),
-                    CV_8UC1, const_cast<uint8_t *>(pImageBuffer)));
+        void *pImageBuffer = ptrGrabResult->GetBuffer();
+        cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(),
+                      CV_8UC1, pImageBuffer);
+        bool written = video_writer_->write(frame);
         if (!written) {
           spdlog::warn("Frame dropped for camera {}", get_serial_number());
         }
-        auto stored = frame_for_display_.store_frame(pImageBuffer);
+        auto stored = frame_for_display_.push(frame);
         if (stored) {
           update_resulting_fps();
         }
@@ -241,8 +209,8 @@ void Camera::load_config(const std::string &config_str) {
   }
   Pylon::CFeaturePersistence::LoadFromString(config_str.c_str(),
                                              &camera_->GetNodeMap());
-  frame_for_display_.update_size(camera_->Width.GetValue(),
-                                 camera_->Height.GetValue());
+  cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(), CV_8UC1);
+  frame_for_display_.push(frame);
   original_trigger_source_ = camera_->TriggerSource.GetValue();
 }
 
@@ -360,17 +328,16 @@ void CameraSystem::set_trigger_source(const bool &use_software_trigger) {
   }
 }
 
-std::vector<std::optional<std::pair<QPixmap, double>>>
-CameraSystem::get_pixmaps_and_fps() {
-  std::vector<std::optional<std::pair<QPixmap, double>>> pixmaps_vec;
+std::vector<std::pair<cv::Mat *, double>> CameraSystem::get_mats_and_fps() {
+  std::vector<std::pair<cv::Mat *, double>> pixmaps_vec;
   pixmaps_vec.reserve(cameras_.size());
   for (auto &camera : cameras_) {
-    auto pixmap_opt = camera.frame_for_display_.retrieve_as_pixmap();
-    if (pixmap_opt) {
+    auto *mat = camera.frame_for_display_.pop();
+    if (mat) {
       pixmaps_vec.emplace_back(
-          std::make_pair(*pixmap_opt, camera.resulting_fps_.load()));
+          std::make_pair(mat, camera.resulting_fps_.load()));
     } else {
-      pixmaps_vec.emplace_back(std::nullopt);
+      pixmaps_vec.emplace_back(std::make_pair(nullptr, 0.0));
     }
   }
   return pixmaps_vec;
