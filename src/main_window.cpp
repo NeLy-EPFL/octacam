@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QDoubleSpinBox>
+#include <QDoubleValidator>
 #include <QFileDialog>
 #include <QFrame>
 #include <QGraphicsPixmapItem>
@@ -45,8 +46,8 @@ constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
 constexpr double FPS_MIN = 0.01;
 constexpr double FPS_DEFAULT = 100.0;
 constexpr double FPS_MAX = 1000;
-constexpr int DURATION_MIN_S = 0;
-constexpr int DURATION_MAX_S = 359999;
+constexpr int DURATION_MIN = 0;
+constexpr int DURATION_MAX = 359999;
 
 constexpr long long MS_IN_HOUR = 3'600'000LL;
 constexpr long long MS_IN_MINUTE = 60'000LL;
@@ -151,12 +152,9 @@ void MainWindow::setup_ui() {
   dock_content->setLayout(dock_layout);
   int row = 0;
 
-  dock_layout->addWidget(new QLabel("Duration (s):"), row, 0);
-  duration_edit = new QLineEdit(dock_content);
-  duration_edit->setValidator(
-      new QIntValidator(DURATION_MIN_S, DURATION_MAX_S, this));
-  duration_edit->setText("30");
-  dock_layout->addWidget(duration_edit, row++, 1);
+  dock_layout->addWidget(new QLabel("Duration"), row, 0);
+  duration_input = new DurationInput(dock_content);
+  dock_layout->addWidget(duration_input, row++, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), row, 0);
   fps_edit = new QDoubleSpinBox(dock_content);
@@ -252,7 +250,7 @@ void MainWindow::setup_ui() {
 
   rotate_all_button->setChecked(true);
 
-  input_widgets.push_back(duration_edit);
+  input_widgets.push_back(duration_input);
   input_widgets.push_back(fps_edit);
   input_widgets.push_back(save_dir_edit);
   input_widgets.push_back(trigger_source_combo);
@@ -425,31 +423,10 @@ void MainWindow::start_record() {
   }
 
   double fps_val = fps_edit->value();
-  int duration_s_val = 0;
-  try {
-    duration_s_val = std::stoi(duration_edit->text().toStdString());
-  } catch (const std::invalid_argument &ia) {
-    QMessageBox::critical(
-        this, "Error",
-        QString("Invalid number format for duration: %1").arg(ia.what()));
-    for (auto *widget : input_widgets) {
-      widget->setEnabled(true);
-    }
-    record_button->setEnabled(true);
-    return;
-  } catch (const std::out_of_range &oor) {
-    QMessageBox::critical(
-        this, "Error",
-        QString("Duration number out of range: %1").arg(oor.what()));
-    for (auto *widget : input_widgets) {
-      widget->setEnabled(true);
-    }
-    record_button->setEnabled(true);
-    return;
-  }
+  std::chrono::nanoseconds duration_ns = duration_input->get_duration();
 
-  record_remaining_time_ = std::chrono::seconds(duration_s_val);
-  const auto duration_ns = NS_IN_SECOND * duration_s_val;
+  record_remaining_time_ =
+      std::chrono::duration_cast<std::chrono::milliseconds>(duration_ns);
   const auto video_writer_info =
       video_writer_combo->currentText().toStdString();
 
