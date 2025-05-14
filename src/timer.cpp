@@ -1,26 +1,32 @@
-#include "timer.h"
-#include <iostream>
+#include "timer.hpp"
+
+#include <cmath>
 
 PreciseTimer::PreciseTimer(std::function<void()> callback)
-    : callback_(callback), interval_{10000000}, running_{false} {}
+    : callback_(std::move(callback)),
+      interval_{std::chrono::nanoseconds(10'000'000)}, running_{false} {}
+
 PreciseTimer::~PreciseTimer() { stop(); }
 
-void PreciseTimer::start(std::chrono::nanoseconds interval,
-                         std::chrono::nanoseconds duration) {
-  if (running_)
-    return;
-  interval_ = interval;
-  duration_ = duration;
-  running_ = true;
-  thread_ = std::thread(&PreciseTimer::run, this);
+void PreciseTimer::set_frequency(const double &hz) {
+  interval_ =
+      std::chrono::nanoseconds(static_cast<long long>(std::round(1e9 / hz)));
 }
 
-void PreciseTimer::start(std::chrono::nanoseconds interval) {
-  if (running_)
+void PreciseTimer::start(std::chrono::nanoseconds duration) {
+  if (running_) {
     return;
-  interval_ = interval;
+  }
   running_ = true;
-  thread_ = std::thread(&PreciseTimer::run2, this);
+  thread_ = std::thread(&PreciseTimer::run_until, this, duration);
+}
+
+void PreciseTimer::start() {
+  if (running_) {
+    return;
+  }
+  running_ = true;
+  thread_ = std::thread(&PreciseTimer::run_indefinite, this);
 }
 
 void PreciseTimer::stop() {
@@ -30,13 +36,10 @@ void PreciseTimer::stop() {
   }
 }
 
-bool PreciseTimer::is_running() const { return running_; }
-
-void PreciseTimer::run() {
+void PreciseTimer::run_indefinite() {
   auto next_time = std::chrono::steady_clock::now();
-  auto end_time = next_time + duration_;
 
-  while (running_ && (next_time < end_time)) {
+  while (running_) {
     next_time += interval_;
     callback_();
     std::this_thread::sleep_until(next_time);
@@ -44,9 +47,11 @@ void PreciseTimer::run() {
   running_ = false;
 }
 
-void PreciseTimer::run2() {
+void PreciseTimer::run_until(std::chrono::nanoseconds duration) {
   auto next_time = std::chrono::steady_clock::now();
-  while (running_) {
+  auto end_time = next_time + duration;
+
+  while (running_ && next_time < end_time) {
     next_time += interval_;
     callback_();
     std::this_thread::sleep_until(next_time);

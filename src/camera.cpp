@@ -1,5 +1,6 @@
-#include "camera.h"
+#include "camera.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -7,187 +8,359 @@
 #include <iostream>
 #include <thread>
 
-FrameForDisplay::~FrameForDisplay() { delete[] data; }
+#include <spdlog/spdlog.h>
 
-std::optional<QPixmap> FrameForDisplay::retrieve_as_pixmap() {
-  std::lock_guard<std::mutex> lock(mtx);
-  if (retrieved) {
-    return std::nullopt;
+namespace {
+constexpr int GRAB_TIMEOUT_MS = 100;
+constexpr int TRIGGER_READY_TIMEOUT_MS = 1000;
+} // namespace
+
+FrameForDisplay::FrameForDisplay() = default;
+
+FrameForDisplay::~FrameForDisplay() = default;
+
+cv::Mat *FrameForDisplay::pop() {
+  std::lock_guard<std::mutex> lock(mtx_);
+  if (mat_) {
+    cv::Mat *temp = mat_;
+    mat_ = nullptr;
+    return temp;
   }
-  QImage image(static_cast<const uint8_t *>(data), width, height,
-               QImage::Format_Grayscale8);
-  auto pixmap = QPixmap::fromImage(image);
-  retrieved = true;
-  return pixmap;
+  return nullptr;
 }
 
-void FrameForDisplay::store_frame(const uint8_t *data) {
-  std::unique_lock<std::mutex> lock(mtx, std::try_to_lock);
-  if (lock.owns_lock() && retrieved) {
-    std::copy(data, data + size, this->data);
-    retrieved = false;
+bool FrameForDisplay::push(const cv::Mat &frame) {
+  std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
+  if (lock.owns_lock() && mat_ == nullptr) {
+    mat_ = new cv::Mat(frame.clone());
+    return true;
   }
-}
-
-void FrameForDisplay::update_size(int width, int height) {
-  std::lock_guard<std::mutex> lock(mtx);
-  if (this->width != width || this->height != height) {
-    delete[] data;
-    this->width = width;
-    this->height = height;
-    size = this->width * this->height;
-    data = new uint8_t[size];
-  }
+  return false;
 }
 
 Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
-    : camera(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
-      system(system) {
-  camera->Open();
+    : camera_(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
+      video_writer_(std::make_unique<OpencvVideoWriter>(20)), started_(false),
+      stop_flag_(false) {
+  camera_->Open();
 }
 
 Camera::~Camera() {
-  stop_flag = true;
-  if (future.valid()) {
-    future.get();
+  stop_flag_ = true;
+  if (future_.valid()) {
+    future_.wait();
   }
 }
 
-Camera::Camera(Camera &&other)
-    : camera(std::move(other.camera)), system(other.system) {
-  other.camera = nullptr;
+Camera::Camera(Camera &&other) noexcept
+    : camera_(std::move(other.camera_)),
+      video_writer_(std::move(other.video_writer_)),
+      frame_for_display_(std::move(other.frame_for_display_)),
+      started_(other.started_.load()), stop_flag_(other.stop_flag_.load()),
+      future_(std::move(other.future_)),
+      timestamps_(std::move(other.timestamps_)),
+      resulting_fps_(other.resulting_fps_.load()) {
+  other.stop_flag_ = true;
 }
 
 std::string Camera::get_serial_number() const {
-  return std::string(camera->GetDeviceInfo().GetSerialNumber().c_str());
+  if (!camera_) {
+    return "N/A";
+  }
+  return std::string(camera_->GetDeviceInfo().GetSerialNumber().c_str());
+}
+
+inline void Camera::update_resulting_fps(size_t window_size) {
+  if (timestamps_.size() < 2 || window_size < 1) {
+    resulting_fps_ = 0.0;
+    return;
+  }
+
+  size_t last_index = timestamps_.size() - 1;
+  size_t start_index =
+      (last_index > window_size) ? last_index - window_size : 0;
+  size_t actual_window_size = last_index - start_index;
+  uint64_t delta_ns = timestamps_[last_index] - timestamps_[start_index];
+
+  if (delta_ns == 0) {
+    resulting_fps_ = 0.0;
+    return;
+  }
+
+  resulting_fps_ = static_cast<double>(actual_window_size * 1e9) /
+                   static_cast<double>(delta_ns);
+}
+
+inline void
+Camera::store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult) {
+  uint64_t timestamp = ptrGrabResult->GetTimeStamp();
+  if (timestamp == 0) {
+    auto now = std::chrono::high_resolution_clock::now();
+    timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now.time_since_epoch())
+                    .count();
+  }
+  timestamps_.push_back(timestamp);
 }
 
 void Camera::start_preview() {
-  stop_flag = false;
-  this->camera->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
-  future = std::async(std::launch::async, [this]() {
-    while (!this->stop_flag && this->camera->IsGrabbing()) {
-      Pylon::CGrabResultPtr ptrGrabResult;
-      camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
-      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
-        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-        this->frame_for_display.store_frame(pImageBuffer);
-      }
-    }
-    this->camera->StopGrabbing();
-  });
-}
-
-void Camera::start_record() {
-  stop_flag = false;
-  camera->StartGrabbing(Pylon::GrabStrategy_OneByOne);
-  future = std::async(std::launch::async, [this]() {
-    while (camera->IsGrabbing() && !stop_flag) {
-      Pylon::CGrabResultPtr ptrGrabResult;
-      camera->RetrieveResult(33, ptrGrabResult, Pylon::TimeoutHandling_Return);
-      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
-        const uint8_t *pImageBuffer = (uint8_t *)ptrGrabResult->GetBuffer();
-        frame_for_display.store_frame(pImageBuffer);
-      }
-    }
-    camera->StopGrabbing();
-  });
-}
-
-void Camera::load_config(const std::string &config) {
-  if (!config.empty()) {
-    Pylon::CFeaturePersistence::LoadFromString(config.c_str(),
-                                               &camera->GetNodeMap());
+  stop_flag_ = false;
+  if (!camera_ || !camera_->IsOpen()) {
+    return;
   }
-  frame_for_display.update_size(camera->Width.GetValue(),
-                                camera->Height.GetValue());
-  camera->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
-  camera->TriggerSource.SetValue(
+  camera_->TriggerMode.SetValue(Basler_UniversalCameraParams::TriggerMode_On);
+  camera_->TriggerSource.SetValue(
       Basler_UniversalCameraParams::TriggerSource_Software);
+  timestamps_.clear();
+  camera_->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
+  future_ = std::async(std::launch::async, [this]() {
+    while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
+      Pylon::CGrabResultPtr ptrGrabResult;
+      camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
+                              Pylon::TimeoutHandling_Return);
+      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
+        store_timestamp(ptrGrabResult);
+
+        void *pImageBuffer = ptrGrabResult->GetBuffer();
+        auto stored = frame_for_display_.push(
+            cv::Mat(camera_->Height.GetValue(), camera_->Width.GetValue(),
+                    CV_8UC1, pImageBuffer));
+        if (stored) {
+          update_resulting_fps();
+        }
+      }
+    }
+    if (camera_) {
+      camera_->StopGrabbing();
+    }
+  });
+}
+
+void Camera::start_record(const std::string &save_path, const double &fps,
+                          const std::string &fourcc_str) {
+  stop_flag_ = false;
+  started_ = false;
+
+  if (!camera_ || !camera_->IsOpen() || !video_writer_) {
+    return;
+  }
+  timestamps_.clear();
+  auto fourcc_int = cv::VideoWriter::fourcc(fourcc_str[0], fourcc_str[1],
+                                            fourcc_str[2], fourcc_str[3]);
+  auto frame_size =
+      cv::Size(camera_->Width.GetValue(), camera_->Height.GetValue());
+  bool opened =
+      video_writer_->open(save_path, fourcc_int, fps, frame_size, false);
+
+  if (!opened) {
+    spdlog::error("Failed to open video writer for: {}", save_path);
+    return;
+  }
+
+  camera_->StartGrabbing(Pylon::GrabStrategy_OneByOne);
+  bool ready = camera_->WaitForFrameTriggerReady(TRIGGER_READY_TIMEOUT_MS,
+                                                 Pylon::TimeoutHandling_Return);
+
+  if (!ready) {
+    spdlog::error("Failed to start grabbing for recording on camera {}",
+                  get_serial_number());
+    video_writer_->close();
+    return;
+  }
+
+  future_ = std::async(std::launch::async, [this]() {
+    bool local_started_flag = false;
+    while (camera_ && camera_->IsGrabbing() && !stop_flag_) {
+      Pylon::CGrabResultPtr ptrGrabResult;
+      camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
+                              Pylon::TimeoutHandling_Return);
+      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
+        store_timestamp(ptrGrabResult);
+        void *pImageBuffer = ptrGrabResult->GetBuffer();
+        cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(),
+                      CV_8UC1, pImageBuffer);
+        bool written = video_writer_->write(frame);
+        if (!written) {
+          spdlog::warn("Frame dropped for camera {}", get_serial_number());
+        }
+        auto stored = frame_for_display_.push(frame);
+        if (stored) {
+          update_resulting_fps();
+        }
+
+        if (!local_started_flag) {
+          local_started_flag = true;
+          started_ = true;
+        }
+      }
+    }
+    if (camera_) {
+      camera_->StopGrabbing();
+    }
+    if (video_writer_) {
+      video_writer_->close();
+    }
+  });
+}
+
+void Camera::load_config(const std::string &config_str) {
+  if (!camera_) {
+    return;
+  }
+  Pylon::CFeaturePersistence::LoadFromString(config_str.c_str(),
+                                             &camera_->GetNodeMap());
+  cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(), CV_8UC1);
+  frame_for_display_.push(frame);
+  original_trigger_source_ = camera_->TriggerSource.GetValue();
 }
 
 void Camera::trigger_once() {
-  // if (camera->IsGrabbing()) {
-  camera->ExecuteSoftwareTrigger();
-  // }
+  if (camera_ && camera_->IsGrabbing()) {
+    camera_->ExecuteSoftwareTrigger();
+  }
 }
 
 CameraSystem::CameraSystem()
-    : trigger_timer([this]() {
-        for (auto &c : cameras) {
-          c.trigger_once();
+    : trigger_timer_([this]() {
+        for (auto &cam : cameras_) {
+          cam.trigger_once();
         }
       }) {
-  auto &tlFactory = Pylon::CTlFactory::GetInstance();
+  Pylon::CTlFactory &tl_factory = Pylon::CTlFactory::GetInstance();
   Pylon::DeviceInfoList_t devices;
-  if (tlFactory.EnumerateDevices(devices) == 0) {
-    std::cerr << "No camera present." << std::endl;
+  auto n_devices = tl_factory.EnumerateDevices(devices);
+
+  if (n_devices == 0) {
+    return;
   }
-  for (size_t i = 0; i < devices.size(); ++i) {
-    cameras.emplace_back(tlFactory.CreateDevice(devices[i]), *this);
+
+  cameras_.reserve(n_devices);
+
+  std::vector<std::string> serial_numbers;
+  serial_numbers.reserve(n_devices);
+
+  for (auto &device : devices) {
+    serial_numbers.push_back(std::string(device.GetSerialNumber().c_str()));
+  }
+
+  // argsort serial_numbers
+  std::vector<size_t> indices(serial_numbers.size());
+  std::iota(indices.begin(), indices.end(), 0);
+  std::sort(indices.begin(), indices.end(),
+            [&serial_numbers](size_t i1, size_t i2) {
+              return serial_numbers[i1] < serial_numbers[i2];
+            });
+
+  for (auto i : indices) {
+    cameras_.emplace_back(tl_factory.CreateDevice(devices[i]), *this);
   }
 }
 
-CameraSystem::~CameraSystem() { trigger_timer.stop(); }
+CameraSystem::~CameraSystem() {
+  stop_software_trigger();
+  stop();
+}
 
-void CameraSystem::load_config(const std::string &directory) {
-  for (auto &camera : cameras) {
+void CameraSystem::load_config(const std::string &directory_str) {
+  for (auto &camera : cameras_) {
     auto serial_number = camera.get_serial_number();
-    std::filesystem::path config_file =
-        std::filesystem::path(directory) / (serial_number + ".pfs");
-    std::ifstream file(config_file);
-    if (file) {
-      std::cout << "Loading config for camera: " << serial_number << std::endl;
-      std::string content((std::istreambuf_iterator<char>(file)),
-                          std::istreambuf_iterator<char>());
-      camera.load_config(content);
+    std::filesystem::path config_file_path =
+        std::filesystem::path(directory_str) / (serial_number + ".pfs");
+    std::ifstream file_stream(config_file_path);
+    if (file_stream) {
+      spdlog::info("Loading config for camera: {}", serial_number);
+      std::string content_str((std::istreambuf_iterator<char>(file_stream)),
+                              std::istreambuf_iterator<char>());
+      camera.load_config(content_str);
     } else {
       camera.load_config("");
-      std::cerr << "Warning: config file not found at " << config_file
-                << std::endl;
+      spdlog::warn("Config file not found at {}", config_file_path.string());
     }
   }
 }
 
 void CameraSystem::start_preview() {
   stop();
-  for (auto &camera : cameras) {
+  for (auto &camera : cameras_) {
     camera.start_preview();
   }
 }
 
-void CameraSystem::start_record() {
+void CameraSystem::start_record(const std::string &save_dir_str,
+                                const double &fps_val,
+                                const std::string &fourcc_str,
+                                const std::string &extension_str) {
   stop();
-  for (auto &camera : cameras) {
-    camera.start_record();
+  for (auto &camera : cameras_) {
+    std::filesystem::path save_path_obj =
+        std::filesystem::path(save_dir_str) /
+        (camera.get_serial_number() + "." + extension_str);
+    camera.start_record(save_path_obj.string(), fps_val, fourcc_str);
   }
 }
 
-std::vector<std::optional<QPixmap>> CameraSystem::get_pixmaps() {
-  std::vector<std::optional<QPixmap>> pixmaps;
-  pixmaps.reserve(cameras.size());
-  for (auto &camera : cameras) {
-    pixmaps.push_back(camera.frame_for_display.retrieve_as_pixmap());
-  }
-  return pixmaps;
+void CameraSystem::set_software_trigger_frequency(const double &hz) {
+  trigger_timer_.set_frequency(hz);
 }
 
-std::vector<Camera>::iterator CameraSystem::begin() { return cameras.begin(); }
-std::vector<Camera>::iterator CameraSystem::end() { return cameras.end(); }
+void CameraSystem::start_software_trigger(std::chrono::nanoseconds duration) {
+  trigger_timer_.start(duration);
+}
+void CameraSystem::start_software_trigger() { trigger_timer_.start(); }
+void CameraSystem::stop_software_trigger() { trigger_timer_.stop(); }
+
+bool CameraSystem::all_cameras_started() const {
+  return std::all_of(
+      cameras_.begin(), cameras_.end(),
+      [](const Camera &camera) { return camera.started_.load(); });
+}
+
+void CameraSystem::set_trigger_source(const bool &use_software_trigger) {
+  for (auto &camera : cameras_) {
+    if (camera.camera_ && camera.camera_->IsOpen()) {
+      if (use_software_trigger) {
+        camera.camera_->TriggerSource.SetValue(
+            Basler_UniversalCameraParams::TriggerSource_Software);
+      } else {
+        camera.camera_->TriggerSource.SetValue(camera.original_trigger_source_);
+      }
+    }
+  }
+}
+
+std::vector<std::pair<cv::Mat *, double>> CameraSystem::get_mats_and_fps() {
+  std::vector<std::pair<cv::Mat *, double>> pixmaps_vec;
+  pixmaps_vec.reserve(cameras_.size());
+  for (auto &camera : cameras_) {
+    auto *mat = camera.frame_for_display_.pop();
+    if (mat) {
+      pixmaps_vec.emplace_back(
+          std::make_pair(mat, camera.resulting_fps_.load()));
+    } else {
+      pixmaps_vec.emplace_back(std::make_pair(nullptr, 0.0));
+    }
+  }
+  return pixmaps_vec;
+}
+
+int CameraSystem::get_camera_count() const { return cameras_.size(); }
+
+std::vector<Camera>::iterator CameraSystem::begin() { return cameras_.begin(); }
+std::vector<Camera>::iterator CameraSystem::end() { return cameras_.end(); }
 std::vector<Camera>::const_iterator CameraSystem::begin() const {
-  return cameras.begin();
+  return cameras_.cbegin();
 }
 std::vector<Camera>::const_iterator CameraSystem::end() const {
-  return cameras.end();
+  return cameras_.cend();
 }
 
 void CameraSystem::stop() {
-  for (auto &camera : cameras) {
-    camera.stop_flag = true;
+  for (auto &camera : cameras_) {
+    camera.stop_flag_ = true;
   }
-  for (auto &camera : cameras) {
-    if (camera.future.valid()) {
-      camera.future.get();
+  for (auto &camera : cameras_) {
+    if (camera.future_.valid()) {
+      camera.future_.wait();
     }
   }
 }
