@@ -65,8 +65,9 @@ void GraphicsView::resizeEvent(QResizeEvent *event) {
   fitInView(scene()->itemsBoundingRect(), Qt::KeepAspectRatio);
 }
 
-MainWindow::MainWindow(CameraSystem &camera_system, QWidget *parent)
-    : QMainWindow(parent), camera_system(camera_system) {
+MainWindow::MainWindow(CameraSystem &camera_system, OctacamConfig config,
+                       QWidget *parent)
+    : QMainWindow(parent), camera_system(camera_system), config(config) {
   setup_ui();
 }
 
@@ -86,6 +87,22 @@ void MainWindow::setup_ui() {
   setCentralWidget(mdi_area);
 
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
+    auto serial_number = camera.get_serial_number();
+
+    CameraConfig camera_config;
+    auto it = std::ranges::find_if(
+        config.camera_configs,
+        [&serial_number](const CameraConfig &camera_config) {
+          return camera_config.serial_number == serial_number;
+        });
+
+    if (it != config.camera_configs.end()) {
+      camera_config = *it;
+    } else {
+      camera_config.serial_number = serial_number;
+      camera_config.name = serial_number;
+    }
+
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
 
@@ -115,7 +132,7 @@ void MainWindow::setup_ui() {
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
-    auto title = QString::fromStdString(camera.get_serial_number());
+    auto title = QString::fromStdString(camera_config.name);
     sub_window->setWindowTitle(title);
   }
 

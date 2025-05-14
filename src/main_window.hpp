@@ -26,6 +26,7 @@
 #include <QVector>
 
 #include "camera.hpp"
+#include "parser.hpp"
 
 class DurationInput : public QWidget {
   Q_OBJECT
@@ -173,7 +174,8 @@ class MainWindow : public QMainWindow {
   Q_OBJECT
 
 public:
-  explicit MainWindow(CameraSystem &camera_system, QWidget *parent = nullptr);
+  explicit MainWindow(CameraSystem &camera_system, OctacamConfig config,
+                      QWidget *parent = nullptr);
   ~MainWindow() override;
   MainWindow(const MainWindow &) = delete;
   MainWindow &operator=(const MainWindow &) = delete;
@@ -197,6 +199,7 @@ private:
   void stop_record();
 
   CameraSystem &camera_system;
+  OctacamConfig config;
   QVector<QGraphicsPixmapItem *> pixmap_items;
   QVector<QWidget *> input_widgets;
   QMdiArea *mdi_area;

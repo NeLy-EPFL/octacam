@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
   camera_system.start_preview();
 
   QApplication qapp(argc, argv);
-  MainWindow main_window(camera_system);
+  MainWindow main_window(camera_system, config);
   main_window.setWindowTitle("octacam");
   main_window.showNormal();
 
