@@ -32,64 +32,142 @@ OctacamConfig parse_config(const std::string &file_path) {
       auto &dst = ret.gui_config;
 
       if (src["fps_default"].IsDefined()) {
-        dst.fps_default = src["fps_default"].as<double>();
+        try {
+          dst.fps_default = src["fps_default"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"fps_default\" is not of type double in the config file");
+        }
       }
       if (src["fps_min"].IsDefined()) {
-        dst.fps_min = src["fps_min"].as<double>();
+        try {
+          dst.fps_min = src["fps_min"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"fps_min\" is not of type double in the config file");
+        }
       }
       if (src["fps_max"].IsDefined()) {
-        dst.fps_max = src["fps_max"].as<double>();
+        try {
+          dst.fps_max = src["fps_max"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"fps_max\" is not of type double in the config file");
+        }
       }
 
       if (src["duration_default"].IsDefined()) {
-        dst.duration_default = src["duration_default"].as<double>();
+        try {
+          dst.duration_default = src["duration_default"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"duration_default\" is not of type double in the config file");
+        }
       }
       if (src["duration_min"].IsDefined()) {
-        dst.duration_min = src["duration_min"].as<double>();
+        try {
+          dst.duration_min = src["duration_min"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"duration_min\" is not of type double in the config file");
+        }
       }
       if (src["duration_max"].IsDefined()) {
-        dst.duration_max = src["duration_max"].as<double>();
+        try {
+          dst.duration_max = src["duration_max"].as<double>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"duration_max\" is not of type double in the config file");
+        }
       }
 
       if (src["duration_unit_default_index"].IsDefined()) {
-        dst.duration_unit_default_index =
-            src["duration_unit_default_index"].as<int>();
+        try {
+          dst.duration_unit_default_index =
+              src["duration_unit_default_index"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"duration_unit_default_index\" is not of type int in "
+                       "the config file");
+        }
       }
       if (src["save_directory_default"].IsDefined()) {
-        dst.save_directory_default =
-            src["save_directory_default"].as<std::string>();
+        try {
+          dst.save_directory_default =
+              src["save_directory_default"].as<std::string>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"save_directory_default\" is not of type string in "
+                       "the config file");
+        }
       }
       if (src["trigger_source_default_index"].IsDefined()) {
-        dst.trigger_source_default_index =
-            src["trigger_source_default_index"].as<int>();
+        try {
+          dst.trigger_source_default_index =
+              src["trigger_source_default_index"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"trigger_source_default_index\" is not of type int in "
+                       "the config file");
+        }
       }
       if (src["video_writer_default_index"].IsDefined()) {
-        dst.video_writer_default_index =
-            src["video_writer_default_index"].as<int>();
+        try {
+          dst.video_writer_default_index =
+              src["video_writer_default_index"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"video_writer_default_index\" is not of type int in "
+                       "the config file");
+        }
       }
 
       if (src["display_refresh_interval_ms"].IsDefined()) {
-        dst.display_refresh_interval_ms =
-            src["display_refresh_interval_ms"].as<int>();
+        try {
+          dst.display_refresh_interval_ms =
+              src["display_refresh_interval_ms"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"display_refresh_interval_ms\" is not of type int in "
+                       "the config file");
+        }
       }
       if (src["record_countdown_timer_interval_ms"].IsDefined()) {
-        dst.record_countdown_timer_interval_ms =
-            src["record_countdown_timer_interval_ms"].as<int>();
+        try {
+          dst.record_countdown_timer_interval_ms =
+              src["record_countdown_timer_interval_ms"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"record_countdown_timer_interval_ms\" is not of type "
+                       "int in the config file");
+        }
       }
       if (src["check_record_started_timer_interval_ms"].IsDefined()) {
-        dst.check_record_started_timer_interval_ms =
-            src["check_record_started_timer_interval_ms"].as<int>();
+        try {
+          dst.check_record_started_timer_interval_ms =
+              src["check_record_started_timer_interval_ms"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"check_record_started_timer_interval_ms\" is not of "
+                       "type int in the config file");
+        }
       }
 
       if (src["dock_min_width"].IsDefined()) {
-        dst.dock_min_width = src["dock_min_width"].as<int>();
+        try {
+          dst.dock_min_width = src["dock_min_width"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"dock_min_width\" is not of type int in the config file");
+        }
       }
       if (src["dock_max_width"].IsDefined()) {
-        dst.dock_max_width = src["dock_max_width"].as<int>();
+        try {
+          dst.dock_max_width = src["dock_max_width"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn(
+              "\"dock_max_width\" is not of type int in the config file");
+        }
       }
       if (src["save_dir_edit_height_factor"].IsDefined()) {
-        dst.save_dir_edit_height_factor =
-            src["save_dir_edit_height_factor"].as<int>();
+        try {
+          dst.save_dir_edit_height_factor =
+              src["save_dir_edit_height_factor"].as<int>();
+        } catch (const YAML::BadConversion &) {
+          spdlog::warn("\"save_dir_edit_height_factor\" is not of type int in "
+                       "the config file");
+        }
       }
     }
   }
@@ -147,13 +225,26 @@ OctacamConfig parse_config(const std::string &file_path) {
     }
 
     if (src["scale_x"].IsDefined()) {
-      dst.scale_x = src["scale_x"].as<double>();
+      try {
+        dst.scale_x = src["scale_x"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn("\"scale_x\" is not of type double in the config file");
+      }
     }
     if (src["scale_y"].IsDefined()) {
-      dst.scale_y = src["scale_y"].as<double>();
+      try {
+        dst.scale_y = src["scale_y"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn("\"scale_y\" is not of type double in the config file");
+      }
     }
     if (src["rotation_deg"].IsDefined()) {
-      dst.rotation_deg = src["rotation_deg"].as<double>();
+      try {
+        dst.rotation_deg = src["rotation_deg"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn(
+            "\"rotation_deg\" is not of type double in the config file");
+      }
     }
     ret.camera_configs.push_back(dst);
     n_cameras++;
