@@ -28,6 +28,7 @@
 #include <QSizePolicy>
 #include <QTimer>
 #include <QToolBar>
+#include <QTransform>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -86,6 +87,19 @@ void MainWindow::setup_ui() {
   mdi_area = new QMdiArea(this);
   setCentralWidget(mdi_area);
 
+  for (auto &camera : camera_system) {
+    auto *pixmap_item = new QGraphicsPixmapItem();
+    pixmap_items.push_back(pixmap_item);
+    pixmap_item->setTransformOriginPoint(pixmap_item->boundingRect().center());
+
+    auto *fps_label = new QLabel("0 fps");
+    fps_label->setAlignment(Qt::AlignRight);
+    fps_labels.push_back(fps_label);
+  }
+  update_frames();
+
+  int i = pixmap_items.size() - 1;
+
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto serial_number = camera.get_serial_number();
 
@@ -113,19 +127,21 @@ void MainWindow::setup_ui() {
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     tool_bar->addWidget(spacer);
 
-    auto *fps_label = new QLabel("0 fps", widget);
-    fps_label->setAlignment(Qt::AlignRight);
-    fps_labels.push_back(fps_label);
-    tool_bar->addWidget(fps_label);
+    tool_bar->addWidget(fps_labels[i]);
 
     auto *view = new GraphicsView(widget);
     view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setScene(new QGraphicsScene(view));
-    auto *pixmap_item = new QGraphicsPixmapItem();
-    pixmap_items.push_back(pixmap_item);
+
+    auto *pixmap_item = pixmap_items[i];
     view->scene()->addItem(pixmap_item);
     layout->addWidget(view);
+
+    QTransform transform;
+    transform.rotate(camera_config.rotation_deg);
+    transform.scale(camera_config.scale_x, camera_config.scale_y);
+    pixmap_item->setTransform(transform);
 
     auto sub_window = mdi_area->addSubWindow(
         widget, Qt::WindowMinMaxButtonsHint | Qt::WindowTitleHint);
@@ -134,9 +150,9 @@ void MainWindow::setup_ui() {
     sub_window->setWindowIcon(QIcon{pixmap});
     auto title = QString::fromStdString(camera_config.name);
     sub_window->setWindowTitle(title);
-  }
 
-  update_frames();
+    --i;
+  }
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
@@ -301,8 +317,6 @@ void MainWindow::rotate_displays() {
       if (reset_rotation) {
         pixmap_item->setRotation(0);
       } else {
-        pixmap_item->setTransformOriginPoint(
-            pixmap_item->boundingRect().center());
         pixmap_item->setRotation(pixmap_item->rotation() + angle_delta);
       }
       if (auto *view = qobject_cast<GraphicsView *>(
@@ -329,7 +343,6 @@ void MainWindow::rotate_displays() {
     if (reset_rotation) {
       item->setRotation(0);
     } else {
-      item->setTransformOriginPoint(item->boundingRect().center());
       item->setRotation(item->rotation() + angle_delta);
     }
     view->fitInView(item->sceneBoundingRect(), Qt::KeepAspectRatio);
