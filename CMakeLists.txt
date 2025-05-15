@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.19)
 project(octacam VERSION 0.1.0 LANGUAGES CXX)
 
-# Set CMP0144 policy to NEW to avoid warnings about <PACKAGENAME>_ROOT variables
-cmake_policy(SET CMP0144 NEW)
+set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -flto=auto -march=native")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -23,6 +23,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
+FetchContent_Declare(
+  yaml-cpp
+  GIT_REPOSITORY https://github.com/jbeder/yaml-cpp.git
+  GIT_TAG 0.8.0
+)
+FetchContent_MakeAvailable(yaml-cpp)
+
 find_package(OpenCV REQUIRED)
 find_package(pylon REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
@@ -38,6 +45,8 @@ target_sources(octacam
         src/camera.hpp
         src/main_window.cpp
         src/main_window.hpp
+        src/parser.cpp
+        src/parser.hpp
         src/timer.cpp
         src/timer.hpp
         src/video_writer.cpp
@@ -52,6 +61,7 @@ target_link_libraries(octacam
         Qt6::Gui
         Qt6::Widgets
         spdlog::spdlog
+        yaml-cpp::yaml-cpp
 )
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -43,7 +44,7 @@ class CameraSystem;
 class Camera {
 public:
   friend class CameraSystem;
-  explicit Camera(Pylon::IPylonDevice *device, const CameraSystem &system);
+  explicit Camera(Pylon::IPylonDevice *device);
   ~Camera();
 
   Camera(const Camera &) = delete;
@@ -52,12 +53,14 @@ public:
   Camera &operator=(Camera &&other) = delete;
 
   std::string get_serial_number() const;
+  void set_name(const std::string &name);
+  std::string get_name() const;
 
 private:
   void start_preview();
   void start_record(const std::string &save_path, const double &fps,
                     const std::string &fourcc);
-  void load_config(const std::string &config);
+  void load_params(const std::string &config);
   void trigger_once();
   inline void store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult);
   inline void update_resulting_fps(size_t n_frames = 6);
@@ -70,13 +73,15 @@ private:
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
   std::atomic<double> resulting_fps_{0.0};
+  const std::string serial_number_;
+  std::string name_;
   Basler_UniversalCameraParams::TriggerSourceEnums original_trigger_source_;
 };
 
 class CameraSystem {
 public:
   friend class Camera;
-  explicit CameraSystem();
+  explicit CameraSystem(const std::vector<std::string> &serial_numbers);
   ~CameraSystem();
 
   CameraSystem(const CameraSystem &) = delete;
@@ -84,7 +89,7 @@ public:
   CameraSystem(CameraSystem &&) = delete;
   CameraSystem &operator=(CameraSystem &&) = delete;
 
-  void load_config(const std::string &directory);
+  void load_config(const std::filesystem::path &directory);
   void start_preview();
   void start_record(const std::string &save_dir, const double &fps,
                     const std::string &fourcc, const std::string &extension);
