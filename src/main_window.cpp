@@ -96,6 +96,9 @@ void MainWindow::setup_ui() {
         [&serial_number](const CameraConfig &camera_config) {
           return camera_config.serial_number == serial_number;
         });
+    if (it != config.camera_configs.end()) {
+      camera_config = *it;
+    }
 
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
@@ -119,8 +122,8 @@ void MainWindow::setup_ui() {
     layout->addWidget(view);
 
     QTransform transform;
-    transform.rotate(camera_config.rotation_deg);
     transform.scale(camera_config.scale_x, camera_config.scale_y);
+    transform.rotate(camera_config.rotation_deg);
     pixmap_item->setTransform(transform);
 
     auto sub_window = mdi_area->addSubWindow(
