@@ -44,7 +44,7 @@ class CameraSystem;
 class Camera {
 public:
   friend class CameraSystem;
-  explicit Camera(Pylon::IPylonDevice *device, const CameraSystem &system);
+  explicit Camera(Pylon::IPylonDevice *device);
   ~Camera();
 
   Camera(const Camera &) = delete;
@@ -73,6 +73,7 @@ private:
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
   std::atomic<double> resulting_fps_{0.0};
+  const std::string serial_number_;
   std::string name_;
   Basler_UniversalCameraParams::TriggerSourceEnums original_trigger_source_;
 };

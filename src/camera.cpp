@@ -38,12 +38,13 @@ bool FrameForDisplay::push(const cv::Mat &frame) {
   return false;
 }
 
-Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
+Camera::Camera(Pylon::IPylonDevice *device)
     : camera_(std::make_unique<Pylon::CBaslerUniversalInstantCamera>(device)),
       video_writer_(std::make_unique<OpencvVideoWriter>(20)), started_(false),
-      stop_flag_(false) {
+      stop_flag_(false),
+      serial_number_(camera_->GetDeviceInfo().GetSerialNumber().c_str()),
+      name_(serial_number_) {
   camera_->Open();
-  name_ = get_serial_number();
 }
 
 Camera::~Camera() {
@@ -60,21 +61,17 @@ Camera::Camera(Camera &&other) noexcept
       started_(other.started_.load()), stop_flag_(other.stop_flag_.load()),
       future_(std::move(other.future_)),
       timestamps_(std::move(other.timestamps_)),
-      resulting_fps_(other.resulting_fps_.load()) {
+      resulting_fps_(other.resulting_fps_.load()),
+      serial_number_(std::move(other.serial_number_)),
+      name_(std::move(other.name_)) {
   other.stop_flag_ = true;
 }
 
 std::string Camera::get_serial_number() const {
-  if (!camera_) {
-    return "N/A";
-  }
-  return std::string(camera_->GetDeviceInfo().GetSerialNumber().c_str());
+  return serial_number_;
 }
 
 void Camera::set_name(const std::string &name) {
-  if (!camera_) {
-    return;
-  }
   name_ = name;
 }
 
@@ -271,7 +268,7 @@ CameraSystem::CameraSystem(
       spdlog::warn("Camera with serial number {} not found", serial_number);
       continue;
     }
-    cameras_.emplace_back(tl_factory.CreateDevice(devices[i]), *this);
+    cameras_.emplace_back(tl_factory.CreateDevice(devices[i]));
   }
 }
 

@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.19)
 project(octacam VERSION 0.1.0 LANGUAGES CXX)
 
-# Set CMP0144 policy to NEW to avoid warnings about <PACKAGENAME>_ROOT variables
-cmake_policy(SET CMP0144 NEW)
-
 set(CMAKE_BUILD_TYPE Release)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -flto=auto -march=native")
 
