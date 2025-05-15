@@ -32,22 +32,26 @@ class DurationInput : public QWidget {
   Q_OBJECT
 
 public:
-  explicit DurationInput(QWidget *parent = nullptr) : QWidget(parent) {
+  explicit DurationInput(double duration_default, double duration_min,
+                         double duration_max, int duration_unit_default_index,
+                         QWidget *parent = nullptr)
+      : QWidget(parent) {
     setContentsMargins(0, 0, 0, 0);
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     setLayout(layout);
 
     auto *duration_edit = new QLineEdit(this);
-    duration_edit->setValidator(new QDoubleValidator(0.01, 1000000, 2, this));
-    duration_edit->setText("10");
+    duration_edit->setValidator(
+        new QDoubleValidator(duration_min, duration_max, 2, this));
+    duration_edit->setText(QString::number(duration_default));
     layout->addWidget(duration_edit);
 
     auto *unit_combo = new QComboBox(this);
     unit_combo->addItem("s");
     unit_combo->addItem("min");
     unit_combo->addItem("h");
-    unit_combo->setCurrentIndex(1);
+    unit_combo->setCurrentIndex(duration_unit_default_index);
     layout->addWidget(unit_combo);
   }
   DurationInput(const DurationInput &) = delete;
@@ -81,14 +85,15 @@ class DirectoryEdit : public QPlainTextEdit {
   Q_OBJECT
 
 public:
-  explicit DirectoryEdit(QWidget *parent = nullptr) : QPlainTextEdit(parent) {
+  explicit DirectoryEdit(std::string save_directory_default,
+                         QWidget *parent = nullptr)
+      : QPlainTextEdit(parent) {
     auto now = std::chrono::system_clock::now();
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
     std::tm *now_tm = std::localtime(&now_time_t);
     std::array<char, 7> date_str_arr;
     std::strftime(date_str_arr.data(), date_str_arr.size(), "%y%m%d", now_tm);
-    QString defaultPath =
-        QString("~/data/TL/%1-dfd_g8m/Fly1/001-neck").arg(date_str_arr.data());
+    QString defaultPath = QString::fromStdString(save_directory_default);
     setPlainText(defaultPath);
   }
 

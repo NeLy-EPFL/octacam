@@ -30,23 +30,66 @@ OctacamConfig parse_config(const std::string &file_path) {
     } else {
       auto src = file["gui"];
       auto &dst = ret.gui_config;
-      if (src["fps"].IsDefined()) {
-        dst.fps = src["fps"].as<double>();
+
+      if (src["fps_default"].IsDefined()) {
+        dst.fps_default = src["fps_default"].as<double>();
       }
-      if (src["duration"].IsDefined()) {
-        dst.duration = src["duration"].as<double>();
+      if (src["fps_min"].IsDefined()) {
+        dst.fps_min = src["fps_min"].as<double>();
       }
-      if (src["unit"].IsDefined()) {
-        dst.unit = src["unit"].as<std::string>();
+      if (src["fps_max"].IsDefined()) {
+        dst.fps_max = src["fps_max"].as<double>();
       }
-      if (src["save_directory"].IsDefined()) {
-        dst.save_directory = src["save_directory"].as<std::string>();
+
+      if (src["duration_default"].IsDefined()) {
+        dst.duration_default = src["duration_default"].as<double>();
       }
-      if (src["trigger_source"].IsDefined()) {
-        dst.trigger_source = src["trigger_source"].as<std::string>();
+      if (src["duration_min"].IsDefined()) {
+        dst.duration_min = src["duration_min"].as<double>();
       }
-      if (src["video_writer"].IsDefined()) {
-        dst.video_writer = src["video_writer"].as<std::string>();
+      if (src["duration_max"].IsDefined()) {
+        dst.duration_max = src["duration_max"].as<double>();
+      }
+
+      if (src["duration_unit_default_index"].IsDefined()) {
+        dst.duration_unit_default_index =
+            src["duration_unit_default_index"].as<int>();
+      }
+      if (src["save_directory_default"].IsDefined()) {
+        dst.save_directory_default =
+            src["save_directory_default"].as<std::string>();
+      }
+      if (src["trigger_source_default_index"].IsDefined()) {
+        dst.trigger_source_default_index =
+            src["trigger_source_default_index"].as<int>();
+      }
+      if (src["video_writer_default_index"].IsDefined()) {
+        dst.video_writer_default_index =
+            src["video_writer_default_index"].as<int>();
+      }
+
+      if (src["display_refresh_interval_ms"].IsDefined()) {
+        dst.display_refresh_interval_ms =
+            src["display_refresh_interval_ms"].as<int>();
+      }
+      if (src["record_countdown_timer_interval_ms"].IsDefined()) {
+        dst.record_countdown_timer_interval_ms =
+            src["record_countdown_timer_interval_ms"].as<int>();
+      }
+      if (src["check_record_started_timer_interval_ms"].IsDefined()) {
+        dst.check_record_started_timer_interval_ms =
+            src["check_record_started_timer_interval_ms"].as<int>();
+      }
+
+      if (src["dock_min_width"].IsDefined()) {
+        dst.dock_min_width = src["dock_min_width"].as<int>();
+      }
+      if (src["dock_max_width"].IsDefined()) {
+        dst.dock_max_width = src["dock_max_width"].as<int>();
+      }
+      if (src["save_dir_edit_height_factor"].IsDefined()) {
+        dst.save_dir_edit_height_factor =
+            src["save_dir_edit_height_factor"].as<int>();
       }
     }
   }
@@ -128,8 +171,10 @@ OctacamConfig parse_config(const std::string &file_path) {
 label:
   char buffer[1000];
   time_t now = std::time(nullptr);
-  std::strftime(buffer, sizeof(buffer), ret.gui_config.save_directory.c_str(),
+  std::strftime(buffer, sizeof(buffer),
+                ret.gui_config.save_directory_default.c_str(),
                 std::localtime(&now));
+  ret.gui_config.save_directory_default = std::string(buffer);
 
   return ret;
 }

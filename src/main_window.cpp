@@ -37,24 +37,9 @@
 #include <stdexcept>
 
 namespace {
-constexpr int REFRESH_INTERVAL_MS = 33;
-constexpr int RECORD_COUNTDOWN_TIMER_INTERVAL_MS = 1000;
-constexpr int CHECK_RECORD_STARTED_TIMER_INTERVAL_MS = 100;
-constexpr int DOCK_MIN_WIDTH = 200;
-constexpr int DOCK_MAX_WIDTH = 300;
-constexpr int SAVE_DIR_EDIT_HEIGHT_FACTOR = 4;
-
-constexpr double FPS_MIN = 0.01;
-constexpr double FPS_DEFAULT = 100.0;
-constexpr double FPS_MAX = 1000;
-constexpr int DURATION_MIN = 0;
-constexpr int DURATION_MAX = 359999;
-
 constexpr long long MS_IN_HOUR = 3'600'000LL;
 constexpr long long MS_IN_MINUTE = 60'000LL;
 constexpr long long MS_IN_SECOND = 1000LL;
-
-constexpr std::chrono::nanoseconds NS_IN_SECOND(1'000'000'000);
 } // namespace
 
 GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
@@ -80,7 +65,9 @@ inline std::chrono::nanoseconds fps_to_ns(double fps) {
 }
 
 void MainWindow::setup_ui() {
-  camera_system.set_software_trigger_frequency(FPS_DEFAULT);
+  auto &cfg = config.gui_config;
+
+  camera_system.set_software_trigger_frequency(cfg.fps_default);
   camera_system.start_software_trigger();
   setWindowTitle("octacam");
 
@@ -149,25 +136,25 @@ void MainWindow::setup_ui() {
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
-  display_timer->setInterval(REFRESH_INTERVAL_MS);
+  display_timer->setInterval(cfg.display_refresh_interval_ms);
   connect(display_timer, &QTimer::timeout, this, &MainWindow::update_frames);
   display_timer->start();
 
   record_countdown_timer = new QTimer(this);
   connect(record_countdown_timer, &QTimer::timeout, this,
           &MainWindow::update_record_countdown);
-  record_countdown_timer->setInterval(RECORD_COUNTDOWN_TIMER_INTERVAL_MS);
+  record_countdown_timer->setInterval(cfg.record_countdown_timer_interval_ms);
 
   check_record_started_timer = new QTimer(this);
   connect(check_record_started_timer, &QTimer::timeout, this,
           &MainWindow::check_record_started);
   check_record_started_timer->setInterval(
-      CHECK_RECORD_STARTED_TIMER_INTERVAL_MS);
+      cfg.check_record_started_timer_interval_ms);
 
   auto *dock = new QDockWidget(this);
   dock->setAllowedAreas(Qt::RightDockWidgetArea);
-  dock->setMinimumWidth(DOCK_MIN_WIDTH);
-  dock->setMaximumWidth(DOCK_MAX_WIDTH);
+  dock->setMinimumWidth(cfg.dock_min_width);
+  dock->setMaximumWidth(cfg.dock_max_width);
   dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
@@ -179,13 +166,15 @@ void MainWindow::setup_ui() {
   int row = 0;
 
   dock_layout->addWidget(new QLabel("Duration"), row, 0);
-  duration_input = new DurationInput(dock_content);
+  duration_input = new DurationInput(
+      cfg.duration_default, cfg.duration_min, cfg.duration_max,
+      cfg.duration_unit_default_index, dock_content);
   dock_layout->addWidget(duration_input, row++, 1);
 
   dock_layout->addWidget(new QLabel("FPS:"), row, 0);
   fps_edit = new QDoubleSpinBox(dock_content);
-  fps_edit->setRange(FPS_MIN, FPS_MAX);
-  fps_edit->setValue(FPS_DEFAULT);
+  fps_edit->setRange(cfg.fps_min, cfg.fps_max);
+  fps_edit->setValue(cfg.fps_default);
   fps_edit->setDecimals(2);
   fps_edit->setSingleStep(1.0);
   connect(fps_edit, &QDoubleSpinBox::valueChanged, this,
@@ -193,21 +182,24 @@ void MainWindow::setup_ui() {
   dock_layout->addWidget(fps_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
-  save_dir_edit = new DirectoryEdit(dock_content);
+  save_dir_edit = new DirectoryEdit(cfg.save_directory_default, dock_content);
   save_dir_edit->setFixedHeight(fontMetrics().height() *
-                                SAVE_DIR_EDIT_HEIGHT_FACTOR);
+                                cfg.save_dir_edit_height_factor);
   dock_layout->addWidget(save_dir_edit, row++, 1);
 
   dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
   trigger_source_combo = new QComboBox(dock_content);
   trigger_source_combo->addItem("software");
   trigger_source_combo->addItem("external");
+  trigger_source_combo->setCurrentIndex(cfg.trigger_source_default_index);
+
   dock_layout->addWidget(trigger_source_combo, row++, 1);
 
   dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
   video_writer_combo = new QComboBox(dock_content);
   video_writer_combo->addItem("opencv MJPG avi");
   video_writer_combo->addItem("opencv avc1 mp4");
+  video_writer_combo->setCurrentIndex(cfg.video_writer_default_index);
   dock_layout->addWidget(video_writer_combo, row++, 1);
 
   record_button = new QPushButton("Start recording", dock);
