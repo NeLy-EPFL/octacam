@@ -65,6 +65,18 @@ int main(int argc, char **argv) {
 
   auto n_cameras = camera_system.get_camera_count();
 
+  for (auto &camera : camera_system) {
+    auto serial_number = camera.get_serial_number();
+    auto it = std::ranges::find_if(
+        config.camera_configs,
+        [&serial_number](const CameraConfig &camera_config) {
+          return camera_config.serial_number == serial_number;
+        });
+    if (it != config.camera_configs.end()) {
+      camera.set_name(it->name);
+    }
+  }
+
   if (n_cameras <= 0) {
     spdlog::warn("No cameras opened. Exiting.");
     return 1;

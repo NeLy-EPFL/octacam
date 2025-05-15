@@ -110,13 +110,6 @@ void MainWindow::setup_ui() {
           return camera_config.serial_number == serial_number;
         });
 
-    if (it != config.camera_configs.end()) {
-      camera_config = *it;
-    } else {
-      camera_config.serial_number = serial_number;
-      camera_config.name = serial_number;
-    }
-
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
 
@@ -148,7 +141,7 @@ void MainWindow::setup_ui() {
     QPixmap pixmap{1, 1};
     pixmap.fill(Qt::transparent);
     sub_window->setWindowIcon(QIcon{pixmap});
-    auto title = QString::fromStdString(camera_config.name);
+    auto title = QString::fromStdString(camera.get_name());
     sub_window->setWindowTitle(title);
 
     --i;

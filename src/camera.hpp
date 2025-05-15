@@ -53,6 +53,8 @@ public:
   Camera &operator=(Camera &&other) = delete;
 
   std::string get_serial_number() const;
+  void set_name(const std::string &name);
+  std::string get_name() const;
 
 private:
   void start_preview();
@@ -71,6 +73,7 @@ private:
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
   std::atomic<double> resulting_fps_{0.0};
+  std::string name_;
   Basler_UniversalCameraParams::TriggerSourceEnums original_trigger_source_;
 };
 

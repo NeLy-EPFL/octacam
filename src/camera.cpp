@@ -43,6 +43,7 @@ Camera::Camera(Pylon::IPylonDevice *device, const CameraSystem &system)
       video_writer_(std::make_unique<OpencvVideoWriter>(20)), started_(false),
       stop_flag_(false) {
   camera_->Open();
+  name_ = get_serial_number();
 }
 
 Camera::~Camera() {
@@ -69,6 +70,15 @@ std::string Camera::get_serial_number() const {
   }
   return std::string(camera_->GetDeviceInfo().GetSerialNumber().c_str());
 }
+
+void Camera::set_name(const std::string &name) {
+  if (!camera_) {
+    return;
+  }
+  name_ = name;
+}
+
+std::string Camera::get_name() const { return name_; }
 
 inline void Camera::update_resulting_fps(size_t window_size) {
   if (timestamps_.size() < 2 || window_size < 1) {
@@ -302,7 +312,7 @@ void CameraSystem::start_record(const std::string &save_dir_str,
   for (auto &camera : cameras_) {
     std::filesystem::path save_path_obj =
         std::filesystem::path(save_dir_str) /
-        (camera.get_serial_number() + "." + extension_str);
+        (camera.get_name() + "." + extension_str);
     camera.start_record(save_path_obj.string(), fps_val, fourcc_str);
   }
 }
