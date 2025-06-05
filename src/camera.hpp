@@ -72,6 +72,7 @@ private:
   std::atomic<bool> stop_flag_{false};
   std::future<void> future_;
   std::vector<uint64_t> timestamps_;
+  std::vector<bool> dropped_;
   std::atomic<double> resulting_fps_{0.0};
   const std::string serial_number_;
   std::string name_;

@@ -18,10 +18,10 @@ struct GuiConfig {
   double fps_default = 100.0;
   double fps_min = 0.01;
   double fps_max = 1000.0;
-  double duration_default = 0.0;
+  double duration_default = 5.0;
   double duration_min = 0.01;
   double duration_max = 1000000.0;
-  int duration_unit_default_index = 1;
+  int duration_unit_default_index = 0;
   std::string save_directory_default = "./";
   int trigger_source_default_index = 0;
   int video_writer_default_index = 0;
