@@ -61,12 +61,16 @@ void OpencvVideoWriter::close() {
 
 void OpencvVideoWriter::writerThreadFunc() {
   while (running_) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condVar_.wait(lock, [this]() { return !frameQueue_.empty() || !running_; });
-
-    while (!frameQueue_.empty()) {
-      writer_ << frameQueue_.front();
+    cv::Mat frame;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      condVar_.wait(lock, [this]() { return !frameQueue_.empty() || !running_; });
+      frame = std::move(frameQueue_.front());
       frameQueue_.pop();
     }
+
+    writer_ << frame;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    frameQueue_.pop();
   }
 }
