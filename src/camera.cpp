@@ -67,13 +67,9 @@ Camera::Camera(Camera &&other) noexcept
   other.stop_flag_ = true;
 }
 
-std::string Camera::get_serial_number() const {
-  return serial_number_;
-}
+std::string Camera::get_serial_number() const { return serial_number_; }
 
-void Camera::set_name(const std::string &name) {
-  name_ = name;
-}
+void Camera::set_name(const std::string &name) { name_ = name; }
 
 std::string Camera::get_name() const { return name_; }
 
