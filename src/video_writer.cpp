@@ -22,7 +22,7 @@ bool OpencvVideoWriter::write(const cv::Mat &frame) {
   if (frameQueue_.size() >= maxQueueSize_) {
     return false; // Drop frame
   }
-  frameQueue_.push(frame.clone());
+  frameQueue_.push(std::move(frame));
   condVar_.notify_one();
   return true;
 }
@@ -44,16 +44,24 @@ void OpencvVideoWriter::close() {
 void OpencvVideoWriter::writerThreadFunc() {
   while (running_) {
     cv::Mat frame;
+
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      condVar_.wait(lock, [this]() { return !frameQueue_.empty() || !running_; });
+      condVar_.wait(lock,
+                    [this]() { return !frameQueue_.empty() || !running_; });
       if (!running_) {
         break;
       }
-      frame = std::move(frameQueue_.front());
-      frameQueue_.pop();
+
+      if (!frameQueue_.empty()) {
+        frame = std::move(frameQueue_.front());
+        frameQueue_.pop();
+      }
     }
-    writer_ << frame;
+
+    if (!frame.empty()) {
+      writer_ << frame;
+    }
   }
 
   std::lock_guard<std::mutex> lock(mutex_);
