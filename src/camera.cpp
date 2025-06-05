@@ -172,7 +172,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     return;
   }
 
-  future_ = std::async(std::launch::async, [this]() {
+  future_ = std::async(std::launch::async, [this, save_path]() {
     bool local_started_flag = false;
     int64_t frame_count = 0;
     while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
@@ -215,6 +215,18 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     size_t dropped_count = std::count(dropped_.begin(), dropped_.end(), true);
     spdlog::info("Camera {}: {} frames recorded, {} frames dropped",
                  get_serial_number(), frame_count, dropped_count);
+
+    std::filesystem::path csv_path(save_path);
+    csv_path.replace_extension(".csv");
+
+    std::ofstream csv_file(csv_path);
+    if (csv_file.is_open()) {
+      csv_file << "frame_index,timestamp,dropped\n";
+      for (size_t i = 0; i < timestamps_.size(); ++i) {
+        csv_file << i << "," << timestamps_[i] << "," << dropped_[i] << "\n";
+      }
+      csv_file.close();
+    }
   });
 }
 
