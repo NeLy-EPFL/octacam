@@ -69,6 +69,5 @@ void OpencvVideoWriter::writerThreadFunc() {
       frameQueue_.pop();
     }
     writer_ << frame;
-    frameQueue_.pop();
   }
 }
