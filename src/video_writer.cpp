@@ -68,9 +68,7 @@ void OpencvVideoWriter::writerThreadFunc() {
       frame = std::move(frameQueue_.front());
       frameQueue_.pop();
     }
-
     writer_ << frame;
-    std::this_thread::sleep_for(std::chrono::seconds(1));
     frameQueue_.pop();
   }
 }
