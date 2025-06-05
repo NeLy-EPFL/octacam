@@ -42,6 +42,5 @@ private:
   std::condition_variable condVar_;
   std::thread writerThread_;
   std::atomic<bool> running_;
-  std::atomic<bool> isOpen_;
   size_t maxQueueSize_;
 };
