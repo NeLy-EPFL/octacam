@@ -1,6 +1,10 @@
 # octacam
 octacam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple Basler cameras. It is designed to be fast, easy to use, and maintainable.
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/a7b6ac6e-5ae3-45fa-ae5a-2e3f5281e5c3" width="400"/>
+</p>
+
 ## Features
 - Support >7 cameras (8 is not the limit despite the name)
 - See live updates of all cameras while recording. 
