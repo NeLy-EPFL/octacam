@@ -42,6 +42,10 @@ After building the project, you can run the executable with the following comman
 ./octacam <config_dir>
 ```
 where `<config_dir>` is the path to the configuration directory containing the `.pfs` Basler camera configuraion files.
+If you encounter errors related to too many opened file descriptors, increase the limit before running octacam:
+```bash
+ulimit -n 8192 && ./octacam <config_dir>
+```
 
 For a complete list of options, run:
 ```bash
