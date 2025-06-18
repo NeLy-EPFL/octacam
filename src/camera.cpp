@@ -67,13 +67,9 @@ Camera::Camera(Camera &&other) noexcept
   other.stop_flag_ = true;
 }
 
-std::string Camera::get_serial_number() const {
-  return serial_number_;
-}
+std::string Camera::get_serial_number() const { return serial_number_; }
 
-void Camera::set_name(const std::string &name) {
-  name_ = name;
-}
+void Camera::set_name(const std::string &name) { name_ = name; }
 
 std::string Camera::get_name() const { return name_; }
 
@@ -152,6 +148,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     return;
   }
   timestamps_.clear();
+  dropped_.clear();
   auto fourcc_int = cv::VideoWriter::fourcc(fourcc_str[0], fourcc_str[1],
                                             fourcc_str[2], fourcc_str[3]);
   auto frame_size =
@@ -175,9 +172,10 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     return;
   }
 
-  future_ = std::async(std::launch::async, [this]() {
+  future_ = std::async(std::launch::async, [this, save_path]() {
     bool local_started_flag = false;
-    while (camera_ && camera_->IsGrabbing() && !stop_flag_) {
+    int64_t frame_count = 0;
+    while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
       Pylon::CGrabResultPtr ptrGrabResult;
       camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
                               Pylon::TimeoutHandling_Return);
@@ -186,10 +184,16 @@ void Camera::start_record(const std::string &save_path, const double &fps,
         void *pImageBuffer = ptrGrabResult->GetBuffer();
         cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(),
                       CV_8UC1, pImageBuffer);
+
         bool written = video_writer_->write(frame);
         if (!written) {
-          spdlog::warn("Frame dropped for camera {}", get_serial_number());
+          spdlog::warn("Frame {} dropped for camera {}", frame_count,
+                       get_serial_number());
+          dropped_.push_back(true);
+        } else {
+          dropped_.push_back(false);
         }
+
         auto stored = frame_for_display_.push(frame);
         if (stored) {
           update_resulting_fps();
@@ -199,6 +203,7 @@ void Camera::start_record(const std::string &save_path, const double &fps,
           local_started_flag = true;
           started_ = true;
         }
+        ++frame_count;
       }
     }
     if (camera_) {
@@ -206,6 +211,21 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     }
     if (video_writer_) {
       video_writer_->close();
+    }
+    size_t dropped_count = std::count(dropped_.begin(), dropped_.end(), true);
+    spdlog::info("Camera {}: {} frames recorded, {} frames dropped",
+                 get_serial_number(), frame_count, dropped_count);
+
+    std::filesystem::path csv_path(save_path);
+    csv_path.replace_extension(".csv");
+
+    std::ofstream csv_file(csv_path);
+    if (csv_file.is_open()) {
+      csv_file << "frame_index,timestamp,dropped\n";
+      for (size_t i = 0; i < timestamps_.size(); ++i) {
+        csv_file << i << "," << timestamps_[i] << "," << dropped_[i] << "\n";
+      }
+      csv_file.close();
     }
   });
 }
