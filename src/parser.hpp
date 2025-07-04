@@ -12,10 +12,10 @@ struct CameraConfig {
   double scale_x = 1;
   double scale_y = 1;
   double rotation_deg = 0;
-  int window_x = -1;
-  int window_y = -1;
-  int window_width = -1;
-  int window_height = -1;
+  double window_x = -1;
+  double window_y = -1;
+  double window_width = -1;
+  double window_height = -1;
 };
 
 struct GuiConfig {
