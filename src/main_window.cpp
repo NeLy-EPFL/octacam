@@ -87,8 +87,6 @@ void MainWindow::setup_ui() {
 
   int i = pixmap_items.size() - 1;
 
-  bool tile = true;
-
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto serial_number = camera.get_serial_number();
 
@@ -351,7 +349,7 @@ void MainWindow::rotate_displays() {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
-  if (mdi_area) {
+  if (!tile && mdi_area) {
     int i = 0;
     for (auto &camera : std::ranges::reverse_view(camera_system)) {
       auto serial_number = camera.get_serial_number();

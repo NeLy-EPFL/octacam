@@ -203,6 +203,7 @@ private:
   void start_record();
   void stop_record();
 
+  bool tile = true;
   CameraSystem &camera_system;
   OctacamConfig config;
   QVector<QGraphicsPixmapItem *> pixmap_items;
