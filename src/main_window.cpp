@@ -134,7 +134,17 @@ void MainWindow::setup_ui() {
     auto title = QString::fromStdString(camera.get_name());
     sub_window->setWindowTitle(title);
 
+    if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
+      tile = false;
+    }
+    if (camera_config.window_width > 0 && camera_config.window_height > 0) {
+      tile = false;
+    }
     --i;
+  }
+
+  if (tile) {
+    mdi_area->tileSubWindows();
   }
 
   auto display_timer = new QTimer(this);
@@ -339,8 +349,35 @@ void MainWindow::rotate_displays() {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
-  if (mdi_area) {
-    mdi_area->tileSubWindows();
+  if (!tile && mdi_area) {
+    int i = 0;
+    for (auto &camera : std::ranges::reverse_view(camera_system)) {
+      auto serial_number = camera.get_serial_number();
+      CameraConfig camera_config;
+      auto it = std::ranges::find_if(
+          config.camera_configs,
+          [&serial_number](const CameraConfig &camera_config) {
+            return camera_config.serial_number == serial_number;
+          });
+      if (it != config.camera_configs.end()) {
+        camera_config = *it;
+      }
+
+      auto *sub_window = mdi_area->subWindowList().at(i++);
+      if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
+        sub_window->move(static_cast<int>(std::round(camera_config.window_x *
+                                                     mdi_area->width())),
+                         static_cast<int>(std::round(camera_config.window_y *
+                                                     mdi_area->height())));
+      }
+      if (camera_config.window_width > 0 && camera_config.window_height > 0) {
+        sub_window->resize(
+            static_cast<int>(
+                std::round(camera_config.window_width * mdi_area->width())),
+            static_cast<int>(
+                std::round(camera_config.window_height * mdi_area->height())));
+      }
+    }
   }
 }
 

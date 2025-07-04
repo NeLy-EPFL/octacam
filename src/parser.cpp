@@ -246,6 +246,37 @@ OctacamConfig parse_config(const std::string &file_path) {
             "\"rotation_deg\" is not of type double in the config file");
       }
     }
+    if (src["window_x"].IsDefined()) {
+      try {
+        dst.window_x = src["window_x"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn("\"window_x\" is not of type double in the config file");
+      }
+    }
+    if (src["window_y"].IsDefined()) {
+      try {
+        dst.window_y = src["window_y"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn("\"window_y\" is not of type double in the config file");
+      }
+    }
+    if (src["window_width"].IsDefined()) {
+      try {
+        dst.window_width = src["window_width"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn(
+            "\"window_width\" is not of type double in the config file");
+      }
+    }
+    if (src["window_height"].IsDefined()) {
+      try {
+        dst.window_height = src["window_height"].as<double>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn(
+            "\"window_height\" is not of type double in the config file");
+      }
+    }
+
     ret.camera_configs.push_back(dst);
     n_cameras++;
   }
