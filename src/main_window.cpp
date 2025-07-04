@@ -87,6 +87,9 @@ void MainWindow::setup_ui() {
 
   int i = pixmap_items.size() - 1;
 
+  // mdi_area->tileSubWindows();
+  bool tile = true;
+
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto serial_number = camera.get_serial_number();
 
@@ -133,8 +136,19 @@ void MainWindow::setup_ui() {
     sub_window->setWindowIcon(QIcon{pixmap});
     auto title = QString::fromStdString(camera.get_name());
     sub_window->setWindowTitle(title);
-
+    if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
+      sub_window->move(camera_config.window_x, camera_config.window_y);
+      tile = false;
+    }
+    if (camera_config.window_width > 0 && camera_config.window_height > 0) {
+      sub_window->resize(camera_config.window_width, camera_config.window_height);
+      tile = false;
+    }
     --i;
+  }
+
+  if (tile) {
+    mdi_area->tileSubWindows();
   }
 
   auto display_timer = new QTimer(this);
@@ -339,9 +353,9 @@ void MainWindow::rotate_displays() {
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
-  if (mdi_area) {
-    mdi_area->tileSubWindows();
-  }
+  // if (mdi_area) {
+  //   mdi_area->tileSubWindows();
+  // }
 }
 
 void MainWindow::update_frames() {
