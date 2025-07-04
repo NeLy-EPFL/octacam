@@ -264,14 +264,16 @@ OctacamConfig parse_config(const std::string &file_path) {
       try {
         dst.window_width = src["window_width"].as<double>();
       } catch (const YAML::BadConversion &) {
-        spdlog::warn("\"window_width\" is not of type double in the config file");
+        spdlog::warn(
+            "\"window_width\" is not of type double in the config file");
       }
     }
     if (src["window_height"].IsDefined()) {
       try {
         dst.window_height = src["window_height"].as<double>();
       } catch (const YAML::BadConversion &) {
-        spdlog::warn("\"window_height\" is not of type double in the config file");
+        spdlog::warn(
+            "\"window_height\" is not of type double in the config file");
       }
     }
 

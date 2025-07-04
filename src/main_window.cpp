@@ -365,16 +365,17 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
 
       auto *sub_window = mdi_area->subWindowList().at(i++);
       if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
-        sub_window->move(
-          static_cast<int>(std::round(camera_config.window_x * mdi_area->width())),
-          static_cast<int>(std::round(camera_config.window_y * mdi_area->height()))
-        );
+        sub_window->move(static_cast<int>(std::round(camera_config.window_x *
+                                                     mdi_area->width())),
+                         static_cast<int>(std::round(camera_config.window_y *
+                                                     mdi_area->height())));
       }
       if (camera_config.window_width > 0 && camera_config.window_height > 0) {
         sub_window->resize(
-          static_cast<int>(std::round(camera_config.window_width * mdi_area->width())),
-          static_cast<int>(std::round(camera_config.window_height * mdi_area->height()))
-        );
+            static_cast<int>(
+                std::round(camera_config.window_width * mdi_area->width())),
+            static_cast<int>(
+                std::round(camera_config.window_height * mdi_area->height())));
       }
     }
   }
