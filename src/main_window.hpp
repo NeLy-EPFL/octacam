@@ -27,6 +27,7 @@
 
 #include "camera.hpp"
 #include "parser.hpp"
+#include "serial.hpp"
 
 class DurationInput : public QWidget {
   Q_OBJECT
@@ -180,7 +181,7 @@ class MainWindow : public QMainWindow {
 
 public:
   explicit MainWindow(CameraSystem &camera_system, OctacamConfig config,
-                      QWidget *parent = nullptr);
+                      SerialPort &serial_port, QWidget *parent = nullptr);
   ~MainWindow() override;
   MainWindow(const MainWindow &) = delete;
   MainWindow &operator=(const MainWindow &) = delete;
@@ -197,6 +198,10 @@ private slots:
   void update_record_countdown();
   void on_record_button_clicked();
   void on_fps_value_changed(double value);
+  void on_step_minus_button_clicked();
+  void on_step_plus_button_clicked();
+  void on_step_degrees_minus_button_clicked();
+  void on_step_degrees_plus_button_clicked();
 
 private:
   void setup_ui();
@@ -206,6 +211,7 @@ private:
   bool tile = true;
   CameraSystem &camera_system;
   OctacamConfig config;
+  SerialPort &serial_port;
   QVector<QGraphicsPixmapItem *> pixmap_items;
   QVector<QWidget *> input_widgets;
   QMdiArea *mdi_area;
@@ -222,4 +228,5 @@ private:
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
+  QDoubleSpinBox *step_degrees_edit;
 };

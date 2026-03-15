@@ -36,6 +36,9 @@
 #include <ranges>
 #include <stdexcept>
 
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+
 namespace {
 constexpr long long MS_IN_HOUR = 3'600'000LL;
 constexpr long long MS_IN_MINUTE = 60'000LL;
@@ -52,8 +55,9 @@ void GraphicsView::resizeEvent(QResizeEvent *event) {
 }
 
 MainWindow::MainWindow(CameraSystem &camera_system, OctacamConfig config,
-                       QWidget *parent)
-    : QMainWindow(parent), camera_system(camera_system), config(config) {
+                       SerialPort &serial_port, QWidget *parent)
+    : QMainWindow(parent), camera_system(camera_system), config(config),
+      serial_port(serial_port) {
   setup_ui();
 }
 
@@ -224,6 +228,47 @@ void MainWindow::setup_ui() {
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
   dock_layout->addWidget(status_label, row++, 0, 1, 2);
+
+  auto step_widget = new QWidget(dock);
+  step_widget->setContentsMargins(0, 0, 0, 0);
+  step_widget->setLayout(new QHBoxLayout(step_widget));
+  step_widget->layout()->setContentsMargins(0, 0, 0, 0);
+
+  auto step_minus_button = new QPushButton("-", dock);
+  auto step_plus_button = new QPushButton("+", dock);
+
+  connect(step_minus_button, &QPushButton::clicked, this,
+          &MainWindow::on_step_minus_button_clicked);
+
+  connect(step_plus_button, &QPushButton::clicked, this,
+          &MainWindow::on_step_plus_button_clicked);
+
+  step_widget->layout()->addWidget(step_minus_button);
+  step_widget->layout()->addWidget(step_plus_button);
+
+  dock_layout->addWidget(new QLabel("Step:"), row, 0);
+  dock_layout->addWidget(step_widget, row++, 1);
+
+  auto step_degrees_widget = new QWidget(dock);
+  step_degrees_widget->setContentsMargins(0, 0, 0, 0);
+  step_degrees_widget->setLayout(new QHBoxLayout(step_degrees_widget));
+  step_degrees_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  step_degrees_edit = new QDoubleSpinBox(step_degrees_widget);
+
+  auto step_degrees_minus_button = new QPushButton("-", step_degrees_widget);
+  auto step_degrees_plus_button = new QPushButton("+", step_degrees_widget);
+  step_degrees_widget->layout()->addWidget(step_degrees_edit);
+  step_degrees_widget->layout()->addWidget(step_degrees_minus_button);
+  step_degrees_widget->layout()->addWidget(step_degrees_plus_button);
+
+  connect(step_degrees_minus_button, &QPushButton::clicked, this,
+          &MainWindow::on_step_degrees_minus_button_clicked);
+
+  connect(step_degrees_plus_button, &QPushButton::clicked, this,
+          &MainWindow::on_step_degrees_plus_button_clicked);
+
+  dock_layout->addWidget(new QLabel("Step degrees:"), row, 0);
+  dock_layout->addWidget(step_degrees_widget, row++, 1);
 
   dock_layout->setRowStretch(row++, 1);
 
@@ -443,6 +488,33 @@ void MainWindow::on_record_button_clicked() {
       stop_record();
     }
   }
+}
+
+void MainWindow::on_step_minus_button_clicked() {
+  serial_port.write("-360\n");
+  spdlog::info("Step minus button clicked");
+}
+
+void MainWindow::on_step_plus_button_clicked() {
+  serial_port.write("360\n");
+  spdlog::info("Step plus button clicked");
+}
+
+void MainWindow::on_step_degrees_minus_button_clicked() {
+  double step_degrees = step_degrees_edit->value();
+  step_degrees_edit->setValue(step_degrees);
+  serial_port.write(QString("-")
+                        .append(QString::number(step_degrees))
+                        .append("\n")
+                        .toStdString());
+  spdlog::info("Step degrees minus button clicked, new value: {}",
+               step_degrees);
+}
+
+void MainWindow::on_step_degrees_plus_button_clicked() {
+  double step_degrees = step_degrees_edit->value();
+  serial_port.write((QString::number(step_degrees)).append("\n").toStdString());
+  spdlog::info("Step degrees plus button clicked, new value: {}", step_degrees);
 }
 
 void MainWindow::on_fps_value_changed(double value) {

@@ -12,6 +12,7 @@
 #include "camera.hpp"
 #include "main_window.hpp"
 #include "parser.hpp"
+#include "serial.hpp"
 
 int main(int argc, char **argv) {
   auto app = CLI::App{"octacam"};
@@ -40,6 +41,8 @@ int main(int argc, char **argv) {
     std::cerr << "Log initialization failed: " << ex.what() << std::endl;
     return 1;
   }
+
+  auto serial_port = SerialPort("/dev/ttyACM0", 9600);
 
   auto config_dir = std::filesystem::canonical(config_dir_str);
   spdlog::info("Using config directory: {}", config_dir.string());
@@ -88,7 +91,7 @@ int main(int argc, char **argv) {
   camera_system.start_preview();
 
   QApplication qapp(argc, argv);
-  MainWindow main_window(camera_system, config);
+  MainWindow main_window(camera_system, config, serial_port);
   main_window.setWindowTitle("octacam");
   main_window.showNormal();
 

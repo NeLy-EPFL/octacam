@@ -33,6 +33,7 @@ FetchContent_MakeAvailable(yaml-cpp)
 find_package(OpenCV REQUIRED)
 find_package(pylon REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Boost REQUIRED)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
@@ -47,6 +48,8 @@ target_sources(octacam
         src/main_window.hpp
         src/parser.cpp
         src/parser.hpp
+        src/serial.cpp
+        src/serial.hpp
         src/timer.cpp
         src/timer.hpp
         src/video_writer.cpp
@@ -63,6 +66,14 @@ target_link_libraries(octacam
         spdlog::spdlog
         yaml-cpp::yaml-cpp
 )
+
+if(TARGET Boost::headers)
+    target_link_libraries(octacam PRIVATE Boost::headers)
+elseif(TARGET Boost::boost)
+    target_link_libraries(octacam PRIVATE Boost::boost)
+endif()
+
+target_compile_definitions(octacam PRIVATE BOOST_ERROR_CODE_HEADER_ONLY)
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
