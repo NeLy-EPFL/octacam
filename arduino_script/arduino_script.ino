@@ -114,7 +114,7 @@ void moveDegrees(float degrees) {
 
   for (unsigned long i = 0; i < steps; i++) {
     oneHalfStep(dir);
-    delayMicroseconds(1000);
+    delayMicroseconds(800);
   }
 
   releaseMotor();

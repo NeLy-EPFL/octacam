@@ -151,6 +151,16 @@ void MainWindow::setup_ui() {
     mdi_area->tileSubWindows();
   }
 
+  step_plus_timer = new QTimer(this);
+  step_plus_timer->setTimerType(Qt::CoarseTimer);
+  step_plus_timer->setInterval(20);
+  connect(step_plus_timer, &QTimer::timeout, this, &MainWindow::step_plus);
+
+  step_minus_timer = new QTimer(this);
+  step_minus_timer->setTimerType(Qt::CoarseTimer);
+  step_minus_timer->setInterval(20);
+  connect(step_minus_timer, &QTimer::timeout, this, &MainWindow::step_minus);
+
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
   display_timer->setInterval(cfg.display_refresh_interval_ms);
@@ -236,17 +246,24 @@ void MainWindow::setup_ui() {
 
   auto step_minus_button = new QPushButton("-", dock);
   auto step_plus_button = new QPushButton("+", dock);
+  step_interval_edit = new QSpinBox(step_widget);
+  step_interval_edit->setRange(1, 1000);
+  step_interval_edit->setValue(10);
 
-  connect(step_minus_button, &QPushButton::clicked, this,
-          &MainWindow::on_step_minus_button_clicked);
+  connect(step_minus_button, &QPushButton::pressed, this,
+          &MainWindow::on_step_minus_button_pressed);
+  connect(step_minus_button, &QPushButton::released, this,
+          &MainWindow::on_step_minus_button_released);
+  connect(step_plus_button, &QPushButton::pressed, this,
+          &MainWindow::on_step_plus_button_pressed);
+  connect(step_plus_button, &QPushButton::released, this,
+          &MainWindow::on_step_plus_button_released);
 
-  connect(step_plus_button, &QPushButton::clicked, this,
-          &MainWindow::on_step_plus_button_clicked);
-
+  step_widget->layout()->addWidget(step_interval_edit);
   step_widget->layout()->addWidget(step_minus_button);
   step_widget->layout()->addWidget(step_plus_button);
 
-  dock_layout->addWidget(new QLabel("Step:"), row, 0);
+  dock_layout->addWidget(new QLabel("Step at interval (ms):"), row, 0);
   dock_layout->addWidget(step_widget, row++, 1);
 
   auto step_degrees_widget = new QWidget(dock);
@@ -254,6 +271,7 @@ void MainWindow::setup_ui() {
   step_degrees_widget->setLayout(new QHBoxLayout(step_degrees_widget));
   step_degrees_widget->layout()->setContentsMargins(0, 0, 0, 0);
   step_degrees_edit = new QDoubleSpinBox(step_degrees_widget);
+  step_degrees_edit->setValue(30);
 
   auto step_degrees_minus_button = new QPushButton("-", step_degrees_widget);
   auto step_degrees_plus_button = new QPushButton("+", step_degrees_widget);
@@ -267,7 +285,7 @@ void MainWindow::setup_ui() {
   connect(step_degrees_plus_button, &QPushButton::clicked, this,
           &MainWindow::on_step_degrees_plus_button_clicked);
 
-  dock_layout->addWidget(new QLabel("Step degrees:"), row, 0);
+  dock_layout->addWidget(new QLabel("Step by degrees:"), row, 0);
   dock_layout->addWidget(step_degrees_widget, row++, 1);
 
   dock_layout->setRowStretch(row++, 1);
@@ -490,31 +508,33 @@ void MainWindow::on_record_button_clicked() {
   }
 }
 
-void MainWindow::on_step_minus_button_clicked() {
-  serial_port.write("-360\n");
-  spdlog::info("Step minus button clicked");
+void MainWindow::on_step_minus_button_pressed() {
+  step_minus_timer->setInterval(step_interval_edit->value());
+  step_minus_timer->start();
 }
 
-void MainWindow::on_step_plus_button_clicked() {
-  serial_port.write("360\n");
-  spdlog::info("Step plus button clicked");
+void MainWindow::on_step_minus_button_released() { step_minus_timer->stop(); }
+
+void MainWindow::on_step_plus_button_pressed() {
+  step_plus_timer->setInterval(step_interval_edit->value());
+  step_plus_timer->start();
 }
+
+void MainWindow::on_step_plus_button_released() { step_plus_timer->stop(); }
+
+void MainWindow::step_plus() { serial_port.write("1\n"); }
+
+void MainWindow::step_minus() { serial_port.write("-1\n"); }
 
 void MainWindow::on_step_degrees_minus_button_clicked() {
-  double step_degrees = step_degrees_edit->value();
+  double step_degrees = -step_degrees_edit->value();
   step_degrees_edit->setValue(step_degrees);
-  serial_port.write(QString("-")
-                        .append(QString::number(step_degrees))
-                        .append("\n")
-                        .toStdString());
-  spdlog::info("Step degrees minus button clicked, new value: {}",
-               step_degrees);
+  serial_port.write(QString::number(step_degrees).append("\n").toStdString());
 }
 
 void MainWindow::on_step_degrees_plus_button_clicked() {
   double step_degrees = step_degrees_edit->value();
   serial_port.write((QString::number(step_degrees)).append("\n").toStdString());
-  spdlog::info("Step degrees plus button clicked, new value: {}", step_degrees);
 }
 
 void MainWindow::on_fps_value_changed(double value) {

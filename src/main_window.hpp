@@ -198,8 +198,12 @@ private slots:
   void update_record_countdown();
   void on_record_button_clicked();
   void on_fps_value_changed(double value);
-  void on_step_minus_button_clicked();
-  void on_step_plus_button_clicked();
+  void on_step_minus_button_pressed();
+  void on_step_plus_button_pressed();
+  void on_step_minus_button_released();
+  void on_step_plus_button_released();
+  void step_plus();
+  void step_minus();
   void on_step_degrees_minus_button_clicked();
   void on_step_degrees_plus_button_clicked();
 
@@ -224,9 +228,12 @@ private:
   QLabel *status_label;
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
+  QSpinBox *step_interval_edit;
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
   QDoubleSpinBox *step_degrees_edit;
+  QTimer *step_plus_timer;
+  QTimer *step_minus_timer;
 };

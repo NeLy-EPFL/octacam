@@ -91,6 +91,4 @@ void SerialPort::write(const std::string &data) {
   if (tcdrain(fd_) != 0) {
     spdlog::warn("tcdrain failed: errno={} ({})", errno, std::strerror(errno));
   }
-
-  spdlog::info("Wrote {} bytes to serial port", total_written);
 }
