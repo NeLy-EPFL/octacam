@@ -67,26 +67,29 @@ SerialPort::~SerialPort() {
   }
 }
 
-void SerialPort::write(const std::string &data) {
+void SerialPort::write(const Command &cmd) {
   if (fd_ < 0) {
     spdlog::error("Serial write skipped: invalid file descriptor");
     return;
   }
 
-  size_t total_written = 0;
-  while (total_written < data.size()) {
-    const ssize_t bytes_written =
-        ::write(fd_, data.data() + total_written, data.size() - total_written);
-    if (bytes_written < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      spdlog::error("Serial write failed: errno={} ({}) after {}/{} bytes",
-                    errno, std::strerror(errno), total_written, data.size());
-      return;
-    }
-    total_written += static_cast<size_t>(bytes_written);
-  }
+  ssize_t bytes_written = ::write(fd_, &cmd, sizeof(cmd));
+
+  // size_t total_written = 0;
+  // while (total_written < data.size()) {
+  //   const ssize_t bytes_written =
+  //       ::write(fd_, data.data() + total_written, data.size() -
+  //       total_written);
+  //   if (bytes_written < 0) {
+  //     if (errno == EINTR) {
+  //       continue;
+  //     }
+  //     spdlog::error("Serial write failed: errno={} ({}) after {}/{} bytes",
+  //                   errno, std::strerror(errno), total_written, data.size());
+  //     return;
+  //   }
+  //   total_written += static_cast<size_t>(bytes_written);
+  // }
 
   if (tcdrain(fd_) != 0) {
     spdlog::warn("tcdrain failed: errno={} ({})", errno, std::strerror(errno));

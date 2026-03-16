@@ -152,12 +152,12 @@ void MainWindow::setup_ui() {
   }
 
   step_plus_timer = new QTimer(this);
-  step_plus_timer->setTimerType(Qt::CoarseTimer);
+  step_plus_timer->setTimerType(Qt::PreciseTimer);
   step_plus_timer->setInterval(20);
   connect(step_plus_timer, &QTimer::timeout, this, &MainWindow::step_plus);
 
   step_minus_timer = new QTimer(this);
-  step_minus_timer->setTimerType(Qt::CoarseTimer);
+  step_minus_timer->setTimerType(Qt::PreciseTimer);
   step_minus_timer->setInterval(20);
   connect(step_minus_timer, &QTimer::timeout, this, &MainWindow::step_minus);
 
@@ -248,7 +248,7 @@ void MainWindow::setup_ui() {
   auto step_plus_button = new QPushButton("+", dock);
   step_interval_edit = new QSpinBox(step_widget);
   step_interval_edit->setRange(1, 1000);
-  step_interval_edit->setValue(10);
+  step_interval_edit->setValue(1);
 
   connect(step_minus_button, &QPushButton::pressed, this,
           &MainWindow::on_step_minus_button_pressed);
@@ -522,19 +522,25 @@ void MainWindow::on_step_plus_button_pressed() {
 
 void MainWindow::on_step_plus_button_released() { step_plus_timer->stop(); }
 
-void MainWindow::step_plus() { serial_port.write("1\n"); }
+void MainWindow::step_plus() {
+  Command cmd{1};
+  serial_port.write(cmd);
+}
 
-void MainWindow::step_minus() { serial_port.write("-1\n"); }
+void MainWindow::step_minus() {
+  Command cmd{0};
+  serial_port.write(cmd);
+}
 
 void MainWindow::on_step_degrees_minus_button_clicked() {
-  double step_degrees = -step_degrees_edit->value();
-  step_degrees_edit->setValue(step_degrees);
-  serial_port.write(QString::number(step_degrees).append("\n").toStdString());
+  // double step_degrees = -step_degrees_edit->value();
+  // step_degrees_edit->setValue(step_degrees);
+  // serial_port.write(QString::number(step_degrees).append("\n").toStdString());
 }
 
 void MainWindow::on_step_degrees_plus_button_clicked() {
-  double step_degrees = step_degrees_edit->value();
-  serial_port.write((QString::number(step_degrees)).append("\n").toStdString());
+  // double step_degrees = step_degrees_edit->value();
+  // serial_port.write((QString::number(step_degrees)).append("\n").toStdString());
 }
 
 void MainWindow::on_fps_value_changed(double value) {

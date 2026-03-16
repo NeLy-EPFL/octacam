@@ -277,47 +277,54 @@ void setup() {
   //  Serial.println("   Example: 90");
 }
 
+char data[1];
+
 void loop() {
-  int n = Serial.available();
-  //  Serial.println("Hello world!");
+  if (Serial.available()) {
+    Serial.readBytes(data, 1);
 
-  if (n) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-
-    if (line.length() == 0)
-      return;
-
-    int tokenCount = countTokens(line);
-
-    if (tokenCount == 1) {
-      float degrees = 0.0f;
-      if (parseOneFloat(line, degrees)) {
-        //        Serial.print("Rotate degrees command: ");
-        //        Serial.println(degrees, 6);
-        //        Serial.print("Using RPM: ");
-        //        Serial.println(currentRpm, 6);
-
-        moveDegrees(degrees);
-        //        Serial.println("Degree move complete. Ready for next
-        //        command.");
-      } else {
-        //        Serial.println("Parse error (1-value mode). Example: 90 or
-        //        -180");
-      }
-    } else if (tokenCount == 5) {
-      if (parseFiveFloats(line, rpmCmd, moveDurationS, restDurationS,
-                          totalDurationS, waitTimeS)) {
-        runProfile(rpmCmd, moveDurationS, restDurationS, totalDurationS,
-                   waitTimeS);
-        //        Serial.println("Ready for next command.");
-      } else {
-        //        Serial.println("Parse error (5-value mode).
-        //        Example: 8.0,2.5,1.0,30,5");
-      }
+    if (data[0]) {
+      oneHalfStep(1);
     } else {
-      //      Serial.println("Invalid input count. Send either 1 value (degrees)
-      //      or 5 values.");
+      oneHalfStep(-1);
     }
+    //    line.trim();
+    //
+    //    if (line.length() == 0)
+    //      return;
+    //
+    //    int tokenCount = countTokens(line);
+    //
+    //    if (tokenCount == 1) {
+    //      float degrees = 0.0f;
+    //      if (parseOneFloat(line, degrees)) {
+    //        //        Serial.print("Rotate degrees command: ");
+    //        //        Serial.println(degrees, 6);
+    //        //        Serial.print("Using RPM: ");
+    //        //        Serial.println(currentRpm, 6);
+    //
+    //        moveDegrees(degrees);
+    //        //        Serial.println("Degree move complete. Ready for next
+    //        //        command.");
+    //      } else {
+    //        //        Serial.println("Parse error (1-value mode). Example: 90
+    //        or
+    //        //        -180");
+    //      }
+    //    } else if (tokenCount == 5) {
+    //      if (parseFiveFloats(line, rpmCmd, moveDurationS, restDurationS,
+    //                          totalDurationS, waitTimeS)) {
+    //        runProfile(rpmCmd, moveDurationS, restDurationS, totalDurationS,
+    //                   waitTimeS);
+    //        //        Serial.println("Ready for next command.");
+    //      } else {
+    //        //        Serial.println("Parse error (5-value mode).
+    //        //        Example: 8.0,2.5,1.0,30,5");
+    //      }
+    //    } else {
+    //      //      Serial.println("Invalid input count. Send either 1 value
+    //      (degrees)
+    //      //      or 5 values.");
+    //    }
   }
 }

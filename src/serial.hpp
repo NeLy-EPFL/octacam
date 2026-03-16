@@ -1,6 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
+
+struct Command {
+  uint8_t n_steps;
+};
 
 class SerialPort {
 public:
@@ -10,7 +15,7 @@ public:
   SerialPort &operator=(const SerialPort &) = delete;
   SerialPort(SerialPort &&) = delete;
   SerialPort &operator=(SerialPort &&) = delete;
-  void write(const std::string &data);
+  void write(const Command &cmd);
 
 private:
   int fd_{-1};
