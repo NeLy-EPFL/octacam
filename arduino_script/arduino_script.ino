@@ -277,13 +277,18 @@ void setup() {
   //  Serial.println("   Example: 90");
 }
 
-char data[1];
+struct Command {
+  int8_t n_steps;
+  int8_t command_type;
+};
+
+Command data;
 
 void loop() {
-  if (Serial.available()) {
-    Serial.readBytes(data, 1);
+  if (Serial.available() >= sizeof(Command)) {
+    Serial.readBytes((char *)&data, sizeof(Command));
 
-    if (data[0]) {
+    if (data.n_steps > 0) {
       oneHalfStep(1);
     } else {
       oneHalfStep(-1);

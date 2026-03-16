@@ -4,7 +4,8 @@
 #include <string>
 
 struct Command {
-  uint8_t n_steps;
+  int8_t n_steps;
+  int8_t command_type;
 };
 
 class SerialPort {

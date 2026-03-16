@@ -528,7 +528,7 @@ void MainWindow::step_plus() {
 }
 
 void MainWindow::step_minus() {
-  Command cmd{0};
+  Command cmd{-1};
   serial_port.write(cmd);
 }
 
