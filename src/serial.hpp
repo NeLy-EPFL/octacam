@@ -1,23 +1,39 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
+#pragma pack(push, 1)
 struct Command {
-  int8_t n_steps;
-  int8_t command_type;
+  uint8_t command_type;
+  int16_t n_steps;
+  uint16_t step_interval_us;
+  uint16_t rest_duration_ms;
+  uint8_t n_repeats;
 };
+#pragma pack(pop)
 
 class SerialPort {
 public:
-  SerialPort(const std::string &device, int baud_rate);
+  SerialPort() = default;
+  SerialPort(const std::string &device, int baud) { open(device, baud); }
   ~SerialPort();
+
   SerialPort(const SerialPort &) = delete;
   SerialPort &operator=(const SerialPort &) = delete;
-  SerialPort(SerialPort &&) = delete;
-  SerialPort &operator=(SerialPort &&) = delete;
-  void write(const Command &cmd);
+  SerialPort(SerialPort &&other) noexcept;
+  SerialPort &operator=(SerialPort &&other) noexcept;
+
+  void open(const std::string &device, int baud);
+  void close();
+  bool isOpen() const noexcept { return fd_ >= 0; }
+
+  std::size_t writeAll(const void *data, std::size_t len);
+  std::size_t readExact(void *out, std::size_t len, int timeoutMs);
 
 private:
-  int fd_{-1};
+  int fd_ = -1;
+  static unsigned long toSpeed(int baud);
+  void configure(int baud);
 };

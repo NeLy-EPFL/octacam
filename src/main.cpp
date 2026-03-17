@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  auto serial_port = SerialPort("/dev/ttyACM0", 9600);
+  auto serial_port = SerialPort("/dev/ttyACM0", 115200);
 
   auto config_dir = std::filesystem::canonical(config_dir_str);
   spdlog::info("Using config directory: {}", config_dir.string());

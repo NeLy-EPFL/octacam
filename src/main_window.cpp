@@ -523,24 +523,23 @@ void MainWindow::on_step_plus_button_pressed() {
 void MainWindow::on_step_plus_button_released() { step_plus_timer->stop(); }
 
 void MainWindow::step_plus() {
-  Command cmd{1};
-  serial_port.write(cmd);
+  Command cmd{0, 1};
+  serial_port.writeAll(&cmd, sizeof(cmd));
 }
 
 void MainWindow::step_minus() {
-  Command cmd{-1};
-  serial_port.write(cmd);
+  Command cmd{0, -1};
+  serial_port.writeAll(&cmd, sizeof(cmd));
 }
 
 void MainWindow::on_step_degrees_minus_button_clicked() {
-  // double step_degrees = -step_degrees_edit->value();
-  // step_degrees_edit->setValue(step_degrees);
-  // serial_port.write(QString::number(step_degrees).append("\n").toStdString());
+  Command cmd{1, 4096, 800};
+  serial_port.writeAll(&cmd, sizeof(cmd));
 }
 
 void MainWindow::on_step_degrees_plus_button_clicked() {
-  // double step_degrees = step_degrees_edit->value();
-  // serial_port.write((QString::number(step_degrees)).append("\n").toStdString());
+  Command cmd{1, -4096, 800};
+  serial_port.writeAll(&cmd, sizeof(cmd));
 }
 
 void MainWindow::on_fps_value_changed(double value) {
