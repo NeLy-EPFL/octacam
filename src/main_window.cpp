@@ -490,14 +490,25 @@ void MainWindow::rotate_displays() {
     for (auto *pixmap_item : pixmap_items) {
       if (!pixmap_item)
         continue;
+
+      pixmap_item->setTransformOriginPoint(
+          pixmap_item->boundingRect().center());
+
       if (reset_rotation) {
         pixmap_item->setRotation(0);
       } else {
         pixmap_item->setRotation(pixmap_item->rotation() + angle_delta);
       }
-      if (auto *view = qobject_cast<GraphicsView *>(
-              pixmap_item->scene()->views().first())) {
-        view->fitInView(pixmap_item->sceneBoundingRect(), Qt::KeepAspectRatio);
+
+      auto *scene = pixmap_item->scene();
+      if (!scene || scene->views().isEmpty()) {
+        continue;
+      }
+
+      if (auto *view = qobject_cast<GraphicsView *>(scene->views().first())) {
+        const QRectF content_bounds = scene->itemsBoundingRect();
+        view->fitInView(content_bounds, Qt::KeepAspectRatio);
+        view->centerOn(content_bounds.center());
       }
     }
     return;
@@ -516,13 +527,19 @@ void MainWindow::rotate_displays() {
   for (auto *item : view->scene()->items()) {
     if (!item)
       continue;
+
+    item->setTransformOriginPoint(item->boundingRect().center());
+
     if (reset_rotation) {
       item->setRotation(0);
     } else {
       item->setRotation(item->rotation() + angle_delta);
     }
-    view->fitInView(item->sceneBoundingRect(), Qt::KeepAspectRatio);
   }
+
+  const QRectF content_bounds = view->scene()->itemsBoundingRect();
+  view->fitInView(content_bounds, Qt::KeepAspectRatio);
+  view->centerOn(content_bounds.center());
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event) {
