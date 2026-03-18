@@ -202,8 +202,8 @@ private slots:
   void on_single_step_cw_button_pressed();
   void on_single_step_ccw_button_released();
   void on_single_step_cw_button_released();
-  void on_multi_step_execute_button_clicked();
-  void update_multi_step_info();
+  void on_step_execute_button_clicked();
+  void update_step_info();
 
 private:
   void setup_ui();
@@ -227,14 +227,14 @@ private:
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
   QSpinBox *single_step_interval_edit;
-  QRadioButton *multi_step_cw_button;
-  QRadioButton *multi_step_ccw_button;
-  QSpinBox *multi_steps_count_spinbox;
-  QSpinBox *multi_step_interval_us_spinbox;
-  QSpinBox *multi_step_rest_ms_spinbox;
-  QSpinBox *multi_step_repeats_spinbox;
-  QSpinBox *multi_step_init_wait_s_spinbox;
-  QLabel *multi_step_info_label;
+  QRadioButton *step_init_cw_button;
+  QRadioButton *step_init_ccw_button;
+  QSpinBox *step_count_spinbox;
+  QSpinBox *step_interval_us_spinbox;
+  QSpinBox *step_rest_ms_spinbox;
+  QSpinBox *step_repeats_spinbox;
+  QSpinBox *step_init_wait_s_spinbox;
+  QLabel *step_info_label;
   QRadioButton *transform_selected_button;
   QRadioButton *transform_all_button;
   std::chrono::milliseconds record_remaining_time_;

@@ -282,88 +282,84 @@ void MainWindow::setup_ui() {
     step_title->setAlignment(Qt::AlignCenter);
     arduino_layout->addWidget(step_title, 0, 0, 1, 3);
 
-    multi_step_info_label = new QLabel(arduino_tab);
-    multi_step_info_label->setAlignment(Qt::AlignCenter);
+    step_info_label = new QLabel(arduino_tab);
+    step_info_label->setAlignment(Qt::AlignCenter);
 
-    multi_step_ccw_button = new QRadioButton("↺", arduino_tab);
-    multi_step_cw_button = new QRadioButton("↻", arduino_tab);
-    multi_step_ccw_button->setChecked(true);
+    step_init_ccw_button = new QRadioButton("↺", arduino_tab);
+    step_init_cw_button = new QRadioButton("↻", arduino_tab);
+    step_init_ccw_button->setChecked(true);
 
-    multi_steps_count_spinbox = new QSpinBox(arduino_tab);
-    multi_steps_count_spinbox->setRange(2, 32767);
-    multi_steps_count_spinbox->setValue(4096);
-    connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
+    step_count_spinbox = new QSpinBox(arduino_tab);
+    step_count_spinbox->setRange(2, 32767);
+    step_count_spinbox->setValue(4096);
+    connect(step_count_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_step_info);
 
-    multi_step_interval_us_spinbox = new QSpinBox(arduino_tab);
-    multi_step_interval_us_spinbox->setRange(800, 65535);
-    multi_step_interval_us_spinbox->setValue(800);
-    multi_step_interval_us_spinbox->setSuffix(" μs");
-    connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
+    step_interval_us_spinbox = new QSpinBox(arduino_tab);
+    step_interval_us_spinbox->setRange(800, 65535);
+    step_interval_us_spinbox->setValue(800);
+    step_interval_us_spinbox->setSuffix(" μs");
+    connect(step_interval_us_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_step_info);
 
-    multi_step_rest_ms_spinbox = new QSpinBox(arduino_tab);
-    multi_step_rest_ms_spinbox->setRange(0, 65535);
-    multi_step_rest_ms_spinbox->setValue(500);
-    multi_step_rest_ms_spinbox->setSuffix(" ms");
-    connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
+    step_rest_ms_spinbox = new QSpinBox(arduino_tab);
+    step_rest_ms_spinbox->setRange(0, 65535);
+    step_rest_ms_spinbox->setValue(500);
+    step_rest_ms_spinbox->setSuffix(" ms");
+    connect(step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_step_info);
 
-    multi_step_repeats_spinbox = new QSpinBox(arduino_tab);
-    multi_step_repeats_spinbox->setRange(1, 255);
-    multi_step_repeats_spinbox->setValue(1);
-    connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
+    step_repeats_spinbox = new QSpinBox(arduino_tab);
+    step_repeats_spinbox->setRange(1, 255);
+    step_repeats_spinbox->setValue(1);
+    connect(step_repeats_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_step_info);
 
-    multi_step_init_wait_s_spinbox = new QSpinBox(arduino_tab);
-    multi_step_init_wait_s_spinbox->setRange(0, 255);
-    multi_step_init_wait_s_spinbox->setValue(0);
-    multi_step_init_wait_s_spinbox->setSuffix(" s");
-    connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
+    step_init_wait_s_spinbox = new QSpinBox(arduino_tab);
+    step_init_wait_s_spinbox->setRange(0, 255);
+    step_init_wait_s_spinbox->setValue(0);
+    step_init_wait_s_spinbox->setSuffix(" s");
+    connect(step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_step_info);
 
-    auto *multi_step_execute_button = new QPushButton("Execute", arduino_tab);
-    connect(multi_step_execute_button, &QPushButton::clicked, this,
-            &MainWindow::on_multi_step_execute_button_clicked);
+    auto *step_execute_button = new QPushButton("Execute", arduino_tab);
+    connect(step_execute_button, &QPushButton::clicked, this,
+            &MainWindow::on_step_execute_button_clicked);
 
-    auto *multi_step_direction_label =
+    auto *step_init_direction_label =
         new QLabel("Initial direction:", arduino_tab);
-    multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_direction_label, 1, 0, 1, 1);
-    arduino_layout->addWidget(multi_step_ccw_button, 1, 1, 1, 1);
-    arduino_layout->addWidget(multi_step_cw_button, 1, 2, 1, 1);
+    step_init_direction_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_init_direction_label, 1, 0, 1, 1);
+    arduino_layout->addWidget(step_init_ccw_button, 1, 1, 1, 1);
+    arduino_layout->addWidget(step_init_cw_button, 1, 2, 1, 1);
 
-    auto *multi_step_n_steps_label = new QLabel("Steps:", arduino_tab);
-    multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_n_steps_label, 2, 0, 1, 1);
-    arduino_layout->addWidget(multi_steps_count_spinbox, 2, 1, 1, 2);
+    auto *step_count_label = new QLabel("Steps:", arduino_tab);
+    step_count_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_count_label, 2, 0, 1, 1);
+    arduino_layout->addWidget(step_count_spinbox, 2, 1, 1, 2);
 
-    auto *multi_step_interval_label = new QLabel("Step interval:", arduino_tab);
-    multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_interval_label, 3, 0, 1, 1);
-    arduino_layout->addWidget(multi_step_interval_us_spinbox, 3, 1, 1, 2);
+    auto *step_interval_label = new QLabel("Step interval:", arduino_tab);
+    step_interval_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_interval_label, 3, 0, 1, 1);
+    arduino_layout->addWidget(step_interval_us_spinbox, 3, 1, 1, 2);
 
-    auto *multi_step_rest_duration_label =
-        new QLabel("Rest duration:", arduino_tab);
-    multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
-                                                 Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_rest_duration_label, 4, 0, 1, 1);
-    arduino_layout->addWidget(multi_step_rest_ms_spinbox, 4, 1, 1, 2);
+    auto *step_rest_label = new QLabel("Rest duration:", arduino_tab);
+    step_rest_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_rest_label, 4, 0, 1, 1);
+    arduino_layout->addWidget(step_rest_ms_spinbox, 4, 1, 1, 2);
 
-    auto *multi_step_repeats_label = new QLabel("Repeats:", arduino_tab);
-    multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_repeats_label, 5, 0, 1, 1);
-    arduino_layout->addWidget(multi_step_repeats_spinbox, 5, 1, 1, 2);
+    auto *step_repeats_label = new QLabel("Repeats:", arduino_tab);
+    step_repeats_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_repeats_label, 5, 0, 1, 1);
+    arduino_layout->addWidget(step_repeats_spinbox, 5, 1, 1, 2);
 
-    auto *multi_step_init_wait_duration_label =
-        new QLabel("Initial wait:", arduino_tab);
-    multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
-                                                      Qt::AlignVCenter);
-    arduino_layout->addWidget(multi_step_init_wait_duration_label, 6, 0, 1, 1);
-    arduino_layout->addWidget(multi_step_init_wait_s_spinbox, 6, 1, 1, 2);
+    auto *step_init_wait_label = new QLabel("Initial wait:", arduino_tab);
+    step_init_wait_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(step_init_wait_label, 6, 0, 1, 1);
+    arduino_layout->addWidget(step_init_wait_s_spinbox, 6, 1, 1, 2);
 
-    arduino_layout->addWidget(multi_step_info_label, 7, 0, 1, 3);
-    arduino_layout->addWidget(multi_step_execute_button, 8, 0, 1, 3);
+    arduino_layout->addWidget(step_info_label, 7, 0, 1, 3);
+    arduino_layout->addWidget(step_execute_button, 8, 0, 1, 3);
 
     arduino_layout->setRowStretch(9, 1);
 
@@ -400,7 +396,7 @@ void MainWindow::setup_ui() {
 
     tabs->addTab(arduino_tab, "Arduino");
 
-    update_multi_step_info();
+    update_step_info();
   }
 
   auto *view_tab = new QWidget(tabs);
@@ -431,12 +427,24 @@ void MainWindow::setup_ui() {
   connect(rotate_cw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
+  view_layout->addWidget(new QLabel("Flip:", view_tab), 2, 0, 1, 1);
+
+  auto *hflip_button = new QPushButton("Horizontal", view_tab);
+  view_layout->addWidget(hflip_button, 2, 1, 1, 1);
+  connect(hflip_button, &QPushButton::clicked, this,
+          &MainWindow::rotate_displays);
+
+  auto *vflip_button = new QPushButton("Vertical", view_tab);
+  view_layout->addWidget(vflip_button, 2, 2, 1, 1);
+  connect(vflip_button, &QPushButton::clicked, this,
+          &MainWindow::rotate_displays);
+
   auto *reset_transformation = new QPushButton("Reset", view_tab);
-  view_layout->addWidget(reset_transformation, 2, 0, 1, 3);
+  view_layout->addWidget(reset_transformation, 3, 0, 1, 3);
   connect(reset_transformation, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  view_layout->setRowStretch(3, 1);
+  view_layout->setRowStretch(4, 1);
 
   tabs->addTab(view_tab, "View");
 
@@ -456,11 +464,17 @@ void MainWindow::rotate_displays() {
   const QString button_text = button_sender->text();
   int angle_delta = 0;
   bool reset_rotation = false;
+  bool hflip = false;
+  bool vflip = false;
 
   if (button_text == "↺") {
     angle_delta = -90;
   } else if (button_text == "↻") {
     angle_delta = 90;
+  } else if (button_text == "Horizontal") {
+    hflip = true;
+  } else if (button_text == "Vertical") {
+    vflip = true;
   } else if (button_text == "Reset") {
     reset_rotation = true;
   } else {
@@ -477,8 +491,17 @@ void MainWindow::rotate_displays() {
 
       if (reset_rotation) {
         pixmap_item->setRotation(0);
+        pixmap_item->setTransform(QTransform());
       } else {
         pixmap_item->setRotation(pixmap_item->rotation() + angle_delta);
+        if (hflip || vflip) {
+          auto center = pixmap_item->boundingRect().center();
+          QTransform flip;
+          flip.translate(center.x(), center.y());
+          flip.scale(hflip ? -1.0 : 1.0, vflip ? -1.0 : 1.0);
+          flip.translate(-center.x(), -center.y());
+          pixmap_item->setTransform(flip, true);
+        }
       }
 
       auto *scene = pixmap_item->scene();
@@ -513,8 +536,17 @@ void MainWindow::rotate_displays() {
 
     if (reset_rotation) {
       item->setRotation(0);
+      item->setTransform(QTransform());
     } else {
       item->setRotation(item->rotation() + angle_delta);
+      if (hflip || vflip) {
+        auto center = item->boundingRect().center();
+        QTransform flip;
+        flip.translate(center.x(), center.y());
+        flip.scale(hflip ? -1.0 : 1.0, vflip ? -1.0 : 1.0);
+        flip.translate(-center.x(), -center.y());
+        item->setTransform(flip, true);
+      }
     }
   }
 
@@ -641,32 +673,28 @@ void MainWindow::on_single_step_cw_button_released() {
   serial_port.writeAll(Command{0});
 }
 
-void MainWindow::on_multi_step_execute_button_clicked() {
+void MainWindow::on_step_execute_button_clicked() {
   int direction =
-      multi_step_cw_button && multi_step_cw_button->isChecked() ? 1 : -1;
-  int16_t steps =
-      static_cast<int16_t>(direction * multi_steps_count_spinbox->value());
-  uint16_t interval =
-      static_cast<uint16_t>(multi_step_interval_us_spinbox->value());
-  uint16_t rest_duration =
-      static_cast<uint16_t>(multi_step_rest_ms_spinbox->value());
-  uint8_t repeats = static_cast<uint8_t>(multi_step_repeats_spinbox->value());
+      step_init_cw_button && step_init_cw_button->isChecked() ? 1 : -1;
+  int16_t steps = static_cast<int16_t>(direction * step_count_spinbox->value());
+  uint16_t interval = static_cast<uint16_t>(step_interval_us_spinbox->value());
+  uint16_t rest_duration = static_cast<uint16_t>(step_rest_ms_spinbox->value());
+  uint8_t repeats = static_cast<uint8_t>(step_repeats_spinbox->value());
   uint8_t init_wait_duration =
-      static_cast<uint8_t>(multi_step_init_wait_s_spinbox->value());
+      static_cast<uint8_t>(step_init_wait_s_spinbox->value());
   serial_port.writeAll(
       Command{steps, interval, rest_duration, repeats, init_wait_duration});
 }
 
-void MainWindow::update_multi_step_info() {
+void MainWindow::update_step_info() {
   uint64_t interval_us =
-      static_cast<uint64_t>(multi_step_interval_us_spinbox->value());
+      static_cast<uint64_t>(step_interval_us_spinbox->value());
   uint64_t rest_duration_us =
-      static_cast<uint64_t>(multi_step_rest_ms_spinbox->value()) * 1000;
+      static_cast<uint64_t>(step_rest_ms_spinbox->value()) * 1000;
   uint64_t init_wait_duration_us =
-      static_cast<uint64_t>(multi_step_init_wait_s_spinbox->value()) * 1000000;
-  uint64_t n_repeats =
-      static_cast<uint64_t>(multi_step_repeats_spinbox->value());
-  uint64_t n_steps = static_cast<uint64_t>(multi_steps_count_spinbox->value());
+      static_cast<uint64_t>(step_init_wait_s_spinbox->value()) * 1000000;
+  uint64_t n_repeats = static_cast<uint64_t>(step_repeats_spinbox->value());
+  uint64_t n_steps = static_cast<uint64_t>(step_count_spinbox->value());
   uint64_t duration_us = interval_us * n_steps;
   uint64_t n_steps_per_rev = 4096;
   long double rpm =
@@ -676,9 +704,9 @@ void MainWindow::update_multi_step_info() {
       rest_duration_us;
   long double total_duration_s =
       static_cast<long double>(total_duration_us) / 1'000'000.0L;
-  multi_step_info_label->setText(QString("Total duration: %1 s, RPM: %2")
-                                     .arg(total_duration_s, 0, 'f', 3)
-                                     .arg(rpm, 0, 'f', 3));
+  step_info_label->setText(QString("Total duration: %1 s, RPM: %2")
+                               .arg(total_duration_s, 0, 'f', 3)
+                               .arg(rpm, 0, 'f', 3));
 }
 
 void MainWindow::on_fps_value_changed(double value) {
