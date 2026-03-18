@@ -155,12 +155,14 @@ void MainWindow::setup_ui() {
   step_cw_timer = new QTimer(this);
   step_cw_timer->setTimerType(Qt::PreciseTimer);
   step_cw_timer->setInterval(1);
-  connect(step_cw_timer, &QTimer::timeout, this, &MainWindow::step_cw);
+  connect(step_cw_timer, &QTimer::timeout, this,
+          [this]() { serial_port.writeAll(Command{0, 1}); });
 
   step_ccw_timer = new QTimer(this);
   step_ccw_timer->setTimerType(Qt::PreciseTimer);
   step_ccw_timer->setInterval(1);
-  connect(step_ccw_timer, &QTimer::timeout, this, &MainWindow::step_ccw);
+  connect(step_ccw_timer, &QTimer::timeout, this,
+          [this]() { serial_port.writeAll(Command{0, -1}); });
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
@@ -575,24 +577,12 @@ void MainWindow::on_single_step_cw_button_pressed() {
 
 void MainWindow::on_single_step_cw_button_released() { step_cw_timer->stop(); }
 
-void MainWindow::step_cw() {
-  Command cmd{0, 1};
-  serial_port.writeAll(&cmd, sizeof(Command));
-}
-
-void MainWindow::step_ccw() {
-  Command cmd{0, -1};
-  serial_port.writeAll(&cmd, sizeof(Command));
-}
-
 void MainWindow::on_step_degrees_minus_button_clicked() {
-  Command cmd{1, 4096, 800};
-  serial_port.writeAll(&cmd, sizeof(Command));
+  serial_port.writeAll(Command{1, 4096, 800});
 }
 
 void MainWindow::on_step_degrees_plus_button_clicked() {
-  Command cmd{1, -4096, 800};
-  serial_port.writeAll(&cmd, sizeof(Command));
+  serial_port.writeAll(Command{1, -4096, 800});
 }
 
 void MainWindow::on_fps_value_changed(double value) {

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 
 #pragma pack(push, 1)
 struct Command {
@@ -30,6 +31,11 @@ public:
   bool isOpen() const noexcept { return fd_ >= 0; }
 
   std::size_t writeAll(const void *data, std::size_t len);
+  template <typename T> std::size_t writeAll(const T &value) {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "writeAll requires trivially copyable types");
+    return writeAll(&value, sizeof(T));
+  }
   std::size_t readExact(void *out, std::size_t len, int timeoutMs);
 
 private:
