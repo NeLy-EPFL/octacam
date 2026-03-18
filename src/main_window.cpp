@@ -218,7 +218,6 @@ void MainWindow::setup_ui() {
       cfg.duration_default, cfg.duration_min, cfg.duration_max,
       cfg.duration_unit_default_index, record_tab);
   record_layout->addWidget(duration_input, row++, 1, 1, 1);
-  duration_input->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
   auto *fps_label = new QLabel("FPS:", record_tab);
   fps_label->setAlignment(Qt::AlignRight);
@@ -236,9 +235,8 @@ void MainWindow::setup_ui() {
   save_dir_label->setAlignment(Qt::AlignRight);
   record_layout->addWidget(save_dir_label, row, 0, 1, 1);
   save_dir_edit = new DirectoryEdit(cfg.save_directory_default, record_tab);
-  save_dir_edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-  save_dir_edit->setFixedHeight(fontMetrics().height() *
-                                cfg.save_dir_edit_height_factor);
+  save_dir_edit->setMinimumHeight(fontMetrics().height() *
+                                  cfg.save_dir_edit_height_factor);
   record_layout->addWidget(save_dir_edit, row++, 1, 1, 1);
 
   auto *trigger_source_label = new QLabel("Trigger source:", record_tab);
@@ -269,6 +267,9 @@ void MainWindow::setup_ui() {
   status_label->setAlignment(Qt::AlignCenter);
   status_label->setWordWrap(true);
   record_layout->addWidget(status_label, row++, 0, 1, 2);
+
+  record_layout->setRowStretch(row, 1);
+
   tabs->addTab(record_tab, "Record");
 
   if (serial_port.is_open()) {
@@ -361,11 +362,17 @@ void MainWindow::setup_ui() {
     arduino_layout->addWidget(step_info_label, 7, 0, 1, 3);
     arduino_layout->addWidget(step_execute_button, 8, 0, 1, 3);
 
-    arduino_layout->setRowStretch(9, 1);
+    step_start_with_recording_checkbox =
+        new QCheckBox("Start with recording", arduino_tab);
+    step_start_with_recording_checkbox->setChecked(true);
+    arduino_layout->addWidget(step_start_with_recording_checkbox, 9, 0, 1, 3,
+                              Qt::AlignCenter);
+
+    arduino_layout->setRowStretch(10, 1);
 
     auto *single_step_title = new QLabel("Adjust position", arduino_tab);
     single_step_title->setAlignment(Qt::AlignCenter);
-    arduino_layout->addWidget(single_step_title, 10, 0, 1, 3);
+    arduino_layout->addWidget(single_step_title, 11, 0, 1, 3);
 
     auto *single_step_ccw_button = new QPushButton("↺", arduino_tab);
     auto *single_step_cw_button = new QPushButton("↻", arduino_tab);
@@ -385,14 +392,14 @@ void MainWindow::setup_ui() {
 
     auto *single_step_interval_label = new QLabel("Interval:", arduino_tab);
     single_step_interval_label->setAlignment(Qt::AlignRight);
-    arduino_layout->addWidget(single_step_interval_label, 11, 0, 1, 1);
-    arduino_layout->addWidget(single_step_interval_edit, 11, 1, 1, 2);
+    arduino_layout->addWidget(single_step_interval_label, 12, 0, 1, 1);
+    arduino_layout->addWidget(single_step_interval_edit, 12, 1, 1, 2);
 
     auto *single_step_direction_label = new QLabel("Direction:", arduino_tab);
     single_step_direction_label->setAlignment(Qt::AlignRight);
-    arduino_layout->addWidget(single_step_direction_label, 12, 0, 1, 1);
-    arduino_layout->addWidget(single_step_ccw_button, 12, 1, 1, 1);
-    arduino_layout->addWidget(single_step_cw_button, 12, 2, 1, 1);
+    arduino_layout->addWidget(single_step_direction_label, 13, 0, 1, 1);
+    arduino_layout->addWidget(single_step_ccw_button, 13, 1, 1, 1);
+    arduino_layout->addWidget(single_step_cw_button, 13, 2, 1, 1);
 
     tabs->addTab(arduino_tab, "Arduino");
 
@@ -613,6 +620,10 @@ void MainWindow::update_frames() {
 
 void MainWindow::check_record_started() {
   if (camera_system.all_cameras_started()) {
+    if (step_start_with_recording_checkbox &&
+        step_start_with_recording_checkbox->isChecked()) {
+      on_step_execute_button_clicked();
+    }
     check_record_started_timer->stop();
     record_countdown_timer->start();
     update_record_countdown();

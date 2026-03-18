@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <regex>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -235,6 +236,7 @@ private:
   QSpinBox *step_repeats_spinbox;
   QSpinBox *step_init_wait_s_spinbox;
   QLabel *step_info_label;
+  QCheckBox *step_start_with_recording_checkbox = nullptr;
   QRadioButton *transform_selected_button;
   QRadioButton *transform_all_button;
   std::chrono::milliseconds record_remaining_time_;
