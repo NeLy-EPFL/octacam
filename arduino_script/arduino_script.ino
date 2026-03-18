@@ -86,7 +86,9 @@ void loop() {
 
     int16_t n_steps = data.n_steps;
 
-    if (n_steps == 1 || n_steps == -1) {
+    if (n_steps == 0) {
+      releaseMotor();
+    } else if (n_steps == 1 || n_steps == -1) {
       oneHalfStep(n_steps);
     } else {
       if (data.init_wait_duration_s > 0) {
