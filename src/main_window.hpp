@@ -202,8 +202,7 @@ private slots:
   void on_single_step_cw_button_pressed();
   void on_single_step_ccw_button_released();
   void on_single_step_cw_button_released();
-  void on_multi_step_ccw_button_clicked();
-  void on_multi_step_cw_button_clicked();
+  void on_multi_step_start_button_clicked();
 
 private:
   void setup_ui();
@@ -229,6 +228,9 @@ private:
   QSpinBox *single_step_interval_edit;
   QSpinBox *multi_steps_count_edit;
   QSpinBox *multi_step_interval_edit;
+  QSpinBox *multi_step_rest_duration_edit;
+  QSpinBox *multi_step_repeats_edit;
+  QSpinBox *multi_step_init_wait_duration_edit;
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;

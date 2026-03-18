@@ -84,18 +84,20 @@ void loop() {
   if (Serial.available() >= sizeof(Command)) {
     Serial.readBytes((char *)&data, sizeof(Command));
 
-    if (data.n_steps == 1 || data.n_steps == -1) {
-      oneHalfStep(data.n_steps);
+    int16_t n_steps = data.n_steps;
+
+    if (n_steps == 1 || n_steps == -1) {
+      oneHalfStep(n_steps);
     } else {
       if (data.init_wait_duration_s > 0) {
         delay(data.init_wait_duration_s * 1000);
       }
       for (uint8_t i = 0; i < data.n_repeats - 1; ++i) {
-        move_n_steps(i % 2 == 0 ? data.n_steps : -data.n_steps,
-                     data.step_interval_us);
+        move_n_steps(n_steps, data.step_interval_us);
         restForDuration(data.rest_duration_ms);
+        n_steps = -n_steps;
       }
-      move_n_steps(data.n_steps, data.step_interval_us);
+      move_n_steps(n_steps, data.step_interval_us);
     }
   }
 }

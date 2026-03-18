@@ -314,7 +314,7 @@ void MainWindow::setup_ui() {
   multi_step_layout->setVerticalSpacing(6);
 
   multi_steps_count_edit = new QSpinBox(multi_step_widget);
-  multi_steps_count_edit->setRange(1, 65535);
+  multi_steps_count_edit->setRange(-32767, 32767);
   multi_steps_count_edit->setValue(1024);
 
   multi_step_interval_edit = new QSpinBox(multi_step_widget);
@@ -322,27 +322,44 @@ void MainWindow::setup_ui() {
   multi_step_interval_edit->setValue(800);
   multi_step_interval_edit->setSuffix(" μs");
 
-  auto *multi_step_ccw_button = new QPushButton("↺", multi_step_widget);
-  auto *multi_step_cw_button = new QPushButton("↻", multi_step_widget);
+  multi_step_rest_duration_edit = new QSpinBox(multi_step_widget);
+  multi_step_rest_duration_edit->setRange(0, 65535);
+  multi_step_rest_duration_edit->setValue(0);
+  multi_step_rest_duration_edit->setSuffix(" ms");
 
-  connect(multi_step_ccw_button, &QPushButton::clicked, this,
-          &MainWindow::on_multi_step_ccw_button_clicked);
-  connect(multi_step_cw_button, &QPushButton::clicked, this,
-          &MainWindow::on_multi_step_cw_button_clicked);
+  multi_step_repeats_edit = new QSpinBox(multi_step_widget);
+  multi_step_repeats_edit->setRange(1, 255);
+  multi_step_repeats_edit->setValue(1);
+  multi_step_repeats_edit->setSuffix(" repeats");
 
-  multi_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
-  multi_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
+  multi_step_init_wait_duration_edit = new QSpinBox(multi_step_widget);
+  multi_step_init_wait_duration_edit->setRange(0, 255);
+  multi_step_init_wait_duration_edit->setValue(0);
+  multi_step_init_wait_duration_edit->setSuffix(" s");
+
+  auto *multi_step_start_button = new QPushButton("Start", multi_step_widget);
+
+  connect(multi_step_start_button, &QPushButton::clicked, this,
+          &MainWindow::on_multi_step_start_button_clicked);
+
+  multi_step_start_button->setMinimumHeight(fontMetrics().height() * 2);
 
   multi_step_layout->addWidget(new QLabel("N steps:", multi_step_widget), 0, 0,
                                1, 1);
-  multi_step_layout->addWidget(multi_steps_count_edit, 0, 1, 1, 2);
+  multi_step_layout->addWidget(multi_steps_count_edit, 0, 1, 1, 1);
   multi_step_layout->addWidget(new QLabel("Interval:", multi_step_widget), 1, 0,
                                1, 1);
-  multi_step_layout->addWidget(multi_step_interval_edit, 1, 1, 1, 2);
-  multi_step_layout->addWidget(new QLabel("Step:", multi_step_widget), 2, 0, 1,
+  multi_step_layout->addWidget(multi_step_interval_edit, 1, 1, 1, 1);
+  multi_step_layout->addWidget(new QLabel("Rest:", multi_step_widget), 2, 0, 1,
                                1);
-  multi_step_layout->addWidget(multi_step_ccw_button, 2, 1, 1, 1);
-  multi_step_layout->addWidget(multi_step_cw_button, 2, 2, 1, 1);
+  multi_step_layout->addWidget(multi_step_rest_duration_edit, 2, 1, 1, 1);
+  multi_step_layout->addWidget(new QLabel("Repeats:", multi_step_widget), 3, 0,
+                               1, 1);
+  multi_step_layout->addWidget(multi_step_repeats_edit, 3, 1, 1, 1);
+  multi_step_layout->addWidget(new QLabel("Initial wait:", multi_step_widget),
+                               4, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_init_wait_duration_edit, 4, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_start_button, 5, 0, 1, 2);
 
   dock_layout->addWidget(multi_step_widget);
 
@@ -581,16 +598,16 @@ void MainWindow::on_single_step_cw_button_pressed() {
   step_cw_timer->start();
 }
 
-void MainWindow::on_multi_step_ccw_button_clicked() {
-  int16_t steps = static_cast<int16_t>(-multi_steps_count_edit->value());
-  uint16_t interval = static_cast<uint16_t>(multi_step_interval_edit->value());
-  serial_port.writeAll(Command{steps, interval, 0, 1, 0});
-}
-
-void MainWindow::on_multi_step_cw_button_clicked() {
+void MainWindow::on_multi_step_start_button_clicked() {
   int16_t steps = static_cast<int16_t>(multi_steps_count_edit->value());
   uint16_t interval = static_cast<uint16_t>(multi_step_interval_edit->value());
-  serial_port.writeAll(Command{steps, interval, 0, 1, 0});
+  uint16_t rest_duration =
+      static_cast<uint16_t>(multi_step_rest_duration_edit->value());
+  uint8_t repeats = static_cast<uint8_t>(multi_step_repeats_edit->value());
+  uint8_t init_wait_duration =
+      static_cast<uint8_t>(multi_step_init_wait_duration_edit->value());
+  serial_port.writeAll(
+      Command{steps, interval, rest_duration, repeats, init_wait_duration});
 }
 
 void MainWindow::on_single_step_cw_button_released() { step_cw_timer->stop(); }
