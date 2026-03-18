@@ -4,11 +4,11 @@
 
 #pragma pack(push, 1)
 struct Command {
-  uint8_t command_type;
   int16_t n_steps;
   uint16_t step_interval_us;
   uint16_t rest_duration_ms;
   uint8_t n_repeats;
+  uint8_t init_wait_duration_s;
 };
 #pragma pack(pop)
 
@@ -84,15 +84,18 @@ void loop() {
   if (Serial.available() >= sizeof(Command)) {
     Serial.readBytes((char *)&data, sizeof(Command));
 
-    if (data.command_type == 0) {
-      oneHalfStep(data.n_steps > 0 ? +1 : -1);
-    } else if (data.command_type == 1) {
-      move_n_steps(data.n_steps, data.step_interval_us);
-    } else if (data.command_type == 2) {
-      for (uint8_t i = 0; i < data.n_repeats; ++i) {
-        move_n_steps(data.n_steps, data.step_interval_us);
+    if (data.n_steps == 1 || data.n_steps == -1) {
+      oneHalfStep(data.n_steps);
+    } else {
+      if (data.init_wait_duration_s > 0) {
+        delay(data.init_wait_duration_s * 1000);
+      }
+      for (uint8_t i = 0; i < data.n_repeats - 1; ++i) {
+        move_n_steps(i % 2 == 0 ? data.n_steps : -data.n_steps,
+                     data.step_interval_us);
         restForDuration(data.rest_duration_ms);
       }
+      move_n_steps(data.n_steps, data.step_interval_us);
     }
   }
 }

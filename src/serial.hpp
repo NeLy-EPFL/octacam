@@ -7,11 +7,11 @@
 
 #pragma pack(push, 1)
 struct Command {
-  uint8_t command_type;
   int16_t n_steps;
   uint16_t step_interval_us;
   uint16_t rest_duration_ms;
   uint8_t n_repeats;
+  uint8_t init_wait_duration_s;
 };
 #pragma pack(pop)
 
