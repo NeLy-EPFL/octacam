@@ -202,8 +202,8 @@ private slots:
   void on_single_step_cw_button_pressed();
   void on_single_step_ccw_button_released();
   void on_single_step_cw_button_released();
-  void step_plus();
-  void step_minus();
+  void step_cw();
+  void step_ccw();
   void on_step_degrees_minus_button_clicked();
   void on_step_degrees_plus_button_clicked();
 
@@ -234,6 +234,6 @@ private:
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
   QDoubleSpinBox *step_degrees_edit;
-  QTimer *step_plus_timer;
-  QTimer *step_minus_timer;
+  QTimer *step_cw_timer;
+  QTimer *step_ccw_timer;
 };

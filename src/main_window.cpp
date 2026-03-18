@@ -152,15 +152,15 @@ void MainWindow::setup_ui() {
     mdi_area->tileSubWindows();
   }
 
-  step_plus_timer = new QTimer(this);
-  step_plus_timer->setTimerType(Qt::PreciseTimer);
-  step_plus_timer->setInterval(20);
-  connect(step_plus_timer, &QTimer::timeout, this, &MainWindow::step_plus);
+  step_cw_timer = new QTimer(this);
+  step_cw_timer->setTimerType(Qt::PreciseTimer);
+  step_cw_timer->setInterval(1);
+  connect(step_cw_timer, &QTimer::timeout, this, &MainWindow::step_cw);
 
-  step_minus_timer = new QTimer(this);
-  step_minus_timer->setTimerType(Qt::PreciseTimer);
-  step_minus_timer->setInterval(20);
-  connect(step_minus_timer, &QTimer::timeout, this, &MainWindow::step_minus);
+  step_ccw_timer = new QTimer(this);
+  step_ccw_timer->setTimerType(Qt::PreciseTimer);
+  step_ccw_timer->setInterval(1);
+  connect(step_ccw_timer, &QTimer::timeout, this, &MainWindow::step_ccw);
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
@@ -276,8 +276,8 @@ void MainWindow::setup_ui() {
   single_step_layout->setHorizontalSpacing(8);
   single_step_layout->setVerticalSpacing(6);
 
-  auto single_step_ccw_button = new QPushButton("↺", single_step_widget);
-  auto single_step_cw_button = new QPushButton("↻", single_step_widget);
+  auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
+  auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
   single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   step_interval_edit = new QSpinBox(single_step_widget);
@@ -304,34 +304,39 @@ void MainWindow::setup_ui() {
 
   dock_layout->addWidget(single_step_widget);
 
-  // auto step_degrees_widget = new QWidget(dock);
-  // step_degrees_widget->setContentsMargins(0, 0, 0, 0);
-  // step_degrees_widget->setLayout(new QHBoxLayout(step_degrees_widget));
-  // step_degrees_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  // step_degrees_edit = new QDoubleSpinBox(step_degrees_widget);
-  // step_degrees_edit->setValue(30);
+  auto *multi_step_widget = new QGroupBox("Multi Step", dock_content);
+  auto *multi_step_layout = new QGridLayout(multi_step_widget);
+  multi_step_widget->setLayout(multi_step_layout);
+  multi_step_layout->setContentsMargins(8, 14, 8, 8);
+  multi_step_layout->setHorizontalSpacing(8);
+  multi_step_layout->setVerticalSpacing(6);
 
-  // auto step_degrees_minus_button = new QPushButton("-", step_degrees_widget);
-  // auto step_degrees_plus_button = new QPushButton("+", step_degrees_widget);
-  // step_degrees_widget->layout()->addWidget(step_degrees_edit);
-  // step_degrees_widget->layout()->addWidget(step_degrees_minus_button);
-  // step_degrees_widget->layout()->addWidget(step_degrees_plus_button);
+  auto *multi_steps_count_edit = new QSpinBox(multi_step_widget);
+  multi_steps_count_edit->setRange(1, 65535);
+  multi_steps_count_edit->setValue(1024);
 
-  // connect(step_degrees_minus_button, &QPushButton::clicked, this,
-  //         &MainWindow::on_step_degrees_minus_button_clicked);
+  auto *multi_step_interval_edit = new QSpinBox(multi_step_widget);
+  multi_step_interval_edit->setRange(1, 65535);
+  multi_step_interval_edit->setValue(800);
+  multi_step_interval_edit->setSuffix(" μs");
 
-  // connect(step_degrees_plus_button, &QPushButton::clicked, this,
-  //         &MainWindow::on_step_degrees_plus_button_clicked);
+  auto *multi_step_ccw_button = new QPushButton("↺", multi_step_widget);
+  auto *multi_step_cw_button = new QPushButton("↻", multi_step_widget);
+  multi_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
+  multi_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
 
-  // dock_layout->addWidget(new QLabel("Step by degrees:"), row, 0);
-  // dock_layout->addWidget(step_degrees_widget, row++, 1);
+  multi_step_layout->addWidget(new QLabel("N steps:", multi_step_widget), 0, 0,
+                               1, 1);
+  multi_step_layout->addWidget(multi_steps_count_edit, 0, 1, 1, 2);
+  multi_step_layout->addWidget(new QLabel("Interval:", multi_step_widget), 1, 0,
+                               1, 1);
+  multi_step_layout->addWidget(multi_step_interval_edit, 1, 1, 1, 2);
+  multi_step_layout->addWidget(new QLabel("Step:", multi_step_widget), 2, 0, 1,
+                               1);
+  multi_step_layout->addWidget(multi_step_ccw_button, 2, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_cw_button, 2, 2, 1, 1);
 
-  // record_layout->setRowStretch(row++, 1);
-
-  // auto *h_line = new QFrame(dock_content);
-  // h_line->setFrameShape(QFrame::HLine);
-  // h_line->setFrameShadow(QFrame::Sunken);
-  // dock_layout->addWidget(h_line);
+  dock_layout->addWidget(multi_step_widget);
 
   auto *rotate_widget = new QGroupBox("Display Rotation", dock_content);
   rotate_widget->setLayout(new QHBoxLayout(rotate_widget));
@@ -341,39 +346,39 @@ void MainWindow::setup_ui() {
 
   rotate_widget->layout()->addWidget(new QLabel("Rotate:", rotate_widget));
 
-  auto rotate_control_widget = new QWidget(rotate_widget);
+  auto *rotate_control_widget = new QWidget(rotate_widget);
   rotate_control_widget->setContentsMargins(0, 0, 0, 0);
   rotate_control_widget->setLayout(new QVBoxLayout(rotate_control_widget));
   rotate_control_widget->layout()->setContentsMargins(0, 0, 0, 0);
   rotate_control_widget->layout()->setSpacing(6);
   rotate_widget->layout()->addWidget(rotate_control_widget);
 
-  auto rotate_buttons_widget = new QWidget(rotate_control_widget);
+  auto *rotate_buttons_widget = new QWidget(rotate_control_widget);
   rotate_buttons_widget->setContentsMargins(0, 0, 0, 0);
   rotate_buttons_widget->setLayout(new QHBoxLayout(rotate_buttons_widget));
   rotate_buttons_widget->layout()->setContentsMargins(0, 0, 0, 0);
   rotate_buttons_widget->layout()->setSpacing(6);
   rotate_control_widget->layout()->addWidget(rotate_buttons_widget);
 
-  auto rotate_ccw_button = new QPushButton("↺", rotate_buttons_widget);
+  auto *rotate_ccw_button = new QPushButton("↺", rotate_buttons_widget);
   rotate_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_ccw_button);
   connect(rotate_ccw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto rotate_cw_button = new QPushButton("↻", rotate_buttons_widget);
+  auto *rotate_cw_button = new QPushButton("↻", rotate_buttons_widget);
   rotate_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_cw_button);
   connect(rotate_cw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto reset_rotation_button = new QPushButton("Reset", rotate_buttons_widget);
+  auto *reset_rotation_button = new QPushButton("Reset", rotate_buttons_widget);
   reset_rotation_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(reset_rotation_button);
   connect(reset_rotation_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto rotate_which_widget = new QWidget(rotate_control_widget);
+  auto *rotate_which_widget = new QWidget(rotate_control_widget);
   rotate_which_widget->setContentsMargins(0, 0, 0, 0);
   rotate_which_widget->setLayout(new QHBoxLayout(rotate_which_widget));
   rotate_which_widget->layout()->setContentsMargins(0, 0, 0, 0);
@@ -555,41 +560,39 @@ void MainWindow::on_record_button_clicked() {
 }
 
 void MainWindow::on_single_step_ccw_button_pressed() {
-  step_minus_timer->setInterval(step_interval_edit->value());
-  step_minus_timer->start();
+  step_ccw_timer->setInterval(step_interval_edit->value());
+  step_ccw_timer->start();
 }
 
 void MainWindow::on_single_step_ccw_button_released() {
-  step_minus_timer->stop();
+  step_ccw_timer->stop();
 }
 
 void MainWindow::on_single_step_cw_button_pressed() {
-  step_plus_timer->setInterval(step_interval_edit->value());
-  step_plus_timer->start();
+  step_cw_timer->setInterval(step_interval_edit->value());
+  step_cw_timer->start();
 }
 
-void MainWindow::on_single_step_cw_button_released() {
-  step_plus_timer->stop();
-}
+void MainWindow::on_single_step_cw_button_released() { step_cw_timer->stop(); }
 
-void MainWindow::step_plus() {
+void MainWindow::step_cw() {
   Command cmd{0, 1};
-  serial_port.writeAll(&cmd, sizeof(cmd));
+  serial_port.writeAll(&cmd, sizeof(Command));
 }
 
-void MainWindow::step_minus() {
+void MainWindow::step_ccw() {
   Command cmd{0, -1};
-  serial_port.writeAll(&cmd, sizeof(cmd));
+  serial_port.writeAll(&cmd, sizeof(Command));
 }
 
 void MainWindow::on_step_degrees_minus_button_clicked() {
   Command cmd{1, 4096, 800};
-  serial_port.writeAll(&cmd, sizeof(cmd));
+  serial_port.writeAll(&cmd, sizeof(Command));
 }
 
 void MainWindow::on_step_degrees_plus_button_clicked() {
   Command cmd{1, -4096, 800};
-  serial_port.writeAll(&cmd, sizeof(cmd));
+  serial_port.writeAll(&cmd, sizeof(Command));
 }
 
 void MainWindow::on_fps_value_changed(double value) {
