@@ -203,6 +203,7 @@ private slots:
   void on_single_step_ccw_button_released();
   void on_single_step_cw_button_released();
   void on_multi_step_start_button_clicked();
+  void update_multi_step_info();
 
 private:
   void setup_ui();

@@ -627,6 +627,8 @@ void MainWindow::on_multi_step_start_button_clicked() {
       Command{steps, interval, rest_duration, repeats, init_wait_duration});
 }
 
+void MainWindow::update_multi_step_info() {}
+
 void MainWindow::on_fps_value_changed(double value) {
   if (value > 1e-6) {
     camera_system.set_software_trigger_frequency(value);
