@@ -227,7 +227,8 @@ private:
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
   QSpinBox *single_step_interval_edit;
-  QComboBox *multi_step_direction_combo;
+  QRadioButton *multi_step_cw_button;
+  QRadioButton *multi_step_ccw_button;
   QSpinBox *multi_steps_count_spinbox;
   QSpinBox *multi_step_interval_us_spinbox;
   QSpinBox *multi_step_rest_ms_spinbox;

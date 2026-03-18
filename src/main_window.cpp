@@ -257,7 +257,6 @@ void MainWindow::setup_ui() {
   record_layout->addWidget(video_writer_combo, row++, 1);
 
   record_button = new QPushButton("Start recording", record_widget);
-  record_button->setMinimumHeight(fontMetrics().height() * 2);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
   record_layout->addWidget(record_button, row++, 0, 1, 2);
@@ -266,7 +265,6 @@ void MainWindow::setup_ui() {
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
   status_label->setWordWrap(true);
-  status_label->setMinimumHeight(fontMetrics().height() * 2);
   record_layout->addWidget(status_label, row++, 0, 1, 2);
   record_layout->setColumnStretch(1, 1);
 
@@ -280,8 +278,6 @@ void MainWindow::setup_ui() {
 
   auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
   auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
-  // single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
-  // single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   single_step_interval_edit = new QSpinBox(single_step_widget);
   single_step_interval_edit->setRange(1, 1000);
   single_step_interval_edit->setValue(1);
@@ -316,10 +312,18 @@ void MainWindow::setup_ui() {
   multi_step_info_label = new QLabel(multi_step_widget);
   multi_step_info_label->setAlignment(Qt::AlignCenter);
 
-  multi_step_direction_combo = new QComboBox(multi_step_widget);
-  multi_step_direction_combo->addItem("Clockwise");
-  multi_step_direction_combo->addItem("Counterclockwise");
-  multi_step_direction_combo->setCurrentIndex(0);
+  auto *multi_step_direction_widget = new QWidget(multi_step_widget);
+  auto *multi_step_direction_layout =
+      new QHBoxLayout(multi_step_direction_widget);
+  multi_step_direction_layout->setContentsMargins(0, 0, 0, 0);
+  multi_step_direction_layout->setSpacing(8);
+
+  multi_step_ccw_button = new QRadioButton("↺", multi_step_direction_widget);
+  multi_step_cw_button = new QRadioButton("↻", multi_step_direction_widget);
+  multi_step_cw_button->setChecked(true);
+
+  multi_step_direction_layout->addWidget(multi_step_ccw_button);
+  multi_step_direction_layout->addWidget(multi_step_cw_button);
 
   multi_steps_count_spinbox = new QSpinBox(multi_step_widget);
   multi_steps_count_spinbox->setRange(2, 32767);
@@ -355,7 +359,6 @@ void MainWindow::setup_ui() {
           &MainWindow::update_multi_step_info);
 
   auto *multi_step_start_button = new QPushButton("Start", multi_step_widget);
-  // multi_step_start_button->setMinimumHeight(fontMetrics().height() * 2);
   connect(multi_step_start_button, &QPushButton::clicked, this,
           &MainWindow::on_multi_step_start_button_clicked);
 
@@ -363,7 +366,7 @@ void MainWindow::setup_ui() {
       new QLabel("Initial direction:", multi_step_widget);
   multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
   multi_step_layout->addWidget(multi_step_direction_label, 0, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_direction_combo, 0, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_direction_widget, 0, 1, 1, 1);
 
   auto *multi_step_n_steps_label = new QLabel("Steps:", multi_step_widget);
   multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -423,19 +426,16 @@ void MainWindow::setup_ui() {
   rotate_control_widget->layout()->addWidget(rotate_buttons_widget);
 
   auto *rotate_ccw_button = new QPushButton("↺", rotate_buttons_widget);
-  rotate_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_ccw_button);
   connect(rotate_ccw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
   auto *rotate_cw_button = new QPushButton("↻", rotate_buttons_widget);
-  rotate_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_cw_button);
   connect(rotate_cw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
   auto *reset_rotation_button = new QPushButton("Reset", rotate_buttons_widget);
-  reset_rotation_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(reset_rotation_button);
   connect(reset_rotation_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
@@ -645,7 +645,7 @@ void MainWindow::on_single_step_cw_button_released() {
 
 void MainWindow::on_multi_step_start_button_clicked() {
   int direction =
-      multi_step_direction_combo->currentText() == "Clockwise" ? 1 : -1;
+      multi_step_cw_button && multi_step_cw_button->isChecked() ? 1 : -1;
   int16_t steps =
       static_cast<int16_t>(direction * multi_steps_count_spinbox->value());
   uint16_t interval =
