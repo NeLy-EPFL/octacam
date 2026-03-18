@@ -282,10 +282,10 @@ void MainWindow::setup_ui() {
   auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
   single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
-  step_interval_edit = new QSpinBox(single_step_widget);
-  step_interval_edit->setRange(1, 1000);
-  step_interval_edit->setValue(1);
-  step_interval_edit->setSuffix(" ms");
+  single_step_interval_edit = new QSpinBox(single_step_widget);
+  single_step_interval_edit->setRange(1, 1000);
+  single_step_interval_edit->setValue(1);
+  single_step_interval_edit->setSuffix(" ms");
 
   connect(single_step_ccw_button, &QPushButton::pressed, this,
           &MainWindow::on_single_step_ccw_button_pressed);
@@ -298,7 +298,7 @@ void MainWindow::setup_ui() {
 
   single_step_layout->addWidget(new QLabel("Interval:", single_step_widget), 0,
                                 0, 1, 1);
-  single_step_layout->addWidget(step_interval_edit, 0, 1, 1, 2);
+  single_step_layout->addWidget(single_step_interval_edit, 0, 1, 1, 2);
   single_step_layout->addWidget(new QLabel("Step:", single_step_widget), 1, 0,
                                 1, 1);
   single_step_layout->addWidget(single_step_ccw_button, 1, 1, 1, 1);
@@ -313,17 +313,23 @@ void MainWindow::setup_ui() {
   multi_step_layout->setHorizontalSpacing(8);
   multi_step_layout->setVerticalSpacing(6);
 
-  auto *multi_steps_count_edit = new QSpinBox(multi_step_widget);
+  multi_steps_count_edit = new QSpinBox(multi_step_widget);
   multi_steps_count_edit->setRange(1, 65535);
   multi_steps_count_edit->setValue(1024);
 
-  auto *multi_step_interval_edit = new QSpinBox(multi_step_widget);
-  multi_step_interval_edit->setRange(1, 65535);
+  multi_step_interval_edit = new QSpinBox(multi_step_widget);
+  multi_step_interval_edit->setRange(800, 65535);
   multi_step_interval_edit->setValue(800);
   multi_step_interval_edit->setSuffix(" μs");
 
   auto *multi_step_ccw_button = new QPushButton("↺", multi_step_widget);
   auto *multi_step_cw_button = new QPushButton("↻", multi_step_widget);
+
+  connect(multi_step_ccw_button, &QPushButton::clicked, this,
+          &MainWindow::on_multi_step_ccw_button_clicked);
+  connect(multi_step_cw_button, &QPushButton::clicked, this,
+          &MainWindow::on_multi_step_cw_button_clicked);
+
   multi_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   multi_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
 
@@ -562,7 +568,7 @@ void MainWindow::on_record_button_clicked() {
 }
 
 void MainWindow::on_single_step_ccw_button_pressed() {
-  step_ccw_timer->setInterval(step_interval_edit->value());
+  step_ccw_timer->setInterval(single_step_interval_edit->value());
   step_ccw_timer->start();
 }
 
@@ -571,19 +577,23 @@ void MainWindow::on_single_step_ccw_button_released() {
 }
 
 void MainWindow::on_single_step_cw_button_pressed() {
-  step_cw_timer->setInterval(step_interval_edit->value());
+  step_cw_timer->setInterval(single_step_interval_edit->value());
   step_cw_timer->start();
 }
 
+void MainWindow::on_multi_step_ccw_button_clicked() {
+  int16_t steps = static_cast<int16_t>(-multi_steps_count_edit->value());
+  uint16_t interval = static_cast<uint16_t>(multi_step_interval_edit->value());
+  serial_port.writeAll(Command{1, steps, interval});
+}
+
+void MainWindow::on_multi_step_cw_button_clicked() {
+  int16_t steps = static_cast<int16_t>(multi_steps_count_edit->value());
+  uint16_t interval = static_cast<uint16_t>(multi_step_interval_edit->value());
+  serial_port.writeAll(Command{1, steps, interval});
+}
+
 void MainWindow::on_single_step_cw_button_released() { step_cw_timer->stop(); }
-
-void MainWindow::on_step_degrees_minus_button_clicked() {
-  serial_port.writeAll(Command{1, 4096, 800});
-}
-
-void MainWindow::on_step_degrees_plus_button_clicked() {
-  serial_port.writeAll(Command{1, -4096, 800});
-}
 
 void MainWindow::on_fps_value_changed(double value) {
   if (value > 1e-6) {
