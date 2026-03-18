@@ -235,8 +235,8 @@ private:
   QSpinBox *multi_step_repeats_spinbox;
   QSpinBox *multi_step_init_wait_s_spinbox;
   QLabel *multi_step_info_label;
-  QRadioButton *rotate_selected_button;
-  QRadioButton *rotate_all_button;
+  QRadioButton *transform_selected_button;
+  QRadioButton *transform_all_button;
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
   QDoubleSpinBox *step_degrees_edit;

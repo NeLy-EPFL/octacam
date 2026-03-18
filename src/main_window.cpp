@@ -27,6 +27,7 @@
 #include <QRadioButton>
 #include <QResizeEvent>
 #include <QSizePolicy>
+#include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QTransform>
@@ -186,7 +187,6 @@ void MainWindow::setup_ui() {
   dock->setMinimumWidth(cfg.dock_min_width);
   dock->setMaximumWidth(cfg.dock_max_width);
   dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
-  // dock->setWindowTitle("Controls");
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
   auto *dock_content = new QWidget(dock);
@@ -194,92 +194,186 @@ void MainWindow::setup_ui() {
 
   auto *dock_layout = new QVBoxLayout(dock_content);
   dock_layout->setContentsMargins(0, 0, 0, 0);
-  dock_layout->setSpacing(10);
+  dock_layout->setSpacing(0);
   dock_content->setLayout(dock_layout);
+
+  auto *tabs = new QTabWidget(dock_content);
+  dock_layout->addWidget(tabs);
 
   int margin = 4;
 
-  auto *record_widget = new QGroupBox("Recording", dock_content);
-  auto *record_layout = new QGridLayout(record_widget);
+  auto *record_tab = new QWidget(tabs);
+  auto *record_layout = new QGridLayout(record_tab);
   record_layout->setContentsMargins(margin, margin, margin, margin);
   record_layout->setHorizontalSpacing(8);
   record_layout->setVerticalSpacing(6);
-  record_widget->setLayout(record_layout);
+  record_tab->setLayout(record_layout);
 
   int row = 0;
 
-  auto *duration_label = new QLabel("Duration:", record_widget);
-  duration_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  record_layout->addWidget(duration_label, row, 0);
+  auto *duration_label = new QLabel("Duration:", record_tab);
+  duration_label->setAlignment(Qt::AlignRight);
+  record_layout->addWidget(duration_label, row, 0, 1, 1);
   duration_input = new DurationInput(
       cfg.duration_default, cfg.duration_min, cfg.duration_max,
-      cfg.duration_unit_default_index, record_widget);
-  record_layout->addWidget(duration_input, row++, 1);
+      cfg.duration_unit_default_index, record_tab);
+  record_layout->addWidget(duration_input, row++, 1, 1, 1);
+  duration_input->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 
-  auto *fps_label = new QLabel("FPS:", record_widget);
-  fps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  record_layout->addWidget(fps_label, row, 0);
-  fps_edit = new QDoubleSpinBox(record_widget);
+  auto *fps_label = new QLabel("FPS:", record_tab);
+  fps_label->setAlignment(Qt::AlignRight);
+  record_layout->addWidget(fps_label, row, 0, 1, 1);
+  fps_edit = new QDoubleSpinBox(record_tab);
   fps_edit->setRange(cfg.fps_min, cfg.fps_max);
   fps_edit->setValue(cfg.fps_default);
   fps_edit->setDecimals(2);
   fps_edit->setSingleStep(1.0);
   connect(fps_edit, &QDoubleSpinBox::valueChanged, this,
           &MainWindow::on_fps_value_changed);
-  record_layout->addWidget(fps_edit, row++, 1);
+  record_layout->addWidget(fps_edit, row++, 1, 1, 1);
 
-  auto *save_dir_label = new QLabel("Save directory:", record_widget);
-  save_dir_label->setAlignment(Qt::AlignRight | Qt::AlignTop);
-  record_layout->addWidget(save_dir_label, row, 0);
-  save_dir_edit = new DirectoryEdit(cfg.save_directory_default, record_widget);
-  save_dir_edit->setMinimumHeight(fontMetrics().height() *
-                                  cfg.save_dir_edit_height_factor);
-  save_dir_edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-  record_layout->addWidget(save_dir_edit, row++, 1);
+  auto *save_dir_label = new QLabel("Save directory:", record_tab);
+  save_dir_label->setAlignment(Qt::AlignRight);
+  record_layout->addWidget(save_dir_label, row, 0, 1, 1);
+  save_dir_edit = new DirectoryEdit(cfg.save_directory_default, record_tab);
+  save_dir_edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  save_dir_edit->setFixedHeight(fontMetrics().height() *
+                                cfg.save_dir_edit_height_factor);
+  record_layout->addWidget(save_dir_edit, row++, 1, 1, 1);
 
-  auto *trigger_source_label = new QLabel("Trigger source:", record_widget);
-  trigger_source_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  record_layout->addWidget(trigger_source_label, row, 0);
-  trigger_source_combo = new QComboBox(record_widget);
+  auto *trigger_source_label = new QLabel("Trigger source:", record_tab);
+  trigger_source_label->setAlignment(Qt::AlignRight);
+  record_layout->addWidget(trigger_source_label, row, 0, 1, 1);
+  trigger_source_combo = new QComboBox(record_tab);
   trigger_source_combo->addItem("software");
   trigger_source_combo->addItem("external");
   trigger_source_combo->setCurrentIndex(cfg.trigger_source_default_index);
+  record_layout->addWidget(trigger_source_combo, row++, 1, 1, 1);
 
-  record_layout->addWidget(trigger_source_combo, row++, 1);
-
-  auto *video_writer_label = new QLabel("Video writer:", record_widget);
-  video_writer_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  record_layout->addWidget(video_writer_label, row, 0);
-  video_writer_combo = new QComboBox(record_widget);
+  auto *video_writer_label = new QLabel("Video writer:", record_tab);
+  video_writer_label->setAlignment(Qt::AlignRight);
+  record_layout->addWidget(video_writer_label, row, 0, 1, 1);
+  video_writer_combo = new QComboBox(record_tab);
   video_writer_combo->addItem("opencv MJPG avi");
   video_writer_combo->addItem("opencv avc1 mp4");
   video_writer_combo->setCurrentIndex(cfg.video_writer_default_index);
-  record_layout->addWidget(video_writer_combo, row++, 1);
+  record_layout->addWidget(video_writer_combo, row++, 1, 1, 1);
 
-  record_button = new QPushButton("Start recording", record_widget);
+  record_button = new QPushButton("Start recording", record_tab);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
   record_layout->addWidget(record_button, row++, 0, 1, 2);
 
-  status_label = new QLabel(record_widget);
+  status_label = new QLabel(record_tab);
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
   status_label->setWordWrap(true);
   record_layout->addWidget(status_label, row++, 0, 1, 2);
-  record_layout->setColumnStretch(1, 1);
-
-  dock_layout->addWidget(record_widget);
+  tabs->addTab(record_tab, "Record");
 
   if (serial_port.is_open()) {
-    auto *single_step_widget = new QGroupBox("Single Step", dock_content);
+    auto *arduino_tab = new QWidget(tabs);
+    auto *arduino_layout = new QGridLayout(arduino_tab);
+    // arduino_layout->setContentsMargins(margin, margin, margin, margin);
+    // arduino_layout->setSpacing(8);
+    arduino_tab->setLayout(arduino_layout);
 
-    auto single_step_layout = new QHBoxLayout(single_step_widget);
-    single_step_widget->setLayout(single_step_layout);
-    single_step_layout->setContentsMargins(margin, margin, margin, margin);
+    auto *step_title = new QLabel("Loop", arduino_tab);
+    step_title->setAlignment(Qt::AlignCenter);
+    arduino_layout->addWidget(step_title, 0, 0, 1, 3);
 
-    auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
-    auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
-    single_step_interval_edit = new QSpinBox(single_step_widget);
+    multi_step_info_label = new QLabel(arduino_tab);
+    multi_step_info_label->setAlignment(Qt::AlignCenter);
+
+    multi_step_ccw_button = new QRadioButton("↺", arduino_tab);
+    multi_step_cw_button = new QRadioButton("↻", arduino_tab);
+    multi_step_ccw_button->setChecked(true);
+
+    multi_steps_count_spinbox = new QSpinBox(arduino_tab);
+    multi_steps_count_spinbox->setRange(2, 32767);
+    multi_steps_count_spinbox->setValue(4096);
+    connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
+
+    multi_step_interval_us_spinbox = new QSpinBox(arduino_tab);
+    multi_step_interval_us_spinbox->setRange(800, 65535);
+    multi_step_interval_us_spinbox->setValue(800);
+    multi_step_interval_us_spinbox->setSuffix(" μs");
+    connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
+
+    multi_step_rest_ms_spinbox = new QSpinBox(arduino_tab);
+    multi_step_rest_ms_spinbox->setRange(0, 65535);
+    multi_step_rest_ms_spinbox->setValue(500);
+    multi_step_rest_ms_spinbox->setSuffix(" ms");
+    connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
+
+    multi_step_repeats_spinbox = new QSpinBox(arduino_tab);
+    multi_step_repeats_spinbox->setRange(1, 255);
+    multi_step_repeats_spinbox->setValue(1);
+    connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
+
+    multi_step_init_wait_s_spinbox = new QSpinBox(arduino_tab);
+    multi_step_init_wait_s_spinbox->setRange(0, 255);
+    multi_step_init_wait_s_spinbox->setValue(0);
+    multi_step_init_wait_s_spinbox->setSuffix(" s");
+    connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
+
+    auto *multi_step_execute_button = new QPushButton("Execute", arduino_tab);
+    connect(multi_step_execute_button, &QPushButton::clicked, this,
+            &MainWindow::on_multi_step_execute_button_clicked);
+
+    auto *multi_step_direction_label =
+        new QLabel("Initial direction:", arduino_tab);
+    multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_direction_label, 1, 0, 1, 1);
+    arduino_layout->addWidget(multi_step_ccw_button, 1, 1, 1, 1);
+    arduino_layout->addWidget(multi_step_cw_button, 1, 2, 1, 1);
+
+    auto *multi_step_n_steps_label = new QLabel("Steps:", arduino_tab);
+    multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_n_steps_label, 2, 0, 1, 1);
+    arduino_layout->addWidget(multi_steps_count_spinbox, 2, 1, 1, 2);
+
+    auto *multi_step_interval_label = new QLabel("Step interval:", arduino_tab);
+    multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_interval_label, 3, 0, 1, 1);
+    arduino_layout->addWidget(multi_step_interval_us_spinbox, 3, 1, 1, 2);
+
+    auto *multi_step_rest_duration_label =
+        new QLabel("Rest duration:", arduino_tab);
+    multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
+                                                 Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_rest_duration_label, 4, 0, 1, 1);
+    arduino_layout->addWidget(multi_step_rest_ms_spinbox, 4, 1, 1, 2);
+
+    auto *multi_step_repeats_label = new QLabel("Repeats:", arduino_tab);
+    multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_repeats_label, 5, 0, 1, 1);
+    arduino_layout->addWidget(multi_step_repeats_spinbox, 5, 1, 1, 2);
+
+    auto *multi_step_init_wait_duration_label =
+        new QLabel("Initial wait:", arduino_tab);
+    multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
+                                                      Qt::AlignVCenter);
+    arduino_layout->addWidget(multi_step_init_wait_duration_label, 6, 0, 1, 1);
+    arduino_layout->addWidget(multi_step_init_wait_s_spinbox, 6, 1, 1, 2);
+
+    arduino_layout->addWidget(multi_step_info_label, 7, 0, 1, 3);
+    arduino_layout->addWidget(multi_step_execute_button, 8, 0, 1, 3);
+
+    arduino_layout->setRowStretch(9, 1);
+
+    auto *single_step_title = new QLabel("Adjust position", arduino_tab);
+    single_step_title->setAlignment(Qt::AlignCenter);
+    arduino_layout->addWidget(single_step_title, 10, 0, 1, 3);
+
+    auto *single_step_ccw_button = new QPushButton("↺", arduino_tab);
+    auto *single_step_cw_button = new QPushButton("↻", arduino_tab);
+    single_step_interval_edit = new QSpinBox(arduino_tab);
     single_step_interval_edit->setRange(1, 1000);
     single_step_interval_edit->setValue(1);
     single_step_interval_edit->setSuffix(" ms");
@@ -293,175 +387,58 @@ void MainWindow::setup_ui() {
     connect(single_step_cw_button, &QPushButton::released, this,
             &MainWindow::on_single_step_cw_button_released);
 
-    auto *single_step_interval_label =
-        new QLabel("Interval:", single_step_widget);
-    single_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    single_step_layout->addWidget(single_step_interval_label);
-    single_step_layout->addWidget(single_step_interval_edit);
-    single_step_layout->addWidget(single_step_ccw_button);
-    single_step_layout->addWidget(single_step_cw_button);
+    auto *single_step_interval_label = new QLabel("Interval:", arduino_tab);
+    single_step_interval_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(single_step_interval_label, 11, 0, 1, 1);
+    arduino_layout->addWidget(single_step_interval_edit, 11, 1, 1, 2);
 
-    dock_layout->addWidget(single_step_widget);
+    auto *single_step_direction_label = new QLabel("Direction:", arduino_tab);
+    single_step_direction_label->setAlignment(Qt::AlignRight);
+    arduino_layout->addWidget(single_step_direction_label, 12, 0, 1, 1);
+    arduino_layout->addWidget(single_step_ccw_button, 12, 1, 1, 1);
+    arduino_layout->addWidget(single_step_cw_button, 12, 2, 1, 1);
 
-    auto *multi_step_widget = new QGroupBox("Multi Step", dock_content);
-    auto *multi_step_layout = new QGridLayout(multi_step_widget);
-    multi_step_widget->setLayout(multi_step_layout);
-    multi_step_layout->setContentsMargins(margin, margin, margin, margin);
-    multi_step_layout->setHorizontalSpacing(8);
-    multi_step_layout->setVerticalSpacing(6);
-
-    multi_step_info_label = new QLabel(multi_step_widget);
-    multi_step_info_label->setAlignment(Qt::AlignCenter);
-
-    auto *multi_step_direction_widget = new QWidget(multi_step_widget);
-    auto *multi_step_direction_layout =
-        new QHBoxLayout(multi_step_direction_widget);
-    multi_step_direction_layout->setContentsMargins(0, 0, 0, 0);
-    multi_step_direction_layout->setSpacing(8);
-
-    multi_step_ccw_button = new QRadioButton("↺", multi_step_direction_widget);
-    multi_step_cw_button = new QRadioButton("↻", multi_step_direction_widget);
-    multi_step_ccw_button->setChecked(true);
-
-    multi_step_direction_layout->addWidget(multi_step_ccw_button);
-    multi_step_direction_layout->addWidget(multi_step_cw_button);
-
-    multi_steps_count_spinbox = new QSpinBox(multi_step_widget);
-    multi_steps_count_spinbox->setRange(2, 32767);
-    multi_steps_count_spinbox->setValue(4096);
-    connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
-
-    multi_step_interval_us_spinbox = new QSpinBox(multi_step_widget);
-    multi_step_interval_us_spinbox->setRange(800, 65535);
-    multi_step_interval_us_spinbox->setValue(800);
-    multi_step_interval_us_spinbox->setSuffix(" μs");
-    connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
-
-    multi_step_rest_ms_spinbox = new QSpinBox(multi_step_widget);
-    multi_step_rest_ms_spinbox->setRange(0, 65535);
-    multi_step_rest_ms_spinbox->setValue(500);
-    multi_step_rest_ms_spinbox->setSuffix(" ms");
-    connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
-
-    multi_step_repeats_spinbox = new QSpinBox(multi_step_widget);
-    multi_step_repeats_spinbox->setRange(1, 255);
-    multi_step_repeats_spinbox->setValue(1);
-    connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
-
-    multi_step_init_wait_s_spinbox = new QSpinBox(multi_step_widget);
-    multi_step_init_wait_s_spinbox->setRange(0, 255);
-    multi_step_init_wait_s_spinbox->setValue(0);
-    multi_step_init_wait_s_spinbox->setSuffix(" s");
-    connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
-            &MainWindow::update_multi_step_info);
-
-    auto *multi_step_execute_button =
-        new QPushButton("Execute", multi_step_widget);
-    connect(multi_step_execute_button, &QPushButton::clicked, this,
-            &MainWindow::on_multi_step_execute_button_clicked);
-
-    auto *multi_step_direction_label =
-        new QLabel("Initial direction:", multi_step_widget);
-    multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_direction_label, 0, 0, 1, 1);
-    multi_step_layout->addWidget(multi_step_direction_widget, 0, 1, 1, 1);
-
-    auto *multi_step_n_steps_label = new QLabel("Steps:", multi_step_widget);
-    multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_n_steps_label, 1, 0, 1, 1);
-    multi_step_layout->addWidget(multi_steps_count_spinbox, 1, 1, 1, 1);
-
-    auto *multi_step_interval_label =
-        new QLabel("Step interval:", multi_step_widget);
-    multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_interval_label, 2, 0, 1, 1);
-    multi_step_layout->addWidget(multi_step_interval_us_spinbox, 2, 1, 1, 1);
-
-    auto *multi_step_rest_duration_label =
-        new QLabel("Rest duration:", multi_step_widget);
-    multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
-                                                 Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_rest_duration_label, 3, 0, 1, 1);
-    multi_step_layout->addWidget(multi_step_rest_ms_spinbox, 3, 1, 1, 1);
-
-    auto *multi_step_repeats_label = new QLabel("Repeats:", multi_step_widget);
-    multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_repeats_label, 4, 0, 1, 1);
-    multi_step_layout->addWidget(multi_step_repeats_spinbox, 4, 1, 1, 1);
-
-    auto *multi_step_init_wait_duration_label =
-        new QLabel("Initial wait:", multi_step_widget);
-    multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
-                                                      Qt::AlignVCenter);
-    multi_step_layout->addWidget(multi_step_init_wait_duration_label, 5, 0, 1,
-                                 1);
-    multi_step_layout->addWidget(multi_step_init_wait_s_spinbox, 5, 1, 1, 1);
-
-    multi_step_layout->addWidget(multi_step_info_label, 6, 0, 1, 2);
-    multi_step_layout->addWidget(multi_step_execute_button, 7, 0, 1, 2);
-
-    dock_layout->addWidget(multi_step_widget);
+    tabs->addTab(arduino_tab, "Arduino");
 
     update_multi_step_info();
   }
 
-  auto *rotate_widget = new QGroupBox("Display Rotation", dock_content);
-  rotate_widget->setLayout(new QHBoxLayout(rotate_widget));
-  rotate_widget->layout()->setContentsMargins(8, 14, 8, 8);
-  rotate_widget->layout()->setSpacing(8);
-  dock_layout->addWidget(rotate_widget);
+  auto *view_tab = new QWidget(tabs);
+  auto *view_layout = new QGridLayout(view_tab);
+  view_layout->setContentsMargins(margin, margin, margin, margin);
+  view_layout->setSpacing(8);
+  view_tab->setLayout(view_layout);
 
-  rotate_widget->layout()->addWidget(new QLabel("Rotate:", rotate_widget));
+  view_layout->addWidget(new QLabel("Apply to:", view_tab), 0, 0, 1, 1);
 
-  auto *rotate_control_widget = new QWidget(rotate_widget);
-  rotate_control_widget->setContentsMargins(0, 0, 0, 0);
-  rotate_control_widget->setLayout(new QVBoxLayout(rotate_control_widget));
-  rotate_control_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  rotate_control_widget->layout()->setSpacing(6);
-  rotate_widget->layout()->addWidget(rotate_control_widget);
+  transform_selected_button = new QRadioButton("Selected", view_tab);
+  view_layout->addWidget(transform_selected_button, 0, 1, 1, 1);
 
-  auto *rotate_buttons_widget = new QWidget(rotate_control_widget);
-  rotate_buttons_widget->setContentsMargins(0, 0, 0, 0);
-  rotate_buttons_widget->setLayout(new QHBoxLayout(rotate_buttons_widget));
-  rotate_buttons_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  rotate_buttons_widget->layout()->setSpacing(6);
-  rotate_control_widget->layout()->addWidget(rotate_buttons_widget);
+  transform_all_button = new QRadioButton("All", view_tab);
+  view_layout->addWidget(transform_all_button, 0, 2, 1, 1);
 
-  auto *rotate_ccw_button = new QPushButton("↺", rotate_buttons_widget);
-  rotate_buttons_widget->layout()->addWidget(rotate_ccw_button);
+  transform_all_button->setChecked(true);
+
+  view_layout->addWidget(new QLabel("Rotate:", view_tab), 1, 0, 1, 1);
+
+  auto *rotate_ccw_button = new QPushButton("↺", view_tab);
+  view_layout->addWidget(rotate_ccw_button, 1, 1, 1, 1);
   connect(rotate_ccw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto *rotate_cw_button = new QPushButton("↻", rotate_buttons_widget);
-  rotate_buttons_widget->layout()->addWidget(rotate_cw_button);
+  auto *rotate_cw_button = new QPushButton("↻", view_tab);
+  view_layout->addWidget(rotate_cw_button, 1, 2, 1, 1);
   connect(rotate_cw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto *reset_rotation_button = new QPushButton("Reset", rotate_buttons_widget);
-  rotate_buttons_widget->layout()->addWidget(reset_rotation_button);
-  connect(reset_rotation_button, &QPushButton::clicked, this,
+  auto *reset_transformation = new QPushButton("Reset", view_tab);
+  view_layout->addWidget(reset_transformation, 2, 0, 1, 3);
+  connect(reset_transformation, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto *rotate_which_widget = new QWidget(rotate_control_widget);
-  rotate_which_widget->setContentsMargins(0, 0, 0, 0);
-  rotate_which_widget->setLayout(new QHBoxLayout(rotate_which_widget));
-  rotate_which_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  rotate_which_widget->layout()->setSpacing(8);
-  rotate_control_widget->layout()->addWidget(rotate_which_widget);
+  view_layout->setRowStretch(3, 1);
 
-  rotate_selected_button = new QRadioButton("Selected", rotate_which_widget);
-  rotate_which_widget->layout()->addWidget(rotate_selected_button);
-
-  rotate_all_button = new QRadioButton("All", rotate_which_widget);
-  rotate_which_widget->layout()->addWidget(rotate_all_button);
-
-  rotate_all_button->setChecked(true);
-
-  dock_layout->addStretch(1);
+  tabs->addTab(view_tab, "View");
 
   input_widgets.push_back(duration_input);
   input_widgets.push_back(fps_edit);
@@ -490,7 +467,7 @@ void MainWindow::rotate_displays() {
     return;
   }
 
-  if (rotate_all_button->isChecked()) {
+  if (transform_all_button->isChecked()) {
     for (auto *pixmap_item : pixmap_items) {
       if (!pixmap_item)
         continue;
