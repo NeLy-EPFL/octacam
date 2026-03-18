@@ -186,20 +186,22 @@ void MainWindow::setup_ui() {
   dock->setMinimumWidth(cfg.dock_min_width);
   dock->setMaximumWidth(cfg.dock_max_width);
   dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
-  dock->setWindowTitle("Controls");
+  // dock->setWindowTitle("Controls");
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
   auto *dock_content = new QWidget(dock);
   dock->setWidget(dock_content);
 
   auto *dock_layout = new QVBoxLayout(dock_content);
-  dock_layout->setContentsMargins(10, 10, 10, 10);
+  dock_layout->setContentsMargins(0, 0, 0, 0);
   dock_layout->setSpacing(10);
   dock_content->setLayout(dock_layout);
 
+  int margin = 4;
+
   auto *record_widget = new QGroupBox("Recording", dock_content);
   auto *record_layout = new QGridLayout(record_widget);
-  record_layout->setContentsMargins(8, 10, 8, 8);
+  record_layout->setContentsMargins(margin, margin, margin, margin);
   record_layout->setHorizontalSpacing(8);
   record_layout->setVerticalSpacing(6);
   record_widget->setLayout(record_layout);
@@ -272,16 +274,14 @@ void MainWindow::setup_ui() {
 
   auto *single_step_widget = new QGroupBox("Single Step", dock_content);
 
-  auto single_step_layout = new QGridLayout(single_step_widget);
+  auto single_step_layout = new QHBoxLayout(single_step_widget);
   single_step_widget->setLayout(single_step_layout);
-  single_step_layout->setContentsMargins(8, 14, 8, 8);
-  single_step_layout->setHorizontalSpacing(8);
-  single_step_layout->setVerticalSpacing(6);
+  single_step_layout->setContentsMargins(margin, margin, margin, margin);
 
   auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
   auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
-  single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
-  single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
+  // single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
+  // single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   single_step_interval_edit = new QSpinBox(single_step_widget);
   single_step_interval_edit->setRange(1, 1000);
   single_step_interval_edit->setValue(1);
@@ -296,20 +296,17 @@ void MainWindow::setup_ui() {
   connect(single_step_cw_button, &QPushButton::released, this,
           &MainWindow::on_single_step_cw_button_released);
 
-  single_step_layout->addWidget(new QLabel("Interval:", single_step_widget), 0,
-                                0, 1, 1);
-  single_step_layout->addWidget(single_step_interval_edit, 0, 1, 1, 2);
-  single_step_layout->addWidget(new QLabel("Step:", single_step_widget), 1, 0,
-                                1, 1);
-  single_step_layout->addWidget(single_step_ccw_button, 1, 1, 1, 1);
-  single_step_layout->addWidget(single_step_cw_button, 1, 2, 1, 1);
+  single_step_layout->addWidget(new QLabel("Interval:", single_step_widget));
+  single_step_layout->addWidget(single_step_interval_edit);
+  single_step_layout->addWidget(single_step_ccw_button);
+  single_step_layout->addWidget(single_step_cw_button);
 
   dock_layout->addWidget(single_step_widget);
 
   auto *multi_step_widget = new QGroupBox("Multi Step", dock_content);
   auto *multi_step_layout = new QGridLayout(multi_step_widget);
   multi_step_widget->setLayout(multi_step_layout);
-  multi_step_layout->setContentsMargins(8, 14, 8, 8);
+  multi_step_layout->setContentsMargins(margin, margin, margin, margin);
   multi_step_layout->setHorizontalSpacing(8);
   multi_step_layout->setVerticalSpacing(6);
 
