@@ -315,7 +315,7 @@ void MainWindow::setup_ui() {
 
   multi_steps_count_edit = new QSpinBox(multi_step_widget);
   multi_steps_count_edit->setRange(-32767, 32767);
-  multi_steps_count_edit->setValue(1024);
+  multi_steps_count_edit->setValue(4096);
 
   multi_step_interval_edit = new QSpinBox(multi_step_widget);
   multi_step_interval_edit->setRange(800, 65535);
@@ -324,7 +324,7 @@ void MainWindow::setup_ui() {
 
   multi_step_rest_duration_edit = new QSpinBox(multi_step_widget);
   multi_step_rest_duration_edit->setRange(0, 65535);
-  multi_step_rest_duration_edit->setValue(0);
+  multi_step_rest_duration_edit->setValue(500);
   multi_step_rest_duration_edit->setSuffix(" ms");
 
   multi_step_repeats_edit = new QSpinBox(multi_step_widget);
