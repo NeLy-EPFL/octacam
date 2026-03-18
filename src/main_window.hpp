@@ -227,11 +227,13 @@ private:
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
   QSpinBox *single_step_interval_edit;
-  QSpinBox *multi_steps_count_edit;
-  QSpinBox *multi_step_interval_edit;
-  QSpinBox *multi_step_rest_duration_edit;
-  QSpinBox *multi_step_repeats_edit;
-  QSpinBox *multi_step_init_wait_duration_edit;
+  QComboBox *multi_step_direction_combo;
+  QSpinBox *multi_steps_count_spinbox;
+  QSpinBox *multi_step_interval_us_spinbox;
+  QSpinBox *multi_step_rest_ms_spinbox;
+  QSpinBox *multi_step_repeats_spinbox;
+  QSpinBox *multi_step_init_wait_s_spinbox;
+  QLabel *multi_step_info_label;
   QRadioButton *rotate_selected_button;
   QRadioButton *rotate_all_button;
   std::chrono::milliseconds record_remaining_time_;

@@ -313,64 +313,90 @@ void MainWindow::setup_ui() {
   multi_step_layout->setHorizontalSpacing(8);
   multi_step_layout->setVerticalSpacing(6);
 
-  multi_steps_count_edit = new QSpinBox(multi_step_widget);
-  multi_steps_count_edit->setRange(-32767, 32767);
-  multi_steps_count_edit->setValue(4096);
+  multi_step_info_label = new QLabel(multi_step_widget);
+  multi_step_info_label->setAlignment(Qt::AlignCenter);
 
-  multi_step_interval_edit = new QSpinBox(multi_step_widget);
-  multi_step_interval_edit->setRange(800, 65535);
-  multi_step_interval_edit->setValue(800);
-  multi_step_interval_edit->setSuffix(" μs");
+  multi_step_direction_combo = new QComboBox(multi_step_widget);
+  multi_step_direction_combo->addItem("Clockwise");
+  multi_step_direction_combo->addItem("Counterclockwise");
+  multi_step_direction_combo->setCurrentIndex(0);
 
-  multi_step_rest_duration_edit = new QSpinBox(multi_step_widget);
-  multi_step_rest_duration_edit->setRange(0, 65535);
-  multi_step_rest_duration_edit->setValue(500);
-  multi_step_rest_duration_edit->setSuffix(" ms");
+  multi_steps_count_spinbox = new QSpinBox(multi_step_widget);
+  multi_steps_count_spinbox->setRange(2, 32767);
+  multi_steps_count_spinbox->setValue(4096);
+  connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
+          &MainWindow::update_multi_step_info);
 
-  multi_step_repeats_edit = new QSpinBox(multi_step_widget);
-  multi_step_repeats_edit->setRange(1, 255);
-  multi_step_repeats_edit->setValue(1);
+  multi_step_interval_us_spinbox = new QSpinBox(multi_step_widget);
+  multi_step_interval_us_spinbox->setRange(800, 65535);
+  multi_step_interval_us_spinbox->setValue(800);
+  multi_step_interval_us_spinbox->setSuffix(" μs");
+  connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
+          &MainWindow::update_multi_step_info);
 
-  multi_step_init_wait_duration_edit = new QSpinBox(multi_step_widget);
-  multi_step_init_wait_duration_edit->setRange(0, 255);
-  multi_step_init_wait_duration_edit->setValue(0);
-  multi_step_init_wait_duration_edit->setSuffix(" s");
+  multi_step_rest_ms_spinbox = new QSpinBox(multi_step_widget);
+  multi_step_rest_ms_spinbox->setRange(0, 65535);
+  multi_step_rest_ms_spinbox->setValue(500);
+  multi_step_rest_ms_spinbox->setSuffix(" ms");
+  connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
+          &MainWindow::update_multi_step_info);
+
+  multi_step_repeats_spinbox = new QSpinBox(multi_step_widget);
+  multi_step_repeats_spinbox->setRange(1, 255);
+  multi_step_repeats_spinbox->setValue(1);
+  connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
+          &MainWindow::update_multi_step_info);
+
+  multi_step_init_wait_s_spinbox = new QSpinBox(multi_step_widget);
+  multi_step_init_wait_s_spinbox->setRange(0, 255);
+  multi_step_init_wait_s_spinbox->setValue(0);
+  multi_step_init_wait_s_spinbox->setSuffix(" s");
+  connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
+          &MainWindow::update_multi_step_info);
 
   auto *multi_step_start_button = new QPushButton("Start", multi_step_widget);
-
+  // multi_step_start_button->setMinimumHeight(fontMetrics().height() * 2);
   connect(multi_step_start_button, &QPushButton::clicked, this,
           &MainWindow::on_multi_step_start_button_clicked);
 
-  multi_step_start_button->setMinimumHeight(fontMetrics().height() * 2);
+  auto *multi_step_direction_label =
+      new QLabel("Initial direction:", multi_step_widget);
+  multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  multi_step_layout->addWidget(multi_step_direction_label, 0, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_direction_combo, 0, 1, 1, 1);
 
   auto *multi_step_n_steps_label = new QLabel("Steps:", multi_step_widget);
   multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_n_steps_label, 0, 0, 1, 1);
-  multi_step_layout->addWidget(multi_steps_count_edit, 0, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_n_steps_label, 1, 0, 1, 1);
+  multi_step_layout->addWidget(multi_steps_count_spinbox, 1, 1, 1, 1);
+
   auto *multi_step_interval_label =
       new QLabel("Step interval:", multi_step_widget);
   multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_interval_label, 1, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_interval_edit, 1, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_interval_label, 2, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_interval_us_spinbox, 2, 1, 1, 1);
+
   auto *multi_step_rest_duration_label =
       new QLabel("Rest duration:", multi_step_widget);
   multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
                                                Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_rest_duration_label, 2, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_rest_duration_edit, 2, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_rest_duration_label, 3, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_rest_ms_spinbox, 3, 1, 1, 1);
+
   auto *multi_step_repeats_label = new QLabel("Repeats:", multi_step_widget);
   multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_repeats_label, 3, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_repeats_edit, 3, 1, 1, 1);
+  multi_step_layout->addWidget(multi_step_repeats_label, 4, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_repeats_spinbox, 4, 1, 1, 1);
+
   auto *multi_step_init_wait_duration_label =
       new QLabel("Initial wait:", multi_step_widget);
   multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
                                                     Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_init_wait_duration_label, 4, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_init_wait_duration_edit, 4, 1, 1, 1);
-  multi_step_layout->addWidget(multi_step_start_button, 5, 0, 1, 2);
+  multi_step_layout->addWidget(multi_step_init_wait_duration_label, 5, 0, 1, 1);
+  multi_step_layout->addWidget(multi_step_init_wait_s_spinbox, 5, 1, 1, 1);
 
-  // multi_step_layout->setColumnStretch(2, 3);
+  multi_step_layout->addWidget(multi_step_info_label, 6, 0, 1, 2);
+  multi_step_layout->addWidget(multi_step_start_button, 7, 0, 1, 2);
 
   dock_layout->addWidget(multi_step_widget);
 
@@ -436,6 +462,8 @@ void MainWindow::setup_ui() {
   input_widgets.push_back(save_dir_edit);
   input_widgets.push_back(trigger_source_combo);
   input_widgets.push_back(video_writer_combo);
+
+  update_multi_step_info();
 }
 
 void MainWindow::rotate_displays() {
@@ -616,18 +644,44 @@ void MainWindow::on_single_step_cw_button_released() {
 }
 
 void MainWindow::on_multi_step_start_button_clicked() {
-  int16_t steps = static_cast<int16_t>(multi_steps_count_edit->value());
-  uint16_t interval = static_cast<uint16_t>(multi_step_interval_edit->value());
+  int direction =
+      multi_step_direction_combo->currentText() == "Clockwise" ? 1 : -1;
+  int16_t steps =
+      static_cast<int16_t>(direction * multi_steps_count_spinbox->value());
+  uint16_t interval =
+      static_cast<uint16_t>(multi_step_interval_us_spinbox->value());
   uint16_t rest_duration =
-      static_cast<uint16_t>(multi_step_rest_duration_edit->value());
-  uint8_t repeats = static_cast<uint8_t>(multi_step_repeats_edit->value());
+      static_cast<uint16_t>(multi_step_rest_ms_spinbox->value());
+  uint8_t repeats = static_cast<uint8_t>(multi_step_repeats_spinbox->value());
   uint8_t init_wait_duration =
-      static_cast<uint8_t>(multi_step_init_wait_duration_edit->value());
+      static_cast<uint8_t>(multi_step_init_wait_s_spinbox->value());
   serial_port.writeAll(
       Command{steps, interval, rest_duration, repeats, init_wait_duration});
 }
 
-void MainWindow::update_multi_step_info() {}
+void MainWindow::update_multi_step_info() {
+  uint64_t interval_us =
+      static_cast<uint64_t>(multi_step_interval_us_spinbox->value());
+  uint64_t rest_duration_us =
+      static_cast<uint64_t>(multi_step_rest_ms_spinbox->value()) * 1000;
+  uint64_t init_wait_duration_us =
+      static_cast<uint64_t>(multi_step_init_wait_s_spinbox->value()) * 1000000;
+  uint64_t n_repeats =
+      static_cast<uint64_t>(multi_step_repeats_spinbox->value());
+  uint64_t n_steps = static_cast<uint64_t>(multi_steps_count_spinbox->value());
+  uint64_t duration_us = interval_us * n_steps;
+  uint64_t n_steps_per_rev = 4096;
+  long double rpm =
+      60'000'000.0L / static_cast<long double>(n_steps_per_rev * interval_us);
+  uint64_t total_duration_us =
+      (duration_us + rest_duration_us) * n_repeats * 2 + init_wait_duration_us -
+      rest_duration_us;
+  long double total_duration_s =
+      static_cast<long double>(total_duration_us) / 1'000'000.0L;
+  multi_step_info_label->setText(QString("Total duration: %1 s, RPM: %2")
+                                     .arg(total_duration_s, 0, 'f', 3)
+                                     .arg(rpm, 0, 'f', 3));
+}
 
 void MainWindow::on_fps_value_changed(double value) {
   if (value > 1e-6) {
