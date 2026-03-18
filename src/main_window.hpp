@@ -198,10 +198,10 @@ private slots:
   void update_record_countdown();
   void on_record_button_clicked();
   void on_fps_value_changed(double value);
-  void on_step_minus_button_pressed();
-  void on_step_plus_button_pressed();
-  void on_step_minus_button_released();
-  void on_step_plus_button_released();
+  void on_single_step_ccw_button_pressed();
+  void on_single_step_cw_button_pressed();
+  void on_single_step_ccw_button_released();
+  void on_single_step_cw_button_released();
   void step_plus();
   void step_minus();
   void on_step_degrees_minus_button_clicked();

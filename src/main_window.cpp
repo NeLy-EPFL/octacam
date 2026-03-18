@@ -239,54 +239,56 @@ void MainWindow::setup_ui() {
   status_label->setAlignment(Qt::AlignCenter);
   dock_layout->addWidget(status_label, row++, 0, 1, 2);
 
-  auto step_widget = new QWidget(dock);
-  step_widget->setContentsMargins(0, 0, 0, 0);
-  step_widget->setLayout(new QHBoxLayout(step_widget));
-  step_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  auto single_step_widget = new QWidget(dock);
+  single_step_widget->setContentsMargins(0, 0, 0, 0);
 
-  auto step_minus_button = new QPushButton("-", dock);
-  auto step_plus_button = new QPushButton("+", dock);
-  step_interval_edit = new QSpinBox(step_widget);
+  auto single_step_layout = new QGridLayout(single_step_widget);
+  single_step_widget->setLayout(single_step_layout);
+  single_step_layout->setContentsMargins(0, 0, 0, 0);
+
+  auto single_step_ccw_button = new QPushButton("↺", single_step_widget);
+  auto single_step_cw_button = new QPushButton("↻", single_step_widget);
+  step_interval_edit = new QSpinBox(single_step_widget);
   step_interval_edit->setRange(1, 1000);
   step_interval_edit->setValue(1);
 
-  connect(step_minus_button, &QPushButton::pressed, this,
-          &MainWindow::on_step_minus_button_pressed);
-  connect(step_minus_button, &QPushButton::released, this,
-          &MainWindow::on_step_minus_button_released);
-  connect(step_plus_button, &QPushButton::pressed, this,
-          &MainWindow::on_step_plus_button_pressed);
-  connect(step_plus_button, &QPushButton::released, this,
-          &MainWindow::on_step_plus_button_released);
+  connect(single_step_ccw_button, &QPushButton::pressed, this,
+          &MainWindow::on_single_step_ccw_button_pressed);
+  connect(single_step_ccw_button, &QPushButton::released, this,
+          &MainWindow::on_single_step_ccw_button_released);
+  connect(single_step_cw_button, &QPushButton::pressed, this,
+          &MainWindow::on_single_step_cw_button_pressed);
+  connect(single_step_cw_button, &QPushButton::released, this,
+          &MainWindow::on_single_step_cw_button_released);
 
-  step_widget->layout()->addWidget(step_interval_edit);
-  step_widget->layout()->addWidget(step_minus_button);
-  step_widget->layout()->addWidget(step_plus_button);
+  single_step_layout->addWidget(new QLabel("Interval (ms):"), 0, 0);
+  single_step_layout->addWidget(step_interval_edit, 0, 1);
+  single_step_layout->addWidget(single_step_ccw_button, 1, 0);
+  single_step_layout->addWidget(single_step_cw_button, 1, 1);
 
-  dock_layout->addWidget(new QLabel("Step at interval (ms):"), row, 0);
-  dock_layout->addWidget(step_widget, row++, 1);
+  dock_layout->addWidget(single_step_widget, row++, 0, 1, 2);
 
-  auto step_degrees_widget = new QWidget(dock);
-  step_degrees_widget->setContentsMargins(0, 0, 0, 0);
-  step_degrees_widget->setLayout(new QHBoxLayout(step_degrees_widget));
-  step_degrees_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  step_degrees_edit = new QDoubleSpinBox(step_degrees_widget);
-  step_degrees_edit->setValue(30);
+  // auto step_degrees_widget = new QWidget(dock);
+  // step_degrees_widget->setContentsMargins(0, 0, 0, 0);
+  // step_degrees_widget->setLayout(new QHBoxLayout(step_degrees_widget));
+  // step_degrees_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  // step_degrees_edit = new QDoubleSpinBox(step_degrees_widget);
+  // step_degrees_edit->setValue(30);
 
-  auto step_degrees_minus_button = new QPushButton("-", step_degrees_widget);
-  auto step_degrees_plus_button = new QPushButton("+", step_degrees_widget);
-  step_degrees_widget->layout()->addWidget(step_degrees_edit);
-  step_degrees_widget->layout()->addWidget(step_degrees_minus_button);
-  step_degrees_widget->layout()->addWidget(step_degrees_plus_button);
+  // auto step_degrees_minus_button = new QPushButton("-", step_degrees_widget);
+  // auto step_degrees_plus_button = new QPushButton("+", step_degrees_widget);
+  // step_degrees_widget->layout()->addWidget(step_degrees_edit);
+  // step_degrees_widget->layout()->addWidget(step_degrees_minus_button);
+  // step_degrees_widget->layout()->addWidget(step_degrees_plus_button);
 
-  connect(step_degrees_minus_button, &QPushButton::clicked, this,
-          &MainWindow::on_step_degrees_minus_button_clicked);
+  // connect(step_degrees_minus_button, &QPushButton::clicked, this,
+  //         &MainWindow::on_step_degrees_minus_button_clicked);
 
-  connect(step_degrees_plus_button, &QPushButton::clicked, this,
-          &MainWindow::on_step_degrees_plus_button_clicked);
+  // connect(step_degrees_plus_button, &QPushButton::clicked, this,
+  //         &MainWindow::on_step_degrees_plus_button_clicked);
 
-  dock_layout->addWidget(new QLabel("Step by degrees:"), row, 0);
-  dock_layout->addWidget(step_degrees_widget, row++, 1);
+  // dock_layout->addWidget(new QLabel("Step by degrees:"), row, 0);
+  // dock_layout->addWidget(step_degrees_widget, row++, 1);
 
   dock_layout->setRowStretch(row++, 1);
 
@@ -508,19 +510,23 @@ void MainWindow::on_record_button_clicked() {
   }
 }
 
-void MainWindow::on_step_minus_button_pressed() {
+void MainWindow::on_single_step_ccw_button_pressed() {
   step_minus_timer->setInterval(step_interval_edit->value());
   step_minus_timer->start();
 }
 
-void MainWindow::on_step_minus_button_released() { step_minus_timer->stop(); }
+void MainWindow::on_single_step_ccw_button_released() {
+  step_minus_timer->stop();
+}
 
-void MainWindow::on_step_plus_button_pressed() {
+void MainWindow::on_single_step_cw_button_pressed() {
   step_plus_timer->setInterval(step_interval_edit->value());
   step_plus_timer->start();
 }
 
-void MainWindow::on_step_plus_button_released() { step_plus_timer->stop(); }
+void MainWindow::on_single_step_cw_button_released() {
+  step_plus_timer->stop();
+}
 
 void MainWindow::step_plus() {
   Command cmd{0, 1};
