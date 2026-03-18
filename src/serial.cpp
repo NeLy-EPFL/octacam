@@ -21,7 +21,7 @@ SerialPort &SerialPort::operator=(SerialPort &&other) noexcept {
   return *this;
 }
 
-unsigned long SerialPort::toSpeed(int baud) {
+unsigned long SerialPort::to_speed(int baud) {
   switch (baud) {
   case 9600:
     return B9600;
@@ -50,7 +50,7 @@ void SerialPort::configure(int baud) {
   tty.c_cc[VMIN] = 0;
   tty.c_cc[VTIME] = 1; // 100ms
 
-  speed_t spd = static_cast<speed_t>(toSpeed(baud));
+  speed_t spd = static_cast<speed_t>(to_speed(baud));
   if (cfsetispeed(&tty, spd) != 0 || cfsetospeed(&tty, spd) != 0)
     throw std::system_error(errno, std::generic_category(), "cfset speed");
   if (tcsetattr(fd_, TCSANOW, &tty) != 0)
@@ -60,8 +60,9 @@ void SerialPort::configure(int baud) {
 void SerialPort::open(const std::string &device, int baud) {
   close();
   fd_ = ::open(device.c_str(), O_RDWR | O_NOCTTY | O_SYNC);
-  if (fd_ < 0)
+  if (fd_ < 0) {
     throw std::system_error(errno, std::generic_category(), "open");
+  }
 
   try {
     configure(baud);
@@ -81,7 +82,7 @@ void SerialPort::close() {
   }
 }
 
-std::size_t SerialPort::writeAll(const void *data, std::size_t len) {
+std::size_t SerialPort::write(const void *data, std::size_t len) {
   auto p = static_cast<const uint8_t *>(data);
   std::size_t total = 0;
   while (total < len) {
@@ -98,7 +99,7 @@ std::size_t SerialPort::writeAll(const void *data, std::size_t len) {
   return total;
 }
 
-std::size_t SerialPort::readExact(void *out, std::size_t len, int timeoutMs) {
+std::size_t SerialPort::read(void *out, std::size_t len, int timeoutMs) {
   auto p = static_cast<uint8_t *>(out);
   std::size_t total = 0;
   int waited = 0;

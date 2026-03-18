@@ -28,18 +28,18 @@ public:
 
   void open(const std::string &device, int baud);
   void close();
-  bool isOpen() const noexcept { return fd_ >= 0; }
+  bool is_open() const noexcept { return fd_ >= 0; }
 
-  std::size_t writeAll(const void *data, std::size_t len);
+  std::size_t write(const void *data, std::size_t len);
   template <typename T> std::size_t writeAll(const T &value) {
     static_assert(std::is_trivially_copyable_v<T>,
                   "writeAll requires trivially copyable types");
-    return writeAll(&value, sizeof(T));
+    return write(&value, sizeof(T));
   }
-  std::size_t readExact(void *out, std::size_t len, int timeoutMs);
+  std::size_t read(void *out, std::size_t len, int timeoutMs);
 
 private:
   int fd_ = -1;
-  static unsigned long toSpeed(int baud);
+  static unsigned long to_speed(int baud);
   void configure(int baud);
 };

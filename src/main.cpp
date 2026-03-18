@@ -42,7 +42,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  auto serial_port = SerialPort("/dev/ttyACM0", 115200);
+  auto serial_port = SerialPort();
+  try {
+    serial_port.open("/dev/ttyACM0", 115200);
+  } catch (const std::system_error &ex) {
+    spdlog::warn("Failed to open serial port {}: {}", "/dev/ttyACM0",
+                 ex.what());
+  }
 
   auto config_dir = std::filesystem::canonical(config_dir_str);
   spdlog::info("Using config directory: {}", config_dir.string());

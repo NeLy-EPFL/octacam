@@ -270,138 +270,144 @@ void MainWindow::setup_ui() {
 
   dock_layout->addWidget(record_widget);
 
-  auto *single_step_widget = new QGroupBox("Single Step", dock_content);
+  if (serial_port.is_open()) {
+    auto *single_step_widget = new QGroupBox("Single Step", dock_content);
 
-  auto single_step_layout = new QHBoxLayout(single_step_widget);
-  single_step_widget->setLayout(single_step_layout);
-  single_step_layout->setContentsMargins(margin, margin, margin, margin);
+    auto single_step_layout = new QHBoxLayout(single_step_widget);
+    single_step_widget->setLayout(single_step_layout);
+    single_step_layout->setContentsMargins(margin, margin, margin, margin);
 
-  auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
-  auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
-  single_step_interval_edit = new QSpinBox(single_step_widget);
-  single_step_interval_edit->setRange(1, 1000);
-  single_step_interval_edit->setValue(1);
-  single_step_interval_edit->setSuffix(" ms");
+    auto *single_step_ccw_button = new QPushButton("↺", single_step_widget);
+    auto *single_step_cw_button = new QPushButton("↻", single_step_widget);
+    single_step_interval_edit = new QSpinBox(single_step_widget);
+    single_step_interval_edit->setRange(1, 1000);
+    single_step_interval_edit->setValue(1);
+    single_step_interval_edit->setSuffix(" ms");
 
-  connect(single_step_ccw_button, &QPushButton::pressed, this,
-          &MainWindow::on_single_step_ccw_button_pressed);
-  connect(single_step_ccw_button, &QPushButton::released, this,
-          &MainWindow::on_single_step_ccw_button_released);
-  connect(single_step_cw_button, &QPushButton::pressed, this,
-          &MainWindow::on_single_step_cw_button_pressed);
-  connect(single_step_cw_button, &QPushButton::released, this,
-          &MainWindow::on_single_step_cw_button_released);
+    connect(single_step_ccw_button, &QPushButton::pressed, this,
+            &MainWindow::on_single_step_ccw_button_pressed);
+    connect(single_step_ccw_button, &QPushButton::released, this,
+            &MainWindow::on_single_step_ccw_button_released);
+    connect(single_step_cw_button, &QPushButton::pressed, this,
+            &MainWindow::on_single_step_cw_button_pressed);
+    connect(single_step_cw_button, &QPushButton::released, this,
+            &MainWindow::on_single_step_cw_button_released);
 
-  auto *single_step_interval_label =
-      new QLabel("Interval:", single_step_widget);
-  single_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  single_step_layout->addWidget(single_step_interval_label);
-  single_step_layout->addWidget(single_step_interval_edit);
-  single_step_layout->addWidget(single_step_ccw_button);
-  single_step_layout->addWidget(single_step_cw_button);
+    auto *single_step_interval_label =
+        new QLabel("Interval:", single_step_widget);
+    single_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    single_step_layout->addWidget(single_step_interval_label);
+    single_step_layout->addWidget(single_step_interval_edit);
+    single_step_layout->addWidget(single_step_ccw_button);
+    single_step_layout->addWidget(single_step_cw_button);
 
-  dock_layout->addWidget(single_step_widget);
+    dock_layout->addWidget(single_step_widget);
 
-  auto *multi_step_widget = new QGroupBox("Multi Step", dock_content);
-  auto *multi_step_layout = new QGridLayout(multi_step_widget);
-  multi_step_widget->setLayout(multi_step_layout);
-  multi_step_layout->setContentsMargins(margin, margin, margin, margin);
-  multi_step_layout->setHorizontalSpacing(8);
-  multi_step_layout->setVerticalSpacing(6);
+    auto *multi_step_widget = new QGroupBox("Multi Step", dock_content);
+    auto *multi_step_layout = new QGridLayout(multi_step_widget);
+    multi_step_widget->setLayout(multi_step_layout);
+    multi_step_layout->setContentsMargins(margin, margin, margin, margin);
+    multi_step_layout->setHorizontalSpacing(8);
+    multi_step_layout->setVerticalSpacing(6);
 
-  multi_step_info_label = new QLabel(multi_step_widget);
-  multi_step_info_label->setAlignment(Qt::AlignCenter);
+    multi_step_info_label = new QLabel(multi_step_widget);
+    multi_step_info_label->setAlignment(Qt::AlignCenter);
 
-  auto *multi_step_direction_widget = new QWidget(multi_step_widget);
-  auto *multi_step_direction_layout =
-      new QHBoxLayout(multi_step_direction_widget);
-  multi_step_direction_layout->setContentsMargins(0, 0, 0, 0);
-  multi_step_direction_layout->setSpacing(8);
+    auto *multi_step_direction_widget = new QWidget(multi_step_widget);
+    auto *multi_step_direction_layout =
+        new QHBoxLayout(multi_step_direction_widget);
+    multi_step_direction_layout->setContentsMargins(0, 0, 0, 0);
+    multi_step_direction_layout->setSpacing(8);
 
-  multi_step_ccw_button = new QRadioButton("↺", multi_step_direction_widget);
-  multi_step_cw_button = new QRadioButton("↻", multi_step_direction_widget);
-  multi_step_cw_button->setChecked(true);
+    multi_step_ccw_button = new QRadioButton("↺", multi_step_direction_widget);
+    multi_step_cw_button = new QRadioButton("↻", multi_step_direction_widget);
+    multi_step_ccw_button->setChecked(true);
 
-  multi_step_direction_layout->addWidget(multi_step_ccw_button);
-  multi_step_direction_layout->addWidget(multi_step_cw_button);
+    multi_step_direction_layout->addWidget(multi_step_ccw_button);
+    multi_step_direction_layout->addWidget(multi_step_cw_button);
 
-  multi_steps_count_spinbox = new QSpinBox(multi_step_widget);
-  multi_steps_count_spinbox->setRange(2, 32767);
-  multi_steps_count_spinbox->setValue(4096);
-  connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
-          &MainWindow::update_multi_step_info);
+    multi_steps_count_spinbox = new QSpinBox(multi_step_widget);
+    multi_steps_count_spinbox->setRange(2, 32767);
+    multi_steps_count_spinbox->setValue(4096);
+    connect(multi_steps_count_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
 
-  multi_step_interval_us_spinbox = new QSpinBox(multi_step_widget);
-  multi_step_interval_us_spinbox->setRange(800, 65535);
-  multi_step_interval_us_spinbox->setValue(800);
-  multi_step_interval_us_spinbox->setSuffix(" μs");
-  connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
-          &MainWindow::update_multi_step_info);
+    multi_step_interval_us_spinbox = new QSpinBox(multi_step_widget);
+    multi_step_interval_us_spinbox->setRange(800, 65535);
+    multi_step_interval_us_spinbox->setValue(800);
+    multi_step_interval_us_spinbox->setSuffix(" μs");
+    connect(multi_step_interval_us_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
 
-  multi_step_rest_ms_spinbox = new QSpinBox(multi_step_widget);
-  multi_step_rest_ms_spinbox->setRange(0, 65535);
-  multi_step_rest_ms_spinbox->setValue(500);
-  multi_step_rest_ms_spinbox->setSuffix(" ms");
-  connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
-          &MainWindow::update_multi_step_info);
+    multi_step_rest_ms_spinbox = new QSpinBox(multi_step_widget);
+    multi_step_rest_ms_spinbox->setRange(0, 65535);
+    multi_step_rest_ms_spinbox->setValue(500);
+    multi_step_rest_ms_spinbox->setSuffix(" ms");
+    connect(multi_step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
 
-  multi_step_repeats_spinbox = new QSpinBox(multi_step_widget);
-  multi_step_repeats_spinbox->setRange(1, 255);
-  multi_step_repeats_spinbox->setValue(1);
-  connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
-          &MainWindow::update_multi_step_info);
+    multi_step_repeats_spinbox = new QSpinBox(multi_step_widget);
+    multi_step_repeats_spinbox->setRange(1, 255);
+    multi_step_repeats_spinbox->setValue(1);
+    connect(multi_step_repeats_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
 
-  multi_step_init_wait_s_spinbox = new QSpinBox(multi_step_widget);
-  multi_step_init_wait_s_spinbox->setRange(0, 255);
-  multi_step_init_wait_s_spinbox->setValue(0);
-  multi_step_init_wait_s_spinbox->setSuffix(" s");
-  connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
-          &MainWindow::update_multi_step_info);
+    multi_step_init_wait_s_spinbox = new QSpinBox(multi_step_widget);
+    multi_step_init_wait_s_spinbox->setRange(0, 255);
+    multi_step_init_wait_s_spinbox->setValue(0);
+    multi_step_init_wait_s_spinbox->setSuffix(" s");
+    connect(multi_step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
+            &MainWindow::update_multi_step_info);
 
-  auto *multi_step_start_button = new QPushButton("Start", multi_step_widget);
-  connect(multi_step_start_button, &QPushButton::clicked, this,
-          &MainWindow::on_multi_step_start_button_clicked);
+    auto *multi_step_execute_button =
+        new QPushButton("Execute", multi_step_widget);
+    connect(multi_step_execute_button, &QPushButton::clicked, this,
+            &MainWindow::on_multi_step_execute_button_clicked);
 
-  auto *multi_step_direction_label =
-      new QLabel("Initial direction:", multi_step_widget);
-  multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_direction_label, 0, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_direction_widget, 0, 1, 1, 1);
+    auto *multi_step_direction_label =
+        new QLabel("Initial direction:", multi_step_widget);
+    multi_step_direction_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_direction_label, 0, 0, 1, 1);
+    multi_step_layout->addWidget(multi_step_direction_widget, 0, 1, 1, 1);
 
-  auto *multi_step_n_steps_label = new QLabel("Steps:", multi_step_widget);
-  multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_n_steps_label, 1, 0, 1, 1);
-  multi_step_layout->addWidget(multi_steps_count_spinbox, 1, 1, 1, 1);
+    auto *multi_step_n_steps_label = new QLabel("Steps:", multi_step_widget);
+    multi_step_n_steps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_n_steps_label, 1, 0, 1, 1);
+    multi_step_layout->addWidget(multi_steps_count_spinbox, 1, 1, 1, 1);
 
-  auto *multi_step_interval_label =
-      new QLabel("Step interval:", multi_step_widget);
-  multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_interval_label, 2, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_interval_us_spinbox, 2, 1, 1, 1);
+    auto *multi_step_interval_label =
+        new QLabel("Step interval:", multi_step_widget);
+    multi_step_interval_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_interval_label, 2, 0, 1, 1);
+    multi_step_layout->addWidget(multi_step_interval_us_spinbox, 2, 1, 1, 1);
 
-  auto *multi_step_rest_duration_label =
-      new QLabel("Rest duration:", multi_step_widget);
-  multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
-                                               Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_rest_duration_label, 3, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_rest_ms_spinbox, 3, 1, 1, 1);
+    auto *multi_step_rest_duration_label =
+        new QLabel("Rest duration:", multi_step_widget);
+    multi_step_rest_duration_label->setAlignment(Qt::AlignRight |
+                                                 Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_rest_duration_label, 3, 0, 1, 1);
+    multi_step_layout->addWidget(multi_step_rest_ms_spinbox, 3, 1, 1, 1);
 
-  auto *multi_step_repeats_label = new QLabel("Repeats:", multi_step_widget);
-  multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_repeats_label, 4, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_repeats_spinbox, 4, 1, 1, 1);
+    auto *multi_step_repeats_label = new QLabel("Repeats:", multi_step_widget);
+    multi_step_repeats_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_repeats_label, 4, 0, 1, 1);
+    multi_step_layout->addWidget(multi_step_repeats_spinbox, 4, 1, 1, 1);
 
-  auto *multi_step_init_wait_duration_label =
-      new QLabel("Initial wait:", multi_step_widget);
-  multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
-                                                    Qt::AlignVCenter);
-  multi_step_layout->addWidget(multi_step_init_wait_duration_label, 5, 0, 1, 1);
-  multi_step_layout->addWidget(multi_step_init_wait_s_spinbox, 5, 1, 1, 1);
+    auto *multi_step_init_wait_duration_label =
+        new QLabel("Initial wait:", multi_step_widget);
+    multi_step_init_wait_duration_label->setAlignment(Qt::AlignRight |
+                                                      Qt::AlignVCenter);
+    multi_step_layout->addWidget(multi_step_init_wait_duration_label, 5, 0, 1,
+                                 1);
+    multi_step_layout->addWidget(multi_step_init_wait_s_spinbox, 5, 1, 1, 1);
 
-  multi_step_layout->addWidget(multi_step_info_label, 6, 0, 1, 2);
-  multi_step_layout->addWidget(multi_step_start_button, 7, 0, 1, 2);
+    multi_step_layout->addWidget(multi_step_info_label, 6, 0, 1, 2);
+    multi_step_layout->addWidget(multi_step_execute_button, 7, 0, 1, 2);
 
-  dock_layout->addWidget(multi_step_widget);
+    dock_layout->addWidget(multi_step_widget);
+
+    update_multi_step_info();
+  }
 
   auto *rotate_widget = new QGroupBox("Display Rotation", dock_content);
   rotate_widget->setLayout(new QHBoxLayout(rotate_widget));
@@ -462,8 +468,6 @@ void MainWindow::setup_ui() {
   input_widgets.push_back(save_dir_edit);
   input_widgets.push_back(trigger_source_combo);
   input_widgets.push_back(video_writer_combo);
-
-  update_multi_step_info();
 }
 
 void MainWindow::rotate_displays() {
@@ -660,7 +664,7 @@ void MainWindow::on_single_step_cw_button_released() {
   serial_port.writeAll(Command{0});
 }
 
-void MainWindow::on_multi_step_start_button_clicked() {
+void MainWindow::on_multi_step_execute_button_clicked() {
   int direction =
       multi_step_cw_button && multi_step_cw_button->isChecked() ? 1 : -1;
   int16_t steps =
