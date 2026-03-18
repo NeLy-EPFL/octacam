@@ -23,6 +23,14 @@ constexpr uint8_t half_step_seq[8][4] = {
     {0, 0, 1, 0}, {0, 0, 1, 1}, {0, 0, 0, 1}, {1, 0, 0, 1}};
 
 int8_t step_index = 0;
+Command command_data;
+char *const command_data_ptr = reinterpret_cast<char *>(&command_data);
+constexpr size_t command_size = sizeof(Command);
+unsigned long start_time_us = 0;
+unsigned long expected_elapsed_time_us = 0;
+unsigned long step_interval_us = 0;
+unsigned long rest_duration_us = 0;
+uint16_t abs_n_steps = 0;
 
 inline void set_coils(const uint8_t a, const uint8_t b, const uint8_t c,
                       const uint8_t d) {
@@ -54,51 +62,78 @@ inline void decrement_half_step() {
             half_step_seq[step_index][2], half_step_seq[step_index][3]);
 }
 
-inline void move_n_steps(int16_t n_steps, const uint16_t step_interval_us) {
-  if (n_steps > 0) {
-    for (int i = 0; i < n_steps; ++i) {
-      increment_half_step();
-      delayMicroseconds(step_interval_us);
+inline void increment_n_half_steps() {
+  for (uint16_t i_step = 0; i_step < abs_n_steps; ++i_step) {
+    while (micros() - start_time_us < expected_elapsed_time_us) {
+      // wait
     }
-  } else {
-    n_steps = -n_steps;
-    for (int i = 0; i < n_steps; ++i) {
-      decrement_half_step();
-      delayMicroseconds(step_interval_us);
-    }
+    increment_half_step();
+    expected_elapsed_time_us += step_interval_us;
   }
-  release_motor();
+}
+
+inline void decrement_n_half_steps() {
+  for (uint16_t i_step = 0; i_step < abs_n_steps; ++i_step) {
+    while (micros() - start_time_us < expected_elapsed_time_us) {
+      // wait
+    }
+    decrement_half_step();
+    expected_elapsed_time_us += step_interval_us;
+  }
+}
+
+inline void rest() {
+  expected_elapsed_time_us += rest_duration_us;
+  while (micros() - start_time_us < expected_elapsed_time_us) {
+    // wait
+  }
 }
 
 inline void execute_command(const Command &command) {
-  if (command.n_steps == 0) {
+  int16_t n_steps = command.n_steps;
+
+  if (n_steps == 0) {
     release_motor();
     return;
   }
 
-  if (command.n_steps == 1) {
+  if (n_steps == 1) {
     increment_half_step();
     return;
   }
 
-  if (command.n_steps == -1) {
+  if (n_steps == -1) {
     decrement_half_step();
     return;
   }
 
-  if (command.init_wait_duration_s > 0) {
-    delay(static_cast<unsigned long>(command.init_wait_duration_s) * 1000UL);
-  }
+  expected_elapsed_time_us =
+      static_cast<unsigned long>(command.init_wait_duration_s) * 1000000UL;
+  step_interval_us = static_cast<unsigned long>(command.step_interval_us);
+  rest_duration_us =
+      static_cast<unsigned long>(command.rest_duration_ms) * 1000UL;
 
-  int16_t current_steps = command.n_steps;
-  for (uint8_t i = 0; i + 1 < command.n_repeats; ++i) {
-    move_n_steps(current_steps, command.step_interval_us);
-    if (command.rest_duration_ms > 0) {
-      delay(command.rest_duration_ms);
+  if (n_steps > 0) {
+    abs_n_steps = static_cast<uint16_t>(n_steps);
+    for (uint8_t i_repeat = 0; i_repeat < command.n_repeats; ++i_repeat) {
+      increment_n_half_steps();
+      release_motor();
+      rest();
+      decrement_n_half_steps();
+      release_motor();
+      rest();
     }
-    current_steps = -current_steps;
+  } else {
+    abs_n_steps = static_cast<uint16_t>(-n_steps);
+    for (uint8_t i_repeat = 0; i_repeat < command.n_repeats; ++i_repeat) {
+      decrement_n_half_steps();
+      release_motor();
+      rest();
+      increment_n_half_steps();
+      release_motor();
+      rest();
+    }
   }
-  move_n_steps(current_steps, command.step_interval_us);
 }
 
 void setup() {
@@ -111,19 +146,14 @@ void setup() {
 
   Serial.begin(115200);
   while (!Serial) {
-    ;
+    // wait
   }
 }
 
-Command command_data;
-char *const command_data_ptr = reinterpret_cast<char *>(&command_data);
-constexpr size_t command_size = sizeof(Command);
-
 void loop() {
   if (Serial.available() >= command_size) {
-    const size_t bytes_read = Serial.readBytes(command_data_ptr, command_size);
-    if (bytes_read == command_size) {
-      execute_command(command_data);
-    }
+    start_time_us = micros();
+    Serial.readBytes(command_data_ptr, command_size);
+    execute_command(command_data);
   }
 }
