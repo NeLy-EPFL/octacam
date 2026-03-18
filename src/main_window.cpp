@@ -13,6 +13,7 @@
 #include <QGraphicsTextItem>
 #include <QGraphicsView>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QIntValidator>
@@ -183,74 +184,106 @@ void MainWindow::setup_ui() {
   dock->setMinimumWidth(cfg.dock_min_width);
   dock->setMaximumWidth(cfg.dock_max_width);
   dock->setFeatures(dock->features() & ~QDockWidget::DockWidgetClosable);
+  dock->setWindowTitle("Controls");
   addDockWidget(Qt::RightDockWidgetArea, dock);
 
   auto *dock_content = new QWidget(dock);
   dock->setWidget(dock_content);
 
-  auto *dock_layout = new QGridLayout(dock_content);
+  auto *dock_layout = new QVBoxLayout(dock_content);
+  dock_layout->setContentsMargins(10, 10, 10, 10);
+  dock_layout->setSpacing(10);
   dock_content->setLayout(dock_layout);
+
+  auto *record_widget = new QGroupBox("Recording", dock_content);
+  auto *record_layout = new QGridLayout(record_widget);
+  record_layout->setContentsMargins(8, 10, 8, 8);
+  record_layout->setHorizontalSpacing(8);
+  record_layout->setVerticalSpacing(6);
+  record_widget->setLayout(record_layout);
+
   int row = 0;
 
-  dock_layout->addWidget(new QLabel("Duration"), row, 0);
+  auto *duration_label = new QLabel("Duration:", record_widget);
+  duration_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  record_layout->addWidget(duration_label, row, 0);
   duration_input = new DurationInput(
       cfg.duration_default, cfg.duration_min, cfg.duration_max,
-      cfg.duration_unit_default_index, dock_content);
-  dock_layout->addWidget(duration_input, row++, 1);
+      cfg.duration_unit_default_index, record_widget);
+  record_layout->addWidget(duration_input, row++, 1);
 
-  dock_layout->addWidget(new QLabel("FPS:"), row, 0);
-  fps_edit = new QDoubleSpinBox(dock_content);
+  auto *fps_label = new QLabel("FPS:", record_widget);
+  fps_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  record_layout->addWidget(fps_label, row, 0);
+  fps_edit = new QDoubleSpinBox(record_widget);
   fps_edit->setRange(cfg.fps_min, cfg.fps_max);
   fps_edit->setValue(cfg.fps_default);
   fps_edit->setDecimals(2);
   fps_edit->setSingleStep(1.0);
   connect(fps_edit, &QDoubleSpinBox::valueChanged, this,
           &MainWindow::on_fps_value_changed);
-  dock_layout->addWidget(fps_edit, row++, 1);
+  record_layout->addWidget(fps_edit, row++, 1);
 
-  dock_layout->addWidget(new QLabel("Save directory:"), row, 0);
-  save_dir_edit = new DirectoryEdit(cfg.save_directory_default, dock_content);
-  save_dir_edit->setFixedHeight(fontMetrics().height() *
-                                cfg.save_dir_edit_height_factor);
-  dock_layout->addWidget(save_dir_edit, row++, 1);
+  auto *save_dir_label = new QLabel("Save directory:", record_widget);
+  save_dir_label->setAlignment(Qt::AlignRight | Qt::AlignTop);
+  record_layout->addWidget(save_dir_label, row, 0);
+  save_dir_edit = new DirectoryEdit(cfg.save_directory_default, record_widget);
+  save_dir_edit->setMinimumHeight(fontMetrics().height() *
+                                  cfg.save_dir_edit_height_factor);
+  save_dir_edit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+  record_layout->addWidget(save_dir_edit, row++, 1);
 
-  dock_layout->addWidget(new QLabel("Trigger source:"), row, 0);
-  trigger_source_combo = new QComboBox(dock_content);
+  auto *trigger_source_label = new QLabel("Trigger source:", record_widget);
+  trigger_source_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  record_layout->addWidget(trigger_source_label, row, 0);
+  trigger_source_combo = new QComboBox(record_widget);
   trigger_source_combo->addItem("software");
   trigger_source_combo->addItem("external");
   trigger_source_combo->setCurrentIndex(cfg.trigger_source_default_index);
 
-  dock_layout->addWidget(trigger_source_combo, row++, 1);
+  record_layout->addWidget(trigger_source_combo, row++, 1);
 
-  dock_layout->addWidget(new QLabel("Video writer:"), row, 0);
-  video_writer_combo = new QComboBox(dock_content);
+  auto *video_writer_label = new QLabel("Video writer:", record_widget);
+  video_writer_label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  record_layout->addWidget(video_writer_label, row, 0);
+  video_writer_combo = new QComboBox(record_widget);
   video_writer_combo->addItem("opencv MJPG avi");
   video_writer_combo->addItem("opencv avc1 mp4");
   video_writer_combo->setCurrentIndex(cfg.video_writer_default_index);
-  dock_layout->addWidget(video_writer_combo, row++, 1);
+  record_layout->addWidget(video_writer_combo, row++, 1);
 
-  record_button = new QPushButton("Start recording", dock);
+  record_button = new QPushButton("Start recording", record_widget);
+  record_button->setMinimumHeight(fontMetrics().height() * 2);
   connect(record_button, &QPushButton::clicked, this,
           &MainWindow::on_record_button_clicked);
-  dock_layout->addWidget(record_button, row++, 0, 1, 2);
+  record_layout->addWidget(record_button, row++, 0, 1, 2);
 
-  status_label = new QLabel(dock_content);
+  status_label = new QLabel(record_widget);
   status_label->setText("");
   status_label->setAlignment(Qt::AlignCenter);
-  dock_layout->addWidget(status_label, row++, 0, 1, 2);
+  status_label->setWordWrap(true);
+  status_label->setMinimumHeight(fontMetrics().height() * 2);
+  record_layout->addWidget(status_label, row++, 0, 1, 2);
+  record_layout->setColumnStretch(1, 1);
 
-  auto single_step_widget = new QWidget(dock);
-  single_step_widget->setContentsMargins(0, 0, 0, 0);
+  dock_layout->addWidget(record_widget);
+
+  auto *single_step_widget = new QGroupBox("Single Step", dock_content);
 
   auto single_step_layout = new QGridLayout(single_step_widget);
   single_step_widget->setLayout(single_step_layout);
-  single_step_layout->setContentsMargins(0, 0, 0, 0);
+  single_step_layout->setContentsMargins(8, 14, 8, 8);
+  single_step_layout->setHorizontalSpacing(8);
+  single_step_layout->setVerticalSpacing(6);
 
   auto single_step_ccw_button = new QPushButton("↺", single_step_widget);
   auto single_step_cw_button = new QPushButton("↻", single_step_widget);
+  single_step_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
+  single_step_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   step_interval_edit = new QSpinBox(single_step_widget);
   step_interval_edit->setRange(1, 1000);
   step_interval_edit->setValue(1);
+  step_interval_edit->setSuffix(" ms");
 
   connect(single_step_ccw_button, &QPushButton::pressed, this,
           &MainWindow::on_single_step_ccw_button_pressed);
@@ -261,12 +294,15 @@ void MainWindow::setup_ui() {
   connect(single_step_cw_button, &QPushButton::released, this,
           &MainWindow::on_single_step_cw_button_released);
 
-  single_step_layout->addWidget(new QLabel("Interval (ms):"), 0, 0);
-  single_step_layout->addWidget(step_interval_edit, 0, 1);
-  single_step_layout->addWidget(single_step_ccw_button, 1, 0);
-  single_step_layout->addWidget(single_step_cw_button, 1, 1);
+  single_step_layout->addWidget(new QLabel("Interval:", single_step_widget), 0,
+                                0, 1, 1);
+  single_step_layout->addWidget(step_interval_edit, 0, 1, 1, 2);
+  single_step_layout->addWidget(new QLabel("Step:", single_step_widget), 1, 0,
+                                1, 1);
+  single_step_layout->addWidget(single_step_ccw_button, 1, 1, 1, 1);
+  single_step_layout->addWidget(single_step_cw_button, 1, 2, 1, 1);
 
-  dock_layout->addWidget(single_step_widget, row++, 0, 1, 2);
+  dock_layout->addWidget(single_step_widget);
 
   // auto step_degrees_widget = new QWidget(dock);
   // step_degrees_widget->setContentsMargins(0, 0, 0, 0);
@@ -290,44 +326,49 @@ void MainWindow::setup_ui() {
   // dock_layout->addWidget(new QLabel("Step by degrees:"), row, 0);
   // dock_layout->addWidget(step_degrees_widget, row++, 1);
 
-  dock_layout->setRowStretch(row++, 1);
+  // record_layout->setRowStretch(row++, 1);
 
-  auto *h_line = new QFrame(dock_content);
-  h_line->setFrameShape(QFrame::HLine);
-  h_line->setFrameShadow(QFrame::Sunken);
-  dock_layout->addWidget(h_line, row++, 0, 1, 2);
+  // auto *h_line = new QFrame(dock_content);
+  // h_line->setFrameShape(QFrame::HLine);
+  // h_line->setFrameShadow(QFrame::Sunken);
+  // dock_layout->addWidget(h_line);
 
-  auto rotate_widget = new QWidget(dock);
-  rotate_widget->setContentsMargins(0, 0, 0, 0);
+  auto *rotate_widget = new QGroupBox("Display Rotation", dock_content);
   rotate_widget->setLayout(new QHBoxLayout(rotate_widget));
-  rotate_widget->layout()->setContentsMargins(0, 0, 0, 0);
-  dock_layout->addWidget(rotate_widget, row, 0, 2, 2);
+  rotate_widget->layout()->setContentsMargins(8, 14, 8, 8);
+  rotate_widget->layout()->setSpacing(8);
+  dock_layout->addWidget(rotate_widget);
 
-  rotate_widget->layout()->addWidget(new QLabel("Rotate:"));
+  rotate_widget->layout()->addWidget(new QLabel("Rotate:", rotate_widget));
 
   auto rotate_control_widget = new QWidget(rotate_widget);
   rotate_control_widget->setContentsMargins(0, 0, 0, 0);
   rotate_control_widget->setLayout(new QVBoxLayout(rotate_control_widget));
   rotate_control_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_control_widget->layout()->setSpacing(6);
   rotate_widget->layout()->addWidget(rotate_control_widget);
 
   auto rotate_buttons_widget = new QWidget(rotate_control_widget);
   rotate_buttons_widget->setContentsMargins(0, 0, 0, 0);
   rotate_buttons_widget->setLayout(new QHBoxLayout(rotate_buttons_widget));
   rotate_buttons_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_buttons_widget->layout()->setSpacing(6);
   rotate_control_widget->layout()->addWidget(rotate_buttons_widget);
 
-  auto rotate_ccw_button = new QPushButton("↺", dock);
+  auto rotate_ccw_button = new QPushButton("↺", rotate_buttons_widget);
+  rotate_ccw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_ccw_button);
   connect(rotate_ccw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto rotate_cw_button = new QPushButton("↻", dock);
+  auto rotate_cw_button = new QPushButton("↻", rotate_buttons_widget);
+  rotate_cw_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(rotate_cw_button);
   connect(rotate_cw_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  auto reset_rotation_button = new QPushButton("Reset", dock);
+  auto reset_rotation_button = new QPushButton("Reset", rotate_buttons_widget);
+  reset_rotation_button->setMinimumHeight(fontMetrics().height() * 2);
   rotate_buttons_widget->layout()->addWidget(reset_rotation_button);
   connect(reset_rotation_button, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
@@ -336,6 +377,7 @@ void MainWindow::setup_ui() {
   rotate_which_widget->setContentsMargins(0, 0, 0, 0);
   rotate_which_widget->setLayout(new QHBoxLayout(rotate_which_widget));
   rotate_which_widget->layout()->setContentsMargins(0, 0, 0, 0);
+  rotate_which_widget->layout()->setSpacing(8);
   rotate_control_widget->layout()->addWidget(rotate_which_widget);
 
   rotate_selected_button = new QRadioButton("Selected", rotate_which_widget);
@@ -345,6 +387,8 @@ void MainWindow::setup_ui() {
   rotate_which_widget->layout()->addWidget(rotate_all_button);
 
   rotate_all_button->setChecked(true);
+
+  dock_layout->addStretch(1);
 
   input_widgets.push_back(duration_input);
   input_widgets.push_back(fps_edit);
