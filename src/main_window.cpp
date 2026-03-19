@@ -231,13 +231,23 @@ void MainWindow::setup_ui() {
           &MainWindow::on_fps_value_changed);
   record_layout->addWidget(fps_edit, row++, 1, 1, 1);
 
-  auto *save_dir_label = new QLabel("Save directory:", record_tab);
-  save_dir_label->setAlignment(Qt::AlignRight);
-  record_layout->addWidget(save_dir_label, row, 0, 1, 1);
+  auto *save_dir_button = new QPushButton("Save directory:", record_tab);
+  record_layout->addWidget(save_dir_button, row, 0, 1, 1,
+                           Qt::AlignRight | Qt::AlignTop);
   save_dir_edit = new DirectoryEdit(cfg.save_directory_default, record_tab);
-  save_dir_edit->setMinimumHeight(fontMetrics().height() *
-                                  cfg.save_dir_edit_height_factor);
+  save_dir_edit->setFixedHeight(fontMetrics().height() *
+                                cfg.save_dir_edit_height_factor);
   record_layout->addWidget(save_dir_edit, row++, 1, 1, 1);
+  connect(save_dir_button, &QPushButton::clicked, this, [this]() {
+    const QString start_dir =
+        save_dir_edit ? save_dir_edit->toPlainText() : QString{};
+    const QString selected_dir = QFileDialog::getExistingDirectory(
+        this, "Select save directory", start_dir,
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (!selected_dir.isEmpty() && save_dir_edit) {
+      save_dir_edit->setPlainText(selected_dir);
+    }
+  });
 
   auto *trigger_source_label = new QLabel("Trigger source:", record_tab);
   trigger_source_label->setAlignment(Qt::AlignRight);
@@ -298,27 +308,27 @@ void MainWindow::setup_ui() {
 
     step_interval_us_spinbox = new QSpinBox(arduino_tab);
     step_interval_us_spinbox->setRange(800, 65535);
-    step_interval_us_spinbox->setValue(800);
+    step_interval_us_spinbox->setValue(1465);
     step_interval_us_spinbox->setSuffix(" μs");
     connect(step_interval_us_spinbox, &QSpinBox::valueChanged, this,
             &MainWindow::update_step_info);
 
     step_rest_ms_spinbox = new QSpinBox(arduino_tab);
     step_rest_ms_spinbox->setRange(0, 65535);
-    step_rest_ms_spinbox->setValue(500);
+    step_rest_ms_spinbox->setValue(1000);
     step_rest_ms_spinbox->setSuffix(" ms");
     connect(step_rest_ms_spinbox, &QSpinBox::valueChanged, this,
             &MainWindow::update_step_info);
 
     step_repeats_spinbox = new QSpinBox(arduino_tab);
     step_repeats_spinbox->setRange(1, 255);
-    step_repeats_spinbox->setValue(1);
+    step_repeats_spinbox->setValue(3);
     connect(step_repeats_spinbox, &QSpinBox::valueChanged, this,
             &MainWindow::update_step_info);
 
     step_init_wait_s_spinbox = new QSpinBox(arduino_tab);
     step_init_wait_s_spinbox->setRange(0, 255);
-    step_init_wait_s_spinbox->setValue(0);
+    step_init_wait_s_spinbox->setValue(10);
     step_init_wait_s_spinbox->setSuffix(" s");
     connect(step_init_wait_s_spinbox, &QSpinBox::valueChanged, this,
             &MainWindow::update_step_info);
