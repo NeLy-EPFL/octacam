@@ -13,14 +13,14 @@ public:
   virtual ~VideoWriter() = default;
 
   virtual bool open(const std::string &filename, int fourcc, double fps,
-                    cv::Size frameSize, bool isColor = true) = 0;
+                    cv::Size frame_size, bool is_color = true) = 0;
   virtual bool write(const cv::Mat &frame) = 0;
   virtual void close() = 0;
 };
 
 class OpencvVideoWriter : public VideoWriter {
 public:
-  OpencvVideoWriter(size_t maxQueueSize = 30);
+  OpencvVideoWriter(size_t max_queue_size = 30);
   ~OpencvVideoWriter();
 
   OpencvVideoWriter(const OpencvVideoWriter &) = delete;
@@ -29,18 +29,18 @@ public:
   OpencvVideoWriter &operator=(OpencvVideoWriter &&) = delete;
 
   bool open(const std::string &filename, int fourcc, double fps,
-            cv::Size frameSize, bool isColor = true) override;
+            cv::Size frame_size, bool is_color = true) override;
   bool write(const cv::Mat &frame) override;
   void close() override;
 
 private:
-  void writerThreadFunc();
+  void writer_thread_func();
 
   cv::VideoWriter writer_;
-  std::queue<cv::Mat> frameQueue_;
+  std::queue<cv::Mat> frame_queue_;
   std::mutex mutex_;
-  std::condition_variable condVar_;
-  std::thread writerThread_;
+  std::condition_variable cond_var_;
+  std::thread writer_thread_;
   std::atomic<bool> running_;
-  size_t maxQueueSize_;
+  size_t max_queue_size_;
 };

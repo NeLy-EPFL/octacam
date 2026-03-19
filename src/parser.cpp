@@ -2,30 +2,42 @@
 
 #include <ctime>
 #include <filesystem>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
 OctacamConfig parse_config(const std::string &file_path) {
-  int n_cameras = 0;
   OctacamConfig ret;
-  YAML::Node file;
+
+  const auto finalize = [&ret]() {
+    char buffer[1000]{};
+    const std::time_t now = std::time(nullptr);
+    const std::tm *local_tm = std::localtime(&now);
+    if (local_tm && std::strftime(buffer, sizeof(buffer),
+                                  ret.gui_config.save_directory_default.c_str(),
+                                  local_tm) > 0) {
+      ret.gui_config.save_directory_default = std::string(buffer);
+    }
+    return ret;
+  };
 
   if (!std::filesystem::exists(file_path)) {
     spdlog::info("octacam config file not found at {}. ", file_path);
     spdlog::info("All detected cameras will be used.");
-    goto label;
+    return finalize();
   }
 
+  YAML::Node file;
   try {
     file = YAML::LoadFile(file_path);
   } catch (const YAML::ParserException &e) {
     spdlog::error("Failed to parse octacam config file: {}", e.what());
-    goto label;
+    return finalize();
   }
 
   if (file["gui"].IsDefined()) {
     if (!file["gui"].IsMap()) {
-      spdlog::warn("Ignoring \"default_parameters\" in octacam config as it is "
+      spdlog::warn("Ignoring \"gui\" in octacam config as it is "
                    "not a map");
     } else {
       auto src = file["gui"];
@@ -173,54 +185,60 @@ OctacamConfig parse_config(const std::string &file_path) {
   }
 
   if (!file["cameras"].IsDefined()) {
-    goto label;
+    return finalize();
   }
 
   if (!file["cameras"].IsSequence()) {
     spdlog::warn(
         "Ignoring \"cameras\" in octacam config as it is not a sequence");
-    goto label;
+    return finalize();
   }
+
+  std::unordered_set<std::string> used_serial_numbers;
+  std::unordered_set<std::string> used_names;
+  int camera_entry_index = 0;
 
   for (const auto &src : file["cameras"]) {
     CameraConfig dst;
     if (!src["serial_number"].IsDefined()) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its "
                    "\"serial_number\" is absent",
-                   n_cameras);
+                   camera_entry_index);
+      ++camera_entry_index;
       continue;
     }
-    dst.serial_number = src["serial_number"].as<std::string>();
-
-    bool is_serial_number_unique = true;
-    for (int i = 0; i < n_cameras; i++) {
-      if (dst.serial_number == ret.camera_configs[i].serial_number) {
-        is_serial_number_unique = false;
-        break;
-      }
+    try {
+      dst.serial_number = src["serial_number"].as<std::string>();
+    } catch (const YAML::BadConversion &) {
+      spdlog::warn("Ignoring the {}th entry of \"cameras\" as its "
+                   "\"serial_number\" is not a string",
+                   camera_entry_index);
+      ++camera_entry_index;
+      continue;
     }
-    if (!is_serial_number_unique) {
+
+    if (!used_serial_numbers.emplace(dst.serial_number).second) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its "
                    "\"serial_number\" is not unique",
-                   n_cameras);
+                   camera_entry_index);
+      ++camera_entry_index;
       continue;
     }
 
     if (src["name"].IsDefined()) {
-      dst.name = src["name"].as<std::string>();
-    }
-
-    bool is_name_unique = true;
-    for (int i = 0; i < n_cameras; i++) {
-      if (dst.name == ret.camera_configs[i].name) {
-        is_name_unique = false;
-        break;
+      try {
+        dst.name = src["name"].as<std::string>();
+      } catch (const YAML::BadConversion &) {
+        spdlog::warn("Ignoring \"name\" for camera {} as it is not a string",
+                     dst.serial_number);
       }
     }
-    if (!is_name_unique) {
+
+    if (!dst.name.empty() && !used_names.emplace(dst.name).second) {
       spdlog::warn("Ignoring the {}th entry of \"cameras\" as its \"name\" is "
                    "not unique",
-                   n_cameras);
+                   camera_entry_index);
+      ++camera_entry_index;
       continue;
     }
 
@@ -278,25 +296,16 @@ OctacamConfig parse_config(const std::string &file_path) {
     }
 
     ret.camera_configs.push_back(dst);
-    n_cameras++;
+    ++camera_entry_index;
   }
 
-  if (n_cameras == 0) {
+  if (ret.camera_configs.empty()) {
     spdlog::info("No cameras found in octacam config file. All detected "
                  "cameras will be used.");
-    goto label;
+    return finalize();
   }
 
   spdlog::info("Found {} camera(s) in octacam config file",
                ret.camera_configs.size());
-
-label:
-  char buffer[1000];
-  time_t now = std::time(nullptr);
-  std::strftime(buffer, sizeof(buffer),
-                ret.gui_config.save_directory_default.c_str(),
-                std::localtime(&now));
-  ret.gui_config.save_directory_default = std::string(buffer);
-
-  return ret;
+  return finalize();
 }

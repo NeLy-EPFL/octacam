@@ -5,7 +5,9 @@
 #include <cmath>
 #include <filesystem>
 #include <regex>
+#include <unordered_map>
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -94,8 +96,8 @@ public:
     std::tm *now_tm = std::localtime(&now_time_t);
     std::array<char, 7> date_str_arr;
     std::strftime(date_str_arr.data(), date_str_arr.size(), "%y%m%d", now_tm);
-    QString defaultPath = QString::fromStdString(save_directory_default);
-    setPlainText(defaultPath);
+    QString default_path = QString::fromStdString(save_directory_default);
+    setPlainText(default_path);
   }
 
   DirectoryEdit(const DirectoryEdit &) = delete;
@@ -104,13 +106,13 @@ public:
   DirectoryEdit &operator=(DirectoryEdit &&) = delete;
 
   virtual void setPlainText(const QString &text) {
-    QString inputPath = text.trimmed();
-    if (inputPath.startsWith("~")) {
-      inputPath.replace(0, 1, QDir::homePath());
+    QString input_path = text.trimmed();
+    if (input_path.startsWith("~")) {
+      input_path.replace(0, 1, QDir::homePath());
     }
-    QDir dir(inputPath);
-    QString absPath = dir.absolutePath().replace('\\', '/');
-    QPlainTextEdit::setPlainText(absPath);
+    QDir dir(input_path);
+    QString abs_path = dir.absolutePath().replace('\\', '/');
+    QPlainTextEdit::setPlainText(abs_path);
   }
 
   void increment() {
@@ -119,28 +121,28 @@ public:
     std::regex pattern("\\d{3}"); // Match exactly three digits
     std::sregex_iterator begin(input.begin(), input.end(), pattern);
     std::sregex_iterator end;
-    std::smatch lastMatch;
+    std::smatch last_match;
 
     // Find the last match
     for (std::sregex_iterator it = begin; it != end; ++it) {
-      lastMatch = *it; // Update the last match
+      last_match = *it; // Update the last match
     }
 
     // Check if a match was found
-    if (!lastMatch.empty()) {
-      std::string matchedNumber = lastMatch.str(); // Get the matched number
-      int number = std::stoi(matchedNumber);       // Convert to integer
-      number += 1;                                 // Increment by 1
+    if (!last_match.empty()) {
+      std::string matched_number = last_match.str(); // Get the matched number
+      int number = std::stoi(matched_number);        // Convert to integer
+      number += 1;                                   // Increment by 1
 
       // Convert back to a zero-padded string
       std::ostringstream oss;
       oss << std::setw(3) << std::setfill('0') << number;
-      std::string incrementedNumber = oss.str();
+      std::string incremented_number = oss.str();
 
       // Replace the last match in the original string
       std::string result = input;
-      result.replace(lastMatch.position(), lastMatch.length(),
-                     incrementedNumber);
+      result.replace(last_match.position(), last_match.length(),
+                     incremented_number);
 
       setPlainText(QString::fromStdString(result));
     }
@@ -198,14 +200,12 @@ private slots:
   void update_record_countdown();
   void on_record_button_clicked();
   void on_fps_value_changed(double value);
-  void on_step_minus_button_pressed();
-  void on_step_plus_button_pressed();
-  void on_step_minus_button_released();
-  void on_step_plus_button_released();
-  void step_plus();
-  void step_minus();
-  void on_step_degrees_minus_button_clicked();
-  void on_step_degrees_plus_button_clicked();
+  void on_single_step_ccw_button_pressed();
+  void on_single_step_cw_button_pressed();
+  void on_single_step_ccw_button_released();
+  void on_single_step_cw_button_released();
+  void on_step_execute_button_clicked();
+  void update_step_info();
 
 private:
   void setup_ui();
@@ -228,12 +228,22 @@ private:
   QLabel *status_label;
   QComboBox *video_writer_combo;
   QComboBox *trigger_source_combo;
-  QSpinBox *step_interval_edit;
-  QRadioButton *rotate_selected_button;
-  QRadioButton *rotate_all_button;
+  QSpinBox *single_step_interval_edit;
+  QRadioButton *step_init_cw_button;
+  QRadioButton *step_init_ccw_button;
+  QSpinBox *step_count_spinbox;
+  QSpinBox *step_interval_us_spinbox;
+  QSpinBox *step_rest_ms_spinbox;
+  QSpinBox *step_repeats_spinbox;
+  QSpinBox *step_init_wait_s_spinbox;
+  QLabel *step_info_label;
+  QCheckBox *step_start_with_recording_checkbox = nullptr;
+  QRadioButton *transform_selected_button;
+  QRadioButton *transform_all_button;
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
   QDoubleSpinBox *step_degrees_edit;
-  QTimer *step_plus_timer;
-  QTimer *step_minus_timer;
+  QTimer *step_cw_timer;
+  QTimer *step_ccw_timer;
+  std::unordered_map<std::string, CameraConfig> camera_config_by_serial_;
 };
