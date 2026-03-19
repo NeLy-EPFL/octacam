@@ -34,3 +34,5 @@ Makefile
 # Ignore other system files
 .DS_Store
 Thumbs.db
+
+.cache/
