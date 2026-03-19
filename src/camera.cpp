@@ -19,20 +19,20 @@ FrameForDisplay::FrameForDisplay() = default;
 
 FrameForDisplay::~FrameForDisplay() = default;
 
-cv::Mat *FrameForDisplay::pop() {
+FrameForDisplay::FrameForDisplay(FrameForDisplay &&other) noexcept {
+  std::lock_guard<std::mutex> lock(other.mtx_);
+  mat_ = std::move(other.mat_);
+}
+
+std::unique_ptr<cv::Mat> FrameForDisplay::pop() {
   std::lock_guard<std::mutex> lock(mtx_);
-  if (mat_) {
-    cv::Mat *temp = mat_;
-    mat_ = nullptr;
-    return temp;
-  }
-  return nullptr;
+  return std::move(mat_);
 }
 
 bool FrameForDisplay::push(const cv::Mat &frame) {
   std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
   if (lock.owns_lock() && mat_ == nullptr) {
-    mat_ = new cv::Mat(frame.clone());
+    mat_ = std::make_unique<cv::Mat>(frame.clone());
     return true;
   }
   return false;
@@ -94,9 +94,8 @@ inline void Camera::update_resulting_fps(size_t window_size) {
                    static_cast<double>(delta_ns);
 }
 
-inline void
-Camera::store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult) {
-  uint64_t timestamp = ptrGrabResult->GetTimeStamp();
+inline void Camera::store_timestamp(const Pylon::CGrabResultPtr &grab_result) {
+  uint64_t timestamp = grab_result->GetTimeStamp();
   if (timestamp == 0) {
     auto now = std::chrono::high_resolution_clock::now();
     timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -118,16 +117,16 @@ void Camera::start_preview() {
   camera_->StartGrabbing(Pylon::GrabStrategy_LatestImageOnly);
   future_ = std::async(std::launch::async, [this]() {
     while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
-      Pylon::CGrabResultPtr ptrGrabResult;
-      camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
+      Pylon::CGrabResultPtr grab_result;
+      camera_->RetrieveResult(GRAB_TIMEOUT_MS, grab_result,
                               Pylon::TimeoutHandling_Return);
-      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
-        store_timestamp(ptrGrabResult);
+      if (grab_result && grab_result->GrabSucceeded()) {
+        store_timestamp(grab_result);
 
-        void *pImageBuffer = ptrGrabResult->GetBuffer();
+        void *image_buffer = grab_result->GetBuffer();
         auto stored = frame_for_display_.push(
             cv::Mat(camera_->Height.GetValue(), camera_->Width.GetValue(),
-                    CV_8UC1, pImageBuffer));
+                    CV_8UC1, image_buffer));
         if (stored) {
           update_resulting_fps();
         }
@@ -176,14 +175,14 @@ void Camera::start_record(const std::string &save_path, const double &fps,
     bool local_started_flag = false;
     int64_t frame_count = 0;
     while (!stop_flag_ && camera_ && camera_->IsGrabbing()) {
-      Pylon::CGrabResultPtr ptrGrabResult;
-      camera_->RetrieveResult(GRAB_TIMEOUT_MS, ptrGrabResult,
+      Pylon::CGrabResultPtr grab_result;
+      camera_->RetrieveResult(GRAB_TIMEOUT_MS, grab_result,
                               Pylon::TimeoutHandling_Return);
-      if (ptrGrabResult && ptrGrabResult->GrabSucceeded()) {
-        store_timestamp(ptrGrabResult);
-        void *pImageBuffer = ptrGrabResult->GetBuffer();
+      if (grab_result && grab_result->GrabSucceeded()) {
+        store_timestamp(grab_result);
+        void *image_buffer = grab_result->GetBuffer();
         cv::Mat frame(camera_->Height.GetValue(), camera_->Width.GetValue(),
-                      CV_8UC1, pImageBuffer);
+                      CV_8UC1, image_buffer);
 
         bool written = video_writer_->write(frame);
         if (!written) {
@@ -363,19 +362,19 @@ void CameraSystem::set_trigger_source(const bool &use_software_trigger) {
   }
 }
 
-std::vector<std::pair<cv::Mat *, double>> CameraSystem::get_mats_and_fps() {
-  std::vector<std::pair<cv::Mat *, double>> pixmaps_vec;
-  pixmaps_vec.reserve(cameras_.size());
+std::vector<std::pair<std::unique_ptr<cv::Mat>, double>>
+CameraSystem::get_mats_and_fps() {
+  std::vector<std::pair<std::unique_ptr<cv::Mat>, double>> frames_and_fps;
+  frames_and_fps.reserve(cameras_.size());
   for (auto &camera : cameras_) {
-    auto *mat = camera.frame_for_display_.pop();
+    auto mat = camera.frame_for_display_.pop();
     if (mat) {
-      pixmaps_vec.emplace_back(
-          std::make_pair(mat, camera.resulting_fps_.load()));
+      frames_and_fps.emplace_back(std::move(mat), camera.resulting_fps_.load());
     } else {
-      pixmaps_vec.emplace_back(std::make_pair(nullptr, 0.0));
+      frames_and_fps.emplace_back(nullptr, 0.0);
     }
   }
-  return pixmaps_vec;
+  return frames_and_fps;
 }
 
 int CameraSystem::get_camera_count() const { return cameras_.size(); }

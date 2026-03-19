@@ -99,13 +99,13 @@ std::size_t SerialPort::write(const void *data, std::size_t len) {
   return total;
 }
 
-std::size_t SerialPort::read(void *out, std::size_t len, int timeoutMs) {
+std::size_t SerialPort::read(void *out, std::size_t len, int timeout_ms) {
   auto p = static_cast<uint8_t *>(out);
   std::size_t total = 0;
   int waited = 0;
   constexpr int stepMs = 10;
 
-  while (total < len && waited < timeoutMs) {
+  while (total < len && waited < timeout_ms) {
     ssize_t n = ::read(fd_, p + total, len - total);
     if (n > 0)
       total += static_cast<std::size_t>(n);

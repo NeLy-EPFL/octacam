@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include <CLI/CLI.hpp>
 #include <QApplication>
@@ -66,8 +67,13 @@ int main(int argc, char **argv) {
   }
 
   std::vector<std::string> requested_serial_numbers;
+  requested_serial_numbers.reserve(config.camera_configs.size());
+  std::unordered_map<std::string, std::string> camera_name_by_serial;
+  camera_name_by_serial.reserve(config.camera_configs.size());
   for (const auto &camera_config : config.camera_configs) {
     requested_serial_numbers.push_back(camera_config.serial_number);
+    camera_name_by_serial.emplace(camera_config.serial_number,
+                                  camera_config.name);
   }
 
   CameraSystem camera_system(requested_serial_numbers);
@@ -75,14 +81,10 @@ int main(int argc, char **argv) {
   auto n_cameras = camera_system.get_camera_count();
 
   for (auto &camera : camera_system) {
-    auto serial_number = camera.get_serial_number();
-    auto it = std::ranges::find_if(
-        config.camera_configs,
-        [&serial_number](const CameraConfig &camera_config) {
-          return camera_config.serial_number == serial_number;
-        });
-    if (it != config.camera_configs.end()) {
-      camera.set_name(it->name);
+    const auto serial_number = camera.get_serial_number();
+    auto it = camera_name_by_serial.find(serial_number);
+    if (it != camera_name_by_serial.end()) {
+      camera.set_name(it->second);
     }
   }
 

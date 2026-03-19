@@ -53,6 +53,9 @@ GraphicsView::~GraphicsView() = default;
 
 void GraphicsView::resizeEvent(QResizeEvent *event) {
   QGraphicsView::resizeEvent(event);
+  if (!scene()) {
+    return;
+  }
   fitInView(scene()->itemsBoundingRect(), Qt::KeepAspectRatio);
 }
 
@@ -60,6 +63,10 @@ MainWindow::MainWindow(CameraSystem &camera_system, OctacamConfig config,
                        SerialPort &serial_port, QWidget *parent)
     : QMainWindow(parent), camera_system(camera_system), config(config),
       serial_port(serial_port) {
+  for (const auto &camera_config : this->config.camera_configs) {
+    camera_config_by_serial_.emplace(camera_config.serial_number,
+                                     camera_config);
+  }
   setup_ui();
 }
 
@@ -72,6 +79,14 @@ inline std::chrono::nanoseconds fps_to_ns(double fps) {
 
 void MainWindow::setup_ui() {
   auto &cfg = config.gui_config;
+  const auto find_camera_config =
+      [this](const std::string &serial_number) -> const CameraConfig * {
+    auto it = camera_config_by_serial_.find(serial_number);
+    if (it == camera_config_by_serial_.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  };
 
   camera_system.set_software_trigger_frequency(cfg.fps_default);
   camera_system.start_software_trigger();
@@ -96,15 +111,7 @@ void MainWindow::setup_ui() {
   for (auto &camera : std::ranges::reverse_view(camera_system)) {
     auto serial_number = camera.get_serial_number();
 
-    CameraConfig camera_config;
-    auto it = std::ranges::find_if(
-        config.camera_configs,
-        [&serial_number](const CameraConfig &camera_config) {
-          return camera_config.serial_number == serial_number;
-        });
-    if (it != config.camera_configs.end()) {
-      camera_config = *it;
-    }
+    const CameraConfig *camera_config = find_camera_config(serial_number);
 
     auto *widget = new QWidget(this);
     auto *layout = new QVBoxLayout(widget);
@@ -128,8 +135,10 @@ void MainWindow::setup_ui() {
     layout->addWidget(view);
 
     QTransform transform;
-    transform.scale(camera_config.scale_x, camera_config.scale_y);
-    transform.rotate(camera_config.rotation_deg);
+    if (camera_config) {
+      transform.scale(camera_config->scale_x, camera_config->scale_y);
+      transform.rotate(camera_config->rotation_deg);
+    }
     pixmap_item->setTransform(transform);
 
     auto sub_window = mdi_area->addSubWindow(
@@ -140,10 +149,12 @@ void MainWindow::setup_ui() {
     auto title = QString::fromStdString(camera.get_name());
     sub_window->setWindowTitle(title);
 
-    if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
+    if (camera_config && camera_config->window_x >= 0 &&
+        camera_config->window_y >= 0) {
       tile = false;
     }
-    if (camera_config.window_width > 0 && camera_config.window_height > 0) {
+    if (camera_config && camera_config->window_width > 0 &&
+        camera_config->window_height > 0) {
       tile = false;
     }
     --i;
@@ -157,13 +168,13 @@ void MainWindow::setup_ui() {
   step_cw_timer->setTimerType(Qt::PreciseTimer);
   step_cw_timer->setInterval(1);
   connect(step_cw_timer, &QTimer::timeout, this,
-          [this]() { serial_port.writeAll(Command{1}); });
+          [this]() { serial_port.write_all(Command{1}); });
 
   step_ccw_timer = new QTimer(this);
   step_ccw_timer->setTimerType(Qt::PreciseTimer);
   step_ccw_timer->setInterval(1);
   connect(step_ccw_timer, &QTimer::timeout, this,
-          [this]() { serial_port.writeAll(Command{-1}); });
+          [this]() { serial_port.write_all(Command{-1}); });
 
   auto display_timer = new QTimer(this);
   display_timer->setTimerType(Qt::CoarseTimer);
@@ -575,55 +586,56 @@ void MainWindow::rotate_displays() {
 void MainWindow::resizeEvent(QResizeEvent *event) {
   QMainWindow::resizeEvent(event);
   if (!tile && mdi_area) {
+    const auto find_camera_config =
+        [this](const std::string &serial_number) -> const CameraConfig * {
+      auto it = camera_config_by_serial_.find(serial_number);
+      if (it == camera_config_by_serial_.end()) {
+        return nullptr;
+      }
+      return &it->second;
+    };
+
     int i = 0;
     for (auto &camera : std::ranges::reverse_view(camera_system)) {
       auto serial_number = camera.get_serial_number();
-      CameraConfig camera_config;
-      auto it = std::ranges::find_if(
-          config.camera_configs,
-          [&serial_number](const CameraConfig &camera_config) {
-            return camera_config.serial_number == serial_number;
-          });
-      if (it != config.camera_configs.end()) {
-        camera_config = *it;
-      }
+      const CameraConfig *camera_config = find_camera_config(serial_number);
 
       auto *sub_window = mdi_area->subWindowList().at(i++);
-      if (camera_config.window_x >= 0 && camera_config.window_y >= 0) {
-        sub_window->move(static_cast<int>(std::round(camera_config.window_x *
+      if (camera_config && camera_config->window_x >= 0 &&
+          camera_config->window_y >= 0) {
+        sub_window->move(static_cast<int>(std::round(camera_config->window_x *
                                                      mdi_area->width())),
-                         static_cast<int>(std::round(camera_config.window_y *
+                         static_cast<int>(std::round(camera_config->window_y *
                                                      mdi_area->height())));
       }
-      if (camera_config.window_width > 0 && camera_config.window_height > 0) {
+      if (camera_config && camera_config->window_width > 0 &&
+          camera_config->window_height > 0) {
         sub_window->resize(
             static_cast<int>(
-                std::round(camera_config.window_width * mdi_area->width())),
+                std::round(camera_config->window_width * mdi_area->width())),
             static_cast<int>(
-                std::round(camera_config.window_height * mdi_area->height())));
+                std::round(camera_config->window_height * mdi_area->height())));
       }
     }
   }
 }
 
 void MainWindow::update_frames() {
-  auto mats_and_fps = camera_system.get_mats_and_fps();
-  for (size_t i = 0; i < mats_and_fps.size(); ++i) {
+  auto frames_and_fps = camera_system.get_mats_and_fps();
+  for (size_t i = 0; i < frames_and_fps.size(); ++i) {
     auto *pixmap_item = pixmap_items[i];
     auto *fps_label = fps_labels[i];
 
-    if (pixmap_item && i < mats_and_fps.size()) {
-      auto [mat, fps] = mats_and_fps[i];
+    if (pixmap_item) {
+      auto &[mat, fps] = frames_and_fps[i];
       if (!mat) {
         continue;
       }
-      cv::Mat frame = mat->clone();
-      QImage image(frame.data, frame.cols, frame.rows,
-                   static_cast<int>(frame.step[0]), QImage::Format_Grayscale8);
+      QImage image(mat->data, mat->cols, mat->rows,
+                   static_cast<int>(mat->step[0]), QImage::Format_Grayscale8);
       QPixmap pixmap = QPixmap::fromImage(image);
       pixmap_item->setPixmap(pixmap);
       fps_label->setText(QString("%1 fps").arg(fps, 6, 'f', 2));
-      delete mat;
     }
   }
 }
@@ -635,7 +647,6 @@ void MainWindow::check_record_started() {
       on_step_execute_button_clicked();
     }
     check_record_started_timer->stop();
-    record_countdown_timer->start();
     update_record_countdown();
     record_countdown_timer->start();
     record_button->setText("Stop recording");
@@ -664,13 +675,10 @@ void MainWindow::update_record_countdown() {
 }
 
 void MainWindow::on_record_button_clicked() {
-  auto *record_button = qobject_cast<QPushButton *>(sender());
-  if (record_button) {
-    if (record_button->text() == "Start recording") {
-      start_record();
-    } else {
-      stop_record();
-    }
+  if (record_button->text() == "Start recording") {
+    start_record();
+  } else {
+    stop_record();
   }
 }
 
@@ -681,7 +689,7 @@ void MainWindow::on_single_step_ccw_button_pressed() {
 
 void MainWindow::on_single_step_ccw_button_released() {
   step_ccw_timer->stop();
-  serial_port.writeAll(Command{0});
+  serial_port.write_all(Command{0});
 }
 
 void MainWindow::on_single_step_cw_button_pressed() {
@@ -691,7 +699,7 @@ void MainWindow::on_single_step_cw_button_pressed() {
 
 void MainWindow::on_single_step_cw_button_released() {
   step_cw_timer->stop();
-  serial_port.writeAll(Command{0});
+  serial_port.write_all(Command{0});
 }
 
 void MainWindow::on_step_execute_button_clicked() {
@@ -703,7 +711,7 @@ void MainWindow::on_step_execute_button_clicked() {
   uint8_t repeats = static_cast<uint8_t>(step_repeats_spinbox->value());
   uint8_t init_wait_duration =
       static_cast<uint8_t>(step_init_wait_s_spinbox->value());
-  serial_port.writeAll(
+  serial_port.write_all(
       Command{steps, interval, rest_duration, repeats, init_wait_duration});
 }
 
@@ -792,6 +800,17 @@ void MainWindow::start_record() {
     }
   }
 
+  if (fourcc_str.size() != 4 || extension_str.empty()) {
+    QMessageBox::warning(this, "Warning",
+                         "Could not parse video writer format. Recording was "
+                         "not started.");
+    for (auto *widget : input_widgets) {
+      widget->setEnabled(true);
+    }
+    record_button->setEnabled(true);
+    return;
+  }
+
   const bool use_software_trigger =
       trigger_source_combo->currentText() == "software";
 
@@ -801,14 +820,7 @@ void MainWindow::start_record() {
     camera_system.set_trigger_source(false);
   }
 
-  if (!fourcc_str.empty() && fourcc_str.length() == 4 &&
-      !extension_str.empty()) {
-    camera_system.start_record(save_dir, fps_val, fourcc_str, extension_str);
-  } else {
-    QMessageBox::warning(this, "Warning",
-                         "Could not parse video writer format. Recording may "
-                         "not use specified FOURCC/extension.");
-  }
+  camera_system.start_record(save_dir, fps_val, fourcc_str, extension_str);
 
   status_label->setText("Waiting for first trigger...");
   record_button->setText("Abort recording");

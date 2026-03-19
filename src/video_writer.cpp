@@ -1,29 +1,39 @@
 #include "video_writer.hpp"
 
-OpencvVideoWriter::OpencvVideoWriter(size_t maxQueueSize)
-    : running_(false), maxQueueSize_(maxQueueSize) {}
+OpencvVideoWriter::OpencvVideoWriter(size_t max_queue_size)
+    : running_(false), max_queue_size_(max_queue_size) {}
 
 OpencvVideoWriter::~OpencvVideoWriter() { close(); }
 
 bool OpencvVideoWriter::open(const std::string &filename, int fourcc,
-                             double fps, cv::Size frameSize, bool isColor) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (!writer_.open(filename, fourcc, fps, frameSize, isColor)) {
-    return false;
+                             double fps, cv::Size frame_size, bool is_color) {
+  close();
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    while (!frame_queue_.empty()) {
+      frame_queue_.pop();
+    }
+    if (!writer_.open(filename, fourcc, fps, frame_size, is_color)) {
+      return false;
+    }
+    running_ = true;
   }
 
-  running_ = true;
-  writerThread_ = std::thread(&OpencvVideoWriter::writerThreadFunc, this);
+  writer_thread_ = std::thread(&OpencvVideoWriter::writer_thread_func, this);
   return true;
 }
 
 bool OpencvVideoWriter::write(const cv::Mat &frame) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (frameQueue_.size() >= maxQueueSize_) {
+  if (!running_ || !writer_.isOpened()) {
+    return false;
+  }
+  if (frame_queue_.size() >= max_queue_size_) {
     return false; // Drop frame
   }
-  frameQueue_.push(std::move(frame));
-  condVar_.notify_one();
+  frame_queue_.push(frame.clone());
+  cond_var_.notify_one();
   return true;
 }
 
@@ -31,42 +41,33 @@ void OpencvVideoWriter::close() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     running_ = false;
-    condVar_.notify_all();
+    cond_var_.notify_all();
   }
 
-  if (writerThread_.joinable()) {
-    writerThread_.join();
+  if (writer_thread_.joinable()) {
+    writer_thread_.join();
   }
 
   writer_.release();
 }
 
-void OpencvVideoWriter::writerThreadFunc() {
-  while (running_) {
+void OpencvVideoWriter::writer_thread_func() {
+  while (true) {
     cv::Mat frame;
 
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      condVar_.wait(lock,
-                    [this]() { return !frameQueue_.empty() || !running_; });
-      if (!running_) {
+      cond_var_.wait(lock,
+                     [this]() { return !frame_queue_.empty() || !running_; });
+      if (!running_ && frame_queue_.empty()) {
         break;
       }
-
-      if (!frameQueue_.empty()) {
-        frame = std::move(frameQueue_.front());
-        frameQueue_.pop();
-      }
+      frame = std::move(frame_queue_.front());
+      frame_queue_.pop();
     }
 
     if (!frame.empty()) {
       writer_ << frame;
     }
-  }
-
-  std::lock_guard<std::mutex> lock(mutex_);
-  while (!frameQueue_.empty()) {
-    writer_ << frameQueue_.front();
-    frameQueue_.pop();
   }
 }

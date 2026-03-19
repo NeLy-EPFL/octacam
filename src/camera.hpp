@@ -27,15 +27,13 @@ public:
 
   FrameForDisplay(const FrameForDisplay &) = delete;
   FrameForDisplay &operator=(const FrameForDisplay &) = delete;
-  FrameForDisplay(FrameForDisplay &&other) : mat_(other.mat_) {
-    other.mat_ = nullptr;
-  }
+  FrameForDisplay(FrameForDisplay &&other) noexcept;
   FrameForDisplay &operator=(FrameForDisplay &&other) = delete;
-  cv::Mat *pop();
+  std::unique_ptr<cv::Mat> pop();
   bool push(const cv::Mat &frame);
 
 private:
-  cv::Mat *mat_ = nullptr;
+  std::unique_ptr<cv::Mat> mat_;
   std::mutex mtx_;
 };
 
@@ -62,7 +60,7 @@ private:
                     const std::string &fourcc);
   void load_params(const std::string &config);
   void trigger_once();
-  inline void store_timestamp(const Pylon::CGrabResultPtr &ptrGrabResult);
+  inline void store_timestamp(const Pylon::CGrabResultPtr &grab_result);
   inline void update_resulting_fps(size_t n_frames = 6);
 
   std::unique_ptr<Pylon::CBaslerUniversalInstantCamera> camera_;
@@ -100,7 +98,7 @@ public:
   void stop_software_trigger();
   void set_trigger_source(const bool &use_software_trigger);
   bool all_cameras_started() const;
-  std::vector<std::pair<cv::Mat *, double>> get_mats_and_fps();
+  std::vector<std::pair<std::unique_ptr<cv::Mat>, double>> get_mats_and_fps();
   int get_camera_count() const;
 
   std::vector<Camera>::iterator begin();

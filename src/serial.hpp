@@ -31,12 +31,12 @@ public:
   bool is_open() const noexcept { return fd_ >= 0; }
 
   std::size_t write(const void *data, std::size_t len);
-  template <typename T> std::size_t writeAll(const T &value) {
+  template <typename T> std::size_t write_all(const T &value) {
     static_assert(std::is_trivially_copyable_v<T>,
-                  "writeAll requires trivially copyable types");
+                  "write_all requires trivially copyable types");
     return write(&value, sizeof(T));
   }
-  std::size_t read(void *out, std::size_t len, int timeoutMs);
+  std::size_t read(void *out, std::size_t len, int timeout_ms);
 
 private:
   int fd_ = -1;
