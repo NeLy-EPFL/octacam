@@ -174,8 +174,14 @@ public:
   GraphicsView(GraphicsView &&) = delete;
   GraphicsView &operator=(GraphicsView &&) = delete;
 
+  void set_cross_visible(bool visible);
+
 protected:
   void resizeEvent(QResizeEvent *event) override;
+  void drawForeground(QPainter *painter, const QRectF &rect) override;
+
+private:
+  bool cross_visible_ = false;
 };
 
 class MainWindow : public QMainWindow {
@@ -217,6 +223,7 @@ private:
   OctacamConfig config;
   SerialPort &serial_port;
   QVector<QGraphicsPixmapItem *> pixmap_items;
+  QVector<GraphicsView *> graphics_views;
   QVector<QWidget *> input_widgets;
   QMdiArea *mdi_area;
   QTimer *record_countdown_timer;
@@ -240,6 +247,7 @@ private:
   QCheckBox *step_start_with_recording_checkbox = nullptr;
   QRadioButton *transform_selected_button;
   QRadioButton *transform_all_button;
+  QCheckBox *display_cross_checkbox;
   std::chrono::milliseconds record_remaining_time_;
   QVector<QLabel *> fps_labels;
   QDoubleSpinBox *step_degrees_edit;

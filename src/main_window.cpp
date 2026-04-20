@@ -32,6 +32,8 @@
 #include <QToolBar>
 #include <QTransform>
 #include <QVBoxLayout>
+#include <QPainter>
+#include <QPen>
 
 #include <cmath>
 #include <cstdlib>
@@ -51,12 +53,45 @@ GraphicsView::GraphicsView(QWidget *parent) : QGraphicsView(parent) {}
 
 GraphicsView::~GraphicsView() = default;
 
+void GraphicsView::set_cross_visible(bool visible) {
+  if (cross_visible_ == visible) {
+    return;
+  }
+  cross_visible_ = visible;
+  viewport()->update();
+}
+
 void GraphicsView::resizeEvent(QResizeEvent *event) {
   QGraphicsView::resizeEvent(event);
   if (!scene()) {
     return;
   }
   fitInView(scene()->itemsBoundingRect(), Qt::KeepAspectRatio);
+}
+
+void GraphicsView::drawForeground(QPainter *painter, const QRectF &rect) {
+  QGraphicsView::drawForeground(painter, rect);
+  if (!cross_visible_) {
+    return;
+  }
+
+  const QRect viewport_rect = viewport()->rect();
+  if (viewport_rect.isEmpty()) {
+    return;
+  }
+
+  const QPoint viewport_center = viewport_rect.center();
+
+  const QPointF scene_left = mapToScene(QPoint(viewport_rect.left(), viewport_center.y()));
+  const QPointF scene_right = mapToScene(QPoint(viewport_rect.right(), viewport_center.y()));
+  const QPointF scene_top = mapToScene(QPoint(viewport_center.x(), viewport_rect.top()));
+  const QPointF scene_bottom = mapToScene(QPoint(viewport_center.x(), viewport_rect.bottom()));
+
+  QPen pen(QColor("lime"));
+  pen.setWidthF(0.0);
+  painter->setPen(pen);
+  painter->drawLine(QLineF(scene_left, scene_right));
+  painter->drawLine(QLineF(scene_top, scene_bottom));
 }
 
 MainWindow::MainWindow(CameraSystem &camera_system, OctacamConfig config,
@@ -129,6 +164,7 @@ void MainWindow::setup_ui() {
     view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     view->setScene(new QGraphicsScene(view));
+    graphics_views.push_back(view);
 
     auto *pixmap_item = pixmap_items[i];
     view->scene()->addItem(pixmap_item);
@@ -472,7 +508,19 @@ void MainWindow::setup_ui() {
   connect(reset_transformation, &QPushButton::clicked, this,
           &MainWindow::rotate_displays);
 
-  view_layout->setRowStretch(4, 1);
+  display_cross_checkbox = new QCheckBox("Display cross", view_tab);
+  display_cross_checkbox->setChecked(false);
+  view_layout->addWidget(display_cross_checkbox, 4, 0, 1, 3, Qt::AlignCenter);
+  connect(display_cross_checkbox, &QCheckBox::toggled, this,
+          [this](bool checked) {
+            for (auto *view : graphics_views) {
+              if (view) {
+                view->set_cross_visible(checked);
+              }
+            }
+          });
+
+  view_layout->setRowStretch(5, 1);
 
   tabs->addTab(view_tab, "View");
 
