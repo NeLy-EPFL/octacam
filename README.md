@@ -11,17 +11,50 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 - See live updates of all cameras while recording.
 - Save frames directly to videos
 
+## Installation
+
+octacam is a Python package. All dependencies — including the Basler pylon
+runtime (bundled by [pypylon](https://github.com/basler/pypylon)), Qt, OpenCV,
+and ffmpeg — install automatically; no SDK downloads or C++ toolchain needed.
+
+```bash
+uv tool install git+https://github.com/NeLy-EPFL/octacam.git
+```
+
+or, from a clone: `uv tool install .` (or `pip install .`).
+
+## Usage
+
+```bash
+octacam gui <config_dir>      # launch the GUI (also: bare `octacam` for ./)
+octacam record <config_dir>   # headless recording (--fps/--duration/--output/--trigger)
+octacam list-cameras          # show detected cameras
+octacam --help
+```
+
+`<config_dir>` contains the per-camera `.pfs` Basler configuration files and an
+optional `octacam_config.yaml` (camera names, display layout, GUI defaults) —
+see [configs/](configs/) for examples.
+
+To run without hardware using Basler's camera emulation:
+
+```bash
+PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
+```
+
 ## Repository layout
 
-octacam is being migrated from C++ to a pip/uv-installable Python package:
-
-- **Repo root** — the Python package (work in progress). Uses [pypylon](https://github.com/basler/pypylon) (which bundles the Basler pylon runtime — no manual SDK install), so installation is a single `uv`/`pip` command once released.
-- **[cpp/](cpp/)** — the original C++/Qt6 implementation, fully functional. See [cpp/README.md](cpp/README.md) for build instructions. This remains the reference implementation until the Python package reaches feature parity.
-- **[configs/](configs/)** — camera `.pfs` files and `octacam_config.yaml` per rig, shared by both implementations.
-- **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gate the Python architecture (pure Python vs. native hot-path module). See [benchmarks/README.md](benchmarks/README.md).
+- **[src/octacam/](src/octacam/)** — the Python package.
+- **[cpp/](cpp/)** — the original C++/Qt6 implementation, kept as the reference
+  until the Python port is validated on the acquisition rig. See
+  [cpp/README.md](cpp/README.md) for build instructions.
+- **[configs/](configs/)** — camera `.pfs` files and `octacam_config.yaml` per
+  rig, shared by both implementations.
+- **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gated the
+  pure-Python architecture. See [benchmarks/README.md](benchmarks/README.md).
 - **[arduino_script/](arduino_script/)** — Arduino sketch for stepper motor control.
 
-## Python development setup
+## Development
 
 Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.11.
 
@@ -29,10 +62,6 @@ Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.11.
 git clone https://github.com/NeLy-EPFL/octacam.git
 cd octacam
 uv sync
-```
-
-Run benchmarks against emulated cameras (no hardware needed):
-
-```bash
+uv run pytest                  # includes an offscreen GUI test on emulated cameras
 uv run benchmarks/bench_pipeline.py --help
 ```
