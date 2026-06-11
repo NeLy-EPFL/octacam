@@ -27,16 +27,71 @@ CODECS = {
 )
 @click.pass_context
 def main(ctx: click.Context, log_level: str) -> None:
-    """octacam: preview, record, and save video streams from multiple Basler cameras."""
+    """octacam: preview, record, and save video streams from multiple Basler cameras.
+
+    Without a subcommand, launches the GUI for the current directory.
+    """
     logging.basicConfig(
         format="[%(levelname)s] %(message)s",
         level=getattr(logging, log_level.upper()),
     )
     if ctx.invoked_subcommand is None:
-        click.echo(
-            "The octacam GUI is not yet ported to Python; use the C++ app in "
-            "cpp/ for the GUI, or run a subcommand (see --help)."
-        )
+        ctx.invoke(gui)
+
+
+@main.command()
+@click.argument(
+    "config_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+)
+@click.option(
+    "--serial-port",
+    default="/dev/ttyACM0",
+    show_default=True,
+    help="Serial device of the Arduino stepper controller.",
+)
+def gui(config_dir: Path, serial_port: str = "/dev/ttyACM0") -> None:
+    """Launch the octacam GUI for the cameras in CONFIG_DIR."""
+    from PySide6.QtWidgets import QApplication
+
+    from octacam.camera import CameraSystem
+    from octacam.config import load_config_dir
+    from octacam.gui.main_window import MainWindow
+    from octacam.serial_link import SerialLink
+
+    serial_link = SerialLink()
+    try:
+        serial_link.open(serial_port, 115200)
+    except Exception as e:
+        log.warning("Failed to open serial port %s: %s", serial_port, e)
+
+    config_dir = config_dir.resolve()
+    log.info("Using config directory: %s", config_dir)
+    config = load_config_dir(config_dir)
+
+    system = CameraSystem([c.serial_number for c in config.cameras])
+    if len(system) == 0:
+        log.warning("No cameras opened. Exiting.")
+        sys.exit(1)
+    log.info("Opened %d camera(s)", len(system))
+
+    names = {c.serial_number: c.name for c in config.cameras if c.name}
+    for camera in system:
+        camera.name = names.get(camera.serial_number, camera.name)
+
+    system.load_config(config_dir)
+    system.start_preview()
+
+    app = QApplication(sys.argv)
+    window = MainWindow(system, config, serial_link)
+    window.setWindowTitle("octacam")
+    window.showNormal()
+    try:
+        sys.exit(app.exec())
+    finally:
+        system.close()
+        serial_link.close()
 
 
 @main.command("list-cameras")
