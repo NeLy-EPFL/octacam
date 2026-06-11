@@ -144,43 +144,36 @@ name = "octacam"
 version = "0.2.0.dev0"
 source = { editable = "." }
 dependencies = [
-    { name = "av" },
     { name = "click" },
     { name = "numpy" },
+    { name = "opencv-python-headless" },
     { name = "pypylon" },
     { name = "pyserial" },
     { name = "pyside6" },
     { name = "pyyaml" },
 ]
 
-[package.optional-dependencies]
-cv = [
-    { name = "opencv-python-headless" },
-]
-
 [package.dev-dependencies]
 dev = [
-    { name = "opencv-python-headless" },
+    { name = "av" },
     { name = "psutil" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "av", specifier = ">=12" },
     { name = "click", specifier = ">=8.1" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "opencv-python-headless", marker = "extra == 'cv'", specifier = ">=4.9" },
+    { name = "opencv-python-headless", specifier = ">=4.9" },
     { name = "pypylon", specifier = ">=4.0" },
     { name = "pyserial", specifier = ">=3.5" },
     { name = "pyside6", specifier = ">=6.7" },
     { name = "pyyaml", specifier = ">=6" },
 ]
-provides-extras = ["cv"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "opencv-python-headless", specifier = ">=4.9" },
+    { name = "av", specifier = ">=12" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pytest", specifier = ">=8" },
 ]

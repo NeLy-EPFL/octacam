@@ -1,18 +1,162 @@
+import logging
+import os
+import sys
+import time
+from pathlib import Path
+
 import click
 
 import octacam
 
+log = logging.getLogger("octacam")
+
+CODECS = {
+    "mjpg": ("MJPG", "avi"),
+    "h264": ("avc1", "mp4"),
+}
+
 
 @click.group(invoke_without_command=True)
 @click.version_option(octacam.__version__)
+@click.option(
+    "--log-level",
+    "-l",
+    type=click.Choice(["debug", "info", "warning", "error"]),
+    default="info",
+    show_default=True,
+)
 @click.pass_context
-def main(ctx: click.Context) -> None:
+def main(ctx: click.Context, log_level: str) -> None:
     """octacam: preview, record, and save video streams from multiple Basler cameras."""
+    logging.basicConfig(
+        format="[%(levelname)s] %(message)s",
+        level=getattr(logging, log_level.upper()),
+    )
     if ctx.invoked_subcommand is None:
         click.echo(
-            "The octacam Python port is under development; the GUI is not yet "
-            "available. Use the C++ app in cpp/ in the meantime."
+            "The octacam GUI is not yet ported to Python; use the C++ app in "
+            "cpp/ for the GUI, or run a subcommand (see --help)."
         )
+
+
+@main.command("list-cameras")
+def list_cameras() -> None:
+    """List detected cameras (set PYLON_CAMEMU=N for emulated ones)."""
+    from pypylon import pylon
+
+    devices = pylon.TlFactory.GetInstance().EnumerateDevices()
+    if not devices:
+        click.echo("No cameras detected.")
+        return
+    for device in devices:
+        click.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
+
+
+@main.command()
+@click.argument(
+    "config_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+)
+@click.option("--fps", "-f", type=float, help="Frame rate [default: from config].")
+@click.option(
+    "--duration",
+    "-d",
+    type=float,
+    help="Recording duration in seconds [default: from config].",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    help="Save directory [default: from config].",
+)
+@click.option(
+    "--codec",
+    type=click.Choice(sorted(CODECS)),
+    default="mjpg",
+    show_default=True,
+)
+@click.option(
+    "--trigger",
+    type=click.Choice(["software", "hardware"]),
+    default="software",
+    show_default=True,
+    help="software: trigger from a timer thread at --fps; hardware: use the "
+    "trigger source configured in the .pfs files.",
+)
+def record(
+    config_dir: Path,
+    fps: float | None,
+    duration: float | None,
+    output: Path | None,
+    codec: str,
+    trigger: str,
+) -> None:
+    """Record videos headlessly from the cameras in CONFIG_DIR."""
+    from octacam.camera import CameraSystem
+    from octacam.config import load_config_dir
+
+    config = load_config_dir(config_dir)
+    if fps is None:
+        fps = config.gui.fps_default
+    if duration is None:
+        duration = config.gui.duration_default
+    if output is None:
+        output = Path(os.path.expanduser(config.gui.save_directory_default))
+
+    system = CameraSystem([c.serial_number for c in config.cameras])
+    if len(system) == 0:
+        log.warning("No cameras opened. Exiting.")
+        sys.exit(1)
+    log.info("Opened %d camera(s)", len(system))
+
+    names = {c.serial_number: c.name for c in config.cameras if c.name}
+    for camera in system:
+        camera.name = names.get(camera.serial_number, camera.name)
+
+    system.load_config(config_dir)
+
+    if output.exists():
+        log.warning("Directory already exists, data might be overwritten: %s", output)
+    output.mkdir(parents=True, exist_ok=True)
+
+    fourcc, extension = CODECS[codec]
+    use_software_trigger = trigger == "software"
+
+    try:
+        system.enable_frame_trigger()
+        system.set_trigger_source(use_software_trigger)
+        system.set_software_trigger_frequency(fps)
+
+        log.info(
+            "Recording %d camera(s) at %g fps for %g s to %s",
+            len(system),
+            fps,
+            duration,
+            output,
+        )
+        system.start_record(output, fps, fourcc, extension)
+        if use_software_trigger:
+            system.start_software_trigger(duration)
+
+        deadline = time.monotonic() + 3.0
+        while not system.all_cameras_started and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if system.all_cameras_started:
+            log.info("All cameras started")
+        else:
+            log.warning("Not all cameras delivered a frame within 3 s")
+
+        time.sleep(duration)
+        time.sleep(0.5)  # grace period for in-flight frames
+        system.stop_software_trigger()
+        system.stop()  # grab loops exit; writers drain and close; CSVs written
+    finally:
+        system.close()
+
+    for camera in system:
+        click.echo(f"{output / camera.name}.{extension}")
 
 
 if __name__ == "__main__":

@@ -7,22 +7,19 @@ requires-python = ">=3.11"
 dependencies = [
     "pypylon>=4.0",
     "numpy>=1.26",
-    "av>=12",
+    "opencv-python-headless>=4.9",
     "pyyaml>=6",
     "pyserial>=3.5",
     "click>=8.1",
     "pyside6>=6.7",
 ]
 
-[project.optional-dependencies]
-cv = ["opencv-python-headless>=4.9"]
-
 [project.scripts]
 octacam = "octacam.cli:main"
 
 [dependency-groups]
 dev = [
-    "opencv-python-headless>=4.9",
+    "av>=12",
     "psutil>=5.9",
     "pytest>=8",
 ]
