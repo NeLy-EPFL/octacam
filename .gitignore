@@ -36,3 +36,13 @@ Makefile
 Thumbs.db
 
 .cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+
+# Benchmark outputs
+benchmarks/results/

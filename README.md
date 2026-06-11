@@ -1,4 +1,5 @@
 # octacam
+
 octacam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple Basler cameras. It is designed to be fast, easy to use, and maintainable.
 
 <p align="center">
@@ -7,49 +8,31 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 
 ## Features
 - Support >7 cameras (8 is not the limit despite the name)
-- See live updates of all cameras while recording. 
+- See live updates of all cameras while recording.
 - Save frames directly to videos
 
-## Installation
-### Prerequisites
-Ensure you have the following installed:
-- C++ compiler with C++20 support (e.g., g++ 11 or higher)
-- CMake 3.19 or higher.
-- Git.
+## Repository layout
 
-### Build Instructions
-1. Install OpenCV, Qt6, and Basler Pylon SDK.
-   ```bash
-    sudo apt-get install libopencv-dev qt6-base-dev libxkbcommon-dev
-    ```
-    For the Basler Pylon SDK, follow the instructions on the [Basler website](https://www.baslerweb.com/en/support/downloads/software-downloads/).
-2. Clone the repository:
-   ```bash
-   git clone https://github.com/NeLy-EPFL/octacam.git
-   cd octacam
-   ```
-3. Create a build directory, configure the project, and build it:
-   ```bash
-   mkdir -p build \
-      && cd build \
-      && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE="-O3 -flto -march=native" .. \
-      && cmake --build .
-   ```
+octacam is being migrated from C++ to a pip/uv-installable Python package:
 
-## Usage
-After building the project, you can run the executable with the following command:
+- **Repo root** — the Python package (work in progress). Uses [pypylon](https://github.com/basler/pypylon) (which bundles the Basler pylon runtime — no manual SDK install), so installation is a single `uv`/`pip` command once released.
+- **[cpp/](cpp/)** — the original C++/Qt6 implementation, fully functional. See [cpp/README.md](cpp/README.md) for build instructions. This remains the reference implementation until the Python package reaches feature parity.
+- **[configs/](configs/)** — camera `.pfs` files and `octacam_config.yaml` per rig, shared by both implementations.
+- **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gate the Python architecture (pure Python vs. native hot-path module). See [benchmarks/README.md](benchmarks/README.md).
+- **[arduino_script/](arduino_script/)** — Arduino sketch for stepper motor control.
+
+## Python development setup
+
+Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.11.
+
 ```bash
-./octacam <config_dir>
-```
-where `<config_dir>` is the path to the configuration directory containing the `.pfs` Basler camera configuraion files.
-If you encounter errors related to too many opened file descriptors, increase the limit before running octacam:
-```bash
-ulimit -n 8192 && ./octacam <config_dir>
+git clone https://github.com/NeLy-EPFL/octacam.git
+cd octacam
+uv sync
 ```
 
-For a complete list of options, run:
+Run benchmarks against emulated cameras (no hardware needed):
+
 ```bash
-./octacam --help
+uv run benchmarks/bench_pipeline.py --help
 ```
-### Code Style
-- Use `clang-format` for consistent code formatting.
