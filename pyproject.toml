@@ -14,6 +14,9 @@ dependencies = [
     "pyside6>=6.7",
     "fastapi>=0.136.3",
     "uvicorn>=0.49.0",
+    # uvicorn ships no WebSocket implementation on its own; the preview/
+    # telemetry/jog socket (octacam serve) needs one at runtime.
+    "websockets>=16.0",
     "imageio-ffmpeg>=0.6.0",
 ]
 
@@ -26,7 +29,6 @@ dev = [
     "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",
-    "websockets>=16.0",
 ]
 
 [build-system]
