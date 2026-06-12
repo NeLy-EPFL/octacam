@@ -4,9 +4,9 @@
 ExposureAuto	Off
 GainAuto	Off
 Width	1984
-Height	512
+Height	1264
 OffsetX	0
-OffsetY	376
+OffsetY	0
 CenterX	0
 CenterY	0
 BinningHorizontalMode	Average

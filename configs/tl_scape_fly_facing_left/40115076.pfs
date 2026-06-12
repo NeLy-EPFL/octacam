@@ -3,10 +3,10 @@
 # Device = Basler::UsbCameraParams -- Basler USB3Vision camera interface -- Device version = 1.0.0 -- Product GUID = 5a809e15-f447-480f-a21f-0fb7256b8400 -- Product version GUID = 6783E95B-A4E9-4F46-B66C-47803414C19E
 ExposureAuto	Off
 GainAuto	Off
-Width	512
-Height	900
-OffsetX	640
-OffsetY	346
+Width	1984
+Height	512
+OffsetX	0
+OffsetY	376
 CenterX	0
 CenterY	0
 BinningHorizontalMode	Average

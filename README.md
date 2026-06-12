@@ -42,6 +42,19 @@ To run without hardware using Basler's camera emulation:
 PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
 ```
 
+## Troubleshooting
+
+**"Insufficient system resources exist to complete the API" at start of
+streaming** — pylon's USB stack needs ~150 open file descriptors and ~16 MB of
+usbfs memory per camera. `octacam` raises its own soft file-descriptor limit at
+startup, but if the hard limit of the session is still too low (`ulimit -Hn`),
+raise it in `/etc/security/limits.conf` or run Basler's `setup-usb.sh`. Also
+make sure `usbcore.usbfs_memory_mb=1000` is set (see
+`/sys/module/usbcore/parameters/usbfs_memory_mb`).
+
+**GUI exits with "Could not load the Qt platform plugin 'xcb'"** — install the
+cursor library required by Qt ≥ 6.5: `sudo apt install libxcb-cursor0`.
+
 ## Repository layout
 
 - **[src/octacam/](src/octacam/)** — the Python package.

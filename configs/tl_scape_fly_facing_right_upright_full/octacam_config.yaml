@@ -1,13 +1,13 @@
 gui:
-  fps_default: 100.0
-  duration_default: 20
+  fps_default: 30.0
+  duration_default: 6.9
   duration_unit_default_index: 0
-  save_directory_default: /data/JSP/%y%m%d_/Fly1/001
-  trigger_source_default_index: 1
+  save_directory_default: ~/data/TL/%y%m%d-genotype/Fly1/001-bhv
+  trigger_source_default_index: 0
   video_writer_default_index: 0
 cameras:
-  - serial_number: 40142907
-    name: camera_RF
+  - serial_number: 40142882
+    name: camera_LF
     scale_x: -1
     scale_y: 1
     rotation_deg: 0
@@ -16,7 +16,7 @@ cameras:
     window_width: 0.333333
     window_height: 0.333333
   - serial_number: 40142892
-    name: camera_RM
+    name: camera_LM
     scale_x: -1
     scale_y: 1
     rotation_deg: 0
@@ -24,8 +24,8 @@ cameras:
     window_y: 0.333333
     window_width: 0.333333
     window_height: 0.333333
-  - serial_number: 40142882
-    name: camera_RH
+  - serial_number: 40142907
+    name: camera_LH
     scale_x: -1
     scale_y: 1
     rotation_deg: 0
@@ -33,8 +33,8 @@ cameras:
     window_y: 0.666666
     window_width: 0.333333
     window_height: 0.333333
-  - serial_number: 40029805
-    name: camera_LF
+  - serial_number: 40115076
+    name: camera_RF
     scale_x: 1
     scale_y: 1
     rotation_deg: 0
@@ -43,7 +43,7 @@ cameras:
     window_width: 0.333333
     window_height: 0.333333
   - serial_number: 40038871
-    name: camera_LM
+    name: camera_RM
     scale_x: 1
     scale_y: 1
     rotation_deg: 0
@@ -51,8 +51,8 @@ cameras:
     window_y: 0.333333
     window_width: 0.333333
     window_height: 0.333333
-  - serial_number: 40115076
-    name: camera_LH
+  - serial_number: 40029805
+    name: camera_RH
     scale_x: 1
     scale_y: 1
     rotation_deg: 0
@@ -60,7 +60,7 @@ cameras:
     window_y: 0.666666
     window_width: 0.333333
     window_height: 0.333333
-  - serial_number: 40256541
+  - serial_number: 40256533
     name: camera_F
     scale_x: 1
     scale_y: 1
@@ -69,7 +69,7 @@ cameras:
     window_y: 0
     window_width: 0.333333
     window_height: 0.5
-  - serial_number: 40256533
+  - serial_number: 40256541
     name: camera_H
     scale_x: 1
     scale_y: 1

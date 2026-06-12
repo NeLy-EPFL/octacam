@@ -4,9 +4,9 @@
 ExposureAuto	Off
 GainAuto	Off
 Width	1984
-Height	512
+Height	832
 OffsetX	0
-OffsetY	376
+OffsetY	216
 CenterX	0
 CenterY	0
 BinningHorizontalMode	Average
@@ -83,7 +83,7 @@ RemoveParameterLimitSelector	Gain
 PgiMode	Off
 ShutterMode	Global
 ExposureMode	Timed
-ExposureTime	300.0
+ExposureTime	600.0
 SensorReadoutMode	Fast
 AcquisitionBurstFrameCount	1
 TriggerSelector	FrameBurstStart

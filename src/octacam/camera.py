@@ -136,6 +136,21 @@ class Camera:
                 e,
             )
 
+    def _start_grabbing(self, strategy) -> None:
+        try:
+            self._camera.StartGrabbing(strategy)
+        except genicam.GenericException:
+            # The pylon error does not identify the camera (only an opaque
+            # USB address), so name it before propagating.
+            log.error(
+                "Failed to start streaming on camera %s. For 'insufficient "
+                "system resources' errors, raise the open file limit "
+                "(ulimit -n; pylon needs ~150 file descriptors per camera) "
+                "and check usbfs_memory_mb.",
+                self.serial_number,
+            )
+            raise
+
     def trigger_once(self) -> None:
         if self._camera.IsGrabbing():
             self._camera.ExecuteSoftwareTrigger()
@@ -148,7 +163,7 @@ class Camera:
         self._camera.TriggerMode.Value = "On"
         self._camera.TriggerSource.Value = "Software"
         self._timestamps.clear()
-        self._camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+        self._start_grabbing(pylon.GrabStrategy_LatestImageOnly)
         self._thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._thread.start()
 
@@ -167,7 +182,7 @@ class Camera:
             log.error("Failed to open video writer for: %s", save_path)
             return
 
-        self._camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+        self._start_grabbing(pylon.GrabStrategy_OneByOne)
         ready = self._camera.WaitForFrameTriggerReady(
             TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
         )

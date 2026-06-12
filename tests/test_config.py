@@ -46,6 +46,38 @@ def test_duplicate_name_skipped(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
+def test_unquoted_numeric_serial_coerced_to_string(tmp_path):
+    # yaml-cpp's as<std::string>() accepted unquoted serial numbers (parsed
+    # as ints); the Python port must keep that behavior.
+    (tmp_path / "octacam_config.yaml").write_text(
+        "cameras:\n"
+        "  - {serial_number: 40029805, name: 7}\n"
+    )
+    config = load_config_dir(tmp_path)
+    assert config.cameras[0].serial_number == "40029805"
+    assert config.cameras[0].name == "7"
+
+
+def test_date_save_directory_coerced(tmp_path):
+    # An unquoted date-like directory parses as datetime.date in PyYAML but
+    # was plain text to yaml-cpp; it must not silently fall back to "./".
+    (tmp_path / "octacam_config.yaml").write_text(
+        "gui: {save_directory_default: 2024-06-11}\n"
+    )
+    assert load_config_dir(tmp_path).gui.save_directory_default == "2024-06-11"
+
+
+def test_non_scalar_serial_skipped(tmp_path):
+    (tmp_path / "octacam_config.yaml").write_text(
+        "cameras:\n"
+        "  - {serial_number: [1, 2]}\n"
+        "  - {serial_number: true}\n"
+        "  - {serial_number: '40'}\n"
+    )
+    config = load_config_dir(tmp_path)
+    assert [c.serial_number for c in config.cameras] == ["40"]
+
+
 def test_bad_types_keep_defaults(tmp_path):
     (tmp_path / "octacam_config.yaml").write_text(
         "gui:\n"

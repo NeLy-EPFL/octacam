@@ -3,9 +3,9 @@
 # Device = Basler::UsbCameraParams -- Basler USB3Vision camera interface -- Device version = 1.0.0 -- Product GUID = 5a809e15-f447-480f-a21f-0fb7256b8400 -- Product version GUID = 6783E95B-A4E9-4F46-B66C-47803414C19E
 ExposureAuto	Off
 GainAuto	Off
-Width	1984
+Width	960
 Height	512
-OffsetX	0
+OffsetX	512
 OffsetY	376
 CenterX	0
 CenterY	0
@@ -83,7 +83,7 @@ RemoveParameterLimitSelector	Gain
 PgiMode	Off
 ShutterMode	Global
 ExposureMode	Timed
-ExposureTime	300.0
+ExposureTime	600.0
 SensorReadoutMode	Fast
 AcquisitionBurstFrameCount	1
 TriggerSelector	FrameBurstStart

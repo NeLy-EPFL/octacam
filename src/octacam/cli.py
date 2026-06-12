@@ -1,5 +1,6 @@
 import logging
 import os
+import resource
 import sys
 import time
 from pathlib import Path
@@ -9,6 +10,20 @@ import click
 import octacam
 
 log = logging.getLogger("octacam")
+
+
+def _raise_fd_limit() -> None:
+    """Raise the soft open-file limit to the hard limit.
+
+    pylon's USB stack uses ~150 file descriptors per streaming camera
+    (one eventfd per queued URB), so 8 cameras exceed the common 1024
+    soft limit and StartGrabbing fails with "Insufficient system
+    resources exist to complete the API".
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+        log.debug("Raised open file limit: %d -> %d", soft, hard)
 
 CODECS = {
     "mjpg": ("MJPG", "avi"),
@@ -35,6 +50,7 @@ def main(ctx: click.Context, log_level: str) -> None:
         format="[%(levelname)s] %(message)s",
         level=getattr(logging, log_level.upper()),
     )
+    _raise_fd_limit()
     if ctx.invoked_subcommand is None:
         ctx.invoke(gui)
 

@@ -1,5 +1,6 @@
 """octacam_config.yaml parsing. Port of cpp/src/parser.{hpp,cpp}."""
 
+import datetime
 import logging
 import time
 from dataclasses import dataclass, field
@@ -65,10 +66,17 @@ def _as_int(value):
     return int(value)
 
 
-def _as_str(value):
-    if not isinstance(value, str):
+def _as_scalar_str(value):
+    # yaml-cpp's as<std::string>() returns any scalar's text, so the C++
+    # version read an unquoted serial number (parsed by PyYAML as an int)
+    # or a date-like save directory (parsed as a date) as a string.
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
         raise ValueError
-    return value
+    if isinstance(value, (int, float, datetime.date)):
+        return str(value)
+    raise ValueError
 
 
 def _set_if_valid(src, key, cast, target, type_name):
@@ -125,7 +133,9 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
                 "duration_max",
             ):
                 _set_if_valid(gui_src, key, _as_float, gui, "double")
-            _set_if_valid(gui_src, "save_directory_default", _as_str, gui, "string")
+            _set_if_valid(
+                gui_src, "save_directory_default", _as_scalar_str, gui, "string"
+            )
             for key in (
                 "duration_unit_default_index",
                 "trigger_source_default_index",
@@ -158,7 +168,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
             )
             continue
         try:
-            serial_number = _as_str(src["serial_number"])
+            serial_number = _as_scalar_str(src["serial_number"])
         except ValueError:
             log.warning(
                 'Ignoring the %dth entry of "cameras" as its "serial_number" '
@@ -178,7 +188,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         camera = CameraConfig(serial_number=serial_number)
         if "name" in src:
             try:
-                camera.name = _as_str(src["name"])
+                camera.name = _as_scalar_str(src["name"])
             except ValueError:
                 log.warning(
                     'Ignoring "name" for camera %s as it is not a string',
