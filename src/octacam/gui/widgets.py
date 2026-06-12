@@ -1,7 +1,5 @@
 """Custom widgets. Port of the widget classes in cpp/src/main_window.{hpp,cpp}."""
 
-import re
-
 from PySide6.QtCore import QDir, QLineF, QPoint, Qt
 from PySide6.QtGui import QColor, QDoubleValidator, QPen
 from PySide6.QtWidgets import (
@@ -70,13 +68,9 @@ class DirectoryEdit(QPlainTextEdit):
         super().setPlainText(abs_path)
 
     def increment(self) -> None:
-        text = self.toPlainText()
-        matches = list(re.finditer(r"\d{3}", text))
-        if not matches:
-            return
-        last = matches[-1]
-        incremented = f"{int(last.group()) + 1:03d}"
-        self.setPlainText(text[: last.start()] + incremented + text[last.end() :])
+        from octacam.controller import increment_trailing_number
+
+        self.setPlainText(increment_trailing_number(self.toPlainText()))
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):

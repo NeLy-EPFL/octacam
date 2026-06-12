@@ -2,7 +2,6 @@ import logging
 import os
 import resource
 import sys
-import time
 from pathlib import Path
 
 import click
@@ -179,11 +178,9 @@ def record(
     trigger: str,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
-    import dataclasses
-
     from octacam.camera import CameraSystem
     from octacam.config import load_config_dir
-    from octacam.writer import FORMATS
+    from octacam.controller import RecordingController, RecordingSettings
 
     config = load_config_dir(config_dir)
     if fps is None:
@@ -207,16 +204,18 @@ def record(
 
     if output.exists():
         log.warning("Directory already exists, data might be overwritten: %s", output)
-    output.mkdir(parents=True, exist_ok=True)
 
-    video_format = dataclasses.replace(FORMATS[codec], crf=crf, preset=preset)
-    use_software_trigger = trigger == "software"
-
+    settings = RecordingSettings(
+        fps=fps,
+        duration_s=duration,
+        save_dir=str(output),
+        trigger_source="software" if trigger == "software" else "external",
+        codec=codec,
+        crf=crf,
+        preset=preset,
+    )
+    controller = RecordingController(system, settings, auto_preview=False)
     try:
-        system.enable_frame_trigger()
-        system.set_trigger_source(use_software_trigger)
-        system.set_software_trigger_frequency(fps)
-
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",
             len(system),
@@ -224,27 +223,16 @@ def record(
             duration,
             output,
         )
-        system.start_record(output, fps, video_format)
-        if use_software_trigger:
-            system.start_software_trigger(duration)
-
-        deadline = time.monotonic() + 3.0
-        while not system.all_cameras_started and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if system.all_cameras_started:
-            log.info("All cameras started")
-        else:
-            log.warning("Not all cameras delivered a frame within 3 s")
-
-        time.sleep(duration)
-        time.sleep(0.5)  # grace period for in-flight frames
-        system.stop_software_trigger()
-        system.stop()  # grab loops exit; writers drain and close; CSVs written
+        result = controller.start_recording(confirm_overwrite=True)
+        if not result.ok:
+            sys.exit(f"Failed to start recording: {result.message}")
+        controller.join()
     finally:
         system.close()
 
+    extension = settings.video_format().extension
     for camera in system:
-        click.echo(f"{output / camera.name}.{video_format.extension}")
+        click.echo(f"{output / camera.name}.{extension}")
 
 
 @main.command()

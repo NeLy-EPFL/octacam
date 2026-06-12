@@ -83,6 +83,7 @@ class Camera:
         self._thread: threading.Thread | None = None
         self._timestamps: list[int] = []
         self._dropped: list[bool] = []
+        self._dropped_count = 0
         self._resulting_fps = 0.0
         self._started = False
         self._original_trigger_source: str | None = None
@@ -94,6 +95,18 @@ class Camera:
     @property
     def resulting_fps(self) -> float:
         return self._resulting_fps
+
+    @property
+    def frames_recorded(self) -> int:
+        return len(self._timestamps)
+
+    @property
+    def dropped_count(self) -> int:
+        return self._dropped_count
+
+    @property
+    def writer_failed(self) -> bool:
+        return self._video_writer is not None and self._video_writer.failed
 
     def load_params(self, config_str: str) -> None:
         if config_str:
@@ -176,6 +189,7 @@ class Camera:
             return
         self._timestamps.clear()
         self._dropped.clear()
+        self._dropped_count = 0
 
         frame_size = (self._camera.Width.Value, self._camera.Height.Value)
         self._video_writer = video_format.create_writer(WRITER_QUEUE_SIZE)
@@ -265,6 +279,7 @@ class Camera:
 
                 written = self._video_writer.write(frame)
                 if not written:
+                    self._dropped_count += 1
                     log.warning(
                         "Frame %d dropped for camera %s",
                         frame_count,
