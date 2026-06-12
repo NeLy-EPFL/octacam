@@ -26,6 +26,7 @@ dev = [
     "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",
+    "websockets>=16.0",
 ]
 
 [build-system]

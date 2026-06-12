@@ -9,7 +9,11 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 ## Features
 - Support >7 cameras (8 is not the limit despite the name)
 - See live updates of all cameras while recording.
-- Save frames directly to videos
+- Save frames directly to videos: H.264 (ffmpeg/x264, true monochrome
+  4:0:0, crash-safe MKV) by default, or raw Mono8 dumps for maximum
+  throughput with offline transcoding (`octacam transcode`).
+- Web GUI (`octacam serve`): control the rig from any browser; works
+  remotely through a plain SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <rig>`).
 
 ## Installation
 
@@ -26,10 +30,20 @@ or, from a clone: `uv tool install .` (or `pip install .`).
 ## Usage
 
 ```bash
-octacam gui <config_dir>      # launch the GUI (also: bare `octacam` for ./)
-octacam record <config_dir>   # headless recording (--fps/--duration/--output/--trigger)
+octacam serve <config_dir>    # web GUI on http://127.0.0.1:8000 (--host/--port)
+octacam gui <config_dir>      # Qt GUI (also: bare `octacam` for ./)
+octacam record <config_dir>   # headless recording (--fps/--duration/--output/
+                              #   --codec x264|raw|mjpg|h264/--crf/--preset/--trigger)
+octacam transcode <dir>       # convert .raw recordings to x264 MKV offline
 octacam list-cameras          # show detected cameras
 octacam --help
+```
+
+For remote operation, tunnel the web GUI over SSH from your machine:
+
+```bash
+ssh -L 8000:127.0.0.1:8000 <rig> octacam serve <config_dir>
+# then open http://localhost:8000
 ```
 
 `<config_dir>` contains the per-camera `.pfs` Basler configuration files and an

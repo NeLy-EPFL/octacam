@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>octacam</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <div id="banner" class="hidden"></div>
+
+  <main id="grid"></main>
+
+  <aside id="sidebar">
+    <nav id="tabs">
+      <button type="button" data-tab="record" class="active">Record</button>
+      <button type="button" data-tab="arduino">Arduino</button>
+      <button type="button" data-tab="view">View</button>
+    </nav>
+
+    <section id="tab-record" class="tab active">
+      <fieldset id="record-fields" disabled>
+        <label class="row"><span>Duration:</span>
+          <span class="duration">
+            <input id="duration-value" type="number" min="0.01" step="any" value="20">
+            <select id="duration-unit">
+              <option value="1" selected>s</option>
+              <option value="60">min</option>
+              <option value="3600">h</option>
+            </select>
+          </span>
+        </label>
+        <label class="row"><span>FPS:</span>
+          <input id="fps" type="number" min="0.01" max="1000" step="1">
+        </label>
+        <div class="col">
+          <label class="col-label" for="save-dir">Save directory:</label>
+          <textarea id="save-dir" rows="3" spellcheck="false"></textarea>
+          <span id="disk-free"></span>
+        </div>
+        <label class="row"><span>Trigger source:</span>
+          <select id="trigger-source">
+            <option value="software">software</option>
+            <option value="external">external</option>
+          </select>
+        </label>
+        <label class="row"><span>Format:</span>
+          <select id="format"></select>
+        </label>
+      </fieldset>
+      <button type="button" id="record-button" class="start" disabled>Start recording</button>
+      <div id="record-status"></div>
+    </section>
+
+    <section id="tab-arduino" class="tab">
+      <fieldset id="arduino-fields" disabled>
+        <h3>Loop</h3>
+        <div class="row"><span>Initial direction:</span>
+          <span class="radio-group">
+            <label><input type="radio" name="loop-dir" id="loop-dir-ccw" checked> &#8634;</label>
+            <label><input type="radio" name="loop-dir" id="loop-dir-cw"> &#8635;</label>
+          </span>
+        </div>
+        <label class="row"><span>Steps:</span>
+          <input id="loop-steps" type="number" min="2" max="32767" value="4096">
+        </label>
+        <label class="row"><span>Step interval:</span>
+          <span class="suffixed">
+            <input id="loop-interval" type="number" min="800" max="65535" value="1465">
+            <span class="suffix">&micro;s</span>
+          </span>
+        </label>
+        <label class="row"><span>Rest duration:</span>
+          <span class="suffixed">
+            <input id="loop-rest" type="number" min="0" max="65535" value="1000">
+            <span class="suffix">ms</span>
+          </span>
+        </label>
+        <label class="row"><span>Repeats:</span>
+          <input id="loop-repeats" type="number" min="1" max="255" value="3">
+        </label>
+        <label class="row"><span>Initial wait:</span>
+          <span class="suffixed">
+            <input id="loop-wait" type="number" min="0" max="255" value="10">
+            <span class="suffix">s</span>
+          </span>
+        </label>
+        <div id="loop-info"></div>
+        <button type="button" id="loop-execute" class="btn wide">Execute</button>
+        <label class="center"><input type="checkbox" id="loop-with-recording" checked> Start with recording</label>
+
+        <h3>Adjust position</h3>
+        <label class="row"><span>Interval:</span>
+          <span class="suffixed">
+            <input id="jog-interval" type="number" min="1" max="1000" value="50">
+            <span class="suffix">ms</span>
+          </span>
+        </label>
+        <div class="row"><span>Direction:</span>
+          <span class="btn-pair">
+            <button type="button" id="jog-ccw" class="btn">&#8634;</button>
+            <button type="button" id="jog-cw" class="btn">&#8635;</button>
+          </span>
+        </div>
+      </fieldset>
+    </section>
+
+    <section id="tab-view" class="tab">
+      <fieldset id="view-fields" disabled>
+        <div class="row"><span>Apply to:</span>
+          <span class="radio-group">
+            <label><input type="radio" name="apply-to" value="selected"> Selected</label>
+            <label><input type="radio" name="apply-to" value="all" checked> All</label>
+          </span>
+        </div>
+        <div class="row"><span>Rotate:</span>
+          <span class="btn-pair">
+            <button type="button" id="rotate-ccw" class="btn">&#8634;</button>
+            <button type="button" id="rotate-cw" class="btn">&#8635;</button>
+          </span>
+        </div>
+        <div class="row"><span>Flip:</span>
+          <span class="btn-pair">
+            <button type="button" id="flip-h" class="btn">Horizontal</button>
+            <button type="button" id="flip-v" class="btn">Vertical</button>
+          </span>
+        </div>
+        <button type="button" id="view-reset" class="btn wide">Reset</button>
+        <label class="center"><input type="checkbox" id="display-cross"> Display cross</label>
+      </fieldset>
+    </section>
+
+    <div id="events"></div>
+    <div id="footer"><span id="version"></span><span id="conn-state"></span></div>
+  </aside>
+</body>
+</html>
