@@ -43,7 +43,9 @@ def test_gui_preview_and_record(qapp, tmp_path):
     config = OctacamConfig()
     config.gui.fps_default = 50.0
 
-    system = CameraSystem()
+    # Request the emulated serials explicitly: on the rig, the real cameras
+    # are attached and would otherwise be opened (and recorded from) too.
+    system = CameraSystem(["0815-0000", "0815-0001"])
     assert len(system) == 2
     system.load_config(tmp_path)  # no .pfs files: emulator defaults
     system.start_preview()
@@ -100,19 +102,22 @@ def test_gui_preview_and_record(qapp, tmp_path):
         assert window.record_button.text() == "Start recording"
         screenshot(window, "finished.png")
 
-        # videos + CSVs for both cameras, ~100 frames each
+        # videos + CSVs for both cameras, ~100 frames each (the default
+        # format is now x264 mkv via ffmpeg)
         import csv
 
         import cv2
 
-        avis = sorted(save_dir.glob("*.avi"))
-        assert len(avis) == 2
-        for avi in avis:
-            cap = cv2.VideoCapture(str(avi))
-            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        videos = sorted(save_dir.glob("*.mkv"))
+        assert len(videos) == 2
+        for video in videos:
+            cap = cv2.VideoCapture(str(video))
+            n = 0
+            while cap.read()[0]:  # CAP_PROP_FRAME_COUNT is unreliable on MKV
+                n += 1
             cap.release()
-            assert 80 <= n <= 120, f"{avi}: {n} frames"
-            rows = list(csv.reader(open(avi.with_suffix(".csv"))))
+            assert 80 <= n <= 120, f"{video}: {n} frames"
+            rows = list(csv.reader(open(video.with_suffix(".csv"))))
             assert rows[0] == ["frame_index", "timestamp", "dropped"]
             assert len(rows) - 1 == n
 

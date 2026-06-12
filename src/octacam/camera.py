@@ -9,7 +9,7 @@ import numpy as np
 from pypylon import genicam, pylon
 
 from octacam.trigger import PreciseTimer
-from octacam.writer import AsyncVideoWriter
+from octacam.writer import AsyncFrameWriter, VideoFormat
 
 log = logging.getLogger("octacam")
 
@@ -78,7 +78,7 @@ class Camera:
         )
         self.name: str = self.serial_number
         self.frame_for_display = LatestFrame()
-        self._video_writer = AsyncVideoWriter(WRITER_QUEUE_SIZE)
+        self._video_writer: AsyncFrameWriter | None = None
         self._stop_flag = threading.Event()
         self._thread: threading.Thread | None = None
         self._timestamps: list[int] = []
@@ -167,7 +167,9 @@ class Camera:
         self._thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._thread.start()
 
-    def start_record(self, save_path: str, fps: float, fourcc: str) -> None:
+    def start_record(
+        self, save_path: str, fps: float, video_format: VideoFormat
+    ) -> None:
         self._stop_flag.clear()
         self._started = False
         if not self._camera.IsOpen():
@@ -176,9 +178,8 @@ class Camera:
         self._dropped.clear()
 
         frame_size = (self._camera.Width.Value, self._camera.Height.Value)
-        if not self._video_writer.open(
-            save_path, fourcc, fps, frame_size, is_color=False
-        ):
+        self._video_writer = video_format.create_writer(WRITER_QUEUE_SIZE)
+        if not self._video_writer.open(save_path, fps, frame_size):
             log.error("Failed to open video writer for: %s", save_path)
             return
 
@@ -354,12 +355,14 @@ class CameraSystem:
             camera.start_preview()
 
     def start_record(
-        self, save_dir: str | Path, fps: float, fourcc: str, extension: str
+        self, save_dir: str | Path, fps: float, video_format: VideoFormat
     ) -> None:
         self.stop()
         for camera in self.cameras:
-            save_path = Path(save_dir) / f"{camera.name}.{extension}"
-            camera.start_record(str(save_path), fps, fourcc)
+            save_path = (
+                Path(save_dir) / f"{camera.name}.{video_format.extension}"
+            )
+            camera.start_record(str(save_path), fps, video_format)
 
     def set_software_trigger_frequency(self, hz: float) -> None:
         self._trigger_timer.set_frequency(hz)

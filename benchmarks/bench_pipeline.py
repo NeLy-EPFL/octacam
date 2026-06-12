@@ -147,6 +147,28 @@ class WriterThread(threading.Thread):
             stream.width, stream.height = w, h
             stream.pix_fmt = "yuvj420p"
             return (container, stream)
+        if self.kind == "ffmpeg-x264":
+            import subprocess
+
+            from octacam.writer import build_x264_args, find_ffmpeg
+
+            args = build_x264_args(
+                find_ffmpeg(),
+                str(self.path),
+                fps,
+                w,
+                h,
+                self.args.crf,
+                self.args.preset,
+                "gray",
+            )
+            return subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
         if self.kind == "copy-only":
             return np.empty((h, w), dtype=np.uint8)
         return None  # null
@@ -182,6 +204,12 @@ class WriterThread(threading.Thread):
             consume(item, copy_mode, lambda arr: np.copyto(self._sink, arr))
         elif self.kind == "cv2-mjpg":
             consume(item, copy_mode, self._sink.write)
+        elif self.kind == "ffmpeg-x264":
+            from octacam.writer import _write_all
+
+            consume(
+                item, copy_mode, lambda arr: _write_all(self._sink.stdin, arr)
+            )
         elif self.kind == "pyav-mjpeg":
             import av
 
@@ -199,6 +227,9 @@ class WriterThread(threading.Thread):
     def _close_sink(self):
         if self.kind == "cv2-mjpg":
             self._sink.release()
+        elif self.kind == "ffmpeg-x264":
+            self._sink.stdin.close()
+            self._sink.wait(timeout=30)
         elif self.kind == "pyav-mjpeg":
             container, stream = self._sink
             for packet in stream.encode():
@@ -305,8 +336,10 @@ def jitter_probe(samples, stop_evt):
 
 def run_cameras(indices, args, out_dir):
     cams = [open_camera(i, args) for i in indices]
+    extension = "mkv" if args.writer == "ffmpeg-x264" else "avi"
     writers = [
-        WriterThread(args.writer, out_dir / f"cam{i}.avi", args) for i in indices
+        WriterThread(args.writer, out_dir / f"cam{i}.{extension}", args)
+        for i in indices
     ]
     stats = [CamStats() for _ in indices]
     stop_evt = threading.Event()
@@ -466,9 +499,11 @@ def main():
     p.add_argument("--duration", type=float, default=15.0)
     p.add_argument(
         "--writer",
-        choices=["null", "copy-only", "cv2-mjpg", "pyav-mjpeg"],
+        choices=["null", "copy-only", "cv2-mjpg", "pyav-mjpeg", "ffmpeg-x264"],
         default="cv2-mjpg",
     )
+    p.add_argument("--crf", type=int, default=16)
+    p.add_argument("--preset", default="ultrafast")
     p.add_argument("--copy", choices=["array", "zerocopy-hold"], default="array")
     p.add_argument("--backend", choices=["threads", "procs"], default="threads")
     p.add_argument("--trigger", choices=["freerun", "software"], default="freerun")

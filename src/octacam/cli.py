@@ -25,10 +25,6 @@ def _raise_fd_limit() -> None:
         resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
         log.debug("Raised open file limit: %d -> %d", soft, hard)
 
-CODECS = {
-    "mjpg": ("MJPG", "avi"),
-    "h264": ("avc1", "mp4"),
-}
 
 
 @click.group(invoke_without_command=True)
@@ -144,9 +140,25 @@ def list_cameras() -> None:
 )
 @click.option(
     "--codec",
-    type=click.Choice(sorted(CODECS)),
-    default="mjpg",
+    type=click.Choice(["x264", "raw", "mjpg", "h264"]),
+    default="x264",
     show_default=True,
+    help="x264: ffmpeg H.264 mkv (gray 4:0:0); raw: Mono8 dump for "
+    "`octacam transcode`; mjpg/h264: the legacy OpenCV writers.",
+)
+@click.option(
+    "--crf",
+    type=int,
+    default=16,
+    show_default=True,
+    help="x264 quality (lower = better; 0 = lossless).",
+)
+@click.option(
+    "--preset",
+    default="ultrafast",
+    show_default=True,
+    help="x264 speed preset. ultrafast is the only one validated at "
+    "8 cameras x 150 fps; slower presets compress better.",
 )
 @click.option(
     "--trigger",
@@ -162,11 +174,16 @@ def record(
     duration: float | None,
     output: Path | None,
     codec: str,
+    crf: int,
+    preset: str,
     trigger: str,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
+    import dataclasses
+
     from octacam.camera import CameraSystem
     from octacam.config import load_config_dir
+    from octacam.writer import FORMATS
 
     config = load_config_dir(config_dir)
     if fps is None:
@@ -192,7 +209,7 @@ def record(
         log.warning("Directory already exists, data might be overwritten: %s", output)
     output.mkdir(parents=True, exist_ok=True)
 
-    fourcc, extension = CODECS[codec]
+    video_format = dataclasses.replace(FORMATS[codec], crf=crf, preset=preset)
     use_software_trigger = trigger == "software"
 
     try:
@@ -207,7 +224,7 @@ def record(
             duration,
             output,
         )
-        system.start_record(output, fps, fourcc, extension)
+        system.start_record(output, fps, video_format)
         if use_software_trigger:
             system.start_software_trigger(duration)
 
@@ -227,7 +244,38 @@ def record(
         system.close()
 
     for camera in system:
-        click.echo(f"{output / camera.name}.{extension}")
+        click.echo(f"{output / camera.name}.{video_format.extension}")
+
+
+@main.command()
+@click.argument(
+    "paths",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+)
+@click.option("--crf", type=int, default=16, show_default=True)
+@click.option(
+    "--preset",
+    default="veryslow",
+    show_default=True,
+    help="x264 speed preset; offline transcoding can afford a slow one.",
+)
+def transcode(paths: tuple[Path, ...], crf: int, preset: str) -> None:
+    """Transcode .raw recordings (with .json sidecars) to x264 MKV.
+
+    PATHS are .raw files or directories to scan for them.
+    """
+    from octacam.writer import transcode_raw
+
+    raw_files: list[Path] = []
+    for path in paths:
+        raw_files.extend(sorted(path.glob("*.raw")) if path.is_dir() else [path])
+    if not raw_files:
+        log.warning("No .raw files found in: %s", ", ".join(map(str, paths)))
+        return
+    for raw_file in dict.fromkeys(raw_files):
+        click.echo(transcode_raw(raw_file, crf=crf, preset=preset))
 
 
 if __name__ == "__main__":

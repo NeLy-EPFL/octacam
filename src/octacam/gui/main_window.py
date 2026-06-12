@@ -32,6 +32,7 @@ from octacam.camera import CameraSystem
 from octacam.config import CameraConfig, OctacamConfig
 from octacam.gui.widgets import DirectoryEdit, DurationInput, GraphicsView
 from octacam.serial_link import Command, SerialLink
+from octacam.writer import FORMATS
 
 log = logging.getLogger("octacam")
 
@@ -267,8 +268,8 @@ class MainWindow(QMainWindow):
         video_writer_label.setAlignment(Qt.AlignRight)
         layout.addWidget(video_writer_label, row, 0, 1, 1)
         self.video_writer_combo = QComboBox(record_tab)
-        self.video_writer_combo.addItem("opencv MJPG avi")
-        self.video_writer_combo.addItem("opencv avc1 mp4")
+        for video_format in FORMATS.values():
+            self.video_writer_combo.addItem(video_format.label)
         self.video_writer_combo.setCurrentIndex(cfg.video_writer_default_index)
         layout.addWidget(self.video_writer_combo, row, 1, 1, 1)
         row += 1
@@ -612,20 +613,9 @@ class MainWindow(QMainWindow):
         duration_s = self.duration_input.get_duration()
         self._record_remaining_time_ms = round(duration_s * 1000)
 
-        video_writer_info = self.video_writer_combo.currentText()
-        fourcc, _, extension = video_writer_info.removeprefix(
-            "opencv "
-        ).partition(" ")
-        if len(fourcc) != 4 or not extension:
-            QMessageBox.warning(
-                self,
-                "Warning",
-                "Could not parse video writer format. Recording was not started.",
-            )
-            for widget in self.input_widgets:
-                widget.setEnabled(True)
-            self.record_button.setEnabled(True)
-            return
+        video_format = list(FORMATS.values())[
+            self.video_writer_combo.currentIndex()
+        ]
 
         use_software_trigger = (
             self.trigger_source_combo.currentText() == "software"
@@ -635,7 +625,7 @@ class MainWindow(QMainWindow):
         if not use_software_trigger:
             self.camera_system.set_trigger_source(False)
 
-        self.camera_system.start_record(save_dir, fps, fourcc, extension)
+        self.camera_system.start_record(save_dir, fps, video_format)
 
         self.status_label.setText("Waiting for first trigger...")
         self.record_button.setText("Abort recording")
