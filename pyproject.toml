@@ -23,6 +23,7 @@ octacam = "octacam.cli:main"
 [dependency-groups]
 dev = [
     "av>=12",
+    "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",
 ]

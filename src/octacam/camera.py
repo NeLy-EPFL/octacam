@@ -77,6 +77,8 @@ class Camera:
             self._camera.GetDeviceInfo().GetSerialNumber()
         )
         self.name: str = self.serial_number
+        self.width = 0
+        self.height = 0
         self.frame_for_display = LatestFrame()
         self._video_writer: AsyncFrameWriter | None = None
         self._stop_flag = threading.Event()
@@ -117,6 +119,7 @@ class Camera:
             )
         height = self._camera.Height.Value
         width = self._camera.Width.Value
+        self.width, self.height = width, height
         self.frame_for_display.push(np.zeros((height, width), dtype=np.uint8))
         try:
             self._original_trigger_source = self._camera.TriggerSource.Value

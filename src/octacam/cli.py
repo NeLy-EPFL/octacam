@@ -105,6 +105,99 @@ def gui(config_dir: Path, serial_port: str = "/dev/ttyACM0") -> None:
         serial_link.close()
 
 
+@main.command()
+@click.argument(
+    "config_dir",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=".",
+)
+@click.option(
+    "--host",
+    default="127.0.0.1",
+    show_default=True,
+    help="Bind address. Keep the loopback default and reach the GUI "
+    "remotely with: ssh -L 8000:127.0.0.1:8000 <rig>",
+)
+@click.option("--port", default=8000, show_default=True)
+@click.option(
+    "--serial-port",
+    default="/dev/ttyACM0",
+    show_default=True,
+    help="Serial device of the Arduino stepper controller.",
+)
+def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
+    """Serve the octacam web GUI for the cameras in CONFIG_DIR."""
+    import uvicorn
+
+    from octacam.camera import CameraSystem
+    from octacam.config import load_config_dir
+    from octacam.controller import (
+        RecordingController,
+        RecordingSettings,
+        normalize_save_dir,
+    )
+    from octacam.serial_link import SerialLink
+    from octacam.web.app import create_app
+    from octacam.writer import FORMATS
+
+    serial_link = SerialLink()
+    try:
+        serial_link.open(serial_port, 115200)
+    except Exception as e:
+        log.warning("Failed to open serial port %s: %s", serial_port, e)
+
+    config_dir = config_dir.resolve()
+    log.info("Using config directory: %s", config_dir)
+    config = load_config_dir(config_dir)
+
+    system = CameraSystem([c.serial_number for c in config.cameras])
+    if len(system) == 0:
+        log.warning("No cameras opened. Exiting.")
+        sys.exit(1)
+    log.info("Opened %d camera(s)", len(system))
+
+    names = {c.serial_number: c.name for c in config.cameras if c.name}
+    for camera in system:
+        camera.name = names.get(camera.serial_number, camera.name)
+    system.load_config(config_dir)
+
+    gui = config.gui
+    unit_seconds = (1.0, 60.0, 3600.0)[
+        gui.duration_unit_default_index
+        if 0 <= gui.duration_unit_default_index <= 2
+        else 0
+    ]
+    codecs = list(FORMATS)
+    settings = RecordingSettings(
+        fps=gui.fps_default,
+        duration_s=gui.duration_default * unit_seconds,
+        save_dir=normalize_save_dir(gui.save_directory_default),
+        trigger_source=(
+            "external" if gui.trigger_source_default_index == 1 else "software"
+        ),
+        codec=(
+            codecs[gui.video_writer_default_index]
+            if 0 <= gui.video_writer_default_index < len(codecs)
+            else "x264"
+        ),
+    )
+    controller = RecordingController(system, settings, serial_link)
+    controller.start_preview()
+    app = create_app(controller, config, serial_link, config_dir=str(config_dir))
+    log.info(
+        "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig>)",
+        host,
+        port,
+        port,
+        port,
+    )
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    finally:
+        controller.close()
+        serial_link.close()
+
+
 @main.command("list-cameras")
 def list_cameras() -> None:
     """List detected cameras (set PYLON_CAMEMU=N for emulated ones)."""
