@@ -32,7 +32,7 @@ from octacam.camera import CameraSystem
 from octacam.config import CameraConfig, OctacamConfig
 from octacam.gui.widgets import DirectoryEdit, DurationInput, GraphicsView
 from octacam.serial_link import Command, SerialLink
-from octacam.writer import FORMATS
+from octacam.writer import FORMATS, default_codec
 
 log = logging.getLogger("octacam")
 
@@ -270,7 +270,9 @@ class MainWindow(QMainWindow):
         self.video_writer_combo = QComboBox(record_tab)
         for video_format in FORMATS.values():
             self.video_writer_combo.addItem(video_format.label)
-        self.video_writer_combo.setCurrentIndex(cfg.video_writer_default_index)
+        self.video_writer_combo.setCurrentIndex(
+            list(FORMATS).index(default_codec(cfg))
+        )
         layout.addWidget(self.video_writer_combo, row, 1, 1, 1)
         row += 1
 

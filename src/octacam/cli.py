@@ -138,7 +138,7 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
     )
     from octacam.serial_link import SerialLink
     from octacam.web.app import create_app
-    from octacam.writer import FORMATS
+    from octacam.writer import default_codec
 
     serial_link = SerialLink()
     try:
@@ -167,7 +167,6 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
         if 0 <= gui.duration_unit_default_index <= 2
         else 0
     ]
-    codecs = list(FORMATS)
     settings = RecordingSettings(
         fps=gui.fps_default,
         duration_s=gui.duration_default * unit_seconds,
@@ -175,11 +174,7 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
         trigger_source=(
             "external" if gui.trigger_source_default_index == 1 else "software"
         ),
-        codec=(
-            codecs[gui.video_writer_default_index]
-            if 0 <= gui.video_writer_default_index < len(codecs)
-            else "x264"
-        ),
+        codec=default_codec(gui),
     )
     controller = RecordingController(system, settings, serial_link)
     controller.start_preview()
@@ -355,8 +350,15 @@ def transcode(paths: tuple[Path, ...], crf: int, preset: str) -> None:
     if not raw_files:
         log.warning("No .raw files found in: %s", ", ".join(map(str, paths)))
         return
+    failures = 0
     for raw_file in dict.fromkeys(raw_files):
-        click.echo(transcode_raw(raw_file, crf=crf, preset=preset))
+        try:
+            click.echo(transcode_raw(raw_file, crf=crf, preset=preset))
+        except Exception as e:  # one bad file must not abort the batch
+            failures += 1
+            log.error("Failed to transcode %s: %s", raw_file, e)
+    if failures:
+        sys.exit(f"{failures} file(s) failed to transcode")
 
 
 if __name__ == "__main__":

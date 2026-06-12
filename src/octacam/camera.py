@@ -179,17 +179,20 @@ class Camera:
         self._camera.TriggerMode.Value = "On"
         self._camera.TriggerSource.Value = "Software"
         self._timestamps.clear()
+        self._dropped.clear()
+        self._dropped_count = 0  # so preview never shows a stale recording count
         self._start_grabbing(pylon.GrabStrategy_LatestImageOnly)
         self._thread = threading.Thread(target=self._preview_loop, daemon=True)
         self._thread.start()
 
     def start_record(
         self, save_path: str, fps: float, video_format: VideoFormat
-    ) -> None:
+    ) -> bool:
+        """Start recording; returns True iff the record loop was launched."""
         self._stop_flag.clear()
         self._started = False
         if not self._camera.IsOpen():
-            return
+            return False
         self._timestamps.clear()
         self._dropped.clear()
         self._dropped_count = 0
@@ -198,24 +201,32 @@ class Camera:
         self._video_writer = video_format.create_writer(WRITER_QUEUE_SIZE)
         if not self._video_writer.open(save_path, fps, frame_size):
             log.error("Failed to open video writer for: %s", save_path)
-            return
+            return False
 
-        self._start_grabbing(pylon.GrabStrategy_OneByOne)
-        ready = self._camera.WaitForFrameTriggerReady(
-            TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
-        )
-        if not ready:
-            log.error(
-                "Failed to start grabbing for recording on camera %s",
-                self.serial_number,
+        # The writer (ffmpeg child + threads) is now live; close it on ANY
+        # failure below so a failed StartGrabbing (e.g. "insufficient
+        # resources") cannot orphan the child process and its threads.
+        try:
+            self._start_grabbing(pylon.GrabStrategy_OneByOne)
+            ready = self._camera.WaitForFrameTriggerReady(
+                TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
             )
+            if not ready:
+                log.error(
+                    "Failed to start grabbing for recording on camera %s",
+                    self.serial_number,
+                )
+                self._video_writer.close()
+                return False
+        except Exception:
             self._video_writer.close()
-            return
+            raise
 
         self._thread = threading.Thread(
             target=self._record_loop, args=(save_path,), daemon=True
         )
         self._thread.start()
+        return True
 
     def stop(self) -> None:
         self._stop_flag.set()
@@ -299,6 +310,7 @@ class Camera:
                 result.Release()
         camera.StopGrabbing()
         self._video_writer.close()
+        self._reconcile_unwritten_frames()
 
         dropped_count = sum(self._dropped)
         log.info(
@@ -308,6 +320,19 @@ class Camera:
             dropped_count,
         )
         self._write_timestamps_csv(save_path)
+
+    def _reconcile_unwritten_frames(self) -> None:
+        """If the sink died, frames accepted into the queue after the failure
+        were discarded rather than written. Mark that trailing run of
+        accepted frames as dropped so the CSV reflects what reached the file.
+        """
+        if self._video_writer is None or not self._video_writer.failed:
+            return
+        written = self._video_writer.frames_written
+        accepted = [i for i, dropped in enumerate(self._dropped) if not dropped]
+        for index in accepted[written:]:
+            self._dropped[index] = True
+            self._dropped_count += 1
 
     def _write_timestamps_csv(self, save_path: str) -> None:
         csv_path = Path(save_path).with_suffix(".csv")
@@ -374,13 +399,25 @@ class CameraSystem:
 
     def start_record(
         self, save_dir: str | Path, fps: float, video_format: VideoFormat
-    ) -> None:
+    ) -> list[str]:
+        """Start recording on all cameras; return the names that started.
+
+        A single camera failing (writer open, trigger-ready timeout, or a
+        StartGrabbing "insufficient resources" error) no longer abandons the
+        others half-started: it is logged and skipped.
+        """
         self.stop()
+        started: list[str] = []
         for camera in self.cameras:
             save_path = (
                 Path(save_dir) / f"{camera.name}.{video_format.extension}"
             )
-            camera.start_record(str(save_path), fps, video_format)
+            try:
+                if camera.start_record(str(save_path), fps, video_format):
+                    started.append(camera.name)
+            except genicam.GenericException:
+                log.error("Camera %s failed to start recording", camera.name)
+        return started
 
     def set_software_trigger_frequency(self, hz: float) -> None:
         self._trigger_timer.set_frequency(hz)

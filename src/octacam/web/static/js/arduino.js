@@ -119,19 +119,31 @@ export class ArduinoTab {
   // --------------------------------------------------------------- jog
 
   _setupJog(button, direction) {
-    const start = () => {
+    button.addEventListener("pointerdown", (e) => {
       if (this.jogTimer !== null) return;
+      // Capture the pointer so the hold survives the cursor leaving the
+      // button (no spurious pointerleave stop) and a second jog button
+      // cannot steal events mid-hold.
+      try {
+        button.setPointerCapture(e.pointerId);
+      } catch {
+        /* capture unsupported; pointerup still stops the jog */
+      }
       const intervalMs = clampInput(this.jogInterval);
       this.send({ type: "jog", n_steps: direction });
       this.jogTimer = setInterval(
         () => this.send({ type: "jog", n_steps: direction }),
         intervalMs
       );
+    });
+    const stop = (e) => {
+      if (button.hasPointerCapture?.(e.pointerId)) {
+        button.releasePointerCapture(e.pointerId);
+      }
+      this.stopJog();
     };
-    button.addEventListener("pointerdown", start);
-    button.addEventListener("pointerup", () => this.stopJog());
-    button.addEventListener("pointercancel", () => this.stopJog());
-    button.addEventListener("pointerleave", () => this.stopJog());
+    button.addEventListener("pointerup", stop);
+    button.addEventListener("pointercancel", stop);
   }
 
   stopJog() {

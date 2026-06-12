@@ -4,12 +4,15 @@ import json
 import time
 
 import numpy as np
+import pytest
 
+from octacam.config import GuiConfig
 from octacam.writer import (
     FORMATS,
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
+    default_codec,
     transcode_raw,
 )
 
@@ -138,3 +141,52 @@ def test_format_registry_creates_writers():
         assert video_format.create_writer(2) is not None
         assert video_format.extension
         assert video_format.label
+
+
+class _FailingSink(AsyncFrameWriter):
+    def __init__(self, fail_after, max_queue_size=50):
+        super().__init__(max_queue_size)
+        self._fail_after = fail_after
+
+    def _open_sink(self, filename, fps, frame_size):
+        self.calls = 0
+
+    def _write_frame(self, frame):
+        self.calls += 1
+        if self.calls > self._fail_after:
+            raise OSError("sink died")
+
+    def _close_sink(self):
+        pass
+
+
+def test_frames_written_reflects_actual_writes_on_failure():
+    # When the sink dies, frames_written must count only what actually
+    # reached it, so the grab loop can mark the discarded tail as dropped.
+    writer = _FailingSink(fail_after=3)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    for frame in synthetic_frames(10):
+        writer.write(frame)
+        time.sleep(0.005)
+    writer.close()
+    assert writer.failed
+    assert writer.frames_written == 3
+
+
+def test_default_codec_resolution():
+    assert default_codec(GuiConfig()) == "x264"  # index 0
+    assert default_codec(GuiConfig(video_writer_default_index=2)) == "mjpg"
+    # the named key overrides the index, and unknown names fall back to x264
+    assert default_codec(GuiConfig(video_writer_default="h264")) == "h264"
+    assert (
+        default_codec(GuiConfig(video_writer_default="h264",
+                                video_writer_default_index=0)) == "h264"
+    )
+    assert default_codec(GuiConfig(video_writer_default="bogus")) == "x264"
+
+
+def test_transcode_missing_sidecar_raises(tmp_path):
+    raw = tmp_path / "orphan.raw"
+    raw.write_bytes(b"\x00" * (WIDTH * HEIGHT))
+    with pytest.raises(FileNotFoundError):
+        transcode_raw(raw)

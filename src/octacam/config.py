@@ -36,6 +36,10 @@ class GuiConfig:
     save_directory_default: str = "./"
     trigger_source_default_index: int = 0
     video_writer_default_index: int = 0
+    # Explicit codec key (x264/raw/mjpg/h264); when set it overrides the
+    # positional video_writer_default_index, which is fragile across changes
+    # to the writer list.
+    video_writer_default: str = ""
 
     display_refresh_interval_ms: int = 33
     record_countdown_timer_interval_ms: int = 1000
@@ -135,6 +139,9 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
                 _set_if_valid(gui_src, key, _as_float, gui, "double")
             _set_if_valid(
                 gui_src, "save_directory_default", _as_scalar_str, gui, "string"
+            )
+            _set_if_valid(
+                gui_src, "video_writer_default", _as_scalar_str, gui, "string"
             )
             for key in (
                 "duration_unit_default_index",

@@ -1,6 +1,12 @@
 // Camera grid: tiles positioned from config layout fractions (or auto-tiled
 // in a 3-column grid), JPEG preview rendering, transforms, crosshair.
 
+// Qt semantics (main_window.py): a camera contributes a manual layout if it
+// has a valid position OR a valid size; positions/sizes are applied
+// independently, each falling back to a default when absent.
+const hasPos = (l) => l.window_x >= 0 && l.window_y >= 0;
+const hasSize = (l) => l.window_width > 0 && l.window_height > 0;
+
 export class CameraGrid {
   constructor(container, cameras) {
     this.container = container;
@@ -8,16 +14,10 @@ export class CameraGrid {
     this.indexBySerial = new Map();
     this.selected = -1;
 
-    // Any unset (< 0) layout value makes ALL cameras auto-tile.
-    this.autoTile = cameras.some((c) => {
-      const l = c.layout;
-      return (
-        l.window_x < 0 ||
-        l.window_y < 0 ||
-        l.window_width < 0 ||
-        l.window_height < 0
-      );
-    });
+    // Auto-tile only when NO camera carries a manual layout; otherwise honor
+    // the configured layouts (a single unconfigured camera must not discard
+    // everyone else's, as the Qt app preserves them).
+    this.autoTile = !cameras.some((c) => hasPos(c.layout) || hasSize(c.layout));
     container.classList.toggle("auto-tile", this.autoTile);
 
     for (const cam of cameras) this._buildTile(cam);
@@ -190,10 +190,14 @@ export class CameraGrid {
       const h = this.container.clientHeight;
       for (const t of this.tiles) {
         const l = t.cam.layout;
-        t.el.style.left = `${Math.round(l.window_x * w)}px`;
-        t.el.style.top = `${Math.round(l.window_y * h)}px`;
-        t.el.style.width = `${Math.round(l.window_width * w)}px`;
-        t.el.style.height = `${Math.round(l.window_height * h)}px`;
+        t.el.style.left = hasPos(l) ? `${Math.round(l.window_x * w)}px` : "0px";
+        t.el.style.top = hasPos(l) ? `${Math.round(l.window_y * h)}px` : "0px";
+        t.el.style.width = hasSize(l)
+          ? `${Math.round(l.window_width * w)}px`
+          : `${Math.round(w / 3)}px`;
+        t.el.style.height = hasSize(l)
+          ? `${Math.round(l.window_height * h)}px`
+          : `${Math.round(h / 3)}px`;
       }
     }
     for (const t of this.tiles) this._layoutCanvas(t);

@@ -27,6 +27,7 @@ from pathlib import Path
 log = logging.getLogger("octacam")
 
 _SENTINEL = None
+FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 
 
 def find_ffmpeg() -> str:
@@ -108,11 +109,19 @@ class AsyncFrameWriter:
         self._thread: threading.Thread | None = None
         self._running = False
         self._failed = False
+        self._written = 0
 
     @property
     def failed(self) -> bool:
         """True once the sink has died; subsequent writes are dropped."""
         return self._failed
+
+    @property
+    def frames_written(self) -> int:
+        """Frames actually handed to the sink (excludes any discarded after
+        a sink failure). The grab loop reconciles this against the queue to
+        keep the CSV's per-frame `dropped` column accurate."""
+        return self._written
 
     def open(self, filename: str, fps: float, frame_size: tuple[int, int]) -> bool:
         """Open `filename` for writing. frame_size is (width, height)."""
@@ -123,6 +132,7 @@ class AsyncFrameWriter:
             log.error("Failed to open writer for %s: %s", filename, e)
             return False
         self._failed = False
+        self._written = 0
         self._queue = queue.Queue(maxsize=self._max_queue_size)
         self._running = True
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
@@ -162,6 +172,7 @@ class AsyncFrameWriter:
                 continue  # keep draining so close() semantics are unchanged
             try:
                 self._write_frame(frame)
+                self._written += 1
             except Exception as e:
                 self._failed = True
                 self._on_sink_failure(e)
@@ -208,7 +219,10 @@ class OpencvVideoWriter(AsyncFrameWriter):
         self._writer = writer
 
     def _write_frame(self, frame):
-        self._writer.write(frame)
+        # cv2.VideoWriter.write returns None on most builds and never raises,
+        # so an explicit False (newer builds) is the only failure signal.
+        if self._writer.write(frame) is False:
+            raise RuntimeError("cv2.VideoWriter.write reported failure")
 
     def _close_sink(self):
         if self._writer is not None:
@@ -298,10 +312,17 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             proc.stdin.close()
         except (BrokenPipeError, OSError):
             pass
+        # Generous finalize window: after stdin closes ffmpeg only has to
+        # flush frames already queued in its own buffers. ultrafast is
+        # near-instant, but a slow preset on a long trial can take a while -
+        # killing it early would truncate the file and wrongly flag failure.
         try:
-            returncode = proc.wait(timeout=10)
+            returncode = proc.wait(timeout=FINALIZE_TIMEOUT_S)
         except subprocess.TimeoutExpired:
-            log.error("ffmpeg did not exit after stdin close; killing it")
+            log.error(
+                "ffmpeg still running %d s after stdin close; killing it",
+                FINALIZE_TIMEOUT_S,
+            )
             proc.kill()
             returncode = proc.wait()
         if self._stderr_thread is not None:
@@ -418,6 +439,26 @@ FORMATS: dict[str, VideoFormat] = {
 }
 
 
+def default_codec(gui_config) -> str:
+    """Resolve the default codec key from a GuiConfig.
+
+    Prefers the explicit named `video_writer_default` (stable across changes
+    to the writer list); falls back to the positional
+    `video_writer_default_index`; else "x264".
+    """
+    named = getattr(gui_config, "video_writer_default", "")
+    if named:
+        if named in FORMATS:
+            return named
+        log.warning("Unknown video_writer_default %r; using x264", named)
+        return "x264"
+    codecs = list(FORMATS)
+    index = getattr(gui_config, "video_writer_default_index", 0)
+    if 0 <= index < len(codecs):
+        return codecs[index]
+    return "x264"
+
+
 def transcode_raw(
     raw_path: Path,
     crf: int = 16,
@@ -427,7 +468,12 @@ def transcode_raw(
 ) -> Path:
     """Transcode a .raw Mono8 dump (with its .json sidecar) to x264 MKV."""
     raw_path = Path(raw_path)
-    meta = json.loads(raw_path.with_suffix(".json").read_text())
+    sidecar = raw_path.with_suffix(".json")
+    if not sidecar.exists():
+        raise FileNotFoundError(
+            f"missing JSON sidecar for {raw_path}: {sidecar}"
+        )
+    meta = json.loads(sidecar.read_text())
     output = Path(output) if output else raw_path.with_suffix(".mkv")
     args = build_x264_args(
         find_ffmpeg(),

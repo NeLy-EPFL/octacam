@@ -31,6 +31,7 @@ log = logging.getLogger("octacam")
 
 STARTED_POLL_INTERVAL_S = 0.1
 STARTED_WARN_AFTER_S = 3.0
+STARTED_FAIL_AFTER_S = 10.0  # then record with whatever cameras started
 STOP_GRACE_S = 0.5  # matches cli.py's in-flight frame grace period
 
 _TRAILING_NUMBER_RE = re.compile(r"\d{3}")
@@ -241,9 +242,27 @@ class RecordingController:
             self.camera_system.enable_frame_trigger()
             self.camera_system.set_trigger_source(use_software_trigger)
             self.camera_system.set_software_trigger_frequency(settings.fps)
-            self.camera_system.start_record(
+            started = self.camera_system.start_record(
                 save_dir, settings.fps, settings.video_format()
             )
+            total = len(self.camera_system)
+            if not started:
+                self._event("error", "No camera could start recording")
+                self._resume_preview()
+                return StartResult(
+                    StartResult.ERROR, "No camera could start recording"
+                )
+            if len(started) < total:
+                missing = [
+                    camera.name
+                    for camera in self.camera_system
+                    if camera.name not in started
+                ]
+                self._event(
+                    "warning",
+                    f"Only {len(started)}/{total} cameras started "
+                    f"recording (missing: {', '.join(missing)})",
+                )
             if use_software_trigger:
                 self.camera_system.start_software_trigger(settings.duration_s)
 
@@ -253,11 +272,23 @@ class RecordingController:
             self._set_state("waiting")
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
-                args=(settings.duration_s, arduino_command),
+                args=(settings.duration_s, arduino_command, len(started)),
                 daemon=True,
             )
             self._monitor.start()
             return StartResult(StartResult.OK)
+
+    def _resume_preview(self) -> None:
+        """Return to preview (or idle) after a recording ends or fails."""
+        if self._auto_preview:
+            self.camera_system.set_software_trigger_frequency(
+                self._settings.fps
+            )
+            self.camera_system.start_preview()
+            self.camera_system.start_software_trigger()
+            self._set_state("preview")
+        else:
+            self._set_state("idle")
 
     def stop_recording(self, abort: bool = False) -> None:
         """Finish (or abort) the current recording early."""
@@ -278,22 +309,33 @@ class RecordingController:
         self.join()
         self.camera_system.close()
 
-    def _monitor_loop(self, duration_s, arduino_command) -> None:
-        # --- wait for the first frame on every camera (Qt's
-        # check_record_started_timer); warn once after 3 s but keep waiting,
-        # since an external trigger may legitimately start late.
+    def _monitor_loop(self, duration_s, arduino_command, expected_started) -> None:
+        # --- wait for the first frame from the cameras that started (Qt's
+        # check_record_started_timer). Warn after 3 s, but - unlike the
+        # unbounded Qt/headless wait - give up after STARTED_FAIL_AFTER_S and
+        # record with whatever started, so a single stalled camera cannot
+        # hang the whole recording (and the deadline) indefinitely.
         start = time.monotonic()
         warned = False
         while not self._stop_event.is_set():
-            if self.camera_system.all_cameras_started:
+            if self._count_started() >= expected_started:
                 break
-            if not warned and time.monotonic() - start > STARTED_WARN_AFTER_S:
+            elapsed = time.monotonic() - start
+            if not warned and elapsed > STARTED_WARN_AFTER_S:
                 self._event(
                     "warning",
                     "Not all cameras delivered a frame within "
-                    f"{STARTED_WARN_AFTER_S:g} s",
+                    f"{STARTED_WARN_AFTER_S:g} s; still waiting",
                 )
                 warned = True
+            if elapsed > STARTED_FAIL_AFTER_S:
+                self._event(
+                    "error",
+                    f"Only {self._count_started()}/{expected_started} cameras "
+                    f"delivered a frame within {STARTED_FAIL_AFTER_S:g} s; "
+                    "starting the countdown anyway",
+                )
+                break
             self._stop_event.wait(STARTED_POLL_INTERVAL_S)
 
         if not self._stop_event.is_set():
@@ -335,18 +377,13 @@ class RecordingController:
                         self._settings.save_dir
                     ),
                 )
-            if self._auto_preview:
-                self.camera_system.set_software_trigger_frequency(
-                    self._settings.fps
-                )
-                self.camera_system.start_preview()
-                self.camera_system.start_software_trigger()
-                self._set_state("preview")
-            else:
-                self._set_state("idle")
+            self._resume_preview()
         self._event(
             "info", "Recording aborted" if aborted else "Recording finished"
         )
+
+    def _count_started(self) -> int:
+        return sum(1 for camera in self.camera_system if camera.started)
 
     # ---------------------------------------------------------------- status
 
