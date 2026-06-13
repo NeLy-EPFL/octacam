@@ -76,9 +76,7 @@ class Camera:
         # The serial number comes from enumeration, so it is available before
         # Open(). Keeping Open() out of the constructor lets CameraSystem open
         # every camera concurrently (see CameraSystem._run_parallel).
-        self.serial_number: str = str(
-            self._camera.GetDeviceInfo().GetSerialNumber()
-        )
+        self.serial_number: str = str(self._camera.GetDeviceInfo().GetSerialNumber())
         self.name: str = self.serial_number
         self.width = 0
         self.height = 0
@@ -263,9 +261,7 @@ class Camera:
         last = len(timestamps) - 1
         start = last - n_frames if last > n_frames else 0
         delta_ns = timestamps[last] - timestamps[start]
-        self._resulting_fps = (
-            (last - start) * 1e9 / delta_ns if delta_ns else 0.0
-        )
+        self._resulting_fps = (last - start) * 1e9 / delta_ns if delta_ns else 0.0
 
     def _preview_loop(self) -> None:
         camera = self._camera
@@ -298,7 +294,7 @@ class Camera:
                 frame = result.Array  # owned copy; writer takes ownership
                 result.Release()
 
-                written = self._video_writer.write(frame)
+                written = self._video_writer.write(frame)  # pyright: ignore[reportOptionalMemberAccess]
                 if not written:
                     self._dropped_count += 1
                     log.warning(
@@ -316,7 +312,7 @@ class Camera:
             else:
                 result.Release()
         camera.StopGrabbing()
-        self._video_writer.close()
+        self._video_writer.close()  # pyright: ignore[reportOptionalMemberAccess]
         self._reconcile_unwritten_frames()
 
         dropped_count = sum(self._dropped)
@@ -346,7 +342,7 @@ class Camera:
         with open(csv_path, "w") as csv_file:
             csv_file.write("frame_index,timestamp,dropped\n")
             for i, (timestamp, dropped) in enumerate(
-                zip(self._timestamps, self._dropped)
+                zip(self._timestamps, self._dropped, strict=False)
             ):
                 csv_file.write(f"{i},{timestamp},{int(dropped)}\n")
 
@@ -362,9 +358,7 @@ class CameraSystem:
             return
         log.info("Detected %d camera(s)", len(devices))
 
-        detected_serial_numbers = [
-            str(device.GetSerialNumber()) for device in devices
-        ]
+        detected_serial_numbers = [str(device.GetSerialNumber()) for device in devices]
         if not requested_serial_numbers:
             final_serial_numbers = sorted(detected_serial_numbers)
         else:
@@ -376,9 +370,7 @@ class CameraSystem:
             try:
                 index = detected_serial_numbers.index(serial_number)
             except ValueError:
-                log.warning(
-                    "Camera with serial number %s not found", serial_number
-                )
+                log.warning("Camera with serial number %s not found", serial_number)
                 continue
             self.cameras.append(Camera(tl_factory.CreateDevice(devices[index])))
 
@@ -418,7 +410,7 @@ class CameraSystem:
         ) as executor:
             futures = [executor.submit(fn, camera) for camera in self.cameras]
         results = []
-        for camera, future in zip(self.cameras, futures):
+        for camera, future in zip(self.cameras, futures, strict=True):
             try:
                 results.append((camera, future.result(), None))
             except Exception as exc:  # re-raised / handled by the caller
@@ -431,9 +423,7 @@ class CameraSystem:
         def load_one(camera: Camera) -> None:
             config_path = directory / f"{camera.serial_number}.pfs"
             if config_path.exists():
-                log.info(
-                    "Loading parameters for camera: %s", camera.serial_number
-                )
+                log.info("Loading parameters for camera: %s", camera.serial_number)
                 camera.load_params(config_path.read_text())
             else:
                 camera.load_params("")
@@ -465,9 +455,7 @@ class CameraSystem:
         self.stop()
 
         def record_one(camera: Camera) -> bool:
-            save_path = (
-                Path(save_dir) / f"{camera.name}.{video_format.extension}"
-            )
+            save_path = Path(save_dir) / f"{camera.name}.{video_format.extension}"
             return camera.start_record(str(save_path), fps, video_format)
 
         # Start every camera at once so they begin grabbing closer together

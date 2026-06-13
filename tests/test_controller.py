@@ -86,21 +86,17 @@ def camera_system(tmp_path):
 def collect_states(controller):
     states = []
     controller.add_listener(
-        lambda kind, payload: states.append(payload["state"])
-        if kind == "state"
-        else None
+        lambda kind, payload: (
+            states.append(payload["state"]) if kind == "state" else None
+        )
     )
     return states
 
 
 def test_full_recording_cycle(camera_system, tmp_path):
     save_dir = tmp_path / "rec" / "001-trial"
-    settings = RecordingSettings(
-        fps=50.0, duration_s=1.5, save_dir=str(save_dir)
-    )
-    controller = RecordingController(
-        camera_system, settings, auto_preview=False
-    )
+    settings = RecordingSettings(fps=50.0, duration_s=1.5, save_dir=str(save_dir))
+    controller = RecordingController(camera_system, settings, auto_preview=False)
     states = collect_states(controller)
 
     result = controller.start_recording()
@@ -132,12 +128,8 @@ def test_full_recording_cycle(camera_system, tmp_path):
 
 def test_abort_recording(camera_system, tmp_path):
     save_dir = tmp_path / "abort" / "001"
-    settings = RecordingSettings(
-        fps=50.0, duration_s=60.0, save_dir=str(save_dir)
-    )
-    controller = RecordingController(
-        camera_system, settings, auto_preview=False
-    )
+    settings = RecordingSettings(fps=50.0, duration_s=60.0, save_dir=str(save_dir))
+    controller = RecordingController(camera_system, settings, auto_preview=False)
     assert controller.start_recording().ok
 
     deadline = time.monotonic() + 10

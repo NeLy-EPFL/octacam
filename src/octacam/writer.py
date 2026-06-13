@@ -13,6 +13,11 @@ full (or once the sink has failed). Available sinks:
 - RawVideoWriter: raw Mono8 dump + JSON sidecar, for `octacam transcode`.
 """
 
+# The sink handles (_queue/_proc/_writer) follow an open -> use -> close
+# lifecycle; they are only touched while the writer thread is running, an
+# invariant pyright can't track across methods.
+# pyright: reportOptionalMemberAccess=false
+
 import json
 import logging
 import os
@@ -71,17 +76,28 @@ def build_x264_args(
     return [
         ffmpeg,
         "-hide_banner",
-        "-loglevel", "warning",
-        "-f", "rawvideo",
-        "-pixel_format", "gray",
-        "-video_size", f"{width}x{height}",
-        "-framerate", f"{fps:g}",
-        "-i", source,
-        "-c:v", "libx264",
-        "-preset", preset,
-        "-crf", str(crf),
-        "-pix_fmt", pix_fmt,
-        "-y", str(output),
+        "-loglevel",
+        "warning",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "gray",
+        "-video_size",
+        f"{width}x{height}",
+        "-framerate",
+        f"{fps:g}",
+        "-i",
+        source,
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        pix_fmt,
+        "-y",
+        str(output),
     ]
 
 
@@ -195,9 +211,7 @@ class AsyncFrameWriter:
 class OpencvVideoWriter(AsyncFrameWriter):
     """cv2.VideoWriter sink (the original octacam writer)."""
 
-    def __init__(
-        self, fourcc: str, max_queue_size: int = 20, is_color: bool = False
-    ):
+    def __init__(self, fourcc: str, max_queue_size: int = 20, is_color: bool = False):
         super().__init__(max_queue_size)
         self._fourcc = fourcc
         self._is_color = is_color
@@ -208,7 +222,7 @@ class OpencvVideoWriter(AsyncFrameWriter):
 
         writer = cv2.VideoWriter(
             filename,
-            cv2.VideoWriter_fourcc(*self._fourcc),
+            cv2.VideoWriter_fourcc(*self._fourcc),  # pyright: ignore[reportAttributeAccessIssue]
             fps,
             frame_size,
             self._is_color,
@@ -264,8 +278,14 @@ class FfmpegVideoWriter(AsyncFrameWriter):
     def _open_sink(self, filename, fps, frame_size):
         width, height = frame_size
         args = build_x264_args(
-            find_ffmpeg(), filename, fps, width, height,
-            self.crf, self.preset, self.pix_fmt,
+            find_ffmpeg(),
+            filename,
+            fps,
+            width,
+            height,
+            self.crf,
+            self.preset,
+            self.pix_fmt,
         )
         self._filename = filename
         self._stderr_tail.clear()
@@ -296,8 +316,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
     def _on_sink_failure(self, exc):
         tail = self.error_tail
         log.error(
-            "ffmpeg writer for %s failed (%s); subsequent frames will be "
-            "dropped%s",
+            "ffmpeg writer for %s failed (%s); subsequent frames will be dropped%s",
             self._filename,
             exc,
             ("\nffmpeg output:\n" + tail) if tail else "",
@@ -334,20 +353,26 @@ class FfmpegVideoWriter(AsyncFrameWriter):
                 "ffmpeg exited with code %d for %s%s",
                 returncode,
                 self._filename,
-                ("\nffmpeg output:\n" + self.error_tail)
-                if self._stderr_tail
-                else "",
+                ("\nffmpeg output:\n" + self.error_tail) if self._stderr_tail else "",
             )
         elif self.remux_mp4:
             self._remux()
 
     def _remux(self):
-        source = Path(self._filename)
+        source = Path(self._filename)  # pyright: ignore[reportArgumentType]
         target = source.with_suffix(".mp4")
         result = subprocess.run(
             [
-                find_ffmpeg(), "-hide_banner", "-loglevel", "warning",
-                "-y", "-i", str(source), "-c", "copy", str(target),
+                find_ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-y",
+                "-i",
+                str(source),
+                "-c",
+                "copy",
+                str(target),
             ],
             capture_output=True,
         )
@@ -470,9 +495,7 @@ def transcode_raw(
     raw_path = Path(raw_path)
     sidecar = raw_path.with_suffix(".json")
     if not sidecar.exists():
-        raise FileNotFoundError(
-            f"missing JSON sidecar for {raw_path}: {sidecar}"
-        )
+        raise FileNotFoundError(f"missing JSON sidecar for {raw_path}: {sidecar}")
     meta = json.loads(sidecar.read_text())
     output = Path(output) if output else raw_path.with_suffix(".mkv")
     args = build_x264_args(

@@ -207,9 +207,7 @@ class WriterThread(threading.Thread):
         elif self.kind == "ffmpeg-x264":
             from octacam.writer import _write_all
 
-            consume(
-                item, copy_mode, lambda arr: _write_all(self._sink.stdin, arr)
-            )
+            consume(item, copy_mode, lambda arr: _write_all(self._sink.stdin, arr))
         elif self.kind == "pyav-mjpeg":
             import av
 
@@ -219,7 +217,9 @@ class WriterThread(threading.Thread):
                 item,
                 copy_mode,
                 # from_ndarray copies, so the zero-copy view does not escape
-                lambda arr: holder.append(av.VideoFrame.from_ndarray(arr, format="gray")),
+                lambda arr: holder.append(
+                    av.VideoFrame.from_ndarray(arr, format="gray")
+                ),
             )
             for packet in stream.encode(holder[0].reformat(format="yuvj420p")):
                 container.mux(packet)
@@ -345,13 +345,13 @@ def run_cameras(indices, args, out_dir):
     stop_evt = threading.Event()
 
     grabbers = [
-        threading.Thread(
-            target=grab_loop, args=(c, w, s, stop_evt, args), daemon=True
-        )
-        for c, w, s in zip(cams, writers, stats)
+        threading.Thread(target=grab_loop, args=(c, w, s, stop_evt, args), daemon=True)
+        for c, w, s in zip(cams, writers, stats, strict=True)
     ]
     jitter = []
-    threads = [threading.Thread(target=jitter_probe, args=(jitter, stop_evt), daemon=True)]
+    threads = [
+        threading.Thread(target=jitter_probe, args=(jitter, stop_evt), daemon=True)
+    ]
     if args.trigger == "software":
         threads.append(
             threading.Thread(
@@ -387,7 +387,9 @@ def run_cameras(indices, args, out_dir):
         "elapsed": elapsed,
         "cpu_percent": cpu,
         "jitter_p99_ms": (
-            statistics.quantiles(jitter, n=100)[98] if len(jitter) >= 100 else float("nan")
+            statistics.quantiles(jitter, n=100)[98]
+            if len(jitter) >= 100
+            else float("nan")
         ),
         "cameras": [
             {
@@ -412,7 +414,7 @@ def run_cameras(indices, args, out_dir):
                     w.encode_ns / w.written / 1e6 if w.written else 0.0
                 ),
             }
-            for i, s, w in zip(indices, stats, writers)
+            for i, s, w in zip(indices, stats, writers, strict=True)
         ],
     }
 

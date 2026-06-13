@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from octacam.plugins.base import OctacamPlugin, Plugin, PluginManager
 

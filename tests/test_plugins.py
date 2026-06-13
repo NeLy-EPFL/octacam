@@ -27,9 +27,7 @@ def test_register_and_build_with_options():
         plugin.options = options
         return plugin
 
-    config = OctacamConfig(
-        plugins=[PluginConfig(name="spy_demo", options={"a": 1})]
-    )
+    config = OctacamConfig(plugins=[PluginConfig(name="spy_demo", options={"a": 1})])
     manager = build_plugins(config)
     assert len(manager.plugins) == 1
     assert manager.plugins[0].options == {"a": 1}

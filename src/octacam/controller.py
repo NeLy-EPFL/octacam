@@ -174,24 +174,21 @@ class RecordingController:
                 raise ValueError("fps must be > 0")
             if "duration_s" in changes and not changes["duration_s"] > 0:
                 raise ValueError("duration_s must be > 0")
-            if "trigger_source" in changes and changes[
-                "trigger_source"
-            ] not in ("software", "external"):
+            if "trigger_source" in changes and changes["trigger_source"] not in (
+                "software",
+                "external",
+            ):
                 raise ValueError("trigger_source must be software or external")
             if "save_dir" in changes:
                 changes["save_dir"] = normalize_save_dir(changes["save_dir"])
             self._settings = dataclasses.replace(self._settings, **changes)
             if "fps" in changes:  # live-updates the preview trigger rate
-                self.camera_system.set_software_trigger_frequency(
-                    self._settings.fps
-                )
+                self.camera_system.set_software_trigger_frequency(self._settings.fps)
             return dataclasses.replace(self._settings)
 
     def validate_save_dir(self, path_str: str) -> dict:
         resolved = Path(normalize_save_dir(path_str))
-        parent = next(
-            (p for p in [resolved, *resolved.parents] if p.exists()), None
-        )
+        parent = next((p for p in [resolved, *resolved.parents] if p.exists()), None)
         free_bytes = shutil.disk_usage(parent).free if parent else 0
         return {
             "resolved": str(resolved),
@@ -207,9 +204,7 @@ class RecordingController:
         with self._lock:
             if self.recording_active:
                 raise RuntimeError("Cannot start preview while recording")
-            self.camera_system.set_software_trigger_frequency(
-                self._settings.fps
-            )
+            self.camera_system.set_software_trigger_frequency(self._settings.fps)
             self.camera_system.start_preview()
             self.camera_system.start_software_trigger()
             self._set_state("preview")
@@ -250,9 +245,7 @@ class RecordingController:
             if not started:
                 self._event("error", "No camera could start recording")
                 self._resume_preview()
-                return StartResult(
-                    StartResult.ERROR, "No camera could start recording"
-                )
+                return StartResult(StartResult.ERROR, "No camera could start recording")
             if len(started) < total:
                 missing = [
                     camera.name
@@ -283,9 +276,7 @@ class RecordingController:
     def _resume_preview(self) -> None:
         """Return to preview (or idle) after a recording ends or fails."""
         if self._auto_preview:
-            self.camera_system.set_software_trigger_frequency(
-                self._settings.fps
-            )
+            self.camera_system.set_software_trigger_frequency(self._settings.fps)
             self.camera_system.start_preview()
             self.camera_system.start_software_trigger()
             self._set_state("preview")
@@ -346,13 +337,12 @@ class RecordingController:
             # motion (or any plugin) stays synchronised to actual capture.
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
-                self._deadline = (
-                    time.monotonic() + duration_s + STOP_GRACE_S
-                )
+                deadline = time.monotonic() + duration_s + STOP_GRACE_S
+                self._deadline = deadline
                 self._set_state("recording")
             # --- countdown
             while not self._stop_event.is_set():
-                remaining = self._deadline - time.monotonic()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self._stop_event.wait(min(remaining, 0.2))
@@ -377,15 +367,11 @@ class RecordingController:
             if not aborted:
                 self._settings = dataclasses.replace(
                     self._settings,
-                    save_dir=increment_trailing_number(
-                        self._settings.save_dir
-                    ),
+                    save_dir=increment_trailing_number(self._settings.save_dir),
                 )
             self._resume_preview()
         self.plugins.dispatch("on_recording_stop", aborted)
-        self._event(
-            "info", "Recording aborted" if aborted else "Recording finished"
-        )
+        self._event("info", "Recording aborted" if aborted else "Recording finished")
 
     def _count_started(self) -> int:
         return sum(1 for camera in self.camera_system if camera.started)
@@ -397,16 +383,12 @@ class RecordingController:
             settings = self._settings
             remaining_ms = None
             if self._state == "recording" and self._deadline is not None:
-                remaining_ms = max(
-                    0, round((self._deadline - time.monotonic()) * 1000)
-                )
+                remaining_ms = max(0, round((self._deadline - time.monotonic()) * 1000))
         try:
             free_bytes = shutil.disk_usage(
                 next(
                     p
-                    for p in [Path(settings.save_dir), *Path(
-                        settings.save_dir
-                    ).parents]
+                    for p in [Path(settings.save_dir), *Path(settings.save_dir).parents]
                     if p.exists()
                 )
             ).free

@@ -69,7 +69,7 @@ class Command:
         )
 
     @classmethod
-    def from_payload(cls, payload) -> "Command":
+    def from_payload(cls, payload) -> Command:
         """Build a Command from a dict of integer fields.
 
         Raises KeyError/TypeError/ValueError on malformed input; callers map
@@ -92,9 +92,7 @@ class SerialLink:
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
-            raise RuntimeError(
-                "pyserial not installed: pip install octacam[arduino]"
-            )
+            raise RuntimeError("pyserial not installed: pip install octacam[arduino]")
         self.close()
         self._serial = serial.Serial(device, baud, timeout=0.1, write_timeout=1)
 
@@ -114,12 +112,12 @@ class SerialLink:
                 return
             try:
                 self._serial.write(command.to_bytes())
-            except serial.SerialException as e:
+            except serial.SerialException as e:  # pyright: ignore[reportOptionalMemberAccess]
                 log.warning("Serial write failed: %s", e)
 
 
 @register("arduino")
-def _build(options: dict) -> "ArduinoPlugin":
+def _build(options: dict) -> ArduinoPlugin:
     if serial is None:
         raise RuntimeError("pyserial not installed: pip install octacam[arduino]")
     device = str(options.get("device", DEFAULT_DEVICE))
@@ -168,7 +166,7 @@ class ArduinoPlugin(Plugin):
         if command is not None:
             self._link.write_command(command)
 
-    def _command_from(self, params: dict | None) -> "Command | None":
+    def _command_from(self, params: dict | None) -> Command | None:
         if not params:
             return None
         spec = params.get(self.name)

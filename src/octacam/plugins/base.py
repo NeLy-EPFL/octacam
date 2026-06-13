@@ -48,7 +48,7 @@ class OctacamPlugin(Protocol):
     def on_recording_stop(self, aborted: bool) -> None: ...
 
     # ---- web contribution (optional) ----
-    def api_router(self) -> "APIRouter | None": ...
+    def api_router(self) -> APIRouter | None: ...
     def on_ws_message(self, message: dict) -> bool: ...  # True = handled
 
 
@@ -81,7 +81,7 @@ class Plugin:
     def on_recording_stop(self, aborted: bool) -> None:
         pass
 
-    def api_router(self) -> "APIRouter | None":
+    def api_router(self) -> APIRouter | None:
         return None
 
     def on_ws_message(self, message: dict) -> bool:

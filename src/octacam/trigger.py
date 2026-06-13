@@ -28,9 +28,7 @@ class PreciseTimer:
         if self._running:
             return
         self._running = True
-        self._thread = threading.Thread(
-            target=self._run, args=(duration,), daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, args=(duration,), daemon=True)
         self._thread.start()
 
     def stop(self) -> None:

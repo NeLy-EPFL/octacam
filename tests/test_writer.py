@@ -58,7 +58,7 @@ def test_ffmpeg_writer_lossless_roundtrip(tmp_path):
 
     decoded = read_all_frames(out)
     assert len(decoded) == len(frames)
-    for src, dec in zip(frames, decoded):
+    for src, dec in zip(frames, decoded, strict=True):
         # cv2 decodes to BGR; every channel equals the gray source
         assert np.array_equal(dec[:, :, 0], src)
 
@@ -137,7 +137,7 @@ def test_drop_on_full_then_drain_on_close(tmp_path):
 
 
 def test_format_registry_creates_writers():
-    for name, video_format in FORMATS.items():
+    for _name, video_format in FORMATS.items():
         assert video_format.create_writer(2) is not None
         assert video_format.extension
         assert video_format.label
@@ -179,8 +179,10 @@ def test_default_codec_resolution():
     # the named key overrides the index, and unknown names fall back to x264
     assert default_codec(GuiConfig(video_writer_default="h264")) == "h264"
     assert (
-        default_codec(GuiConfig(video_writer_default="h264",
-                                video_writer_default_index=0)) == "h264"
+        default_codec(
+            GuiConfig(video_writer_default="h264", video_writer_default_index=0)
+        )
+        == "h264"
     )
     assert default_codec(GuiConfig(video_writer_default="bogus")) == "x264"
 
