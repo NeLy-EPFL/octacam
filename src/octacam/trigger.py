@@ -1,4 +1,4 @@
-"""Precise periodic callback timer. Port of cpp/src/timer.{hpp,cpp}."""
+"""Precise periodic callback timer."""
 
 import threading
 import time

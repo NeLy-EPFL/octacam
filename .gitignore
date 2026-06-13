@@ -1,35 +1,13 @@
-# Ignore build artifacts
-build/
-
-# Ignore CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-
 # Ignore editor-specific files
 *.swp
 *.swo
 .idea/
 .vscode/
 
-# Ignore compiled object files
-*.o
-*.obj
-
-# Ignore executable files
-*.exe
-*.out
-*.app
-
 # Ignore logs and temporary files
 *.log
 *.tmp
 *.bak
-*.d
-
-# Ignore dependency files
-*.d
 
 # Ignore other system files
 .DS_Store

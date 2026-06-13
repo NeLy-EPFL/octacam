@@ -1,4 +1,4 @@
-"""Serial link to the Arduino stepper controller. Port of cpp/src/serial.{hpp,cpp}."""
+"""Serial link to the Arduino stepper controller."""
 
 import logging
 import struct

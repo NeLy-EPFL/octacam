@@ -1,4 +1,4 @@
-"""Camera acquisition on pypylon. Port of cpp/src/camera.{hpp,cpp}."""
+"""Camera acquisition on pypylon."""
 
 import logging
 import threading

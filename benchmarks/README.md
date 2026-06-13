@@ -5,8 +5,8 @@ pipeline (pypylon + OpenCV/PyAV) sustains the target load, no native extension m
 is needed. Target: **8 cameras × 1920×1080 (≈2 MP, Mono8) × 150 fps ≈ 1200 frames/s,
 ~2.4 GB/s raw**.
 
-`bench_pipeline.py` replays the C++ hot path ([cpp/src/camera.cpp](../cpp/src/camera.cpp),
-[cpp/src/video_writer.cpp](../cpp/src/video_writer.cpp)) in Python: one grab thread per
+`bench_pipeline.py` replays the C++ hot path (per-camera grab → bounded queue →
+writer) in Python: one grab thread per
 camera → bounded queue (20, drop-on-full) → one writer thread per camera, plus a ~30 Hz
 preview copy per camera simulating the GUI, and optionally the 150 Hz software-trigger
 thread the C++ app uses for recording.

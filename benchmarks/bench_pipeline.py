@@ -1,7 +1,7 @@
 """Phase 0 benchmark: can a pure-Python octacam pipeline keep up?
 
-Mirrors the C++ hot path (cpp/src/camera.cpp + cpp/src/video_writer.cpp):
-one grab thread per camera -> bounded queue (drop on full) -> one writer
+Mirrors the C++ hot path: one grab thread per camera -> bounded queue
+(drop on full) -> one writer
 thread per camera, plus a ~30 Hz preview tap per camera simulating the GUI.
 
 Runs against Basler's camera emulator (PYLON_CAMEMU) so no hardware is needed.
@@ -29,7 +29,7 @@ os.environ.setdefault("PYLON_CAMEMU", "8")
 import numpy as np
 from pypylon import genicam, pylon
 
-GRAB_TIMEOUT_MS = 100  # matches cpp/src/camera.cpp GRAB_TIMEOUT_MS
+GRAB_TIMEOUT_MS = 100  # matches the C++ GRAB_TIMEOUT_MS
 SENTINEL = None
 
 

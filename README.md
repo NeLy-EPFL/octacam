@@ -72,11 +72,8 @@ cursor library required by Qt ≥ 6.5: `sudo apt install libxcb-cursor0`.
 ## Repository layout
 
 - **[src/octacam/](src/octacam/)** — the Python package.
-- **[cpp/](cpp/)** — the original C++/Qt6 implementation, kept as the reference
-  until the Python port is validated on the acquisition rig. See
-  [cpp/README.md](cpp/README.md) for build instructions.
 - **[configs/](configs/)** — camera `.pfs` files and `octacam_config.yaml` per
-  rig, shared by both implementations.
+  rig.
 - **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gated the
   pure-Python architecture. See [benchmarks/README.md](benchmarks/README.md).
 - **[arduino_script/](arduino_script/)** — Arduino sketch for stepper motor control.

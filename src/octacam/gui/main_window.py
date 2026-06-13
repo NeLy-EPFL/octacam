@@ -1,4 +1,4 @@
-"""Main application window. Port of cpp/src/main_window.{hpp,cpp}."""
+"""Main application window."""
 
 import logging
 from pathlib import Path

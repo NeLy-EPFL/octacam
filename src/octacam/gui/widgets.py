@@ -1,4 +1,4 @@
-"""Custom widgets. Port of the widget classes in cpp/src/main_window.{hpp,cpp}."""
+"""Custom widgets."""
 
 from PySide6.QtCore import QDir, QLineF, QPoint, Qt
 from PySide6.QtGui import QColor, QDoubleValidator, QPen

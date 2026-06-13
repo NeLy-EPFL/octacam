@@ -1,4 +1,4 @@
-"""octacam_config.yaml parsing. Port of cpp/src/parser.{hpp,cpp}."""
+"""octacam_config.yaml parsing."""
 
 import datetime
 import logging
@@ -236,7 +236,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
 
 
 def find_config_file(config_dir: str | Path) -> Path:
-    """Mirrors main.cpp: prefer octacam_config.yml, fall back to .yaml."""
+    """Mirrors the original C++ app: prefer octacam_config.yml, fall back to .yaml."""
     config_dir = Path(config_dir)
     config_path = config_dir / "octacam_config.yml"
     if not config_path.exists():
