@@ -13,7 +13,7 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
   4:0:0, crash-safe MKV) by default, or raw Mono8 dumps for maximum
   throughput with offline transcoding (`octacam transcode`).
 - Web GUI (`octacam serve`): control the rig from any browser; works
-  remotely through a plain SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <rig>`).
+  remotely through a plain SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <rig-hostname>`).
 
 ## Installation
 
@@ -42,7 +42,7 @@ octacam --help
 For remote operation, tunnel the web GUI over SSH from your machine:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 <rig> octacam serve <config_dir>
+ssh -L 8000:127.0.0.1:8000 <rig-hostname> octacam serve <config_dir>
 # then open http://localhost:8000
 ```
 

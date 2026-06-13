@@ -116,7 +116,7 @@ def gui(config_dir: Path, serial_port: str = "/dev/ttyACM0") -> None:
     default="127.0.0.1",
     show_default=True,
     help="Bind address. Keep the loopback default and reach the GUI "
-    "remotely with: ssh -L 8000:127.0.0.1:8000 <rig>",
+    "remotely with: ssh -L 8000:127.0.0.1:8000 <rig-hostname>",
 )
 @click.option("--port", default=8000, show_default=True)
 @click.option(
@@ -180,7 +180,7 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
     controller.start_preview()
     app = create_app(controller, config, serial_link, config_dir=str(config_dir))
     log.info(
-        "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig>)",
+        "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
         host,
         port,
         port,
