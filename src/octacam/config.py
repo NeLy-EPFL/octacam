@@ -91,10 +91,33 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+_BACKENDS = ("basler", "flir", "fake")
+
+
 class OctacamConfig(BaseModel):
+    # Which camera SDK this rig uses. One vendor per config directory; absent
+    # means Basler so every existing config keeps working untouched.
+    backend: str = "basler"
     gui: GuiConfig = Field(default_factory=GuiConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
+
+
+def _parse_backend(value: object) -> str:
+    """Parse the optional top-level ``backend`` key, tolerantly (defaults basler)."""
+    if value is None:
+        return "basler"
+    try:
+        name = _scalar_str(value).strip().lower()
+    except ValueError:
+        log.warning('Ignoring "backend" in octacam config as it is not a string')
+        return "basler"
+    if name not in _BACKENDS:
+        log.warning(
+            'Ignoring unknown "backend" %r in octacam config; using "basler"', name
+        )
+        return "basler"
+    return name
 
 
 def _lenient_validate(
@@ -247,6 +270,8 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
     except tomllib.TOMLDecodeError as e:
         log.error("Failed to parse octacam config file: %s", e)
         return _finalize(config)
+
+    config.backend = _parse_backend(data.get("backend"))
 
     gui_src = data.get("gui")
     if gui_src is not None:

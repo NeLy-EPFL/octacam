@@ -159,7 +159,7 @@ def serve(
     """Serve the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
 
-    from octacam.camera import CameraSystem
+    from octacam.cameras import BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import (
         RecordingController,
@@ -174,7 +174,12 @@ def serve(
     log.info("Using config directory: %s", config_dir)
     config = load_config_dir(config_dir)
 
-    system = CameraSystem([c.serial_number for c in config.cameras])
+    try:
+        system = CameraSystem(
+            [c.serial_number for c in config.cameras], backend=config.backend
+        )
+    except BackendUnavailable as e:
+        sys.exit(str(e))
     if len(system) == 0:
         log.warning("No cameras opened. Exiting.")
         sys.exit(1)
@@ -226,16 +231,36 @@ def serve(
 
 
 @app.command("list-cameras")
-def list_cameras() -> None:
-    """List detected cameras (set PYLON_CAMEMU=N for emulated ones)."""
-    from pypylon import pylon
+def list_cameras(
+    backend: Annotated[
+        str,
+        typer.Option(help="Camera backend to enumerate: basler, flir, or fake."),
+    ] = "basler",
+) -> None:
+    """List detected cameras (set PYLON_CAMEMU=N for emulated Basler ones)."""
+    if backend == "basler":
+        from pypylon import pylon
 
-    devices = pylon.TlFactory.GetInstance().EnumerateDevices()
-    if not devices:
+        devices = pylon.TlFactory.GetInstance().EnumerateDevices()
+        if not devices:
+            typer.echo("No cameras detected.")
+            return
+        for device in devices:
+            typer.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
+        return
+
+    from octacam.cameras import BackendUnavailable, select_backend
+
+    try:
+        enumerate_fn, _factory, _extension = select_backend(backend)
+        entries = enumerate_fn(None)
+    except BackendUnavailable as e:
+        sys.exit(str(e))
+    if not entries:
         typer.echo("No cameras detected.")
         return
-    for device in devices:
-        typer.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
+    for serial, _handle in entries:
+        typer.echo(f"{serial}\t{backend}")
 
 
 @app.command()
@@ -288,7 +313,7 @@ def record(
     no_plugins: NoPlugins = False,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
-    from octacam.camera import CameraSystem
+    from octacam.cameras import BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import RecordingController, RecordingSettings
     from octacam.plugins import build_plugins
@@ -301,7 +326,12 @@ def record(
     if output is None:
         output = Path(os.path.expanduser(config.gui.save_directory_default))
 
-    system = CameraSystem([c.serial_number for c in config.cameras])
+    try:
+        system = CameraSystem(
+            [c.serial_number for c in config.cameras], backend=config.backend
+        )
+    except BackendUnavailable as e:
+        sys.exit(str(e))
     if len(system) == 0:
         log.warning("No cameras opened. Exiting.")
         sys.exit(1)

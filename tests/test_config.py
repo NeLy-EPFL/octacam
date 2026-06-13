@@ -110,3 +110,22 @@ def test_plugins_tables_with_options_and_duplicates(tmp_path):
 def test_toml_file_loaded(tmp_path):
     (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 42\n")
     assert load_config_dir(tmp_path).gui.fps_default == 42.0
+
+
+def test_backend_defaults_to_basler(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 1\n")
+    assert load_config_dir(tmp_path).backend == "basler"
+
+
+def test_backend_parsed_when_present(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        'backend = "flir"\n[[cameras]]\nserial_number = "a"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert config.backend == "flir"
+    assert [c.serial_number for c in config.cameras] == ["a"]
+
+
+def test_unknown_backend_falls_back_to_basler(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text('backend = "nikon"\n')
+    assert load_config_dir(tmp_path).backend == "basler"

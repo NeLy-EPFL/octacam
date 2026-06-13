@@ -115,3 +115,23 @@ def test_copy_auxiliary_pfs_skips_live_serials(tmp_path):
     cw.copy_auxiliary_pfs(src, dst, {"0815-0000"})
     assert (dst / "fictrac_camera_config.pfs").exists()
     assert not (dst / "0815-0000.pfs").exists()  # live serial written separately
+
+
+def test_pfs_helpers_honor_a_non_pfs_extension(tmp_path):
+    # The persistence generalization: a FLIR/fake backend persists per-camera
+    # files under its own extension; the helpers must round-trip those too.
+    cw.write_pfs_files(tmp_path, {"FAKE-0": "{}\n"}, extension="json")
+    assert (tmp_path / "FAKE-0.json").exists()
+    assert not (tmp_path / "FAKE-0.pfs").exists()
+    assert cw.read_pfs_files(tmp_path, extension="json") == {"FAKE-0": "{}\n"}
+    # the default extension stays "pfs" and ignores the json file
+    assert cw.read_pfs_files(tmp_path) == {}
+
+
+def test_backend_key_preserved_through_save(tmp_path):
+    raw = {"backend": "flir", "gui": {"fps_default": 30.0}, "cameras": []}
+    doc = cw.merge_camera_display(raw, [{"serial": "A", "rotation_deg": 90.0}])
+    cw.write_config(tmp_path, doc)
+    written = (tmp_path / "octacam_config.toml").read_text()
+    assert tomllib.loads(written)["backend"] == "flir"
+    assert parse_config(tmp_path / "octacam_config.toml").backend == "flir"

@@ -101,6 +101,16 @@ def _dumps(data: dict) -> str:
         _emit_table(lines, header, table, array=array)
         blocks.append("\n".join(lines))
 
+    # Top-level scalar keys (e.g. ``backend``) must precede any table header in
+    # TOML; preserve them verbatim so a round-trip save never drops them.
+    scalars = {
+        key: value
+        for key, value in data.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+    if scalars:
+        blocks.append("\n".join(f"{k} = {_toml_value(v)}" for k, v in scalars.items()))
+
     gui = data.get("gui")
     if isinstance(gui, dict) and gui:
         block("gui", gui)
@@ -179,25 +189,29 @@ def write_config(config_dir: str | Path, doc: dict) -> Path:
     return path
 
 
-def write_pfs_files(target_dir: str | Path, pfs_by_serial: dict[str, str]) -> None:
+def write_pfs_files(
+    target_dir: str | Path, pfs_by_serial: dict[str, str], extension: str = "pfs"
+) -> None:
     target_dir = Path(target_dir)
     for serial, text in pfs_by_serial.items():
-        atomic_write_text(target_dir / f"{serial}.pfs", text)
+        atomic_write_text(target_dir / f"{serial}.{extension}", text)
 
 
-def read_pfs_files(config_dir: str | Path) -> dict[str, str]:
-    """Map ``<serial> -> .pfs text`` for every ``*.pfs`` in ``config_dir``.
+def read_pfs_files(config_dir: str | Path, extension: str = "pfs") -> dict[str, str]:
+    """Map ``<serial> -> param text`` for every per-camera file in ``config_dir``.
 
     The inverse of :func:`write_pfs_files`, used to reset live cameras back to
-    the parameters the active config shipped. Keyed by file stem (the serial for
-    a ``<serial>.pfs``), so auxiliary files like ``fictrac_camera_config.pfs``
-    are read too but simply never match a live serial.
+    the parameters the active config shipped. ``extension`` is the active
+    backend's parameter-file suffix (``pfs`` for Basler, ``json`` for FLIR, ...).
+    Keyed by file stem (the serial for a ``<serial>.<extension>``), so auxiliary
+    files like ``fictrac_camera_config.pfs`` are read too but simply never match
+    a live serial.
     """
     config_dir = Path(config_dir)
     out: dict[str, str] = {}
     if not config_dir.is_dir():
         return out
-    for path in sorted(config_dir.glob("*.pfs")):
+    for path in sorted(config_dir.glob(f"*.{extension}")):
         try:
             out[path.stem] = path.read_text()
         except OSError:
@@ -206,17 +220,21 @@ def read_pfs_files(config_dir: str | Path) -> dict[str, str]:
 
 
 def copy_auxiliary_pfs(
-    src_dir: str | Path, target_dir: str | Path, live_serials: set[str]
+    src_dir: str | Path,
+    target_dir: str | Path,
+    live_serials: set[str],
+    extension: str = "pfs",
 ) -> None:
-    """Copy ``*.pfs`` that are not ``<live-serial>.pfs`` into a new config dir.
+    """Copy per-camera files that are not ``<live-serial>.<extension>`` to a new dir.
 
-    Preserves helper configs (e.g. ``fictrac_camera_config.pfs``) and the .pfs
-    of cameras not currently opened, so the new dir is a complete preset.
+    Preserves helper configs (e.g. ``fictrac_camera_config.pfs``) and the
+    parameter files of cameras not currently opened, so the new dir is a
+    complete preset.
     """
     src_dir, target_dir = Path(src_dir), Path(target_dir)
     if src_dir.resolve() == target_dir.resolve():
         return
-    for src in sorted(src_dir.glob("*.pfs")):
+    for src in sorted(src_dir.glob(f"*.{extension}")):
         if src.stem not in live_serials:
             atomic_write_text(target_dir / src.name, src.read_text())
 

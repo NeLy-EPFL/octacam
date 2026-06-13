@@ -437,7 +437,7 @@ requires-dist = [
     { name = "uvicorn", specifier = ">=0.49.0" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["arduino"]
+provides-extras = ["arduino", "flir"]
 
 [package.metadata.requires-dev]
 dev = [

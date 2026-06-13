@@ -1,7 +1,7 @@
 [project]
 name = "octacam"
 version = "0.2.0.dev0"
-description = "Preview, record, and save video streams from multiple Basler cameras"
+description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,6 +22,11 @@ dependencies = [
 [project.optional-dependencies]
 # Opt-in plugins (octacam.plugins.<name>) and their extra runtime deps.
 arduino = ["pyserial>=3.5"]
+# FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
+# PyPI (it ships with the SDK installer). This extra is therefore a documented,
+# greppable install marker rather than a dependency list: install the Spinnaker
+# SDK and `pip install spinnaker_python-*.whl` manually (see the README).
+flir = []
 
 [project.scripts]
 octacam = "octacam.cli:main"

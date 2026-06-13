@@ -1,6 +1,6 @@
 # octacam
 
-octacam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple Basler cameras. It is designed to be fast, easy to use, and maintainable.
+octacam is the successor to SeptaCam, a tool for previewing, recording, and saving video streams from multiple scientific cameras. It drives Basler (USB3, via pypylon) and FLIR/Teledyne (USB3, via Spinnaker/PySpin) cameras through one common interface, and is designed to be fast, easy to use, and maintainable. See [Camera backends](#camera-backends).
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a7b6ac6e-5ae3-45fa-ae5a-2e3f5281e5c3" width="400"/>
@@ -27,6 +27,10 @@ uv tool install git+https://github.com/NeLy-EPFL/octacam.git
 
 or, from a clone: `uv tool install .` (or `pip install .`).
 
+The Basler runtime is bundled, so a Basler rig works out of the box. **FLIR
+cameras need the Spinnaker SDK installed separately** (PySpin is not on PyPI) —
+see [FLIR / Teledyne setup](#flir--teledyne-setup).
+
 Optional plugins ship as extras — install the ones you need, e.g. the Arduino
 stepper controller: `pip install "octacam[arduino]"` (see [Plugins](#plugins)).
 
@@ -37,7 +41,7 @@ octacam serve <config_dir>    # web GUI on http://127.0.0.1:8000 (--host/--port)
 octacam record <config_dir>   # headless recording (--fps/--duration/--output/
                               #   --codec x264|raw|mjpg|h264/--crf/--preset/--trigger)
 octacam transcode <dir>       # convert .raw recordings to x264 MKV offline
-octacam list-cameras          # show detected cameras
+octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
 octacam --help
 ```
 
@@ -51,15 +55,59 @@ ssh -L 8000:127.0.0.1:8000 <rig-hostname> octacam serve <config_dir>
 # then open http://localhost:8000
 ```
 
-`<config_dir>` contains the per-camera `.pfs` Basler configuration files and an
-optional `octacam_config.toml` (camera names, display layout, GUI defaults) —
-see [configs/](configs/) for examples.
+`<config_dir>` contains an optional `octacam_config.toml` (camera names, display
+layout, GUI defaults, and the camera [`backend`](#camera-backends)) plus the
+per-camera sensor-parameter files — `<serial>.pfs` for Basler, `<serial>.json`
+for FLIR — see [configs/](configs/) for examples.
 
 To run without hardware using Basler's camera emulation:
 
 ```bash
 PYLON_CAMEMU=8 octacam serve configs/emulate_8_cameras
 ```
+
+## Camera backends
+
+octacam drives more than one camera vendor through a common interface. Pick the
+backend per rig with a top-level `backend` key in `octacam_config.toml` (one
+vendor per config directory):
+
+```toml
+backend = "basler"   # default — omit the key and Basler is assumed
+# backend = "flir"   # FLIR / Teledyne (Spinnaker / PySpin)
+```
+
+| `backend` | SDK                     | per-camera parameter file | notes                       |
+| --------- | ----------------------- | ------------------------- | --------------------------- |
+| `basler`  | pypylon (bundled)       | `<serial>.pfs`            | default                     |
+| `flir`    | Spinnaker / PySpin      | `<serial>.json`           | runs the sensor in Mono8    |
+| `fake`    | none (in-memory)        | `<serial>.json`           | synthetic frames for tests  |
+
+Everything else — preview, recording (monochrome H.264 or raw), the software
+trigger, the per-camera exposure/gain/ROI controls, the timestamp CSVs, and the
+web GUI — behaves identically across backends. `list-cameras` takes a matching
+`--backend`:
+
+```bash
+octacam list-cameras --backend flir
+```
+
+### FLIR / Teledyne setup
+
+PySpin is not on PyPI; it ships with Teledyne's Spinnaker SDK. Install the SDK
+and its PySpin wheel into octacam's environment, then (optionally) mark the
+intent with the `flir` extra:
+
+```bash
+# 1. Install the Spinnaker SDK for your platform (from Teledyne).
+# 2. Install the matching PySpin wheel into octacam's environment:
+pip install spinnaker_python-*.whl
+# 3. (optional) records the dependency; installs nothing on its own:
+pip install "octacam[flir]"
+```
+
+If PySpin is missing when a FLIR config is served, octacam exits with a clear
+message rather than a traceback.
 
 ## Plugins
 

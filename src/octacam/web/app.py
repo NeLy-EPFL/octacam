@@ -430,7 +430,9 @@ def create_app(
         if not config_dir:
             raise HTTPException(400, "No config directory is set for this session")
         payload = payload or CameraParamReset()
-        pfs_by_serial = config_writer.read_pfs_files(config_dir)
+        pfs_by_serial = config_writer.read_pfs_files(
+            config_dir, controller.camera_system.extension
+        )
         try:
             result = controller.reset_camera_params(index, pfs_by_serial, payload.scope)
         except IndexError:
@@ -488,9 +490,13 @@ def create_app(
                     active, req.name or "", overwrite=req.overwrite
                 )
                 target.mkdir(parents=True, exist_ok=True)
-                config_writer.copy_auxiliary_pfs(active, target, set(pfs))
+                config_writer.copy_auxiliary_pfs(
+                    active, target, set(pfs), controller.camera_system.extension
+                )
             if req.save_sensor:
-                config_writer.write_pfs_files(target, pfs)
+                config_writer.write_pfs_files(
+                    target, pfs, controller.camera_system.extension
+                )
             if req.save_display and doc is not None:
                 config_writer.write_config(target, doc)
         except RuntimeError as e:  # recording started between the check and save

@@ -1,0 +1,19 @@
+# Example FLIR / Teledyne (Spinnaker / PySpin) rig.
+#
+# `backend = "flir"` selects the Spinnaker backend (install the SDK + PySpin
+# wheel first; see the README). With no [[cameras]] entries, every detected
+# FLIR camera is used; add entries keyed by serial_number to pin names and the
+# display layout. Per-camera sensor parameters persist next to this file as
+# <serial>.json (written by the web GUI's "Save…" dialog), not as Basler .pfs.
+backend = "flir"
+
+[gui]
+fps_default = 30.0
+duration_default = 10.0
+save_directory_default = "~/data/%y%m%d/flir/001"
+
+# Pin a camera's name and grid placement (optional). Sensor parameters
+# (exposure/gain/ROI) live in <serial>.json, set from the GUI.
+# [[cameras]]
+# serial_number = "20415678"
+# name = "grasshopper_left"
