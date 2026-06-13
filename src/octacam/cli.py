@@ -2,13 +2,56 @@ import logging
 import os
 import resource
 import sys
+from enum import StrEnum
 from pathlib import Path
+from typing import Annotated
 
-import click
+import typer
 
 import octacam
 
 log = logging.getLogger("octacam")
+
+
+class LogLevel(StrEnum):
+    debug = "debug"
+    info = "info"
+    warning = "warning"
+    error = "error"
+
+
+class Codec(StrEnum):
+    x264 = "x264"
+    raw = "raw"
+    mjpg = "mjpg"
+    h264 = "h264"
+
+
+class Trigger(StrEnum):
+    software = "software"
+    hardware = "hardware"
+
+
+def _setup_logging(level: LogLevel) -> None:
+    """Route the "octacam" logger through rich (colored level, pretty tracebacks).
+
+    Logs go to stderr so stdout stays clean for the machine-readable output of
+    `list-cameras`/`record`/`transcode`."""
+    from rich.console import Console
+    from rich.logging import RichHandler
+
+    handler = RichHandler(
+        console=Console(stderr=True),
+        show_time=False,
+        show_path=False,
+        markup=False,
+        rich_tracebacks=True,
+    )
+    logger = logging.getLogger("octacam")
+    logger.handlers.clear()
+    logger.addHandler(handler)
+    logger.setLevel(getattr(logging, level.value.upper()))
+    logger.propagate = False
 
 
 def _raise_fd_limit() -> None:
@@ -25,48 +68,36 @@ def _raise_fd_limit() -> None:
         log.debug("Raised open file limit: %d -> %d", soft, hard)
 
 
-
-@click.group(invoke_without_command=True)
-@click.version_option(octacam.__version__)
-@click.option(
-    "--log-level",
-    "-l",
-    type=click.Choice(["debug", "info", "warning", "error"]),
-    default="info",
-    show_default=True,
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=False,
+    rich_markup_mode=None,
 )
-@click.pass_context
-def main(ctx: click.Context, log_level: str) -> None:
-    """octacam: preview, record, and save video streams from multiple Basler cameras.
 
-    Run `octacam serve <config_dir>` for the web GUI, or see the commands below.
-    """
-    logging.basicConfig(
-        format="[%(levelname)s] %(message)s",
-        level=getattr(logging, log_level.upper()),
-    )
-    _raise_fd_limit()
-    if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
-        ctx.exit()
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(octacam.__version__)
+        raise typer.Exit()
 
 
 # Plugins are opt-in; the default launch loads none. Enable them per-rig in the
-# config's `plugins:` section, or per-launch with these flags.
-def _plugin_options(func):
-    func = click.option(
+# config's `plugins` section, or per-launch with these options.
+EnabledPlugins = Annotated[
+    list[str] | None,
+    typer.Option(
         "--plugin",
-        "enabled_plugins",
-        multiple=True,
-        help="Enable a plugin (repeatable); adds to the config's `plugins:` "
+        help="Enable a plugin (repeatable); adds to the config's `plugins` "
         "(e.g. --plugin arduino). Requires its extra: pip install octacam[arduino].",
-    )(func)
-    func = click.option(
+    ),
+]
+NoPlugins = Annotated[
+    bool,
+    typer.Option(
         "--no-plugins",
-        is_flag=True,
         help="Disable all plugins for this launch, ignoring the config.",
-    )(func)
-    return func
+    ),
+]
 
 
 def _resolve_enabled(enabled_plugins, no_plugins):
@@ -77,30 +108,53 @@ def _resolve_enabled(enabled_plugins, no_plugins):
     """
     if no_plugins:
         return []
-    return list(enabled_plugins) or None
+    return list(enabled_plugins) if enabled_plugins else None
 
 
-@main.command()
-@click.argument(
-    "config_dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=".",
-)
-@click.option(
-    "--host",
-    default="127.0.0.1",
-    show_default=True,
-    help="Bind address. Keep the loopback default and reach the GUI "
-    "remotely with: ssh -L 8000:127.0.0.1:8000 <rig-hostname>",
-)
-@click.option("--port", default=8000, show_default=True)
-@_plugin_options
+@app.callback(invoke_without_command=True)
+def main_callback(
+    ctx: typer.Context,
+    log_level: Annotated[
+        LogLevel,
+        typer.Option("--log-level", "-l", help="Logging verbosity."),
+    ] = LogLevel.info,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the version and exit.",
+        ),
+    ] = False,
+) -> None:
+    """octacam: preview, record, and save video streams from multiple Basler cameras.
+
+    Run `octacam serve <config_dir>` for the web GUI, or see the commands below.
+    """
+    _setup_logging(log_level)
+    _raise_fd_limit()
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+
+
+@app.command()
 def serve(
-    config_dir: Path,
-    host: str,
-    port: int,
-    enabled_plugins: tuple[str, ...],
-    no_plugins: bool,
+    config_dir: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+    ] = Path("."),
+    host: Annotated[
+        str,
+        typer.Option(
+            help="Bind address. Keep the loopback default and reach the GUI "
+            "remotely with: ssh -L 8000:127.0.0.1:8000 <rig-hostname>"
+        ),
+    ] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="Port to bind.")] = 8000,
+    enabled_plugins: EnabledPlugins = None,
+    no_plugins: NoPlugins = False,
 ) -> None:
     """Serve the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
@@ -171,80 +225,67 @@ def serve(
         log.info("octacam stopped.")
 
 
-@main.command("list-cameras")
+@app.command("list-cameras")
 def list_cameras() -> None:
     """List detected cameras (set PYLON_CAMEMU=N for emulated ones)."""
     from pypylon import pylon
 
     devices = pylon.TlFactory.GetInstance().EnumerateDevices()
     if not devices:
-        click.echo("No cameras detected.")
+        typer.echo("No cameras detected.")
         return
     for device in devices:
-        click.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
+        typer.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
 
 
-@main.command()
-@click.argument(
-    "config_dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=".",
-)
-@click.option("--fps", "-f", type=float, help="Frame rate [default: from config].")
-@click.option(
-    "--duration",
-    "-d",
-    type=float,
-    help="Recording duration in seconds [default: from config].",
-)
-@click.option(
-    "--output",
-    "-o",
-    type=click.Path(path_type=Path),
-    help="Save directory [default: from config].",
-)
-@click.option(
-    "--codec",
-    type=click.Choice(["x264", "raw", "mjpg", "h264"]),
-    default="x264",
-    show_default=True,
-    help="x264: ffmpeg H.264 mkv (gray 4:0:0); raw: Mono8 dump for "
-    "`octacam transcode`; mjpg/h264: the legacy OpenCV writers.",
-)
-@click.option(
-    "--crf",
-    type=int,
-    default=16,
-    show_default=True,
-    help="x264 quality (lower = better; 0 = lossless).",
-)
-@click.option(
-    "--preset",
-    default="ultrafast",
-    show_default=True,
-    help="x264 speed preset. ultrafast is the only one validated at "
-    "8 cameras x 150 fps; slower presets compress better.",
-)
-@click.option(
-    "--trigger",
-    type=click.Choice(["software", "hardware"]),
-    default="software",
-    show_default=True,
-    help="software: trigger from a timer thread at --fps; hardware: use the "
-    "trigger source configured in the .pfs files.",
-)
-@_plugin_options
+@app.command()
 def record(
-    config_dir: Path,
-    fps: float | None,
-    duration: float | None,
-    output: Path | None,
-    codec: str,
-    crf: int,
-    preset: str,
-    trigger: str,
-    enabled_plugins: tuple[str, ...],
-    no_plugins: bool,
+    config_dir: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+    ] = Path("."),
+    fps: Annotated[
+        float | None,
+        typer.Option("--fps", "-f", help="Frame rate [default: from config]."),
+    ] = None,
+    duration: Annotated[
+        float | None,
+        typer.Option(
+            "--duration",
+            "-d",
+            help="Recording duration in seconds [default: from config].",
+        ),
+    ] = None,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Save directory [default: from config]."),
+    ] = None,
+    codec: Annotated[
+        Codec,
+        typer.Option(
+            help="x264: ffmpeg H.264 mkv (gray 4:0:0); raw: Mono8 dump for "
+            "`octacam transcode`; mjpg/h264: the legacy OpenCV writers."
+        ),
+    ] = Codec.x264,
+    crf: Annotated[
+        int, typer.Option(help="x264 quality (lower = better; 0 = lossless).")
+    ] = 16,
+    preset: Annotated[
+        str,
+        typer.Option(
+            help="x264 speed preset. ultrafast is the only one validated at "
+            "8 cameras x 150 fps; slower presets compress better."
+        ),
+    ] = "ultrafast",
+    trigger: Annotated[
+        Trigger,
+        typer.Option(
+            help="software: trigger from a timer thread at --fps; hardware: use "
+            "the trigger source configured in the .pfs files."
+        ),
+    ] = Trigger.software,
+    enabled_plugins: EnabledPlugins = None,
+    no_plugins: NoPlugins = False,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
     from octacam.camera import CameraSystem
@@ -282,8 +323,8 @@ def record(
         fps=fps,
         duration_s=duration,
         save_dir=str(output),
-        trigger_source="software" if trigger == "software" else "external",
-        codec=codec,
+        trigger_source="software" if trigger == Trigger.software else "external",
+        codec=codec.value,
         crf=crf,
         preset=preset,
     )
@@ -306,24 +347,26 @@ def record(
 
     extension = settings.video_format().extension
     for camera in system:
-        click.echo(f"{output / camera.name}.{extension}")
+        typer.echo(f"{output / camera.name}.{extension}")
 
 
-@main.command()
-@click.argument(
-    "paths",
-    nargs=-1,
-    required=True,
-    type=click.Path(exists=True, path_type=Path),
-)
-@click.option("--crf", type=int, default=16, show_default=True)
-@click.option(
-    "--preset",
-    default="veryslow",
-    show_default=True,
-    help="x264 speed preset; offline transcoding can afford a slow one.",
-)
-def transcode(paths: tuple[Path, ...], crf: int, preset: str) -> None:
+@app.command()
+def transcode(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            help="PATHS are .raw files or directories to scan for them.",
+        ),
+    ],
+    crf: Annotated[int, typer.Option()] = 16,
+    preset: Annotated[
+        str,
+        typer.Option(
+            help="x264 speed preset; offline transcoding can afford a slow one."
+        ),
+    ] = "veryslow",
+) -> None:
     """Transcode .raw recordings (with .json sidecars) to x264 MKV.
 
     PATHS are .raw files or directories to scan for them.
@@ -339,12 +382,19 @@ def transcode(paths: tuple[Path, ...], crf: int, preset: str) -> None:
     failures = 0
     for raw_file in dict.fromkeys(raw_files):
         try:
-            click.echo(transcode_raw(raw_file, crf=crf, preset=preset))
+            typer.echo(transcode_raw(raw_file, crf=crf, preset=preset))
         except Exception as e:  # one bad file must not abort the batch
             failures += 1
             log.error("Failed to transcode %s: %s", raw_file, e)
     if failures:
         sys.exit(f"{failures} file(s) failed to transcode")
+
+
+def main() -> None:
+    from rich.traceback import install
+
+    install(show_locals=False)
+    app()
 
 
 if __name__ == "__main__":
