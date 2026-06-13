@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -72,7 +73,9 @@ def _drop_empty_pfs_values(content: str) -> str:
 class Camera:
     def __init__(self, device):
         self._camera = pylon.InstantCamera(device)
-        self._camera.Open()
+        # The serial number comes from enumeration, so it is available before
+        # Open(). Keeping Open() out of the constructor lets CameraSystem open
+        # every camera concurrently (see CameraSystem._run_parallel).
         self.serial_number: str = str(
             self._camera.GetDeviceInfo().GetSerialNumber()
         )
@@ -89,6 +92,10 @@ class Camera:
         self._resulting_fps = 0.0
         self._started = False
         self._original_trigger_source: str | None = None
+
+    def open(self) -> None:
+        """Open the underlying device (a blocking USB round-trip)."""
+        self._camera.Open()
 
     @property
     def started(self) -> bool:
@@ -363,6 +370,8 @@ class CameraSystem:
         else:
             final_serial_numbers = list(requested_serial_numbers)
 
+        # Create the device objects on this thread (the TlFactory is shared
+        # and CreateDevice is cheap), then open them all at once below.
         for serial_number in final_serial_numbers:
             try:
                 index = detected_serial_numbers.index(serial_number)
@@ -373,15 +382,53 @@ class CameraSystem:
                 continue
             self.cameras.append(Camera(tl_factory.CreateDevice(devices[index])))
 
+        # Open in parallel: each Open() blocks on USB round-trips with the GIL
+        # released, so 8 cameras open in roughly the time one used to take.
+        failures = [
+            (camera, exc)
+            for camera, _result, exc in self._run_parallel(lambda c: c.open())
+            if exc is not None
+        ]
+        if failures:
+            for camera in self.cameras:
+                camera.close()  # close() no-ops on cameras that never opened
+            camera, exc = failures[0]
+            log.error("Failed to open camera %s", camera.serial_number)
+            raise exc
+
     def __len__(self) -> int:
         return len(self.cameras)
 
     def __iter__(self):
         return iter(self.cameras)
 
+    def _run_parallel(self, fn):
+        """Call fn(camera) on every camera concurrently, preserving order.
+
+        Returns a list of (camera, result, exception) tuples in self.cameras
+        order; exception is None on success, otherwise the raised exception
+        (result is then None). pypylon releases the GIL during its blocking
+        USB calls, so the per-camera open / parameter-load / StartGrabbing
+        work overlaps instead of running one camera at a time.
+        """
+        if not self.cameras:
+            return []
+        with ThreadPoolExecutor(
+            max_workers=len(self.cameras), thread_name_prefix="cam"
+        ) as executor:
+            futures = [executor.submit(fn, camera) for camera in self.cameras]
+        results = []
+        for camera, future in zip(self.cameras, futures):
+            try:
+                results.append((camera, future.result(), None))
+            except Exception as exc:  # re-raised / handled by the caller
+                results.append((camera, None, exc))
+        return results
+
     def load_config(self, directory: str | Path) -> None:
         directory = Path(directory)
-        for camera in self.cameras:
+
+        def load_one(camera: Camera) -> None:
             config_path = directory / f"{camera.serial_number}.pfs"
             if config_path.exists():
                 log.info(
@@ -392,10 +439,19 @@ class CameraSystem:
                 camera.load_params("")
                 log.warning("Parameters file not found at %s", config_path)
 
+        # Loading a .pfs writes many registers over USB per camera; run the
+        # cameras in parallel so the whole load takes one camera's time, not N.
+        for _camera, _result, exc in self._run_parallel(load_one):
+            if exc is not None:
+                raise exc
+
     def start_preview(self) -> None:
         self.stop()
-        for camera in self.cameras:
-            camera.start_preview()
+        for _camera, _result, exc in self._run_parallel(
+            lambda camera: camera.start_preview()
+        ):
+            if exc is not None:
+                raise exc
 
     def start_record(
         self, save_dir: str | Path, fps: float, video_format: VideoFormat
@@ -407,16 +463,23 @@ class CameraSystem:
         others half-started: it is logged and skipped.
         """
         self.stop()
-        started: list[str] = []
-        for camera in self.cameras:
+
+        def record_one(camera: Camera) -> bool:
             save_path = (
                 Path(save_dir) / f"{camera.name}.{video_format.extension}"
             )
-            try:
-                if camera.start_record(str(save_path), fps, video_format):
-                    started.append(camera.name)
-            except genicam.GenericException:
+            return camera.start_record(str(save_path), fps, video_format)
+
+        # Start every camera at once so they begin grabbing closer together
+        # (and the operator waits one StartGrabbing, not eight back to back).
+        started: list[str] = []
+        for camera, ok, exc in self._run_parallel(record_one):
+            if isinstance(exc, genicam.GenericException):
                 log.error("Camera %s failed to start recording", camera.name)
+            elif exc is not None:
+                raise exc
+            elif ok:
+                started.append(camera.name)
         return started
 
     def set_software_trigger_frequency(self, hz: float) -> None:
