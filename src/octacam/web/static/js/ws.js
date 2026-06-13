@@ -12,10 +12,12 @@ export class ReconnectingSocket {
     this.ws = null;
     this.attempt = 0;
     this.timer = null;
+    this.userClosed = false;
   }
 
   connect() {
     clearTimeout(this.timer);
+    this.userClosed = false;
     const ws = new WebSocket(this.url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
@@ -29,8 +31,16 @@ export class ReconnectingSocket {
       if (this.ws !== ws) return;
       this.ws = null;
       this.handlers.onClose?.();
-      this._scheduleReconnect();
+      if (!this.userClosed) this._scheduleReconnect();
     };
+  }
+
+  // User-initiated disconnect: drop the socket and stop auto-reconnecting.
+  // Call connect() again to reconnect.
+  disconnect() {
+    this.userClosed = true;
+    clearTimeout(this.timer);
+    if (this.ws) this.ws.close();
   }
 
   send(obj) {

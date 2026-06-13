@@ -51,9 +51,16 @@ class GuiConfig:
 
 
 @dataclass
+class PluginConfig:
+    name: str
+    options: dict = field(default_factory=dict)
+
+
+@dataclass
 class OctacamConfig:
     gui: GuiConfig = field(default_factory=GuiConfig)
     cameras: list[CameraConfig] = field(default_factory=list)
+    plugins: list[PluginConfig] = field(default_factory=list)
 
 
 def _as_float(value):
@@ -92,6 +99,50 @@ def _set_if_valid(src, key, cast, target, type_name):
         log.warning('"%s" is not of type %s in the config file', key, type_name)
         return
     setattr(target, key, value)
+
+
+def _parse_plugins(plugins_src) -> list[PluginConfig]:
+    """Parse the optional ``plugins:`` list (opt-in plugin selection).
+
+    Each entry is either a bare name (``- arduino``) or a single-key map of
+    name -> options (``- arduino: {device: ...}``). Malformed or duplicate
+    entries are warned about and skipped — never raised — matching the rest of
+    this module's tolerant parsing.
+    """
+    if plugins_src is None:
+        return []
+    if not isinstance(plugins_src, list):
+        log.warning('Ignoring "plugins" in octacam config as it is not a sequence')
+        return []
+    result: list[PluginConfig] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(plugins_src):
+        name = None
+        options: dict = {}
+        if isinstance(entry, str):
+            name = entry
+        elif isinstance(entry, dict) and len(entry) == 1:
+            (key, value), = entry.items()
+            if isinstance(key, str):
+                name = key
+                if isinstance(value, dict):
+                    options = value
+                elif value is not None:
+                    log.warning(
+                        'Ignoring options for plugin "%s" as they are not a map',
+                        key,
+                    )
+        if not name:
+            log.warning(
+                'Ignoring the %dth entry of "plugins" as it is malformed', index
+            )
+            continue
+        if name in seen:
+            log.warning('Ignoring duplicate plugin "%s" in the config file', name)
+            continue
+        seen.add(name)
+        result.append(PluginConfig(name=name, options=options))
+    return result
 
 
 def _finalize(config: OctacamConfig) -> OctacamConfig:
@@ -155,6 +206,9 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
                 "save_dir_edit_height_factor",
             ):
                 _set_if_valid(gui_src, key, _as_int, gui, "int")
+
+    # Parsed before the cameras block, which has several early returns.
+    config.plugins = _parse_plugins(file.get("plugins"))
 
     cameras_src = file.get("cameras")
     if cameras_src is None:

@@ -24,7 +24,7 @@ octacam records 8× Basler acA1920-150um USB3 cameras (1920×1080 Mono8, softwar
 - **Raw mode** (speed-first option): Mono8 frames streamed to `<name>.raw` + JSON sidecar (width/height/fps), `octacam transcode` converts offline. Preview works identically (taps live frames, not files).
 - **ffmpeg binary**: `imageio-ffmpeg` dependency (bundles a static GPL ffmpeg with libx264 → `uv tool install` stays one-command), fall back to system `ffmpeg` if present.
 - **Web stack**: FastAPI + uvicorn, static frontend shipped as package data. Vanilla JS modules (no node/npm build step). Bind `127.0.0.1` by default; SSH tunnel is the auth layer.
-- **Qt GUI stays untouched** for now; the web GUI is a new `octacam serve` command. Retire Qt only after rig validation.
+- **Qt GUI stays untouched** for now; the web GUI is a new `octacam serve` command. Retire Qt only after rig validation. _(Update: the web GUI reached parity and the Qt GUI (`gui/`, the `octacam gui` command, the `pyside6` dependency) has since been removed; the web GUI is the only frontend. Arduino/serial control was also extracted into an opt-in plugin under `octacam.plugins.*` — see the README "Plugins" section.)_
 - **Timestamps**: keep the per-camera CSV sidecar (`frame_index,timestamp,dropped`) exactly as today.
 - **Repo**: no reorg needed (that was for the Rust layout). New code lives in `src/octacam/`.
 

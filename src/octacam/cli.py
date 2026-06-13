@@ -39,7 +39,7 @@ def _raise_fd_limit() -> None:
 def main(ctx: click.Context, log_level: str) -> None:
     """octacam: preview, record, and save video streams from multiple Basler cameras.
 
-    Without a subcommand, launches the GUI for the current directory.
+    Run `octacam serve <config_dir>` for the web GUI, or see the commands below.
     """
     logging.basicConfig(
         format="[%(levelname)s] %(message)s",
@@ -47,62 +47,37 @@ def main(ctx: click.Context, log_level: str) -> None:
     )
     _raise_fd_limit()
     if ctx.invoked_subcommand is None:
-        ctx.invoke(gui)
+        click.echo(ctx.get_help())
+        ctx.exit()
 
 
-@main.command()
-@click.argument(
-    "config_dir",
-    type=click.Path(exists=True, file_okay=False, path_type=Path),
-    default=".",
-)
-@click.option(
-    "--serial-port",
-    default="/dev/ttyACM0",
-    show_default=True,
-    help="Serial device of the Arduino stepper controller.",
-)
-def gui(config_dir: Path, serial_port: str = "/dev/ttyACM0") -> None:
-    """Launch the octacam GUI for the cameras in CONFIG_DIR."""
-    from PySide6.QtWidgets import QApplication
+# Plugins are opt-in; the default launch loads none. Enable them per-rig in the
+# config's `plugins:` section, or per-launch with these flags.
+def _plugin_options(func):
+    func = click.option(
+        "--plugin",
+        "enabled_plugins",
+        multiple=True,
+        help="Enable a plugin (repeatable); adds to the config's `plugins:` "
+        "(e.g. --plugin arduino). Requires its extra: pip install octacam[arduino].",
+    )(func)
+    func = click.option(
+        "--no-plugins",
+        is_flag=True,
+        help="Disable all plugins for this launch, ignoring the config.",
+    )(func)
+    return func
 
-    from octacam.camera import CameraSystem
-    from octacam.config import load_config_dir
-    from octacam.gui.main_window import MainWindow
-    from octacam.serial_link import SerialLink
 
-    serial_link = SerialLink()
-    try:
-        serial_link.open(serial_port, 115200)
-    except Exception as e:
-        log.warning("Failed to open serial port %s: %s", serial_port, e)
+def _resolve_enabled(enabled_plugins, no_plugins):
+    """Map the CLI flags to build_plugins' `enabled` argument.
 
-    config_dir = config_dir.resolve()
-    log.info("Using config directory: %s", config_dir)
-    config = load_config_dir(config_dir)
-
-    system = CameraSystem([c.serial_number for c in config.cameras])
-    if len(system) == 0:
-        log.warning("No cameras opened. Exiting.")
-        sys.exit(1)
-    log.info("Opened %d camera(s)", len(system))
-
-    names = {c.serial_number: c.name for c in config.cameras if c.name}
-    for camera in system:
-        camera.name = names.get(camera.serial_number, camera.name)
-
-    system.load_config(config_dir)
-    system.start_preview()
-
-    app = QApplication(sys.argv)
-    window = MainWindow(system, config, serial_link)
-    window.setWindowTitle("octacam")
-    window.showNormal()
-    try:
-        sys.exit(app.exec())
-    finally:
-        system.close()
-        serial_link.close()
+    None = no override (use the config), [] = --no-plugins, or the list of
+    --plugin names to add to the config selection.
+    """
+    if no_plugins:
+        return []
+    return list(enabled_plugins) or None
 
 
 @main.command()
@@ -119,13 +94,14 @@ def gui(config_dir: Path, serial_port: str = "/dev/ttyACM0") -> None:
     "remotely with: ssh -L 8000:127.0.0.1:8000 <rig-hostname>",
 )
 @click.option("--port", default=8000, show_default=True)
-@click.option(
-    "--serial-port",
-    default="/dev/ttyACM0",
-    show_default=True,
-    help="Serial device of the Arduino stepper controller.",
-)
-def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
+@_plugin_options
+def serve(
+    config_dir: Path,
+    host: str,
+    port: int,
+    enabled_plugins: tuple[str, ...],
+    no_plugins: bool,
+) -> None:
     """Serve the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
 
@@ -136,15 +112,9 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
         RecordingSettings,
         normalize_save_dir,
     )
-    from octacam.serial_link import SerialLink
+    from octacam.plugins import build_plugins
     from octacam.web.app import create_app
     from octacam.writer import default_codec
-
-    serial_link = SerialLink()
-    try:
-        serial_link.open(serial_port, 115200)
-    except Exception as e:
-        log.warning("Failed to open serial port %s: %s", serial_port, e)
 
     config_dir = config_dir.resolve()
     log.info("Using config directory: %s", config_dir)
@@ -161,6 +131,9 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
         camera.name = names.get(camera.serial_number, camera.name)
     system.load_config(config_dir)
 
+    plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
+    plugins.setup_all()
+
     gui = config.gui
     unit_seconds = (1.0, 60.0, 3600.0)[
         gui.duration_unit_default_index
@@ -176,9 +149,9 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
         ),
         codec=default_codec(gui),
     )
-    controller = RecordingController(system, settings, serial_link)
+    controller = RecordingController(system, settings, plugins)
     controller.start_preview()
-    app = create_app(controller, config, serial_link, config_dir=str(config_dir))
+    app = create_app(controller, config, plugins, config_dir=str(config_dir))
     log.info(
         "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
         host,
@@ -189,8 +162,13 @@ def serve(config_dir: Path, host: str, port: int, serial_port: str) -> None:
     try:
         uvicorn.run(app, host=host, port=port, log_level="warning")
     finally:
+        # Runs on Ctrl+C, on the /api/shutdown self-signal, and on errors.
+        # Cleanup can take a moment (finalizing recordings, draining ffmpeg,
+        # closing cameras), so bracket it with messages.
+        log.info("Shutting down — finalizing recordings and releasing cameras…")
         controller.close()
-        serial_link.close()
+        plugins.teardown_all()
+        log.info("octacam stopped.")
 
 
 @main.command("list-cameras")
@@ -255,6 +233,7 @@ def list_cameras() -> None:
     help="software: trigger from a timer thread at --fps; hardware: use the "
     "trigger source configured in the .pfs files.",
 )
+@_plugin_options
 def record(
     config_dir: Path,
     fps: float | None,
@@ -264,11 +243,14 @@ def record(
     crf: int,
     preset: str,
     trigger: str,
+    enabled_plugins: tuple[str, ...],
+    no_plugins: bool,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
     from octacam.camera import CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import RecordingController, RecordingSettings
+    from octacam.plugins import build_plugins
 
     config = load_config_dir(config_dir)
     if fps is None:
@@ -293,6 +275,9 @@ def record(
     if output.exists():
         log.warning("Directory already exists, data might be overwritten: %s", output)
 
+    plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
+    plugins.setup_all()
+
     settings = RecordingSettings(
         fps=fps,
         duration_s=duration,
@@ -302,7 +287,7 @@ def record(
         crf=crf,
         preset=preset,
     )
-    controller = RecordingController(system, settings, auto_preview=False)
+    controller = RecordingController(system, settings, plugins, auto_preview=False)
     try:
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",
@@ -317,6 +302,7 @@ def record(
         controller.join()
     finally:
         system.close()
+        plugins.teardown_all()
 
     extension = settings.video_format().extension
     for camera in system:

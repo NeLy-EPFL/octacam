@@ -18,20 +18,30 @@ import dataclasses
 import json
 import logging
 import math
+import os
+import signal
 import struct
 import time
 from collections import deque
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    BackgroundTasks,
+    Body,
+    FastAPI,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import octacam
 from octacam.config import OctacamConfig
 from octacam.controller import RecordingController, StartResult
-from octacam.serial_link import Command, SerialLink
+from octacam.plugins.base import PluginManager
 from octacam.writer import FORMATS
 
 log = logging.getLogger("octacam")
@@ -40,13 +50,6 @@ STATIC_DIR = Path(__file__).parent / "static"
 TELEMETRY_INTERVAL_S = 0.5
 PREVIEW_MAX_DIM = 640  # longest preview edge after downscaling
 JPEG_QUALITY = 75
-COMMAND_FIELDS = (
-    "n_steps",
-    "step_interval_us",
-    "rest_duration_ms",
-    "n_repeats",
-    "init_wait_duration_s",
-)
 # u8 version | u8 kind | u8 camera | u8 flags(bit0=recording) |
 # u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
 FRAME_HEADER = struct.Struct("<BBBBIQfI")
@@ -101,11 +104,11 @@ class _AppState:
         self,
         controller: RecordingController,
         config: OctacamConfig,
-        serial_link: SerialLink | None,
+        plugins: PluginManager,
     ):
         self.controller = controller
         self.config = config
-        self.serial_link = serial_link
+        self.plugins = plugins
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._frame_counters: dict[int, int] = {}
@@ -200,20 +203,23 @@ class _AppState:
             )
 
 
-def _parse_command(payload) -> Command:
-    try:
-        return Command(**{field: int(payload[field]) for field in COMMAND_FIELDS})
-    except (KeyError, TypeError, ValueError):
-        raise HTTPException(422, "Invalid stepper command") from None
+def _default_shutdown() -> None:
+    """Stop the server. uvicorn already installs a SIGINT handler, so this
+    triggers its graceful shutdown -> lifespan teardown -> the cleanup in the
+    `finally` block of cli.serve (cameras released, ffmpeg finalized, serial
+    closed)."""
+    os.kill(os.getpid(), signal.SIGINT)
 
 
 def create_app(
     controller: RecordingController,
     config: OctacamConfig,
-    serial_link: SerialLink | None = None,
+    plugins: PluginManager | None = None,
     config_dir: str = "",
+    shutdown_callback: Callable[[], None] = _default_shutdown,
 ) -> FastAPI:
-    state = _AppState(controller, config, serial_link)
+    plugins = plugins if plugins is not None else PluginManager([])
+    state = _AppState(controller, config, plugins)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -272,7 +278,7 @@ def create_app(
         return {
             "version": octacam.__version__,
             "config_dir": config_dir,
-            "serial_available": serial_link is not None and serial_link.is_open,
+            "plugins": state.plugins.status(),
             "display_refresh_interval_ms": (
                 config.gui.display_refresh_interval_ms
             ),
@@ -312,12 +318,9 @@ def create_app(
 
     @app.post("/api/recording/start")
     def start_recording(payload: dict = Body(default_factory=dict)):
-        arduino_command = None
-        if payload.get("arduino_command"):
-            arduino_command = _parse_command(payload["arduino_command"])
         result = controller.start_recording(
             confirm_overwrite=bool(payload.get("confirm_overwrite")),
-            arduino_command=arduino_command,
+            plugin_params=payload.get("plugin_params"),
         )
         body = {"status": result.status, "message": result.message}
         if result.ok:
@@ -336,12 +339,18 @@ def create_app(
         controller.stop_recording(abort=True)
         return JSONResponse({"status": "ok"}, status_code=202)
 
-    @app.post("/api/serial/command")
-    def serial_command(payload: dict = Body(...)):
-        if serial_link is None or not serial_link.is_open:
-            raise HTTPException(503, "Serial port not available")
-        serial_link.write_command(_parse_command(payload))
-        return {"status": "ok"}
+    @app.post("/api/shutdown")
+    def shutdown(background_tasks: BackgroundTasks):
+        # Shutting down releases the cameras for everyone, so refuse while a
+        # recording is in progress rather than discarding it (controller.close
+        # aborts). The background task runs after the 202 is flushed, so the
+        # client always learns the request was accepted before the server dies.
+        if controller.recording_active:
+            raise HTTPException(
+                409, "Stop the recording before shutting down the server"
+            )
+        background_tasks.add_task(shutdown_callback)
+        return JSONResponse({"status": "shutting_down"}, status_code=202)
 
     @app.websocket("/api/ws")
     async def websocket_endpoint(ws: WebSocket):
@@ -368,18 +377,15 @@ def create_app(
                     message = json.loads(text)
                 except ValueError:
                     continue
-                if message.get("type") == "jog":
-                    n_steps = message.get("n_steps")
-                    if (
-                        n_steps in (-1, 0, 1)
-                        and serial_link is not None
-                        and serial_link.is_open
-                    ):
-                        await loop.run_in_executor(
-                            None,
-                            serial_link.write_command,
-                            Command(n_steps=n_steps),
-                        )
+                # Hand the message to plugins (e.g. Arduino jog); the first
+                # one to claim it wins. Run in the executor so a plugin's
+                # blocking I/O never stalls the event loop.
+                for plugin in state.plugins.plugins:
+                    handled = await loop.run_in_executor(
+                        None, plugin.on_ws_message, message
+                    )
+                    if handled:
+                        break
         except WebSocketDisconnect:
             pass
         finally:
@@ -387,6 +393,13 @@ def create_app(
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sender
+
+    # Plugin-contributed REST endpoints (e.g. Arduino's /api/serial/command).
+    # Registered before the static catch-all mount at "/".
+    for plugin in plugins.plugins:
+        router = plugin.api_router()
+        if router is not None:
+            app.include_router(router)
 
     if STATIC_DIR.is_dir():
         app.mount(

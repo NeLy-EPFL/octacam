@@ -236,10 +236,9 @@ export class RecordTab {
   }
 
   async _start() {
-    const body = {
-      confirm_overwrite: false,
-      arduino_command: this.getArduinoCommand(),
-    };
+    const body = { confirm_overwrite: false };
+    const arduinoCommand = this.getArduinoCommand();
+    if (arduinoCommand) body.plugin_params = { arduino: arduinoCommand };
     let r = await api("POST", "/api/recording/start", body);
     if (r.status === 409 && r.data?.status === "needs_confirm") {
       if (!window.confirm(r.data.message)) return;

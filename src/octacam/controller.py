@@ -7,9 +7,10 @@ state machine:
     preview/idle -> waiting -> recording -> finishing -> preview/idle
 
 A monitor thread replaces the Qt timers: it polls for the first frame on
-every camera (firing an armed Arduino command at that moment), enforces the
-recording deadline, and runs the teardown sequence in the same order as the
-original code (stop trigger -> grab loops exit -> writers drain -> CSVs).
+every camera (dispatching plugin hooks at that moment — e.g. an Arduino
+stepper command), enforces the recording deadline, and runs the teardown
+sequence in the same order as the original code (stop trigger -> grab loops
+exit -> writers drain -> CSVs).
 """
 
 import dataclasses
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from octacam.camera import CameraSystem
-from octacam.serial_link import Command, SerialLink
+from octacam.plugins.base import PluginManager
 from octacam.writer import FORMATS, VideoFormat
 
 log = logging.getLogger("octacam")
@@ -105,11 +106,11 @@ class RecordingController:
         self,
         camera_system: CameraSystem,
         settings: RecordingSettings,
-        serial_link: SerialLink | None = None,
+        plugins: PluginManager | None = None,
         auto_preview: bool = True,
     ):
         self.camera_system = camera_system
-        self.serial_link = serial_link
+        self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
         self._lock = threading.RLock()
@@ -218,7 +219,7 @@ class RecordingController:
     def start_recording(
         self,
         confirm_overwrite: bool = False,
-        arduino_command: Command | None = None,
+        plugin_params: dict | None = None,
     ) -> StartResult:
         with self._lock:
             if self.recording_active:
@@ -270,9 +271,10 @@ class RecordingController:
             self._stop_event.clear()
             self._deadline = None
             self._set_state("waiting")
+            self.plugins.dispatch("on_recording_start", plugin_params)
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
-                args=(settings.duration_s, arduino_command, len(started)),
+                args=(settings.duration_s, plugin_params, len(started)),
                 daemon=True,
             )
             self._monitor.start()
@@ -309,7 +311,7 @@ class RecordingController:
         self.join()
         self.camera_system.close()
 
-    def _monitor_loop(self, duration_s, arduino_command, expected_started) -> None:
+    def _monitor_loop(self, duration_s, plugin_params, expected_started) -> None:
         # --- wait for the first frame from the cameras that started (Qt's
         # check_record_started_timer). Warn after 3 s, but - unlike the
         # unbounded Qt/headless wait - give up after STARTED_FAIL_AFTER_S and
@@ -339,8 +341,10 @@ class RecordingController:
             self._stop_event.wait(STARTED_POLL_INTERVAL_S)
 
         if not self._stop_event.is_set():
-            if arduino_command is not None and self.serial_link is not None:
-                self.serial_link.write_command(arduino_command)
+            # Fire plugin first-frame hooks at the t0 of the countdown, in the
+            # same place the inline Arduino write used to live, so stepper
+            # motion (or any plugin) stays synchronised to actual capture.
+            self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
                 self._deadline = (
                     time.monotonic() + duration_s + STOP_GRACE_S
@@ -378,6 +382,7 @@ class RecordingController:
                     ),
                 )
             self._resume_preview()
+        self.plugins.dispatch("on_recording_stop", aborted)
         self._event(
             "info", "Recording aborted" if aborted else "Recording finished"
         )

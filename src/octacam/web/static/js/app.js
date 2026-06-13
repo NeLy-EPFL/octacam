@@ -79,7 +79,10 @@ async function main() {
   versionEl.title = system.config_dir;
 
   setupTabs();
-  if (!system.serial_available) {
+  // The Arduino tab is contributed by the opt-in `arduino` plugin; show it
+  // only when that plugin is loaded and its serial port is ready.
+  const arduinoReady = Boolean(system.plugins?.arduino?.ready);
+  if (!arduinoReady) {
     document.querySelector('#tabs button[data-tab="arduino"]').remove();
     document.getElementById("tab-arduino").remove();
   }
@@ -94,14 +97,26 @@ async function main() {
     record?.handleEvent(evt);
   };
 
+  let connMode = "offline";
+  let userDisconnected = false; // user clicked Disconnect — suppress reconnect
+  let serverStopped = false; // server was shut down from the UI
+  let recordingActive = false; // a trial is in progress on the rig
+
   const sock = new ReconnectingSocket(wsUrl(), {
-    onOpen: () => setConnected(true),
-    onClose: () => setConnected(false),
+    onOpen: () => setConnectionMode("connected"),
+    onClose: () =>
+      setConnectionMode(
+        serverStopped
+          ? "stopped"
+          : userDisconnected
+            ? "offline"
+            : "reconnecting"
+      ),
     onFrame: (frame) => grid.handleFrame(frame),
     onJson: (msg) => handleJson(msg),
   });
 
-  const arduino = system.serial_available
+  const arduino = arduinoReady
     ? new ArduinoTab({ send: (m) => sock.send(m), notify })
     : null;
 
@@ -111,19 +126,44 @@ async function main() {
     notify,
   });
 
-  function setConnected(connected) {
+  // Connection has four modes: "connected", "reconnecting" (unexpected drop),
+  // "offline" (user disconnected, calm) and "stopped" (server shut down).
+  function setConnectionMode(mode) {
+    connMode = mode;
+    const connected = mode === "connected";
+
     const banner = document.getElementById("banner");
-    banner.textContent = "Disconnected — reconnecting…";
-    banner.classList.toggle("hidden", connected);
+    if (mode === "reconnecting") {
+      banner.textContent = "Disconnected — reconnecting…";
+      banner.classList.remove("hidden");
+    } else if (mode === "stopped") {
+      banner.textContent = "Server stopped.";
+      banner.classList.remove("hidden");
+    } else {
+      banner.classList.add("hidden"); // connected, or user-initiated offline
+    }
+    banner.classList.toggle("stopped", mode === "stopped");
+
     const connState = document.getElementById("conn-state");
-    connState.textContent = connected ? "connected" : "disconnected";
+    connState.textContent =
+      mode === "connected"
+        ? "connected"
+        : mode === "stopped"
+          ? "server stopped"
+          : "disconnected";
     connState.className = connected ? "online" : "offline";
+
     record.setConnected(connected);
     for (const id of ["arduino-fields", "view-fields"]) {
       const fs = document.getElementById(id);
       if (fs) fs.disabled = !connected;
     }
     if (!connected) arduino?.stopJog();
+
+    const disconnectBtn = document.getElementById("disconnect-btn");
+    disconnectBtn.textContent = mode === "offline" ? "Connect" : "Disconnect";
+    disconnectBtn.disabled = mode === "stopped";
+    document.getElementById("shutdown-btn").disabled = mode === "stopped";
   }
 
   function applyCameraStats(cameras) {
@@ -143,6 +183,9 @@ async function main() {
     switch (msg.type) {
       case "state":
       case "telemetry":
+        recordingActive = ["waiting", "recording", "finishing"].includes(
+          msg.state
+        );
         record.applyState(msg);
         if (Array.isArray(msg.cameras)) applyCameraStats(msg.cameras);
         break;
@@ -155,6 +198,53 @@ async function main() {
         break;
     }
   }
+
+  document.getElementById("disconnect-btn").addEventListener("click", () => {
+    if (connMode === "offline") {
+      userDisconnected = false;
+      setConnectionMode("reconnecting");
+      sock.connect();
+    } else {
+      userDisconnected = true;
+      sock.disconnect();
+      setConnectionMode("offline");
+    }
+  });
+
+  document.getElementById("shutdown-btn").addEventListener("click", async () => {
+    const ok = window.confirm(
+      "Shut down the octacam server on the rig? This releases all cameras " +
+        "and disconnects every client."
+    );
+    if (!ok) return;
+    let r;
+    try {
+      r = await api("POST", "/api/shutdown");
+    } catch {
+      notify("error", "Shutdown request failed: server unreachable");
+      return;
+    }
+    if (r.status === 409) {
+      notify("warning", "Stop the recording before shutting down.");
+      return;
+    }
+    if (!r.ok) {
+      notify("error", r.data?.detail || `Shutdown failed (HTTP ${r.status})`);
+      return;
+    }
+    serverStopped = true;
+    sock.disconnect();
+    setConnectionMode("stopped");
+  });
+
+  // Recording continues on the rig if the tab closes, but a stray close
+  // mid-trial is worth a speed-bump (browsers show a generic prompt).
+  window.addEventListener("beforeunload", (e) => {
+    if (recordingActive) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
 
   record.applyState(snap);
   sock.connect();

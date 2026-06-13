@@ -46,6 +46,13 @@ body {
   text-align: center;
 }
 
+/* terminal state after a user-initiated shutdown — informational, not alarming */
+#banner.stopped {
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
 /* ------------------------------------------------------- camera grid */
 
 #grid {
@@ -386,7 +393,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer {
   flex: none;
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
   padding: 4px 8px;
   border-top: 1px solid var(--border);
   font-size: 11px;
@@ -395,3 +403,27 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #conn-state.online { color: var(--green); }
 #conn-state.offline { color: var(--red); }
+
+#footer-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#footer-actions button {
+  padding: 2px 8px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
+#footer-actions button:disabled { opacity: 0.5; cursor: default; }
+
+#shutdown-btn { font-size: 13px; line-height: 1; }
+#shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }

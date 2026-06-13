@@ -153,6 +153,40 @@ def test_abort_recording(camera_system, tmp_path):
     assert any(e["message"] == "Recording aborted" for e in controller.events)
 
 
+def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
+    from octacam.plugins.base import Plugin, PluginManager
+
+    calls = []
+
+    class Spy(Plugin):
+        name = "spy"
+
+        def on_recording_start(self, params):
+            calls.append(("start", params))
+
+        def on_first_frame(self, params):
+            calls.append(("first_frame", params))
+
+        def on_recording_stop(self, aborted):
+            calls.append(("stop", aborted))
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        camera_system, settings, PluginManager([Spy()]), auto_preview=False
+    )
+    params = {"spy": {"value": 1}}
+    assert controller.start_recording(plugin_params=params).ok
+    controller.join(timeout=20)
+
+    first_frames = [c for c in calls if c[0] == "first_frame"]
+    assert len(first_frames) == 1, "on_first_frame must fire exactly once"
+    assert first_frames[0][1] == params  # plugin slice threaded through
+    assert ("start", params) in calls
+    assert ("stop", False) in calls  # completed, not aborted
+
+
 def test_needs_confirm_on_existing_dir(camera_system, tmp_path):
     save_dir = tmp_path / "exists"
     save_dir.mkdir()

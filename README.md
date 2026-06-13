@@ -18,8 +18,8 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 ## Installation
 
 octacam is a Python package. All dependencies — including the Basler pylon
-runtime (bundled by [pypylon](https://github.com/basler/pypylon)), Qt, OpenCV,
-and ffmpeg — install automatically; no SDK downloads or C++ toolchain needed.
+runtime (bundled by [pypylon](https://github.com/basler/pypylon)), OpenCV, and
+ffmpeg — install automatically; no SDK downloads or C++ toolchain needed.
 
 ```bash
 uv tool install git+https://github.com/NeLy-EPFL/octacam.git
@@ -27,17 +27,22 @@ uv tool install git+https://github.com/NeLy-EPFL/octacam.git
 
 or, from a clone: `uv tool install .` (or `pip install .`).
 
+Optional plugins ship as extras — install the ones you need, e.g. the Arduino
+stepper controller: `pip install "octacam[arduino]"` (see [Plugins](#plugins)).
+
 ## Usage
 
 ```bash
 octacam serve <config_dir>    # web GUI on http://127.0.0.1:8000 (--host/--port)
-octacam gui <config_dir>      # Qt GUI (also: bare `octacam` for ./)
 octacam record <config_dir>   # headless recording (--fps/--duration/--output/
                               #   --codec x264|raw|mjpg|h264/--crf/--preset/--trigger)
 octacam transcode <dir>       # convert .raw recordings to x264 MKV offline
 octacam list-cameras          # show detected cameras
 octacam --help
 ```
+
+`serve` and `record` also accept `--plugin <name>` (repeatable) and
+`--no-plugins` (see [Plugins](#plugins)).
 
 For remote operation, tunnel the web GUI over SSH from your machine:
 
@@ -53,8 +58,34 @@ see [configs/](configs/) for examples.
 To run without hardware using Basler's camera emulation:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
+PYLON_CAMEMU=8 octacam serve configs/emulate_8_cameras
 ```
+
+## Plugins
+
+Optional hardware/integration features ship as opt-in plugins under
+`octacam.plugins.*`. **The default launch loads none** — you choose what each
+rig needs. Enable a plugin persistently in the rig's `octacam_config.yml`:
+
+```yaml
+plugins:
+  - arduino:                 # an entry can be a bare name, or carry options
+      device: /dev/ttyACM0
+      baud: 115200
+```
+
+or per-launch with `--plugin arduino` (repeatable; adds to the config), and
+disable everything for one run with `--no-plugins`. Each plugin declares its
+own extra dependencies — install them with the matching extra, e.g.
+`pip install "octacam[arduino]"`.
+
+Bundled plugins:
+
+- **arduino** — drives an Arduino stepper-motor controller over serial. Adds
+  the web GUI's Arduino tab (loop program + hold-to-jog), and fires an armed
+  loop command at the first captured frame so motion is synced to capture. See
+  [arduino_script/](arduino_script/) for the matching firmware. Extra:
+  `octacam[arduino]` (pyserial).
 
 ## Troubleshooting
 
@@ -65,9 +96,6 @@ startup, but if the hard limit of the session is still too low (`ulimit -Hn`),
 raise it in `/etc/security/limits.conf` or run Basler's `setup-usb.sh`. Also
 make sure `usbcore.usbfs_memory_mb=1000` is set (see
 `/sys/module/usbcore/parameters/usbfs_memory_mb`).
-
-**GUI exits with "Could not load the Qt platform plugin 'xcb'"** — install the
-cursor library required by Qt ≥ 6.5: `sudo apt install libxcb-cursor0`.
 
 ## Repository layout
 
@@ -86,6 +114,6 @@ Requires [uv](https://docs.astral.sh/uv/) and Python ≥ 3.11.
 git clone https://github.com/NeLy-EPFL/octacam.git
 cd octacam
 uv sync
-uv run pytest                  # includes an offscreen GUI test on emulated cameras
+uv run pytest                  # runs against Basler's camera emulator
 uv run benchmarks/bench_pipeline.py --help
 ```

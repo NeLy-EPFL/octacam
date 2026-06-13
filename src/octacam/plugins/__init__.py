@@ -1,0 +1,97 @@
+"""Bundled, opt-in plugin registry for octacam.
+
+Plugins are selected by name from the ``plugins:`` section of
+``octacam_config.yml`` (each entry may carry options) and/or the ``--plugin``
+CLI flag. The default launch loads none. Selection resolves to instantiated
+plugins via a name -> factory registry, mirroring ``writer.FORMATS``.
+
+Only in-repo plugins under ``octacam.plugins.<name>`` are discoverable; there
+is no third-party entry-point discovery (by design).
+"""
+
+from __future__ import annotations
+
+import importlib
+import logging
+from typing import Callable
+
+from octacam.plugins.base import OctacamPlugin, Plugin, PluginManager
+
+log = logging.getLogger("octacam")
+
+__all__ = ["OctacamPlugin", "Plugin", "PluginManager", "register", "build_plugins"]
+
+# name -> factory(options: dict) -> OctacamPlugin. Populated by @register when a
+# plugin module is imported (lazily, in build_plugins).
+_REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
+
+# Bundled plugins live at octacam.plugins.<name>; importing the module runs its
+# @register call. Listed here so build_plugins knows what it may import.
+_BUILTINS = ("arduino",)
+
+
+def register(name: str):
+    """Decorator registering a factory under ``name`` (mirrors ``FORMATS``)."""
+
+    def decorator(factory: Callable[[dict], OctacamPlugin]):
+        _REGISTRY[name] = factory
+        return factory
+
+    return decorator
+
+
+def _import_builtin(name: str) -> None:
+    """Lazily import a bundled plugin module so its @register call runs.
+
+    A missing optional dependency (or any import error) is downgraded to a
+    debug log; ``build_plugins`` then reports it as a skipped plugin.
+    """
+    if name in _REGISTRY or name not in _BUILTINS:
+        return
+    try:
+        importlib.import_module(f"octacam.plugins.{name}")
+    except Exception as e:
+        log.debug("Plugin module %r could not be imported: %s", name, e)
+
+
+def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
+    """Merge config plugins with the CLI override into ``[(name, options)]``.
+
+    ``enabled`` is ``None`` for no override (use the config as-is), an empty
+    list for ``--no-plugins`` (disable everything), or a list of names from
+    ``--plugin`` that are *added* to the config selection.
+    """
+    selection = [(p.name, dict(p.options)) for p in config_plugins]
+    if enabled is None:
+        return selection
+    if not enabled:  # --no-plugins
+        return []
+    known = {name for name, _ in selection}
+    for name in enabled:
+        if name not in known:
+            selection.append((name, {}))
+            known.add(name)
+    return selection
+
+
+def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
+    """Resolve the configured/enabled plugins into a :class:`PluginManager`.
+
+    Unknown names and plugins whose optional dependency is missing are logged
+    and skipped — core always keeps running.
+    """
+    selection = _resolve_selection(getattr(config, "plugins", []), enabled)
+    plugins: list[OctacamPlugin] = []
+    for name, options in selection:
+        _import_builtin(name)
+        factory = _REGISTRY.get(name)
+        if factory is None:
+            log.warning("Unknown plugin %r; skipping", name)
+            continue
+        try:
+            plugins.append(factory(options))
+        except Exception as e:
+            log.warning("Plugin %r failed to load (%s); skipping", name, e)
+    if plugins:
+        log.info("Loaded plugin(s): %s", ", ".join(p.name for p in plugins))
+    return PluginManager(plugins)
