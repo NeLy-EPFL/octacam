@@ -15,8 +15,9 @@
   <aside id="sidebar">
     <nav id="tabs">
       <button type="button" data-tab="record" class="active">Record</button>
-      <button type="button" data-tab="arduino">Arduino</button>
+      <button type="button" data-tab="camera">Camera</button>
       <button type="button" data-tab="view">View</button>
+      <button type="button" data-tab="arduino">Arduino</button>
     </nav>
 
     <section id="tab-record" class="tab active">
@@ -51,6 +52,53 @@
       </fieldset>
       <button type="button" id="record-button" class="start" disabled>Start recording</button>
       <div id="record-status"></div>
+    </section>
+
+    <section id="tab-camera" class="tab">
+      <fieldset id="camera-fields" disabled>
+        <label class="row"><span>Camera:</span>
+          <select id="cam-target"></select>
+        </label>
+        <div class="row"><span>Apply to:</span>
+          <span class="radio-group">
+            <label><input type="radio" name="cam-apply-to" value="selected" checked> Selected</label>
+            <label><input type="radio" name="cam-apply-to" value="all"> All</label>
+          </span>
+        </div>
+        <label class="row"><span>Width:</span>
+          <input id="cam-width" type="number" step="1">
+        </label>
+        <span class="node-range" id="cam-width-range"></span>
+        <label class="row"><span>Height:</span>
+          <input id="cam-height" type="number" step="1">
+        </label>
+        <span class="node-range" id="cam-height-range"></span>
+        <label class="row"><span>Exposure:</span>
+          <span class="suffixed">
+            <input id="cam-exposure" type="number" step="any">
+            <span class="suffix">&micro;s</span>
+          </span>
+        </label>
+        <span class="node-range" id="cam-exposure-range"></span>
+        <details id="cam-advanced">
+          <summary>Advanced</summary>
+          <label class="row"><span>Gain:</span>
+            <input id="cam-gain" type="number" step="any">
+          </label>
+          <span class="node-range" id="cam-gain-range"></span>
+          <label class="row"><span>Offset X:</span>
+            <input id="cam-offset_x" type="number" step="1">
+          </label>
+          <span class="node-range" id="cam-offset_x-range"></span>
+          <label class="row"><span>Offset Y:</span>
+            <input id="cam-offset_y" type="number" step="1">
+          </label>
+          <span class="node-range" id="cam-offset_y-range"></span>
+        </details>
+        <button id="cam-reset" type="button" class="btn wide"
+          title="Reset sensor parameters to the active config's saved values">Reset to config</button>
+      </fieldset>
+      <div id="camera-status"></div>
     </section>
 
     <section id="tab-arduino" class="tab">
@@ -128,6 +176,8 @@
         </div>
         <button type="button" id="view-reset" class="btn wide">Reset</button>
         <label class="center"><input type="checkbox" id="display-cross"> Display cross</label>
+        <label class="center"><input type="checkbox" id="layout-edit"> Edit tile layout</label>
+        <div id="layout-hint">Drag a tile to move it; drag its corner to resize.</div>
       </fieldset>
     </section>
 
@@ -136,10 +186,33 @@
       <span id="version"></span>
       <span id="conn-state"></span>
       <span id="footer-actions">
+        <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save…</button>
         <button id="disconnect-btn" type="button">Disconnect</button>
         <button id="shutdown-btn" type="button" title="Stop the octacam server on the rig">⏻</button>
       </span>
     </div>
   </aside>
+
+  <div id="save-dialog" class="modal hidden">
+    <div class="modal-card">
+      <h3>Save configuration</h3>
+      <div class="row"><span>Target:</span>
+        <span class="radio-group">
+          <label><input type="radio" name="save-target" value="active" checked> Active</label>
+          <label><input type="radio" name="save-target" value="new"> New…</label>
+        </span>
+      </div>
+      <label class="row" id="save-name-row"><span>Name:</span>
+        <input id="save-name" type="text" spellcheck="false" placeholder="my_rig">
+      </label>
+      <label class="check"><input type="checkbox" id="save-sensor" checked> Sensor parameters (.pfs)</label>
+      <label class="check"><input type="checkbox" id="save-display" checked> Display layout (.toml)</label>
+      <div id="save-error" class="modal-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="save-cancel" class="btn">Cancel</button>
+        <button type="button" id="save-confirm" class="btn">Save</button>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

@@ -252,3 +252,223 @@ def test_recording_cycle_over_rest(client, tmp_path):
     needs_confirm = client.post("/api/recording/start", json={})
     assert needs_confirm.status_code == 409
     assert needs_confirm.json()["status"] == "needs_confirm"
+
+
+# --------------------------------------------- camera parameters / config save
+
+
+def test_camera_param_endpoints(client):
+    system = client.get("/api/system").json()
+    assert "params" in system["cameras"][0]  # descriptors served on /api/system
+
+    params = client.get("/api/cameras/0/params").json()
+    assert {"index", "serial", "width", "height", "params"} <= set(params)
+    assert params["params"]["exposure"]["value"] > 0
+
+    assert client.get("/api/cameras/99/params").status_code == 404
+
+    # live exposure: 200 + echoed device value
+    r = client.put("/api/cameras/0/params", json={"name": "exposure", "value": 1500.0})
+    assert r.status_code == 200, r.text
+    assert r.json()["updated"][0]["params"]["exposure"]["value"] == 1500.0
+
+    # geometry change echoes the new width
+    r = client.put("/api/cameras/0/params", json={"name": "width", "value": 640})
+    assert r.status_code == 200 and r.json()["updated"][0]["width"] == 640
+
+    # apply to all cameras
+    r = client.put(
+        "/api/cameras/0/params",
+        json={"name": "exposure", "value": 900.0, "scope": "all"},
+    )
+    assert r.status_code == 200 and len(r.json()["updated"]) == 2
+
+    # validation
+    assert (
+        client.put(
+            "/api/cameras/0/params", json={"name": "bogus", "value": 1}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/cameras/0/params", json={"name": "gain", "value": 1, "x": 2}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/cameras/99/params", json={"name": "gain", "value": 1}
+        ).status_code
+        == 404
+    )
+
+
+def test_camera_param_reset_endpoint(client):
+    # The fixture starts with no <serial>.pfs, so save the current params into
+    # the active config dir to create a baseline to reset back to.
+    saved = client.post(
+        "/api/config/save", json={"target": "active", "save_display": False}
+    )
+    assert saved.status_code == 200, saved.text
+
+    baseline = client.get("/api/cameras/0/params").json()["params"]["exposure"]["value"]
+    moved = client.put(
+        "/api/cameras/0/params", json={"name": "exposure", "value": baseline + 1000.0}
+    ).json()
+    assert abs(moved["updated"][0]["params"]["exposure"]["value"] - baseline) > 1.0
+
+    # reset the selected camera (no body -> default scope "selected")
+    reset = client.post("/api/cameras/0/params/reset")
+    assert reset.status_code == 200, reset.text
+    restored = reset.json()["updated"][0]["params"]["exposure"]["value"]
+    assert abs(restored - baseline) < 1.0
+
+    # reset all cameras
+    reset_all = client.post("/api/cameras/0/params/reset", json={"scope": "all"})
+    assert reset_all.status_code == 200, reset_all.text
+    assert len(reset_all.json()["updated"]) == 2
+
+    assert client.post("/api/cameras/99/params/reset").status_code == 404
+    # unknown body field rejected by the strict model
+    assert client.post("/api/cameras/0/params/reset", json={"x": 1}).status_code == 422
+
+
+def test_camera_param_reset_without_config_pfs(client):
+    # No <serial>.pfs in the active config dir -> nothing to reset to (422).
+    assert client.post("/api/cameras/0/params/reset").status_code == 422
+
+
+def test_camera_param_reset_rejects_invalid_pfs(client, tmp_path):
+    # A hand-edited / externally-placed .pfs the device rejects must yield a
+    # clean 422 (not a 500) and must not strand the live preview.
+    (tmp_path / f"{EMULATED_SERIALS[0]}.pfs").write_text("not a feature stream\n")
+    r = client.post("/api/cameras/0/params/reset")
+    assert r.status_code == 422, r.text
+    # the camera is still previewing afterward, so live edits keep working
+    ok = client.put("/api/cameras/0/params", json={"name": "exposure", "value": 1200.0})
+    assert ok.status_code == 200, ok.text
+
+
+def test_camera_param_reset_locked_while_recording(client):
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        locked = client.post("/api/cameras/0/params/reset")
+        assert locked.status_code == 409
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
+def test_camera_params_locked_while_recording(client):
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        locked = client.put(
+            "/api/cameras/0/params", json={"name": "width", "value": 640}
+        )
+        assert locked.status_code == 409
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
+def _save_client(tmp_path, config_dir):
+    from octacam.config import parse_config
+
+    system = CameraSystem(EMULATED_SERIALS)
+    system.load_config(config_dir)
+    config = parse_config(config_dir / "octacam_config.toml")
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(system, settings)
+    controller.start_preview()
+    app = create_app(controller, config, None, config_dir=str(config_dir))
+    return controller, app
+
+
+def test_config_save_active_and_new(tmp_path):
+    active = tmp_path / "rigs" / "active"
+    active.mkdir(parents=True)
+    (active / "octacam_config.toml").write_text(
+        '[gui]\nsave_directory_default = "/data/%y%m%d/001"\n'
+    )
+    (active / "fictrac_camera_config.pfs").write_text("aux\n")  # helper config
+
+    controller, app = _save_client(tmp_path, active)
+    cams = [
+        {"serial": s, "rotation_deg": 90.0, "scale_x": -1.0} for s in EMULATED_SERIALS
+    ]
+    try:
+        with TestClient(app) as client:
+            # save to active: writes .pfs + .toml, refreshes the live config
+            r = client.post(
+                "/api/config/save", json={"target": "active", "cameras": cams}
+            )
+            assert r.status_code == 200, r.text
+            assert sorted(r.json()["cameras_written"]) == EMULATED_SERIALS
+            assert (active / f"{EMULATED_SERIALS[0]}.pfs").exists()
+            toml = (active / "octacam_config.toml").read_text()
+            assert "rotation_deg = 90.0" in toml
+            assert "%y%m%d" in toml  # strftime template preserved
+            # /api/system reflects the saved transform immediately
+            sysinfo = client.get("/api/system").json()
+            assert sysinfo["cameras"][0]["transform"]["rotation_deg"] == 90.0
+
+            # save to a new sibling dir
+            r = client.post(
+                "/api/config/save",
+                json={"target": "new", "name": "variant", "cameras": cams},
+            )
+            assert r.status_code == 200, r.text
+            new_dir = tmp_path / "rigs" / "variant"
+            assert (new_dir / "octacam_config.toml").exists()
+            assert (new_dir / f"{EMULATED_SERIALS[0]}.pfs").exists()
+            assert (new_dir / "fictrac_camera_config.pfs").exists()  # aux copied
+
+            # collision without overwrite, then with
+            again = client.post(
+                "/api/config/save",
+                json={"target": "new", "name": "variant", "cameras": cams},
+            )
+            assert again.status_code == 409
+            forced = client.post(
+                "/api/config/save",
+                json={
+                    "target": "new",
+                    "name": "variant",
+                    "overwrite": True,
+                    "cameras": cams,
+                },
+            )
+            assert forced.status_code == 200
+
+            # path-traversal name rejected
+            bad = client.post(
+                "/api/config/save",
+                json={"target": "new", "name": "../evil", "cameras": cams},
+            )
+            assert bad.status_code == 422
+    finally:
+        controller.close()
+
+
+def test_config_save_refused_while_recording(tmp_path):
+    active = tmp_path / "rigs" / "active"
+    active.mkdir(parents=True)
+    (active / "octacam_config.toml").write_text("[gui]\nfps_default = 50.0\n")
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            started = client.post(
+                "/api/recording/start", json={"confirm_overwrite": True}
+            )
+            assert started.status_code == 202, started.text
+            refused = client.post(
+                "/api/config/save", json={"target": "active", "cameras": []}
+            )
+            assert refused.status_code == 409
+            controller.stop_recording(abort=True)
+    finally:
+        controller.close()

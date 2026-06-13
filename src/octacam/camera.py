@@ -1,6 +1,7 @@
 """Camera acquisition on pypylon."""
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,65 @@ log = logging.getLogger("octacam")
 GRAB_TIMEOUT_MS = 100
 TRIGGER_READY_TIMEOUT_MS = 1000
 WRITER_QUEUE_SIZE = 20
+
+# Editable sensor parameters, mapped from the GUI's snake_case names to their
+# GenICam node names. GEOMETRY_PARAMS can only be written while the camera is
+# NOT grabbing (pylon raises otherwise), so set_geometry cycles the preview;
+# LIVE_PARAMS are writable on a running camera.
+GEOMETRY_PARAMS = {"width": "Width", "height": "Height"}
+LIVE_PARAMS = {
+    "exposure": "ExposureTime",
+    "gain": "Gain",
+    "offset_x": "OffsetX",
+    "offset_y": "OffsetY",
+}
+PARAM_NODES = {**GEOMETRY_PARAMS, **LIVE_PARAMS}
+
+_TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
+
+
+def _node_attr(node, attr: str):
+    """Best-effort read of node.Min/.Max/.Inc/.Unit; None when unsupported.
+
+    Float/enum nodes (Gain, PixelFormat) lack some of these and raise rather
+    than return, so a missing attribute is expected, not an error.
+    """
+    try:
+        return getattr(node, attr)
+    except (AttributeError, genicam.GenericException):
+        return None
+
+
+def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
+    """Undo the live preview's trigger overrides in a saved .pfs.
+
+    start_preview forces the FrameStart selector to TriggerMode On /
+    TriggerSource Software; a saved snapshot would bake those in, so a later
+    headless/external recording would misread the rig's intended source. Reset
+    the FrameStart context to the shipped convention (TriggerMode Off,
+    TriggerSource = the value load_params captured). Other selectors (e.g.
+    FrameBurstStart) and context-qualified lines are left untouched.
+    """
+    out = []
+    for line in content.splitlines():
+        fields = line.split("\t")
+        key = fields[0] if fields else ""
+        if (
+            not line.startswith("#")
+            and key in ("TriggerMode", "TriggerSource")
+            and len(fields) >= 2
+        ):
+            match = _TRIGGER_SELECTOR_RE.search("\t".join(fields[1:-1]))
+            selector = match.group(1) if match else None
+            if selector in (None, "FrameStart"):
+                if key == "TriggerMode":
+                    fields[-1] = "Off"
+                    line = "\t".join(fields)
+                elif key == "TriggerSource" and original_source is not None:
+                    fields[-1] = original_source
+                    line = "\t".join(fields)
+        out.append(line)
+    return "\n".join(out) + "\n"
 
 
 class LatestFrame:
@@ -83,6 +143,9 @@ class Camera:
         self.frame_for_display = LatestFrame()
         self._video_writer: AsyncFrameWriter | None = None
         self._stop_flag = threading.Event()
+        # Serializes external node access (read/set/save and the W/H grab
+        # cycle) against itself; the preview loop stays lock-free.
+        self._param_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._timestamps: list[int] = []
         self._dropped: list[bool] = []
@@ -130,6 +193,170 @@ class Camera:
             self._original_trigger_source = self._camera.TriggerSource.Value
         except genicam.GenericException:
             self._original_trigger_source = None
+
+    # ----------------------------------------------------- sensor parameters
+
+    def _resolve_node(self, name: str):
+        try:
+            node_name = PARAM_NODES[name]
+        except KeyError:
+            raise ValueError(f"Unknown camera parameter: {name}") from None
+        return getattr(self._camera, node_name)
+
+    @staticmethod
+    def _snap(value: float, node) -> float:
+        """Clamp to [Min, Max] and round to the node's increment grid."""
+        lo = _node_attr(node, "Min")
+        hi = _node_attr(node, "Max")
+        inc = _node_attr(node, "Inc")
+        if inc:
+            base = lo if lo is not None else 0.0
+            value = base + round((value - base) / inc) * inc
+        if lo is not None:
+            value = max(lo, value)
+        if hi is not None:
+            value = min(hi, value)
+        return value
+
+    def read_param(self, name: str) -> dict:
+        """Descriptor for one editable param: value, bounds, writability."""
+        node = self._resolve_node(name)
+        with self._param_lock:
+            # Geometry is "editable" whenever the camera is open even though
+            # IsWritable is False mid-preview (set_geometry cycles the grab);
+            # for live params the raw writability is meaningful (e.g. a model
+            # without Gain control).
+            writable = (
+                self._camera.IsOpen()
+                if name in GEOMETRY_PARAMS
+                else genicam.IsWritable(node.Node)
+            )
+            return {
+                "name": name,
+                "value": node.Value,
+                "min": _node_attr(node, "Min"),
+                "max": _node_attr(node, "Max"),
+                "inc": _node_attr(node, "Inc"),
+                "unit": _node_attr(node, "Unit"),
+                "writable": writable,
+            }
+
+    def read_params(self) -> dict[str, dict]:
+        """Descriptors for every editable param the camera actually exposes."""
+        params: dict[str, dict] = {}
+        for name in PARAM_NODES:
+            try:
+                params[name] = self.read_param(name)
+            except genicam.GenericException:
+                continue  # node unavailable on this model
+        return params
+
+    def set_live_param(self, name: str, value: float) -> dict:
+        """Set a param writable on a running camera (exposure/gain/offset)."""
+        if name not in LIVE_PARAMS:
+            raise ValueError(f"{name} cannot be set live")
+        node = self._resolve_node(name)
+        with self._param_lock:
+            target = self._snap(float(value), node)
+            if isinstance(node.Value, int):
+                target = int(round(target))
+            try:
+                node.Value = target
+            except genicam.GenericException as e:
+                raise ValueError(str(e)) from None
+        return self.read_param(name)
+
+    def set_geometry(
+        self, *, width: int | None = None, height: int | None = None
+    ) -> dict:
+        """Set Width/Height, transparently cycling this camera's preview grab.
+
+        pylon refuses Width/Height writes while grabbing, so the preview loop
+        is stopped and (if it was running) restarted around the write. The
+        cached size and the display placeholder are refreshed so downstream
+        consumers (preview encoder, GUI) immediately see the new ROI. Preview
+        is always restored, even when pylon rejects the value.
+        """
+        with self._param_lock:
+            was_grabbing = self._camera.IsGrabbing()
+            if was_grabbing:
+                self.stop()
+                self.join()
+            error: ValueError | None = None
+            try:
+                if height is not None:
+                    self._camera.Height.Value = int(
+                        self._snap(height, self._camera.Height)
+                    )
+                if width is not None:
+                    self._camera.Width.Value = int(
+                        self._snap(width, self._camera.Width)
+                    )
+            except genicam.GenericException as e:
+                error = ValueError(str(e))
+            self.width = self._camera.Width.Value
+            self.height = self._camera.Height.Value
+            self.frame_for_display.pop()
+            self.frame_for_display.push(
+                np.zeros((self.height, self.width), dtype=np.uint8)
+            )
+            params = self.read_params()  # read while stopped for clean values
+            if was_grabbing:
+                self.start_preview()
+            if error is not None:
+                raise error
+        return {"width": self.width, "height": self.height, "params": params}
+
+    def reset_params(self, config_str: str) -> dict:
+        """Re-apply this camera's config ``.pfs``, cycling the preview grab.
+
+        Restores every sensor parameter to the value the active config shipped
+        (exactly what load_config applied at startup). The full nodemap reload
+        includes Width/Height, which pylon refuses mid-grab, so the preview is
+        stopped and restored around the write, as set_geometry does. An empty
+        ``config_str`` (no ``.pfs`` for this camera) leaves the camera untouched
+        and just reports its current parameters.
+        """
+        with self._param_lock:
+            if not config_str:
+                return {
+                    "width": self.width,
+                    "height": self.height,
+                    "params": self.read_params(),
+                }
+            was_grabbing = self._camera.IsGrabbing()
+            if was_grabbing:
+                self.stop()
+                self.join()
+            self.frame_for_display.pop()  # drop stale frame so it reshapes
+            error: ValueError | None = None
+            try:
+                self.load_params(config_str)
+            except genicam.GenericException as e:
+                # A .pfs the device rejects (wrong model/firmware, hand-edited,
+                # out-of-range value) must not strand the preview: mirror
+                # set_geometry and always restore it, refreshing the placeholder
+                # to the current ROI, before re-raising as a ValueError.
+                error = ValueError(str(e))
+                self.width = self._camera.Width.Value
+                self.height = self._camera.Height.Value
+                self.frame_for_display.push(
+                    np.zeros((self.height, self.width), dtype=np.uint8)
+                )
+            params = self.read_params()  # read while stopped for clean values
+            if was_grabbing:
+                self.start_preview()
+            if error is not None:
+                raise error
+        return {"width": self.width, "height": self.height, "params": params}
+
+    def save_params(self) -> str:
+        """Full .pfs text of the current node map (round-trips load_params)."""
+        if not self._camera.IsOpen():
+            return ""
+        with self._param_lock:
+            content = pylon.FeaturePersistence.SaveToString(self._camera.GetNodeMap())
+        return _normalize_pfs_triggers(content, self._original_trigger_source)
 
     def enable_frame_trigger(self) -> None:
         """Set TriggerMode On for FrameStart, as start_preview does in C++.
@@ -393,6 +620,32 @@ class CameraSystem:
 
     def __iter__(self):
         return iter(self.cameras)
+
+    def camera_at(self, index: int) -> Camera:
+        if not 0 <= index < len(self.cameras):
+            raise IndexError(f"No camera at index {index}")
+        return self.cameras[index]
+
+    def apply_to_all(self, fn) -> list:
+        """Run fn(camera) across all cameras concurrently, in camera order.
+
+        Raises the first exception (e.g. a rejected parameter value) so the
+        caller can surface it; otherwise returns each camera's result.
+        """
+        results = []
+        for _camera, result, exc in self._run_parallel(fn):
+            if exc is not None:
+                raise exc
+            results.append(result)
+        return results
+
+    def save_all_params(self) -> dict[str, str]:
+        """Map serial_number -> current .pfs text, snapshotting in parallel."""
+        out: dict[str, str] = {}
+        for camera, text, exc in self._run_parallel(lambda c: c.save_params()):
+            if exc is None and text:
+                out[camera.serial_number] = text
+        return out
 
     def _run_parallel(self, fn):
         """Call fn(camera) on every camera concurrently, preserving order.

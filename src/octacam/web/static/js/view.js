@@ -22,4 +22,7 @@ export function initViewTab(grid) {
   document
     .getElementById("display-cross")
     .addEventListener("change", (e) => grid.setCrossVisible(e.target.checked));
+  document
+    .getElementById("layout-edit")
+    .addEventListener("change", (e) => grid.setLayoutEditing(e.target.checked));
 }

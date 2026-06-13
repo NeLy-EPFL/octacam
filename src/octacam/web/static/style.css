@@ -427,3 +427,115 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #shutdown-btn { font-size: 13px; line-height: 1; }
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
+
+/* ------------------------------------------------ camera params tab */
+
+.node-range {
+  display: block;
+  margin: -3px 0 7px 104px; /* align under the input (96px label + 8px gap) */
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+#cam-reset { margin-top: 12px; }
+
+#cam-advanced { margin-top: 6px; }
+#cam-advanced summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+#camera-status {
+  margin-top: 8px;
+  min-height: 1.2em;
+  text-align: center;
+  color: var(--amber);
+  font-size: 12px;
+}
+
+#layout-hint {
+  margin-top: 4px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ----------------------------------------- layout editing (tile grips) */
+
+#grid.layout-editing .tile { cursor: move; }
+#grid.layout-editing .tile-body { pointer-events: none; } /* let drags hit the tile */
+
+.tile-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  display: none;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, var(--accent) 50%);
+  z-index: 2;
+}
+
+#grid.layout-editing .tile-grip { display: block; }
+
+/* --------------------------------------------------------- save modal */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.modal-card {
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.modal-card h3 {
+  margin: 0 0 12px;
+  text-align: center;
+  font-size: 13px;
+}
+
+.modal-card .row { grid-template-columns: 64px 1fr; }
+.modal-card input[type="text"] { width: 100%; }
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  cursor: pointer;
+}
+
+.modal-error {
+  min-height: 1.2em;
+  margin: 6px 0;
+  color: var(--red);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.modal-actions #save-confirm:not(:disabled) {
+  background: var(--green);
+  border-color: transparent;
+  color: #fff;
+}

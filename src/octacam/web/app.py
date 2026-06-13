@@ -25,6 +25,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from fastapi import (
@@ -36,10 +37,11 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 import octacam
-from octacam.config import OctacamConfig
+from octacam import config_writer
+from octacam.config import OctacamConfig, find_config_file, parse_config
 from octacam.controller import RecordingController, StartResult
 from octacam.plugins.base import PluginManager
 from octacam.writer import FORMATS
@@ -89,6 +91,54 @@ class SaveDirValidateRequest(BaseModel):
 class RecordingStartRequest(BaseModel):
     confirm_overwrite: bool = False
     plugin_params: dict | None = None
+
+
+class CameraParamPatch(BaseModel):
+    """Set one sensor parameter on the selected camera or all cameras."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    value: float
+    scope: Literal["selected", "all"] = "selected"
+
+
+class CameraParamReset(BaseModel):
+    """Reset the selected camera's (or all cameras') params to the config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope: Literal["selected", "all"] = "selected"
+
+
+class CameraDisplayParams(BaseModel):
+    """A camera's composed display state, sent up by the browser to be saved.
+
+    Defaults mirror CameraConfig so an unconfigured camera (window_* = -1 =
+    "unset") round-trips through the tolerant loader unchanged."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    serial: str
+    name: str | None = None
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    rotation_deg: float = 0.0
+    window_x: float = -1.0
+    window_y: float = -1.0
+    window_width: float = -1.0
+    window_height: float = -1.0
+
+
+class SaveConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: Literal["active", "new"] = "active"
+    name: str | None = None  # required when target == "new"
+    overwrite: bool = False  # only meaningful for target == "new"
+    save_sensor: bool = True  # write <serial>.pfs files
+    save_display: bool = True  # write octacam_config.toml
+    cameras: list[CameraDisplayParams] = Field(default_factory=list)
 
 
 class _Client:
@@ -141,9 +191,17 @@ class _AppState:
         controller: RecordingController,
         config: OctacamConfig,
         plugins: PluginManager,
+        config_dir: str = "",
     ):
         self.controller = controller
+        # `config` is the live source of truth (a save replaces it); `raw_config`
+        # is the raw parsed TOML the writer patches so [gui]/[[plugins]] and the
+        # strftime save-dir template survive a save verbatim.
         self.config = config
+        self.config_dir = config_dir
+        self.raw_config = (
+            config_writer.load_raw_config(config_dir) if config_dir else {}
+        )
         self.plugins = plugins
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -251,7 +309,7 @@ def create_app(
     shutdown_callback: Callable[[], None] = _default_shutdown,
 ) -> FastAPI:
     plugins = plugins if plugins is not None else PluginManager([])
-    state = _AppState(controller, config, plugins)
+    state = _AppState(controller, config, plugins, config_dir)
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -275,7 +333,7 @@ def create_app(
 
     @app.get("/api/system")
     def get_system():
-        config_by_serial = {c.serial_number: c for c in config.cameras}
+        config_by_serial = {c.serial_number: c for c in state.config.cameras}
         cameras = []
         for index, camera in enumerate(controller.camera_system):
             camera_config = config_by_serial.get(camera.serial_number)
@@ -286,6 +344,7 @@ def create_app(
                     "name": camera.name,
                     "width": camera.width,
                     "height": camera.height,
+                    "params": camera.read_params(),
                     "layout": {
                         key: getattr(camera_config, key) if camera_config else -1.0
                         for key in (
@@ -309,7 +368,9 @@ def create_app(
             "version": octacam.__version__,
             "config_dir": config_dir,
             "plugins": state.plugins.status(),
-            "display_refresh_interval_ms": (config.gui.display_refresh_interval_ms),
+            "display_refresh_interval_ms": (
+                state.config.gui.display_refresh_interval_ms
+            ),
             "formats": [
                 {"codec": codec, "label": video_format.label}
                 for codec, video_format in FORMATS.items()
@@ -336,6 +397,127 @@ def create_app(
         settings = dataclasses.asdict(updated)
         state.broadcast_threadsafe("settings", settings)
         return settings
+
+    @app.get("/api/cameras/{index}/params")
+    def get_camera_params(index: int):
+        try:
+            return controller.read_camera_params(index)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+
+    @app.put("/api/cameras/{index}/params")
+    def put_camera_params(index: int, patch: CameraParamPatch):
+        try:
+            result = controller.set_camera_param(
+                index, patch.name, patch.value, patch.scope
+            )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        # Push the new values to every client, deduped per camera index so a
+        # fast slider drag collapses to the latest (newest-only queue_text).
+        for entry in result["updated"]:
+            state.broadcast_threadsafe(
+                f"camera_params:{entry['index']}", {"type": "camera_params", **entry}
+            )
+        return result
+
+    @app.post("/api/cameras/{index}/params/reset")
+    def reset_camera_params(index: int, payload: CameraParamReset | None = None):
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        payload = payload or CameraParamReset()
+        pfs_by_serial = config_writer.read_pfs_files(config_dir)
+        try:
+            result = controller.reset_camera_params(index, pfs_by_serial, payload.scope)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except FileNotFoundError as e:
+            raise HTTPException(422, str(e)) from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:  # a .pfs the device rejects
+            raise HTTPException(422, str(e)) from None
+        for entry in result["updated"]:
+            state.broadcast_threadsafe(
+                f"camera_params:{entry['index']}", {"type": "camera_params", **entry}
+            )
+        return result
+
+    @app.get("/api/config/configs")
+    def list_configs():
+        if not config_dir:
+            return {"active": "", "configs": []}
+        parent = Path(config_dir).parent
+        try:
+            names = sorted(
+                p.name for p in parent.iterdir() if (p / "octacam_config.toml").exists()
+            )
+        except OSError:
+            names = []
+        return {"active": Path(config_dir).name, "configs": names}
+
+    @app.post("/api/config/save")
+    def save_config(req: SaveConfigRequest):
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        if not req.save_sensor and not req.save_display:
+            raise HTTPException(422, "Nothing to save: enable sensor and/or display")
+        # Refuse while recording: a full nodemap snapshot would contend with the
+        # record grab loop, and the operator should not reshape config mid-trial.
+        if controller.recording_active:
+            raise HTTPException(409, "Cannot save the config while recording")
+
+        active = Path(config_dir)
+        try:
+            pfs = controller.export_camera_params() if req.save_sensor else {}
+            doc = (
+                config_writer.merge_camera_display(
+                    state.raw_config, [c.model_dump() for c in req.cameras]
+                )
+                if req.save_display
+                else None
+            )
+            if req.target == "active":
+                target = active
+            else:
+                target = config_writer.resolve_new_config_dir(
+                    active, req.name or "", overwrite=req.overwrite
+                )
+                target.mkdir(parents=True, exist_ok=True)
+                config_writer.copy_auxiliary_pfs(active, target, set(pfs))
+            if req.save_sensor:
+                config_writer.write_pfs_files(target, pfs)
+            if req.save_display and doc is not None:
+                config_writer.write_config(target, doc)
+        except RuntimeError as e:  # recording started between the check and save
+            raise HTTPException(409, str(e)) from None
+        except ValueError as e:  # invalid new-config name
+            raise HTTPException(422, str(e)) from None
+        except FileExistsError as e:
+            raise HTTPException(
+                409, f"Config already exists: {e}. Resend with overwrite=true."
+            ) from None
+        except PermissionError as e:
+            raise HTTPException(403, f"Config directory is not writable: {e}") from None
+        except OSError as e:
+            raise HTTPException(500, f"Failed to write config: {e}") from None
+
+        # Adopt the just-saved layout as the live config so /api/system reflects
+        # it immediately (only for the active dir; "new" is write-only).
+        if req.target == "active" and req.save_display and doc is not None:
+            state.raw_config = doc
+            state.config = parse_config(find_config_file(active))
+
+        return {
+            "status": "ok",
+            "config_dir": str(target),
+            "target": req.target,
+            "cameras_written": sorted(pfs),
+        }
 
     @app.post("/api/save-dir/validate")
     def validate_save_dir(payload: SaveDirValidateRequest):

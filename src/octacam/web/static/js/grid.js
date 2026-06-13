@@ -1,5 +1,8 @@
 // Camera grid: tiles positioned from config layout fractions (or auto-tiled
-// in a 3-column grid), JPEG preview rendering, transforms, crosshair.
+// in a 3-column grid), JPEG preview rendering, transforms, crosshair, and
+// (in edit mode) drag-to-move / drag-corner-to-resize layout editing.
+
+import { clamp } from "./util.js";
 
 // Qt semantics (main_window.py): a camera contributes a manual layout if it
 // has a valid position OR a valid size; positions/sizes are applied
@@ -7,12 +10,18 @@
 const hasPos = (l) => l.window_x >= 0 && l.window_y >= 0;
 const hasSize = (l) => l.window_width > 0 && l.window_height > 0;
 
+// A pointer travel (px) below this is a click (select), not a drag.
+const DRAG_THRESHOLD = 4;
+const norm360 = (deg) => ((deg % 360) + 360) % 360;
+
 export class CameraGrid {
-  constructor(container, cameras) {
+  constructor(container, cameras, { onSelect } = {}) {
     this.container = container;
+    this.onSelect = onSelect;
     this.tiles = [];
     this.indexBySerial = new Map();
     this.selected = -1;
+    this._editing = false;
 
     // Auto-tile only when NO camera carries a manual layout; otherwise honor
     // the configured layouts (a single unconfigured camera must not discard
@@ -43,11 +52,11 @@ export class CameraGrid {
       <div class="tile-body">
         <canvas width="0" height="0"></canvas>
         <div class="tile-cross"><div class="cross-h"></div><div class="cross-v"></div></div>
-      </div>`;
+      </div>
+      <div class="tile-grip" title="Drag to resize"></div>`;
     const nameEl = el.querySelector(".tile-name");
     nameEl.textContent = cam.name;
     nameEl.title = `serial ${cam.serial}`;
-    el.addEventListener("click", () => this.select(index));
     this.container.appendChild(el);
 
     const canvas = el.querySelector("canvas");
@@ -65,14 +74,24 @@ export class CameraGrid {
       natH: 0,
       busy: false,
       pendingBlob: null,
+      suppressClick: false,
     };
     this.tiles.push(tile);
+    el.addEventListener("click", () => {
+      if (tile.suppressClick) {
+        tile.suppressClick = false;
+        return;
+      }
+      this.select(index);
+    });
+    el.addEventListener("pointerdown", (e) => this._onTilePointerDown(e, tile));
     this._applyTransform(tile);
   }
 
   select(index) {
     this.selected = index;
     this.tiles.forEach((t, i) => t.el.classList.toggle("selected", i === index));
+    this.onSelect?.(index);
   }
 
   setCrossVisible(visible) {
@@ -184,22 +203,146 @@ export class CameraGrid {
     t.canvas.style.height = `${t.natH * k}px`;
   }
 
+  _applyTileBox(t) {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    const l = t.cam.layout;
+    t.el.style.left = hasPos(l) ? `${Math.round(l.window_x * w)}px` : "0px";
+    t.el.style.top = hasPos(l) ? `${Math.round(l.window_y * h)}px` : "0px";
+    t.el.style.width = hasSize(l)
+      ? `${Math.round(l.window_width * w)}px`
+      : `${Math.round(w / 3)}px`;
+    t.el.style.height = hasSize(l)
+      ? `${Math.round(l.window_height * h)}px`
+      : `${Math.round(h / 3)}px`;
+    this._layoutCanvas(t);
+  }
+
   _layoutAll() {
     if (!this.autoTile) {
-      const w = this.container.clientWidth;
-      const h = this.container.clientHeight;
-      for (const t of this.tiles) {
-        const l = t.cam.layout;
-        t.el.style.left = hasPos(l) ? `${Math.round(l.window_x * w)}px` : "0px";
-        t.el.style.top = hasPos(l) ? `${Math.round(l.window_y * h)}px` : "0px";
-        t.el.style.width = hasSize(l)
-          ? `${Math.round(l.window_width * w)}px`
-          : `${Math.round(w / 3)}px`;
-        t.el.style.height = hasSize(l)
-          ? `${Math.round(l.window_height * h)}px`
-          : `${Math.round(h / 3)}px`;
-      }
+      for (const t of this.tiles) this._applyTileBox(t);
+    } else {
+      for (const t of this.tiles) this._layoutCanvas(t);
     }
-    for (const t of this.tiles) this._layoutCanvas(t);
+  }
+
+  // ----------------------------------------------------- layout editing
+
+  setLayoutEditing(enabled) {
+    this._editing = enabled;
+    this.container.classList.toggle("layout-editing", enabled);
+    // Editing needs explicit per-tile boxes; convert the CSS-grid auto layout
+    // into the current positions/sizes as fractions so they can be edited.
+    if (enabled && this.autoTile) this._materializeAutoLayout();
+  }
+
+  _materializeAutoLayout() {
+    const cr = this.container.getBoundingClientRect();
+    for (const t of this.tiles) {
+      const r = t.el.getBoundingClientRect();
+      t.cam.layout = {
+        window_x: (r.left - cr.left) / cr.width,
+        window_y: (r.top - cr.top) / cr.height,
+        window_width: r.width / cr.width,
+        window_height: r.height / cr.height,
+      };
+    }
+    this.autoTile = false;
+    this.container.classList.remove("auto-tile");
+    this._layoutAll();
+  }
+
+  _onTilePointerDown(e, tile) {
+    if (!this._editing || e.button !== 0) return;
+    const resize = e.target.classList.contains("tile-grip");
+    const cr = this.container.getBoundingClientRect();
+    const l = tile.cam.layout;
+    const start = {
+      x: e.clientX,
+      y: e.clientY,
+      lx: hasPos(l) ? l.window_x : 0,
+      ly: hasPos(l) ? l.window_y : 0,
+      lw: hasSize(l) ? l.window_width : 1 / 3,
+      lh: hasSize(l) ? l.window_height : 1 / 3,
+      moved: false,
+    };
+    const move = (ev) => {
+      if (
+        !start.moved &&
+        Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD
+      ) {
+        return;
+      }
+      start.moved = true;
+      const dx = (ev.clientX - start.x) / cr.width;
+      const dy = (ev.clientY - start.y) / cr.height;
+      if (resize) {
+        tile.cam.layout = {
+          window_x: start.lx,
+          window_y: start.ly,
+          window_width: clamp(start.lw + dx, 0.05, 1),
+          window_height: clamp(start.lh + dy, 0.05, 1),
+        };
+      } else {
+        tile.cam.layout = {
+          window_x: clamp(start.lx + dx, 0, 1),
+          window_y: clamp(start.ly + dy, 0, 1),
+          window_width: start.lw,
+          window_height: start.lh,
+        };
+      }
+      this._applyTileBox(tile);
+    };
+    const up = () => {
+      tile.el.removeEventListener("pointermove", move);
+      tile.el.removeEventListener("pointerup", up);
+      tile.el.removeEventListener("pointercancel", up);
+      if (start.moved) tile.suppressClick = true; // don't select after a drag
+    };
+    tile.el.setPointerCapture(e.pointerId);
+    tile.el.addEventListener("pointermove", move);
+    tile.el.addEventListener("pointerup", up);
+    tile.el.addEventListener("pointercancel", up);
+    e.preventDefault();
+  }
+
+  // ------------------------------------------------ display-param capture
+
+  // Per-camera display state for saving: base transform composed with the
+  // browser-only runtime rotate/flip, plus the current layout fractions.
+  getDisplayParams() {
+    return this.tiles.map((t) => {
+      const b = t.cam.transform;
+      const r = t.runtime;
+      const l = t.cam.layout;
+      return {
+        serial: t.cam.serial,
+        name: t.cam.name,
+        scale_x: (b.scale_x || 1) * r.fx,
+        scale_y: (b.scale_y || 1) * r.fy,
+        rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
+        window_x: l.window_x,
+        window_y: l.window_y,
+        window_width: l.window_width,
+        window_height: l.window_height,
+      };
+    });
+  }
+
+  // After a save, fold runtime into the base so the persisted transform isn't
+  // double-applied; the on-screen result is unchanged.
+  commitRuntime() {
+    for (const t of this.tiles) {
+      const b = t.cam.transform;
+      const r = t.runtime;
+      t.cam.transform = {
+        scale_x: (b.scale_x || 1) * r.fx,
+        scale_y: (b.scale_y || 1) * r.fy,
+        rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
+      };
+      t.runtime = { rot: 0, fx: 1, fy: 1 };
+      this._applyTransform(t);
+      this._layoutCanvas(t);
+    }
   }
 }

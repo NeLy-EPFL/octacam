@@ -6,6 +6,8 @@ import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
 import { ArduinoTab } from "./arduino.js";
 import { initViewTab } from "./view.js";
+import { CameraTab } from "./camera.js";
+import { SaveDialog } from "./save.js";
 
 const MAX_EVENTS = 5;
 const events = [];
@@ -87,7 +89,11 @@ async function main() {
     document.getElementById("tab-arduino").remove();
   }
 
-  const grid = new CameraGrid(document.getElementById("grid"), system.cameras);
+  let cameraTab = null;
+  let saveDialog = null;
+  const grid = new CameraGrid(document.getElementById("grid"), system.cameras, {
+    onSelect: (i) => cameraTab?.selectCamera(i),
+  });
   initViewTab(grid);
 
   let record = null;
@@ -126,6 +132,17 @@ async function main() {
     notify,
   });
 
+  cameraTab = new CameraTab({
+    cameras: system.cameras,
+    notify,
+    onSelect: (i) => grid.select(i),
+  });
+  saveDialog = new SaveDialog({
+    grid,
+    notify,
+    getRecording: () => recordingActive,
+  });
+
   // Connection has four modes: "connected", "reconnecting" (unexpected drop),
   // "offline" (user disconnected, calm) and "stopped" (server shut down).
   function setConnectionMode(mode) {
@@ -154,6 +171,8 @@ async function main() {
     connState.className = connected ? "online" : "offline";
 
     record.setConnected(connected);
+    cameraTab?.setConnected(connected);
+    saveDialog?.setConnected(connected);
     for (const id of ["arduino-fields", "view-fields"]) {
       const fs = document.getElementById(id);
       if (fs) fs.disabled = !connected;
@@ -187,10 +206,14 @@ async function main() {
           msg.state
         );
         record.applyState(msg);
+        cameraTab?.setRecording(recordingActive);
         if (Array.isArray(msg.cameras)) applyCameraStats(msg.cameras);
         break;
       case "settings":
         record.applySettings(msg);
+        break;
+      case "camera_params":
+        cameraTab?.applyParams(msg);
         break;
       case "event":
         addEvent(msg);
