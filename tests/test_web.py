@@ -2,7 +2,6 @@
 
 import json
 import os
-import struct
 import time
 from unittest.mock import Mock
 
@@ -96,7 +95,10 @@ def test_system_and_settings_endpoints(client):
     assert len(system["cameras"]) == 2
     assert system["cameras"][0]["width"] > 0
     assert {f["codec"] for f in system["formats"]} == {
-        "x264", "raw", "mjpg", "h264",
+        "x264",
+        "raw",
+        "mjpg",
+        "h264",
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
     assert system["plugins"] == {}
@@ -120,8 +122,14 @@ def test_system_and_settings_endpoints(client):
     # the serial endpoint is contributed by the (absent) arduino plugin, so it
     # is not served here (404/405 from the static catch-all, never 200/503)
     command = dict.fromkeys(
-        ("n_steps", "step_interval_us", "rest_duration_ms",
-         "n_repeats", "init_wait_duration_s"), 1,
+        (
+            "n_steps",
+            "step_interval_us",
+            "rest_duration_ms",
+            "n_repeats",
+            "init_wait_duration_s",
+        ),
+        1,
     )
     assert client.post("/api/serial/command", json=command).status_code in (404, 405)
 
@@ -145,8 +153,8 @@ def test_websocket_preview_and_telemetry(client):
 
     assert got_state and got_settings
     assert len(frames) >= 4
-    version, kind, camera_index, flags, number, ts, fps, dropped = (
-        FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
+    version, kind, camera_index, flags, number, ts, fps, dropped = FRAME_HEADER.unpack(
+        frames[0][: FRAME_HEADER.size]
     )
     assert (version, kind) == (1, 1)
     assert camera_index in (0, 1)
@@ -201,9 +209,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
         with TestClient(app) as client:
             # generic plugin status surfaced on /api/system
             system_info = client.get("/api/system").json()
-            assert system_info["plugins"] == {
-                "stub": {"ready": True, "hello": "world"}
-            }
+            assert system_info["plugins"] == {"stub": {"ready": True, "hello": "world"}}
             # contributed REST endpoint is mounted
             assert client.post("/api/stub/ping").json() == {"pong": True}
             # WS messages are dispatched to the plugin
@@ -219,9 +225,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
 
 def test_recording_cycle_over_rest(client, tmp_path):
     save_dir = tmp_path / "rec" / "001"
-    response = client.post(
-        "/api/recording/start", json={"confirm_overwrite": False}
-    )
+    response = client.post("/api/recording/start", json={"confirm_overwrite": False})
     assert response.status_code == 202, response.text
 
     busy = client.post("/api/recording/start", json={})

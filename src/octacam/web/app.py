@@ -23,13 +23,12 @@ import signal
 import struct
 import time
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 from fastapi import (
     BackgroundTasks,
-    Body,
     FastAPI,
     HTTPException,
     WebSocket,
@@ -37,6 +36,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, field_validator
 
 import octacam
 from octacam.config import OctacamConfig
@@ -53,6 +53,42 @@ JPEG_QUALITY = 75
 # u8 version | u8 kind | u8 camera | u8 flags(bit0=recording) |
 # u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
 FRAME_HEADER = struct.Struct("<BBBBIQfI")
+
+
+class SettingsPatch(BaseModel):
+    """Partial update for RecordingSettings; unknown keys are rejected (422).
+
+    Cross-field rules (fps > 0, known codec, …) stay in
+    RecordingController.update_settings — only the fields actually sent are
+    forwarded, via model_dump(exclude_unset=True)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fps: float | None = None
+    duration_s: float | None = None
+    save_dir: str | None = None
+    trigger_source: str | None = None
+    codec: str | None = None
+    crf: int | None = None
+    preset: str | None = None
+    pix_fmt: str | None = None
+    remux_mp4: bool | None = None
+
+
+class SaveDirValidateRequest(BaseModel):
+    path: str
+
+    @field_validator("path")
+    @classmethod
+    def _non_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("path is required")
+        return value
+
+
+class RecordingStartRequest(BaseModel):
+    confirm_overwrite: bool = False
+    plugin_params: dict | None = None
 
 
 class _Client:
@@ -153,9 +189,7 @@ class _AppState:
                     grabbed.append((index, camera, frame))
             if not grabbed:
                 continue
-            messages = await loop.run_in_executor(
-                None, self._encode_batch, grabbed
-            )
+            messages = await loop.run_in_executor(None, self._encode_batch, grabbed)
             for camera_index, message in messages:
                 for client in list(self.clients):
                     client.queue_frame(camera_index, message)
@@ -195,9 +229,7 @@ class _AppState:
             await asyncio.sleep(TELEMETRY_INTERVAL_S)
             if not self.clients:
                 continue
-            snapshot = await loop.run_in_executor(
-                None, self.controller.snapshot
-            )
+            snapshot = await loop.run_in_executor(None, self.controller.snapshot)
             self._broadcast_text(
                 "telemetry", json.dumps({"type": "telemetry", **snapshot})
             )
@@ -264,9 +296,7 @@ def create_app(
                         )
                     },
                     "transform": {
-                        key: getattr(camera_config, key)
-                        if camera_config
-                        else default
+                        key: getattr(camera_config, key) if camera_config else default
                         for key, default in (
                             ("scale_x", 1.0),
                             ("scale_y", 1.0),
@@ -279,9 +309,7 @@ def create_app(
             "version": octacam.__version__,
             "config_dir": config_dir,
             "plugins": state.plugins.status(),
-            "display_refresh_interval_ms": (
-                config.gui.display_refresh_interval_ms
-            ),
+            "display_refresh_interval_ms": (config.gui.display_refresh_interval_ms),
             "formats": [
                 {"codec": codec, "label": video_format.label}
                 for codec, video_format in FORMATS.items()
@@ -298,9 +326,9 @@ def create_app(
         return dataclasses.asdict(controller.get_settings())
 
     @app.put("/api/settings")
-    def put_settings(changes: dict = Body(...)):
+    def put_settings(patch: SettingsPatch):
         try:
-            updated = controller.update_settings(**changes)
+            updated = controller.update_settings(**patch.model_dump(exclude_unset=True))
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from None
         except (ValueError, TypeError) as e:
@@ -310,17 +338,15 @@ def create_app(
         return settings
 
     @app.post("/api/save-dir/validate")
-    def validate_save_dir(payload: dict = Body(...)):
-        path = payload.get("path")
-        if not isinstance(path, str) or not path.strip():
-            raise HTTPException(422, "path is required")
-        return controller.validate_save_dir(path)
+    def validate_save_dir(payload: SaveDirValidateRequest):
+        return controller.validate_save_dir(payload.path)
 
     @app.post("/api/recording/start")
-    def start_recording(payload: dict = Body(default_factory=dict)):
+    def start_recording(payload: RecordingStartRequest | None = None):
+        payload = payload or RecordingStartRequest()
         result = controller.start_recording(
-            confirm_overwrite=bool(payload.get("confirm_overwrite")),
-            plugin_params=payload.get("plugin_params"),
+            confirm_overwrite=payload.confirm_overwrite,
+            plugin_params=payload.plugin_params,
         )
         body = {"status": result.status, "message": result.message}
         if result.ok:
@@ -402,8 +428,6 @@ def create_app(
             app.include_router(router)
 
     if STATIC_DIR.is_dir():
-        app.mount(
-            "/", StaticFiles(directory=STATIC_DIR, html=True), name="static"
-        )
+        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
     return app
