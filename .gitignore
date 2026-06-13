@@ -22,5 +22,11 @@ __pycache__/
 .venv/
 dist/
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # Benchmark outputs
 benchmarks/results/

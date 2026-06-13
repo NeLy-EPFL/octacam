@@ -8,8 +8,9 @@ dependencies = [
     "pypylon>=4.0",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
-    "pyyaml>=6",
-    "click>=8.1",
+    "pydantic>=2",
+    "typer>=0.15",
+    "rich>=13.7",
     "fastapi>=0.136.3",
     "uvicorn>=0.49.0",
     # uvicorn ships no WebSocket implementation on its own; the preview/
@@ -31,13 +32,36 @@ dev = [
     "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.8",
+    "pyright>=1.1.390",
     # so the bundled plugins (and their tests) load in the dev environment.
     "pyserial>=3.5",
 ]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/octacam"]
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# The formatter owns wrapping; long help strings / log messages are intentional.
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's parameter helpers are designed to be called in argument defaults.
+extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.Query"]
+
+[tool.pyright]
+# The library is the type-check surface; tests use stubs/fakes and monkeypatch
+# private attributes, which intentionally fight static typing.
+include = ["src"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+
+[tool.pytest.ini_options]
+addopts = "--cov=src/octacam --cov-report=term-missing"
