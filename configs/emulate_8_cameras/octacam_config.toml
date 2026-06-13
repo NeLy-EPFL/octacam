@@ -1,0 +1,95 @@
+[gui]
+fps_default = 100.0
+duration_default = 5.0
+duration_unit_default_index = 0
+save_directory_default = "~/data/TL/%y%m%d-genotype/Fly1/001-bhv"
+trigger_source_default_index = 0
+video_writer_default_index = 0
+
+[[cameras]]
+serial_number = "0815-0000"
+name = "camera_LF"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0.6666667
+window_y = 0
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0001"
+name = "camera_LM"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0.6666667
+window_y = 0.33333333
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0002"
+name = "camera_LH"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0.6666667
+window_y = 0.6666667
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0003"
+name = "camera_RF"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0
+window_y = 0
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0004"
+name = "camera_RM"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0
+window_y = 0.33333333
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0005"
+name = "camera_RH"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0
+window_y = 0.6666667
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0006"
+name = "camera_F"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0.33333333
+window_y = 0
+window_width = 0.33333333
+window_height = 0.33333333
+
+[[cameras]]
+serial_number = "0815-0007"
+name = "camera_H"
+scale_x = 1
+scale_y = 1
+rotation_deg = 0
+window_x = 0.33333333
+window_y = 0.33333333
+window_width = 0.33333333
+window_height = 0.6666667

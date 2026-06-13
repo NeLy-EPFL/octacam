@@ -1,18 +1,43 @@
-"""octacam_config.yaml parsing."""
+"""octacam_config.toml parsing.
+
+The loader is deliberately *tolerant*: a malformed file, section, or field is
+warned about and falls back to the default rather than raising, so a rig's
+config can never stop the app from starting. pydantic validates the types;
+``_lenient_validate`` turns validation errors into warn-and-default.
+"""
 
 import datetime
 import logging
 import time
-from dataclasses import dataclass, field
+import tomllib
 from pathlib import Path
+from typing import TypeVar
 
-import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 log = logging.getLogger("octacam")
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 
-@dataclass
-class CameraConfig:
+
+def _scalar_str(value: object) -> str:
+    """Coerce a TOML scalar to a string, rejecting bool/array/table.
+
+    TOML strings are normally quoted, but an unquoted integer serial number or
+    a date-like save directory parses as an int/date; accept those as text
+    (mirroring how the values were always meant to be read)."""
+    if isinstance(value, bool):
+        raise ValueError("expected a string, got a boolean")
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, datetime.date, datetime.datetime)):
+        return str(value)
+    raise ValueError("expected a string")
+
+
+class CameraConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     serial_number: str
     name: str = ""
     scale_x: float = 1.0
@@ -23,9 +48,15 @@ class CameraConfig:
     window_width: float = -1.0
     window_height: float = -1.0
 
+    @field_validator("serial_number", "name", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
 
-@dataclass
-class GuiConfig:
+
+class GuiConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     fps_default: float = 100.0
     fps_min: float = 0.01
     fps_max: float = 1000.0
@@ -49,88 +80,86 @@ class GuiConfig:
     dock_max_width: int = 300
     save_dir_edit_height_factor: int = 4
 
+    @field_validator("save_directory_default", "video_writer_default", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
 
-@dataclass
-class PluginConfig:
+
+class PluginConfig(BaseModel):
     name: str
-    options: dict = field(default_factory=dict)
+    options: dict = Field(default_factory=dict)
 
 
-@dataclass
-class OctacamConfig:
-    gui: GuiConfig = field(default_factory=GuiConfig)
-    cameras: list[CameraConfig] = field(default_factory=list)
-    plugins: list[PluginConfig] = field(default_factory=list)
+class OctacamConfig(BaseModel):
+    gui: GuiConfig = Field(default_factory=GuiConfig)
+    cameras: list[CameraConfig] = Field(default_factory=list)
+    plugins: list[PluginConfig] = Field(default_factory=list)
 
 
-def _as_float(value):
-    if isinstance(value, bool):
-        raise ValueError
-    return float(value)
+def _lenient_validate(
+    model_cls: type[_ModelT], data: dict, context: str, fallback: _ModelT
+) -> _ModelT:
+    """Validate ``data`` against ``model_cls``, dropping invalid fields.
+
+    Each field that fails validation is warned about and removed (so its model
+    default applies), then validation is retried. This reproduces the original
+    "a bad field keeps its default" behavior on top of pydantic."""
+    data = dict(data)
+    while True:
+        try:
+            return model_cls.model_validate(data)
+        except ValidationError as exc:
+            removable = {
+                err["loc"][0]
+                for err in exc.errors()
+                if err["loc"]
+                and isinstance(err["loc"][0], str)
+                and err["loc"][0] in data
+            }
+            if not removable:
+                log.warning(
+                    'Could not parse the "%s" config section; using defaults', context
+                )
+                return fallback
+            for key in removable:
+                log.warning(
+                    'Ignoring invalid "%s" in %s; using the default', key, context
+                )
+                data.pop(key, None)
 
 
-def _as_int(value):
-    if isinstance(value, bool):
-        raise ValueError
-    if isinstance(value, float) and not value.is_integer():
-        raise ValueError
-    return int(value)
+def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
+    """Parse the optional ``plugins`` array (opt-in plugin selection).
 
-
-def _as_scalar_str(value):
-    # yaml-cpp's as<std::string>() returns any scalar's text, so the C++
-    # version read an unquoted serial number (parsed by PyYAML as an int)
-    # or a date-like save directory (parsed as a date) as a string.
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool):
-        raise ValueError
-    if isinstance(value, (int, float, datetime.date)):
-        return str(value)
-    raise ValueError
-
-
-def _set_if_valid(src, key, cast, target, type_name):
-    if not isinstance(src, dict) or key not in src:
-        return
-    try:
-        value = cast(src[key])
-    except (TypeError, ValueError):
-        log.warning('"%s" is not of type %s in the config file', key, type_name)
-        return
-    setattr(target, key, value)
-
-
-def _parse_plugins(plugins_src) -> list[PluginConfig]:
-    """Parse the optional ``plugins:`` list (opt-in plugin selection).
-
-    Each entry is either a bare name (``- arduino``) or a single-key map of
-    name -> options (``- arduino: {device: ...}``). Malformed or duplicate
-    entries are warned about and skipped — never raised — matching the rest of
-    this module's tolerant parsing.
-    """
+    Each entry is either a bare name (``plugins = ["arduino"]``) or a table with
+    ``name`` and optional ``options`` (``[[plugins]]`` / ``name = "arduino"`` +
+    ``[plugins.options]``). Malformed or duplicate entries are warned about and
+    skipped — never raised — matching the rest of this module's tolerant
+    parsing."""
     if plugins_src is None:
         return []
     if not isinstance(plugins_src, list):
-        log.warning('Ignoring "plugins" in octacam config as it is not a sequence')
+        log.warning('Ignoring "plugins" in octacam config as it is not an array')
         return []
     result: list[PluginConfig] = []
     seen: set[str] = set()
     for index, entry in enumerate(plugins_src):
-        name = None
+        name: str | None = None
         options: dict = {}
         if isinstance(entry, str):
             name = entry
-        elif isinstance(entry, dict) and len(entry) == 1:
-            (key, value), = entry.items()
-            if isinstance(key, str):
-                name = key
-                if isinstance(value, dict):
-                    options = value
-                elif value is not None:
+        elif isinstance(entry, dict):
+            raw_name = entry.get("name")
+            if isinstance(raw_name, str) and raw_name:
+                name = raw_name
+                raw_options = entry.get("options", {})
+                if isinstance(raw_options, dict):
+                    options = raw_options
+                elif raw_options is not None:
                     log.warning(
-                        'Ignoring options for plugin "%s" as they are not a map',
-                        key,
+                        'Ignoring options for plugin "%s" as they are not a table',
+                        name,
                     )
         if not name:
             log.warning(
@@ -143,6 +172,54 @@ def _parse_plugins(plugins_src) -> list[PluginConfig]:
         seen.add(name)
         result.append(PluginConfig(name=name, options=options))
     return result
+
+
+def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
+    cameras: list[CameraConfig] = []
+    used_serial_numbers: set[str] = set()
+    used_names: set[str] = set()
+
+    for index, src in enumerate(cameras_src):
+        if not isinstance(src, dict) or "serial_number" not in src:
+            log.warning(
+                'Ignoring the %dth entry of "cameras" as its "serial_number" is absent',
+                index,
+            )
+            continue
+        try:
+            serial_number = _scalar_str(src["serial_number"])
+        except ValueError:
+            log.warning(
+                'Ignoring the %dth entry of "cameras" as its "serial_number" is not a scalar',
+                index,
+            )
+            continue
+        if serial_number in used_serial_numbers:
+            log.warning(
+                'Ignoring the %dth entry of "cameras" as its "serial_number" is not unique',
+                index,
+            )
+            continue
+        used_serial_numbers.add(serial_number)
+
+        fields = dict(src)
+        fields["serial_number"] = serial_number
+        camera = _lenient_validate(
+            CameraConfig,
+            fields,
+            f'the {index}th entry of "cameras"',
+            CameraConfig(serial_number=serial_number),
+        )
+        if camera.name:
+            if camera.name in used_names:
+                log.warning(
+                    'Ignoring the %dth entry of "cameras" as its "name" is not unique',
+                    index,
+                )
+                continue
+            used_names.add(camera.name)
+        cameras.append(camera)
+    return cameras
 
 
 def _finalize(config: OctacamConfig) -> OctacamConfig:
@@ -166,118 +243,29 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return _finalize(config)
 
     try:
-        file = yaml.safe_load(file_path.read_text())
-    except yaml.YAMLError as e:
+        data = tomllib.loads(file_path.read_text())
+    except tomllib.TOMLDecodeError as e:
         log.error("Failed to parse octacam config file: %s", e)
         return _finalize(config)
-    if not isinstance(file, dict):
-        return _finalize(config)
 
-    gui_src = file.get("gui")
+    gui_src = data.get("gui")
     if gui_src is not None:
         if not isinstance(gui_src, dict):
-            log.warning('Ignoring "gui" in octacam config as it is not a map')
+            log.warning('Ignoring "gui" in octacam config as it is not a table')
         else:
-            gui = config.gui
-            for key in (
-                "fps_default",
-                "fps_min",
-                "fps_max",
-                "duration_default",
-                "duration_min",
-                "duration_max",
-            ):
-                _set_if_valid(gui_src, key, _as_float, gui, "double")
-            _set_if_valid(
-                gui_src, "save_directory_default", _as_scalar_str, gui, "string"
-            )
-            _set_if_valid(
-                gui_src, "video_writer_default", _as_scalar_str, gui, "string"
-            )
-            for key in (
-                "duration_unit_default_index",
-                "trigger_source_default_index",
-                "video_writer_default_index",
-                "display_refresh_interval_ms",
-                "record_countdown_timer_interval_ms",
-                "check_record_started_timer_interval_ms",
-                "dock_min_width",
-                "dock_max_width",
-                "save_dir_edit_height_factor",
-            ):
-                _set_if_valid(gui_src, key, _as_int, gui, "int")
+            config.gui = _lenient_validate(GuiConfig, gui_src, "gui", GuiConfig())
 
     # Parsed before the cameras block, which has several early returns.
-    config.plugins = _parse_plugins(file.get("plugins"))
+    config.plugins = _parse_plugins(data.get("plugins"))
 
-    cameras_src = file.get("cameras")
+    cameras_src = data.get("cameras")
     if cameras_src is None:
         return _finalize(config)
     if not isinstance(cameras_src, list):
-        log.warning('Ignoring "cameras" in octacam config as it is not a sequence')
+        log.warning('Ignoring "cameras" in octacam config as it is not an array')
         return _finalize(config)
 
-    used_serial_numbers = set()
-    used_names = set()
-
-    for index, src in enumerate(cameras_src):
-        if not isinstance(src, dict) or "serial_number" not in src:
-            log.warning(
-                'Ignoring the %dth entry of "cameras" as its "serial_number" '
-                "is absent",
-                index,
-            )
-            continue
-        try:
-            serial_number = _as_scalar_str(src["serial_number"])
-        except ValueError:
-            log.warning(
-                'Ignoring the %dth entry of "cameras" as its "serial_number" '
-                "is not a string",
-                index,
-            )
-            continue
-        if serial_number in used_serial_numbers:
-            log.warning(
-                'Ignoring the %dth entry of "cameras" as its "serial_number" '
-                "is not unique",
-                index,
-            )
-            continue
-        used_serial_numbers.add(serial_number)
-
-        camera = CameraConfig(serial_number=serial_number)
-        if "name" in src:
-            try:
-                camera.name = _as_scalar_str(src["name"])
-            except ValueError:
-                log.warning(
-                    'Ignoring "name" for camera %s as it is not a string',
-                    serial_number,
-                )
-        if camera.name:
-            if camera.name in used_names:
-                log.warning(
-                    'Ignoring the %dth entry of "cameras" as its "name" is '
-                    "not unique",
-                    index,
-                )
-                continue
-            used_names.add(camera.name)
-
-        for key in (
-            "scale_x",
-            "scale_y",
-            "rotation_deg",
-            "window_x",
-            "window_y",
-            "window_width",
-            "window_height",
-        ):
-            _set_if_valid(src, key, _as_float, camera, "double")
-
-        config.cameras.append(camera)
-
+    config.cameras = _parse_cameras(cameras_src)
     if not config.cameras:
         log.info(
             "No cameras found in octacam config file. All detected cameras "
@@ -290,12 +278,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
 
 
 def find_config_file(config_dir: str | Path) -> Path:
-    """Mirrors the original C++ app: prefer octacam_config.yml, fall back to .yaml."""
-    config_dir = Path(config_dir)
-    config_path = config_dir / "octacam_config.yml"
-    if not config_path.exists():
-        config_path = config_dir / "octacam_config.yaml"
-    return config_path
+    return Path(config_dir) / "octacam_config.toml"
 
 
 def load_config_dir(config_dir: str | Path) -> OctacamConfig:

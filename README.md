@@ -52,7 +52,7 @@ ssh -L 8000:127.0.0.1:8000 <rig-hostname> octacam serve <config_dir>
 ```
 
 `<config_dir>` contains the per-camera `.pfs` Basler configuration files and an
-optional `octacam_config.yaml` (camera names, display layout, GUI defaults) —
+optional `octacam_config.toml` (camera names, display layout, GUI defaults) —
 see [configs/](configs/) for examples.
 
 To run without hardware using Basler's camera emulation:
@@ -65,13 +65,13 @@ PYLON_CAMEMU=8 octacam serve configs/emulate_8_cameras
 
 Optional hardware/integration features ship as opt-in plugins under
 `octacam.plugins.*`. **The default launch loads none** — you choose what each
-rig needs. Enable a plugin persistently in the rig's `octacam_config.yml`:
+rig needs. Enable a plugin persistently in the rig's `octacam_config.toml`:
 
-```yaml
-plugins:
-  - arduino:                 # an entry can be a bare name, or carry options
-      device: /dev/ttyACM0
-      baud: 115200
+```toml
+# bare names work too: plugins = ["arduino"]
+[[plugins]]
+name = "arduino"
+options = { device = "/dev/ttyACM0", baud = 115200 }
 ```
 
 or per-launch with `--plugin arduino` (repeatable; adds to the config), and
@@ -100,7 +100,7 @@ make sure `usbcore.usbfs_memory_mb=1000` is set (see
 ## Repository layout
 
 - **[src/octacam/](src/octacam/)** — the Python package.
-- **[configs/](configs/)** — camera `.pfs` files and `octacam_config.yaml` per
+- **[configs/](configs/)** — camera `.pfs` files and `octacam_config.toml` per
   rig.
 - **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gated the
   pure-Python architecture. See [benchmarks/README.md](benchmarks/README.md).

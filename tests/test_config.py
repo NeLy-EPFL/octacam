@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).parent.parent
 
 
 def test_missing_file_returns_defaults(tmp_path):
-    config = parse_config(tmp_path / "nope.yaml")
+    config = parse_config(tmp_path / "nope.toml")
     assert config.cameras == []
     assert config.gui == GuiConfig()
 
@@ -26,32 +26,29 @@ def test_parses_emulate_8_cameras_config():
 
 
 def test_duplicate_serial_skipped(tmp_path):
-    (tmp_path / "octacam_config.yaml").write_text(
-        "cameras:\n"
-        "  - serial_number: a\n"
-        "  - serial_number: a\n"
-        "  - serial_number: b\n"
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\n'
+        '[[cameras]]\nserial_number = "a"\n'
+        '[[cameras]]\nserial_number = "b"\n'
     )
     config = load_config_dir(tmp_path)
     assert [c.serial_number for c in config.cameras] == ["a", "b"]
 
 
 def test_duplicate_name_skipped(tmp_path):
-    (tmp_path / "octacam_config.yaml").write_text(
-        "cameras:\n"
-        "  - {serial_number: a, name: x}\n"
-        "  - {serial_number: b, name: x}\n"
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "x"\n'
+        '[[cameras]]\nserial_number = "b"\nname = "x"\n'
     )
     config = load_config_dir(tmp_path)
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
-def test_unquoted_numeric_serial_coerced_to_string(tmp_path):
-    # yaml-cpp's as<std::string>() accepted unquoted serial numbers (parsed
-    # as ints); the Python port must keep that behavior.
-    (tmp_path / "octacam_config.yaml").write_text(
-        "cameras:\n"
-        "  - {serial_number: 40029805, name: 7}\n"
+def test_integer_serial_and_name_coerced_to_string(tmp_path):
+    # TOML keeps types explicit, but an unquoted integer serial/name should
+    # still be read as text rather than rejected.
+    (tmp_path / "octacam_config.toml").write_text(
+        "[[cameras]]\nserial_number = 40029805\nname = 7\n"
     )
     config = load_config_dir(tmp_path)
     assert config.cameras[0].serial_number == "40029805"
@@ -59,32 +56,32 @@ def test_unquoted_numeric_serial_coerced_to_string(tmp_path):
 
 
 def test_date_save_directory_coerced(tmp_path):
-    # An unquoted date-like directory parses as datetime.date in PyYAML but
-    # was plain text to yaml-cpp; it must not silently fall back to "./".
-    (tmp_path / "octacam_config.yaml").write_text(
-        "gui: {save_directory_default: 2024-06-11}\n"
+    # An unquoted date parses as a TOML date; it must be read as a string and
+    # not silently fall back to "./".
+    (tmp_path / "octacam_config.toml").write_text(
+        "[gui]\nsave_directory_default = 2024-06-11\n"
     )
     assert load_config_dir(tmp_path).gui.save_directory_default == "2024-06-11"
 
 
 def test_non_scalar_serial_skipped(tmp_path):
-    (tmp_path / "octacam_config.yaml").write_text(
-        "cameras:\n"
-        "  - {serial_number: [1, 2]}\n"
-        "  - {serial_number: true}\n"
-        "  - {serial_number: '40'}\n"
+    (tmp_path / "octacam_config.toml").write_text(
+        "[[cameras]]\nserial_number = [1, 2]\n"
+        "[[cameras]]\nserial_number = true\n"
+        '[[cameras]]\nserial_number = "40"\n'
     )
     config = load_config_dir(tmp_path)
     assert [c.serial_number for c in config.cameras] == ["40"]
 
 
 def test_bad_types_keep_defaults(tmp_path):
-    (tmp_path / "octacam_config.yaml").write_text(
-        "gui:\n"
-        "  fps_default: not-a-number\n"
-        "  dock_min_width: 1.5\n"
-        "cameras:\n"
-        "  - {serial_number: a, scale_x: wat}\n"
+    (tmp_path / "octacam_config.toml").write_text(
+        "[gui]\n"
+        'fps_default = "not-a-number"\n'
+        "dock_min_width = 1.5\n"
+        "[[cameras]]\n"
+        'serial_number = "a"\n'
+        'scale_x = "wat"\n'
     )
     config = load_config_dir(tmp_path)
     assert config.gui.fps_default == 100.0
@@ -92,7 +89,24 @@ def test_bad_types_keep_defaults(tmp_path):
     assert config.cameras[0].scale_x == 1.0
 
 
-def test_yml_preferred_over_yaml(tmp_path):
-    (tmp_path / "octacam_config.yml").write_text("gui: {fps_default: 42}\n")
-    (tmp_path / "octacam_config.yaml").write_text("gui: {fps_default: 7}\n")
+def test_plugins_bare_name_list(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text('plugins = ["arduino", "other"]\n')
+    plugins = load_config_dir(tmp_path).plugins
+    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert plugins[0].options == {}
+
+
+def test_plugins_tables_with_options_and_duplicates(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[plugins]]\nname = "arduino"\n'
+        '[[plugins]]\nname = "arduino"\n'  # duplicate -> skipped
+        '[[plugins]]\nname = "other"\noptions = {device = "/dev/ttyACM0"}\n'
+    )
+    plugins = load_config_dir(tmp_path).plugins
+    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert plugins[1].options == {"device": "/dev/ttyACM0"}
+
+
+def test_toml_file_loaded(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 42\n")
     assert load_config_dir(tmp_path).gui.fps_default == 42.0
