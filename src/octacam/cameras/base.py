@@ -23,6 +23,7 @@ from typing import ClassVar, Protocol
 
 import numpy as np
 
+from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.writer import AsyncFrameWriter, VideoFormat
 
 log = logging.getLogger("octacam")
@@ -100,8 +101,9 @@ class CameraBackend(Protocol):
     def start_grab_preview(self) -> None: ...
     def start_grab_record(self) -> bool: ...
     def stop_grab(self) -> None: ...
-    def retrieve(self, timeout_ms: int, wants_array: Callable[[], bool]) -> Frame | None:
-        ...
+    def retrieve(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None: ...
 
 
 def snap_value(value: float, info: NodeInfo) -> float:
@@ -166,8 +168,13 @@ class Camera:
         self.name: str = self.serial_number
         self.width = 0
         self.height = 0
+        # The persisted display orientation (rotation/flips), applied to the
+        # video when recording in "display" form. Set from config at load time;
+        # identity until then.
+        self.display_transform = DisplayTransform()
         self.frame_for_display = LatestFrame()
         self._video_writer: AsyncFrameWriter | None = None
+        self._recorded_frame_size: tuple[int, int] | None = None
         self._stop_flag = threading.Event()
         # Serializes external node access (read/set/save and the W/H grab
         # cycle) against itself; the preview loop stays lock-free.
@@ -209,6 +216,34 @@ class Camera:
         return self._dropped_count
 
     @property
+    def dropped_indices(self) -> list[int]:
+        """Frame indices that were dropped (encoder/queue could not accept)."""
+        return [i for i, dropped in enumerate(self._dropped) if dropped]
+
+    @property
+    def start_timestamp_ns(self) -> int | None:
+        """Timestamp of the first recorded frame, or None if none were grabbed."""
+        return self._timestamps[0] if self._timestamps else None
+
+    @property
+    def mean_fps(self) -> float:
+        """Average fps across the whole recording (vs the rolling resulting_fps)."""
+        timestamps = self._timestamps
+        if len(timestamps) < 2:
+            return 0.0
+        span_ns = timestamps[-1] - timestamps[0]
+        return (len(timestamps) - 1) * 1e9 / span_ns if span_ns else 0.0
+
+    @property
+    def recorded_frame_size(self) -> tuple[int, int] | None:
+        """The (width, height) actually written for the last recording.
+
+        Equals the sensor size, or the transform's output size when the
+        display transform was baked in (a 90°/270° rotation swaps the axes).
+        """
+        return self._recorded_frame_size
+
+    @property
     def writer_failed(self) -> bool:
         return self._video_writer is not None and self._video_writer.failed
 
@@ -216,9 +251,7 @@ class Camera:
         self._backend.load_params(config_str)
         self.width = self._backend.width()
         self.height = self._backend.height()
-        self.frame_for_display.push(
-            np.zeros((self.height, self.width), dtype=np.uint8)
-        )
+        self.frame_for_display.push(np.zeros((self.height, self.width), dtype=np.uint8))
 
     # ----------------------------------------------------- sensor parameters
 
@@ -233,9 +266,7 @@ class Camera:
             # for live params the raw writability is meaningful (e.g. a model
             # without Gain control).
             writable = (
-                self._backend.is_open()
-                if name in GEOMETRY_PARAMS
-                else info.writable
+                self._backend.is_open() if name in GEOMETRY_PARAMS else info.writable
             )
             return {
                 "name": name,
@@ -392,9 +423,19 @@ class Camera:
         self._thread.start()
 
     def start_record(
-        self, save_path: str, fps: float, video_format: VideoFormat
+        self,
+        save_path: str,
+        fps: float,
+        video_format: VideoFormat,
+        record_form: str = "display",
+        save_frame_timestamps: bool = False,
     ) -> bool:
-        """Start recording; returns True iff the record loop was launched."""
+        """Start recording; returns True iff the record loop was launched.
+
+        ``record_form`` selects "display" (bake the camera's display transform
+        into the video) or "sensor" (raw, untransformed). ``save_frame_timestamps``
+        re-enables the per-frame timestamp CSV (off by default).
+        """
         self._stop_flag.clear()
         self._started = False
         if not self._backend.is_open():
@@ -403,7 +444,14 @@ class Camera:
         self._dropped.clear()
         self._dropped_count = 0
 
-        frame_size = (self._backend.width(), self._backend.height())
+        bake = record_form == "display" and not self.display_transform.is_identity
+        transform = self.display_transform if bake else None
+
+        sensor_size = (self._backend.width(), self._backend.height())
+        frame_size = (
+            self.display_transform.output_size(*sensor_size) if bake else sensor_size
+        )
+        self._recorded_frame_size = frame_size
         self._video_writer = video_format.create_writer(WRITER_QUEUE_SIZE)
         if not self._video_writer.open(save_path, fps, frame_size):
             log.error("Failed to open video writer for: %s", save_path)
@@ -425,7 +473,9 @@ class Camera:
             raise
 
         self._thread = threading.Thread(
-            target=self._record_loop, args=(save_path,), daemon=True
+            target=self._record_loop,
+            args=(save_path, transform, save_frame_timestamps),
+            daemon=True,
         )
         self._thread.start()
         return True
@@ -476,7 +526,12 @@ class Camera:
                     self._update_resulting_fps()
         backend.stop_grab()
 
-    def _record_loop(self, save_path: str) -> None:
+    def _record_loop(
+        self,
+        save_path: str,
+        transform: DisplayTransform | None = None,
+        save_frame_timestamps: bool = False,
+    ) -> None:
         backend = self._backend
         frame_count = 0
         while not self._stop_flag.is_set() and backend.is_grabbing():
@@ -488,7 +543,11 @@ class Camera:
                 continue
             self._store_timestamp(timestamp)
 
-            written = self._video_writer.write(array)  # pyright: ignore[reportOptionalMemberAccess]
+            # Bake the display orientation into the recorded frame when asked;
+            # the preview still gets the raw array (the browser applies the
+            # transform via CSS), and identity/sensor recordings pay nothing.
+            to_write = apply_display_transform(array, transform) if transform else array
+            written = self._video_writer.write(to_write)  # pyright: ignore[reportOptionalMemberAccess]
             if not written:
                 self._dropped_count += 1
                 log.warning(
@@ -514,7 +573,8 @@ class Camera:
             frame_count,
             dropped_count,
         )
-        self._write_timestamps_csv(save_path)
+        if save_frame_timestamps:
+            self._write_timestamps_csv(save_path)
 
     def _reconcile_unwritten_frames(self) -> None:
         """If the sink died, frames accepted into the queue after the failure

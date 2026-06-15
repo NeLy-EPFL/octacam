@@ -5,6 +5,17 @@ duration_unit_default_index = 0
 save_directory_default = "~/data/TL/%y%m%d-genotype/Fly1/001-bhv"
 trigger_source_default_index = 0
 video_writer_default_index = 0
+# "display" bakes each camera's rotation/flips into the video; "sensor" saves
+# the raw image. save_frame_timestamps re-enables the per-frame timestamp CSV.
+record_form_default = "display"
+save_frame_timestamps_default = false
+
+# Offline `octacam transcode` defaults (overridable per run with CLI flags).
+[transcode]
+format = "mp4"
+crf = 20
+preset = "veryslow"
+pix_fmt = "gray"
 
 [[cameras]]
 serial_number = "0815-0000"

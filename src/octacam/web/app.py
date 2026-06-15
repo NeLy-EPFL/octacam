@@ -80,6 +80,8 @@ class SettingsPatch(BaseModel):
     pix_fmt: str | None = None
     remux_mp4: bool | None = None
     x264_params: str | None = None
+    record_form: str | None = None
+    save_frame_timestamps: bool | None = None
 
 
 class SaveDirValidateRequest(BaseModel):
@@ -133,6 +135,19 @@ class CameraNamePatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+
+
+class CameraTransformPatch(BaseModel):
+    """One camera's live display transform (negative scale = flip).
+
+    The View tab sends this on every rotate/flip so a "display"-form recording
+    bakes in exactly what the operator sees, without needing a config save."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    rotation_deg: float = 0.0
 
 
 class CameraDisplayParams(BaseModel):
@@ -496,6 +511,17 @@ def create_app(
         )
         return result
 
+    @app.put("/api/cameras/{index}/transform")
+    def put_camera_transform(index: int, patch: CameraTransformPatch):
+        try:
+            return controller.set_camera_transform(
+                index, patch.scale_x, patch.scale_y, patch.rotation_deg
+            )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+
     @app.post("/api/cameras/{index}/params/reset")
     def reset_camera_params(index: int, payload: CameraParamReset | None = None):
         if not config_dir:
@@ -584,10 +610,13 @@ def create_app(
             raise HTTPException(500, f"Failed to write config: {e}") from None
 
         # Adopt the just-saved layout as the live config so /api/system reflects
-        # it immediately (only for the active dir; "new" is write-only).
+        # it immediately (only for the active dir; "new" is write-only), and
+        # refresh the live per-camera display transforms from it so a saved
+        # rotation/flip keeps baking into recordings.
         if req.target == "active" and req.save_display and doc is not None:
             state.raw_config = doc
             state.config = parse_config(find_config_file(active))
+            controller.camera_system.apply_display_config(state.config.cameras)
 
         return {
             "status": "ok",

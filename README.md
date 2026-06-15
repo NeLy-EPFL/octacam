@@ -40,8 +40,9 @@ stepper controller: `pip install "octacam[arduino]"` (see [Plugins](#plugins)).
 ```bash
 octacam gui <config_dir>      # web GUI on http://127.0.0.1:8765 (--host/--port/--no-browser)
 octacam record <config_dir>   # headless recording (--fps/--duration/--output/--codec
-                              #   x264|raw|mjpg|h264/--crf/--preset/--x264-params/--trigger)
-octacam transcode <dir>       # convert .raw recordings to x264 MKV offline
+                              #   x264|raw/--crf/--preset/--x264-params/--trigger/
+                              #   --record-form sensor|display/--save-frame-timestamps)
+octacam transcode <paths...>  # transcode folders/videos offline (-r/--as-displayed)
 octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
 octacam list-plugins          # show bundled plugins and whether each can load
 octacam --help
@@ -49,6 +50,35 @@ octacam --help
 
 `gui` and `record` also accept `--plugin <name>` (repeatable) and
 `--no-plugins` (see [Plugins](#plugins)).
+
+### Recording outputs
+
+Each recording writes its videos plus one `recording_summary.json` in the save
+directory. The summary holds what matters for checking a trial: per camera the
+recording fps, the start timestamp, and which frame indices were dropped, plus
+the session start wall-clock time and recording settings. It also documents what
+the `dropped` count does *not* include — only frames the encoder/writer queue
+could not accept are counted, not frames the camera or transport never delivered
+(e.g. USB bandwidth gaps). For the latter, turn on the per-frame timestamp CSV
+(`--save-frame-timestamps`, off by default) and inspect the inter-frame gaps.
+
+By default frames are saved in **display** form: each camera's rotation/flips
+(as configured in the GUI's View tab) are baked into the video so the file
+matches what you see on screen. Pass `--record-form sensor` (or set
+`gui.record_form_default = "sensor"`) to save the raw, untransformed sensor
+image instead. Both are toggleable live in the web GUI's Record tab.
+
+`octacam transcode` accepts any mix of folders and video files (and `-r` to
+recurse). A folder is transcoded according to its `recording_summary.json` when
+present; otherwise its `.mkv`/`.raw` files are transcoded with default
+parameters and no transform (with a warning). `--as-displayed` applies each
+video's recorded transform (skipped automatically when it was already baked in
+at record time); the default reproduces the file as saved. Output container and
+encoder settings come from the `[transcode]` config table (defaults: mp4,
+`preset=veryslow`, `crf=20`, `pix_fmt=gray`) and are overridable per run with
+`--format/--crf/--preset/--pix-fmt/--x264-params`. Pass `--remove-source` to
+delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar) once it transcodes
+successfully — the `recording_summary.json` is always kept.
 
 `octacam gui` opens the default browser automatically. It skips this over an SSH
 session or on a headless host (where the browser would launch on the rig instead
@@ -90,8 +120,8 @@ backend = "basler"   # default — omit the key and Basler is assumed
 | `fake`    | none (in-memory)        | `<serial>.json`           | synthetic frames for tests  |
 
 Everything else — preview, recording (monochrome H.264 or raw), the software
-trigger, the per-camera exposure/gain/ROI controls, the timestamp CSVs, and the
-web GUI — behaves identically across backends. `list-cameras` takes a matching
+trigger, the per-camera exposure/gain/ROI controls, the recording summary (and
+opt-in timestamp CSVs), and the web GUI — behaves identically across backends. `list-cameras` takes a matching
 `--backend`:
 
 ```bash

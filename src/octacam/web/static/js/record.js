@@ -38,6 +38,8 @@ export class RecordTab {
     this.diskFree = document.getElementById("disk-free");
     this.trigger = document.getElementById("trigger-source");
     this.format = document.getElementById("format");
+    this.recordForm = document.getElementById("record-form");
+    this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
     this.button = document.getElementById("record-button");
     this.status = document.getElementById("record-status");
     this.progress = document.getElementById("record-progress");
@@ -67,6 +69,15 @@ export class RecordTab {
     );
     this.format.addEventListener("change", () =>
       this._put({ codec: this.format.value }, [this.format])
+    );
+    this.recordForm.addEventListener("change", () =>
+      this._put({ record_form: this.recordForm.value }, [this.recordForm])
+    );
+    this.saveFrameTimestamps.addEventListener("change", () =>
+      this._put(
+        { save_frame_timestamps: this.saveFrameTimestamps.checked },
+        [this.saveFrameTimestamps]
+      )
     );
     this.button.addEventListener("click", () => this._onButton());
 
@@ -107,6 +118,15 @@ export class RecordTab {
     }
     if (s.codec && canSet(this.format)) {
       this.format.value = s.codec;
+    }
+    if (s.record_form && canSet(this.recordForm)) {
+      this.recordForm.value = s.record_form;
+    }
+    if (
+      typeof s.save_frame_timestamps === "boolean" &&
+      canSet(this.saveFrameTimestamps)
+    ) {
+      this.saveFrameTimestamps.checked = s.save_frame_timestamps;
     }
   }
 

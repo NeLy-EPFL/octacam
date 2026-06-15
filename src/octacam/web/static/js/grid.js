@@ -2,7 +2,7 @@
 // in a 3-column grid), JPEG preview rendering, transforms, crosshair, and
 // (in edit mode) drag-to-move / drag-corner-to-resize layout editing.
 
-import { clamp } from "./util.js";
+import { api, clamp } from "./util.js";
 
 // Qt semantics (main_window.py): a camera contributes a manual layout if it
 // has a valid position OR a valid size; positions/sizes are applied
@@ -225,7 +225,21 @@ export class CameraGrid {
       }
       this._applyTransform(t);
       this._layoutCanvas(t);
+      this._pushTransform(t);
     }
+  }
+
+  // Mirror the on-screen transform to the server so a "display"-form recording
+  // bakes in exactly what is shown (the runtime rotate/flip is otherwise
+  // browser-only). Fire-and-forget; a 409 (locked while recording) is ignored.
+  _pushTransform(t) {
+    const b = t.cam.transform;
+    const r = t.runtime;
+    api("PUT", `/api/cameras/${t.index}/transform`, {
+      scale_x: (b.scale_x || 1) * r.fx,
+      scale_y: (b.scale_y || 1) * r.fy,
+      rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
+    }).catch(() => {});
   }
 
   handleFrame(frame) {

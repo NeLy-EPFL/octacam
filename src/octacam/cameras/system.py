@@ -10,13 +10,18 @@ rest of the system only ever sees :class:`~octacam.cameras.base.Camera`.
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from octacam.cameras.base import BackendError, Camera
 from octacam.cameras.registry import select_backend, teardown_backend
+from octacam.transform import DisplayTransform, from_camera_config
 from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
+
+if TYPE_CHECKING:
+    from octacam.config import CameraConfig
 
 log = logging.getLogger("octacam")
 
@@ -130,6 +135,19 @@ class CameraSystem:
             if exc is not None:
                 raise exc
 
+    def apply_display_config(self, cameras: "list[CameraConfig]") -> None:
+        """Set each camera's display transform from its persisted config entry.
+
+        The transform (rotation/flips) is baked into the video when recording
+        in "display" form; a camera absent from the config keeps the identity.
+        """
+        by_serial = {c.serial_number: c for c in cameras}
+        for camera in self.cameras:
+            cfg = by_serial.get(camera.serial_number)
+            camera.display_transform = (
+                from_camera_config(cfg) if cfg is not None else DisplayTransform()
+            )
+
     def start_preview(self) -> None:
         self.stop()
         for _camera, _result, exc in self._run_parallel(
@@ -139,7 +157,12 @@ class CameraSystem:
                 raise exc
 
     def start_record(
-        self, save_dir: str | Path, fps: float, video_format: VideoFormat
+        self,
+        save_dir: str | Path,
+        fps: float,
+        video_format: VideoFormat,
+        record_form: str = "display",
+        save_frame_timestamps: bool = False,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
@@ -151,7 +174,13 @@ class CameraSystem:
 
         def record_one(camera: Camera) -> bool:
             save_path = Path(save_dir) / f"{camera.name}.{video_format.extension}"
-            return camera.start_record(str(save_path), fps, video_format)
+            return camera.start_record(
+                str(save_path),
+                fps,
+                video_format,
+                record_form,
+                save_frame_timestamps,
+            )
 
         # Start every camera at once so they begin grabbing closer together
         # (and the operator waits one start, not eight back to back).

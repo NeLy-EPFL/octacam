@@ -9,7 +9,6 @@ full (or once the sink has failed). Available sinks:
   entirely in the child process, outside the GIL. Validated on the rig:
   8 parallel ultrafast encoders sustain >1200 fps aggregate at 1080p
   (see docs/web-gui-plan.md).
-- OpencvVideoWriter: the original cv2.VideoWriter path (MJPG avi, avc1 mp4).
 - RawVideoWriter: raw Mono8 dump + JSON sidecar, for `octacam transcode`.
 """
 
@@ -77,6 +76,7 @@ def build_x264_args(
     pix_fmt: str,
     source: str = "pipe:0",
     x264_params: str = "",
+    vf: str = "",
 ) -> list[str]:
     """ffmpeg argv encoding rawvideo GRAY8 (from `source`) to x264.
 
@@ -88,6 +88,10 @@ def build_x264_args(
     ``x264_params``, when non-empty, is passed verbatim as ffmpeg's
     ``-x264-params`` (a single ``opt=val:opt2=val2`` token) so any libx264
     knob beyond crf/preset can be set from config without a dedicated flag.
+
+    ``vf``, when non-empty, is a single ffmpeg ``-vf`` filter chain (e.g.
+    ``transpose=1,hflip``) applied before encoding — used by `octacam
+    transcode --as-displayed` to bake a display orientation in.
     """
     return [
         ffmpeg,
@@ -104,6 +108,7 @@ def build_x264_args(
         f"{fps:g}",
         "-i",
         source,
+        *(["-vf", vf] if vf else []),
         "-c:v",
         "libx264",
         "-preset",
@@ -223,42 +228,6 @@ class AsyncFrameWriter:
 
     def _on_sink_failure(self, exc: Exception) -> None:
         log.error("Writer failed (%s); subsequent frames will be dropped", exc)
-
-
-class OpencvVideoWriter(AsyncFrameWriter):
-    """cv2.VideoWriter sink (the original octacam writer)."""
-
-    def __init__(self, fourcc: str, max_queue_size: int = 20, is_color: bool = False):
-        super().__init__(max_queue_size)
-        self._fourcc = fourcc
-        self._is_color = is_color
-        self._writer = None
-
-    def _open_sink(self, filename, fps, frame_size):
-        import cv2
-
-        writer = cv2.VideoWriter(
-            filename,
-            cv2.VideoWriter_fourcc(*self._fourcc),  # pyright: ignore[reportAttributeAccessIssue]
-            fps,
-            frame_size,
-            self._is_color,
-        )
-        if not writer.isOpened():
-            writer.release()
-            raise RuntimeError("cv2.VideoWriter could not open the file")
-        self._writer = writer
-
-    def _write_frame(self, frame):
-        # cv2.VideoWriter.write returns None on most builds and never raises,
-        # so an explicit False (newer builds) is the only failure signal.
-        if self._writer.write(frame) is False:
-            raise RuntimeError("cv2.VideoWriter.write reported failure")
-
-    def _close_sink(self):
-        if self._writer is not None:
-            self._writer.release()
-            self._writer = None
 
 
 class FfmpegVideoWriter(AsyncFrameWriter):
@@ -443,14 +412,12 @@ class RawVideoWriter(AsyncFrameWriter):
 # Format registry
 # ---------------------------------------------------------------------------
 
-_OPENCV_FOURCC = {"mjpg": "MJPG", "h264": "avc1"}
-
 
 @dataclass(frozen=True)
 class VideoFormat:
     """A recording format selectable from the GUI/CLI."""
 
-    codec: str  # "x264" | "raw" | "mjpg" | "h264"
+    codec: str  # "x264" | "raw"
     extension: str
     label: str
     crf: int = DEFAULT_CRF
@@ -471,8 +438,6 @@ class VideoFormat:
             )
         if self.codec == "raw":
             return RawVideoWriter(max_queue_size)
-        if self.codec in _OPENCV_FOURCC:
-            return OpencvVideoWriter(_OPENCV_FOURCC[self.codec], max_queue_size)
         raise ValueError(f"Unknown codec: {self.codec}")
 
 
@@ -481,8 +446,6 @@ class VideoFormat:
 FORMATS: dict[str, VideoFormat] = {
     "x264": VideoFormat("x264", "mkv", "x264 mkv (ffmpeg)"),
     "raw": VideoFormat("raw", "raw", "raw Mono8 (transcode later)"),
-    "mjpg": VideoFormat("mjpg", "avi", "MJPG avi (opencv)"),
-    "h264": VideoFormat("h264", "mp4", "avc1 mp4 (opencv)"),
 }
 
 
@@ -513,8 +476,12 @@ def transcode_raw(
     pix_fmt: str = DEFAULT_PIX_FMT,
     output: Path | None = None,
     x264_params: str = DEFAULT_X264_PARAMS,
+    vf: str = "",
 ) -> Path:
-    """Transcode a .raw Mono8 dump (with its .json sidecar) to x264 MKV."""
+    """Transcode a .raw Mono8 dump (with its .json sidecar) to x264.
+
+    ``output`` defaults to ``<raw>.mkv``; pass an explicit path to choose the
+    container. ``vf`` bakes in a display orientation (see build_x264_args)."""
     raw_path = Path(raw_path)
     sidecar = raw_path.with_suffix(".json")
     if not sidecar.exists():
@@ -532,11 +499,90 @@ def transcode_raw(
         pix_fmt,
         source=str(raw_path),
         x264_params=x264_params,
+        vf=vf,
     )
+    _run_ffmpeg(args, raw_path)
+    return output
+
+
+def transcode_encoded(
+    src: Path,
+    output: Path,
+    crf: int = 20,
+    preset: str = "veryslow",
+    pix_fmt: str = DEFAULT_PIX_FMT,
+    x264_params: str = DEFAULT_X264_PARAMS,
+    vf: str = "",
+) -> Path:
+    """Transcode an already-encoded video (mkv/mp4) to ``output``.
+
+    With no ``vf`` (no transform) this is a fast, lossless stream-copy remux;
+    with a ``vf`` filter chain it re-encodes with libx264 to bake it in.
+    """
+    src = Path(src)
+    output = Path(output)
+    ffmpeg = find_ffmpeg()
+    head = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-y", "-i", str(src)]
+    if vf:
+        args = [
+            *head,
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-crf",
+            str(crf),
+            *(["-x264-params", x264_params] if x264_params else []),
+            "-pix_fmt",
+            pix_fmt,
+            str(output),
+        ]
+    else:
+        args = [*head, "-c", "copy", str(output)]
+    _run_ffmpeg(args, src)
+    return output
+
+
+def transcode_file(
+    input_path: Path,
+    output: Path,
+    crf: int = 20,
+    preset: str = "veryslow",
+    pix_fmt: str = DEFAULT_PIX_FMT,
+    x264_params: str = DEFAULT_X264_PARAMS,
+    vf: str = "",
+) -> Path:
+    """Transcode one ``.raw``/``.mkv``/``.mp4`` file to ``output``.
+
+    Dispatches on the input suffix; ``vf`` (if any) bakes a display transform
+    in. The caller picks ``output`` (extension = desired container)."""
+    input_path = Path(input_path)
+    if input_path.suffix == ".raw":
+        return transcode_raw(
+            input_path,
+            crf=crf,
+            preset=preset,
+            pix_fmt=pix_fmt,
+            output=output,
+            x264_params=x264_params,
+            vf=vf,
+        )
+    return transcode_encoded(
+        input_path,
+        output,
+        crf=crf,
+        preset=preset,
+        pix_fmt=pix_fmt,
+        x264_params=x264_params,
+        vf=vf,
+    )
+
+
+def _run_ffmpeg(args: list[str], src: Path) -> None:
     result = subprocess.run(args, capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg failed for {raw_path}: "
-            f"{result.stderr.decode(errors='replace').strip()}"
+            f"ffmpeg failed for {src}: {result.stderr.decode(errors='replace').strip()}"
         )
-    return output

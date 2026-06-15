@@ -52,6 +52,15 @@
         <label class="row"><span>Format:</span>
           <select id="format"></select>
         </label>
+        <label class="row"><span>Saved image:</span>
+          <select id="record-form">
+            <option value="display">display (rotated/flipped)</option>
+            <option value="sensor">sensor (raw)</option>
+          </select>
+        </label>
+        <label class="row"><span>Per-frame timestamp CSV:</span>
+          <input id="save-frame-timestamps" type="checkbox">
+        </label>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled>Start recording</button>
       <div id="record-status"></div>

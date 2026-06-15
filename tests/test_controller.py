@@ -1,5 +1,6 @@
 """RecordingController tests: pure-unit + emulator integration."""
 
+import json
 import os
 import time
 
@@ -20,6 +21,55 @@ EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 
 
 # ------------------------------------------------------------------- units
+
+
+def test_build_recording_summary():
+    from types import SimpleNamespace
+
+    from octacam.controller import build_recording_summary
+    from octacam.transform import DisplayTransform
+
+    cam = SimpleNamespace(
+        name="cam0",
+        serial_number="S0",
+        recorded_frame_size=(240, 320),
+        mean_fps=99.97,
+        frames_recorded=500,
+        dropped_count=2,
+        dropped_indices=[137, 411],
+        start_timestamp_ns=123,
+        writer_failed=False,
+        display_transform=DisplayTransform(rotation_deg=90),
+    )
+    settings = RecordingSettings(
+        fps=100.0, duration_s=5.0, codec="x264", record_form="display"
+    )
+    summary = build_recording_summary(
+        settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
+    )
+    assert summary["fps_target"] == 100.0
+    assert summary["record_form"] == "display"
+    assert "USB" in summary["dropped_frames_note"]
+    assert summary["start_time"].startswith("20")
+    (entry,) = summary["cameras"]
+    assert entry["file"] == "cam0.mkv"
+    assert entry["dropped_indices"] == [137, 411]
+    assert (entry["width"], entry["height"]) == (240, 320)
+    assert entry["transform"] == {"rotation_deg": 90, "flip_h": False, "flip_v": False}
+    assert entry["transform_applied"] is True
+
+    # sensor form never flags the transform as baked in, even when non-identity.
+    sensor_summary = build_recording_summary(
+        dataclasses_replace(settings, record_form="sensor"), [cam], 0, aborted=False
+    )
+    assert sensor_summary["cameras"][0]["transform_applied"] is False
+    assert sensor_summary["start_time"] is None
+
+
+def dataclasses_replace(obj, **kw):
+    import dataclasses
+
+    return dataclasses.replace(obj, **kw)
 
 
 def test_increment_trailing_number():
@@ -159,9 +209,15 @@ def test_full_recording_cycle(camera_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-        csv_lines = video.with_suffix(".csv").read_text().splitlines()
-        assert csv_lines[0] == "frame_index,timestamp,dropped"
-        assert 50 <= len(csv_lines) - 1 <= 100  # ~75 frames at 50 fps x 1.5 s
+        assert not video.with_suffix(".csv").exists()  # CSV is opt-in now
+
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["record_form"] == "display"
+    assert len(summary["cameras"]) == 2
+    for cam in summary["cameras"]:
+        assert 50 <= cam["frames"] <= 100  # ~75 frames at 50 fps x 1.5 s
+        assert cam["transform_applied"] is False  # no display config -> identity
+        assert cam["start_timestamp_ns"]
 
     # the save dir auto-incremented for the next trial
     assert controller.get_settings().save_dir.endswith("002-trial")

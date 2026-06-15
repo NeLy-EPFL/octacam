@@ -14,6 +14,8 @@ exit -> writers drain -> CSVs).
 """
 
 import dataclasses
+import datetime
+import json
 import logging
 import os
 import re
@@ -26,6 +28,7 @@ from pathlib import Path
 
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
+from octacam.transform import RECORDING_SUMMARY_FILENAME, DisplayTransform
 from octacam.writer import (
     DEFAULT_CRF,
     DEFAULT_PIX_FMT,
@@ -96,6 +99,11 @@ class RecordingSettings:
     pix_fmt: str = DEFAULT_PIX_FMT
     remux_mp4: bool = False
     x264_params: str = DEFAULT_X264_PARAMS
+    # "display" bakes each camera's display transform into the video; "sensor"
+    # saves the raw, untransformed image. save_frame_timestamps re-enables the
+    # per-frame timestamp CSV (debugging; off by default).
+    record_form: str = "display"
+    save_frame_timestamps: bool = False
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.codec]
@@ -126,6 +134,72 @@ class StartResult:
         return self.status == self.OK
 
 
+_DROPPED_FRAMES_NOTE = (
+    "`dropped` counts only frames the encoder/writer queue could not accept "
+    "(the host could not keep up). Frames the camera or transport never "
+    "delivered (e.g. USB bandwidth gaps) are NOT detected here; enable "
+    "save_frame_timestamps and inspect the inter-frame timestamp gaps to "
+    "investigate those."
+)
+
+
+def build_recording_summary(
+    settings: RecordingSettings,
+    cameras,
+    start_wall_ns: int,
+    aborted: bool,
+) -> dict:
+    """Assemble the recording_summary.json payload from finalized camera stats.
+
+    Pure (no I/O) so it can be unit-tested without a recording. Each camera's
+    ``transform`` is always recorded (so `octacam transcode --as-displayed` can
+    apply it later); ``transform_applied`` is true only when it was baked into
+    the saved file (display form + non-identity transform)."""
+    extension = settings.video_format().extension
+    start_iso = (
+        datetime.datetime.fromtimestamp(
+            start_wall_ns / 1e9, tz=datetime.UTC
+        ).isoformat()
+        if start_wall_ns
+        else None
+    )
+    cams = []
+    for camera in cameras:
+        transform = camera.display_transform
+        applied = settings.record_form == "display" and not transform.is_identity
+        size = camera.recorded_frame_size
+        cams.append(
+            {
+                "name": camera.name,
+                "serial": camera.serial_number,
+                "file": f"{camera.name}.{extension}",
+                "width": size[0] if size else None,
+                "height": size[1] if size else None,
+                "fps": round(camera.mean_fps, 3),
+                "frames": camera.frames_recorded,
+                "dropped": camera.dropped_count,
+                "dropped_indices": camera.dropped_indices,
+                "start_timestamp_ns": camera.start_timestamp_ns,
+                "writer_failed": camera.writer_failed,
+                "transform": transform.to_dict(),
+                "transform_applied": applied,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "start_time": start_iso,
+        "start_time_ns": start_wall_ns or None,
+        "aborted": aborted,
+        "fps_target": settings.fps,
+        "duration_s": settings.duration_s,
+        "trigger_source": settings.trigger_source,
+        "codec": settings.codec,
+        "record_form": settings.record_form,
+        "dropped_frames_note": _DROPPED_FRAMES_NOTE,
+        "cameras": cams,
+    }
+
+
 class RecordingController:
     """Owns the recording state machine on top of a CameraSystem.
 
@@ -154,6 +228,9 @@ class RecordingController:
         self._stop_event = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
+        # Host wall-clock (ns) captured when the current/last recording started,
+        # written into recording_summary.json as the real-world start time.
+        self._recording_start_wall_ns = 0
         # Bumped each time a countdown starts so clients can tell one recording
         # from the next even if they miss the intervening non-recording states.
         self._recording_seq = 0
@@ -217,6 +294,11 @@ class RecordingController:
                 "external",
             ):
                 raise ValueError("trigger_source must be software or external")
+            if "record_form" in changes and changes["record_form"] not in (
+                "display",
+                "sensor",
+            ):
+                raise ValueError("record_form must be display or sensor")
             if "save_dir" in changes:
                 changes["save_dir"] = normalize_save_dir(changes["save_dir"])
             self._settings = dataclasses.replace(self._settings, **changes)
@@ -412,6 +494,27 @@ class RecordingController:
             camera.name = clean
             return {"index": index, "serial": camera.serial_number, "name": clean}
 
+    def set_camera_transform(
+        self, index: int, scale_x: float, scale_y: float, rotation_deg: float
+    ) -> dict:
+        """Set one camera's display transform live; rejected while recording.
+
+        This is what gets baked into a "display"-form recording, so the GUI's
+        View-tab rotate/flip pushes here as the operator works — keeping "what
+        you see" and "what is recorded" in sync without a config save."""
+        with self._lock:
+            if self.recording_active:
+                raise RuntimeError("Camera transforms are locked while recording")
+            camera = self.camera_system.camera_at(index)
+            camera.display_transform = DisplayTransform.from_scale_rotation(
+                scale_x, scale_y, rotation_deg
+            )
+            return {
+                "index": index,
+                "serial": camera.serial_number,
+                "transform": camera.display_transform.to_dict(),
+            }
+
     # -------------------------------------------------------------- preview
 
     def start_preview(self) -> None:
@@ -458,8 +561,13 @@ class RecordingController:
             self.camera_system.enable_frame_trigger()
             self.camera_system.set_trigger_source(use_software_trigger)
             self.camera_system.set_software_trigger_frequency(settings.fps)
+            self._recording_start_wall_ns = time.time_ns()
             started = self.camera_system.start_record(
-                save_dir, settings.fps, settings.video_format()
+                save_dir,
+                settings.fps,
+                settings.video_format(),
+                settings.record_form,
+                settings.save_frame_timestamps,
             )
             total = len(self.camera_system)
             if not started:
@@ -582,6 +690,12 @@ class RecordingController:
                     "recording (see log for ffmpeg output)",
                 )
 
+        # All camera threads are joined now (stats/CSVs final) and save_dir is
+        # still the recording's own directory (it is incremented below). Write
+        # the session summary here so both the duration-elapsed and manual-stop
+        # paths produce exactly one; never let a summary error abort teardown.
+        self._write_recording_summary(self._aborted)
+
         with self._lock:
             self._deadline = None
             aborted = self._aborted
@@ -593,6 +707,21 @@ class RecordingController:
             self._resume_preview()
         self.plugins.dispatch("on_recording_stop", aborted)
         self._event("info", "Recording aborted" if aborted else "Recording finished")
+
+    def _write_recording_summary(self, aborted: bool) -> None:
+        """Write recording_summary.json into the recording's save directory."""
+        path = Path(self._settings.save_dir) / RECORDING_SUMMARY_FILENAME
+        try:
+            summary = build_recording_summary(
+                self._settings,
+                list(self.camera_system),
+                self._recording_start_wall_ns,
+                aborted,
+            )
+            path.write_text(json.dumps(summary, indent=2) + "\n")
+            log.info("Wrote recording summary: %s", path)
+        except Exception:
+            log.exception("Failed to write recording summary to %s", path)
 
     def _count_started(self) -> int:
         return sum(1 for camera in self.camera_system if camera.started)

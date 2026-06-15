@@ -1,0 +1,279 @@
+"""`octacam transcode`: writer dispatch + CLI folder/file/summary resolution."""
+
+import json
+import logging
+import os
+
+os.environ.setdefault("PYLON_CAMEMU", "2")
+
+import numpy as np
+import pytest
+from typer.testing import CliRunner
+
+from octacam.cli import app
+from octacam.transform import DisplayTransform
+from octacam.writer import transcode_encoded, transcode_file, transcode_raw
+
+runner = CliRunner()
+cv2 = pytest.importorskip("cv2")
+
+
+def _frame(width, height):
+    return np.arange(height * width, dtype=np.uint8).reshape(height, width) * 2
+
+
+def _write_raw(path, frame, fps=10.0):
+    height, width = frame.shape
+    path.write_bytes(frame.tobytes())
+    path.with_suffix(".json").write_text(
+        json.dumps(
+            {"width": width, "height": height, "pixel_format": "Mono8", "fps": fps}
+        )
+    )
+
+
+def _make_mkv(path, frame):
+    """Encode a one-frame .mkv next to ``path`` (an encoded-input fixture)."""
+    raw = path.with_suffix(".raw")
+    _write_raw(raw, frame)
+    transcode_raw(raw, crf=0, preset="ultrafast", output=path)
+    raw.unlink()
+    raw.with_suffix(".json").unlink()
+    return path
+
+
+def _dims(path):
+    cap = cv2.VideoCapture(str(path))
+    ok, frame = cap.read()
+    cap.release()
+    assert ok, path
+    return frame.shape[1], frame.shape[0]  # (width, height)
+
+
+def _summary(folder, cameras):
+    (folder / "recording_summary.json").write_text(
+        json.dumps({"schema_version": 1, "cameras": cameras})
+    )
+
+
+# ------------------------------------------------------------------ writer
+
+
+def test_transcode_file_raw_to_mp4(tmp_path):
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    out = transcode_file(raw, tmp_path / "cam.mp4")
+    assert out.suffix == ".mp4" and out.exists()
+    assert _dims(out) == (16, 12)
+
+
+def test_transcode_encoded_remux_is_lossless_copy(tmp_path):
+    src = _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
+    out = transcode_encoded(src, tmp_path / "cam.mp4")  # no vf -> stream copy
+    assert _dims(out) == (16, 12)
+
+
+def test_transcode_file_applies_vf(tmp_path):
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    from octacam.transform import display_vf_filter
+
+    out = transcode_file(
+        raw, tmp_path / "cam.mp4", vf=display_vf_filter(DisplayTransform(90))
+    )
+    assert _dims(out) == (12, 16)  # 90deg swap
+
+
+# --------------------------------------------------------------------- CLI
+
+
+def _run(*args):
+    return runner.invoke(app, ["transcode", *args])
+
+
+def test_folder_with_summary_as_saved_keeps_orientation(tmp_path):
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    _summary(
+        tmp_path,
+        [
+            {
+                "file": "cam0.raw",
+                "transform": DisplayTransform(90).to_dict(),
+                "transform_applied": False,
+            }
+        ],
+    )
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (16, 12)  # as-saved: no transform
+
+
+def test_folder_with_summary_as_displayed_applies_transform(tmp_path):
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    _summary(
+        tmp_path,
+        [
+            {
+                "file": "cam0.raw",
+                "transform": DisplayTransform(90).to_dict(),
+                "transform_applied": False,
+            }
+        ],
+    )
+    result = _run(str(tmp_path), "--as-displayed", "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # rotated
+
+
+def test_as_displayed_does_not_reapply_when_already_baked(tmp_path):
+    # Display-form recording: the raw is already rotated (12x16) and flagged.
+    _write_raw(tmp_path / "cam0.raw", _frame(12, 16))
+    _summary(
+        tmp_path,
+        [
+            {
+                "file": "cam0.raw",
+                "transform": DisplayTransform(90).to_dict(),
+                "transform_applied": True,
+            }
+        ],
+    )
+    result = _run(str(tmp_path), "--as-displayed", "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # unchanged, not re-rotated
+
+
+class _ListHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path):
+    from octacam.cli import _transcode_jobs
+
+    _write_raw(tmp_path / "a.raw", _frame(16, 12))
+    _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
+    # The CLI callback clears the octacam logger's handlers, so exercise the
+    # resolver directly to capture its warning and inspect the jobs.
+    handler = _ListHandler()
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        jobs = _transcode_jobs(
+            [tmp_path], recursive=False, as_displayed=False, out_format="mp4"
+        )
+    finally:
+        logger.removeHandler(handler)
+    assert sorted(p.name for p, _vf in jobs) == ["a.raw", "b.mkv"]
+    assert all(vf == "" for _p, vf in jobs)  # no transform without a summary
+    assert any("recording_summary.json" in m for m in handler.messages)
+
+
+def test_folder_without_summary_transcodes_to_mp4(tmp_path):
+    _write_raw(tmp_path / "a.raw", _frame(16, 12))
+    _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "a.mp4").exists()
+    assert (tmp_path / "b.mp4").exists()
+
+
+def test_single_file_uses_summary_in_its_folder(tmp_path):
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    _summary(
+        tmp_path,
+        [
+            {
+                "file": "cam0.raw",
+                "transform": DisplayTransform(90).to_dict(),
+                "transform_applied": False,
+            }
+        ],
+    )
+    result = _run(
+        str(tmp_path / "cam0.raw"), "--as-displayed", "--config-dir", str(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (12, 16)
+
+
+def test_recursive_and_mixed_args_dedup(tmp_path):
+    sub_a = tmp_path / "a"
+    sub_b = tmp_path / "b"
+    sub_a.mkdir()
+    sub_b.mkdir()
+    _write_raw(sub_a / "cam.raw", _frame(16, 12))
+    _write_raw(sub_b / "cam.raw", _frame(16, 12))
+    # Pass the parent recursively AND sub_b/cam.raw explicitly: the duplicate
+    # must collapse to a single job (no double transcode / error).
+    result = _run(
+        "-r", str(tmp_path), str(sub_b / "cam.raw"), "--config-dir", str(tmp_path)
+    )
+    assert result.exit_code == 0, result.output
+    assert (sub_a / "cam.mp4").exists()
+    assert (sub_b / "cam.mp4").exists()
+    assert result.output.count(str(sub_b / "cam.mp4")) == 1
+
+
+def test_remove_source_deletes_raw_and_sidecar_keeps_summary(tmp_path):
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    _summary(
+        tmp_path,
+        [
+            {
+                "file": "cam0.raw",
+                "transform": DisplayTransform().to_dict(),
+                "transform_applied": True,
+            }
+        ],
+    )
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cam0.mp4").exists()
+    assert not (tmp_path / "cam0.raw").exists()
+    assert not (tmp_path / "cam0.json").exists()  # raw geometry sidecar removed
+    assert (tmp_path / "recording_summary.json").exists()  # summary kept
+
+
+def test_remove_source_deletes_mkv(tmp_path):
+    _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cam.mp4").exists()
+    assert not (tmp_path / "cam.mkv").exists()
+
+
+def test_remove_source_keeps_file_when_transcode_fails(tmp_path):
+    # A .raw with no .json sidecar fails to transcode; the source must survive.
+    (tmp_path / "orphan.raw").write_bytes(_frame(16, 12).tobytes())
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    assert result.exit_code != 0
+    assert (tmp_path / "orphan.raw").exists()
+
+
+def test_config_transcode_defaults_and_format_override(tmp_path):
+    cfg_dir = tmp_path / "cfg"
+    cfg_dir.mkdir()
+    (cfg_dir / "octacam_config.toml").write_text(
+        '[transcode]\nformat = "mkv"\ncrf = 10\n'
+    )
+    rec = tmp_path / "rec"
+    rec.mkdir()
+    _write_raw(rec / "cam.raw", _frame(16, 12))
+    # Config default container is mkv.
+    assert _run(str(rec), "--config-dir", str(cfg_dir)).exit_code == 0
+    assert (rec / "cam.mkv").exists()
+    # CLI --format overrides the config default.
+    (rec / "cam2.raw").write_bytes((rec / "cam.raw").read_bytes())
+    (rec / "cam2.json").write_text((rec / "cam.json").read_text())
+    assert (
+        _run(
+            str(rec / "cam2.raw"), "--config-dir", str(cfg_dir), "--format", "mp4"
+        ).exit_code
+        == 0
+    )
+    assert (rec / "cam2.mp4").exists()

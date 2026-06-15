@@ -74,7 +74,7 @@ def test_list_plugins_lists_bundled_arduino():
 def test_record_help_shows_enum_choices():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
-    assert "[x264|raw|mjpg|h264]" in result.output
+    assert "[x264|raw]" in result.output
     assert "[software|hardware]" in result.output
 
 
@@ -241,6 +241,26 @@ def test_launch_browser_uses_webbrowser_without_os_opener(monkeypatch):
 def test_transcode_requires_paths():
     result = runner.invoke(app, ["transcode"])
     assert result.exit_code != 0
+
+
+def test_record_help_lists_new_options():
+    result = runner.invoke(app, ["record", "--help"])
+    assert result.exit_code == 0
+    assert "--record-form" in result.output
+    assert "--save-frame-timestamps" in result.output
+
+
+def test_transcode_help_lists_new_options():
+    result = runner.invoke(app, ["transcode", "--help"])
+    assert result.exit_code == 0
+    for opt in (
+        "--recursive",
+        "--as-displayed",
+        "--config-dir",
+        "--format",
+        "--remove-source",
+    ):
+        assert opt in result.output
 
 
 def test_resolve_enabled():

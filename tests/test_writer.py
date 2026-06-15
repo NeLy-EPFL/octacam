@@ -205,14 +205,16 @@ def test_capture_default_crf_is_18():
 
 def test_default_codec_resolution():
     assert default_codec(GuiConfig()) == "x264"  # index 0
-    assert default_codec(GuiConfig(video_writer_default_index=2)) == "mjpg"
+    assert default_codec(GuiConfig(video_writer_default_index=1)) == "raw"
+    # an out-of-range index falls back to x264
+    assert default_codec(GuiConfig(video_writer_default_index=9)) == "x264"
     # the named key overrides the index, and unknown names fall back to x264
-    assert default_codec(GuiConfig(video_writer_default="h264")) == "h264"
+    assert default_codec(GuiConfig(video_writer_default="raw")) == "raw"
     assert (
         default_codec(
-            GuiConfig(video_writer_default="h264", video_writer_default_index=0)
+            GuiConfig(video_writer_default="raw", video_writer_default_index=0)
         )
-        == "h264"
+        == "raw"
     )
     assert default_codec(GuiConfig(video_writer_default="bogus")) == "x264"
 

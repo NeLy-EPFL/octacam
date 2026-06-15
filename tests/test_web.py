@@ -97,18 +97,29 @@ def test_system_and_settings_endpoints(client):
     assert {f["codec"] for f in system["formats"]} == {
         "x264",
         "raw",
-        "mjpg",
-        "h264",
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
     assert system["plugins"] == {}
 
     settings = client.get("/api/settings").json()
     assert settings["fps"] == 50.0
+    # New recording-output toggles default to display form, CSV off.
+    assert settings["record_form"] == "display"
+    assert settings["save_frame_timestamps"] is False
 
     response = client.put("/api/settings", json={"fps": 60.0, "crf": 18})
     assert response.status_code == 200
     assert response.json()["fps"] == 60.0
+
+    # record_form/save_frame_timestamps patch; invalid record_form is rejected.
+    patched = client.put(
+        "/api/settings",
+        json={"record_form": "sensor", "save_frame_timestamps": True},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["record_form"] == "sensor"
+    assert patched.json()["save_frame_timestamps"] is True
+    assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
 
     # libx264 knobs (crf and the free-form -x264-params passthrough) patch too
     patched = client.put("/api/settings", json={"x264_params": "keyint=30:scenecut=0"})
@@ -275,7 +286,13 @@ def test_recording_cycle_over_rest(client, tmp_path):
 
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
-    assert all(v.with_suffix(".csv").exists() for v in videos)
+    # Per-frame CSVs are opt-in now; by default only the compact summary lands.
+    assert not any(v.with_suffix(".csv").exists() for v in videos)
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["record_form"] == "display"
+    assert len(summary["cameras"]) == 2
+    assert all(c["frames"] > 0 for c in summary["cameras"])
+    assert "dropped_frames_note" in summary
     # save dir auto-incremented for the next trial
     assert client.get("/api/settings").json()["save_dir"].endswith("002")
 
@@ -284,6 +301,75 @@ def test_recording_cycle_over_rest(client, tmp_path):
     needs_confirm = client.post("/api/recording/start", json={})
     assert needs_confirm.status_code == 409
     assert needs_confirm.json()["status"] == "needs_confirm"
+
+
+def test_recording_writes_csv_when_enabled(client, tmp_path):
+    save_dir = tmp_path / "rec" / "001"
+    assert (
+        client.put("/api/settings", json={"save_frame_timestamps": True}).status_code
+        == 200
+    )
+    response = client.post("/api/recording/start", json={"confirm_overwrite": False})
+    assert response.status_code == 202, response.text
+
+    deadline = time.monotonic() + 25
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get("/api/state").json()
+        if state["state"] == "preview" and state["cameras"][0]["frames"]:
+            break
+        time.sleep(0.2)
+    assert state is not None and state["state"] == "preview"
+
+    videos = sorted(save_dir.glob("*.mkv"))
+    assert len(videos) == 2
+    assert all(v.with_suffix(".csv").exists() for v in videos)
+    for video in videos:
+        lines = video.with_suffix(".csv").read_text().splitlines()
+        assert lines[0] == "frame_index,timestamp,dropped"
+
+
+def test_live_transform_is_baked_into_display_recording(client, tmp_path):
+    save_dir = tmp_path / "rec" / "001"
+    # The View tab pushes the composed transform here; rotate camera 0 by 90deg.
+    r = client.put("/api/cameras/0/transform", json={"rotation_deg": 90})
+    assert r.status_code == 200
+    assert r.json()["transform"] == {
+        "rotation_deg": 90,
+        "flip_h": False,
+        "flip_v": False,
+    }
+
+    response = client.post("/api/recording/start", json={"confirm_overwrite": False})
+    assert response.status_code == 202, response.text
+    deadline = time.monotonic() + 25
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get("/api/state").json()
+        if state["state"] == "preview" and state["cameras"][0]["frames"]:
+            break
+        time.sleep(0.2)
+    assert state is not None and state["state"] == "preview"
+
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    cams = {c["serial"]: c for c in summary["cameras"]}
+    rotated = cams["0815-0000"]
+    plain = cams["0815-0001"]
+    assert rotated["transform_applied"] is True
+    assert plain["transform_applied"] is False
+    # A 90deg rotation swaps the recorded dimensions vs the un-rotated camera.
+    assert (rotated["width"], rotated["height"]) == (plain["height"], plain["width"])
+
+
+def test_transform_endpoint_locked_while_recording(client):
+    client.post("/api/recording/start", json={"confirm_overwrite": False})
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if client.get("/api/state").json()["state"] in ("waiting", "recording"):
+            break
+        time.sleep(0.05)
+    blocked = client.put("/api/cameras/0/transform", json={"rotation_deg": 90})
+    assert blocked.status_code == 409
 
 
 # --------------------------------------------- camera parameters / config save

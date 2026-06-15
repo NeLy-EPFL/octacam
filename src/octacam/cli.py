@@ -1,5 +1,6 @@
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import resource
@@ -32,13 +33,16 @@ class LogLevel(StrEnum):
 class Codec(StrEnum):
     x264 = "x264"
     raw = "raw"
-    mjpg = "mjpg"
-    h264 = "h264"
 
 
 class Trigger(StrEnum):
     software = "software"
     hardware = "hardware"
+
+
+class RecordForm(StrEnum):
+    sensor = "sensor"
+    display = "display"
 
 
 def _setup_logging(level: LogLevel) -> None:
@@ -411,6 +415,7 @@ def gui(
     for camera in system:
         camera.name = names.get(camera.serial_number, camera.name)
     system.load_config(config_dir)
+    system.apply_display_config(config.cameras)
 
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
     plugins.setup_all()
@@ -433,6 +438,8 @@ def gui(
         preset=gui_cfg.preset_default,
         pix_fmt=gui_cfg.pix_fmt_default,
         x264_params=gui_cfg.x264_params_default,
+        record_form=gui_cfg.record_form_default,
+        save_frame_timestamps=gui_cfg.save_frame_timestamps_default,
     )
     controller = RecordingController(system, settings, plugins)
     controller.start_preview()
@@ -552,7 +559,7 @@ def record(
         Codec,
         typer.Option(
             help="x264: ffmpeg H.264 mkv (gray 4:0:0); raw: Mono8 dump for "
-            "`octacam transcode`; mjpg/h264: the legacy OpenCV writers."
+            "`octacam transcode`."
         ),
     ] = Codec.x264,
     crf: Annotated[
@@ -583,6 +590,22 @@ def record(
             "the trigger source configured in the .pfs files."
         ),
     ] = Trigger.software,
+    record_form: Annotated[
+        RecordForm | None,
+        typer.Option(
+            "--record-form",
+            help="display: bake each camera's rotation/flips into the video; "
+            "sensor: save the raw, untransformed image [default: from config].",
+        ),
+    ] = None,
+    save_frame_timestamps: Annotated[
+        bool | None,
+        typer.Option(
+            "--save-frame-timestamps/--no-save-frame-timestamps",
+            help="Also write a per-frame timestamp CSV per camera, for "
+            "debugging [default: from config].",
+        ),
+    ] = None,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
 ) -> None:
@@ -605,6 +628,11 @@ def record(
         preset = config.gui.preset_default
     if x264_params is None:
         x264_params = config.gui.x264_params_default
+    record_form_value = (
+        record_form.value if record_form is not None else config.gui.record_form_default
+    )
+    if save_frame_timestamps is None:
+        save_frame_timestamps = config.gui.save_frame_timestamps_default
 
     try:
         system = CameraSystem(
@@ -622,6 +650,7 @@ def record(
         camera.name = names.get(camera.serial_number, camera.name)
 
     system.load_config(config_dir)
+    system.apply_display_config(config.cameras)
 
     if output.exists():
         log.warning("Directory already exists, data might be overwritten: %s", output)
@@ -639,6 +668,8 @@ def record(
         preset=preset,
         pix_fmt=config.gui.pix_fmt_default,
         x264_params=x264_params,
+        record_form=record_form_value,
+        save_frame_timestamps=save_frame_timestamps,
     )
     controller = RecordingController(system, settings, plugins, auto_preview=False)
     try:
@@ -662,54 +693,228 @@ def record(
         typer.echo(f"{output / camera.name}.{extension}")
 
 
+def _read_summary(path: Path) -> dict | None:
+    """Load a recording_summary.json, or None (with a warning) if unreadable."""
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        log.warning("Could not read %s: %s", path, e)
+        return None
+
+
+def _job_vf(entry: dict, as_displayed: bool) -> str:
+    """The ffmpeg -vf chain for one summary camera entry under the chosen mode."""
+    from octacam.transform import DisplayTransform, display_vf_filter
+
+    if not as_displayed or entry.get("transform_applied"):
+        # as-saved, or the transform is already baked into the file.
+        return ""
+    return display_vf_filter(DisplayTransform.from_dict(entry.get("transform") or {}))
+
+
+def _transcode_jobs(
+    paths: list[Path], recursive: bool, as_displayed: bool, out_format: str
+) -> list[tuple[Path, str]]:
+    """Resolve folders/files to a deduped list of (input_path, vf) jobs.
+
+    A folder with a recording_summary.json is driven by it; one without has its
+    loose .mkv/.raw transcoded with no transform (and a warning). A file is
+    matched against a summary in its own folder, else transcoded plainly."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    jobs: dict[Path, tuple[Path, str]] = {}
+
+    def add(input_path: Path, vf: str) -> None:
+        jobs.setdefault(input_path.resolve(), (input_path, vf))
+
+    def handle_dir(directory: Path) -> None:
+        summary_path = directory / RECORDING_SUMMARY_FILENAME
+        if summary_path.exists():
+            data = _read_summary(summary_path)
+            if data is not None:
+                for entry in data.get("cameras", []):
+                    name = entry.get("file")
+                    if not name:
+                        continue
+                    video = directory / name
+                    if video.exists():
+                        add(video, _job_vf(entry, as_displayed))
+                    else:
+                        log.warning("%s lists %s but it is missing", summary_path, name)
+                return
+        loose = sorted(p for p in directory.iterdir() if p.suffix in (".mkv", ".raw"))
+        if loose:
+            log.warning(
+                "No %s in %s; transcoding %d file(s) with defaults and no transform",
+                RECORDING_SUMMARY_FILENAME,
+                directory,
+                len(loose),
+            )
+        for video in loose:
+            add(video, "")
+
+    for path in paths:
+        if path.is_dir():
+            handle_dir(path)
+            if recursive:
+                for sub in sorted(path.rglob("*")):
+                    if sub.is_dir():
+                        handle_dir(sub)
+        else:
+            entry = None
+            summary_path = path.parent / RECORDING_SUMMARY_FILENAME
+            if summary_path.exists():
+                data = _read_summary(summary_path)
+                if data is not None:
+                    entry = next(
+                        (
+                            e
+                            for e in data.get("cameras", [])
+                            if e.get("file") == path.name
+                        ),
+                        None,
+                    )
+            if entry is not None:
+                add(path, _job_vf(entry, as_displayed))
+            else:
+                log.warning(
+                    "No %s entry for %s; transcoding with defaults and no transform",
+                    RECORDING_SUMMARY_FILENAME,
+                    path,
+                )
+                add(path, "")
+
+    return list(jobs.values())
+
+
 @app.command()
 def transcode(
     paths: Annotated[
         list[Path],
         typer.Argument(
             exists=True,
-            help="PATHS are .raw files or directories to scan for them.",
+            help="Folders and/or video files (.mkv/.raw). A folder is driven by "
+            "its recording_summary.json if present.",
         ),
     ],
-    crf: Annotated[int, typer.Option()] = 16,
-    preset: Annotated[
-        str,
+    recursive: Annotated[
+        bool,
+        typer.Option("-r", "--recursive", help="Recurse into the given folders."),
+    ] = False,
+    as_displayed: Annotated[
+        bool,
         typer.Option(
-            help="x264 speed preset; offline transcoding can afford a slow one."
+            "--as-displayed/--as-saved",
+            help="Apply each video's recorded display transform (skipped when "
+            "already baked in). Default: reproduce as saved.",
         ),
-    ] = "veryslow",
+    ] = False,
+    config_dir: Annotated[
+        Path,
+        typer.Option(
+            "--config-dir",
+            help="Directory whose octacam_config.toml [transcode] table supplies "
+            "the default encoding parameters.",
+        ),
+    ] = Path("."),
+    fmt: Annotated[
+        str | None,
+        typer.Option("--format", help="Output container [default: from config]."),
+    ] = None,
+    crf: Annotated[
+        int | None, typer.Option(help="x264 quality [default: from config].")
+    ] = None,
+    preset: Annotated[
+        str | None, typer.Option(help="x264 speed preset [default: from config].")
+    ] = None,
+    pix_fmt: Annotated[
+        str | None,
+        typer.Option("--pix-fmt", help="Pixel format [default: from config]."),
+    ] = None,
     x264_params: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--x264-params",
-            help='Extra libx264 options as ffmpeg -x264-params, e.g. "keyint=30'
-            ':scenecut=0".',
+            help='Extra libx264 -x264-params, e.g. "keyint=30:scenecut=0" '
+            "[default: from config].",
         ),
-    ] = "",
+    ] = None,
+    remove_source: Annotated[
+        bool,
+        typer.Option(
+            "--remove-source",
+            help="Delete each source .mkv/.raw (and a .raw's .json sidecar) once "
+            "it transcodes successfully. The recording_summary.json is kept.",
+        ),
+    ] = False,
 ) -> None:
-    """Transcode .raw recordings (with .json sidecars) to x264 MKV.
+    """Transcode recordings to compressed video.
 
-    PATHS are .raw files or directories to scan for them.
+    PATHS may mix folders and video files. A folder is transcoded per its
+    recording_summary.json when present (honoring --as-saved/--as-displayed);
+    otherwise its .mkv/.raw files are transcoded with default parameters and no
+    transform. Defaults come from the [transcode] config table.
     """
-    from octacam.writer import transcode_raw
+    from octacam.config import load_config_dir
+    from octacam.writer import transcode_file
 
-    raw_files: list[Path] = []
-    for path in paths:
-        raw_files.extend(sorted(path.glob("*.raw")) if path.is_dir() else [path])
-    if not raw_files:
-        log.warning("No .raw files found in: %s", ", ".join(map(str, paths)))
+    tcfg = load_config_dir(config_dir).transcode
+    out_format = (fmt or tcfg.format).lstrip(".")
+    crf = crf if crf is not None else tcfg.crf
+    preset = preset or tcfg.preset
+    pix_fmt = pix_fmt or tcfg.pix_fmt
+    x264_params = x264_params if x264_params is not None else tcfg.x264_params
+
+    jobs = _transcode_jobs(paths, recursive, as_displayed, out_format)
+    if not jobs:
+        log.warning("No videos to transcode in: %s", ", ".join(map(str, paths)))
         return
     failures = 0
-    for raw_file in dict.fromkeys(raw_files):
-        try:
-            typer.echo(
-                transcode_raw(raw_file, crf=crf, preset=preset, x264_params=x264_params)
+    for input_path, vf in jobs:
+        output = input_path.with_suffix("." + out_format)
+        if output.resolve() == input_path.resolve():
+            log.warning(
+                "Skipping %s: already in target format (%s)", input_path, out_format
             )
+            continue
+        try:
+            result = transcode_file(
+                input_path,
+                output,
+                crf=crf,
+                preset=preset,
+                pix_fmt=pix_fmt,
+                x264_params=x264_params,
+                vf=vf,
+            )
+            typer.echo(result)
         except Exception as e:  # one bad file must not abort the batch
             failures += 1
-            log.error("Failed to transcode %s: %s", raw_file, e)
+            log.error("Failed to transcode %s: %s", input_path, e)
+            continue
+        if remove_source:
+            _remove_source_files(input_path)
     if failures:
         sys.exit(f"{failures} file(s) failed to transcode")
+
+
+def _remove_source_files(input_path: Path) -> None:
+    """Delete a transcoded source and, for .raw, its .json geometry sidecar.
+
+    Never removes the session recording_summary.json. Deletion failures are
+    logged but never fail the run (the transcode already succeeded)."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    victims = [input_path]
+    if input_path.suffix == ".raw":
+        sidecar = input_path.with_suffix(".json")
+        if sidecar.name != RECORDING_SUMMARY_FILENAME:
+            victims.append(sidecar)
+    for victim in victims:
+        try:
+            victim.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("Could not remove %s: %s", victim, e)
 
 
 def main() -> None:
