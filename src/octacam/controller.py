@@ -26,7 +26,14 @@ from pathlib import Path
 
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
-from octacam.writer import FORMATS, VideoFormat
+from octacam.writer import (
+    DEFAULT_CRF,
+    DEFAULT_PIX_FMT,
+    DEFAULT_PRESET,
+    DEFAULT_X264_PARAMS,
+    FORMATS,
+    VideoFormat,
+)
 
 log = logging.getLogger("octacam")
 
@@ -54,6 +61,29 @@ def normalize_save_dir(text: str) -> str:
     return str(path.absolute()).replace("\\", "/")
 
 
+def sanitize_camera_name(name: str) -> str:
+    """Validate a camera name as a safe, single-segment video filename stem.
+
+    ``camera.name`` becomes the per-camera output filename (CameraSystem.
+    start_record writes ``<name>.<ext>``), so a name must be non-blank and
+    contain no path separators or ``.``/``..`` traversal. Mirrors
+    config_writer.safe_config_name, kept separate to give a camera-specific
+    error message.
+    """
+    clean = (name or "").strip()
+    if (
+        not clean
+        or clean in (".", "..")
+        or "/" in clean
+        or "\\" in clean
+        or os.sep in clean
+        or (os.altsep and os.altsep in clean)
+        or Path(clean).name != clean
+    ):
+        raise ValueError(f"Invalid camera name: {name!r}")
+    return clean
+
+
 @dataclass
 class RecordingSettings:
     fps: float = 100.0
@@ -61,10 +91,11 @@ class RecordingSettings:
     save_dir: str = "./"
     trigger_source: str = "software"  # "software" | "external"
     codec: str = "x264"
-    crf: int = 16
-    preset: str = "ultrafast"
-    pix_fmt: str = "gray"
+    crf: int = DEFAULT_CRF
+    preset: str = DEFAULT_PRESET
+    pix_fmt: str = DEFAULT_PIX_FMT
     remux_mp4: bool = False
+    x264_params: str = DEFAULT_X264_PARAMS
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.codec]
@@ -75,6 +106,7 @@ class RecordingSettings:
                 preset=self.preset,
                 pix_fmt=self.pix_fmt,
                 remux_mp4=self.remux_mp4,
+                x264_params=self.x264_params,
             )
         return video_format
 
@@ -122,6 +154,9 @@ class RecordingController:
         self._stop_event = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
+        # Bumped each time a countdown starts so clients can tell one recording
+        # from the next even if they miss the intervening non-recording states.
+        self._recording_seq = 0
         self._listeners: list = []
         self.events: deque = deque(maxlen=100)
 
@@ -198,6 +233,41 @@ class RecordingController:
             "exists": resolved.exists(),
             "creatable": parent is not None and os.access(parent, os.W_OK),
             "free_bytes": free_bytes,
+        }
+
+    def browse_directory(self, path_str: str = "") -> dict:
+        """List the immediate subdirectories of a server-side path.
+
+        Recording happens on the rig, so the save directory is a *server-side*
+        path the browser cannot pick natively; this backs an in-app directory
+        picker. A blank path opens at the current save directory; a partially
+        typed or not-yet-created path falls back to its nearest existing
+        ancestor, so the picker always lands somewhere it can list. Hidden
+        directories (``.``-prefixed) are omitted.
+        """
+        raw = (path_str or "").strip() or (self._settings.save_dir or "")
+        base = Path(normalize_save_dir(raw)) if raw.strip() else Path.home()
+        current = next(
+            (p for p in [base, *base.parents] if p.is_dir()),
+            Path(base.anchor or "/"),
+        )
+        try:
+            entries = sorted(
+                (
+                    child.name
+                    for child in current.iterdir()
+                    if not child.name.startswith(".") and child.is_dir()
+                ),
+                key=str.lower,
+            )
+        except OSError:
+            entries = []
+        parent = str(current.parent) if current.parent != current else None
+        return {
+            "path": str(current),
+            "parent": parent,
+            "writable": os.access(current, os.W_OK),
+            "entries": entries,
         }
 
     # ------------------------------------------------------ camera parameters
@@ -322,6 +392,26 @@ class RecordingController:
                 raise RuntimeError("Cannot save camera parameters while recording")
         return self.camera_system.save_all_params()
 
+    def set_camera_name(self, index: int, name: str) -> dict:
+        """Rename one camera live; rejected while recording or on a clash.
+
+        ``camera.name`` is the per-camera output filename, so the name must be
+        a safe single segment (``sanitize_camera_name``) and unique across the
+        rig — two cameras sharing a name would write to the same video file.
+        The change is in-memory only; it is persisted to the config solely by
+        an explicit save (the GUI sends each camera's name with the layout).
+        """
+        clean = sanitize_camera_name(name)
+        with self._lock:
+            if self.recording_active:
+                raise RuntimeError("Camera names are locked while recording")
+            camera = self.camera_system.camera_at(index)
+            for other_index, other in enumerate(self.camera_system):
+                if other_index != index and other.name == clean:
+                    raise ValueError(f"Another camera already uses the name {clean!r}")
+            camera.name = clean
+            return {"index": index, "serial": camera.serial_number, "name": clean}
+
     # -------------------------------------------------------------- preview
 
     def start_preview(self) -> None:
@@ -353,7 +443,8 @@ class RecordingController:
             if save_dir.exists() and not confirm_overwrite:
                 return StartResult(
                     StartResult.NEEDS_CONFIRM,
-                    f"Directory already exists: {save_dir}",
+                    f"Directory already exists: {save_dir}\n\n"
+                    "Existing data will be overwritten.",
                 )
             try:
                 save_dir.mkdir(parents=True, exist_ok=True)
@@ -468,6 +559,7 @@ class RecordingController:
             with self._lock:
                 deadline = time.monotonic() + duration_s + STOP_GRACE_S
                 self._deadline = deadline
+                self._recording_seq += 1
                 self._set_state("recording")
             # --- countdown
             while not self._stop_event.is_set():
@@ -511,8 +603,10 @@ class RecordingController:
         with self._lock:
             settings = self._settings
             remaining_ms = None
+            recording_id = None
             if self._state == "recording" and self._deadline is not None:
                 remaining_ms = max(0, round((self._deadline - time.monotonic()) * 1000))
+                recording_id = self._recording_seq
         try:
             free_bytes = shutil.disk_usage(
                 next(
@@ -526,6 +620,7 @@ class RecordingController:
         return {
             "state": self._state,
             "remaining_ms": remaining_ms,
+            "recording_id": recording_id,
             "save_dir": settings.save_dir,
             "disk_free_bytes": free_bytes,
             "settings": dataclasses.asdict(settings),

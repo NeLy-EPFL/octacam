@@ -113,6 +113,22 @@ body {
 
 .tile-name.failed { color: var(--red); }
 
+/* double-click a tile title to rename (allowed only when connected and not
+   recording); the cursor hint signals editability. */
+#grid.can-rename .tile-name { cursor: text; }
+
+.tile-title.editing .tile-name { display: none; }
+
+/* Two classes outrank the global input[type="text"] rule on width/padding. */
+.tile-title .tile-name-edit {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  padding: 0 3px;
+  font-size: 11px;
+  border-color: var(--accent);
+}
+
 .tile-stats {
   flex: none;
   display: flex;
@@ -218,6 +234,22 @@ body {
 
 .tab h3:first-child { margin-top: 0; }
 
+/* Plugin status notice (e.g. Arduino serial port unavailable). Lives outside
+   the disabled fieldset so its action button stays clickable. */
+.plugin-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.plugin-status button { flex: none; }
+
 fieldset {
   margin: 0;
   padding: 0;
@@ -261,7 +293,7 @@ fieldset:disabled { opacity: 0.55; }
 
 /* inputs */
 
-input[type="number"], select, textarea {
+input[type="number"], input[type="text"], select, textarea {
   width: 100%;
   min-width: 0;
   padding: 3px 6px;
@@ -272,7 +304,8 @@ input[type="number"], select, textarea {
   font: inherit;
 }
 
-input[type="number"]:focus, select:focus, textarea:focus {
+input[type="number"]:focus, input[type="text"]:focus,
+select:focus, textarea:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -354,12 +387,49 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #record-status.error { color: var(--red); }
 #record-status.warning { color: var(--amber); }
 
-#disk-free {
-  display: block;
+#record-progress {
+  height: 6px;
   margin-top: 2px;
-  text-align: right;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#record-progress-bar {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.25s linear;
+}
+
+/* Waiting for the first trigger: no deadline yet, so sweep an indeterminate
+   bar instead of sitting at zero. */
+#record-progress.indeterminate #record-progress-bar {
+  width: 35%;
+  transition: none;
+  animation: record-indeterminate 1.25s ease-in-out infinite;
+}
+
+@keyframes record-indeterminate {
+  from { margin-left: -35%; }
+  to { margin-left: 100%; }
+}
+
+.save-dir-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.save-dir-foot #browse-dir-btn { flex: none; font-size: 11px; padding: 3px 8px; }
+
+#disk-free {
   font-size: 11px;
   color: var(--text-dim);
+  text-align: right;
 }
 
 #loop-info {
@@ -393,21 +463,32 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer {
   flex: none;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
   border-top: 1px solid var(--border);
   font-size: 11px;
   color: var(--text-dim);
 }
 
+#footer-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
 #conn-state.online { color: var(--green); }
 #conn-state.offline { color: var(--red); }
 
+/* shown only when another browser is also connected (shared control) */
+#peers::before { content: "● "; color: var(--text-dim); }
+#peers { color: var(--text); }
+
 #footer-actions {
-  margin-left: auto;
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
 }
 
@@ -425,7 +506,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
-#shutdown-btn { font-size: 13px; line-height: 1; }
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
 
 /* ------------------------------------------------ camera params tab */
@@ -535,6 +615,71 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 .modal-actions #save-confirm:not(:disabled) {
+  background: var(--green);
+  border-color: transparent;
+  color: #fff;
+}
+
+/* ----------------------------------------------- directory picker modal */
+
+#dir-dialog .modal-card { width: 420px; }
+
+.dir-current-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+#dir-up { flex: none; padding: 2px 9px; }
+
+.dir-current {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.dir-list {
+  height: 220px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.dir-entry {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dir-entry::after { content: "/"; color: var(--text-dim); }
+.dir-entry:hover { background: var(--panel-2); }
+
+.dir-empty {
+  padding: 10px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.modal-actions #dir-select:not(:disabled) {
   background: var(--green);
   border-color: transparent;
   color: #fff;

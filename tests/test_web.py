@@ -110,6 +110,11 @@ def test_system_and_settings_endpoints(client):
     assert response.status_code == 200
     assert response.json()["fps"] == 60.0
 
+    # libx264 knobs (crf and the free-form -x264-params passthrough) patch too
+    patched = client.put("/api/settings", json={"x264_params": "keyint=30:scenecut=0"})
+    assert patched.status_code == 200
+    assert patched.json()["x264_params"] == "keyint=30:scenecut=0"
+
     assert client.put("/api/settings", json={"fps": -1}).status_code == 422
     assert client.put("/api/settings", json={"bogus": 1}).status_code == 422
 
@@ -132,6 +137,33 @@ def test_system_and_settings_endpoints(client):
         1,
     )
     assert client.post("/api/serial/command", json=command).status_code in (404, 405)
+
+
+def _wait_for_presence(ws, tries=200):
+    """Return the client count from the next presence message on ``ws``.
+
+    The socket also carries preview frames, state, settings and telemetry, so
+    skip past those until a presence message arrives.
+    """
+    for _ in range(tries):
+        message = ws.receive()
+        if message.get("text"):
+            payload = json.loads(message["text"])
+            if payload["type"] == "presence":
+                return payload["clients"]
+    raise AssertionError("no presence message received")
+
+
+def test_websocket_broadcasts_presence(client):
+    # One browser: it learns it is alone.
+    with client.websocket_connect("/api/ws") as ws1:
+        assert _wait_for_presence(ws1) == 1
+        # A second browser connects: both are told the count rose to 2.
+        with client.websocket_connect("/api/ws") as ws2:
+            assert _wait_for_presence(ws2) == 2
+            assert _wait_for_presence(ws1) == 2
+        # After it leaves, the first sees the count fall back to 1.
+        assert _wait_for_presence(ws1) == 1
 
 
 def test_websocket_preview_and_telemetry(client):
@@ -302,6 +334,144 @@ def test_camera_param_endpoints(client):
         ).status_code
         == 404
     )
+
+
+def test_browse_endpoint(client, tmp_path):
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "afile.txt").write_text("x")
+
+    listing = client.post("/api/browse", json={"path": str(tmp_path)}).json()
+    assert listing["path"] == str(tmp_path)
+    # sorted, directories only, dotfiles and plain files omitted
+    assert listing["entries"] == ["alpha", "beta"]
+    assert listing["parent"] == str(tmp_path.parent)
+    assert listing["writable"] is True
+
+    # descend into a subfolder
+    deeper = client.post("/api/browse", json={"path": str(tmp_path / "alpha")}).json()
+    assert deeper["path"] == str(tmp_path / "alpha")
+    assert deeper["parent"] == str(tmp_path)
+
+    # a not-yet-created path falls back to its nearest existing ancestor
+    nope = client.post(
+        "/api/browse", json={"path": str(tmp_path / "alpha" / "x" / "y")}
+    ).json()
+    assert nope["path"] == str(tmp_path / "alpha")
+
+    # blank path opens at the current save dir's nearest existing ancestor
+    # (the fixture's save_dir is tmp_path/rec/001, which does not exist yet)
+    assert client.post("/api/browse", json={"path": ""}).json()["path"] == str(tmp_path)
+
+    # default body (no path) is accepted; unknown field is rejected
+    assert client.post("/api/browse").status_code == 200
+    assert client.post("/api/browse", json={"x": 1}).status_code == 422
+
+
+def test_camera_name_endpoint(client):
+    r = client.put("/api/cameras/0/name", json={"name": "left"})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"index": 0, "serial": EMULATED_SERIALS[0], "name": "left"}
+
+    # the live rename is reflected by /api/system and /api/state
+    assert client.get("/api/system").json()["cameras"][0]["name"] == "left"
+    assert client.get("/api/state").json()["cameras"][0]["name"] == "left"
+
+    # surrounding whitespace is trimmed
+    trimmed = client.put("/api/cameras/1/name", json={"name": "  right  "})
+    assert trimmed.json()["name"] == "right"
+
+    # a name already taken by another camera is rejected
+    assert client.put("/api/cameras/1/name", json={"name": "left"}).status_code == 422
+    # renaming a camera to its own current name is a no-op success
+    assert client.put("/api/cameras/0/name", json={"name": "left"}).status_code == 200
+
+    # path separators and blank names are rejected (the name is a filename stem)
+    assert client.put("/api/cameras/0/name", json={"name": "a/b"}).status_code == 422
+    assert client.put("/api/cameras/0/name", json={"name": "   "}).status_code == 422
+
+    # bad index, and strict-model violations
+    assert client.put("/api/cameras/9/name", json={"name": "x"}).status_code == 404
+    assert (
+        client.put("/api/cameras/0/name", json={"name": "x", "y": 1}).status_code == 422
+    )
+    assert client.put("/api/cameras/0/name", json={}).status_code == 422
+
+
+def test_camera_name_locked_while_recording(client):
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        locked = client.put("/api/cameras/0/name", json={"name": "left"})
+        assert locked.status_code == 409
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
+def test_camera_name_used_for_recording_file(client, tmp_path):
+    save_dir = tmp_path / "rec" / "001"
+    assert (
+        client.put("/api/cameras/0/name", json={"name": "cam-left"}).status_code == 200
+    )
+    assert (
+        client.put("/api/cameras/1/name", json={"name": "cam-right"}).status_code == 200
+    )
+
+    response = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert response.status_code == 202, response.text
+
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        if client.get("/api/state").json()["state"] == "preview":
+            break
+        time.sleep(0.2)
+
+    # the per-camera video files are named after the renamed cameras
+    assert (save_dir / "cam-left.mkv").exists()
+    assert (save_dir / "cam-right.mkv").exists()
+
+
+def test_config_save_rejects_unsafe_camera_name(client, tmp_path):
+    # Path-traversal / separator names are rejected at the save boundary, just
+    # as the live-rename endpoint rejects them (the name is a filename stem).
+    for bad in ("a/b", "..", "."):
+        r = client.post(
+            "/api/config/save",
+            json={
+                "target": "active",
+                "save_sensor": False,
+                "cameras": [{"serial": EMULATED_SERIALS[0], "name": bad}],
+            },
+        )
+        assert r.status_code == 422, (bad, r.text)
+
+    # Two cameras sharing a name would collide on one video file -> rejected.
+    dup = client.post(
+        "/api/config/save",
+        json={
+            "target": "active",
+            "save_sensor": False,
+            "cameras": [
+                {"serial": EMULATED_SERIALS[0], "name": "same"},
+                {"serial": EMULATED_SERIALS[1], "name": "same"},
+            ],
+        },
+    )
+    assert dup.status_code == 422, dup.text
+
+    # A safe, unique name is accepted and persisted trimmed.
+    ok = client.post(
+        "/api/config/save",
+        json={
+            "target": "active",
+            "save_sensor": False,
+            "cameras": [{"serial": EMULATED_SERIALS[0], "name": "  cam-left  "}],
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    toml = (tmp_path / "octacam_config.toml").read_text()
+    assert 'name = "cam-left"' in toml
 
 
 def test_camera_param_reset_endpoint(client):

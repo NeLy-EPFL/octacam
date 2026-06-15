@@ -34,6 +34,17 @@ log = logging.getLogger("octacam")
 _SENTINEL = None
 FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 
+# Default libx264 encoder parameters. The single source of truth shared by the
+# writer, the RecordingSettings dataclass, the config (gui.*_default), and the
+# CLI, so the default can never drift between layers. CRF 18 is the capture
+# default (near-visually-lossless; offline transcoding can re-encode harder).
+DEFAULT_CRF = 18
+DEFAULT_PRESET = "ultrafast"
+DEFAULT_PIX_FMT = "gray"
+# Extra libx264 options passed verbatim to ffmpeg's -x264-params (e.g.
+# "keyint=30:scenecut=0"); empty means the flag is omitted entirely.
+DEFAULT_X264_PARAMS = ""
+
 
 def find_ffmpeg() -> str:
     """Locate an ffmpeg executable: $OCTACAM_FFMPEG, imageio-ffmpeg, $PATH."""
@@ -65,6 +76,7 @@ def build_x264_args(
     preset: str,
     pix_fmt: str,
     source: str = "pipe:0",
+    x264_params: str = "",
 ) -> list[str]:
     """ffmpeg argv encoding rawvideo GRAY8 (from `source`) to x264.
 
@@ -72,6 +84,10 @@ def build_x264_args(
     ffmpeg-based tools; browsers would need yuv420p). Note: ffprobe shows
     such streams as yuvj420p because the H.264 decoder synthesizes neutral
     chroma; the x264 encoder log ("4:0:0, 8-bit") is the source of truth.
+
+    ``x264_params``, when non-empty, is passed verbatim as ffmpeg's
+    ``-x264-params`` (a single ``opt=val:opt2=val2`` token) so any libx264
+    knob beyond crf/preset can be set from config without a dedicated flag.
     """
     return [
         ffmpeg,
@@ -94,6 +110,7 @@ def build_x264_args(
         preset,
         "-crf",
         str(crf),
+        *(["-x264-params", x264_params] if x264_params else []),
         "-pix_fmt",
         pix_fmt,
         "-y",
@@ -255,17 +272,19 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
     def __init__(
         self,
-        crf: int = 16,
-        preset: str = "ultrafast",
-        pix_fmt: str = "gray",
+        crf: int = DEFAULT_CRF,
+        preset: str = DEFAULT_PRESET,
+        pix_fmt: str = DEFAULT_PIX_FMT,
         remux_mp4: bool = False,
         max_queue_size: int = 20,
+        x264_params: str = DEFAULT_X264_PARAMS,
     ):
         super().__init__(max_queue_size)
         self.crf = crf
         self.preset = preset
         self.pix_fmt = pix_fmt
         self.remux_mp4 = remux_mp4
+        self.x264_params = x264_params
         self._proc: subprocess.Popen | None = None
         self._filename: str | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
@@ -286,6 +305,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             self.crf,
             self.preset,
             self.pix_fmt,
+            x264_params=self.x264_params,
         )
         self._filename = filename
         self._stderr_tail.clear()
@@ -433,10 +453,11 @@ class VideoFormat:
     codec: str  # "x264" | "raw" | "mjpg" | "h264"
     extension: str
     label: str
-    crf: int = 16
-    preset: str = "ultrafast"
-    pix_fmt: str = "gray"
+    crf: int = DEFAULT_CRF
+    preset: str = DEFAULT_PRESET
+    pix_fmt: str = DEFAULT_PIX_FMT
     remux_mp4: bool = False
+    x264_params: str = DEFAULT_X264_PARAMS
 
     def create_writer(self, max_queue_size: int = 20) -> AsyncFrameWriter:
         if self.codec == "x264":
@@ -446,6 +467,7 @@ class VideoFormat:
                 pix_fmt=self.pix_fmt,
                 remux_mp4=self.remux_mp4,
                 max_queue_size=max_queue_size,
+                x264_params=self.x264_params,
             )
         if self.codec == "raw":
             return RawVideoWriter(max_queue_size)
@@ -488,8 +510,9 @@ def transcode_raw(
     raw_path: Path,
     crf: int = 16,
     preset: str = "ultrafast",
-    pix_fmt: str = "gray",
+    pix_fmt: str = DEFAULT_PIX_FMT,
     output: Path | None = None,
+    x264_params: str = DEFAULT_X264_PARAMS,
 ) -> Path:
     """Transcode a .raw Mono8 dump (with its .json sidecar) to x264 MKV."""
     raw_path = Path(raw_path)
@@ -508,6 +531,7 @@ def transcode_raw(
         preset,
         pix_fmt,
         source=str(raw_path),
+        x264_params=x264_params,
     )
     result = subprocess.run(args, capture_output=True)
     if result.returncode != 0:

@@ -13,6 +13,7 @@ from octacam.controller import (
     StartResult,
     increment_trailing_number,
     normalize_save_dir,
+    sanitize_camera_name,
 )
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
@@ -62,11 +63,56 @@ def test_update_settings_validation():
         controller.update_settings(fps=10.0)
 
 
+def test_sanitize_camera_name():
+    assert sanitize_camera_name("  cam left  ") == "cam left"
+    assert sanitize_camera_name("cam_01") == "cam_01"
+    for bad in ("", "   ", ".", "..", "a/b", "a\\b"):
+        with pytest.raises(ValueError):
+            sanitize_camera_name(bad)
+
+
+def test_browse_directory(tmp_path):
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "f.txt").write_text("x")
+
+    controller = RecordingController.__new__(RecordingController)
+    controller._settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
+
+    listing = controller.browse_directory(str(tmp_path))
+    assert listing["path"] == str(tmp_path)
+    assert listing["entries"] == ["a", "b"]  # sorted, dirs only, no dotfiles
+    assert listing["parent"] == str(tmp_path.parent)
+    assert listing["writable"] is True
+
+    # blank path -> the nearest existing ancestor of the current save_dir
+    assert controller.browse_directory("")["path"] == str(tmp_path)
+    # a not-yet-created path -> its nearest existing ancestor
+    assert controller.browse_directory(str(tmp_path / "a" / "x" / "y"))["path"] == str(
+        tmp_path / "a"
+    )
+
+
 def test_video_format_carries_x264_options():
-    settings = RecordingSettings(codec="x264", crf=20, preset="superfast")
+    settings = RecordingSettings(
+        codec="x264",
+        crf=20,
+        preset="superfast",
+        pix_fmt="yuv420p",
+        x264_params="keyint=30:scenecut=0",
+    )
     video_format = settings.video_format()
     assert (video_format.crf, video_format.preset) == (20, "superfast")
+    assert video_format.pix_fmt == "yuv420p"
+    assert video_format.x264_params == "keyint=30:scenecut=0"
     assert RecordingSettings(codec="raw").video_format().extension == "raw"
+
+
+def test_recording_settings_default_crf_is_18():
+    # The capture default tracks writer.DEFAULT_CRF (CRF 18, near visually
+    # lossless); raising it shrinks files/CPU for the same perceptual quality.
+    assert RecordingSettings().crf == 18
 
 
 # ------------------------------------------------- emulator integration
@@ -194,3 +240,29 @@ def test_needs_confirm_on_existing_dir(camera_system, tmp_path):
     validation = controller.validate_save_dir(str(save_dir))
     assert validation["exists"] and validation["creatable"]
     assert validation["free_bytes"] > 0
+
+
+def test_set_camera_name(camera_system):
+    controller = RecordingController(
+        camera_system, RecordingSettings(), auto_preview=False
+    )
+
+    result = controller.set_camera_name(0, "  left  ")
+    assert result == {"index": 0, "serial": EMULATED_SERIALS[0], "name": "left"}
+    assert camera_system.cameras[0].name == "left"
+
+    # renaming a camera to its own name is a no-op success
+    controller.set_camera_name(0, "left")
+
+    # a name held by another camera, an unsafe name, and a bad index all raise
+    with pytest.raises(ValueError):
+        controller.set_camera_name(1, "left")
+    with pytest.raises(ValueError):
+        controller.set_camera_name(0, "a/b")
+    with pytest.raises(IndexError):
+        controller.set_camera_name(9, "x")
+
+    # names are locked while a recording is active
+    controller._state = "recording"
+    with pytest.raises(RuntimeError):
+        controller.set_camera_name(0, "other")

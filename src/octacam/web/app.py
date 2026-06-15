@@ -37,12 +37,16 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import octacam
 from octacam import config_writer
 from octacam.config import OctacamConfig, find_config_file, parse_config
-from octacam.controller import RecordingController, StartResult
+from octacam.controller import (
+    RecordingController,
+    StartResult,
+    sanitize_camera_name,
+)
 from octacam.plugins.base import PluginManager
 from octacam.writer import FORMATS
 
@@ -75,6 +79,7 @@ class SettingsPatch(BaseModel):
     preset: str | None = None
     pix_fmt: str | None = None
     remux_mp4: bool | None = None
+    x264_params: str | None = None
 
 
 class SaveDirValidateRequest(BaseModel):
@@ -86,6 +91,17 @@ class SaveDirValidateRequest(BaseModel):
         if not value.strip():
             raise ValueError("path is required")
         return value
+
+
+class BrowseRequest(BaseModel):
+    """List a server-side directory's subfolders for the save-dir picker.
+
+    A blank path is allowed (and means "open at the current save directory"),
+    unlike SaveDirValidateRequest which requires one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = ""
 
 
 class RecordingStartRequest(BaseModel):
@@ -111,6 +127,14 @@ class CameraParamReset(BaseModel):
     scope: Literal["selected", "all"] = "selected"
 
 
+class CameraNamePatch(BaseModel):
+    """Rename one camera (validated and applied by the controller)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
 class CameraDisplayParams(BaseModel):
     """A camera's composed display state, sent up by the browser to be saved.
 
@@ -129,6 +153,13 @@ class CameraDisplayParams(BaseModel):
     window_width: float = -1.0
     window_height: float = -1.0
 
+    @field_validator("name")
+    @classmethod
+    def _safe_name(cls, value: str | None) -> str | None:
+        # The name becomes a video filename stem, so hold a saved name to the
+        # same rules as the live-rename endpoint (controller.set_camera_name).
+        return sanitize_camera_name(value) if value is not None else None
+
 
 class SaveConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -139,6 +170,16 @@ class SaveConfigRequest(BaseModel):
     save_sensor: bool = True  # write <serial>.pfs files
     save_display: bool = True  # write octacam_config.toml
     cameras: list[CameraDisplayParams] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _unique_names(self) -> "SaveConfigRequest":
+        # Two cameras sharing a name would write to the same video file, so
+        # reject duplicates at the save boundary (the loader drops them too,
+        # but only incidentally). Names are already sanitized per-field above.
+        names = [c.name for c in self.cameras if c.name]
+        if len(names) != len(set(names)):
+            raise ValueError("Camera names must be unique")
+        return self
 
 
 class _Client:
@@ -216,6 +257,19 @@ class _AppState:
     def _broadcast_event(self, message: str) -> None:
         for client in list(self.clients):
             client.queue_event(message)
+
+    def broadcast_presence(self) -> None:
+        """Tell every connected browser how many are currently connected.
+
+        Control is shared (any browser can drive the rig), so a presence count
+        lets an operator see they are not alone before changing settings or
+        shutting the server down. Called on the event-loop thread from the
+        WebSocket handler, so the synchronous queue-to-clients path is safe.
+        """
+        self._broadcast_text(
+            "presence",
+            json.dumps({"type": "presence", "clients": len(self.clients)}),
+        )
 
     def broadcast_threadsafe(self, kind: str, payload: dict) -> None:
         """Push controller/state updates from non-asyncio threads."""
@@ -296,7 +350,7 @@ class _AppState:
 def _default_shutdown() -> None:
     """Stop the server. uvicorn already installs a SIGINT handler, so this
     triggers its graceful shutdown -> lifespan teardown -> the cleanup in the
-    `finally` block of cli.serve (cameras released, ffmpeg finalized, serial
+    `finally` block of cli.gui (cameras released, ffmpeg finalized, serial
     closed)."""
     os.kill(os.getpid(), signal.SIGINT)
 
@@ -425,6 +479,23 @@ def create_app(
             )
         return result
 
+    @app.put("/api/cameras/{index}/name")
+    def put_camera_name(index: int, patch: CameraNamePatch):
+        try:
+            result = controller.set_camera_name(index, patch.name)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        # Broadcast so every browser's grid tile and camera picker relabel; the
+        # `:index` suffix dedups per camera in the newest-only send queue.
+        state.broadcast_threadsafe(
+            f"camera_name:{result['index']}", {"type": "camera_name", **result}
+        )
+        return result
+
     @app.post("/api/cameras/{index}/params/reset")
     def reset_camera_params(index: int, payload: CameraParamReset | None = None):
         if not config_dir:
@@ -529,6 +600,11 @@ def create_app(
     def validate_save_dir(payload: SaveDirValidateRequest):
         return controller.validate_save_dir(payload.path)
 
+    @app.post("/api/browse")
+    def browse(payload: BrowseRequest | None = None):
+        payload = payload or BrowseRequest()
+        return controller.browse_directory(payload.path)
+
     @app.post("/api/recording/start")
     def start_recording(payload: RecordingStartRequest | None = None):
         payload = payload or RecordingStartRequest()
@@ -571,6 +647,7 @@ def create_app(
         await ws.accept()
         client = _Client(ws)
         state.clients.add(client)
+        state.broadcast_presence()
         sender = asyncio.create_task(client.sender())
         loop = asyncio.get_running_loop()
         try:
@@ -604,6 +681,11 @@ def create_app(
             pass
         finally:
             state.clients.discard(client)
+            state.broadcast_presence()
+            # Let plugins react to the closed socket (e.g. the Arduino jog clock
+            # stops, so a dropped connection can't leave the motor spinning).
+            # Off the event loop: the hook may join a worker thread.
+            await loop.run_in_executor(None, state.plugins.dispatch, "on_ws_disconnect")
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sender

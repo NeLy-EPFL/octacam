@@ -94,7 +94,14 @@ class FlirBackend:
     # ------------------------------------------------------------- lifecycle
 
     def open(self) -> None:
-        self._cam.Init()
+        spin = _spin()
+        try:
+            self._cam.Init()
+        except spin.SpinnakerException as e:
+            # Usually the camera is already in use by another process (a second
+            # `octacam gui` on the rig). Surface it as a BackendError so the
+            # caller reports it cleanly instead of a raw PySpin traceback.
+            raise BackendError(str(e)) from e
         # Force monochrome so GetNDArray() yields a 2-D uint8 array matching the
         # GRAY8 video writer.
         try:
@@ -281,9 +288,7 @@ class FlirBackend:
             self._cam.BeginAcquisition()
         except spin.SpinnakerException as e:
             # Name the camera (mirrors the Basler "insufficient resources" hint).
-            log.error(
-                "Failed to start streaming on camera %s: %s", self._serial, e
-            )
+            log.error("Failed to start streaming on camera %s: %s", self._serial, e)
             raise BackendError(str(e)) from e
 
     def start_grab_preview(self) -> None:

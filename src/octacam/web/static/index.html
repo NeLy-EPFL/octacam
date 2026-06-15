@@ -38,7 +38,10 @@
         <div class="col">
           <label class="col-label" for="save-dir">Save directory:</label>
           <textarea id="save-dir" rows="3" spellcheck="false"></textarea>
-          <span id="disk-free"></span>
+          <div class="save-dir-foot">
+            <button type="button" id="browse-dir-btn" class="btn">Browse…</button>
+            <span id="disk-free"></span>
+          </div>
         </div>
         <label class="row"><span>Trigger source:</span>
           <select id="trigger-source">
@@ -52,6 +55,7 @@
       </fieldset>
       <button type="button" id="record-button" class="start" disabled>Start recording</button>
       <div id="record-status"></div>
+      <div id="record-progress" class="hidden"><div id="record-progress-bar"></div></div>
     </section>
 
     <section id="tab-camera" class="tab">
@@ -102,6 +106,10 @@
     </section>
 
     <section id="tab-arduino" class="tab">
+      <div id="arduino-status" class="plugin-status hidden">
+        <span id="arduino-status-msg"></span>
+        <button type="button" id="arduino-reconnect" class="btn">Reconnect</button>
+      </div>
       <fieldset id="arduino-fields" disabled>
         <h3>Loop</h3>
         <div class="row"><span>Initial direction:</span>
@@ -139,10 +147,10 @@
         <label class="center"><input type="checkbox" id="loop-with-recording" checked> Start with recording</label>
 
         <h3>Adjust position</h3>
-        <label class="row"><span>Interval:</span>
+        <label class="row"><span>Step interval:</span>
           <span class="suffixed">
-            <input id="jog-interval" type="number" min="1" max="1000" value="50">
-            <span class="suffix">ms</span>
+            <input id="jog-interval" type="number" min="1000" max="65535" value="2000">
+            <span class="suffix">&micro;s</span>
           </span>
         </label>
         <div class="row"><span>Direction:</span>
@@ -183,13 +191,16 @@
 
     <div id="events"></div>
     <div id="footer">
-      <span id="version"></span>
-      <span id="conn-state"></span>
-      <span id="footer-actions">
-        <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save…</button>
+      <div id="footer-status">
+        <span id="version"></span>
+        <span id="conn-state"></span>
+        <span id="peers" class="hidden" title="Browsers connected to this server"></span>
+      </div>
+      <div id="footer-actions">
+        <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save config…</button>
         <button id="disconnect-btn" type="button">Disconnect</button>
-        <button id="shutdown-btn" type="button" title="Stop the octacam server on the rig">⏻</button>
-      </span>
+        <button id="shutdown-btn" type="button" title="Stop the octacam server on the rig">Shut down</button>
+      </div>
     </div>
   </aside>
 
@@ -211,6 +222,25 @@
       <div class="modal-actions">
         <button type="button" id="save-cancel" class="btn">Cancel</button>
         <button type="button" id="save-confirm" class="btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dir-dialog" class="modal hidden">
+    <div class="modal-card">
+      <h3>Choose save directory</h3>
+      <div class="dir-current-row">
+        <button type="button" id="dir-up" class="btn" title="Parent folder">&#8593;</button>
+        <span id="dir-current" class="dir-current"></span>
+      </div>
+      <div id="dir-list" class="dir-list"></div>
+      <label class="row"><span>New folder:</span>
+        <input id="dir-new" type="text" spellcheck="false" placeholder="optional subfolder">
+      </label>
+      <div id="dir-error" class="modal-error"></div>
+      <div class="modal-actions">
+        <button type="button" id="dir-cancel" class="btn">Cancel</button>
+        <button type="button" id="dir-select" class="btn">Use this folder</button>
       </div>
     </div>
   </div>

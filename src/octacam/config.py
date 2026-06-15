@@ -15,6 +15,13 @@ from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from octacam.writer import (
+    DEFAULT_CRF,
+    DEFAULT_PIX_FMT,
+    DEFAULT_PRESET,
+    DEFAULT_X264_PARAMS,
+)
+
 log = logging.getLogger("octacam")
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
@@ -72,6 +79,15 @@ class GuiConfig(BaseModel):
     # to the writer list.
     video_writer_default: str = ""
 
+    # libx264 capture defaults (used when the codec is x264). They seed the
+    # initial RecordingSettings and the `octacam record` fallbacks; the web UI
+    # and CLI can still override them per recording. x264_params is passed
+    # verbatim to ffmpeg's -x264-params (e.g. "keyint=30:scenecut=0").
+    crf_default: int = DEFAULT_CRF
+    preset_default: str = DEFAULT_PRESET
+    pix_fmt_default: str = DEFAULT_PIX_FMT
+    x264_params_default: str = DEFAULT_X264_PARAMS
+
     display_refresh_interval_ms: int = 33
     record_countdown_timer_interval_ms: int = 1000
     check_record_started_timer_interval_ms: int = 100
@@ -80,7 +96,14 @@ class GuiConfig(BaseModel):
     dock_max_width: int = 300
     save_dir_edit_height_factor: int = 4
 
-    @field_validator("save_directory_default", "video_writer_default", mode="before")
+    @field_validator(
+        "save_directory_default",
+        "video_writer_default",
+        "preset_default",
+        "pix_fmt_default",
+        "x264_params_default",
+        mode="before",
+    )
     @classmethod
     def _as_scalar_str(cls, value: object) -> str:
         return _scalar_str(value)
@@ -197,6 +220,22 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
     return result
 
 
+def _is_safe_camera_name(name: str) -> bool:
+    """Whether ``name`` is usable as a per-camera video filename stem.
+
+    A camera's name becomes ``<name>.<ext>`` at record time, so it must be a
+    single path segment with no traversal. Mirrors
+    ``controller.sanitize_camera_name``, duplicated here so this parse module
+    stays free of the heavier camera/controller imports.
+    """
+    return (
+        name not in (".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and Path(name).name == name
+    )
+
+
 def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
     cameras: list[CameraConfig] = []
     used_serial_numbers: set[str] = set()
@@ -233,6 +272,14 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
             f'the {index}th entry of "cameras"',
             CameraConfig(serial_number=serial_number),
         )
+        if camera.name and not _is_safe_camera_name(camera.name):
+            log.warning(
+                'Ignoring unsafe "name" %r in the %dth entry of "cameras"; '
+                "falling back to the serial number",
+                camera.name,
+                index,
+            )
+            camera.name = ""
         if camera.name:
             if camera.name in used_names:
                 log.warning(

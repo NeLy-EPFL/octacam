@@ -5,10 +5,22 @@ import { api, clampInput } from "./util.js";
 const STEPS_PER_REVOLUTION = 4096;
 
 export class ArduinoTab {
-  constructor({ send, notify }) {
+  constructor({ send, notify, status }) {
     this.send = send; // sends a JSON message over the WS
     this.notify = notify;
-    this.jogTimer = null;
+    this.jogging = false;
+    // Whether the serial port is open (from /api/system, updated by reconnect),
+    // and whether the control WebSocket is up. Both must hold for the controls
+    // to be usable.
+    this.ready = Boolean(status?.ready);
+    this.device = status?.device || "";
+    this.connected = false;
+
+    this.fields = document.getElementById("arduino-fields");
+    this.statusBox = document.getElementById("arduino-status");
+    this.statusMsg = document.getElementById("arduino-status-msg");
+    this.reconnectBtn = document.getElementById("arduino-reconnect");
+    this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
     this.dirCw = document.getElementById("loop-dir-cw");
     this.steps = document.getElementById("loop-steps");
@@ -41,6 +53,60 @@ export class ArduinoTab {
     this._setupJog(document.getElementById("jog-cw"), 1);
 
     this.updateInfo();
+    this._refresh();
+  }
+
+  // ----------------------------------------------------- serial state
+
+  setConnected(connected) {
+    this.connected = connected;
+    if (!connected) this.stopJog();
+    this._refresh();
+  }
+
+  // Reflect the current (websocket, serial) state in the UI: the loop/jog
+  // controls are usable only when both are up; otherwise show why.
+  _refresh() {
+    this.fields.disabled = !this.connected || !this.ready;
+    if (this.ready) {
+      this.statusBox.classList.add("hidden");
+    } else {
+      const where = this.device ? ` (${this.device})` : "";
+      this.statusMsg.textContent =
+        `Serial port${where} is not open — check the Arduino is plugged in ` +
+        `and the device path is correct, then reconnect.`;
+      this.statusBox.classList.remove("hidden");
+    }
+  }
+
+  async _reconnect() {
+    this.reconnectBtn.disabled = true;
+    let r;
+    try {
+      r = await api("POST", "/api/serial/reconnect");
+    } catch {
+      this.reconnectBtn.disabled = false;
+      this.notify("error", "Reconnect failed: server unreachable");
+      return;
+    }
+    this.reconnectBtn.disabled = false;
+    if (!r.ok) {
+      this.notify("error", r.data?.detail || `Reconnect failed (HTTP ${r.status})`);
+      return;
+    }
+    this.ready = Boolean(r.data?.ready);
+    if (r.data?.device) this.device = r.data.device;
+    this._refresh();
+    if (this.ready) {
+      this.notify("info", `Serial port ${this.device} connected.`);
+    } else {
+      this.notify(
+        "warning",
+        r.data?.error
+          ? `Serial port still unavailable: ${r.data.error}`
+          : "Serial port still unavailable."
+      );
+    }
   }
 
   // -------------------------------------------------------------- loop
@@ -76,8 +142,10 @@ export class ArduinoTab {
     };
   }
 
-  // Command to attach to /api/recording/start, or null.
+  // Command to attach to /api/recording/start, or null. Skipped when the
+  // serial port isn't open — there is no board to drive.
   getStartCommand() {
+    if (!this.ready) return null;
     return this.withRecording.checked ? this.command() : null;
   }
 
@@ -118,9 +186,13 @@ export class ArduinoTab {
 
   // --------------------------------------------------------------- jog
 
+  // Pressing a button starts the backend pulse clock; releasing stops it. The
+  // clock (not these messages) paces the steps, so we send exactly one start
+  // and one stop per hold — the wrong-frequency creep of the old per-step
+  // setInterval is gone.
   _setupJog(button, direction) {
     button.addEventListener("pointerdown", (e) => {
-      if (this.jogTimer !== null) return;
+      if (this.jogging) return;
       // Capture the pointer so the hold survives the cursor leaving the
       // button (no spurious pointerleave stop) and a second jog button
       // cannot steal events mid-hold.
@@ -129,12 +201,13 @@ export class ArduinoTab {
       } catch {
         /* capture unsupported; pointerup still stops the jog */
       }
-      const intervalMs = clampInput(this.jogInterval);
-      this.send({ type: "jog", n_steps: direction });
-      this.jogTimer = setInterval(
-        () => this.send({ type: "jog", n_steps: direction }),
-        intervalMs
-      );
+      this.jogging = true;
+      this.send({
+        type: "jog",
+        action: "start",
+        direction,
+        interval_us: clampInput(this.jogInterval),
+      });
     });
     const stop = (e) => {
       if (button.hasPointerCapture?.(e.pointerId)) {
@@ -147,9 +220,8 @@ export class ArduinoTab {
   }
 
   stopJog() {
-    if (this.jogTimer === null) return;
-    clearInterval(this.jogTimer);
-    this.jogTimer = null;
-    this.send({ type: "jog", n_steps: 0 });
+    if (!this.jogging) return;
+    this.jogging = false;
+    this.send({ type: "jog", action: "stop" });
   }
 }

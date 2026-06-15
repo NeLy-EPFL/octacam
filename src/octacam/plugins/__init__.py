@@ -13,13 +13,23 @@ from __future__ import annotations
 
 import importlib
 import logging
+import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from octacam.plugins.base import OctacamPlugin, Plugin, PluginManager
 
 log = logging.getLogger("octacam")
 
-__all__ = ["OctacamPlugin", "Plugin", "PluginManager", "register", "build_plugins"]
+__all__ = [
+    "OctacamPlugin",
+    "Plugin",
+    "PluginManager",
+    "PluginInfo",
+    "register",
+    "build_plugins",
+    "available_plugins",
+]
 
 # name -> factory(options: dict) -> OctacamPlugin. Populated by @register when a
 # plugin module is imported (lazily, in build_plugins).
@@ -95,3 +105,52 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     if plugins:
         log.info("Loaded plugin(s): %s", ", ".join(p.name for p in plugins))
     return PluginManager(plugins)
+
+
+@dataclass(frozen=True)
+class PluginInfo:
+    """A bundled plugin and whether it can currently be loaded.
+
+    ``available`` is False when the plugin's optional dependency is missing; in
+    that case ``detail`` carries the reason (typically the install hint).
+    """
+
+    name: str
+    summary: str
+    available: bool
+    detail: str = ""
+
+
+def _plugin_summary(name: str) -> str:
+    """First line of a bundled plugin module's docstring (best-effort)."""
+    module = sys.modules.get(f"octacam.plugins.{name}")
+    doc = (getattr(module, "__doc__", None) or "").strip()
+    return doc.splitlines()[0] if doc else ""
+
+
+def available_plugins() -> list[PluginInfo]:
+    """Describe every bundled plugin and whether it can load right now.
+
+    Mirrors :func:`build_plugins`: each builtin is imported (running its
+    ``@register``) and dry-run built with no options. A plugin whose optional
+    dependency is missing raises during that build; it is reported as
+    ``available=False`` with the error as ``detail`` rather than propagating.
+    """
+    infos: list[PluginInfo] = []
+    for name in _BUILTINS:
+        _import_builtin(name)
+        summary = _plugin_summary(name)
+        factory = _REGISTRY.get(name)
+        if factory is None:
+            infos.append(
+                PluginInfo(
+                    name, summary, available=False, detail="module failed to import"
+                )
+            )
+            continue
+        try:
+            factory({})
+            infos.append(PluginInfo(name, summary, available=True))
+        except Exception as e:
+            infos.append(PluginInfo(name, summary, available=False, detail=str(e)))
+    return infos

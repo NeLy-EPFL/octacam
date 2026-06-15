@@ -8,10 +8,12 @@ import pytest
 
 from octacam.config import GuiConfig
 from octacam.writer import (
+    DEFAULT_CRF,
     FORMATS,
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
+    build_x264_args,
     default_codec,
     transcode_raw,
 )
@@ -171,6 +173,34 @@ def test_frames_written_reflects_actual_writes_on_failure():
     writer.close()
     assert writer.failed
     assert writer.frames_written == 3
+
+
+def test_build_x264_args_threads_x264_params():
+    common = dict(ffmpeg="ffmpeg", output="o.mkv", fps=30.0, width=64, height=48)
+
+    # Omitted when blank: no stray -x264-params flag.
+    bare = build_x264_args(crf=18, preset="ultrafast", pix_fmt="gray", **common)
+    assert "-x264-params" not in bare
+    assert bare[bare.index("-crf") + 1] == "18"
+    assert bare[bare.index("-preset") + 1] == "ultrafast"
+
+    # Passed verbatim as a single token when set.
+    extra = build_x264_args(
+        crf=18,
+        preset="ultrafast",
+        pix_fmt="gray",
+        x264_params="keyint=30:scenecut=0",
+        **common,
+    )
+    assert extra[extra.index("-x264-params") + 1] == "keyint=30:scenecut=0"
+
+
+def test_capture_default_crf_is_18():
+    # The capture default lives in one place (writer.DEFAULT_CRF) and is shared
+    # by the writer and the x264 format entry.
+    assert DEFAULT_CRF == 18
+    assert FfmpegVideoWriter().crf == 18
+    assert FORMATS["x264"].crf == 18
 
 
 def test_default_codec_resolution():

@@ -44,6 +44,20 @@ def test_duplicate_name_skipped(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
+def test_unsafe_camera_name_dropped(tmp_path):
+    # A name becomes a video filename stem; a traversal/separator name must not
+    # survive the load (it would write outside the save dir). The camera is
+    # kept but its name is cleared so it falls back to the serial.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "../evil"\n'
+        '[[cameras]]\nserial_number = "b"\nname = "ok"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert [c.serial_number for c in config.cameras] == ["a", "b"]
+    assert config.cameras[0].name == ""
+    assert config.cameras[1].name == "ok"
+
+
 def test_integer_serial_and_name_coerced_to_string(tmp_path):
     # TOML keeps types explicit, but an unquoted integer serial/name should
     # still be read as text rather than rejected.
@@ -110,6 +124,31 @@ def test_plugins_tables_with_options_and_duplicates(tmp_path):
 def test_toml_file_loaded(tmp_path):
     (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 42\n")
     assert load_config_dir(tmp_path).gui.fps_default == 42.0
+
+
+def test_encoder_defaults_parsed(tmp_path):
+    # Capture defaults to CRF 18 and can be overridden in [gui]; x264_params
+    # is a free-form ffmpeg -x264-params string.
+    assert GuiConfig().crf_default == 18
+    (tmp_path / "octacam_config.toml").write_text(
+        "[gui]\n"
+        "crf_default = 23\n"
+        'preset_default = "veryfast"\n'
+        'pix_fmt_default = "yuv420p"\n'
+        'x264_params_default = "keyint=30:scenecut=0"\n'
+    )
+    gui = load_config_dir(tmp_path).gui
+    assert gui.crf_default == 23
+    assert gui.preset_default == "veryfast"
+    assert gui.pix_fmt_default == "yuv420p"
+    assert gui.x264_params_default == "keyint=30:scenecut=0"
+
+
+def test_bad_crf_default_falls_back(tmp_path):
+    # A non-integer crf_default is dropped (warn) and the default applies,
+    # like the other tolerant [gui] fields.
+    (tmp_path / "octacam_config.toml").write_text('[gui]\ncrf_default = "lossless"\n')
+    assert load_config_dir(tmp_path).gui.crf_default == 18
 
 
 def test_backend_defaults_to_basler(tmp_path):

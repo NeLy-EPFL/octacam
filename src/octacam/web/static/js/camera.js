@@ -23,11 +23,13 @@ function rangeHint(d) {
 
 export class CameraTab {
   // `cameras` is the /api/system camera list (each has index, serial, name,
-  // width, height, params). `onSelect` syncs the grid's selected tile.
-  constructor({ cameras, notify, onSelect }) {
+  // width, height, params). `onSelect` syncs the grid's selected tile;
+  // `onRename(index, name)` relabels the matching grid tile after a rename.
+  constructor({ cameras, notify, onSelect, onRename }) {
     this.cameras = cameras;
     this.notify = notify;
     this.onSelect = onSelect;
+    this.onRename = onRename;
     this.connected = false;
     this.recording = false;
     this.busy = false;
@@ -98,6 +100,18 @@ export class CameraTab {
     if (entry.index === this.selected) this.render();
   }
 
+  // A camera_name broadcast (this client's own rename, or another client's):
+  // relabel the picker option and grid tile, and refresh the name field.
+  applyName(entry) {
+    const cam = this.cameras[entry.index];
+    if (!cam || typeof entry.name !== "string") return;
+    cam.name = entry.name;
+    const opt = this.target.querySelector(`option[value="${entry.index}"]`);
+    if (opt) opt.textContent = entry.name;
+    this.onRename?.(entry.index, entry.name);
+    if (entry.index === this.selected) this.render();
+  }
+
   render() {
     const cam = this.cameras[this.selected];
     if (!cam) return;
@@ -141,6 +155,33 @@ export class CameraTab {
   }
 
   // ------------------------------------------------------- UI -> server
+
+  // Rename a camera from the grid's inline (double-click) tile editor. Sends
+  // the PUT, then applies the result locally (picker option + grid tile via
+  // applyName). Returns the canonical new name on success, or null on a no-op
+  // or failure, so the editor knows whether to keep or revert. The server is
+  // the real validator (uniqueness, safe filename stem) and rejects renames
+  // while recording with 409.
+  async renameCamera(index, name) {
+    const cam = this.cameras[index];
+    if (!cam) return null;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === cam.name) return null; // blank/unchanged: no-op
+    let r;
+    try {
+      r = await api("PUT", `/api/cameras/${index}/name`, { name: trimmed });
+    } catch {
+      this.notify("error", "Rename failed: server unreachable");
+      return null;
+    }
+    if (r.ok && r.data) {
+      this.applyName(r.data);
+      this.notify("info", `Renamed camera to ${r.data.name}`);
+      return r.data.name;
+    }
+    this.notify("error", r.data?.detail || `Rename failed (HTTP ${r.status})`);
+    return null;
+  }
 
   async _commit(name) {
     const cam = this.cameras[this.selected];

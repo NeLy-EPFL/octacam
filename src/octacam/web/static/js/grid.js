@@ -15,13 +15,23 @@ const DRAG_THRESHOLD = 4;
 const norm360 = (deg) => ((deg % 360) + 360) % 360;
 
 export class CameraGrid {
-  constructor(container, cameras, { onSelect } = {}) {
+  constructor(container, cameras, { onSelect, onRename } = {}) {
     this.container = container;
     this.onSelect = onSelect;
+    this.onRename = onRename; // async (index, name) -> canonical name | null
     this.tiles = [];
     this.indexBySerial = new Map();
     this.selected = -1;
-    this._editing = false;
+    this._editing = false; // layout editing (drag tiles)
+    // Inline name editing (double-click a tile title); locked unless connected
+    // and not recording. The recording state is only authoritative once a
+    // state/telemetry message arrives, so _recordingKnown holds the lock on
+    // until then (a (re)connect mid-recording must not briefly offer an edit).
+    this._connected = false;
+    this._recording = false;
+    this._recordingKnown = false;
+    this._renameLocked = true;
+    this._nameEdit = null;
 
     // Auto-tile only when NO camera carries a manual layout; otherwise honor
     // the configured layouts (a single unconfigured camera must not discard
@@ -62,6 +72,7 @@ export class CameraGrid {
     const canvas = el.querySelector("canvas");
     const tile = {
       cam,
+      index,
       el,
       canvas,
       ctx: canvas.getContext("2d"),
@@ -85,6 +96,10 @@ export class CameraGrid {
       this.select(index);
     });
     el.addEventListener("pointerdown", (e) => this._onTilePointerDown(e, tile));
+    nameEl.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      this._startNameEdit(tile);
+    });
     this._applyTransform(tile);
   }
 
@@ -96,6 +111,97 @@ export class CameraGrid {
 
   setCrossVisible(visible) {
     this.container.classList.toggle("show-cross", visible);
+  }
+
+  // Relabel a tile after a camera rename (the camera object is shared with the
+  // Camera tab, so cam.name is already updated; this refreshes the DOM text).
+  setName(index, name) {
+    const t = this.tiles[index];
+    if (!t) return;
+    t.cam.name = name;
+    t.nameEl.textContent = name;
+  }
+
+  // ------------------------------------------------ inline name editing
+
+  // Inline rename is locked unless the socket is up and no recording is in
+  // progress (the server also rejects renames while recording with 409).
+  setConnected(connected) {
+    this._connected = connected;
+    // On a drop the last-seen recording flag is stale; require a fresh
+    // state message after reconnecting before unlocking again.
+    if (!connected) this._recordingKnown = false;
+    this._refreshRenameLock();
+  }
+
+  setRecording(recording) {
+    this._recording = recording;
+    this._recordingKnown = true;
+    this._refreshRenameLock();
+  }
+
+  _refreshRenameLock() {
+    this._renameLocked =
+      !this._connected || this._recording || !this._recordingKnown;
+    this.container.classList.toggle("can-rename", !this._renameLocked);
+    if (this._renameLocked) this._cancelNameEdit(); // abort an open editor
+  }
+
+  // Double-click a tile title -> edit its name in place. The committed name
+  // goes through onRename (the Camera tab's renameCamera), which relabels the
+  // tile via setName on success; on a no-op/failure the title reverts.
+  _startNameEdit(tile) {
+    if (this._renameLocked || this._editing || this._nameEdit) return;
+
+    const title = tile.el.querySelector(".tile-title");
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "tile-name-edit";
+    input.value = tile.cam.name;
+    input.spellcheck = false;
+    input.maxLength = 64;
+
+    let done = false;
+    const finish = async (commit) => {
+      if (done) return; // guard against blur firing during teardown
+      done = true;
+      input.removeEventListener("keydown", onKey);
+      input.removeEventListener("blur", onBlur);
+      if (commit) {
+        input.disabled = true;
+        await this.onRename?.(tile.index, input.value);
+      }
+      input.remove();
+      title.classList.remove("editing");
+      this._nameEdit = null;
+    };
+    const onKey = (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        finish(true);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        finish(false);
+      }
+    };
+    const onBlur = () => finish(true);
+
+    input.addEventListener("keydown", onKey);
+    input.addEventListener("blur", onBlur);
+    // Keep clicks inside the field from selecting the tile or starting a drag.
+    input.addEventListener("pointerdown", (e) => e.stopPropagation());
+    input.addEventListener("click", (e) => e.stopPropagation());
+
+    this._nameEdit = { tile, finish };
+    title.classList.add("editing");
+    tile.nameEl.insertAdjacentElement("afterend", input);
+    input.focus();
+    input.select();
+  }
+
+  _cancelNameEdit() {
+    this._nameEdit?.finish(false);
   }
 
   // op: {rotateDelta?, flipH?, flipV?, reset?}; scope: "all" | "selected"

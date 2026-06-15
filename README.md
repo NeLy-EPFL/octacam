@@ -12,8 +12,9 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 - Save frames directly to videos: H.264 (ffmpeg/x264, true monochrome
   4:0:0, crash-safe MKV) by default, or raw Mono8 dumps for maximum
   throughput with offline transcoding (`octacam transcode`).
-- Web GUI (`octacam serve`): control the rig from any browser; works
-  remotely through a plain SSH tunnel (`ssh -L 8000:127.0.0.1:8000 <rig-hostname>`).
+- Web GUI (`octacam gui`): control the rig from any browser; opens automatically
+  on the local machine, and works remotely through a plain SSH tunnel
+  (`ssh -L 8765:127.0.0.1:8765 <rig-hostname>`).
 
 ## Installation
 
@@ -37,22 +38,27 @@ stepper controller: `pip install "octacam[arduino]"` (see [Plugins](#plugins)).
 ## Usage
 
 ```bash
-octacam serve <config_dir>    # web GUI on http://127.0.0.1:8000 (--host/--port)
-octacam record <config_dir>   # headless recording (--fps/--duration/--output/
-                              #   --codec x264|raw|mjpg|h264/--crf/--preset/--trigger)
+octacam gui <config_dir>      # web GUI on http://127.0.0.1:8765 (--host/--port/--no-browser)
+octacam record <config_dir>   # headless recording (--fps/--duration/--output/--codec
+                              #   x264|raw|mjpg|h264/--crf/--preset/--x264-params/--trigger)
 octacam transcode <dir>       # convert .raw recordings to x264 MKV offline
 octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
+octacam list-plugins          # show bundled plugins and whether each can load
 octacam --help
 ```
 
-`serve` and `record` also accept `--plugin <name>` (repeatable) and
+`gui` and `record` also accept `--plugin <name>` (repeatable) and
 `--no-plugins` (see [Plugins](#plugins)).
+
+`octacam gui` opens the default browser automatically. It skips this over an SSH
+session or on a headless host (where the browser would launch on the rig instead
+of your machine); pass `--no-browser` to skip it explicitly.
 
 For remote operation, tunnel the web GUI over SSH from your machine:
 
 ```bash
-ssh -L 8000:127.0.0.1:8000 <rig-hostname> octacam serve <config_dir>
-# then open http://localhost:8000
+ssh -L 8765:127.0.0.1:8765 <rig-hostname> octacam gui <config_dir>
+# then open http://localhost:8765
 ```
 
 `<config_dir>` contains an optional `octacam_config.toml` (camera names, display
@@ -63,7 +69,7 @@ for FLIR — see [configs/](configs/) for examples.
 To run without hardware using Basler's camera emulation:
 
 ```bash
-PYLON_CAMEMU=8 octacam serve configs/emulate_8_cameras
+PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
 ```
 
 ## Camera backends
@@ -125,7 +131,8 @@ options = { device = "/dev/ttyACM0", baud = 115200 }
 or per-launch with `--plugin arduino` (repeatable; adds to the config), and
 disable everything for one run with `--no-plugins`. Each plugin declares its
 own extra dependencies — install them with the matching extra, e.g.
-`pip install "octacam[arduino]"`.
+`pip install "octacam[arduino]"`. Run `octacam list-plugins` to see the bundled
+plugins and whether each one's dependency is installed.
 
 Bundled plugins:
 

@@ -34,7 +34,7 @@ class OctacamPlugin(Protocol):
 
     name: str
 
-    # ---- process lifecycle (octacam serve/record startup & shutdown) ----
+    # ---- process lifecycle (octacam gui/record startup & shutdown) ----
     def setup(self) -> None: ...
     def teardown(self) -> None: ...
     def is_ready(self) -> bool: ...
@@ -50,6 +50,7 @@ class OctacamPlugin(Protocol):
     # ---- web contribution (optional) ----
     def api_router(self) -> APIRouter | None: ...
     def on_ws_message(self, message: dict) -> bool: ...  # True = handled
+    def on_ws_disconnect(self) -> None: ...  # a control socket closed
 
 
 class Plugin:
@@ -86,6 +87,9 @@ class Plugin:
 
     def on_ws_message(self, message: dict) -> bool:
         return False
+
+    def on_ws_disconnect(self) -> None:
+        pass
 
 
 class PluginManager:

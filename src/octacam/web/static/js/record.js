@@ -1,6 +1,6 @@
 // Record tab: settings inputs, start/stop button state machine, status line.
 
-import { api, clampInput, formatBytes, formatHMS } from "./util.js";
+import { api, clamp, clampInput, formatBytes, formatHMS } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
@@ -14,7 +14,18 @@ export class RecordTab {
     this.notify = notify;
     this.settings = null;
     this.state = "idle";
-    this.remainingMs = null;
+    // The countdown is driven by an absolute end time in the client's monotonic
+    // clock (performance.now()), not by mutating a remaining-ms counter, so it
+    // survives jitter between the local tick and server telemetry. See _anchor.
+    this.deadline = null;
+    this.totalMs = null;
+    // Identity of the recording the deadline belongs to, so a new recording
+    // re-anchors fresh even if we never saw the non-recording states between
+    // them (coalesced sends, or a reconnect spanning a recording boundary).
+    this.recordingId = null;
+    // One-shot flag: skip the progress-bar width transition on the first frame
+    // of a fresh countdown so the bar never sweeps backward to its start.
+    this.barJump = false;
     this.lastEvent = null;
     this.connected = false;
     this.requestPending = false;
@@ -29,6 +40,8 @@ export class RecordTab {
     this.format = document.getElementById("format");
     this.button = document.getElementById("record-button");
     this.status = document.getElementById("record-status");
+    this.progress = document.getElementById("record-progress");
+    this.progressBar = document.getElementById("record-progress-bar");
 
     for (const f of formats) {
       const opt = document.createElement("option");
@@ -57,13 +70,15 @@ export class RecordTab {
     );
     this.button.addEventListener("click", () => this._onButton());
 
-    // Local countdown tick between telemetry updates.
+    // Re-render between telemetry updates so the countdown and progress bar
+    // advance smoothly. Both are derived from `this.deadline`, so this only
+    // reads the clock - it never mutates the remaining time, which is what made
+    // the old per-second decrement race with telemetry and tick back up.
     setInterval(() => {
-      if (this.state === "recording" && this.remainingMs != null) {
-        this.remainingMs = Math.max(0, this.remainingMs - 1000);
+      if (this.state === "recording" && this.deadline != null) {
         this.renderStatus();
       }
-    }, 1000);
+    }, 250);
   }
 
   // ------------------------------------------------------ server -> UI
@@ -97,11 +112,12 @@ export class RecordTab {
 
   applyState(snap) {
     this.state = snap.state;
-    if ("remaining_ms" in snap) this.remainingMs = snap.remaining_ms;
+    // Settings first: _syncCountdown reads duration_s to size the progress bar.
+    if (snap.settings) this.applySettings(snap.settings);
+    this._syncCountdown(snap);
     if (typeof snap.disk_free_bytes === "number") {
       this.diskFree.textContent = `${formatBytes(snap.disk_free_bytes)} free`;
     }
-    if (snap.settings) this.applySettings(snap.settings);
     this.updateControls();
     this.renderStatus();
   }
@@ -138,15 +154,59 @@ export class RecordTab {
       !this.connected || this.state === "finishing" || this.requestPending;
   }
 
+  // Remaining time derived from the deadline, clamped at zero. Returns null
+  // when no recording is counting down.
+  _remainingMs() {
+    if (this.deadline == null) return null;
+    return Math.max(0, this.deadline - performance.now());
+  }
+
+  _syncCountdown(snap) {
+    if (snap.state !== "recording" || snap.remaining_ms == null) {
+      this.deadline = null;
+      this.totalMs = null;
+      this.recordingId = null;
+      return;
+    }
+    // A different recording must not inherit the previous trial's (now stale,
+    // possibly already-elapsed) deadline, which Math.min would latch onto and
+    // pin the countdown at 0:00. Drop the anchor so _anchor starts fresh.
+    if (snap.recording_id !== this.recordingId) {
+      this.recordingId = snap.recording_id;
+      this.deadline = null;
+      this.totalMs = null;
+    }
+    this._anchor(snap.remaining_ms);
+  }
+
+  // Convert a server-reported remaining time into an absolute deadline. The
+  // deadline for a recording is fixed, so once anchored we only ever pull it
+  // *earlier* (Math.min): jitter between the local tick and telemetry samples
+  // can no longer make the displayed countdown tick back up.
+  _anchor(ms) {
+    const target = performance.now() + ms;
+    if (this.deadline == null) {
+      // Fresh recording, or a connect partway through one. Adopt the value as
+      // the total; duration_s covers the mid-recording case, where `ms` is only
+      // the leftover and would otherwise under-size the progress bar.
+      this.deadline = target;
+      this.totalMs = Math.max(ms, (this.settings?.duration_s ?? 0) * 1000);
+      this.barJump = true;
+    } else {
+      this.deadline = Math.min(this.deadline, target);
+    }
+  }
+
   renderStatus() {
+    const remaining = this._remainingMs();
     let text = "";
     let level = "";
     if (this.state === "waiting") {
       text = "Waiting for first trigger...";
     } else if (this.state === "recording") {
       text =
-        this.remainingMs != null
-          ? `Remaining time: ${formatHMS(this.remainingMs)}`
+        remaining != null
+          ? `Remaining time: ${formatHMS(remaining)}`
           : "Recording...";
     } else if (this.state === "finishing") {
       text = "Finishing…";
@@ -157,6 +217,47 @@ export class RecordTab {
     this.status.textContent = text;
     this.status.className =
       level === "error" ? "error" : level === "warning" ? "warning" : "";
+    this._renderProgress(remaining);
+  }
+
+  _renderProgress(remaining) {
+    const prog = this.progress;
+    const bar = this.progressBar;
+    if (this.state === "recording" && this.deadline != null) {
+      const frac =
+        this.totalMs > 0 ? clamp(1 - remaining / this.totalMs, 0, 1) : 1;
+      // Entering determinate from waiting/hidden, or starting a fresh
+      // countdown, would otherwise animate the bar *backward* from the 35%
+      // indeterminate sweep (or a stale finished width) down to its start.
+      const jump =
+        this.barJump ||
+        prog.classList.contains("hidden") ||
+        prog.classList.contains("indeterminate");
+      this.barJump = false;
+      prog.classList.remove("hidden", "indeterminate");
+      const width = `${(frac * 100).toFixed(1)}%`;
+      if (jump) {
+        bar.style.transition = "none";
+        bar.style.width = width;
+        void bar.offsetWidth; // commit the jump before re-enabling the glide
+        bar.style.transition = "";
+      } else {
+        bar.style.width = width;
+      }
+    } else if (this.state === "waiting") {
+      // Armed but no deadline yet: show an indeterminate sweep rather than a
+      // bar stuck at zero. Clear the inline width so the CSS rule drives it.
+      bar.style.width = "";
+      prog.classList.remove("hidden");
+      prog.classList.add("indeterminate");
+    } else if (this.state === "finishing") {
+      prog.classList.remove("hidden", "indeterminate");
+      bar.style.width = "100%";
+    } else {
+      bar.style.width = "";
+      prog.classList.add("hidden");
+      prog.classList.remove("indeterminate");
+    }
   }
 
   // ------------------------------------------------------ UI -> server
@@ -168,6 +269,19 @@ export class RecordTab {
       this.durationValue,
       this.durationUnit,
     ]);
+  }
+
+  // Current save-dir text (possibly uncommitted), so the directory picker can
+  // open near wherever the operator is pointing.
+  getSaveDir() {
+    return this.saveDir.value;
+  }
+
+  // Adopt a path chosen in the directory picker and commit it like a manual
+  // edit (PUT + revalidate, updating the disk-free readout).
+  setSaveDir(path) {
+    this.saveDir.value = path;
+    this._commitSaveDir();
   }
 
   async _commitSaveDir() {

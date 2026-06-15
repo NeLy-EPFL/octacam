@@ -1,7 +1,7 @@
 """Plugin registry + manager behavior."""
 
 from octacam.config import OctacamConfig, PluginConfig
-from octacam.plugins import PluginManager, build_plugins, register
+from octacam.plugins import PluginManager, available_plugins, build_plugins, register
 from octacam.plugins.base import Plugin
 
 
@@ -45,6 +45,18 @@ def test_cli_plugin_flag_adds_to_config():
     assert [p.name for p in manager.plugins] == ["spy_added"]
 
 
+def test_available_plugins_describes_bundled_arduino():
+    infos = {info.name: info for info in available_plugins()}
+    # Only in-repo builtins are discoverable; arduino is the one bundled plugin.
+    assert "arduino" in infos
+    info = infos["arduino"]
+    assert isinstance(info.available, bool)
+    assert info.summary  # first line of the module docstring
+    # When the optional dependency is missing, the reason is surfaced.
+    if not info.available:
+        assert info.detail
+
+
 def test_dispatch_swallows_plugin_exceptions():
     class Boom(Plugin):
         name = "boom"
@@ -63,6 +75,76 @@ def test_status_shape():
             return {"foo": 1}
 
     assert PluginManager([Demo()]).status() == {"demo": {"ready": True, "foo": 1}}
+
+
+class _FakeLink:
+    """Stand-in for arduino.SerialLink so tests need no real serial device."""
+
+    def __init__(self):
+        self._open = False
+        self.fail: Exception | None = None
+
+    def open(self, device, baud):
+        self._open = False  # the real open() closes any prior link first
+        if self.fail is not None:
+            raise self.fail
+        self._open = True
+
+    def close(self):
+        self._open = False
+
+    @property
+    def is_open(self):
+        return self._open
+
+
+def test_arduino_open_reports_success_and_failure():
+    """_open never raises; it returns None on success, the message on failure."""
+    from octacam.plugins.arduino import ArduinoPlugin
+
+    plugin = ArduinoPlugin(device="/dev/test")
+    plugin._link = link = _FakeLink()
+
+    assert plugin.is_ready() is False
+    assert plugin._open() is None
+    assert plugin.is_ready() is True
+
+    link.fail = OSError("no such device")
+    assert plugin._open() == "no such device"
+    assert plugin.is_ready() is False  # a failed open leaves the port closed
+
+
+def test_arduino_reconnect_endpoint_surfaces_ready_state():
+    """POST /api/serial/reconnect re-opens the port and reports the outcome."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from octacam.plugins.arduino import ArduinoPlugin
+
+    plugin = ArduinoPlugin(device="/dev/test")
+    plugin._link = link = _FakeLink()
+
+    app = FastAPI()
+    app.include_router(plugin.api_router())
+    client = TestClient(app)
+
+    # Board absent: reconnect fails, ready stays false and the reason is surfaced.
+    link.fail = OSError("no such device")
+    r = client.post("/api/serial/reconnect")
+    assert r.status_code == 200
+    assert r.json() == {
+        "ready": False,
+        "device": "/dev/test",
+        "error": "no such device",
+    }
+
+    # Board now present: reconnect succeeds.
+    link.fail = None
+    assert client.post("/api/serial/reconnect").json() == {
+        "ready": True,
+        "device": "/dev/test",
+        "error": None,
+    }
 
 
 def test_setup_teardown_order():

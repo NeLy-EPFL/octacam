@@ -102,7 +102,14 @@ class BaslerBackend:
         return self._serial
 
     def open(self) -> None:
-        self.raw.Open()
+        try:
+            self.raw.Open()
+        except genicam.GenericException as e:
+            # Usually the device is already opened exclusively by another
+            # process (a second `octacam gui` on the rig). Surface it as a
+            # BackendError so the caller reports it cleanly instead of letting
+            # a raw pylon traceback escape.
+            raise BackendError(str(e)) from e
 
     def close(self) -> None:
         if self.raw.IsOpen():
