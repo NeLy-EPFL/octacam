@@ -232,19 +232,25 @@ class _Client:
         self.wakeup.set()
 
     async def sender(self) -> None:
-        while True:
-            await self.wakeup.wait()
-            self.wakeup.clear()
-            frames, self.frames = self.frames, {}
-            texts, self.texts = self.texts, {}
-            events = list(self.events)
-            self.events.clear()
-            for message in texts.values():
-                await self.ws.send_text(message)
-            for message in events:
-                await self.ws.send_text(message)
-            for message in frames.values():
-                await self.ws.send_bytes(message)
+        # A client can vanish mid-send (browser tab closed, SSH tunnel
+        # dropped). Starlette surfaces that as WebSocketDisconnect from the
+        # send_* calls; swallow it so the task ends cleanly instead of dying
+        # with an exception that the endpoint's teardown `await sender` would
+        # re-raise and crash the ASGI app with.
+        with contextlib.suppress(WebSocketDisconnect):
+            while True:
+                await self.wakeup.wait()
+                self.wakeup.clear()
+                frames, self.frames = self.frames, {}
+                texts, self.texts = self.texts, {}
+                events = list(self.events)
+                self.events.clear()
+                for message in texts.values():
+                    await self.ws.send_text(message)
+                for message in events:
+                    await self.ws.send_text(message)
+                for message in frames.values():
+                    await self.ws.send_bytes(message)
 
 
 class _AppState:

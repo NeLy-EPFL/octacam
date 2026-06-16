@@ -603,7 +603,12 @@ class RecordingController:
             self.plugins.dispatch("on_recording_start", plugin_params)
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
-                args=(settings.duration_s, plugin_params, len(started)),
+                args=(
+                    settings.duration_s,
+                    plugin_params,
+                    len(started),
+                    not use_software_trigger,
+                ),
                 daemon=True,
             )
             self._monitor.start()
@@ -638,12 +643,18 @@ class RecordingController:
         self.join()
         self.camera_system.close()
 
-    def _monitor_loop(self, duration_s, plugin_params, expected_started) -> None:
+    def _monitor_loop(
+        self, duration_s, plugin_params, expected_started, external_trigger
+    ) -> None:
         # --- wait for the first frame from the cameras that started (Qt's
-        # check_record_started_timer). Warn after 3 s, but - unlike the
-        # unbounded Qt/headless wait - give up after STARTED_FAIL_AFTER_S and
-        # record with whatever started, so a single stalled camera cannot
-        # hang the whole recording (and the deadline) indefinitely.
+        # check_record_started_timer). Warn after 3 s. With the software
+        # trigger - unlike the unbounded Qt/headless wait - give up after
+        # STARTED_FAIL_AFTER_S and record with whatever started, so a single
+        # stalled camera cannot hang the whole recording (and the deadline)
+        # indefinitely. With an external trigger the frames only arrive once
+        # the external source fires, which may be arbitrarily far in the
+        # future, so there is no such deadline: wait indefinitely (until the
+        # first frame, or the user stops the recording).
         start = time.monotonic()
         warned = False
         while not self._stop_event.is_set():
@@ -651,13 +662,20 @@ class RecordingController:
                 break
             elapsed = time.monotonic() - start
             if not warned and elapsed > STARTED_WARN_AFTER_S:
-                self._event(
-                    "warning",
-                    "Not all cameras delivered a frame within "
-                    f"{STARTED_WARN_AFTER_S:g} s; still waiting",
-                )
+                if external_trigger:
+                    self._event(
+                        "info",
+                        "Waiting for the external trigger; recording will "
+                        "begin on the first frame",
+                    )
+                else:
+                    self._event(
+                        "warning",
+                        "Not all cameras delivered a frame within "
+                        f"{STARTED_WARN_AFTER_S:g} s; still waiting",
+                    )
                 warned = True
-            if elapsed > STARTED_FAIL_AFTER_S:
+            if not external_trigger and elapsed > STARTED_FAIL_AFTER_S:
                 self._event(
                     "error",
                     f"Only {self._count_started()}/{expected_started} cameras "
@@ -697,6 +715,27 @@ class RecordingController:
                     f"Writer for camera {camera.name} failed during the "
                     "recording (see log for ffmpeg output)",
                 )
+
+        # A camera that captured 0 frames produced only a header-only file (no
+        # video). The writer never fails for this - it opened fine and just got
+        # no frames - so without this check the recording is reported as a
+        # normal success. The usual cause is an external trigger that never
+        # fired during the window; flag it loudly here, while frames_recorded is
+        # final, rather than letting it surface later as a cryptic transcode
+        # error on the empty file.
+        empty = [c.name for c in self.camera_system if c.frames_recorded == 0]
+        if empty:
+            self._event(
+                "error",
+                f"{len(empty)} camera(s) captured 0 frames (no video written): "
+                f"{', '.join(empty)}. "
+                + (
+                    "No external trigger pulses were received during the "
+                    "recording window."
+                    if self._settings.trigger_source == "external"
+                    else "The cameras delivered no frames."
+                ),
+            )
 
         # All camera threads are joined now (stats/CSVs final) and save_dir is
         # still the recording's own directory (it is incremented below). Write

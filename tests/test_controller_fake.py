@@ -138,6 +138,89 @@ def test_fake_recording_without_session_id_skips_cache(
     assert session_cache.last_folder() is None
 
 
+def test_fake_external_trigger_waits_indefinitely(fake_system, tmp_path, monkeypatch):
+    """External trigger must never auto-start: it waits for the first frame.
+
+    With the software trigger a stalled camera is given up on after
+    STARTED_FAIL_AFTER_S and the countdown starts anyway. With an external
+    trigger no frame arrives until the external source fires, so the monitor
+    must wait indefinitely (here: stay in "waiting" well past a shrunk fail
+    threshold) and only start once a frame is actually delivered.
+    """
+    import time
+
+    import octacam.controller as controller_module
+
+    # Shrink the thresholds so the *old* auto-start behaviour would trigger
+    # almost immediately; if the fix works the controller still won't start.
+    monkeypatch.setattr(controller_module, "STARTED_WARN_AFTER_S", 0.1)
+    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+
+    save_dir = tmp_path / "ext" / "001"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=30.0, save_dir=str(save_dir), trigger_source="external"
+    )
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+
+    assert controller.start_recording().ok
+    # The fake backend only yields a frame when trigger_once() is called, and
+    # external mode never starts the software trigger, so no frame arrives.
+    # Wait well past STARTED_FAIL_AFTER_S; the recording must not have started.
+    time.sleep(1.0)
+    assert controller.state == "waiting"
+    messages = [e["message"] for e in controller.events]
+    assert not any("starting the countdown anyway" in m for m in messages)
+    assert any("Waiting for the external trigger" in m for m in messages)
+
+    # Now the external source "fires": frames arrive and recording begins.
+    deadline = time.monotonic() + 10
+    while controller.state == "waiting" and time.monotonic() < deadline:
+        for camera in fake_system:
+            camera.trigger_once()
+        time.sleep(0.05)
+    assert controller.state == "recording"
+
+    controller.stop_recording(abort=True)
+    controller.join(timeout=20)
+    assert controller.state == "idle"
+
+
+def test_fake_zero_frame_recording_is_flagged(fake_system, tmp_path):
+    """A capture that yields no frames (external trigger that never fired) must
+    be flagged loudly, not reported as a silent success.
+
+    Reproduces the failure mode where the first external-trigger recording ran
+    its window with no pulses: every camera wrote a header-only file with 0
+    frames, yet aborted/writer_failed stayed False so it looked successful.
+    """
+    import time
+
+    save_dir = tmp_path / "ext" / "001"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=30.0, save_dir=str(save_dir), trigger_source="external"
+    )
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+
+    assert controller.start_recording().ok
+    # No frame is ever delivered (external mode + no trigger_once), so the
+    # monitor stays in "waiting"; stop it normally (not an abort), as an
+    # operator who gave up waiting would.
+    time.sleep(0.5)
+    assert controller.state == "waiting"
+    controller.stop_recording(abort=False)
+    controller.join(timeout=20)
+
+    # The summary still records the empty capture (not an abort, 0 frames)...
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["aborted"] is False
+    assert all(c["frames"] == 0 for c in summary["cameras"])
+    # ...but the controller now emits a loud zero-frame error, naming the
+    # likely cause, so it is no longer a silent success.
+    errors = [e["message"] for e in controller.events if e["level"] == "error"]
+    assert any("captured 0 frames" in m for m in errors)
+    assert any("external trigger" in m.lower() for m in errors)
+
+
 def test_fake_abort_recording(fake_system, tmp_path):
     import time
 

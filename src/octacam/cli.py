@@ -306,7 +306,9 @@ def _print_transcode_hints(session_id: str, config_dir: Path) -> None:
     try:
         folders = session_cache.session_folders(session_id)
     except Exception:
-        log.debug("Could not read the recording cache for transcode hints", exc_info=True)
+        log.debug(
+            "Could not read the recording cache for transcode hints", exc_info=True
+        )
         return
     if not folders:
         return
@@ -826,10 +828,20 @@ def _transcode_jobs(
                     if not name:
                         continue
                     video = directory / name
-                    if video.exists():
-                        add(video, _job_vf(entry, as_displayed))
-                    else:
+                    if not video.exists():
                         log.warning("%s lists %s but it is missing", summary_path, name)
+                    elif entry.get("frames") == 0:
+                        # A 0-frame recording is a header-only file with no video
+                        # (e.g. an external trigger that never fired). Feeding it
+                        # to ffmpeg only yields a cryptic matroska/EBML error, so
+                        # skip it here with a clear message instead.
+                        log.warning(
+                            "Skipping %s: recording captured 0 frames "
+                            "(empty header-only file)",
+                            video,
+                        )
+                    else:
+                        add(video, _job_vf(entry, as_displayed))
                 return
         loose = sorted(p for p in directory.iterdir() if p.suffix in (".mkv", ".raw"))
         if loose:

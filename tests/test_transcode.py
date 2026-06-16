@@ -294,6 +294,44 @@ def test_folder_without_summary_transcodes_to_mp4(tmp_path):
     assert (tmp_path / "b.mp4").exists()
 
 
+def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
+    from octacam.cli import _transcode_jobs
+
+    # A real capture and a 0-frame (header-only) capture in the same folder.
+    _make_mkv(tmp_path / "good.mkv", _frame(16, 12))
+    (tmp_path / "empty.mkv").write_bytes(b"\x00" * 64)  # header-only stub
+    _summary(
+        tmp_path,
+        [
+            {"file": "good.mkv", "frames": 120},
+            {"file": "empty.mkv", "frames": 0},
+        ],
+    )
+    handler = _ListHandler()
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        jobs = _transcode_jobs(
+            [tmp_path], recursive=False, as_displayed=False, out_format="mp4"
+        )
+    finally:
+        logger.removeHandler(handler)
+    # The frameless file is skipped; the real one is still queued.
+    assert [p.name for p, _vf in jobs] == ["good.mkv"]
+    assert any("0 frames" in m for m in handler.messages)
+
+
+def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
+    # A folder whose only camera captured 0 frames must not be handed to ffmpeg
+    # (which would emit a cryptic matroska error and a non-zero exit); it is
+    # skipped, leaving the run successful with nothing transcoded.
+    (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)
+    _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "cam0.mp4").exists()
+
+
 def test_single_file_uses_summary_in_its_folder(tmp_path):
     _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
     _summary(
