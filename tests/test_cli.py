@@ -1,5 +1,6 @@
 """CLI smoke tests for the typer app (no real recording is started)."""
 
+import logging
 import os
 import socket
 import sys
@@ -261,6 +262,72 @@ def test_transcode_help_lists_new_options():
         "--remove-source",
     ):
         assert opt in result.output
+
+
+def test_transcode_help_lists_cache_selectors():
+    result = runner.invoke(app, ["transcode", "--help"])
+    assert result.exit_code == 0
+    for opt in ("--last", "--session", "--today", "--session-id"):
+        assert opt in result.output
+
+
+class _MsgHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def _capture_octacam_logs(level=logging.INFO):
+    handler = _MsgHandler()
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    return logger, handler
+
+
+def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
+    from octacam import cli, session_cache
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    logger, handler = _capture_octacam_logs(logging.WARNING)
+    try:
+        cli._warn_if_transcoding()  # nothing running -> silent
+        assert not handler.messages
+        with session_cache.mark_transcode_active("3 file(s)"):
+            cli._warn_if_transcoding()
+    finally:
+        logger.removeHandler(handler)
+    assert any("transcode" in m and "CPU-heavy" in m for m in handler.messages)
+
+
+def test_print_transcode_hints_uses_exact_session_id(tmp_path, monkeypatch):
+    from octacam import cli, session_cache
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    rec = tmp_path / "rec" / "001"
+    rec.mkdir(parents=True)
+    session_cache.record_recording(rec, "sessZ", "gui")
+
+    logger, handler = _capture_octacam_logs(logging.INFO)
+    try:
+        cli._print_transcode_hints("sessZ", tmp_path / "cfg")
+    finally:
+        logger.removeHandler(handler)
+    blob = "\n".join(handler.messages)
+    # The exact session id (not the hijackable bare --session) is printed.
+    assert "--session-id sessZ" in blob
+    assert "--today" in blob and "--last" in blob
+
+    # A session that recorded nothing prints no hint.
+    logger, handler = _capture_octacam_logs(logging.INFO)
+    try:
+        cli._print_transcode_hints("sessNONE", tmp_path / "cfg")
+    finally:
+        logger.removeHandler(handler)
+    assert not handler.messages
 
 
 def test_resolve_enabled():

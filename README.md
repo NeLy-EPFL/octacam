@@ -43,6 +43,7 @@ octacam record <config_dir>   # headless recording (--fps/--duration/--output/--
                               #   x264|raw/--crf/--preset/--x264-params/--trigger/
                               #   --record-form sensor|display/--save-frame-timestamps)
 octacam transcode <paths...>  # transcode folders/videos offline (-r/--as-displayed)
+octacam transcode --last      # …or the last recording / --session / --today (no paths)
 octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
 octacam list-plugins          # show bundled plugins and whether each can load
 octacam --help
@@ -79,6 +80,30 @@ encoder settings come from the `[transcode]` config table (defaults: mp4,
 `--format/--crf/--preset/--pix-fmt/--x264-params`. Pass `--remove-source` to
 delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar) once it transcodes
 successfully — the `recording_summary.json` is always kept.
+
+Instead of typing paths, you can let octacam remember where it recorded. Every
+finished recording (from the GUI or `octacam record`) is noted in a small cache
+under `~/.cache/octacam` (override with `OCTACAM_CACHE_DIR`), so you can transcode
+without retyping a single path:
+
+```bash
+octacam transcode --last      # the most recent recording folder
+octacam transcode --session   # every folder from the last GUI session
+octacam transcode --today     # every folder recorded today
+```
+
+These combine with the encoding flags above (e.g. `octacam transcode --session
+--format mkv`). `--session` means the *most recent* session; when a GUI session
+ends, octacam prints a ready-to-run command using `--session-id <id>` (the exact
+session) so it stays correct even if you record again afterwards. Folders that
+were deleted between recording and transcoding are silently skipped. The cache
+prunes itself (entries older than 30 days are dropped on each write), so it never
+grows without bound.
+
+Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
+startup when a transcode is already running on the same machine (it competes with
+live capture/encoding and can cause dropped frames), so you can choose to wait for
+it to finish.
 
 `octacam gui` opens the default browser automatically. It skips this over an SSH
 session or on a headless host (where the browser would launch on the rig instead

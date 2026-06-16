@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import resource
+import shlex
 import shutil
 import socket
 import subprocess
@@ -292,6 +293,70 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
         log.warning("Failed to open a browser — open %s manually.", url, exc_info=True)
 
 
+def _print_transcode_hints(session_id: str, config_dir: Path) -> None:
+    """On GUI shutdown, print the transcode commands for what was just recorded.
+
+    Stays silent when the session recorded nothing (it only previewed). The
+    GUI's config dir carries the ``[transcode]`` encoding defaults, so it is
+    appended as ``--config-dir`` whenever it is not the current directory, and
+    the printed commands reproduce this rig's settings verbatim.
+    """
+    from octacam import session_cache
+
+    try:
+        folders = session_cache.session_folders(session_id)
+    except Exception:
+        log.debug("Could not read the recording cache for transcode hints", exc_info=True)
+        return
+    if not folders:
+        return
+    try:
+        same_dir = config_dir.resolve() == Path.cwd().resolve()
+    except OSError:
+        same_dir = False
+    suffix = "" if same_dir else f" --config-dir {shlex.quote(str(config_dir))}"
+    # The "this session" line names the exact session id, not the bare --session
+    # selector: --session resolves to the *latest* session, so a later recording
+    # (this rig or another) would otherwise make the printed command target the
+    # wrong batch. --today / --last stay as convenient latest-selectors.
+    log.info(
+        "Recorded %d folder(s) this session. Transcode them with:\n"
+        "  this session:   octacam transcode --session-id %s%s\n"
+        "  today:          octacam transcode --today%s\n"
+        "  last recording: octacam transcode --last%s",
+        len(folders),
+        shlex.quote(session_id),
+        suffix,
+        suffix,
+        suffix,
+    )
+
+
+def _warn_if_transcoding() -> None:
+    """Warn when an `octacam transcode` is running elsewhere on this machine.
+
+    Transcoding runs slow x264 presets across many files and saturates the CPU,
+    so it competes with live capture/encoding and can cause dropped frames. The
+    operator should know before starting a GUI session or a headless recording.
+    Best-effort: any failure to check is silently ignored.
+    """
+    from octacam import session_cache
+
+    try:
+        count = session_cache.transcode_running()
+    except Exception:
+        log.debug("Could not check for running transcodes", exc_info=True)
+        return
+    if count:
+        log.warning(
+            "%d octacam transcode%s running on this machine — transcoding is "
+            "CPU-heavy and may slow capture/encoding (risking dropped frames). "
+            "Consider waiting for it to finish.",
+            count,
+            " is" if count == 1 else "s are",
+        )
+
+
 @app.callback(invoke_without_command=True)
 def main_callback(
     ctx: typer.Context,
@@ -351,6 +416,7 @@ def gui(
     """Launch the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
 
+    from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import (
@@ -389,6 +455,9 @@ def gui(
         )
 
     config = load_config_dir(config_dir)
+
+    # A transcode running on this machine will fight live capture for the CPU.
+    _warn_if_transcoding()
 
     try:
         system = CameraSystem(
@@ -441,7 +510,11 @@ def gui(
         record_form=gui_cfg.record_form_default,
         save_frame_timestamps=gui_cfg.save_frame_timestamps_default,
     )
-    controller = RecordingController(system, settings, plugins)
+    # One session id for this GUI run; every recording made before shutdown is
+    # tagged with it in the session cache so `octacam transcode --session` can
+    # find the whole batch later (and we print the commands on the way out).
+    session_id = session_cache.new_session_id()
+    controller = RecordingController(system, settings, plugins, session_id=session_id)
     controller.start_preview()
     app = create_app(controller, config, plugins, config_dir=str(config_dir))
     log.info(
@@ -474,6 +547,9 @@ def gui(
         # Release the single-instance lock so a relaunch is not briefly blocked
         # while this process lingers; the OS would also drop it on exit.
         instance_lock.close()
+        # If anything was recorded this session, print the ready-to-run transcode
+        # commands for it (and for today / the last recording).
+        _print_transcode_hints(session_id, config_dir)
         log.info("octacam stopped.")
 
 
@@ -610,6 +686,7 @@ def record(
     no_plugins: NoPlugins = False,
 ) -> None:
     """Record videos headlessly from the cameras in CONFIG_DIR."""
+    from octacam import session_cache
     from octacam.cameras import BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import RecordingController, RecordingSettings
@@ -633,6 +710,9 @@ def record(
     )
     if save_frame_timestamps is None:
         save_frame_timestamps = config.gui.save_frame_timestamps_default
+
+    # A transcode running on this machine will fight live capture for the CPU.
+    _warn_if_transcoding()
 
     try:
         system = CameraSystem(
@@ -671,7 +751,16 @@ def record(
         record_form=record_form_value,
         save_frame_timestamps=save_frame_timestamps,
     )
-    controller = RecordingController(system, settings, plugins, auto_preview=False)
+    # Tag this headless run in the session cache so `octacam transcode --last`
+    # and `--today` pick it up too (a one-off, single-folder "session").
+    controller = RecordingController(
+        system,
+        settings,
+        plugins,
+        auto_preview=False,
+        session_id=session_cache.new_session_id(),
+        record_kind="record",
+    )
     try:
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",
@@ -787,16 +876,116 @@ def _transcode_jobs(
     return list(jobs.values())
 
 
+def _resolve_transcode_paths(
+    paths: list[Path],
+    last: bool,
+    session: bool,
+    today: bool,
+    session_id: str | None,
+) -> list[Path]:
+    """Resolve explicit PATHS or one cache selector to a list of folders.
+
+    The selectors --last/--session/--today/--session-id are mutually exclusive
+    and cannot be combined with explicit PATHS. They read the recording cache
+    (octacam.session_cache) and skip folders that have since been deleted, so a
+    removed recording is simply ignored. ``--session`` means the most recent
+    session; ``--session-id`` names an exact one (what the GUI prints on exit, so
+    the command stays correct even if another recording happens afterwards).
+    Exits with a clear message on a bad combination or when nothing is found.
+    """
+    from octacam import session_cache
+
+    chosen = [
+        name
+        for name, on in (
+            ("--last", last),
+            ("--session", session),
+            ("--today", today),
+            ("--session-id", session_id is not None),
+        )
+        if on
+    ]
+    if len(chosen) > 1:
+        sys.exit(f"Choose at most one of {', '.join(chosen)}.")
+    if chosen and paths:
+        sys.exit(f"{chosen[0]} cannot be combined with explicit PATHS.")
+    if not chosen:
+        if not paths:
+            sys.exit(
+                "Provide one or more PATHS, or one of "
+                "--last/--session/--today/--session-id."
+            )
+        return paths
+
+    if last:
+        selector = "--last"
+        folder = session_cache.last_folder()
+        folders = [folder] if folder else []
+    elif session:
+        selector = "--session"
+        folders = session_cache.session_folders()
+    elif today:
+        selector = "--today"
+        folders = session_cache.today_folders()
+    else:
+        selector = f"--session-id {shlex.quote(session_id or '')}"
+        folders = session_cache.session_folders(session_id)
+    if not folders:
+        sys.exit(
+            f"No recordings found for {selector} in the cache "
+            f"({session_cache.cache_dir()}). Record something first, or pass "
+            "explicit PATHS."
+        )
+    log.info(
+        "%s: transcoding %d folder(s) from the recording cache", selector, len(folders)
+    )
+    return folders
+
+
 @app.command()
 def transcode(
     paths: Annotated[
-        list[Path],
+        list[Path] | None,
         typer.Argument(
             exists=True,
             help="Folders and/or video files (.mkv/.raw). A folder is driven by "
-            "its recording_summary.json if present.",
+            "its recording_summary.json if present. Omit when using "
+            "--last/--session/--today.",
         ),
-    ],
+    ] = None,
+    last: Annotated[
+        bool,
+        typer.Option(
+            "--last",
+            "--last-recording",
+            help="Transcode the most recent recording folder (from the recording "
+            "cache); no PATHS needed.",
+        ),
+    ] = False,
+    session: Annotated[
+        bool,
+        typer.Option(
+            "--session",
+            "--last-session",
+            help="Transcode every folder from the last GUI session; no PATHS needed.",
+        ),
+    ] = False,
+    today: Annotated[
+        bool,
+        typer.Option(
+            "--today",
+            help="Transcode every folder recorded today; no PATHS needed.",
+        ),
+    ] = False,
+    session_id: Annotated[
+        str | None,
+        typer.Option(
+            "--session-id",
+            help="Transcode every folder from one exact session id (the value the "
+            "GUI prints on exit); unlike --session it is not hijacked by a later "
+            "recording.",
+        ),
+    ] = None,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -854,9 +1043,19 @@ def transcode(
     recording_summary.json when present (honoring --as-saved/--as-displayed);
     otherwise its .mkv/.raw files are transcoded with default parameters and no
     transform. Defaults come from the [transcode] config table.
+
+    Instead of PATHS, pass one of --last (the most recent recording folder),
+    --session (every folder from the last GUI session), --today (every folder
+    recorded today), or --session-id (an exact session). These read the recording
+    cache octacam keeps and silently skip any folder that has since been deleted.
     """
+    from octacam import session_cache
     from octacam.config import load_config_dir
     from octacam.writer import transcode_file
+
+    paths = _resolve_transcode_paths(
+        list(paths or []), last, session, today, session_id
+    )
 
     tcfg = load_config_dir(config_dir).transcode
     out_format = (fmt or tcfg.format).lstrip(".")
@@ -870,30 +1069,35 @@ def transcode(
         log.warning("No videos to transcode in: %s", ", ".join(map(str, paths)))
         return
     failures = 0
-    for input_path, vf in jobs:
-        output = input_path.with_suffix("." + out_format)
-        if output.resolve() == input_path.resolve():
-            log.warning(
-                "Skipping %s: already in target format (%s)", input_path, out_format
-            )
-            continue
-        try:
-            result = transcode_file(
-                input_path,
-                output,
-                crf=crf,
-                preset=preset,
-                pix_fmt=pix_fmt,
-                x264_params=x264_params,
-                vf=vf,
-            )
-            typer.echo(result)
-        except Exception as e:  # one bad file must not abort the batch
-            failures += 1
-            log.error("Failed to transcode %s: %s", input_path, e)
-            continue
-        if remove_source:
-            _remove_source_files(input_path)
+    # Advertise this run so a concurrent `gui`/`record` can warn about the CPU
+    # contention; the marker is dropped (and cleaned up) when the run ends.
+    with session_cache.mark_transcode_active(f"{len(jobs)} file(s)"):
+        for input_path, vf in jobs:
+            output = input_path.with_suffix("." + out_format)
+            if output.resolve() == input_path.resolve():
+                log.warning(
+                    "Skipping %s: already in target format (%s)",
+                    input_path,
+                    out_format,
+                )
+                continue
+            try:
+                result = transcode_file(
+                    input_path,
+                    output,
+                    crf=crf,
+                    preset=preset,
+                    pix_fmt=pix_fmt,
+                    x264_params=x264_params,
+                    vf=vf,
+                )
+                typer.echo(result)
+            except Exception as e:  # one bad file must not abort the batch
+                failures += 1
+                log.error("Failed to transcode %s: %s", input_path, e)
+                continue
+            if remove_source:
+                _remove_source_files(input_path)
     if failures:
         sys.exit(f"{failures} file(s) failed to transcode")
 

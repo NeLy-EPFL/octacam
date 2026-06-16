@@ -214,11 +214,19 @@ class RecordingController:
         settings: RecordingSettings,
         plugins: PluginManager | None = None,
         auto_preview: bool = True,
+        session_id: str | None = None,
+        record_kind: str = "gui",
     ):
         self.camera_system = camera_system
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
+        # When set, each finished recording's folder is noted in the session
+        # cache (octacam.session_cache) under this id so `octacam transcode
+        # --last/--session/--today` can find it later. None disables the cache
+        # (e.g. in unit tests that construct a controller directly).
+        self._session_id = session_id
+        self._record_kind = record_kind
         self._lock = threading.RLock()
         self._state = "idle"
         # True while a camera's geometry is being changed (preview stopped and
@@ -695,6 +703,7 @@ class RecordingController:
         # the session summary here so both the duration-elapsed and manual-stop
         # paths produce exactly one; never let a summary error abort teardown.
         self._write_recording_summary(self._aborted)
+        self._note_in_session_cache()
 
         with self._lock:
             self._deadline = None
@@ -722,6 +731,24 @@ class RecordingController:
             log.info("Wrote recording summary: %s", path)
         except Exception:
             log.exception("Failed to write recording summary to %s", path)
+
+    def _note_in_session_cache(self) -> None:
+        """Record this recording's folder in the session cache for `transcode`.
+
+        Lets `octacam transcode --last/--session/--today` rediscover it later.
+        No-ops without a session id (direct controller construction in tests);
+        best-effort, so a cache failure never disturbs recording teardown. Runs
+        before save_dir is incremented, so it captures the just-written folder.
+        """
+        if not self._session_id:
+            return
+        folder = Path(self._settings.save_dir)
+        try:
+            from octacam import session_cache
+
+            session_cache.record_recording(folder, self._session_id, self._record_kind)
+        except Exception:
+            log.exception("Failed to note %s in the recording cache", folder)
 
     def _count_started(self) -> int:
         return sum(1 for camera in self.camera_system if camera.started)

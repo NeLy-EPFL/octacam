@@ -104,6 +104,40 @@ def test_fake_recording_bakes_display_transform(fake_system, tmp_path):
         assert frame.shape[:2] == (320, 240)  # (height, width) after rotation
 
 
+def test_fake_recording_notes_folder_in_session_cache(
+    fake_system, tmp_path, monkeypatch
+):
+    # With a session id, each finished recording's folder is noted in the cache
+    # so `octacam transcode --session` can rediscover the batch.
+    from octacam import session_cache
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    save_dir = tmp_path / "rec" / "001-bhv"
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, session_id="sess-test"
+    )
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+    assert session_cache.session_folders("sess-test") == [save_dir.resolve()]
+
+
+def test_fake_recording_without_session_id_skips_cache(
+    fake_system, tmp_path, monkeypatch
+):
+    # No session id (the default for a directly-built controller) -> the cache
+    # is untouched, so unit tests never write to the user cache dir.
+    from octacam import session_cache
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+    assert session_cache.last_folder() is None
+
+
 def test_fake_abort_recording(fake_system, tmp_path):
     import time
 
