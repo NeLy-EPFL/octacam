@@ -48,9 +48,14 @@ class OctacamPlugin(Protocol):
     def on_recording_stop(self, aborted: bool) -> None: ...
 
     # ---- web contribution (optional) ----
+    # client_id identifies the WebSocket connection a message/disconnect came
+    # from, so a plugin can scope per-connection state (e.g. a hold-to-jog) to
+    # the socket that owns it.
     def api_router(self) -> APIRouter | None: ...
-    def on_ws_message(self, message: dict) -> bool: ...  # True = handled
-    def on_ws_disconnect(self) -> None: ...  # a control socket closed
+    def on_ws_message(
+        self, message: dict, client_id: int
+    ) -> bool: ...  # True = handled
+    def on_ws_disconnect(self, client_id: int) -> None: ...  # a control socket closed
 
 
 class Plugin:
@@ -85,10 +90,10 @@ class Plugin:
     def api_router(self) -> APIRouter | None:
         return None
 
-    def on_ws_message(self, message: dict) -> bool:
+    def on_ws_message(self, message: dict, client_id: int) -> bool:
         return False
 
-    def on_ws_disconnect(self) -> None:
+    def on_ws_disconnect(self, client_id: int) -> None:
         pass
 
 

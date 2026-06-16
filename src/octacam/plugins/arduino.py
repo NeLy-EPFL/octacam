@@ -153,9 +153,18 @@ class JogClock:
     coarse, jittery, and capped by round-trip latency). Stopping releases the
     motor coils with a final ``n_steps=0`` command.
 
+    ``start``/``stop`` never block on the serial link: a stalled write must not
+    wedge the caller (a web executor thread). Instead of joining the outgoing
+    thread, ``start`` bumps a generation counter so a superseded thread skips
+    its coil-release (the new thread now owns the coils) and exits on its own.
+
     ``write`` must be a callable taking a :class:`Command`; it is shared with
     the loop/first-frame writers, which serialise on the link's own lock.
     """
+
+    # How long teardown waits for a stopping thread's coil-release to flush
+    # before giving up (a class attribute so tests can shorten it).
+    JOIN_TIMEOUT_S = 1.0
 
     def __init__(self, write, max_steps: int = JOG_MAX_STEPS):
         self._write = write
@@ -163,35 +172,55 @@ class JogClock:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Bumped on every start; the running thread releases the coils only
+        # while its captured generation is still current (see _run's finally).
+        self._generation = 0
 
     def start(self, direction: int, interval_us: object) -> None:
         interval_s = _clamp_jog_interval_us(interval_us) / 1_000_000
         with self._lock:
-            self._stop_locked()
+            # Supersede any running jog: a higher generation makes the outgoing
+            # thread suppress its release, and signalling its stop event makes
+            # it exit promptly. No join — the generation guard keeps a lingering
+            # (e.g. write-stalled) thread from clobbering the new direction.
+            self._generation += 1
+            generation = self._generation
+            self._stop.set()
             self._stop = stop = threading.Event()
             self._thread = threading.Thread(
                 target=self._run,
-                args=(direction, interval_s, stop),
+                args=(direction, interval_s, stop, generation),
                 name="arduino-jog",
                 daemon=True,
             )
             self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, join: bool = False) -> bool:
+        """Stop the running jog, releasing the coils.
+
+        The generation is left unchanged, so the outgoing thread releases the
+        coils in its finally. ``join=True`` (teardown) waits for that release to
+        flush before the caller closes the serial port.
+
+        Returns True once the clock is fully stopped (nothing was running, or
+        the thread was joined). Returns False only when ``join=True`` and the
+        thread did not exit within ``JOIN_TIMEOUT_S`` (e.g. wedged on a serial
+        write) — the caller should then release the coils itself before closing.
+        """
         with self._lock:
-            self._stop_locked()
+            thread = self._thread
+            if thread is None:
+                return True
+            self._stop.set()
+            self._thread = None
+        if not join:
+            return True
+        thread.join(timeout=self.JOIN_TIMEOUT_S)
+        return not thread.is_alive()
 
-    def _stop_locked(self) -> None:
-        if self._thread is None:
-            return
-        self._stop.set()
-        # Bounded so a write stuck on the serial write timeout can't wedge the
-        # caller (a web executor thread). A timed-out thread releases the coils
-        # and exits on its own; the link lock keeps writes from interleaving.
-        self._thread.join(timeout=1.0)
-        self._thread = None
-
-    def _run(self, direction: int, interval_s: float, stop: threading.Event) -> None:
+    def _run(
+        self, direction: int, interval_s: float, stop: threading.Event, generation: int
+    ) -> None:
         command = Command(n_steps=direction)
         release = Command(n_steps=0)
         steps = 0
@@ -216,7 +245,11 @@ class JogClock:
                         "Arduino jog: hit %d-step safety cap; stopping", self._max_steps
                     )
         finally:
-            self._write(release)
+            # Release the coils only if a newer jog has not superseded us, so a
+            # restart's pulses are not clobbered by this thread's stray release.
+            # An atomic int read — no lock, so no deadlock with a joining caller.
+            if generation == self._generation:
+                self._write(release)
 
 
 @register("arduino")
@@ -246,6 +279,12 @@ class ArduinoPlugin(Plugin):
         # Bound method (not self._link.write_command) so the clock always
         # writes through the current link, even after a reconnect swaps it.
         self._jog = JogClock(self._write)
+        # The jog is one shared motor but the rig is multi-client, so the jog
+        # is scoped to the connection that started it: only its owner (or that
+        # owner disconnecting) may stop it. Guards owner + clock transitions.
+        self._jog_lock = threading.Lock()
+        self._jog_owner: int | None = None
+        self._closing = False  # set in teardown to refuse jogs racing shutdown
 
     def _write(self, command: Command) -> None:
         self._link.write_command(command)
@@ -269,7 +308,17 @@ class ArduinoPlugin(Plugin):
         return None
 
     def teardown(self) -> None:
-        self._jog.stop()
+        with self._jog_lock:
+            # Refuse any jog start that races shutdown: once closing, a start
+            # that slipped past _jog.stop() below would spawn a thread nothing
+            # ever stops. _start_jog checks this flag under the same lock.
+            self._closing = True
+            self._jog_owner = None
+        # Stop unconditionally and wait for the coil-release to flush before the
+        # port closes (a released write no-ops once closed). If the thread is
+        # wedged past the join timeout, release the coils here ourselves.
+        if not self._jog.stop(join=True):
+            self._write(Command(n_steps=0))
         self._link.close()
 
     def is_ready(self) -> bool:
@@ -329,25 +378,45 @@ class ArduinoPlugin(Plugin):
 
         return router
 
-    def on_ws_message(self, message: dict) -> bool:
+    def on_ws_message(self, message: dict, client_id: int) -> bool:
         """Handle hold-to-jog start/stop messages.
 
         ``{"type": "jog", "action": "start", "direction": -1|1,
         "interval_us": N}`` starts the backend pulse clock in that direction;
         ``{"type": "jog", "action": "stop"}`` stops it. The clock — not these
         messages — paces the steps, so the client sends exactly one of each per
-        hold.
+        hold. The jog is scoped to ``client_id`` so concurrent operators don't
+        cancel each other (only the owner may stop it).
         """
         if message.get("type") != "jog":
             return False
         if message.get("action") == "start":
-            if message.get("direction") in (-1, 1) and self._link.is_open:
-                self._jog.start(message["direction"], message.get("interval_us"))
+            self._start_jog(message, client_id)
         else:  # "stop" (or any non-start jog message) halts the clock
-            self._jog.stop()
+            self._stop_jog(client_id)
         return True
 
-    def on_ws_disconnect(self) -> None:
-        # A dropped control socket must not leave the motor spinning: the
-        # release message can't arrive over a closed connection.
-        self._jog.stop()
+    def on_ws_disconnect(self, client_id: int) -> None:
+        # A dropped control socket must not leave the motor spinning, but only
+        # if this client owned the jog — another operator's hold is untouched.
+        self._stop_jog(client_id)
+
+    def _start_jog(self, message: dict, client_id: int) -> None:
+        direction = message.get("direction")
+        if direction not in (-1, 1) or not self._link.is_open:
+            return  # nothing to drive (covered client-side by the ready gate)
+        with self._jog_lock:
+            if self._closing:
+                return  # shutting down — don't spawn a jog nothing will stop
+            # Latest press owns the motor; a previous owner's later release is
+            # then ignored (it is no longer the owner) and its hold's stray
+            # pulses are superseded by the clock's generation guard.
+            self._jog_owner = client_id
+            self._jog.start(direction, message.get("interval_us"))
+
+    def _stop_jog(self, client_id: int) -> None:
+        with self._jog_lock:
+            if client_id != self._jog_owner:
+                return  # not the owner — leave the active jog (if any) running
+            self._jog_owner = None
+            self._jog.stop()

@@ -13,6 +13,7 @@ from octacam.plugins.arduino import (
     JOG_MIN_INTERVAL_US,
     ArduinoPlugin,
     Command,
+    JogClock,
     _clamp_jog_interval_us,
 )
 
@@ -31,13 +32,28 @@ class FakeLink:
 
     def write_command(self, command: Command) -> None:
         with self._lock:
-            self.written.append(command.to_bytes())
+            if self._open:  # mirror SerialLink: writes no-op once closed
+                self.written.append(command.to_bytes())
 
     def open(self, device, baud) -> None:
         self._open = True
 
     def close(self) -> None:
         self._open = False
+
+    def snapshot(self) -> list[bytes]:
+        with self._lock:
+            return list(self.written)
+
+
+def _wait(predicate, timeout=1.0):
+    """Poll until predicate() is true (jog start/stop are non-blocking)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
 
 
 # ------------------------------------------------------------- wire format
@@ -102,19 +118,28 @@ def test_on_first_frame_without_params_is_noop():
 # --------------------------------------------------------- jog pulse clock
 
 
-def _start_jog(plugin, direction, interval_us=JOG_MIN_INTERVAL_US):
+RELEASE = Command(n_steps=0).to_bytes()
+
+
+def _start_jog(plugin, direction, interval_us=JOG_MIN_INTERVAL_US, client_id=1):
     return plugin.on_ws_message(
         {
             "type": "jog",
             "action": "start",
             "direction": direction,
             "interval_us": interval_us,
-        }
+        },
+        client_id,
     )
 
 
-def _stop_jog(plugin):
-    return plugin.on_ws_message({"type": "jog", "action": "stop"})
+def _stop_jog(plugin, client_id=1):
+    return plugin.on_ws_message({"type": "jog", "action": "stop"}, client_id)
+
+
+def _released(link):
+    """True once the clock has stopped and written its coil-release."""
+    return _wait(lambda: link.snapshot()[-1:] == [RELEASE])
 
 
 def test_clamp_jog_interval():
@@ -130,11 +155,12 @@ def test_jog_start_pulses_until_stop_then_releases():
     plugin._link = link = FakeLink()
     assert _start_jog(plugin, 1) is True
     time.sleep(0.03)  # let the backend clock emit several pulses
-    assert _stop_jog(plugin) is True  # joins the clock thread before returning
+    assert _stop_jog(plugin) is True
+    assert _released(link)  # coils released after the (async) stop
 
-    writes = link.written
+    writes = link.snapshot()
     assert len(writes) >= 2  # at least one pulse + the release
-    assert writes[-1] == Command(n_steps=0).to_bytes()  # coils released on stop
+    assert writes[-1] == RELEASE
     # Every tick before the release is a single forward half-step.
     assert all(w == Command(n_steps=1).to_bytes() for w in writes[:-1])
 
@@ -143,9 +169,8 @@ def test_jog_direction_sign():
     plugin = ArduinoPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, -1)
-    time.sleep(0.02)
+    assert _wait(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
     _stop_jog(plugin)
-    assert link.written[0] == Command(n_steps=-1).to_bytes()
 
 
 def test_jog_ignores_bad_direction():
@@ -153,7 +178,7 @@ def test_jog_ignores_bad_direction():
     plugin._link = link = FakeLink()
     assert _start_jog(plugin, 7) is True  # handled, but not a valid direction
     time.sleep(0.02)
-    assert link.written == []
+    assert link.snapshot() == []
 
 
 def test_jog_noop_when_serial_closed():
@@ -161,19 +186,19 @@ def test_jog_noop_when_serial_closed():
     plugin._link = link = FakeLink(is_open=False)
     assert _start_jog(plugin, 1) is True
     time.sleep(0.02)
-    assert link.written == []
+    assert link.snapshot() == []
 
 
-def test_jog_stopped_by_ws_disconnect():
+def test_jog_stopped_by_owner_ws_disconnect():
     plugin = ArduinoPlugin()
     plugin._link = link = FakeLink()
-    _start_jog(plugin, 1)
+    _start_jog(plugin, 1, client_id=7)
     time.sleep(0.02)
-    plugin.on_ws_disconnect()  # dropped socket must not leave the motor spinning
-    assert link.written[-1] == Command(n_steps=0).to_bytes()
-    n = len(link.written)
+    plugin.on_ws_disconnect(7)  # owner's socket dropped -> must stop the motor
+    assert _released(link)
+    n = len(link.snapshot())
     time.sleep(0.02)
-    assert len(link.written) == n  # clock really stopped — no further pulses
+    assert len(link.snapshot()) == n  # clock really stopped — no further pulses
 
 
 def test_jog_restart_switches_direction():
@@ -184,15 +209,115 @@ def test_jog_restart_switches_direction():
     _start_jog(plugin, -1)  # re-press the other way without an explicit stop
     time.sleep(0.02)
     _stop_jog(plugin)
-    assert link.written[0] == Command(n_steps=1).to_bytes()
-    assert link.written[-1] == Command(n_steps=0).to_bytes()
-    assert Command(n_steps=-1).to_bytes() in link.written
+    assert _released(link)
+    writes = link.snapshot()
+    assert writes[0] == Command(n_steps=1).to_bytes()
+    assert writes[-1] == RELEASE
+    assert Command(n_steps=-1).to_bytes() in writes
+    # The superseded forward thread must not have injected a stray release.
+    assert writes.count(RELEASE) == 1
+
+
+# ---- multi-client jog ownership (one shared motor, many browsers) ----
+
+
+def test_jog_stop_ignored_from_non_owner():
+    plugin = ArduinoPlugin()
+    plugin._link = link = FakeLink()
+    _start_jog(plugin, 1, client_id=1)  # operator A holds the button
+    time.sleep(0.02)
+    _stop_jog(plugin, client_id=2)  # operator B releases -> must NOT stop A
+    time.sleep(0.02)
+    assert RELEASE not in link.snapshot()  # still jogging
+    _stop_jog(plugin, client_id=1)  # A releases -> stops
+    assert _released(link)
+
+
+def test_jog_other_client_disconnect_keeps_it_running():
+    plugin = ArduinoPlugin()
+    plugin._link = link = FakeLink()
+    _start_jog(plugin, 1, client_id=1)
+    time.sleep(0.02)
+    plugin.on_ws_disconnect(2)  # an unrelated browser drops
+    time.sleep(0.02)
+    assert RELEASE not in link.snapshot()
+    n = len(link.snapshot())
+    assert _wait(lambda: len(link.snapshot()) > n)  # A still being pulsed
+    plugin.on_ws_disconnect(1)  # the owner drops -> stops
+    assert _released(link)
+
+
+def test_jog_takeover_by_second_client():
+    plugin = ArduinoPlugin()
+    plugin._link = link = FakeLink()
+    _start_jog(plugin, 1, client_id=1)
+    time.sleep(0.02)
+    _start_jog(plugin, -1, client_id=2)  # B seizes the shared motor
+    time.sleep(0.02)
+    _stop_jog(plugin, client_id=1)  # A (no longer owner) releases -> ignored
+    time.sleep(0.02)
+    writes = link.snapshot()
+    assert RELEASE not in writes  # B still jogging
+    assert Command(n_steps=-1).to_bytes() in writes
+    _stop_jog(plugin, client_id=2)  # the new owner releases
+    assert _released(link)
+
+
+def test_teardown_stops_jog_and_releases_before_close():
+    plugin = ArduinoPlugin()
+    plugin._link = link = FakeLink()
+    _start_jog(plugin, 1, client_id=1)
+    time.sleep(0.02)
+    plugin.teardown()  # joins, flushes the release, then closes the link
+    assert link.snapshot()[-1] == RELEASE  # release landed while still open
+    assert not link.is_open
+
+
+def test_jog_start_refused_while_closing():
+    plugin = ArduinoPlugin()
+    plugin._link = link = FakeLink()
+    plugin.teardown()  # marks the plugin closing (and closes the link)
+    link.open(None, None)  # pretend the port came back after teardown
+    assert _start_jog(plugin, 1) is True  # message is handled...
+    time.sleep(0.02)
+    assert link.snapshot() == []  # ...but no jog is spawned while closing
+    assert plugin._jog_owner is None
+
+
+class StallingLink(FakeLink):
+    """FakeLink whose first write blocks until released — simulates a serial
+    write wedged past the teardown join timeout."""
+
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def write_command(self, command):
+        if not self.entered.is_set():
+            self.entered.set()
+            self.release.wait(2.0)  # bounded so a broken test can't hang
+        super().write_command(command)
+
+
+def test_stop_join_reports_wedged_thread(monkeypatch):
+    # A thread wedged in a write past the join timeout cannot flush its release,
+    # so stop(join=True) returns False and teardown must release the coils itself.
+    monkeypatch.setattr(JogClock, "JOIN_TIMEOUT_S", 0.05)
+    plugin = ArduinoPlugin()
+    plugin._link = link = StallingLink()
+    try:
+        _start_jog(plugin, 1)
+        assert link.entered.wait(1.0)  # clock thread is wedged in the first write
+        assert plugin._jog.stop(join=True) is False
+    finally:
+        link.release.set()  # let the wedged thread finish and exit cleanly
 
 
 def test_non_jog_message_not_handled():
     plugin = ArduinoPlugin()
     plugin._link = FakeLink()
-    assert plugin.on_ws_message({"type": "something-else"}) is False
+    assert plugin.on_ws_message({"type": "something-else"}, 1) is False
 
 
 # ------------------------------------------------------ contributed router

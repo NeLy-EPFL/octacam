@@ -15,6 +15,7 @@ nothing is encoded when no client is connected.
 import asyncio
 import contextlib
 import dataclasses
+import itertools
 import json
 import logging
 import math
@@ -206,8 +207,13 @@ class _Client:
     latest state, never a growing backlog.
     """
 
+    _next_id = itertools.count(1)
+
     def __init__(self, ws: WebSocket):
         self.ws = ws
+        # Stable per-connection id so plugins can scope transient per-client
+        # state (e.g. the Arduino jog) to the socket that owns it.
+        self.id = next(_Client._next_id)
         self.frames: dict[int, bytes] = {}
         self.texts: dict[str, str] = {}
         self.events: deque[str] = deque(maxlen=50)  # events are not dropped
@@ -699,10 +705,11 @@ def create_app(
                     continue
                 # Hand the message to plugins (e.g. Arduino jog); the first
                 # one to claim it wins. Run in the executor so a plugin's
-                # blocking I/O never stalls the event loop.
+                # blocking I/O never stalls the event loop. The client id lets
+                # a plugin scope per-connection state to the owning socket.
                 for plugin in state.plugins.plugins:
                     handled = await loop.run_in_executor(
-                        None, plugin.on_ws_message, message
+                        None, plugin.on_ws_message, message, client.id
                     )
                     if handled:
                         break
@@ -711,10 +718,13 @@ def create_app(
         finally:
             state.clients.discard(client)
             state.broadcast_presence()
-            # Let plugins react to the closed socket (e.g. the Arduino jog clock
-            # stops, so a dropped connection can't leave the motor spinning).
-            # Off the event loop: the hook may join a worker thread.
-            await loop.run_in_executor(None, state.plugins.dispatch, "on_ws_disconnect")
+            # Let plugins react to this socket closing (e.g. the Arduino jog
+            # clock stops if this client owned it, so a dropped connection
+            # can't leave the motor spinning — but another client's jog is
+            # left untouched). Off the event loop in case the hook blocks.
+            await loop.run_in_executor(
+                None, state.plugins.dispatch, "on_ws_disconnect", client.id
+            )
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await sender

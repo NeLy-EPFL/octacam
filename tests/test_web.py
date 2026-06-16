@@ -231,10 +231,10 @@ def test_plugin_contributions_wired_into_app(tmp_path):
 
             return router
 
-        def on_ws_message(self, message):
+        def on_ws_message(self, message, client_id):
             if message.get("type") != "stubjog":
                 return False
-            self.jogs.append(message.get("n"))
+            self.jogs.append((message.get("n"), client_id))
             return True
 
     system = CameraSystem(EMULATED_SERIALS)
@@ -255,13 +255,16 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             assert system_info["plugins"] == {"stub": {"ready": True, "hello": "world"}}
             # contributed REST endpoint is mounted
             assert client.post("/api/stub/ping").json() == {"pong": True}
-            # WS messages are dispatched to the plugin
+            # WS messages are dispatched to the plugin with the client id
             with client.websocket_connect("/api/ws") as ws:
                 ws.send_text(json.dumps({"type": "stubjog", "n": 5}))
                 deadline = time.monotonic() + 3
                 while not stub.jogs and time.monotonic() < deadline:
                     time.sleep(0.05)
-            assert stub.jogs == [5]
+            assert len(stub.jogs) == 1
+            n, client_id = stub.jogs[0]
+            assert n == 5
+            assert isinstance(client_id, int) and client_id > 0
     finally:
         controller.close()
 
