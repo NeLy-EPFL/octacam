@@ -840,6 +840,7 @@ def _transcode_jobs(
     third element is the recording's frame count when the summary records it
     (used to make the progress bar determinate), else None."""
     from octacam.transform import RECORDING_SUMMARY_FILENAME
+    from octacam.writer import is_partial_transcode
 
     jobs: dict[Path, tuple[Path, str, int | None]] = {}
 
@@ -876,7 +877,11 @@ def _transcode_jobs(
                             frames if isinstance(frames, int) else None,
                         )
                 return
-        loose = sorted(p for p in directory.iterdir() if p.suffix in (".mkv", ".raw"))
+        loose = sorted(
+            p
+            for p in directory.iterdir()
+            if p.suffix in (".mkv", ".raw") and not is_partial_transcode(p)
+        )
         if loose:
             log.warning(
                 "No %s in %s; transcoding %d file(s) with defaults and no transform",
@@ -894,6 +899,11 @@ def _transcode_jobs(
                 for sub in sorted(path.rglob("*")):
                     if sub.is_dir():
                         handle_dir(sub)
+        elif is_partial_transcode(path):
+            # An orphaned in-progress temp (left by a hard kill) named directly
+            # is not a real recording — skip it as the folder scan does, so it
+            # is never fed to ffmpeg.
+            log.warning("Skipping orphaned partial transcode: %s", path)
         else:
             entry = None
             summary_path = path.parent / RECORDING_SUMMARY_FILENAME
@@ -1216,6 +1226,8 @@ def transcode(
         log.warning("No videos to transcode in: %s", ", ".join(map(str, paths)))
         return
     failures = 0
+    completed = 0
+    interrupted = False
     raw_output = progress_style is ProgressStyle.ffmpeg
     # A live progress bar only makes sense on a terminal; piped/CI runs and the
     # raw-ffmpeg style skip it (ffmpeg paints its own output in raw mode).
@@ -1227,36 +1239,54 @@ def transcode(
         session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
         bar or contextlib.nullcontext(),
     ):
-        for index, (input_path, vf, frames) in enumerate(jobs, 1):
-            output = input_path.with_suffix("." + out_format)
-            if output.resolve() == input_path.resolve():
-                log.warning(
-                    "Skipping %s: already in target format (%s)",
-                    input_path,
-                    out_format,
-                )
-                continue
-            on_progress = bar.file(index, input_path) if bar else None
-            try:
-                result = transcode_file(
-                    input_path,
-                    output,
-                    crf=crf,
-                    preset=preset,
-                    pix_fmt=pix_fmt,
-                    x264_params=x264_params,
-                    vf=vf,
-                    total_frames=frames,
-                    on_progress=on_progress,
-                    raw_output=raw_output,
-                )
-                typer.echo(result)
-            except Exception as e:  # one bad file must not abort the batch
-                failures += 1
-                log.error("Failed to transcode %s: %s", input_path, e)
-                continue
-            if remove_source:
-                _remove_source_files(input_path)
+        # A Ctrl-C stops the batch where it stands rather than tearing through
+        # the rest of the jobs: transcode_file already kills its ffmpeg child
+        # and discards the partial output, so the in-flight file leaves nothing
+        # behind. Files already finished keep their outputs.
+        try:
+            for index, (input_path, vf, frames) in enumerate(jobs, 1):
+                output = input_path.with_suffix("." + out_format)
+                if output.resolve() == input_path.resolve():
+                    log.warning(
+                        "Skipping %s: already in target format (%s)",
+                        input_path,
+                        out_format,
+                    )
+                    continue
+                on_progress = bar.file(index, input_path) if bar else None
+                try:
+                    result = transcode_file(
+                        input_path,
+                        output,
+                        crf=crf,
+                        preset=preset,
+                        pix_fmt=pix_fmt,
+                        x264_params=x264_params,
+                        vf=vf,
+                        total_frames=frames,
+                        on_progress=on_progress,
+                        raw_output=raw_output,
+                    )
+                    typer.echo(result)
+                except Exception as e:  # one bad file must not abort the batch
+                    failures += 1
+                    log.error("Failed to transcode %s: %s", input_path, e)
+                    continue
+                completed += 1
+                if remove_source:
+                    _remove_source_files(input_path)
+        except KeyboardInterrupt:
+            interrupted = True
+    # Report outside the `with` so the message lands after the live bar is torn
+    # down (and after the activity marker is cleared) instead of under it.
+    if interrupted:
+        log.warning(
+            "Interrupted — stopped after %d of %d file(s); the in-progress "
+            "transcode was discarded.",
+            completed,
+            len(jobs),
+        )
+        raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
     if failures:
         sys.exit(f"{failures} file(s) failed to transcode")
 

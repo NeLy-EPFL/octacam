@@ -16,6 +16,7 @@ from octacam.writer import (
     TranscodeProgress,
     _parse_progress,
     _reporting_args,
+    is_partial_transcode,
     transcode_encoded,
     transcode_file,
     transcode_raw,
@@ -89,6 +90,7 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
 
     def fake_run(args, src, **kwargs):
         captured["args"] = args
+        open(args[-1], "wb").close()  # a real run leaves the output file in place
 
     monkeypatch.setattr("octacam.writer._run_ffmpeg", fake_run)
     transcode_encoded(
@@ -221,6 +223,62 @@ def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
             output=tmp_path / "cam.mkv",
             on_progress=boom,
         )
+
+
+class _Stop(BaseException):
+    """Stand-in for KeyboardInterrupt: a BaseException raised mid-encode."""
+
+
+def _raise_stop(_p):
+    raise _Stop
+
+
+def test_interrupt_leaves_no_partial_output(tmp_path):
+    # A Ctrl-C (modelled by a BaseException-raising callback) mid-encode must
+    # leave the output path empty and no temp file behind: the encode writes a
+    # discardable sibling, never a truncated file masquerading as finished.
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(64, 48))
+    out = tmp_path / "cam.mkv"
+    with pytest.raises(_Stop):
+        transcode_raw(raw, crf=0, preset="ultrafast", output=out, on_progress=_raise_stop)
+    assert not out.exists()  # no partial final file
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name not in ("cam.raw", "cam.json")]
+    assert leftovers == [], f"orphaned temp files: {leftovers}"
+
+
+def test_interrupt_does_not_clobber_existing_output(tmp_path):
+    # An interrupted re-transcode must not destroy a previously good output: the
+    # new file is renamed into place only once whole, so the old one survives.
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(64, 48))
+    out = tmp_path / "cam.mkv"
+    out.write_bytes(b"PREEXISTING-GOOD-OUTPUT")
+    with pytest.raises(_Stop):
+        transcode_raw(raw, crf=0, preset="ultrafast", output=out, on_progress=_raise_stop)
+    assert out.read_bytes() == b"PREEXISTING-GOOD-OUTPUT"  # untouched
+
+
+def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
+    # transcode_encoded (re-encode of an already-encoded source) shares
+    # _atomic_output, so an interrupt mid-re-encode must also leave no output
+    # and no temp behind.
+    src = _make_mkv(tmp_path / "cam.mkv", _frame(64, 48))
+    out = tmp_path / "out.mp4"
+    with pytest.raises(_Stop):
+        transcode_encoded(src, out, crf=0, preset="ultrafast", on_progress=_raise_stop)
+    assert not out.exists()
+    assert src.exists()  # the source is never touched on the way out
+    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+
+
+def test_successful_transcode_leaves_no_temp_file(tmp_path):
+    # The happy path must not strand the temp sibling either.
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    transcode_raw(raw, crf=0, preset="ultrafast", output=tmp_path / "cam.mkv")
+    assert (tmp_path / "cam.mkv").exists()
+    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
 
 
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
@@ -635,6 +693,75 @@ def test_transcode_cli_octacam_progress_style_is_default(tmp_path):
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam0.mp4").exists()
     assert str(tmp_path / "cam0.mp4") in result.output  # result path on stdout
+
+
+def test_transcode_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
+    # Ctrl-C mid-batch through the REAL transcode_file/_atomic_output path: stop
+    # cleanly with the SIGINT exit code, keep the finished file's renamed output,
+    # and leave the interrupted file with neither a final nor a temp artifact.
+    import octacam.writer as writer
+
+    _write_raw(tmp_path / "a.raw", _frame(16, 12))
+    _write_raw(tmp_path / "b.raw", _frame(16, 12))
+    calls: list = []
+
+    def fake_run_ffmpeg(args, src, **kwargs):
+        calls.append(src)
+        open(args[-1], "wb").close()  # ffmpeg writes the temp output...
+        if len(calls) == 2:
+            raise KeyboardInterrupt  # ...then Ctrl-C lands during the 2nd file
+
+    monkeypatch.setattr(writer, "_run_ffmpeg", fake_run_ffmpeg)
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    assert result.exit_code == 130, result.output  # 128 + SIGINT
+    assert len(calls) == 2  # stopped at the interrupted file, no further jobs
+    assert (tmp_path / "a.mp4").exists()  # finished output renamed into place
+    assert not (tmp_path / "b.mp4").exists()  # interrupted output absent
+    # the interrupted encode's temp is discarded, not orphaned
+    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+
+
+def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
+    # The --progress-style ffmpeg path runs ffmpeg via subprocess.run (not Popen);
+    # a Ctrl-C there must still discard the partial temp — the cleanup lives in
+    # _atomic_output, wrapping both progress modes.
+    import octacam.writer as writer
+
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+
+    def fake_run(args, *a, **k):
+        open(args[-1], "wb").close()  # ffmpeg wrote a partial file...
+        raise KeyboardInterrupt  # ...then the terminal's SIGINT arrives
+
+    monkeypatch.setattr(writer.subprocess, "run", fake_run)
+    with pytest.raises(KeyboardInterrupt):
+        transcode_raw(
+            raw, crf=0, preset="ultrafast", output=tmp_path / "cam.mkv", raw_output=True
+        )
+    assert not (tmp_path / "cam.mkv").exists()
+    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+
+
+def test_transcode_skips_orphaned_partial_files(tmp_path):
+    # A partial temp file a hard kill orphaned must not be picked up as a job.
+    from octacam.cli import _transcode_jobs
+    from octacam.writer import _partial_path
+
+    _write_raw(tmp_path / "cam.raw", _frame(16, 12))
+    orphan = _partial_path(tmp_path / "cam.mkv")
+    orphan.write_bytes(b"\x00" * 32)  # leftover ".octacam-part" sibling
+    assert is_partial_transcode(orphan)
+    # ...whether discovered by a folder scan...
+    jobs = _transcode_jobs(
+        [tmp_path], recursive=False, as_displayed=False, out_format="mkv"
+    )
+    assert sorted(p.name for p, _vf, _n in jobs) == ["cam.raw"]  # orphan skipped
+    # ...or named explicitly on the command line.
+    explicit = _transcode_jobs(
+        [orphan], recursive=False, as_displayed=False, out_format="mkv"
+    )
+    assert explicit == []
 
 
 def test_transcode_cli_rejects_unknown_progress_style(tmp_path):

@@ -17,6 +17,7 @@ full (or once the sink has failed). Available sinks:
 # invariant pyright can't track across methods.
 # pyright: reportOptionalMemberAccess=false
 
+import contextlib
 import json
 import logging
 import os
@@ -493,6 +494,53 @@ def default_codec(gui_config) -> str:
     return "x264"
 
 
+# Infix tagging an in-progress transcode's temp file (see _partial_path). Kept
+# greppable and stable so the folder scanner (cli._transcode_jobs) can skip any
+# such file a hard kill left behind.
+PARTIAL_INFIX = ".octacam-part"
+
+
+def _partial_path(output: Path) -> Path:
+    """Sibling temp path an in-progress encode of ``output`` writes to.
+
+    Lives in ``output``'s own directory (so the final rename is an atomic,
+    same-filesystem ``os.replace``) and is hidden + tagged with
+    :data:`PARTIAL_INFIX`, yet keeps ``output``'s real extension last so ffmpeg
+    still infers the container muxer from the filename."""
+    return output.with_name(f".{output.stem}{PARTIAL_INFIX}{output.suffix}")
+
+
+def is_partial_transcode(path: Path) -> bool:
+    """True for a transcode temp file (see :func:`_partial_path`).
+
+    Lets a folder scan skip a partial output a crash/SIGKILL orphaned before
+    its cleanup could run — a Ctrl-C or any caught failure removes it itself."""
+    return PARTIAL_INFIX in path.name
+
+
+@contextlib.contextmanager
+def _atomic_output(output: Path):
+    """Yield a temp path to encode into, swapped onto ``output`` only on success.
+
+    The whole point of graceful interruption: ffmpeg writes a sibling
+    :func:`_partial_path`, which is atomically renamed onto ``output`` when the
+    body returns normally and deleted on *any* exception — a re-encode failure,
+    or a Ctrl-C (KeyboardInterrupt) / kill that propagates out mid-encode. So a
+    partial encode never appears at ``output``, and an interrupted run never
+    clobbers an existing ``output`` (the rename happens only once the new file
+    is whole)."""
+    tmp = _partial_path(output)
+    tmp.unlink(missing_ok=True)  # clear any orphan a prior hard kill left
+    try:
+        yield tmp
+        # Swap in only once the encode is whole. Inside the try so a failed
+        # rename cleans up too, never stranding the temp.
+        os.replace(tmp, output)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def transcode_raw(
     raw_path: Path,
     crf: int = 20,
@@ -523,26 +571,27 @@ def transcode_raw(
     total_frames = (
         raw_path.stat().st_size // (width * height) if width and height else None
     )
-    args = build_x264_args(
-        find_ffmpeg(),
-        str(output),
-        meta["fps"],
-        width,
-        height,
-        crf,
-        preset,
-        pix_fmt,
-        source=str(raw_path),
-        x264_params=x264_params,
-        vf=vf,
-    )
-    _run_ffmpeg(
-        args,
-        raw_path,
-        on_progress=on_progress,
-        total_frames=total_frames,
-        raw_output=raw_output,
-    )
+    with _atomic_output(output) as tmp:
+        args = build_x264_args(
+            find_ffmpeg(),
+            str(tmp),
+            meta["fps"],
+            width,
+            height,
+            crf,
+            preset,
+            pix_fmt,
+            source=str(raw_path),
+            x264_params=x264_params,
+            vf=vf,
+        )
+        _run_ffmpeg(
+            args,
+            raw_path,
+            on_progress=on_progress,
+            total_frames=total_frames,
+            raw_output=raw_output,
+        )
     return output
 
 
@@ -574,33 +623,34 @@ def transcode_encoded(
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
-    args = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-y",
-        "-i",
-        str(src),
-        *(["-vf", vf] if vf else []),
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        str(crf),
-        *(["-x264-params", x264_params] if x264_params else []),
-        "-pix_fmt",
-        pix_fmt,
-        str(output),
-    ]
-    _run_ffmpeg(
-        args,
-        src,
-        on_progress=on_progress,
-        total_frames=total_frames,
-        raw_output=raw_output,
-    )
+    with _atomic_output(output) as tmp:
+        args = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-y",
+            "-i",
+            str(src),
+            *(["-vf", vf] if vf else []),
+            "-c:v",
+            "libx264",
+            "-preset",
+            preset,
+            "-crf",
+            str(crf),
+            *(["-x264-params", x264_params] if x264_params else []),
+            "-pix_fmt",
+            pix_fmt,
+            str(tmp),
+        ]
+        _run_ffmpeg(
+            args,
+            src,
+            on_progress=on_progress,
+            total_frames=total_frames,
+            raw_output=raw_output,
+        )
     return output
 
 
