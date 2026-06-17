@@ -10,13 +10,6 @@ video_writer_default_index = 0
 record_form_default = "display"
 save_frame_timestamps_default = false
 
-# Offline `octacam transcode` defaults (overridable per run with CLI flags).
-[transcode]
-format = "mp4"
-crf = 20
-preset = "veryslow"
-pix_fmt = "gray"
-
 [[cameras]]
 serial_number = "0815-0000"
 name = "camera_LF"

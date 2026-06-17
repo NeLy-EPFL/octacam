@@ -307,6 +307,34 @@ def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
     on_progress(TranscodeProgress(90, 10.0, 9.0, 1.0, total_frames=100, done=True))
     task = bar._progress.tasks[-1]
     assert task.completed >= task.total  # bar reaches 100% despite the overshoot
+    assert task.finished  # finished => a solid full bar, not a partial one
+
+
+def test_progress_bar_snaps_to_full_when_total_undershoots(tmp_path):
+    # The hint can also undershoot (more frames encoded than expected); the bar
+    # must still land on a full 100% rather than appearing to overflow.
+    from octacam.cli import _TranscodeProgressBar
+
+    bar = _TranscodeProgressBar(1)
+    on_progress = bar.file(1, tmp_path / "a.raw")
+    on_progress(TranscodeProgress(110, 10.0, 11.0, 1.0, total_frames=100, done=True))
+    task = bar._progress.tasks[-1]
+    assert task.total == 110 and task.completed == 110 and task.finished
+
+
+def test_progress_bar_indeterminate_snaps_to_full_when_done(tmp_path):
+    # A file with no known total draws an indeterminate bar; on completion it
+    # must still close on a clean 100% (final frame count becomes the total)
+    # instead of vanishing mid-pulse — the "moved on before 100%" symptom.
+    from octacam.cli import _TranscodeProgressBar
+
+    bar = _TranscodeProgressBar(1)
+    on_progress = bar.file(1, tmp_path / "a.mkv")
+    on_progress(TranscodeProgress(40, 10.0, 4.0, 1.0, total_frames=None, done=False))
+    assert bar._progress.tasks[-1].total is None  # indeterminate while running
+    on_progress(TranscodeProgress(42, 10.0, 4.2, 1.0, total_frames=None, done=True))
+    task = bar._progress.tasks[-1]
+    assert task.total == 42 and task.completed == 42 and task.finished
 
 
 # --------------------------------------------------------------------- CLI
@@ -352,7 +380,7 @@ def _recording_folder(tmp_path, name, session="s1"):
 def test_transcode_last_uses_cache(tmp_path, cache_env):
     f1 = _recording_folder(tmp_path, "rec1")
     f2 = _recording_folder(tmp_path, "rec2")
-    result = _run("--last", "--config-dir", str(tmp_path))
+    result = _run("--last")
     assert result.exit_code == 0, result.output
     assert (f2 / "cam0.mp4").exists()  # only the most recent folder
     assert not (f1 / "cam0.mp4").exists()
@@ -362,20 +390,11 @@ def test_transcode_session_uses_cache(tmp_path, cache_env):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s2")
-    result = _run("--session", "--config-dir", str(tmp_path))
+    result = _run("--session")
     assert result.exit_code == 0, result.output
     assert (f1 / "cam0.mp4").exists()
     assert (f2 / "cam0.mp4").exists()
     assert not (f_old / "cam0.mp4").exists()  # an earlier session is excluded
-
-
-def test_transcode_today_uses_cache(tmp_path, cache_env):
-    f1 = _recording_folder(tmp_path, "rec1", session="s1")
-    f2 = _recording_folder(tmp_path, "rec2", session="s2")
-    result = _run("--today", "--config-dir", str(tmp_path))
-    assert result.exit_code == 0, result.output
-    assert (f1 / "cam0.mp4").exists()
-    assert (f2 / "cam0.mp4").exists()  # spans sessions, all of today
 
 
 def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
@@ -384,7 +403,7 @@ def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
     f1 = _recording_folder(tmp_path, "rec1", session="s1")
     f2 = _recording_folder(tmp_path, "rec2", session="s1")
     shutil.rmtree(f1)  # removed between recording and transcoding -> ignored
-    result = _run("--session", "--config-dir", str(tmp_path))
+    result = _run("--session")
     assert result.exit_code == 0, result.output
     assert (f2 / "cam0.mp4").exists()
 
@@ -395,7 +414,7 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     f1 = _recording_folder(tmp_path, "rec1", session="guiA")
     f2 = _recording_folder(tmp_path, "rec2", session="guiA")
     later = _recording_folder(tmp_path, "rec3", session="recB")  # a later session
-    result = _run("--session-id", "guiA", "--config-dir", str(tmp_path))
+    result = _run("--session-id", "guiA")
     assert result.exit_code == 0, result.output
     assert (f1 / "cam0.mp4").exists()
     assert (f2 / "cam0.mp4").exists()
@@ -403,7 +422,7 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     # Bare --session would instead pick the later session (regression guard).
     for folder in (f1, f2, later):
         (folder / "cam0.mp4").unlink(missing_ok=True)
-    assert _run("--session", "--config-dir", str(tmp_path)).exit_code == 0
+    assert _run("--session").exit_code == 0
     assert (later / "cam0.mp4").exists()
     assert not (f1 / "cam0.mp4").exists()
 
@@ -412,7 +431,7 @@ def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s3")
-    result = _run("--all", "--config-dir", str(tmp_path))
+    result = _run("--all")
     assert result.exit_code == 0, result.output
     # Every folder in the cache, regardless of session or day.
     assert (f_old / "cam0.mp4").exists()
@@ -421,31 +440,31 @@ def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
 
 
 def test_transcode_all_empty_cache_errors(tmp_path, cache_env):
-    result = _run("--all", "--config-dir", str(tmp_path))
+    result = _run("--all")
     assert result.exit_code != 0
     assert "No recordings found" in result.output
 
 
 def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
     _recording_folder(tmp_path, "rec1")
-    result = _run("--last", "--today", "--config-dir", str(tmp_path))
+    result = _run("--last", "--session")
     assert result.exit_code != 0
     assert "at most one" in result.output
     # --all is part of the mutual-exclusion set too.
-    result = _run("--all", "--last", "--config-dir", str(tmp_path))
+    result = _run("--all", "--last")
     assert result.exit_code != 0
     assert "at most one" in result.output
 
 
 def test_transcode_selector_rejects_explicit_paths(tmp_path, cache_env):
     f1 = _recording_folder(tmp_path, "rec1")
-    result = _run(str(f1), "--last", "--config-dir", str(tmp_path))
+    result = _run(str(f1), "--last")
     assert result.exit_code != 0
     assert "cannot be combined" in result.output
 
 
 def test_transcode_selector_empty_cache_errors(tmp_path, cache_env):
-    result = _run("--last", "--config-dir", str(tmp_path))
+    result = _run("--last")
     assert result.exit_code != 0
     assert "No recordings found" in result.output
 
@@ -462,7 +481,7 @@ def test_folder_with_summary_as_saved_keeps_orientation(tmp_path):
             }
         ],
     )
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path))
     assert result.exit_code == 0, result.output
     assert _dims(tmp_path / "cam0.mp4") == (16, 12)  # as-saved: no transform
 
@@ -479,7 +498,7 @@ def test_folder_with_summary_as_displayed_applies_transform(tmp_path):
             }
         ],
     )
-    result = _run(str(tmp_path), "--as-displayed", "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path), "--as-displayed")
     assert result.exit_code == 0, result.output
     assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # rotated
 
@@ -497,7 +516,7 @@ def test_as_displayed_does_not_reapply_when_already_baked(tmp_path):
             }
         ],
     )
-    result = _run(str(tmp_path), "--as-displayed", "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path), "--as-displayed")
     assert result.exit_code == 0, result.output
     assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # unchanged, not re-rotated
 
@@ -535,7 +554,7 @@ def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path):
 def test_folder_without_summary_transcodes_to_mp4(tmp_path):
     _write_raw(tmp_path / "a.raw", _frame(16, 12))
     _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path))
     assert result.exit_code == 0, result.output
     assert (tmp_path / "a.mp4").exists()
     assert (tmp_path / "b.mp4").exists()
@@ -574,7 +593,7 @@ def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
     # skipped, leaving the run successful with nothing transcoded.
     (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)
     _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path))
     assert result.exit_code == 0, result.output
     assert not (tmp_path / "cam0.mp4").exists()
 
@@ -592,8 +611,7 @@ def test_single_file_uses_summary_in_its_folder(tmp_path):
         ],
     )
     result = _run(
-        str(tmp_path / "cam0.raw"), "--as-displayed", "--config-dir", str(tmp_path)
-    )
+        str(tmp_path / "cam0.raw"), "--as-displayed"    )
     assert result.exit_code == 0, result.output
     assert _dims(tmp_path / "cam0.mp4") == (12, 16)
 
@@ -608,8 +626,7 @@ def test_recursive_and_mixed_args_dedup(tmp_path):
     # Pass the parent recursively AND sub_b/cam.raw explicitly: the duplicate
     # must collapse to a single job (no double transcode / error).
     result = _run(
-        "-r", str(tmp_path), str(sub_b / "cam.raw"), "--config-dir", str(tmp_path)
-    )
+        "-r", str(tmp_path), str(sub_b / "cam.raw")    )
     assert result.exit_code == 0, result.output
     assert (sub_a / "cam.mp4").exists()
     assert (sub_b / "cam.mp4").exists()
@@ -628,7 +645,7 @@ def test_remove_source_deletes_raw_and_sidecar_keeps_summary(tmp_path):
             }
         ],
     )
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    result = _run(str(tmp_path), "--remove-source")
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam0.mp4").exists()
     assert not (tmp_path / "cam0.raw").exists()
@@ -638,7 +655,7 @@ def test_remove_source_deletes_raw_and_sidecar_keeps_summary(tmp_path):
 
 def test_remove_source_deletes_mkv(tmp_path):
     _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    result = _run(str(tmp_path), "--remove-source")
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam.mp4").exists()
     assert not (tmp_path / "cam.mkv").exists()
@@ -647,40 +664,30 @@ def test_remove_source_deletes_mkv(tmp_path):
 def test_remove_source_keeps_file_when_transcode_fails(tmp_path):
     # A .raw with no .json sidecar fails to transcode; the source must survive.
     (tmp_path / "orphan.raw").write_bytes(_frame(16, 12).tobytes())
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path), "--remove-source")
+    result = _run(str(tmp_path), "--remove-source")
     assert result.exit_code != 0
     assert (tmp_path / "orphan.raw").exists()
 
 
-def test_config_transcode_defaults_and_format_override(tmp_path):
-    cfg_dir = tmp_path / "cfg"
-    cfg_dir.mkdir()
-    (cfg_dir / "octacam_config.toml").write_text(
-        '[transcode]\nformat = "mkv"\ncrf = 10\n'
-    )
+def test_transcode_default_format_and_override(tmp_path):
     rec = tmp_path / "rec"
     rec.mkdir()
     _write_raw(rec / "cam.raw", _frame(16, 12))
-    # Config default container is mkv.
-    assert _run(str(rec), "--config-dir", str(cfg_dir)).exit_code == 0
-    assert (rec / "cam.mkv").exists()
-    # CLI --format overrides the config default.
+    # The default container is mp4 (the CLI default; no config involved).
+    assert _run(str(rec)).exit_code == 0
+    assert (rec / "cam.mp4").exists()
+    # CLI --format overrides the default.
     (rec / "cam2.raw").write_bytes((rec / "cam.raw").read_bytes())
     (rec / "cam2.json").write_text((rec / "cam.json").read_text())
-    assert (
-        _run(
-            str(rec / "cam2.raw"), "--config-dir", str(cfg_dir), "--format", "mp4"
-        ).exit_code
-        == 0
-    )
-    assert (rec / "cam2.mp4").exists()
+    assert _run(str(rec / "cam2.raw"), "--format", "mkv").exit_code == 0
+    assert (rec / "cam2.mkv").exists()
 
 
 def test_transcode_cli_ffmpeg_progress_style(tmp_path):
     # --progress-style ffmpeg streams ffmpeg's native output but still succeeds.
     _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
     result = _run(
-        str(tmp_path), "--config-dir", str(tmp_path), "--progress-style", "ffmpeg"
+        str(tmp_path), "--progress-style", "ffmpeg"
     )
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam0.mp4").exists()
@@ -689,7 +696,7 @@ def test_transcode_cli_ffmpeg_progress_style(tmp_path):
 def test_transcode_cli_octacam_progress_style_is_default(tmp_path):
     # The default style transcodes cleanly (the bar is a no-op off a terminal).
     _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path))
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam0.mp4").exists()
     assert str(tmp_path / "cam0.mp4") in result.output  # result path on stdout
@@ -712,7 +719,7 @@ def test_transcode_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch)
             raise KeyboardInterrupt  # ...then Ctrl-C lands during the 2nd file
 
     monkeypatch.setattr(writer, "_run_ffmpeg", fake_run_ffmpeg)
-    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    result = _run(str(tmp_path))
     assert result.exit_code == 130, result.output  # 128 + SIGINT
     assert len(calls) == 2  # stopped at the interrupted file, no further jobs
     assert (tmp_path / "a.mp4").exists()  # finished output renamed into place
@@ -767,6 +774,6 @@ def test_transcode_skips_orphaned_partial_files(tmp_path):
 def test_transcode_cli_rejects_unknown_progress_style(tmp_path):
     _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
     result = _run(
-        str(tmp_path), "--config-dir", str(tmp_path), "--progress-style", "bogus"
+        str(tmp_path), "--progress-style", "bogus"
     )
     assert result.exit_code != 0

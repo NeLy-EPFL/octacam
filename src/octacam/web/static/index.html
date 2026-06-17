@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>octacam</title>
+  <script>
+    // Apply the saved theme before first paint to avoid a flash of the wrong
+    // colours. Dark is the default (the stylesheet's :root); only "light" needs
+    // an attribute. js/theme.js owns the toggle once the app has loaded.
+    try {
+      if (localStorage.getItem("octacam.theme") === "light")
+        document.documentElement.dataset.theme = "light";
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="./style.css">
   <script type="module" src="./js/app.js"></script>
 </head>
@@ -12,81 +21,95 @@
 
   <main id="grid"></main>
 
+  <div id="sidebar-resizer" title="Drag to resize the control panel"></div>
+
   <aside id="sidebar">
     <nav id="tabs">
-      <button type="button" data-tab="record" class="active">Record</button>
-      <button type="button" data-tab="camera">Camera</button>
-      <button type="button" data-tab="view">View</button>
-      <button type="button" data-tab="arduino">Arduino</button>
+      <button type="button" data-tab="record" class="active"
+        title="Configure and start/stop a recording">Record</button>
+      <button type="button" data-tab="camera"
+        title="Adjust per-camera sensor parameters (resolution, exposure, gain)">Camera</button>
+      <button type="button" data-tab="view"
+        title="Rotate, flip, and crosshair options for the live preview">View</button>
+      <button type="button" data-tab="arduino"
+        title="Drive the turntable stepper via the Arduino plugin">Arduino</button>
     </nav>
 
     <section id="tab-record" class="tab active">
       <fieldset id="record-fields" disabled>
-        <label class="row"><span>Duration:</span>
+        <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
-            <input id="duration-value" type="number" min="0.01" step="any" value="20">
-            <select id="duration-unit">
+            <input id="duration-value" type="number" min="0.01" step="any" value="20"
+              title="Recording length, in the unit selected at right">
+            <select id="duration-unit" title="Time unit for the duration">
               <option value="1" selected>s</option>
               <option value="60">min</option>
               <option value="3600">h</option>
             </select>
           </span>
         </label>
-        <label class="row"><span>FPS:</span>
+        <label class="row" title="Target capture rate in frames per second (applies to every camera)"><span>FPS:</span>
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>
         <div class="col">
-          <label class="col-label" for="save-dir">Save directory:</label>
-          <textarea id="save-dir" rows="3" spellcheck="false"></textarea>
+          <label class="col-label" for="save-dir"
+            title="Folder on the rig where the video files are written">Save directory:</label>
+          <textarea id="save-dir" rows="3" spellcheck="false"
+            title="Folder on the rig where the video files are written"></textarea>
           <div class="save-dir-foot">
-            <button type="button" id="browse-dir-btn" class="btn">Browse…</button>
-            <span id="disk-free"></span>
+            <button type="button" id="browse-dir-btn" class="btn"
+              title="Browse the rig's filesystem to pick a save folder">Browse…</button>
+            <span id="disk-free" title="Free space available on the save folder's drive"></span>
           </div>
         </div>
-        <label class="row"><span>Trigger source:</span>
+        <label class="row"
+          title="software: the server starts each frame on a timer. external: every frame is driven by a hardware trigger signal."><span>Trigger source:</span>
           <select id="trigger-source">
             <option value="software">software</option>
             <option value="external">external</option>
           </select>
         </label>
-        <label class="row"><span>Format:</span>
+        <label class="row" title="Container and codec used for the saved video files"><span>Format:</span>
           <select id="format"></select>
         </label>
-        <label class="row"><span>Saved image:</span>
+        <label class="row"
+          title="display: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Saved image:</span>
           <select id="record-form">
             <option value="display">display (rotated/flipped)</option>
             <option value="sensor">sensor (raw)</option>
           </select>
         </label>
-        <label class="row"><span>Per-frame timestamp CSV:</span>
+        <label class="row"
+          title="Also write a CSV listing the capture timestamp of every frame, per camera"><span>Per-frame timestamp CSV:</span>
           <input id="save-frame-timestamps" type="checkbox">
         </label>
       </fieldset>
-      <button type="button" id="record-button" class="start" disabled>Start recording</button>
+      <button type="button" id="record-button" class="start" disabled
+        title="Start or stop recording on all cameras at once">Start recording</button>
       <div id="record-status"></div>
       <div id="record-progress" class="hidden"><div id="record-progress-bar"></div></div>
     </section>
 
     <section id="tab-camera" class="tab">
       <fieldset id="camera-fields" disabled>
-        <label class="row"><span>Camera:</span>
+        <label class="row" title="Which camera these sensor parameters are read from and applied to"><span>Camera:</span>
           <select id="cam-target"></select>
         </label>
-        <div class="row"><span>Apply to:</span>
+        <div class="row" title="Apply a change to just the selected camera, or to every camera at once"><span>Apply to:</span>
           <span class="radio-group">
-            <label><input type="radio" name="cam-apply-to" value="selected" checked> Selected</label>
-            <label><input type="radio" name="cam-apply-to" value="all"> All</label>
+            <label title="Change only the selected camera"><input type="radio" name="cam-apply-to" value="selected" checked> Selected</label>
+            <label title="Change all cameras at once"><input type="radio" name="cam-apply-to" value="all"> All</label>
           </span>
         </div>
-        <label class="row"><span>Width:</span>
+        <label class="row" title="Active image width in pixels (sensor region of interest)"><span>Width:</span>
           <input id="cam-width" type="number" step="1">
         </label>
         <span class="node-range" id="cam-width-range"></span>
-        <label class="row"><span>Height:</span>
+        <label class="row" title="Active image height in pixels (sensor region of interest)"><span>Height:</span>
           <input id="cam-height" type="number" step="1">
         </label>
         <span class="node-range" id="cam-height-range"></span>
-        <label class="row"><span>Exposure:</span>
+        <label class="row" title="Exposure time per frame, in microseconds"><span>Exposure:</span>
           <span class="suffixed">
             <input id="cam-exposure" type="number" step="any">
             <span class="suffix">&micro;s</span>
@@ -94,16 +117,16 @@
         </label>
         <span class="node-range" id="cam-exposure-range"></span>
         <details id="cam-advanced">
-          <summary>Advanced</summary>
-          <label class="row"><span>Gain:</span>
+          <summary title="Show less-common sensor controls (gain and ROI offset)">Advanced</summary>
+          <label class="row" title="Brightness gain applied to the sensor signal (in the camera's gain units)"><span>Gain:</span>
             <input id="cam-gain" type="number" step="any">
           </label>
           <span class="node-range" id="cam-gain-range"></span>
-          <label class="row"><span>Offset X:</span>
+          <label class="row" title="Horizontal start of the sensor region of interest, in pixels"><span>Offset X:</span>
             <input id="cam-offset_x" type="number" step="1">
           </label>
           <span class="node-range" id="cam-offset_x-range"></span>
-          <label class="row"><span>Offset Y:</span>
+          <label class="row" title="Vertical start of the sensor region of interest, in pixels"><span>Offset Y:</span>
             <input id="cam-offset_y" type="number" step="1">
           </label>
           <span class="node-range" id="cam-offset_y-range"></span>
@@ -117,55 +140,58 @@
     <section id="tab-arduino" class="tab">
       <div id="arduino-status" class="plugin-status hidden">
         <span id="arduino-status-msg"></span>
-        <button type="button" id="arduino-reconnect" class="btn">Reconnect</button>
+        <button type="button" id="arduino-reconnect" class="btn"
+          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
       </div>
       <fieldset id="arduino-fields" disabled>
-        <h3>Loop</h3>
-        <div class="row"><span>Initial direction:</span>
+        <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
+        <div class="row" title="Rotation direction of the first sweep"><span>Initial direction:</span>
           <span class="radio-group">
-            <label><input type="radio" name="loop-dir" id="loop-dir-ccw" checked> &#8634;</label>
-            <label><input type="radio" name="loop-dir" id="loop-dir-cw"> &#8635;</label>
+            <label title="Start counter-clockwise"><input type="radio" name="loop-dir" id="loop-dir-ccw" checked> &#8634;</label>
+            <label title="Start clockwise"><input type="radio" name="loop-dir" id="loop-dir-cw"> &#8635;</label>
           </span>
         </div>
-        <label class="row"><span>Steps:</span>
+        <label class="row" title="Number of motor steps in each sweep"><span>Steps:</span>
           <input id="loop-steps" type="number" min="2" max="32767" value="4096">
         </label>
-        <label class="row"><span>Step interval:</span>
+        <label class="row" title="Delay between motor steps, in microseconds (smaller = faster rotation)"><span>Step interval:</span>
           <span class="suffixed">
             <input id="loop-interval" type="number" min="800" max="65535" value="1465">
             <span class="suffix">&micro;s</span>
           </span>
         </label>
-        <label class="row"><span>Rest duration:</span>
+        <label class="row" title="Pause at the end of each sweep before reversing, in milliseconds"><span>Rest duration:</span>
           <span class="suffixed">
             <input id="loop-rest" type="number" min="0" max="65535" value="1000">
             <span class="suffix">ms</span>
           </span>
         </label>
-        <label class="row"><span>Repeats:</span>
+        <label class="row" title="How many sweeps to run in the loop"><span>Repeats:</span>
           <input id="loop-repeats" type="number" min="1" max="255" value="3">
         </label>
-        <label class="row"><span>Initial wait:</span>
+        <label class="row" title="Delay before the first sweep starts, in seconds"><span>Initial wait:</span>
           <span class="suffixed">
             <input id="loop-wait" type="number" min="0" max="255" value="10">
             <span class="suffix">s</span>
           </span>
         </label>
         <div id="loop-info"></div>
-        <button type="button" id="loop-execute" class="btn wide">Execute</button>
-        <label class="center"><input type="checkbox" id="loop-with-recording" checked> Start with recording</label>
+        <button type="button" id="loop-execute" class="btn wide"
+          title="Send the configured loop program to the Arduino and run it now">Execute</button>
+        <label class="center" title="Run the loop automatically whenever a recording starts">
+          <input type="checkbox" id="loop-with-recording" checked> Start with recording</label>
 
-        <h3>Adjust position</h3>
-        <label class="row"><span>Step interval:</span>
+        <h3 title="Manually nudge the turntable to a starting position">Adjust position</h3>
+        <label class="row" title="Delay between steps while jogging, in microseconds (smaller = faster)"><span>Step interval:</span>
           <span class="suffixed">
             <input id="jog-interval" type="number" min="1000" max="65535" value="2000">
             <span class="suffix">&micro;s</span>
           </span>
         </label>
-        <div class="row"><span>Direction:</span>
+        <div class="row" title="Hold a button to rotate the turntable; release to stop"><span>Direction:</span>
           <span class="btn-pair">
-            <button type="button" id="jog-ccw" class="btn">&#8634;</button>
-            <button type="button" id="jog-cw" class="btn">&#8635;</button>
+            <button type="button" id="jog-ccw" class="btn" title="Hold to jog counter-clockwise">&#8634;</button>
+            <button type="button" id="jog-cw" class="btn" title="Hold to jog clockwise">&#8635;</button>
           </span>
         </div>
       </fieldset>
@@ -173,28 +199,33 @@
 
     <section id="tab-view" class="tab">
       <fieldset id="view-fields" disabled>
-        <div class="row"><span>Apply to:</span>
+        <label class="row" title="Which camera the rotate/flip controls apply to when Apply to is set to Selected"><span>Camera:</span>
+          <select id="view-target"></select>
+        </label>
+        <div class="row" title="Apply rotate/flip to just the selected camera, or to every camera at once"><span>Apply to:</span>
           <span class="radio-group">
-            <label><input type="radio" name="apply-to" value="selected"> Selected</label>
-            <label><input type="radio" name="apply-to" value="all" checked> All</label>
+            <label title="Change only the selected camera"><input type="radio" name="apply-to" value="selected"> Selected</label>
+            <label title="Change all cameras at once"><input type="radio" name="apply-to" value="all" checked> All</label>
           </span>
         </div>
-        <div class="row"><span>Rotate:</span>
+        <div class="row"
+          title="Rotate the preview 90°. Does not change the sensor; baked into recordings saved in 'display' form."><span>Rotate:</span>
           <span class="btn-pair">
-            <button type="button" id="rotate-ccw" class="btn">&#8634;</button>
-            <button type="button" id="rotate-cw" class="btn">&#8635;</button>
+            <button type="button" id="rotate-ccw" class="btn" title="Rotate 90° counter-clockwise">&#8634;</button>
+            <button type="button" id="rotate-cw" class="btn" title="Rotate 90° clockwise">&#8635;</button>
           </span>
         </div>
-        <div class="row"><span>Flip:</span>
+        <div class="row"
+          title="Mirror the preview. Does not change the sensor; baked into recordings saved in 'display' form."><span>Flip:</span>
           <span class="btn-pair">
-            <button type="button" id="flip-h" class="btn">Horizontal</button>
-            <button type="button" id="flip-v" class="btn">Vertical</button>
+            <button type="button" id="flip-h" class="btn" title="Mirror left-to-right">Horizontal</button>
+            <button type="button" id="flip-v" class="btn" title="Mirror top-to-bottom">Vertical</button>
           </span>
         </div>
-        <button type="button" id="view-reset" class="btn wide">Reset</button>
-        <label class="center"><input type="checkbox" id="display-cross"> Display cross</label>
-        <label class="center"><input type="checkbox" id="layout-edit"> Edit tile layout</label>
-        <div id="layout-hint">Drag a tile to move it; drag its corner to resize.</div>
+        <button type="button" id="view-reset" class="btn wide"
+          title="Clear all rotation and flips for the targeted camera(s)">Reset</button>
+        <label class="center" title="Overlay centering crosshairs on every preview tile">
+          <input type="checkbox" id="display-cross"> Display cross</label>
       </fieldset>
     </section>
 
@@ -202,12 +233,15 @@
     <div id="footer">
       <div id="footer-status">
         <span id="version"></span>
-        <span id="conn-state"></span>
+        <span id="conn-state" title="Live connection status to the octacam server"></span>
         <span id="peers" class="hidden" title="Browsers connected to this server"></span>
       </div>
       <div id="footer-actions">
+        <button id="theme-toggle" type="button" aria-pressed="false"
+          title="Switch to light theme">&#9728;</button>
         <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save config…</button>
-        <button id="disconnect-btn" type="button">Disconnect</button>
+        <button id="disconnect-btn" type="button"
+          title="Disconnect this browser (the recording keeps running on the rig)">Disconnect</button>
         <button id="shutdown-btn" type="button" title="Stop the octacam server on the rig">Shut down</button>
       </div>
     </div>
@@ -216,21 +250,23 @@
   <div id="save-dialog" class="modal hidden">
     <div class="modal-card">
       <h3>Save configuration</h3>
-      <div class="row"><span>Target:</span>
+      <div class="row" title="Overwrite the active config, or create a new named one"><span>Target:</span>
         <span class="radio-group">
-          <label><input type="radio" name="save-target" value="active" checked> Active</label>
-          <label><input type="radio" name="save-target" value="new"> New…</label>
+          <label title="Overwrite the currently loaded config"><input type="radio" name="save-target" value="active" checked> Active</label>
+          <label title="Save as a new config"><input type="radio" name="save-target" value="new"> New…</label>
         </span>
       </div>
-      <label class="row" id="save-name-row"><span>Name:</span>
+      <label class="row" id="save-name-row" title="Name for the new config folder"><span>Name:</span>
         <input id="save-name" type="text" spellcheck="false" placeholder="my_rig">
       </label>
-      <label class="check"><input type="checkbox" id="save-sensor" checked> Sensor parameters (.pfs)</label>
-      <label class="check"><input type="checkbox" id="save-display" checked> Display layout (.toml)</label>
+      <label class="check" title="Save current sensor parameters as a Pylon .pfs file">
+        <input type="checkbox" id="save-sensor" checked> Sensor parameters (.pfs)</label>
+      <label class="check" title="Save the window layout and rotation/flip as a .toml file">
+        <input type="checkbox" id="save-display" checked> Display layout (.toml)</label>
       <div id="save-error" class="modal-error"></div>
       <div class="modal-actions">
         <button type="button" id="save-cancel" class="btn">Cancel</button>
-        <button type="button" id="save-confirm" class="btn">Save</button>
+        <button type="button" id="save-confirm" class="btn" title="Write the configuration to disk">Save</button>
       </div>
     </div>
   </div>
@@ -243,13 +279,13 @@
         <span id="dir-current" class="dir-current"></span>
       </div>
       <div id="dir-list" class="dir-list"></div>
-      <label class="row"><span>New folder:</span>
+      <label class="row" title="Create a new subfolder inside the current folder and use it"><span>New folder:</span>
         <input id="dir-new" type="text" spellcheck="false" placeholder="optional subfolder">
       </label>
       <div id="dir-error" class="modal-error"></div>
       <div class="modal-actions">
         <button type="button" id="dir-cancel" class="btn">Cancel</button>
-        <button type="button" id="dir-select" class="btn">Use this folder</button>
+        <button type="button" id="dir-select" class="btn" title="Save recordings in the current folder">Use this folder</button>
       </div>
     </div>
   </div>

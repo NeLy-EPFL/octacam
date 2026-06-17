@@ -1,4 +1,4 @@
-/* octacam web GUI — dark lab-tool theme */
+/* octacam web GUI — lab-tool theme (dark by default, light via [data-theme]) */
 
 :root {
   color-scheme: dark;
@@ -13,7 +13,30 @@
   --red: #e5534b;
   --amber: #d4a72c;
   --lime: #00ff00;
+  --selected-bg: #20354e; /* tinted title bar of the selected tile */
+  --video-bg: #000; /* letterbox behind each tile's video */
   --sidebar-width: 280px;
+  --resizer-width: 6px;
+}
+
+/* Light theme — only the colours that differ from the dark defaults above are
+   redefined; everything else (e.g. --lime, which overlays the black video
+   letterbox) inherits. Selected by setting data-theme="light" on <html>; an
+   inline script in index.html applies the saved choice before first paint. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --panel: #ffffff;
+  --panel-2: #e9ecf0;
+  --border: #b9c0ca;
+  --text: #1b2027;
+  --text-dim: #5b6571;
+  --accent: #1561c4;
+  --green: #1a7f37;
+  --red: #cf222e;
+  --amber: #845800;
+  --selected-bg: #dbe7fb;
+  --video-bg: #fff;
 }
 
 * { box-sizing: border-box; }
@@ -37,7 +60,9 @@ body {
   position: fixed;
   top: 0;
   left: 0;
-  right: var(--sidebar-width);
+  /* clear both the sidebar and the resizer gutter so the banner ends at the
+     grid's right edge */
+  right: calc(var(--sidebar-width) + var(--resizer-width));
   z-index: 100;
   padding: 5px 10px;
   background: var(--red);
@@ -60,6 +85,9 @@ body {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+  /* Contain the tiles' (unbounded, raise-counter) z-indexes in their own
+     stacking context so they can never climb over the banner or modals. */
+  isolation: isolate;
 }
 
 #grid.auto-tile {
@@ -79,24 +107,35 @@ body {
   overflow: hidden;
   background: var(--panel);
   border: 1px solid var(--border);
+  /* Self-contained stacking context so a tile's z-indexed chrome (title,
+     resize handles, maximize button) never bleeds over a neighbouring window
+     when overlapping in free-form (MDI) layouts. Tile-to-tile order is set by
+     the inline z-index the raise counter assigns on focus. */
+  isolation: isolate;
 }
 
-#grid.auto-tile .tile { position: static; }
+/* Auto-tiled grid items stay in flow but are positioned so each tile's
+   absolutely-placed window chrome (maximize button, resize handles) anchors to
+   the tile rather than the grid. */
+#grid.auto-tile .tile { position: relative; }
 
 .tile.selected { border-color: var(--accent); }
-.tile.selected .tile-title { background: #20354e; }
+.tile.selected .tile-title { background: var(--selected-bg); }
 
 .tile-title {
+  position: relative;
+  z-index: 2; /* drag surface — above the edge resize zones (z 1) */
   flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 2px 6px;
+  padding: 2px 22px 2px 6px; /* right pad clears the absolute maximize button */
   background: var(--panel-2);
   font-size: 11px;
   user-select: none;
-  cursor: default;
+  cursor: move;
+  touch-action: none;
 }
 
 .tile-name {
@@ -147,10 +186,10 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
-  background: #000;
+  background: var(--video-bg);
 }
 
-.tile-body canvas { display: block; background: #000; }
+.tile-body canvas { display: block; background: var(--video-bg); }
 
 .tile-cross {
   position: absolute;
@@ -180,6 +219,21 @@ body {
 }
 
 /* ----------------------------------------------------------- sidebar */
+
+/* Drag handle that resizes the sidebar by driving --sidebar-width (which both
+   the sidebar and the connection banner read). A 6px gutter to match the
+   tiles' resize zones; turns accent-coloured on hover/drag to hint grabbing. */
+#sidebar-resizer {
+  flex: none;
+  width: var(--resizer-width);
+  background: var(--border);
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: none;
+}
+
+#sidebar-resizer:hover,
+#sidebar-resizer.dragging { background: var(--accent); }
 
 #sidebar {
   flex: none;
@@ -506,6 +560,14 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
+/* Compact icon button toggling the dark/light theme (☀ / ☾). */
+#theme-toggle {
+  flex: none;
+  padding: 2px 7px;
+  font-size: 13px;
+  line-height: 1;
+}
+
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
 
 /* ------------------------------------------------ camera params tab */
@@ -535,31 +597,110 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   font-size: 12px;
 }
 
-#layout-hint {
-  margin-top: 4px;
-  text-align: center;
-  font-size: 11px;
+/* ------------------------------------- MDI window chrome (move/resize/max) */
+
+/* Maximize / restore button — an absolute child of the tile (not the title) so
+   its z-index beats the corner resize handles and it stays clickable. */
+.tile-max {
+  position: absolute;
+  z-index: 4;
+  top: 3px;
+  right: 4px;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
   color: var(--text-dim);
 }
 
-/* ----------------------------------------- layout editing (tile grips) */
+.tile-max:hover { color: var(--text); }
 
-#grid.layout-editing .tile { cursor: move; }
-#grid.layout-editing .tile-body { pointer-events: none; } /* let drags hit the tile */
-
-.tile-grip {
+/* maximize glyph: a single square outline */
+.tile-max::before {
+  content: "";
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 16px;
-  height: 16px;
-  display: none;
-  cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 50%, var(--accent) 50%);
-  z-index: 2;
+  left: 2px;
+  top: 2px;
+  width: 9px;
+  height: 9px;
+  border: 1px solid currentColor;
 }
 
-#grid.layout-editing .tile-grip { display: block; }
+/* restore glyph: two offset square outlines */
+.tile.maximized .tile-max::before {
+  left: 1px;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+}
+
+.tile.maximized .tile-max::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 8px;
+  height: 8px;
+  border: 1px solid currentColor;
+}
+
+/* Invisible resize zones around each window. The side edges sit below the
+   title bar (z 1) so a grab on the title moves rather than resizes; the top
+   edge and the bottom corners sit above (z 3) so the window still resizes from
+   those points. (No top corners — the title owns the top edge, where they would
+   collide with the camera name's double-click-to-rename and the button.) */
+.tile-resize {
+  position: absolute;
+  z-index: 1;
+  touch-action: none;
+}
+
+.tile-resize.n,
+.tile-resize.s { left: 0; right: 0; height: 6px; cursor: ns-resize; }
+.tile-resize.e,
+.tile-resize.w { top: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+
+.tile-resize.n { top: 0; z-index: 3; }
+.tile-resize.s { bottom: 0; }
+.tile-resize.e { right: 0; }
+.tile-resize.w { left: 0; }
+
+.tile-resize.se,
+.tile-resize.sw { width: 14px; height: 14px; z-index: 3; }
+
+.tile-resize.se { bottom: 0; right: 0; cursor: nwse-resize; }
+.tile-resize.sw { bottom: 0; left: 0; cursor: nesw-resize; }
+
+/* Subtle grip on the lower-right corner to hint resizability. */
+.tile-resize.se::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  background: linear-gradient(135deg, transparent 50%, var(--text-dim) 50%);
+  opacity: 0.6;
+}
+
+.tile:hover .tile-resize.se::after { opacity: 1; }
+
+/* Maximized window fills the grid; its inline z-index (from the raise counter)
+   floats it above its peers, and its resize zones are disabled. */
+.tile.maximized {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: auto !important;
+  height: auto !important;
+}
+
+.tile.maximized .tile-resize { display: none; }
+.tile.maximized .tile-title { cursor: default; }
 
 /* --------------------------------------------------------- save modal */
 

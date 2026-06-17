@@ -1,5 +1,6 @@
 """Web backend integration tests against the camera emulator."""
 
+import asyncio
 import json
 import os
 import time
@@ -731,3 +732,79 @@ def test_config_save_refused_while_recording(tmp_path):
             controller.stop_recording(abort=True)
     finally:
         controller.close()
+
+
+def test_sender_survives_send_after_socket_close():
+    """A send racing socket teardown must not crash the ASGI app.
+
+    When the connection has already closed (client gone, or uvicorn sent the
+    close frame on shutdown), the ASGI layer raises a bare RuntimeError from
+    send_* rather than WebSocketDisconnect. The sender task must swallow it so
+    the endpoint's `await sender` teardown doesn't re-raise it and surface as
+    the "Unexpected ASGI message 'websocket.send'..." crash.
+    """
+    from starlette.websockets import WebSocketState
+
+    from octacam.web.app import _Client
+
+    class _ClosedWS:
+        client_state = WebSocketState.CONNECTED  # peer still looks connected
+
+        async def send_text(self, _message):
+            raise RuntimeError(
+                "Unexpected ASGI message 'websocket.send', after sending "
+                "'websocket.close' or response already completed."
+            )
+
+        async def send_bytes(self, _message):  # pragma: no cover
+            raise RuntimeError("socket already closed")
+
+    client = _Client(_ClosedWS())
+    client.queue_text("state", "{}")
+
+    # Must return cleanly (and promptly) instead of propagating RuntimeError.
+    asyncio.run(asyncio.wait_for(client.sender(), timeout=1.0))
+
+
+def test_sender_skips_send_once_peer_disconnected():
+    """If the peer is already gone, the sender shouldn't even attempt a send."""
+    from starlette.websockets import WebSocketState
+
+    from octacam.web.app import _Client
+
+    ws = Mock()
+    ws.client_state = WebSocketState.DISCONNECTED
+    client = _Client(ws)
+    client.queue_text("state", "{}")
+    client.queue_frame(0, b"jpegbytes")
+
+    asyncio.run(asyncio.wait_for(client.sender(), timeout=1.0))
+    ws.send_text.assert_not_called()
+    ws.send_bytes.assert_not_called()
+
+
+def test_client_is_ready_for_tracks_unsent_frames():
+    """is_ready_for gates preview encoding on the client having drained the
+    previous frame, so a backed-up client stops the rig re-encoding previews
+    it can't keep up with."""
+    from starlette.websockets import WebSocketState
+
+    from octacam.web.app import _Client
+
+    ws = Mock()
+    ws.client_state = WebSocketState.CONNECTED
+    client = _Client(ws)
+
+    # Fresh client: nothing pending, ready for every camera.
+    assert client.is_ready_for(0)
+    assert client.is_ready_for(1)
+
+    # A queued-but-unsent frame marks that camera not-ready (a new encode would
+    # only overwrite it), while other cameras stay independently ready.
+    client.queue_frame(0, b"jpeg0")
+    assert not client.is_ready_for(0)
+    assert client.is_ready_for(1)
+
+    # Draining the pending dict (what sender() does on each wakeup) clears it.
+    client.frames.clear()
+    assert client.is_ready_for(0)

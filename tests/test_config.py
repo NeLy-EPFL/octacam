@@ -1,7 +1,7 @@
 import time
 from pathlib import Path
 
-from octacam.config import GuiConfig, TranscodeConfig, load_config_dir, parse_config
+from octacam.config import GuiConfig, load_config_dir, parse_config
 
 REPO_ROOT = Path(__file__).parent.parent
 
@@ -10,40 +10,12 @@ def test_missing_file_returns_defaults(tmp_path):
     config = parse_config(tmp_path / "nope.toml")
     assert config.cameras == []
     assert config.gui == GuiConfig()
-    assert config.transcode == TranscodeConfig()
 
 
 def test_gui_recording_output_defaults():
     gui = GuiConfig()
     assert gui.record_form_default == "display"
     assert gui.save_frame_timestamps_default is False
-
-
-def test_transcode_defaults_and_parsing(tmp_path):
-    assert TranscodeConfig().model_dump() == {
-        "format": "mp4",
-        "crf": 20,
-        "preset": "veryslow",
-        "pix_fmt": "gray",
-        "x264_params": "",
-    }
-    (tmp_path / "octacam_config.toml").write_text(
-        '[transcode]\nformat = "mkv"\ncrf = 12\npreset = "slow"\n'
-    )
-    config = load_config_dir(tmp_path)
-    assert config.transcode.format == "mkv"
-    assert config.transcode.crf == 12
-    assert config.transcode.preset == "slow"
-    assert config.transcode.pix_fmt == "gray"  # untouched default
-
-
-def test_lenient_transcode_drops_bad_field(tmp_path):
-    (tmp_path / "octacam_config.toml").write_text(
-        '[transcode]\ncrf = "not-an-int"\nformat = "mkv"\n'
-    )
-    config = load_config_dir(tmp_path)
-    assert config.transcode.crf == 20  # bad field -> default
-    assert config.transcode.format == "mkv"  # good field kept
 
 
 def test_parses_emulate_8_cameras_config():

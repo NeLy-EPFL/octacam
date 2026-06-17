@@ -1,4 +1,4 @@
-"""The recording-session cache that backs `octacam transcode --last/--session/--today`."""
+"""The recording-session cache that backs `octacam transcode --last/--session/--all`."""
 
 import datetime
 import os
@@ -75,15 +75,6 @@ def test_session_folders_empty_for_unknown(cache_dir, tmp_path):
     assert session_cache.session_folders("nope") == []
 
 
-def test_today_folders(cache_dir, tmp_path):
-    a = _make(tmp_path, "a")
-    session_cache.record_recording(a, "s1")
-    assert session_cache.today_folders() == [a.resolve()]
-    # A different calendar day yields nothing.
-    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
-    assert session_cache.today_folders(when=tomorrow) == []
-
-
 def test_all_folders_spans_sessions_in_record_order(cache_dir, tmp_path):
     a, b, c = (_make(tmp_path, n) for n in "abc")
     session_cache.record_recording(a, "s1")
@@ -112,7 +103,6 @@ def test_dedup_same_folder_recorded_twice(cache_dir, tmp_path):
     session_cache.record_recording(a, "s1")
     session_cache.record_recording(a, "s1")
     assert session_cache.session_folders("s1") == [a.resolve()]
-    assert session_cache.today_folders() == [a.resolve()]
 
 
 def test_retention_prunes_old_entries(cache_dir, tmp_path, monkeypatch):

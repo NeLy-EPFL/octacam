@@ -257,7 +257,6 @@ def test_transcode_help_lists_new_options():
     for opt in (
         "--recursive",
         "--as-displayed",
-        "--config-dir",
         "--format",
         "--remove-source",
     ):
@@ -267,7 +266,7 @@ def test_transcode_help_lists_new_options():
 def test_transcode_help_lists_cache_selectors():
     result = runner.invoke(app, ["transcode", "--help"])
     assert result.exit_code == 0
-    for opt in ("--last", "--session", "--today", "--session-id"):
+    for opt in ("--last", "--session", "--session-id", "--all"):
         assert opt in result.output
 
 
@@ -303,7 +302,7 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
     assert any("transcode" in m and "CPU-heavy" in m for m in handler.messages)
 
 
-def test_print_transcode_hints_uses_exact_session_id(tmp_path, monkeypatch):
+def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):
     from octacam import cli, session_cache
 
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
@@ -313,18 +312,17 @@ def test_print_transcode_hints_uses_exact_session_id(tmp_path, monkeypatch):
 
     logger, handler = _capture_octacam_logs(logging.INFO)
     try:
-        cli._print_transcode_hints("sessZ", tmp_path / "cfg")
+        cli._print_transcode_hints("sessZ")
     finally:
         logger.removeHandler(handler)
     blob = "\n".join(handler.messages)
-    # The exact session id (not the hijackable bare --session) is printed.
-    assert "--session-id sessZ" in blob
-    assert "--today" in blob and "--last" in blob
+    # Two ready-to-run selectors: the last session and every cached session.
+    assert "--session" in blob and "--all" in blob
 
     # A session that recorded nothing prints no hint.
     logger, handler = _capture_octacam_logs(logging.INFO)
     try:
-        cli._print_transcode_hints("sessNONE", tmp_path / "cfg")
+        cli._print_transcode_hints("sessNONE")
     finally:
         logger.removeHandler(handler)
     assert not handler.messages

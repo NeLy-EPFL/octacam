@@ -223,7 +223,7 @@ class RecordingController:
         self._auto_preview = auto_preview
         # When set, each finished recording's folder is noted in the session
         # cache (octacam.session_cache) under this id so `octacam transcode
-        # --last/--session/--today` can find it later. None disables the cache
+        # --last/--session/--all` can find it later. None disables the cache
         # (e.g. in unit tests that construct a controller directly).
         self._session_id = session_id
         self._record_kind = record_kind
@@ -774,7 +774,7 @@ class RecordingController:
     def _note_in_session_cache(self) -> None:
         """Record this recording's folder in the session cache for `transcode`.
 
-        Lets `octacam transcode --last/--session/--today` rediscover it later.
+        Lets `octacam transcode --last/--session/--all` rediscover it later.
         No-ops without a session id (direct controller construction in tests);
         best-effort, so a cache failure never disturbs recording teardown. Runs
         before save_dir is incremented, so it captures the just-written folder.

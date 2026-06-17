@@ -3,7 +3,7 @@
 Each finished recording's save directory is appended to a small JSONL under the
 user cache dir (``~/.cache/octacam/recordings.jsonl`` by default) so that, later,
 ``octacam transcode`` can target the *last* recording, the *last GUI session*, or
-*today's* recordings without the operator re-typing paths.
+*every* recording without the operator re-typing paths.
 
 Design notes:
 
@@ -240,17 +240,6 @@ def session_folders(session_id: str | None = None) -> list[Path]:
     if session_id is None:
         return []
     folders = [Path(e["folder"]) for e in entries if e.get("session") == session_id]
-    return _existing(folders)
-
-
-def today_folders(when: datetime.date | None = None) -> list[Path]:
-    """Existing folders recorded on ``when`` (today by default), in local time."""
-    target = when or _now().date()
-    folders = [
-        Path(entry["folder"])
-        for entry in _read_entries()
-        if (t := _parse_time(entry.get("time"))) is not None and t.date() == target
-    ]
     return _existing(folders)
 
 

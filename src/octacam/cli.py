@@ -319,13 +319,10 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
         log.warning("Failed to open a browser — open %s manually.", url, exc_info=True)
 
 
-def _print_transcode_hints(session_id: str, config_dir: Path) -> None:
+def _print_transcode_hints(session_id: str) -> None:
     """On GUI shutdown, print the transcode commands for what was just recorded.
 
-    Stays silent when the session recorded nothing (it only previewed). The
-    GUI's config dir carries the ``[transcode]`` encoding defaults, so it is
-    appended as ``--config-dir`` whenever it is not the current directory, and
-    the printed commands reproduce this rig's settings verbatim.
+    Stays silent when the session recorded nothing (it only previewed).
     """
     from octacam import session_cache
 
@@ -338,25 +335,11 @@ def _print_transcode_hints(session_id: str, config_dir: Path) -> None:
         return
     if not folders:
         return
-    try:
-        same_dir = config_dir.resolve() == Path.cwd().resolve()
-    except OSError:
-        same_dir = False
-    suffix = "" if same_dir else f" --config-dir {shlex.quote(str(config_dir))}"
-    # The "this session" line names the exact session id, not the bare --session
-    # selector: --session resolves to the *latest* session, so a later recording
-    # (this rig or another) would otherwise make the printed command target the
-    # wrong batch. --today / --last stay as convenient latest-selectors.
     log.info(
         "Recorded %d folder(s) this session. Transcode them with:\n"
-        "  this session:   octacam transcode --session-id %s%s\n"
-        "  today:          octacam transcode --today%s\n"
-        "  last recording: octacam transcode --last%s",
+        "  last session:  octacam transcode --session\n"
+        "  all sessions:  octacam transcode --all",
         len(folders),
-        shlex.quote(session_id),
-        suffix,
-        suffix,
-        suffix,
     )
 
 
@@ -564,7 +547,22 @@ def gui(
             daemon=True,
         ).start()
     try:
-        uvicorn.run(app, host=host, port=port, log_level="warning")
+        # ws_ping_timeout: uvicorn's websocket keepalive pings the browser and
+        # drops the socket if no pong returns within this window. That same
+        # socket also carries the preview stream (up to ~8 cameras worth of JPEG
+        # frames at the display refresh rate), so over a slow `ssh -L` tunnel the
+        # link can stay congested long enough that the default 20s pong wait
+        # elapses and a perfectly live GUI is killed with a 1011 "keepalive ping
+        # timeout". Give the pong a generous window; the ping still runs at the
+        # default interval, so a genuinely dead (half-open) client is reaped and
+        # its preview encoding stops.
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level="warning",
+            ws_ping_timeout=60.0,
+        )
     finally:
         # Runs on Ctrl+C, on the /api/shutdown self-signal, and on errors.
         # Cleanup can take a moment (finalizing recordings, draining ffmpeg,
@@ -576,8 +574,8 @@ def gui(
         # while this process lingers; the OS would also drop it on exit.
         instance_lock.close()
         # If anything was recorded this session, print the ready-to-run transcode
-        # commands for it (and for today / the last recording).
-        _print_transcode_hints(session_id, config_dir)
+        # commands for it.
+        _print_transcode_hints(session_id)
         log.info("octacam stopped.")
 
 
@@ -780,7 +778,7 @@ def record(
         save_frame_timestamps=save_frame_timestamps,
     )
     # Tag this headless run in the session cache so `octacam transcode --last`
-    # and `--today` pick it up too (a one-off, single-folder "session").
+    # and `--session` pick it up too (a one-off, single-folder "session").
     controller = RecordingController(
         system,
         settings,
@@ -940,13 +938,12 @@ def _resolve_transcode_paths(
     paths: list[Path],
     last: bool,
     session: bool,
-    today: bool,
     session_id: str | None,
     all_: bool,
 ) -> list[Path]:
     """Resolve explicit PATHS or one cache selector to a list of folders.
 
-    The selectors --last/--session/--today/--session-id/--all are mutually
+    The selectors --last/--session/--session-id/--all are mutually
     exclusive and cannot be combined with explicit PATHS. They read the recording
     cache (octacam.session_cache) and skip folders that have since been deleted,
     so a removed recording is simply ignored. ``--session`` means the most recent
@@ -962,7 +959,6 @@ def _resolve_transcode_paths(
         for name, on in (
             ("--last", last),
             ("--session", session),
-            ("--today", today),
             ("--session-id", session_id is not None),
             ("--all", all_),
         )
@@ -976,7 +972,7 @@ def _resolve_transcode_paths(
         if not paths:
             sys.exit(
                 "Provide one or more PATHS, or one of "
-                "--last/--session/--today/--session-id/--all."
+                "--last/--session/--session-id/--all."
             )
         return paths
 
@@ -990,9 +986,6 @@ def _resolve_transcode_paths(
     elif session:
         selector = "--session"
         folders = session_cache.session_folders()
-    elif today:
-        selector = "--today"
-        folders = session_cache.today_folders()
     else:
         selector = f"--session-id {shlex.quote(session_id or '')}"
         folders = session_cache.session_folders(session_id)
@@ -1064,18 +1057,27 @@ class _TranscodeProgressBar:
                 stats.append(f"{p.fps:.0f} fps")
             if p.speed:
                 stats.append(f"{p.speed:.3g}x")
-            # On the final block, snap a determinate bar to full: the frame total
-            # is only a hint and may overshoot the frames actually encoded (e.g.
-            # a recording with dropped frames), which would otherwise leave the
-            # bar short of 100% just before it is wiped.
+            # On the final block, snap the bar to a clean 100%. The frame total
+            # is only a hint and may over- or undershoot the frames actually
+            # encoded (e.g. a recording with dropped frames), and a file with no
+            # known total has been drawing an indeterminate bar — so adopt the
+            # final frame count as the total whenever it would otherwise leave
+            # the bar shy of (or past) full, or mid indeterminate-pulse.
             completed = p.frame
-            if p.done and p.total_frames is not None:
-                completed = max(p.frame, p.total_frames)
+            total = p.total_frames
+            if p.done:
+                total = max(p.frame, total or 0) or None
+                completed = p.frame if total is None else total
             self._progress.update(
                 task,
-                total=p.total_frames,
+                total=total,
                 completed=completed,
                 stats="  ".join(stats),
+                # Paint the full bar now: rich's auto-refresh runs on a timer and
+                # may not tick before this task is removed (next file) or the
+                # batch stops (transient bar is wiped), leaving the last painted
+                # frame short of 100%. refresh() no-ops until the live is started.
+                refresh=p.done,
             )
 
         return on_progress
@@ -1089,7 +1091,7 @@ def transcode(
             exists=True,
             help="Folders and/or video files (.mkv/.raw). A folder is driven by "
             "its recording_summary.json if present. Omit when using "
-            "--last/--session/--today/--all.",
+            "--last/--session/--all.",
         ),
     ] = None,
     last: Annotated[
@@ -1107,13 +1109,6 @@ def transcode(
             "--session",
             "--last-session",
             help="Transcode every folder from the last GUI session; no PATHS needed.",
-        ),
-    ] = False,
-    today: Annotated[
-        bool,
-        typer.Option(
-            "--today",
-            help="Transcode every folder recorded today; no PATHS needed.",
         ),
     ] = False,
     session_id: Annotated[
@@ -1145,36 +1140,23 @@ def transcode(
             "already baked in). Default: reproduce as saved.",
         ),
     ] = False,
-    config_dir: Annotated[
-        Path,
-        typer.Option(
-            "--config-dir",
-            help="Directory whose octacam_config.toml [transcode] table supplies "
-            "the default encoding parameters.",
-        ),
-    ] = Path("."),
     fmt: Annotated[
-        str | None,
-        typer.Option("--format", help="Output container [default: from config]."),
-    ] = None,
-    crf: Annotated[
-        int | None, typer.Option(help="x264 quality [default: from config].")
-    ] = None,
-    preset: Annotated[
-        str | None, typer.Option(help="x264 speed preset [default: from config].")
-    ] = None,
+        str,
+        typer.Option("--format", help="Output container."),
+    ] = "mp4",
+    crf: Annotated[int, typer.Option(help="x264 quality.")] = 20,
+    preset: Annotated[str, typer.Option(help="x264 speed preset.")] = "veryslow",
     pix_fmt: Annotated[
-        str | None,
-        typer.Option("--pix-fmt", help="Pixel format [default: from config]."),
-    ] = None,
+        str,
+        typer.Option("--pix-fmt", help="Pixel format."),
+    ] = "gray",
     x264_params: Annotated[
-        str | None,
+        str,
         typer.Option(
             "--x264-params",
-            help='Extra libx264 -x264-params, e.g. "keyint=30:scenecut=0" '
-            "[default: from config].",
+            help='Extra libx264 -x264-params, e.g. "keyint=30:scenecut=0".',
         ),
-    ] = None,
+    ] = "",
     remove_source: Annotated[
         bool,
         typer.Option(
@@ -1198,28 +1180,20 @@ def transcode(
     PATHS may mix folders and video files. A folder is transcoded per its
     recording_summary.json when present (honoring --as-saved/--as-displayed);
     otherwise its .mkv/.raw files are transcoded with default parameters and no
-    transform. Defaults come from the [transcode] config table.
+    transform. Encoding defaults come from the CLI options below.
 
     Instead of PATHS, pass one of --last (the most recent recording folder),
-    --session (every folder from the last GUI session), --today (every folder
-    recorded today), --session-id (an exact session), or --all (every folder the
-    cache still holds). These read the recording cache octacam keeps and silently
-    skip any folder that has since been deleted.
+    --session (every folder from the last GUI session), --session-id (an exact
+    session), or --all (every folder the cache still holds). These read the
+    recording cache octacam keeps and silently skip any folder that has since
+    been deleted.
     """
     from octacam import session_cache
-    from octacam.config import load_config_dir
     from octacam.writer import transcode_file
 
-    paths = _resolve_transcode_paths(
-        list(paths or []), last, session, today, session_id, all_
-    )
+    paths = _resolve_transcode_paths(list(paths or []), last, session, session_id, all_)
 
-    tcfg = load_config_dir(config_dir).transcode
-    out_format = (fmt or tcfg.format).lstrip(".")
-    crf = crf if crf is not None else tcfg.crf
-    preset = preset or tcfg.preset
-    pix_fmt = pix_fmt or tcfg.pix_fmt
-    x264_params = x264_params if x264_params is not None else tcfg.x264_params
+    out_format = fmt.lstrip(".")
 
     jobs = _transcode_jobs(paths, recursive, as_displayed, out_format)
     if not jobs:

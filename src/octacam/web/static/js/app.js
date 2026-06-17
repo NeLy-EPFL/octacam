@@ -5,8 +5,10 @@ import { ReconnectingSocket } from "./ws.js";
 import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
 import { ArduinoTab } from "./arduino.js";
-import { initViewTab } from "./view.js";
+import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
+import { initSidebarResize } from "./resize.js";
+import { initTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
 
@@ -75,6 +77,8 @@ async function loadInitial() {
 }
 
 async function main() {
+  initTheme();
+  initSidebarResize();
   const [system, snap] = await loadInitial();
 
   const versionEl = document.getElementById("version");
@@ -94,13 +98,21 @@ async function main() {
   }
 
   let cameraTab = null;
+  let viewTab = null;
   let saveDialog = null;
   let dirPicker = null;
   const grid = new CameraGrid(document.getElementById("grid"), system.cameras, {
-    onSelect: (i) => cameraTab?.selectCamera(i),
+    onSelect: (i) => {
+      cameraTab?.selectCamera(i);
+      viewTab?.selectCamera(i);
+    },
     onRename: (i, name) => cameraTab?.renameCamera(i, name),
   });
-  initViewTab(grid);
+  viewTab = new ViewTab({
+    cameras: system.cameras,
+    grid,
+    onSelect: (i) => grid.select(i),
+  });
 
   let record = null;
   const notify = (level, message) => {
@@ -143,7 +155,10 @@ async function main() {
     cameras: system.cameras,
     notify,
     onSelect: (i) => grid.select(i),
-    onRename: (i, name) => grid.setName(i, name),
+    onRename: (i, name) => {
+      grid.setName(i, name);
+      viewTab?.applyName(i, name);
+    },
   });
   saveDialog = new SaveDialog({
     grid,
@@ -155,6 +170,10 @@ async function main() {
     onPick: (path) => record.setSaveDir(path),
     getStart: () => record.getSaveDir(),
   });
+
+  // Establish an initial current camera so the grid highlight and both pickers
+  // agree from the start (and "Apply to: Selected" always has a target).
+  if (system.cameras.length) grid.select(0);
 
   // Connection has four modes: "connected", "reconnecting" (unexpected drop),
   // "offline" (user disconnected, calm) and "stopped" (server shut down).

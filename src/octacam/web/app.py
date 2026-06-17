@@ -39,6 +39,7 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from starlette.websockets import WebSocketState
 
 import octacam
 from octacam import config_writer
@@ -231,16 +232,38 @@ class _Client:
         self.events.append(message)
         self.wakeup.set()
 
+    def is_ready_for(self, camera_index: int) -> bool:
+        """True when this client has no preview frame still waiting to be sent
+        for ``camera_index``.
+
+        The sender swaps the whole pending-frame dict out atomically before
+        draining it, so an entry lingers here only while a frame is queued but
+        not yet handed to the socket. A slow client (or a stalled ssh -L tunnel)
+        leaves the previous frame pending; encoding another would just overwrite
+        it (newest-only) and waste CPU. The preview loop uses this to pace
+        encoding to what clients can actually consume."""
+        return camera_index not in self.frames
+
     async def sender(self) -> None:
         # A client can vanish mid-send (browser tab closed, SSH tunnel
-        # dropped). Starlette surfaces that as WebSocketDisconnect from the
-        # send_* calls; swallow it so the task ends cleanly instead of dying
-        # with an exception that the endpoint's teardown `await sender` would
-        # re-raise and crash the ASGI app with.
-        with contextlib.suppress(WebSocketDisconnect):
+        # dropped) or the socket can be closed from under us on server
+        # shutdown. A client-initiated disconnect surfaces as
+        # WebSocketDisconnect, but a send issued after the connection has
+        # already closed (e.g. uvicorn sent the close frame) surfaces from
+        # the ASGI layer as a bare RuntimeError ("Unexpected ASGI message
+        # 'websocket.send', after sending 'websocket.close'..."). Swallow
+        # both so the task ends cleanly instead of dying with an exception
+        # that the endpoint's teardown `await sender` would re-raise and
+        # crash the ASGI app with.
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
             while True:
                 await self.wakeup.wait()
                 self.wakeup.clear()
+                # Don't even attempt a doomed send if the peer is gone; the
+                # RuntimeError suppression above is only the backstop for the
+                # narrow race where the socket closes mid-batch.
+                if self.ws.client_state != WebSocketState.CONNECTED:
+                    return
                 frames, self.frames = self.frames, {}
                 texts, self.texts = self.texts, {}
                 events = list(self.events)
@@ -319,18 +342,32 @@ class _AppState:
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(interval)
-            if not self.clients:
+            clients = list(self.clients)
+            if not clients:
                 continue
+            # Only spend a frame grab and a JPEG encode on cameras at least one
+            # client has drained. A client still sending the previous frame for
+            # a camera would just have it overwritten (newest-only), so skipping
+            # the encode keeps server load matched to what clients can actually
+            # consume: a slow or stalled ssh -L tunnel can't make the rig burn
+            # CPU encoding previews nobody is keeping up with (which would
+            # otherwise contend with the live recording encode path).
             grabbed = []
+            ready_by_index: dict[int, list[_Client]] = {}
             for index, camera in enumerate(self.controller.camera_system):
+                ready = [c for c in clients if c.is_ready_for(index)]
+                if not ready:
+                    continue
                 frame = camera.frame_for_display.pop()
-                if frame is not None:
-                    grabbed.append((index, camera, frame))
+                if frame is None:
+                    continue
+                grabbed.append((index, camera, frame))
+                ready_by_index[index] = ready
             if not grabbed:
                 continue
             messages = await loop.run_in_executor(None, self._encode_batch, grabbed)
             for camera_index, message in messages:
-                for client in list(self.clients):
+                for client in ready_by_index[camera_index]:
                     client.queue_frame(camera_index, message)
 
     def _encode_batch(self, grabbed) -> list[tuple[int, bytes]]:

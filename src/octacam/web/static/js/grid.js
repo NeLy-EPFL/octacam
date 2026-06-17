@@ -1,6 +1,8 @@
-// Camera grid: tiles positioned from config layout fractions (or auto-tiled
-// in a 3-column grid), JPEG preview rendering, transforms, crosshair, and
-// (in edit mode) drag-to-move / drag-corner-to-resize layout editing.
+// Camera grid: MDI-style subwindows positioned from config layout fractions
+// (or auto-tiled in a 3-column grid), JPEG preview rendering, transforms, and
+// crosshair. Each tile behaves like a Qt MDI subwindow: drag its title bar to
+// move, drag an edge/corner to resize, double-click the title (or click its
+// button) to maximize/restore. Clicking a tile raises it above its peers.
 
 import { api, clamp } from "./util.js";
 
@@ -22,7 +24,7 @@ export class CameraGrid {
     this.tiles = [];
     this.indexBySerial = new Map();
     this.selected = -1;
-    this._editing = false; // layout editing (drag tiles)
+    this._z = 0; // stacking counter — clicking a tile raises it above its peers
     // Inline name editing (double-click a tile title); locked unless connected
     // and not recording. The recording state is only authoritative once a
     // state/telemetry message arrives, so _recordingKnown holds the lock on
@@ -52,7 +54,7 @@ export class CameraGrid {
     const el = document.createElement("div");
     el.className = "tile";
     el.innerHTML = `
-      <div class="tile-title">
+      <div class="tile-title" title="Drag to move; double-click to maximize">
         <span class="tile-name"></span>
         <span class="tile-stats">
           <span class="tile-dropped"></span>
@@ -63,7 +65,13 @@ export class CameraGrid {
         <canvas width="0" height="0"></canvas>
         <div class="tile-cross"><div class="cross-h"></div><div class="cross-v"></div></div>
       </div>
-      <div class="tile-grip" title="Drag to resize"></div>`;
+      <button type="button" class="tile-max" title="Maximize" tabindex="-1"></button>
+      <div class="tile-resize n" data-dir="n"></div>
+      <div class="tile-resize s" data-dir="s"></div>
+      <div class="tile-resize e" data-dir="e"></div>
+      <div class="tile-resize w" data-dir="w"></div>
+      <div class="tile-resize se" data-dir="se" title="Drag to resize"></div>
+      <div class="tile-resize sw" data-dir="sw" title="Drag to resize"></div>`;
     const nameEl = el.querySelector(".tile-name");
     nameEl.textContent = cam.name;
     nameEl.title = `serial ${cam.serial}`;
@@ -80,14 +88,19 @@ export class CameraGrid {
       nameEl,
       fpsEl: el.querySelector(".tile-fps"),
       droppedEl: el.querySelector(".tile-dropped"),
+      maxBtn: el.querySelector(".tile-max"),
       runtime: { rot: 0, fx: 1, fy: 1 },
       natW: 0,
       natH: 0,
       busy: false,
       pendingBlob: null,
       suppressClick: false,
+      maximized: false,
     };
     this.tiles.push(tile);
+
+    // Clicking anywhere on a tile selects it and raises it above its peers; a
+    // drag/resize sets suppressClick so the gesture doesn't also select.
     el.addEventListener("click", () => {
       if (tile.suppressClick) {
         tile.suppressClick = false;
@@ -95,11 +108,29 @@ export class CameraGrid {
       }
       this.select(index);
     });
-    el.addEventListener("pointerdown", (e) => this._onTilePointerDown(e, tile));
+    el.addEventListener("pointerdown", () => this._raise(tile));
+
+    const title = el.querySelector(".tile-title");
+    title.addEventListener("pointerdown", (e) => this._onMoveStart(e, tile));
+    // Double-click the title bar (but not the name, where it renames) maximizes.
+    title.addEventListener("dblclick", (e) => {
+      if (e.target.closest(".tile-name, .tile-name-edit")) return;
+      this.toggleMaximize(tile);
+    });
     nameEl.addEventListener("dblclick", (e) => {
       e.stopPropagation();
       this._startNameEdit(tile);
     });
+    tile.maxBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    tile.maxBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleMaximize(tile);
+    });
+    for (const h of el.querySelectorAll(".tile-resize")) {
+      h.addEventListener("pointerdown", (e) =>
+        this._onResizeStart(e, tile, h.dataset.dir)
+      );
+    }
     this._applyTransform(tile);
   }
 
@@ -151,7 +182,7 @@ export class CameraGrid {
   // goes through onRename (the Camera tab's renameCamera), which relabels the
   // tile via setName on success; on a no-op/failure the title reverts.
   _startNameEdit(tile) {
-    if (this._renameLocked || this._editing || this._nameEdit) return;
+    if (this._renameLocked || this._nameEdit) return;
 
     const title = tile.el.querySelector(".tile-title");
     const input = document.createElement("input");
@@ -346,17 +377,38 @@ export class CameraGrid {
     }
   }
 
-  // ----------------------------------------------------- layout editing
+  // -------------------------------------------------- window interactions
 
-  setLayoutEditing(enabled) {
-    this._editing = enabled;
-    this.container.classList.toggle("layout-editing", enabled);
-    // Editing needs explicit per-tile boxes; convert the CSS-grid auto layout
-    // into the current positions/sizes as fractions so they can be edited.
-    if (enabled && this.autoTile) this._materializeAutoLayout();
+  // Clicking/dragging a tile floats it above its peers (Qt MDI focus order).
+  _raise(tile) {
+    tile.el.style.zIndex = String(++this._z);
   }
 
-  _materializeAutoLayout() {
+  // Toggle a tile between its normal geometry and filling the whole grid. Only
+  // one tile is maximized at a time; cam.layout keeps the normal box so a save
+  // (or restore) reflects the real geometry, not the maximized override.
+  toggleMaximize(tile) {
+    const next = !tile.maximized;
+    if (next) {
+      for (const t of this.tiles) {
+        if (t !== tile && t.maximized) this._setMaximized(t, false);
+      }
+    }
+    this._setMaximized(tile, next);
+    this._raise(tile);
+    this._layoutCanvas(tile);
+  }
+
+  _setMaximized(tile, on) {
+    tile.maximized = on;
+    tile.el.classList.toggle("maximized", on);
+    tile.maxBtn.title = on ? "Restore" : "Maximize";
+  }
+
+  // The first move/resize converts the CSS-grid auto layout into explicit
+  // per-tile fractions so windows can be placed freely; a no-op once done.
+  _ensureMaterialized() {
+    if (!this.autoTile) return;
     const cr = this.container.getBoundingClientRect();
     for (const t of this.tiles) {
       const r = t.el.getBoundingClientRect();
@@ -372,9 +424,10 @@ export class CameraGrid {
     this._layoutAll();
   }
 
-  _onTilePointerDown(e, tile) {
-    if (!this._editing || e.button !== 0) return;
-    const resize = e.target.classList.contains("tile-grip");
+  // Drag the title bar to move the window, kept fully inside the grid.
+  _onMoveStart(e, tile) {
+    if (e.button !== 0 || tile.maximized) return;
+    this._ensureMaterialized();
     const cr = this.container.getBoundingClientRect();
     const l = tile.cam.layout;
     const start = {
@@ -396,34 +449,84 @@ export class CameraGrid {
       start.moved = true;
       const dx = (ev.clientX - start.x) / cr.width;
       const dy = (ev.clientY - start.y) / cr.height;
-      if (resize) {
-        tile.cam.layout = {
-          window_x: start.lx,
-          window_y: start.ly,
-          window_width: clamp(start.lw + dx, 0.05, 1),
-          window_height: clamp(start.lh + dy, 0.05, 1),
-        };
-      } else {
-        tile.cam.layout = {
-          window_x: clamp(start.lx + dx, 0, 1),
-          window_y: clamp(start.ly + dy, 0, 1),
-          window_width: start.lw,
-          window_height: start.lh,
-        };
-      }
+      tile.cam.layout = {
+        window_x: clamp(start.lx + dx, 0, 1 - start.lw),
+        window_y: clamp(start.ly + dy, 0, 1 - start.lh),
+        window_width: start.lw,
+        window_height: start.lh,
+      };
       this._applyTileBox(tile);
     };
+    this._startDrag(e, tile, start, move);
+  }
+
+  // Drag an edge/corner handle to resize; `dir` combines n/s/e/w.
+  _onResizeStart(e, tile, dir) {
+    if (e.button !== 0 || tile.maximized) return;
+    e.stopPropagation(); // a handle drag must not also move or select the tile
+    this._ensureMaterialized();
+    const MIN = 0.05;
+    const cr = this.container.getBoundingClientRect();
+    const l = tile.cam.layout;
+    const start = {
+      x: e.clientX,
+      y: e.clientY,
+      lx: hasPos(l) ? l.window_x : 0,
+      ly: hasPos(l) ? l.window_y : 0,
+      lw: hasSize(l) ? l.window_width : 1 / 3,
+      lh: hasSize(l) ? l.window_height : 1 / 3,
+      moved: false,
+    };
+    const move = (ev) => {
+      if (
+        !start.moved &&
+        Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD
+      ) {
+        return;
+      }
+      start.moved = true;
+      const dx = (ev.clientX - start.x) / cr.width;
+      const dy = (ev.clientY - start.y) / cr.height;
+      let { lx, ly, lw, lh } = start;
+      if (dir.includes("e")) lw = clamp(start.lw + dx, MIN, 1 - start.lx);
+      if (dir.includes("s")) lh = clamp(start.lh + dy, MIN, 1 - start.ly);
+      if (dir.includes("w")) {
+        const nx = clamp(start.lx + dx, 0, start.lx + start.lw - MIN);
+        lx = nx;
+        lw = start.lx + start.lw - nx;
+      }
+      if (dir.includes("n")) {
+        const ny = clamp(start.ly + dy, 0, start.ly + start.lh - MIN);
+        ly = ny;
+        lh = start.ly + start.lh - ny;
+      }
+      tile.cam.layout = {
+        window_x: lx,
+        window_y: ly,
+        window_width: lw,
+        window_height: lh,
+      };
+      this._applyTileBox(tile);
+    };
+    this._startDrag(e, tile, start, move);
+  }
+
+  // Shared pointer-capture loop for move/resize: run `move` on each pointer
+  // step and, if the pointer actually traveled, swallow the trailing select
+  // click so a drag/resize doesn't also (de)select the tile.
+  _startDrag(e, tile, start, move) {
+    this._raise(tile);
     const up = () => {
       tile.el.removeEventListener("pointermove", move);
       tile.el.removeEventListener("pointerup", up);
       tile.el.removeEventListener("pointercancel", up);
-      if (start.moved) tile.suppressClick = true; // don't select after a drag
+      tile.el.releasePointerCapture?.(e.pointerId);
+      if (start.moved) tile.suppressClick = true;
     };
     tile.el.setPointerCapture(e.pointerId);
     tile.el.addEventListener("pointermove", move);
     tile.el.addEventListener("pointerup", up);
     tile.el.addEventListener("pointercancel", up);
-    e.preventDefault();
   }
 
   // ------------------------------------------------ display-param capture

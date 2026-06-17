@@ -75,11 +75,10 @@ present; otherwise its `.mkv`/`.raw` files are transcoded with default
 parameters and no transform (with a warning). `--as-displayed` applies each
 video's recorded transform (skipped automatically when it was already baked in
 at record time); the default reproduces the file as saved. Output container and
-encoder settings come from the `[transcode]` config table (defaults: mp4,
-`preset=veryslow`, `crf=20`, `pix_fmt=gray`) and are overridable per run with
-`--format/--crf/--preset/--pix-fmt/--x264-params`. Pass `--remove-source` to
-delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar) once it transcodes
-successfully — the `recording_summary.json` is always kept.
+encoder settings default to mp4, `preset=veryslow`, `crf=20`, `pix_fmt=gray` and
+are set per run with `--format/--crf/--preset/--pix-fmt/--x264-params`. Pass
+`--remove-source` to delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar)
+once it transcodes successfully — the `recording_summary.json` is always kept.
 
 Progress is shown as an octacam-style bar (`[i/N] name`, percent, fps, speed,
 elapsed) reformatted live from ffmpeg's output. Pass `--progress-style ffmpeg`
@@ -93,16 +92,16 @@ without retyping a single path:
 ```bash
 octacam transcode --last      # the most recent recording folder
 octacam transcode --session   # every folder from the last GUI session
-octacam transcode --today     # every folder recorded today
+octacam transcode --all       # every folder still in the cache
 ```
 
 These combine with the encoding flags above (e.g. `octacam transcode --session
---format mkv`). `--session` means the *most recent* session; when a GUI session
-ends, octacam prints a ready-to-run command using `--session-id <id>` (the exact
-session) so it stays correct even if you record again afterwards. Folders that
-were deleted between recording and transcoding are silently skipped. The cache
-prunes itself (entries older than 30 days are dropped on each write), so it never
-grows without bound.
+--format mkv`). `--session` means the *most recent* session; `--session-id <id>`
+names an exact one if a later recording would otherwise steal "most recent" out
+from under it. When a GUI session ends, octacam prints ready-to-run `--session`
+and `--all` commands. Folders that were deleted between recording and transcoding
+are silently skipped. The cache prunes itself (entries older than 30 days are
+dropped on each write), so it never grows without bound.
 
 Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
 startup when a transcode is already running on the same machine (it competes with

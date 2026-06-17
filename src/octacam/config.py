@@ -118,27 +118,6 @@ class GuiConfig(BaseModel):
         return _scalar_str(value)
 
 
-class TranscodeConfig(BaseModel):
-    """Defaults for `octacam transcode` (offline raw/video -> compressed video).
-
-    Independent of the capture-side libx264 settings in GuiConfig: transcoding
-    is offline, so it can afford a slow preset for better compression. Every
-    field is overridable per invocation by the matching CLI flag."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    format: str = "mp4"  # output container extension
-    crf: int = 20
-    preset: str = "veryslow"
-    pix_fmt: str = "gray"
-    x264_params: str = ""
-
-    @field_validator("format", "preset", "pix_fmt", "x264_params", mode="before")
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
-
-
 class PluginConfig(BaseModel):
     name: str
     options: dict = Field(default_factory=dict)
@@ -152,7 +131,6 @@ class OctacamConfig(BaseModel):
     # means Basler so every existing config keeps working untouched.
     backend: str = "basler"
     gui: GuiConfig = Field(default_factory=GuiConfig)
-    transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
 
@@ -357,15 +335,6 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
             log.warning('Ignoring "gui" in octacam config as it is not a table')
         else:
             config.gui = _lenient_validate(GuiConfig, gui_src, "gui", GuiConfig())
-
-    transcode_src = data.get("transcode")
-    if transcode_src is not None:
-        if not isinstance(transcode_src, dict):
-            log.warning('Ignoring "transcode" in octacam config as it is not a table')
-        else:
-            config.transcode = _lenient_validate(
-                TranscodeConfig, transcode_src, "transcode", TranscodeConfig()
-            )
 
     # Parsed before the cameras block, which has several early returns.
     config.plugins = _parse_plugins(data.get("plugins"))
