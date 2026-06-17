@@ -81,6 +81,10 @@ encoder settings come from the `[transcode]` config table (defaults: mp4,
 delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar) once it transcodes
 successfully — the `recording_summary.json` is always kept.
 
+Progress is shown as an octacam-style bar (`[i/N] name`, percent, fps, speed,
+elapsed) reformatted live from ffmpeg's output. Pass `--progress-style ffmpeg`
+to stream ffmpeg's own native output verbatim instead.
+
 Instead of typing paths, you can let octacam remember where it recorded. Every
 finished recording (from the GUI or `octacam record`) is noted in a small cache
 under `~/.cache/octacam` (override with `OCTACAM_CACHE_DIR`), so you can transcode

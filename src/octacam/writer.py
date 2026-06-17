@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,29 @@ DEFAULT_PIX_FMT = "gray"
 # Extra libx264 options passed verbatim to ffmpeg's -x264-params (e.g.
 # "keyint=30:scenecut=0"); empty means the flag is omitted entirely.
 DEFAULT_X264_PARAMS = ""
+
+
+@dataclass(frozen=True)
+class TranscodeProgress:
+    """One progress sample parsed from ffmpeg's ``-progress pipe:1`` stream.
+
+    ``total_frames`` is the encode's known frame count when derivable (always
+    for ``.raw`` inputs, and from the recording summary for encoded ones), else
+    None for an indeterminate bar. ``fps``/``speed`` are 0.0 until ffmpeg has
+    measured them. ``done`` is True on the terminal ``progress=end`` block."""
+
+    frame: int
+    fps: float
+    out_time_s: float
+    speed: float
+    total_frames: int | None
+    done: bool
+
+
+# Called once per ffmpeg progress block during a transcode. Lives in the writer
+# as a plain callback so the UI layer (the CLI's rich progress bar) owns all
+# rendering and the writer stays free of presentation concerns.
+ProgressCallback = Callable[[TranscodeProgress], None]
 
 
 def find_ffmpeg() -> str:
@@ -477,23 +501,34 @@ def transcode_raw(
     output: Path | None = None,
     x264_params: str = DEFAULT_X264_PARAMS,
     vf: str = "",
+    *,
+    on_progress: ProgressCallback | None = None,
+    raw_output: bool = False,
 ) -> Path:
     """Transcode a .raw Mono8 dump (with its .json sidecar) to x264.
 
     ``output`` defaults to ``<raw>.mkv``; pass an explicit path to choose the
-    container. ``vf`` bakes in a display orientation (see build_x264_args)."""
+    container. ``vf`` bakes in a display orientation (see build_x264_args).
+    ``on_progress``/``raw_output`` control progress reporting (see
+    :func:`_run_ffmpeg`); the exact frame total is derived from the Mono8 file
+    size so the bar is always determinate."""
     raw_path = Path(raw_path)
     sidecar = raw_path.with_suffix(".json")
     if not sidecar.exists():
         raise FileNotFoundError(f"missing JSON sidecar for {raw_path}: {sidecar}")
     meta = json.loads(sidecar.read_text())
     output = Path(output) if output else raw_path.with_suffix(".mkv")
+    width, height = meta["width"], meta["height"]
+    # Mono8 is exactly 1 byte/pixel, so the file size pins the frame count.
+    total_frames = (
+        raw_path.stat().st_size // (width * height) if width and height else None
+    )
     args = build_x264_args(
         find_ffmpeg(),
         str(output),
         meta["fps"],
-        meta["width"],
-        meta["height"],
+        width,
+        height,
         crf,
         preset,
         pix_fmt,
@@ -501,7 +536,13 @@ def transcode_raw(
         x264_params=x264_params,
         vf=vf,
     )
-    _run_ffmpeg(args, raw_path)
+    _run_ffmpeg(
+        args,
+        raw_path,
+        on_progress=on_progress,
+        total_frames=total_frames,
+        raw_output=raw_output,
+    )
     return output
 
 
@@ -513,6 +554,10 @@ def transcode_encoded(
     pix_fmt: str = DEFAULT_PIX_FMT,
     x264_params: str = DEFAULT_X264_PARAMS,
     vf: str = "",
+    *,
+    total_frames: int | None = None,
+    on_progress: ProgressCallback | None = None,
+    raw_output: bool = False,
 ) -> Path:
     """Re-encode an already-encoded video (mkv/mp4) to ``output`` with libx264.
 
@@ -521,6 +566,10 @@ def transcode_encoded(
     preset to keep up with the cameras, so this offline pass is where the slow
     preset earns its compression. ``vf``, when non-empty, additionally bakes a
     display transform in (see build_x264_args).
+
+    ``total_frames`` (e.g. from the recording summary) makes the progress bar
+    determinate; without it the bar is indeterminate. ``on_progress``/
+    ``raw_output`` control progress reporting (see :func:`_run_ffmpeg`).
     """
     src = Path(src)
     output = Path(output)
@@ -545,7 +594,13 @@ def transcode_encoded(
         pix_fmt,
         str(output),
     ]
-    _run_ffmpeg(args, src)
+    _run_ffmpeg(
+        args,
+        src,
+        on_progress=on_progress,
+        total_frames=total_frames,
+        raw_output=raw_output,
+    )
     return output
 
 
@@ -557,11 +612,18 @@ def transcode_file(
     pix_fmt: str = DEFAULT_PIX_FMT,
     x264_params: str = DEFAULT_X264_PARAMS,
     vf: str = "",
+    *,
+    total_frames: int | None = None,
+    on_progress: ProgressCallback | None = None,
+    raw_output: bool = False,
 ) -> Path:
     """Transcode one ``.raw``/``.mkv``/``.mp4`` file to ``output``.
 
     Dispatches on the input suffix; ``vf`` (if any) bakes a display transform
-    in. The caller picks ``output`` (extension = desired container)."""
+    in. The caller picks ``output`` (extension = desired container).
+    ``total_frames``/``on_progress``/``raw_output`` are forwarded to the
+    progress reporting (a ``.raw`` input derives its own exact total, so the
+    hint there is ignored)."""
     input_path = Path(input_path)
     if input_path.suffix == ".raw":
         return transcode_raw(
@@ -572,6 +634,8 @@ def transcode_file(
             output=output,
             x264_params=x264_params,
             vf=vf,
+            on_progress=on_progress,
+            raw_output=raw_output,
         )
     return transcode_encoded(
         input_path,
@@ -581,12 +645,154 @@ def transcode_file(
         pix_fmt=pix_fmt,
         x264_params=x264_params,
         vf=vf,
+        total_frames=total_frames,
+        on_progress=on_progress,
+        raw_output=raw_output,
     )
 
 
-def _run_ffmpeg(args: list[str], src: Path) -> None:
-    result = subprocess.run(args, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"ffmpeg failed for {src}: {result.stderr.decode(errors='replace').strip()}"
-        )
+def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
+    """Re-set ffmpeg's verbosity/progress flags for the chosen output mode.
+
+    Strips whatever ``-hide_banner``/``-loglevel``/``-stats``/``-nostats``/
+    ``-progress`` flags the arg builders baked in, then re-inserts the pair the
+    mode needs: the octacam bar wants a quiet ffmpeg emitting a machine-readable
+    ``-progress`` stream, while raw mode wants ffmpeg's native ``-stats`` line
+    at info level streamed straight to the terminal."""
+    exe, rest = args[0], args[1:]
+    cleaned: list[str] = []
+    skip_next = False
+    for tok in rest:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in ("-loglevel", "-progress"):
+            skip_next = True  # also drop the value token that follows
+            continue
+        if tok in ("-hide_banner", "-stats", "-nostats"):
+            continue
+        cleaned.append(tok)
+    if raw_output:
+        flags = ["-hide_banner", "-loglevel", "info", "-stats"]
+    else:
+        flags = [
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostats",
+            "-progress",
+            "pipe:1",
+        ]
+    return [exe, *flags, *cleaned]
+
+
+def _to_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except ValueError:  # ffmpeg prints "N/A" before the first measurement
+        return default
+
+
+def _to_float(value: str, default: float) -> float:
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _parse_progress(
+    stream, on_progress: ProgressCallback, total_frames: int | None
+) -> None:
+    """Parse ffmpeg ``-progress pipe:1`` blocks, emitting one sample per block.
+
+    ffmpeg writes one ``key=value`` per line and closes each block with a
+    ``progress=continue`` (or final ``progress=end``) line; we snapshot the
+    latest frame/fps/time/speed at every block boundary. Unmeasured fields
+    arrive as ``N/A`` and keep their prior value."""
+    frame = 0
+    fps = 0.0
+    out_time_s = 0.0
+    speed = 0.0
+    for line in stream:
+        key, sep, value = line.strip().partition("=")
+        if not sep:
+            continue
+        value = value.strip()
+        if key == "frame":
+            frame = _to_int(value, frame)
+        elif key == "fps":
+            fps = _to_float(value, fps)
+        elif key == "out_time_us":
+            out_time_s = _to_float(value, out_time_s * 1e6) / 1e6
+        elif key == "speed":
+            speed = _to_float(value.rstrip("x"), speed)
+        elif key == "progress":
+            on_progress(
+                TranscodeProgress(
+                    frame, fps, out_time_s, speed, total_frames, value == "end"
+                )
+            )
+
+
+def _drain_into(stream, sink: deque[str]) -> None:
+    with stream:
+        for line in stream:
+            text = line.rstrip()
+            if text:
+                sink.append(text)
+
+
+def _run_ffmpeg(
+    args: list[str],
+    src: Path,
+    *,
+    on_progress: ProgressCallback | None = None,
+    total_frames: int | None = None,
+    raw_output: bool = False,
+) -> None:
+    """Run an ffmpeg transcode of ``src``, raising RuntimeError on failure.
+
+    With ``raw_output`` true, ffmpeg's native output streams straight to the
+    terminal (the user opted into the raw ffmpeg view). Otherwise ffmpeg runs
+    quietly with ``-progress pipe:1``: each block is parsed and forwarded to
+    ``on_progress`` (if any) to drive a progress bar, while stderr is captured
+    and surfaced only when the encode fails."""
+    args = _reporting_args(args, raw_output)
+    if raw_output:
+        # Inherit stdout/stderr so ffmpeg's stats/log paint the terminal live.
+        returncode = subprocess.run(args).returncode
+        if returncode != 0:
+            raise RuntimeError(f"ffmpeg failed for {src} (exit code {returncode})")
+        return
+
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    assert proc.stdout is not None and proc.stderr is not None  # PIPE => set
+    stderr_tail: deque[str] = deque(maxlen=40)
+    # stderr is drained on its own thread (and closed there via `with stream`)
+    # so a chatty ffmpeg can never fill the pipe and stall while we read stdout.
+    stderr_thread = threading.Thread(
+        target=_drain_into, args=(proc.stderr, stderr_tail), daemon=True
+    )
+    stderr_thread.start()
+    try:
+        if on_progress is not None:
+            _parse_progress(proc.stdout, on_progress, total_frames)
+        else:
+            for _ in proc.stdout:  # drain so a full pipe never stalls ffmpeg
+                pass
+    except BaseException:
+        # A Ctrl-C (or a raising progress callback) must take ffmpeg down with
+        # us, not leave it encoding a partial file after we stop reading it.
+        proc.kill()
+        raise
+    finally:
+        # Always reap the child (the old subprocess.run did); after a kill the
+        # wait returns at once. stderr is left for its own thread to close.
+        proc.stdout.close()
+        returncode = proc.wait()
+        stderr_thread.join(timeout=2)
+    if returncode != 0:
+        tail = "\n".join(stderr_tail).strip()
+        raise RuntimeError(f"ffmpeg failed for {src}: {tail}")

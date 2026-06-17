@@ -12,7 +12,14 @@ from typer.testing import CliRunner
 
 from octacam.cli import app
 from octacam.transform import DisplayTransform
-from octacam.writer import transcode_encoded, transcode_file, transcode_raw
+from octacam.writer import (
+    TranscodeProgress,
+    _parse_progress,
+    _reporting_args,
+    transcode_encoded,
+    transcode_file,
+    transcode_raw,
+)
 
 runner = CliRunner()
 cv2 = pytest.importorskip("cv2")
@@ -80,7 +87,7 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     # `-c copy` shortcut that made `transcode` a near-instant remux.
     captured = {}
 
-    def fake_run(args, src):
+    def fake_run(args, src, **kwargs):
         captured["args"] = args
 
     monkeypatch.setattr("octacam.writer._run_ffmpeg", fake_run)
@@ -104,6 +111,144 @@ def test_transcode_file_applies_vf(tmp_path):
         raw, tmp_path / "cam.mp4", vf=display_vf_filter(DisplayTransform(90))
     )
     assert _dims(out) == (12, 16)  # 90deg swap
+
+
+# ------------------------------------------------------- progress reporting
+
+
+def test_reporting_args_octacam_adds_progress_stream():
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-i", "x.raw", "out.mkv"]
+    out = _reporting_args(args, raw_output=False)
+    assert out[0] == "ffmpeg"
+    assert out[out.index("-progress") + 1] == "pipe:1"
+    assert "-nostats" in out
+    assert out.count("-loglevel") == 1
+    assert out[out.index("-loglevel") + 1] == "warning"
+    # The core encode args survive untouched.
+    assert out[out.index("-i") + 1] == "x.raw" and out[-1] == "out.mkv"
+
+
+def test_reporting_args_ffmpeg_mode_streams_native_stats():
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-i", "x.raw", "out.mkv"]
+    out = _reporting_args(args, raw_output=True)
+    assert "-progress" not in out  # no machine-readable stream in raw mode
+    assert "-stats" in out
+    assert out[out.index("-loglevel") + 1] == "info"
+
+
+def test_reporting_args_replaces_prebaked_flags_without_duplication():
+    # Pre-existing reporting flags must be stripped, not duplicated.
+    args = [
+        "ffmpeg",
+        "-nostats",
+        "-progress",
+        "pipe:1",
+        "-loglevel",
+        "warning",
+        "-i",
+        "x",
+        "out",
+    ]
+    out = _reporting_args(args, raw_output=True)
+    assert out.count("-progress") == 0
+    assert out.count("-loglevel") == 1
+    assert out.count("-nostats") == 0 and out.count("-stats") == 1
+
+
+def test_parse_progress_emits_one_sample_per_block():
+    lines = [
+        "frame=10\n",
+        "fps=N/A\n",
+        "speed=N/A\n",
+        "out_time_us=N/A\n",
+        "progress=continue\n",
+        "frame=50\n",
+        "fps=25.0\n",
+        "speed=2.0x\n",
+        "out_time_us=2000000\n",
+        "progress=end\n",
+    ]
+    samples: list[TranscodeProgress] = []
+    _parse_progress(iter(lines), samples.append, total_frames=50)
+    assert len(samples) == 2
+    first, last = samples
+    # N/A fields keep their default (0.0) rather than crashing.
+    assert (first.frame, first.fps, first.speed, first.done) == (10, 0.0, 0.0, False)
+    assert (last.frame, last.fps, last.speed) == (50, 25.0, 2.0)
+    assert last.out_time_s == 2.0 and last.done and last.total_frames == 50
+
+
+def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))  # exactly one 16x12 Mono8 frame
+    samples: list[TranscodeProgress] = []
+    transcode_raw(
+        raw,
+        crf=0,
+        preset="ultrafast",
+        output=tmp_path / "cam.mkv",
+        on_progress=samples.append,
+    )
+    assert samples, "expected at least the terminal progress sample"
+    last = samples[-1]
+    assert last.done and last.total_frames == 1 and last.frame == 1
+
+
+def test_transcode_raw_output_mode_still_produces_file(tmp_path):
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    out = transcode_file(raw, tmp_path / "cam.mp4", raw_output=True)
+    assert out.exists() and _dims(out) == (16, 12)
+
+
+def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
+    # A raising progress callback must propagate (and the ffmpeg child is killed
+    # and reaped on the way out — the regression guard for the lost cleanup).
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+
+    class Boom(Exception):
+        pass
+
+    def boom(_p):
+        raise Boom
+
+    with pytest.raises(Boom):
+        transcode_raw(
+            raw,
+            crf=0,
+            preset="ultrafast",
+            output=tmp_path / "cam.mkv",
+            on_progress=boom,
+        )
+
+
+def test_progress_bar_indeterminate_after_determinate(tmp_path):
+    # A file with a known total followed by one without must NOT inherit the
+    # prior total (rich's reset/update keep total on None) — regression guard.
+    from octacam.cli import _TranscodeProgressBar
+
+    bar = _TranscodeProgressBar(2)
+    determinate = bar.file(1, tmp_path / "a.raw")
+    determinate(TranscodeProgress(50, 10.0, 5.0, 1.0, total_frames=100, done=False))
+    assert bar._progress.tasks[-1].total == 100
+
+    indeterminate = bar.file(2, tmp_path / "b.mkv")
+    indeterminate(TranscodeProgress(30, 10.0, 3.0, 1.0, total_frames=None, done=False))
+    assert bar._progress.tasks[-1].total is None  # not the stale 100
+    assert len(bar._progress.tasks) == 1  # only one bar is kept visible
+
+
+def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
+    # The frame total is only a hint; a recording with dropped frames encodes
+    # fewer than the hint, so the final block must still read 100%.
+    from octacam.cli import _TranscodeProgressBar
+
+    bar = _TranscodeProgressBar(1)
+    on_progress = bar.file(1, tmp_path / "a.raw")
+    on_progress(TranscodeProgress(90, 10.0, 9.0, 1.0, total_frames=100, done=True))
+    task = bar._progress.tasks[-1]
+    assert task.completed >= task.total  # bar reaches 100% despite the overshoot
 
 
 # --------------------------------------------------------------------- CLI
@@ -324,8 +469,8 @@ def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path):
         )
     finally:
         logger.removeHandler(handler)
-    assert sorted(p.name for p, _vf in jobs) == ["a.raw", "b.mkv"]
-    assert all(vf == "" for _p, vf in jobs)  # no transform without a summary
+    assert sorted(p.name for p, _vf, _n in jobs) == ["a.raw", "b.mkv"]
+    assert all(vf == "" for _p, vf, _n in jobs)  # no transform without a summary
     assert any("recording_summary.json" in m for m in handler.messages)
 
 
@@ -361,7 +506,7 @@ def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
     finally:
         logger.removeHandler(handler)
     # The frameless file is skipped; the real one is still queued.
-    assert [p.name for p, _vf in jobs] == ["good.mkv"]
+    assert [p.name for p, _vf, _n in jobs] == ["good.mkv"]
     assert any("0 frames" in m for m in handler.messages)
 
 
@@ -471,3 +616,30 @@ def test_config_transcode_defaults_and_format_override(tmp_path):
         == 0
     )
     assert (rec / "cam2.mp4").exists()
+
+
+def test_transcode_cli_ffmpeg_progress_style(tmp_path):
+    # --progress-style ffmpeg streams ffmpeg's native output but still succeeds.
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    result = _run(
+        str(tmp_path), "--config-dir", str(tmp_path), "--progress-style", "ffmpeg"
+    )
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cam0.mp4").exists()
+
+
+def test_transcode_cli_octacam_progress_style_is_default(tmp_path):
+    # The default style transcodes cleanly (the bar is a no-op off a terminal).
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    result = _run(str(tmp_path), "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "cam0.mp4").exists()
+    assert str(tmp_path / "cam0.mp4") in result.output  # result path on stdout
+
+
+def test_transcode_cli_rejects_unknown_progress_style(tmp_path):
+    _write_raw(tmp_path / "cam0.raw", _frame(16, 12))
+    result = _run(
+        str(tmp_path), "--config-dir", str(tmp_path), "--progress-style", "bogus"
+    )
+    assert result.exit_code != 0

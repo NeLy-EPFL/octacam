@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -15,7 +16,12 @@ import time
 import webbrowser
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from rich.progress import TaskID
+
+    from octacam.writer import ProgressCallback
 
 import typer
 
@@ -46,16 +52,36 @@ class RecordForm(StrEnum):
     display = "display"
 
 
+class ProgressStyle(StrEnum):
+    octacam = "octacam"
+    ffmpeg = "ffmpeg"
+
+
+_stderr_console_singleton = None
+
+
+def _stderr_console():
+    """The single rich Console octacam draws on stderr (logs + progress bars).
+
+    Sharing one Console lets a live progress bar and the logger coordinate, so
+    log lines render cleanly above the bar instead of corrupting it."""
+    global _stderr_console_singleton
+    if _stderr_console_singleton is None:
+        from rich.console import Console
+
+        _stderr_console_singleton = Console(stderr=True)
+    return _stderr_console_singleton
+
+
 def _setup_logging(level: LogLevel) -> None:
     """Route the "octacam" logger through rich (colored level, pretty tracebacks).
 
     Logs go to stderr so stdout stays clean for the machine-readable output of
     `list-cameras`/`record`/`transcode`."""
-    from rich.console import Console
     from rich.logging import RichHandler
 
     handler = RichHandler(
-        console=Console(stderr=True),
+        console=_stderr_console(),
         show_time=False,
         show_path=False,
         markup=False,
@@ -805,18 +831,20 @@ def _job_vf(entry: dict, as_displayed: bool) -> str:
 
 def _transcode_jobs(
     paths: list[Path], recursive: bool, as_displayed: bool, out_format: str
-) -> list[tuple[Path, str]]:
-    """Resolve folders/files to a deduped list of (input_path, vf) jobs.
+) -> list[tuple[Path, str, int | None]]:
+    """Resolve folders/files to a deduped list of (input_path, vf, frames) jobs.
 
     A folder with a recording_summary.json is driven by it; one without has its
     loose .mkv/.raw transcoded with no transform (and a warning). A file is
-    matched against a summary in its own folder, else transcoded plainly."""
+    matched against a summary in its own folder, else transcoded plainly. The
+    third element is the recording's frame count when the summary records it
+    (used to make the progress bar determinate), else None."""
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
-    jobs: dict[Path, tuple[Path, str]] = {}
+    jobs: dict[Path, tuple[Path, str, int | None]] = {}
 
-    def add(input_path: Path, vf: str) -> None:
-        jobs.setdefault(input_path.resolve(), (input_path, vf))
+    def add(input_path: Path, vf: str, frames: int | None = None) -> None:
+        jobs.setdefault(input_path.resolve(), (input_path, vf, frames))
 
     def handle_dir(directory: Path) -> None:
         summary_path = directory / RECORDING_SUMMARY_FILENAME
@@ -841,7 +869,12 @@ def _transcode_jobs(
                             video,
                         )
                     else:
-                        add(video, _job_vf(entry, as_displayed))
+                        frames = entry.get("frames")
+                        add(
+                            video,
+                            _job_vf(entry, as_displayed),
+                            frames if isinstance(frames, int) else None,
+                        )
                 return
         loose = sorted(p for p in directory.iterdir() if p.suffix in (".mkv", ".raw"))
         if loose:
@@ -876,7 +909,12 @@ def _transcode_jobs(
                         None,
                     )
             if entry is not None:
-                add(path, _job_vf(entry, as_displayed))
+                frames = entry.get("frames")
+                add(
+                    path,
+                    _job_vf(entry, as_displayed),
+                    frames if isinstance(frames, int) else None,
+                )
             else:
                 log.warning(
                     "No %s entry for %s; transcoding with defaults and no transform",
@@ -958,6 +996,79 @@ def _resolve_transcode_paths(
         "%s: transcoding %d folder(s) from the recording cache", selector, len(folders)
     )
     return folders
+
+
+class _TranscodeProgressBar:
+    """An octacam-styled rich progress bar fed by writer progress callbacks.
+
+    One bar walks the batch, each file labelled ``[i/N] name``. A fresh task is
+    started per file (the previous one removed) so a file with no known frame
+    total stays genuinely indeterminate — rich's reset/update treat ``total=None``
+    as "keep the current total", so reusing one task would leak a prior file's
+    total. It draws on the shared stderr console so octacam log lines (and the
+    stdout result paths) render cleanly above the live bar."""
+
+    def __init__(self, total_jobs: int):
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._total_jobs = total_jobs
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[stats]}"),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task: TaskID | None = None
+
+    def __enter__(self):
+        self._progress.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._progress.stop()
+
+    def file(self, index: int, path: Path) -> "ProgressCallback":
+        """Start a fresh bar for one file and return its progress callback."""
+        from octacam.writer import TranscodeProgress
+
+        if self._task is not None:
+            self._progress.remove_task(self._task)  # keep only one bar visible
+        desc = f"[{index}/{self._total_jobs}] {path.name}"
+        task = self._progress.add_task(desc, total=None, stats="")
+        self._task = task
+
+        def on_progress(p: TranscodeProgress) -> None:
+            stats = [f"{p.frame} frames"]
+            if p.fps:
+                stats.append(f"{p.fps:.0f} fps")
+            if p.speed:
+                stats.append(f"{p.speed:.3g}x")
+            # On the final block, snap a determinate bar to full: the frame total
+            # is only a hint and may overshoot the frames actually encoded (e.g.
+            # a recording with dropped frames), which would otherwise leave the
+            # bar short of 100% just before it is wiped.
+            completed = p.frame
+            if p.done and p.total_frames is not None:
+                completed = max(p.frame, p.total_frames)
+            self._progress.update(
+                task,
+                total=p.total_frames,
+                completed=completed,
+                stats="  ".join(stats),
+            )
+
+        return on_progress
 
 
 @app.command()
@@ -1062,6 +1173,15 @@ def transcode(
             "it transcodes successfully. The recording_summary.json is kept.",
         ),
     ] = False,
+    progress_style: Annotated[
+        ProgressStyle,
+        typer.Option(
+            "--progress-style",
+            help="How to show transcode progress. octacam (default): reformat "
+            "ffmpeg's progress into an octacam-style progress bar. ffmpeg: stream "
+            "ffmpeg's own output verbatim.",
+        ),
+    ] = ProgressStyle.octacam,
 ) -> None:
     """Transcode recordings to compressed video.
 
@@ -1096,10 +1216,18 @@ def transcode(
         log.warning("No videos to transcode in: %s", ", ".join(map(str, paths)))
         return
     failures = 0
+    raw_output = progress_style is ProgressStyle.ffmpeg
+    # A live progress bar only makes sense on a terminal; piped/CI runs and the
+    # raw-ffmpeg style skip it (ffmpeg paints its own output in raw mode).
+    show_bar = not raw_output and _stderr_console().is_terminal
+    bar = _TranscodeProgressBar(len(jobs)) if show_bar else None
     # Advertise this run so a concurrent `gui`/`record` can warn about the CPU
     # contention; the marker is dropped (and cleaned up) when the run ends.
-    with session_cache.mark_transcode_active(f"{len(jobs)} file(s)"):
-        for input_path, vf in jobs:
+    with (
+        session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
+        bar or contextlib.nullcontext(),
+    ):
+        for index, (input_path, vf, frames) in enumerate(jobs, 1):
             output = input_path.with_suffix("." + out_format)
             if output.resolve() == input_path.resolve():
                 log.warning(
@@ -1108,6 +1236,7 @@ def transcode(
                     out_format,
                 )
                 continue
+            on_progress = bar.file(index, input_path) if bar else None
             try:
                 result = transcode_file(
                     input_path,
@@ -1117,6 +1246,9 @@ def transcode(
                     pix_fmt=pix_fmt,
                     x264_params=x264_params,
                     vf=vf,
+                    total_frames=frames,
+                    on_progress=on_progress,
+                    raw_output=raw_output,
                 )
                 typer.echo(result)
             except Exception as e:  # one bad file must not abort the batch
