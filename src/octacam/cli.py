@@ -894,15 +894,17 @@ def _resolve_transcode_paths(
     session: bool,
     today: bool,
     session_id: str | None,
+    all_: bool,
 ) -> list[Path]:
     """Resolve explicit PATHS or one cache selector to a list of folders.
 
-    The selectors --last/--session/--today/--session-id are mutually exclusive
-    and cannot be combined with explicit PATHS. They read the recording cache
-    (octacam.session_cache) and skip folders that have since been deleted, so a
-    removed recording is simply ignored. ``--session`` means the most recent
+    The selectors --last/--session/--today/--session-id/--all are mutually
+    exclusive and cannot be combined with explicit PATHS. They read the recording
+    cache (octacam.session_cache) and skip folders that have since been deleted,
+    so a removed recording is simply ignored. ``--session`` means the most recent
     session; ``--session-id`` names an exact one (what the GUI prints on exit, so
-    the command stays correct even if another recording happens afterwards).
+    the command stays correct even if another recording happens afterwards);
+    ``--all`` is every folder the cache still holds (last RETENTION_DAYS).
     Exits with a clear message on a bad combination or when nothing is found.
     """
     from octacam import session_cache
@@ -914,6 +916,7 @@ def _resolve_transcode_paths(
             ("--session", session),
             ("--today", today),
             ("--session-id", session_id is not None),
+            ("--all", all_),
         )
         if on
     ]
@@ -925,7 +928,7 @@ def _resolve_transcode_paths(
         if not paths:
             sys.exit(
                 "Provide one or more PATHS, or one of "
-                "--last/--session/--today/--session-id."
+                "--last/--session/--today/--session-id/--all."
             )
         return paths
 
@@ -933,6 +936,9 @@ def _resolve_transcode_paths(
         selector = "--last"
         folder = session_cache.last_folder()
         folders = [folder] if folder else []
+    elif all_:
+        selector = "--all"
+        folders = session_cache.all_folders()
     elif session:
         selector = "--session"
         folders = session_cache.session_folders()
@@ -962,7 +968,7 @@ def transcode(
             exists=True,
             help="Folders and/or video files (.mkv/.raw). A folder is driven by "
             "its recording_summary.json if present. Omit when using "
-            "--last/--session/--today.",
+            "--last/--session/--today/--all.",
         ),
     ] = None,
     last: Annotated[
@@ -998,6 +1004,14 @@ def transcode(
             "recording.",
         ),
     ] = None,
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Transcode every recording folder still in the cache (all "
+            "sessions, all days); no PATHS needed.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -1058,15 +1072,16 @@ def transcode(
 
     Instead of PATHS, pass one of --last (the most recent recording folder),
     --session (every folder from the last GUI session), --today (every folder
-    recorded today), or --session-id (an exact session). These read the recording
-    cache octacam keeps and silently skip any folder that has since been deleted.
+    recorded today), --session-id (an exact session), or --all (every folder the
+    cache still holds). These read the recording cache octacam keeps and silently
+    skip any folder that has since been deleted.
     """
     from octacam import session_cache
     from octacam.config import load_config_dir
     from octacam.writer import transcode_file
 
     paths = _resolve_transcode_paths(
-        list(paths or []), last, session, today, session_id
+        list(paths or []), last, session, today, session_id, all_
     )
 
     tcfg = load_config_dir(config_dir).transcode

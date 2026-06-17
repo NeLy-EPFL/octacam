@@ -67,10 +67,32 @@ def test_transcode_file_raw_to_mp4(tmp_path):
     assert _dims(out) == (16, 12)
 
 
-def test_transcode_encoded_remux_is_lossless_copy(tmp_path):
+def test_transcode_encoded_produces_valid_video(tmp_path):
     src = _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
-    out = transcode_encoded(src, tmp_path / "cam.mp4")  # no vf -> stream copy
+    out = transcode_encoded(src, tmp_path / "cam.mp4")  # mkv -> re-encoded mp4
     assert _dims(out) == (16, 12)
+
+
+def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
+    # An already-encoded source must be re-encoded with the chosen slow preset,
+    # not stream-copied: capture uses a fast preset, so this offline pass is
+    # where the compression is earned. Regression guard for the dropped
+    # `-c copy` shortcut that made `transcode` a near-instant remux.
+    captured = {}
+
+    def fake_run(args, src):
+        captured["args"] = args
+
+    monkeypatch.setattr("octacam.writer._run_ffmpeg", fake_run)
+    transcode_encoded(
+        tmp_path / "cam.mkv", tmp_path / "cam.mp4", crf=20, preset="veryslow"
+    )
+    args = captured["args"]
+    assert "copy" not in args  # no stream-copy shortcut
+    assert "libx264" in args
+    assert args[args.index("-preset") + 1] == "veryslow"
+    assert args[args.index("-crf") + 1] == "20"
+    assert args[args.index("-pix_fmt") + 1] == "gray"
 
 
 def test_transcode_file_applies_vf(tmp_path):
@@ -183,9 +205,31 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
+def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
+    f_old = _recording_folder(tmp_path, "old", session="s1")
+    f1 = _recording_folder(tmp_path, "rec1", session="s2")
+    f2 = _recording_folder(tmp_path, "rec2", session="s3")
+    result = _run("--all", "--config-dir", str(tmp_path))
+    assert result.exit_code == 0, result.output
+    # Every folder in the cache, regardless of session or day.
+    assert (f_old / "cam0.mp4").exists()
+    assert (f1 / "cam0.mp4").exists()
+    assert (f2 / "cam0.mp4").exists()
+
+
+def test_transcode_all_empty_cache_errors(tmp_path, cache_env):
+    result = _run("--all", "--config-dir", str(tmp_path))
+    assert result.exit_code != 0
+    assert "No recordings found" in result.output
+
+
 def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
     _recording_folder(tmp_path, "rec1")
     result = _run("--last", "--today", "--config-dir", str(tmp_path))
+    assert result.exit_code != 0
+    assert "at most one" in result.output
+    # --all is part of the mutual-exclusion set too.
+    result = _run("--all", "--last", "--config-dir", str(tmp_path))
     assert result.exit_code != 0
     assert "at most one" in result.output
 

@@ -84,6 +84,27 @@ def test_today_folders(cache_dir, tmp_path):
     assert session_cache.today_folders(when=tomorrow) == []
 
 
+def test_all_folders_spans_sessions_in_record_order(cache_dir, tmp_path):
+    a, b, c = (_make(tmp_path, n) for n in "abc")
+    session_cache.record_recording(a, "s1")
+    session_cache.record_recording(b, "s2")
+    session_cache.record_recording(c, "s2")
+    assert session_cache.all_folders() == [a.resolve(), b.resolve(), c.resolve()]
+
+
+def test_all_folders_empty_when_no_cache(cache_dir):
+    assert session_cache.all_folders() == []
+
+
+def test_all_folders_skips_deleted_and_dedups(cache_dir, tmp_path):
+    a, b = _make(tmp_path, "a"), _make(tmp_path, "b")
+    session_cache.record_recording(a, "s1")
+    session_cache.record_recording(a, "s1")  # same folder twice -> one entry
+    session_cache.record_recording(b, "s2")
+    b.rmdir()  # gone since recording -> dropped
+    assert session_cache.all_folders() == [a.resolve()]
+
+
 def test_dedup_same_folder_recorded_twice(cache_dir, tmp_path):
     # Aborting reuses the same save dir (no increment), so the folder can appear
     # twice; queries must collapse it to one.

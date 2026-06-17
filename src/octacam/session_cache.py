@@ -254,6 +254,16 @@ def today_folders(when: datetime.date | None = None) -> list[Path]:
     return _existing(folders)
 
 
+def all_folders() -> list[Path]:
+    """Every existing recording folder in the cache, in record order.
+
+    Spans every session and day the cache still holds (pruned to the last
+    :data:`RETENTION_DAYS` on each write). Deduplicated, with any since-deleted
+    folders dropped, so a stale entry is silently ignored, never an error.
+    """
+    return _existing([Path(entry["folder"]) for entry in _read_entries()])
+
+
 # ---------------------------------------------------------------------------
 # Transcode-activity markers
 #

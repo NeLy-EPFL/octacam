@@ -471,8 +471,8 @@ def default_codec(gui_config) -> str:
 
 def transcode_raw(
     raw_path: Path,
-    crf: int = 16,
-    preset: str = "ultrafast",
+    crf: int = 20,
+    preset: str = "veryslow",
     pix_fmt: str = DEFAULT_PIX_FMT,
     output: Path | None = None,
     x264_params: str = DEFAULT_X264_PARAMS,
@@ -514,33 +514,37 @@ def transcode_encoded(
     x264_params: str = DEFAULT_X264_PARAMS,
     vf: str = "",
 ) -> Path:
-    """Transcode an already-encoded video (mkv/mp4) to ``output``.
+    """Re-encode an already-encoded video (mkv/mp4) to ``output`` with libx264.
 
-    With no ``vf`` (no transform) this is a fast, lossless stream-copy remux;
-    with a ``vf`` filter chain it re-encodes with libx264 to bake it in.
+    Always re-encodes with the given libx264 ``preset``/``crf``/``pix_fmt``
+    rather than stream-copying the source: captures are written with a fast
+    preset to keep up with the cameras, so this offline pass is where the slow
+    preset earns its compression. ``vf``, when non-empty, additionally bakes a
+    display transform in (see build_x264_args).
     """
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
-    head = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-y", "-i", str(src)]
-    if vf:
-        args = [
-            *head,
-            "-vf",
-            vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-crf",
-            str(crf),
-            *(["-x264-params", x264_params] if x264_params else []),
-            "-pix_fmt",
-            pix_fmt,
-            str(output),
-        ]
-    else:
-        args = [*head, "-c", "copy", str(output)]
+    args = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-y",
+        "-i",
+        str(src),
+        *(["-vf", vf] if vf else []),
+        "-c:v",
+        "libx264",
+        "-preset",
+        preset,
+        "-crf",
+        str(crf),
+        *(["-x264-params", x264_params] if x264_params else []),
+        "-pix_fmt",
+        pix_fmt,
+        str(output),
+    ]
     _run_ffmpeg(args, src)
     return output
 

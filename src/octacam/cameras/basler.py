@@ -93,9 +93,14 @@ class BaslerBackend:
     extension = "pfs"
 
     def __init__(self, device):
+        # Set to None by close() once the device is destroyed; the is_open/
+        # is_grabbing guards below tolerate that so a second close() is a no-op.
         self.raw = pylon.InstantCamera(device)
         self._serial = str(self.raw.GetDeviceInfo().GetSerialNumber())
         self._original_trigger_source: str | None = None
+        # Count grabs that pylon flagged as incomplete/failed (USB bandwidth
+        # gaps, packet loss) so a rig delivering partial frames can be spotted.
+        self._incomplete_grabs = 0
 
     @property
     def serial_number(self) -> str:
@@ -112,14 +117,31 @@ class BaslerBackend:
             raise BackendError(str(e)) from e
 
     def close(self) -> None:
-        if self.raw.IsOpen():
-            self.raw.Close()
+        # Tear the device down while the pylon runtime is still alive. pypylon
+        # runs PylonTerminate() from a Py_AtExit hook during interpreter
+        # shutdown; an InstantCamera (or the TlFactory) left for the garbage
+        # collector to destroy *after* that point touches freed runtime state
+        # and segfaults — the crash that appears right after "octacam stopped".
+        # Close() alone does not detach the device, so DestroyDevice() here (and
+        # dropping the reference) makes the wrapper collectable before exit.
+        if self.raw is None:  # idempotent: a second close() must not raise
+            return
+        try:
+            if self.raw.IsGrabbing():
+                self.raw.StopGrabbing()
+            if self.raw.IsOpen():
+                self.raw.Close()
+            self.raw.DestroyDevice()
+        except genicam.GenericException as e:
+            log.warning("Error tearing down camera %s: %s", self._serial, e)
+        finally:
+            self.raw = None
 
     def is_open(self) -> bool:
-        return self.raw.IsOpen()
+        return self.raw is not None and self.raw.IsOpen()
 
     def is_grabbing(self) -> bool:
-        return self.raw.IsGrabbing()
+        return self.raw is not None and self.raw.IsGrabbing()
 
     def width(self) -> int:
         return self.raw.Width.Value
@@ -239,8 +261,23 @@ class BaslerBackend:
         try:
             # IsValid is the pypylon equivalent of C++'s `if (grab_result)`:
             # a timed-out RetrieveResult returns an empty result whose other
-            # accessors throw.
-            if not (result.IsValid() and result.GrabSucceeded()):
+            # accessors throw, so bail before touching them.
+            if not result.IsValid():
+                return None
+            # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
+            # packet loss): pylon already drops it for us, but partial frames are
+            # a prime suspect for corrupt previews, so surface the cause
+            # periodically (rate-limited to avoid flooding at the trigger rate).
+            if not result.GrabSucceeded():
+                self._incomplete_grabs += 1
+                if self._incomplete_grabs % 100 == 1:
+                    log.warning(
+                        "Camera %s: %d incomplete grab(s); last: %s (0x%08X)",
+                        self._serial,
+                        self._incomplete_grabs,
+                        result.GetErrorDescription(),
+                        result.GetErrorCode(),
+                    )
                 return None
             timestamp = result.TimeStamp
             array = result.Array if wants_array() else None
