@@ -53,7 +53,7 @@ JOG_DEFAULT_INTERVAL_US = 2000
 JOG_MAX_STEPS = 100_000
 
 # Wire format of the packed C++ Command struct (and the matching struct in
-# arduino_script): little-endian int16, uint16, uint16, uint8, uint8.
+# arduino/stepper_motor): little-endian int16, uint16, uint16, uint8, uint8.
 _COMMAND_FORMAT = "<hHHBB"
 COMMAND_FIELDS = (
     "n_steps",

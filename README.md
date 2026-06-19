@@ -197,7 +197,7 @@ Bundled plugins:
 - **arduino** — drives an Arduino stepper-motor controller over serial. Adds
   the web GUI's Arduino tab (loop program + hold-to-jog), and fires an armed
   loop command at the first captured frame so motion is synced to capture. See
-  [arduino_script/](arduino_script/) for the matching firmware. Extra:
+  [arduino/stepper_motor/](arduino/stepper_motor/) for the matching firmware. Extra:
   `octacam[arduino]` (pyserial).
 
 ## Troubleshooting
@@ -217,7 +217,7 @@ make sure `usbcore.usbfs_memory_mb=1000` is set (see
   rig.
 - **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gated the
   pure-Python architecture. See [benchmarks/README.md](benchmarks/README.md).
-- **[arduino_script/](arduino_script/)** — Arduino sketch for stepper motor control.
+- **[arduino/](arduino/)** — Arduino sketches: `stepper_motor/` (turntable stepper via the `arduino` plugin) and `2photon_trigger/` (2-photon rig hardware trigger via the `twophoton` plugin).
 
 ## Development
 

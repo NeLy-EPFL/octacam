@@ -115,12 +115,3 @@ regardless of USB port.
    ```
 4. Verify: `ls -l /dev/arduinoCams` should point to a `ttyACM*` device.
 
-## Windows
-
-Use the COM port shown in Device Manager (e.g. `COM3`):
-
-```toml
-[[plugins]]
-name = "twophoton"
-device = "COM3"
-```
