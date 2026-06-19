@@ -410,6 +410,9 @@ dependencies = [
 arduino = [
     { name = "pyserial" },
 ]
+twophoton = [
+    { name = "pyserial" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -432,12 +435,13 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2" },
     { name = "pypylon", specifier = ">=4.0" },
     { name = "pyserial", marker = "extra == 'arduino'", specifier = ">=3.5" },
+    { name = "pyserial", marker = "extra == 'twophoton'", specifier = ">=3.5" },
     { name = "rich", specifier = ">=13.7" },
     { name = "typer", specifier = ">=0.15" },
     { name = "uvicorn", specifier = ">=0.49.0" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["arduino", "flir"]
+provides-extras = ["arduino", "twophoton", "flir"]
 
 [package.metadata.requires-dev]
 dev = [

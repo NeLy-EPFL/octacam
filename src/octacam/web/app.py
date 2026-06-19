@@ -429,6 +429,12 @@ def create_app(
     plugins = plugins if plugins is not None else PluginManager([])
     state = _AppState(controller, config, plugins, config_dir)
 
+    # Give plugins that support real-time WS push a broadcast callback.
+    # Checked by duck-typing so core stays decoupled from concrete plugin classes.
+    for plugin in plugins.plugins:
+        if hasattr(plugin, "set_broadcast"):
+            plugin.set_broadcast(state.broadcast_threadsafe)
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         state.loop = asyncio.get_running_loop()

@@ -9,8 +9,9 @@ function trimNum(v) {
 }
 
 export class RecordTab {
-  constructor({ formats, getArduinoCommand, notify }) {
+  constructor({ formats, getArduinoCommand, getTwoPhotonParams, notify }) {
     this.getArduinoCommand = getArduinoCommand;
+    this.getTwoPhotonParams = getTwoPhotonParams;
     this.notify = notify;
     this.settings = null;
     this.state = "idle";
@@ -372,7 +373,12 @@ export class RecordTab {
   async _start() {
     const body = { confirm_overwrite: false };
     const arduinoCommand = this.getArduinoCommand();
-    if (arduinoCommand) body.plugin_params = { arduino: arduinoCommand };
+    const tpParams = this.getTwoPhotonParams?.();
+    if (arduinoCommand || tpParams) {
+      body.plugin_params = {};
+      if (arduinoCommand) body.plugin_params.arduino = arduinoCommand;
+      if (tpParams) body.plugin_params.twophoton = tpParams;
+    }
     let r = await api("POST", "/api/recording/start", body);
     if (r.status === 409 && r.data?.status === "needs_confirm") {
       if (!window.confirm(r.data.message)) return;

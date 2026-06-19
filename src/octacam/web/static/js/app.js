@@ -5,6 +5,7 @@ import { ReconnectingSocket } from "./ws.js";
 import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
 import { ArduinoTab } from "./arduino.js";
+import { TwoPhotonTab } from "./twophoton.js";
 import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
 import { initSidebarResize } from "./resize.js";
@@ -86,15 +87,18 @@ async function main() {
   versionEl.title = system.config_dir;
 
   setupTabs();
-  // The Arduino tab is contributed by the opt-in `arduino` plugin. Show it
-  // whenever the plugin is loaded — even if its serial port could not be
-  // opened. A not-ready plugin shows a "serial unavailable" notice with a
-  // Reconnect button instead of vanishing, so a missing/unplugged board is
-  // diagnosable rather than looking like the plugin was never enabled.
+  // Show optional plugin tabs only when the plugin is loaded. A not-ready
+  // plugin still shows its tab (with a "serial unavailable" notice and a
+  // Reconnect button) so a missing/unplugged board is diagnosable.
   const arduinoStatus = system.plugins?.arduino ?? null;
   if (!arduinoStatus) {
     document.querySelector('#tabs button[data-tab="arduino"]')?.remove();
     document.getElementById("tab-arduino")?.remove();
+  }
+  const twoPhotonStatus = system.plugins?.twophoton ?? null;
+  if (!twoPhotonStatus) {
+    document.querySelector('#tabs button[data-tab="twophoton"]')?.remove();
+    document.getElementById("tab-twophoton")?.remove();
   }
 
   let cameraTab = null;
@@ -145,11 +149,23 @@ async function main() {
     ? new ArduinoTab({ send: (m) => sock.send(m), notify, status: arduinoStatus })
     : null;
 
+  // TwoPhotonTab needs record.settings, so record is created first and a
+  // getter is passed in; the closure is only called at start-recording time
+  // when record.settings is already populated.
   record = new RecordTab({
     formats: system.formats,
     getArduinoCommand: () => (arduino ? arduino.getStartCommand() : null),
+    getTwoPhotonParams: () => (twophoton ? twophoton.getStartParams() : null),
     notify,
   });
+
+  const twophoton = twoPhotonStatus
+    ? new TwoPhotonTab({
+        notify,
+        status: twoPhotonStatus,
+        getRecordSettings: () => record.settings,
+      })
+    : null;
 
   cameraTab = new CameraTab({
     cameras: system.cameras,
@@ -211,6 +227,7 @@ async function main() {
     // it owns its own enable/disable (and jog stop); the view tab is a plain
     // connected/not toggle.
     arduino?.setConnected(connected);
+    twophoton?.setConnected(connected);
     const viewFields = document.getElementById("view-fields");
     if (viewFields) viewFields.disabled = !connected;
     // Presence is only meaningful while connected; the server resends the
@@ -278,6 +295,9 @@ async function main() {
       case "event":
         addEvent(msg);
         record.handleEvent(msg);
+        break;
+      case "twophoton_state":
+        twophoton?.applyState(msg);
         break;
     }
   }

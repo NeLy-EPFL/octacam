@@ -37,7 +37,35 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 
 # Bundled plugins live at octacam.plugins.<name>; importing the module runs its
 # @register call. Listed here so build_plugins knows what it may import.
-_BUILTINS = ("arduino",)
+_BUILTINS = ("arduino", "twophoton")
+
+
+def _discover_entry_points() -> None:
+    """Load third-party plugins registered under the ``octacam.plugins`` group.
+
+    A separate package (e.g. ``octacam-twophoton``) can register plugins via::
+
+        [project.entry-points."octacam.plugins"]
+        twophoton = "octacam_twophoton.plugin:_build"
+
+    Importing the entry point runs its ``@register`` call, making the plugin
+    available to :func:`build_plugins` without any changes to octacam core.
+    Failures are silently downgraded to debug logs; a broken third-party plugin
+    must not prevent the core from starting.
+    """
+    try:
+        from importlib.metadata import entry_points
+
+        for ep in entry_points(group="octacam.plugins"):
+            if ep.name in _REGISTRY:
+                continue  # in-repo builtin already registered; don't override
+            try:
+                ep.load()
+                log.debug("Loaded entry-point plugin %r from %s", ep.name, ep.value)
+            except Exception as e:
+                log.debug("Entry-point plugin %r failed to load: %s", ep.name, e)
+    except Exception as e:
+        log.debug("Entry-point plugin discovery failed: %s", e)
 
 
 def register(name: str):
@@ -90,6 +118,7 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     Unknown names and plugins whose optional dependency is missing are logged
     and skipped — core always keeps running.
     """
+    _discover_entry_points()
     selection = _resolve_selection(getattr(config, "plugins", []), enabled)
     plugins: list[OctacamPlugin] = []
     for name, options in selection:
@@ -136,6 +165,7 @@ def available_plugins() -> list[PluginInfo]:
     dependency is missing raises during that build; it is reported as
     ``available=False`` with the error as ``detail`` rather than propagating.
     """
+    _discover_entry_points()
     infos: list[PluginInfo] = []
     for name in _BUILTINS:
         _import_builtin(name)

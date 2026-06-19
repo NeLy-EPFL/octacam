@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 # Opt-in plugins (octacam.plugins.<name>) and their extra runtime deps.
 arduino = ["pyserial>=3.5"]
+twophoton = ["pyserial>=3.5"]
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
 # PyPI (it ships with the SDK installer). This extra is therefore a documented,
 # greppable install marker rather than a dependency list: install the Spinnaker

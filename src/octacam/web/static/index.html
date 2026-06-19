@@ -33,6 +33,8 @@
         title="Rotate, flip, and crosshair options for the live preview">View</button>
       <button type="button" data-tab="arduino"
         title="Drive the turntable stepper via the Arduino plugin">Arduino</button>
+      <button type="button" data-tab="twophoton"
+        title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
     </nav>
 
     <section id="tab-record" class="tab active">
@@ -195,6 +197,33 @@
           </span>
         </div>
       </fieldset>
+    </section>
+
+    <section id="tab-twophoton" class="tab">
+      <div id="twophoton-status" class="plugin-status hidden">
+        <span id="twophoton-status-msg"></span>
+        <button type="button" id="twophoton-reconnect" class="btn"
+          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+      </div>
+      <div class="col">
+        <div class="row" title="Current state of the Arduino trigger board">
+          <span id="twophoton-state-label">Arduino state:</span>
+          <span id="twophoton-state-value" class="twophoton-state twophoton-state--idle">
+            Idle — waiting for arm command
+          </span>
+        </div>
+        <p class="hint">
+          FPS and duration are taken from the Record tab settings.
+          When "Arm with recording" is checked, the Arduino is armed
+          automatically each time a recording starts, then waits for the
+          ThorSync rising edge before emitting camera trigger pulses.
+        </p>
+        <label class="center"
+          title="Arm the Arduino automatically when a recording starts">
+          <input type="checkbox" id="twophoton-arm-with-recording" checked>
+          Arm with recording
+        </label>
+      </div>
     </section>
 
     <section id="tab-view" class="tab">
