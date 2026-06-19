@@ -160,6 +160,13 @@ class TwoPhotonLink:
                 b = s.read(1)
             except serial.SerialException:  # pyright: ignore[reportOptionalMemberAccess]
                 break
+            except Exception:
+                # The port was closed under us (s.fd → None during shutdown),
+                # which surfaces as TypeError from os.read(None, 1). Any other
+                # unexpected exception should also not crash the daemon thread.
+                if not self._reader_stop.is_set():
+                    log.debug("2-photon trigger: read error in reader thread", exc_info=True)
+                break
             if b and b[0:1] in (bytes([x]) for x in _STATUS_BYTES):
                 try:
                     self._on_status(chr(b[0]))
