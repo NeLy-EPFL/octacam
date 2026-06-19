@@ -268,9 +268,11 @@ def test_reconnect_endpoint_reopens_link(monkeypatch):
 # Factory: _build
 # ---------------------------------------------------------------------------
 
-def test_build_requires_device():
-    with pytest.raises(RuntimeError, match="device"):
-        _build({})
+def test_build_uses_default_device_when_omitted():
+    # No device key → falls back to DEFAULT_DEVICE ("/dev/ArduinoCam")
+    from octacam.plugins.twophoton import DEFAULT_DEVICE
+    plugin = _build({})
+    assert plugin.device == DEFAULT_DEVICE
 
 
 def test_build_raises_without_pyserial(monkeypatch):

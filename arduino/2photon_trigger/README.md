@@ -58,52 +58,62 @@ IDLE ──(arm packet)──▶ ARMED ──(ThorSync ↑)──▶ RUNNING ─
 2. Select **Board: Arduino Mega or Mega 2560** and the correct port.
 3. Upload.
 
-## Setting up a persistent device symlink (Linux)
-
-On the 2-photon rig there may be multiple Arduinos (stepper motor + camera
-trigger). A udev rule gives each one a stable, descriptive name regardless of
-which USB port it is plugged into.
-
-1. Find the device's serial number:
-   ```bash
-   udevadm info -a -n /dev/ttyACM0 | grep '{serial}' | head -1
-   ```
-2. Create `/etc/udev/rules.d/99-octacam.rules` with one line per Arduino:
-   ```
-   SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{serial}=="<SERIAL>", \
-     SYMLINK+="ArduinoCam", MODE="0666"
-   ```
-   Repeat with a different `SYMLINK` name (e.g. `ArduinoStepper`) for the
-   stepper-motor Arduino.
-3. Reload rules:
-   ```bash
-   sudo udevadm control --reload-rules && sudo udevadm trigger
-   ```
-4. The device is now available as `/dev/ArduinoCam`.
-
 ## octacam plugin configuration
 
-In `octacam_config.toml`:
+The plugin default device path is `/dev/arduinoCams`. On an existing rig that
+already has that symlink, simply enabling the plugin is enough:
+
+```toml
+# octacam_config.toml — minimal, uses the default /dev/arduinoCams
+[[plugins]]
+name = "twophoton"
+```
+
+Override the device or other options as needed:
 
 ```toml
 [[plugins]]
 name = "twophoton"
-device = "/dev/ArduinoCam"   # or /dev/ttyACM0, COM3, etc.
+device = "/dev/arduinoCams"   # default; override for ttyACM1, COM3, etc.
 # baud = 115200              # optional; matches firmware default
 # default_fps = 100          # fallback FPS when GUI params are absent
 # default_duration_ms = 10000  # fallback duration in ms
 ```
 
-Or at launch time:
+Or enable at launch time without touching the config:
 ```bash
 octacam gui configs/my_rig --plugin twophoton
 ```
 
 The plugin requires pyserial:
 ```bash
-uv add "octacam[twophoton]"
+uv sync --extra twophoton
 # or: pip install "octacam[twophoton]"
 ```
+
+## Setting up a persistent device symlink (Linux — new rigs only)
+
+Existing rigs already have `/dev/arduinoCams`; skip this section.
+
+On a fresh machine, multiple Arduinos (camera trigger + stepper motor) need
+stable, descriptive names so the correct board is always at the expected path
+regardless of USB port.
+
+1. Find the camera-trigger Arduino's USB serial number:
+   ```bash
+   udevadm info -a -n /dev/ttyACM0 | grep '{serial}' | head -1
+   ```
+2. Create `/etc/udev/rules.d/99-octacam.rules`:
+   ```
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{serial}=="<SERIAL>", \
+     SYMLINK+="ArduinoCam", MODE="0666"
+   ```
+   Add a second line with `SYMLINK+="ArduinoStepper"` for the stepper Arduino.
+3. Reload rules and replug:
+   ```bash
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+4. Verify: `ls -l /dev/arduinoCams` should point to a `ttyACM*` device.
 
 ## Windows
 

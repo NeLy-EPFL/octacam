@@ -54,6 +54,7 @@ except ImportError:
 
 log = logging.getLogger("octacam")
 
+DEFAULT_DEVICE = "/dev/arduinoCams"
 DEFAULT_BAUD = 115200
 DEFAULT_FPS = 100
 DEFAULT_DURATION_MS = 10_000
@@ -179,12 +180,7 @@ def _build(options: dict) -> "TwoPhotonPlugin":
         raise RuntimeError(
             "pyserial not installed: pip install octacam[twophoton]"
         )
-    device = options.get("device")
-    if not device:
-        raise RuntimeError(
-            "twophoton plugin: 'device' is required in the plugin config "
-            "(e.g. device = \"/dev/ArduinoCam\")"
-        )
+    device = str(options.get("device") or DEFAULT_DEVICE)
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))
     except (TypeError, ValueError):
@@ -218,7 +214,7 @@ class TwoPhotonPlugin(Plugin):
 
     def __init__(
         self,
-        device: str,
+        device: str = DEFAULT_DEVICE,
         baud: int = DEFAULT_BAUD,
         default_fps: int = DEFAULT_FPS,
         default_duration_ms: int = DEFAULT_DURATION_MS,
