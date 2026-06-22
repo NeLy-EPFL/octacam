@@ -142,23 +142,29 @@ def test_on_recording_start_sends_arm_packet():
     assert dur == 5000
 
 
-def test_on_recording_start_uses_defaults_when_no_params():
+def test_on_recording_start_does_not_arm_when_no_params():
+    # params=None means "arm with recording" was unchecked — must not send anything.
     plugin, link = _plugin_with_fake()
     plugin.on_recording_start(None)
+    assert link.snapshot() == []
+
+
+def test_on_recording_start_does_not_arm_when_plugin_key_absent():
+    # A different plugin's params present but no "twophoton" key → do not arm.
+    plugin, link = _plugin_with_fake()
+    plugin.on_recording_start({"arduino": {"n_steps": 100}})
+    assert link.snapshot() == []
+
+
+def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty():
+    # {"twophoton": {}} means checkbox was checked, GUI omitted optional fields.
+    plugin, link = _plugin_with_fake()
+    plugin.on_recording_start({"twophoton": {}})
     written = link.snapshot()
     assert len(written) == 1
     _, fps, dur = struct.unpack(ARM_FORMAT, written[0])
     assert fps == DEFAULT_FPS
     assert dur == DEFAULT_DURATION_MS
-
-
-def test_on_recording_start_uses_defaults_when_plugin_key_absent():
-    plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"arduino": {"n_steps": 100}})  # different plugin
-    written = link.snapshot()
-    assert len(written) == 1
-    _, fps, _ = struct.unpack(ARM_FORMAT, written[0])
-    assert fps == DEFAULT_FPS
 
 
 def test_on_recording_stop_abort_sends_cancel():
@@ -290,3 +296,57 @@ def test_build_uses_provided_options():
     assert plugin.baud == 9600
     assert plugin._default_fps == 50
     assert plugin._default_duration_ms == 3000
+
+
+# ---------------------------------------------------------------------------
+# TwoPhotonLink: is_open thread-safety
+# ---------------------------------------------------------------------------
+
+def test_is_open_safe_when_serial_is_none():
+    # Regression: is_open must not raise AttributeError when _serial is nulled
+    # concurrently by close(). Snapshot the attribute to a local first.
+    from octacam.plugins.twophoton import TwoPhotonLink
+    link = TwoPhotonLink(on_status=lambda s: None)
+    # _serial starts as None; is_open should return False without AttributeError.
+    assert link.is_open is False
+
+
+# ---------------------------------------------------------------------------
+# Plugin registry: builtins always win over external entry points
+# ---------------------------------------------------------------------------
+
+def test_builtin_not_overridden_by_entry_point(monkeypatch):
+    """An external entry-point named 'twophoton' must not replace the builtin."""
+    import octacam.plugins as registry_mod
+    from octacam.plugins import _BUILTINS, _REGISTRY
+
+    sentinel_factory = lambda opts: object()  # noqa: E731
+
+    class FakeEP:
+        name = "twophoton"
+        value = "fake_package:factory"
+        def load(self):
+            return sentinel_factory
+
+    def fake_entry_points(group):
+        return [FakeEP()]
+
+    # Clear twophoton from registry so the entry-point would normally win.
+    saved = _REGISTRY.pop("twophoton", None)
+    try:
+        monkeypatch.setattr(
+            "octacam.plugins.entry_points", fake_entry_points, raising=False
+        )
+        # Patch importlib.metadata.entry_points inside the module
+        import importlib.metadata as meta_mod
+        monkeypatch.setattr(meta_mod, "entry_points", fake_entry_points)
+
+        registry_mod._discover_entry_points()
+
+        # The builtin name must not have been replaced by the external factory.
+        assert _REGISTRY.get("twophoton") is not sentinel_factory, (
+            "External entry-point overwrote the builtin 'twophoton' factory"
+        )
+    finally:
+        if saved is not None:
+            _REGISTRY["twophoton"] = saved

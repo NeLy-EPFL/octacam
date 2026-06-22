@@ -5,8 +5,9 @@ Plugins are selected by name from the ``plugins:`` section of
 CLI flag. The default launch loads none. Selection resolves to instantiated
 plugins via a name -> factory registry, mirroring ``writer.FORMATS``.
 
-Only in-repo plugins under ``octacam.plugins.<name>`` are discoverable; there
-is no third-party entry-point discovery (by design).
+Bundled plugins under ``octacam.plugins.<name>`` are always preferred; third-
+party plugins may register additional names via the ``octacam.plugins``
+entry-point group.
 """
 
 from __future__ import annotations
@@ -57,8 +58,8 @@ def _discover_entry_points() -> None:
         from importlib.metadata import entry_points
 
         for ep in entry_points(group="octacam.plugins"):
-            if ep.name in _REGISTRY:
-                continue  # in-repo builtin already registered; don't override
+            if ep.name in _BUILTINS or ep.name in _REGISTRY:
+                continue  # builtins always win; skip already-loaded names
             try:
                 ep.load()
                 log.debug("Loaded entry-point plugin %r from %s", ep.name, ep.value)

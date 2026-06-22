@@ -133,7 +133,8 @@ class TwoPhotonLink:
 
     @property
     def is_open(self) -> bool:
-        return self._serial is not None and self._serial.is_open
+        s = self._serial
+        return s is not None and s.is_open
 
     def _write(self, data: bytes) -> None:
         with self._write_lock:
@@ -167,7 +168,7 @@ class TwoPhotonLink:
                 if not self._reader_stop.is_set():
                     log.debug("2-photon trigger: read error in reader thread", exc_info=True)
                 break
-            if b and b[0:1] in (bytes([x]) for x in _STATUS_BYTES):
+            if b and b[0] in _STATUS_BYTES:
                 try:
                     self._on_status(chr(b[0]))
                 except Exception:
@@ -277,12 +278,15 @@ class TwoPhotonPlugin(Plugin):
     # -------------------------------------------------- recording lifecycle
 
     def on_recording_start(self, params: dict | None) -> None:
-        """Arm the Arduino with the recording's fps and duration.
+        """Arm the Arduino when the GUI's "Arm with recording" checkbox is checked.
 
-        ``params["twophoton"]`` may carry ``fps`` and ``duration_ms`` sent by
-        the GUI; falls back to the plugin's configured defaults when absent.
+        Only arms when ``params["twophoton"]`` is present — its absence means the
+        operator left the checkbox unchecked.  ``fps`` and ``duration_ms`` inside
+        that dict are optional; they fall back to the plugin's configured defaults.
         """
-        spec = (params or {}).get("twophoton", {})
+        spec = (params or {}).get("twophoton")
+        if spec is None:
+            return
         arm = ArmParams.from_payload(spec, self._default_fps, self._default_duration_ms)
         log.info(
             "2-photon trigger: arming at %d fps for %d ms", arm.fps, arm.duration_ms

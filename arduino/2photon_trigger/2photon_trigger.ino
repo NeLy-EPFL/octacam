@@ -92,9 +92,9 @@ static void timer1_stop() {
 // Blocks for up to kPayloadWaitMs (a few milliseconds); returns false on
 // timeout or if the payload values are out of range.
 static bool parse_arm_payload(uint16_t &fps, uint32_t &duration_ms) {
-  const uint32_t deadline = millis() + kPayloadWaitMs;
+  const uint32_t start = millis();
   while (Serial.available() < static_cast<int>(kArmPayloadSize)) {
-    if (millis() > deadline) return false;
+    if (millis() - start >= kPayloadWaitMs) return false;
   }
   uint8_t buf[kArmPayloadSize];
   Serial.readBytes(reinterpret_cast<char *>(buf), kArmPayloadSize);
