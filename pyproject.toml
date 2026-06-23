@@ -17,12 +17,18 @@ dependencies = [
     # telemetry/jog socket (octacam serve) needs one at runtime.
     "websockets>=16.0",
     "imageio-ffmpeg>=0.6.0",
+    # The flywheel and twophoton plugins talk to an Arduino over serial. It's a
+    # light, pure-Python dep needed by every bundled plugin, so it ships by
+    # default rather than as an extra people can forget to install.
+    "pyserial>=3.5",
 ]
 
 [project.optional-dependencies]
-# Opt-in plugins (octacam.plugins.<name>) and their extra runtime deps.
-arduino = ["pyserial>=3.5"]
-twophoton = ["pyserial>=3.5"]
+# Opt-in plugins (octacam.plugins.<name>). pyserial-backed plugins (flywheel,
+# twophoton) now get their dep from the main list, so these are documented,
+# greppable install markers rather than dependency lists.
+flywheel = []
+twophoton = []
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
 # PyPI (it ships with the SDK installer). This extra is therefore a documented,
 # greppable install marker rather than a dependency list: install the Spinnaker
@@ -41,8 +47,6 @@ dev = [
     "pytest-cov>=5",
     "ruff>=0.8",
     "pyright>=1.1.390",
-    # so the bundled plugins (and their tests) load in the dev environment.
-    "pyserial>=3.5",
 ]
 
 [build-system]

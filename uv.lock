@@ -400,18 +400,11 @@ dependencies = [
     { name = "opencv-python-headless" },
     { name = "pydantic" },
     { name = "pypylon" },
+    { name = "pyserial" },
     { name = "rich" },
     { name = "typer" },
     { name = "uvicorn" },
     { name = "websockets" },
-]
-
-[package.optional-dependencies]
-arduino = [
-    { name = "pyserial" },
-]
-twophoton = [
-    { name = "pyserial" },
 ]
 
 [package.dev-dependencies]
@@ -420,7 +413,6 @@ dev = [
     { name = "httpx" },
     { name = "psutil" },
     { name = "pyright" },
-    { name = "pyserial" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -434,14 +426,13 @@ requires-dist = [
     { name = "opencv-python-headless", specifier = ">=4.9" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pypylon", specifier = ">=4.0" },
-    { name = "pyserial", marker = "extra == 'arduino'", specifier = ">=3.5" },
-    { name = "pyserial", marker = "extra == 'twophoton'", specifier = ">=3.5" },
+    { name = "pyserial", specifier = ">=3.5" },
     { name = "rich", specifier = ">=13.7" },
     { name = "typer", specifier = ">=0.15" },
     { name = "uvicorn", specifier = ">=0.49.0" },
     { name = "websockets", specifier = ">=16.0" },
 ]
-provides-extras = ["arduino", "twophoton", "flir"]
+provides-extras = ["flywheel", "twophoton", "flir"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -449,7 +440,6 @@ dev = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pyright", specifier = ">=1.1.390" },
-    { name = "pyserial", specifier = ">=3.5" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=5" },
     { name = "ruff", specifier = ">=0.8" },
