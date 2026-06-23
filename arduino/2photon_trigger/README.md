@@ -69,15 +69,18 @@ already has that symlink, simply enabling the plugin is enough:
 name = "twophoton"
 ```
 
-Override the device or other options as needed:
+Override the device or other options as needed (settings go under a
+`[plugins.options]` sub-table):
 
 ```toml
 [[plugins]]
 name = "twophoton"
-device = "/dev/arduinoCams"   # default; override for ttyACM1, COM3, etc.
-# baud = 115200              # optional; matches firmware default
-# default_fps = 100          # fallback FPS when GUI params are absent
-# default_duration_ms = 10000  # fallback duration in ms
+
+[plugins.options]
+device = "/dev/arduinoCams"     # default; override for ttyACM1, COM3, etc.
+# baud = 115200                 # optional; matches firmware default
+# default_fps = 100             # fallback FPS when GUI params are absent
+# default_duration_ms = 10000   # fallback duration in ms
 ```
 
 Or enable at launch time without touching the config:
@@ -85,11 +88,8 @@ Or enable at launch time without touching the config:
 octacam gui configs/my_rig --plugin twophoton
 ```
 
-The plugin requires pyserial:
-```bash
-uv sync --extra twophoton
-# or: pip install "octacam[twophoton]"
-```
+The plugin uses pyserial, which ships with octacam by default — no extra
+install is needed.
 
 ## Setting up a persistent device symlink (Linux — new rigs only)
 

@@ -3,17 +3,21 @@
 Arms an Arduino-based camera trigger over a serial link. The Arduino waits for
 a ThorSync rising edge, then generates a precise square-wave camera trigger at
 the configured frame rate for the configured duration. Enable it with a
-``[[plugins]]`` entry in ``octacam_config.toml``::
+``[[plugins]]`` entry in ``octacam_config.toml`` (settings go under a
+``[plugins.options]`` sub-table)::
 
     [[plugins]]
     name = "twophoton"
-    device = "/dev/ArduinoCam"   # udev symlink or /dev/ttyACM0, COM3, etc.
+
+    [plugins.options]
+    device = "/dev/arduinoCams"  # udev symlink or /dev/ttyACM0, COM3, etc.
     baud = 115200                # optional; default 115200
     default_fps = 100            # fallback when GUI params are not sent
     default_duration_ms = 10000  # fallback duration in milliseconds
 
 The plugin can also be enabled at launch time with ``--plugin twophoton``.
-Requires the optional dependency: ``pip install octacam[twophoton]``.
+Its serial dependency (pyserial) ships with octacam by default, so no extra
+install is needed.
 
 Wire protocol (host → Arduino, 7 bytes little-endian):
   [0xA5][fps:uint16][duration_ms:uint32]  — arm
@@ -77,7 +81,7 @@ class ArmParams:
         return struct.pack(_ARM_FORMAT, _ARM_MAGIC, self.fps, self.duration_ms)
 
     @classmethod
-    def from_payload(cls, payload: dict, default_fps: int, default_duration_ms: int) -> "ArmParams":
+    def from_payload(cls, payload: dict, default_fps: int, default_duration_ms: int) -> ArmParams:
         """Build from a plugin_params dict; falls back to defaults on missing keys."""
         try:
             fps = int(payload.get("fps", default_fps))
@@ -109,9 +113,7 @@ class TwoPhotonLink:
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
-            raise RuntimeError(
-                "pyserial not installed: pip install octacam[twophoton]"
-            )
+            raise RuntimeError("pyserial not installed: pip install pyserial")
         self.close()
         s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
         self._serial = s
@@ -183,11 +185,9 @@ _STATE_LABELS: dict[str, str] = {
 
 
 @register("twophoton")
-def _build(options: dict) -> "TwoPhotonPlugin":
+def _build(options: dict) -> TwoPhotonPlugin:
     if serial is None:
-        raise RuntimeError(
-            "pyserial not installed: pip install octacam[twophoton]"
-        )
+        raise RuntimeError("pyserial not installed: pip install pyserial")
     device = str(options.get("device") or DEFAULT_DEVICE)
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))
