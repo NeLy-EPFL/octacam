@@ -110,20 +110,20 @@ def test_bad_types_keep_defaults(tmp_path):
 
 
 def test_plugins_bare_name_list(tmp_path):
-    (tmp_path / "octacam_config.toml").write_text('plugins = ["arduino", "other"]\n')
+    (tmp_path / "octacam_config.toml").write_text('plugins = ["flywheel", "other"]\n')
     plugins = load_config_dir(tmp_path).plugins
-    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert [p.name for p in plugins] == ["flywheel", "other"]
     assert plugins[0].options == {}
 
 
 def test_plugins_tables_with_options_and_duplicates(tmp_path):
     (tmp_path / "octacam_config.toml").write_text(
-        '[[plugins]]\nname = "arduino"\n'
-        '[[plugins]]\nname = "arduino"\n'  # duplicate -> skipped
+        '[[plugins]]\nname = "flywheel"\n'
+        '[[plugins]]\nname = "flywheel"\n'  # duplicate -> skipped
         '[[plugins]]\nname = "other"\noptions = {device = "/dev/ttyACM0"}\n'
     )
     plugins = load_config_dir(tmp_path).plugins
-    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert [p.name for p in plugins] == ["flywheel", "other"]
     assert plugins[1].options == {"device": "/dev/ttyACM0"}
 
 

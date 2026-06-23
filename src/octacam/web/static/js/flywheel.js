@@ -1,10 +1,10 @@
-// Arduino tab: stepper loop command + hold-to-jog position adjustment.
+// Flywheel tab: stepper loop command + hold-to-jog position adjustment.
 
 import { api, clampInput } from "./util.js";
 
 const STEPS_PER_REVOLUTION = 4096;
 
-export class ArduinoTab {
+export class FlywheelTab {
   constructor({ send, notify, status }) {
     this.send = send; // sends a JSON message over the WS
     this.notify = notify;
@@ -16,10 +16,10 @@ export class ArduinoTab {
     this.device = status?.device || "";
     this.connected = false;
 
-    this.fields = document.getElementById("arduino-fields");
-    this.statusBox = document.getElementById("arduino-status");
-    this.statusMsg = document.getElementById("arduino-status-msg");
-    this.reconnectBtn = document.getElementById("arduino-reconnect");
+    this.fields = document.getElementById("flywheel-fields");
+    this.statusBox = document.getElementById("flywheel-status");
+    this.statusMsg = document.getElementById("flywheel-status-msg");
+    this.reconnectBtn = document.getElementById("flywheel-reconnect");
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
     this.dirCw = document.getElementById("loop-dir-cw");

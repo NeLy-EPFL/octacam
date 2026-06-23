@@ -9,8 +9,8 @@ countdown, so it must not block.
 
 Plugins are bundled in-repo under ``octacam.plugins.<name>`` and registered via
 the ``@register`` decorator (see :mod:`octacam.plugins`). They are opt-in: the
-default launch loads none. A user enables them through the ``plugins:`` section
-of ``octacam_config.yml`` or the ``--plugin`` CLI flag.
+default launch loads none. A user enables them through the ``[[plugins]]``
+section of ``octacam_config.toml`` or the ``--plugin`` CLI flag.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class OctacamPlugin(Protocol):
 
     # ---- recording lifecycle (called from the controller monitor thread) ----
     # params is this plugin's slice of the recording-start request, keyed by
-    # plugin name (e.g. {"arduino": {...}}).
+    # plugin name (e.g. {"flywheel": {...}}).
     def on_recording_start(self, params: dict | None) -> None: ...
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...

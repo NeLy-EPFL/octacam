@@ -7,7 +7,7 @@ state machine:
     preview/idle -> waiting -> recording -> finishing -> preview/idle
 
 A monitor thread replaces the Qt timers: it polls for the first frame on
-every camera (dispatching plugin hooks at that moment — e.g. an Arduino
+every camera (dispatching plugin hooks at that moment — e.g. a flywheel
 stepper command), enforces the recording deadline, and runs the teardown
 sequence in the same order as the original code (stop trigger -> grab loops
 exit -> writers drain -> CSVs).
@@ -687,7 +687,7 @@ class RecordingController:
 
         if not self._stop_event.is_set():
             # Fire plugin first-frame hooks at the t0 of the countdown, in the
-            # same place the inline Arduino write used to live, so stepper
+            # same place the inline flywheel write used to live, so stepper
             # motion (or any plugin) stays synchronised to actual capture.
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:

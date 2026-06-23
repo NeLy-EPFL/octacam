@@ -31,8 +31,8 @@
         title="Adjust per-camera sensor parameters (resolution, exposure, gain)">Camera</button>
       <button type="button" data-tab="view"
         title="Rotate, flip, and crosshair options for the live preview">View</button>
-      <button type="button" data-tab="arduino"
-        title="Drive the turntable stepper via the Arduino plugin">Arduino</button>
+      <button type="button" data-tab="flywheel"
+        title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
       <button type="button" data-tab="twophoton"
         title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
     </nav>
@@ -139,13 +139,13 @@
       <div id="camera-status"></div>
     </section>
 
-    <section id="tab-arduino" class="tab">
-      <div id="arduino-status" class="plugin-status hidden">
-        <span id="arduino-status-msg"></span>
-        <button type="button" id="arduino-reconnect" class="btn"
+    <section id="tab-flywheel" class="tab">
+      <div id="flywheel-status" class="plugin-status hidden">
+        <span id="flywheel-status-msg"></span>
+        <button type="button" id="flywheel-reconnect" class="btn"
           title="Try to reopen the serial connection to the Arduino">Reconnect</button>
       </div>
-      <fieldset id="arduino-fields" disabled>
+      <fieldset id="flywheel-fields" disabled>
         <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
         <div class="row" title="Rotation direction of the first sweep"><span>Initial direction:</span>
           <span class="radio-group">

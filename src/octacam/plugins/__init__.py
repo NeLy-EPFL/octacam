@@ -1,8 +1,9 @@
 """Bundled, opt-in plugin registry for octacam.
 
-Plugins are selected by name from the ``plugins:`` section of
-``octacam_config.yml`` (each entry may carry options) and/or the ``--plugin``
-CLI flag. The default launch loads none. Selection resolves to instantiated
+Plugins are selected by name from the ``[[plugins]]`` section of
+``octacam_config.toml`` (each entry may carry an ``[plugins.options]`` table)
+and/or the ``--plugin`` CLI flag. The default launch loads none. Selection
+resolves to instantiated
 plugins via a name -> factory registry, mirroring ``writer.FORMATS``.
 
 Bundled plugins under ``octacam.plugins.<name>`` are always preferred; third-
@@ -38,7 +39,7 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 
 # Bundled plugins live at octacam.plugins.<name>; importing the module runs its
 # @register call. Listed here so build_plugins knows what it may import.
-_BUILTINS = ("arduino", "twophoton")
+_BUILTINS = ("flywheel", "twophoton")
 
 
 def _discover_entry_points() -> None:

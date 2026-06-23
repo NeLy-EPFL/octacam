@@ -213,7 +213,7 @@ class _Client:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         # Stable per-connection id so plugins can scope transient per-client
-        # state (e.g. the Arduino jog) to the socket that owns it.
+        # state (e.g. the flywheel jog) to the socket that owns it.
         self.id = next(_Client._next_id)
         self.frames: dict[int, bytes] = {}
         self.texts: dict[str, str] = {}
@@ -752,7 +752,7 @@ def create_app(
                     message = json.loads(text)
                 except ValueError:
                     continue
-                # Hand the message to plugins (e.g. Arduino jog); the first
+                # Hand the message to plugins (e.g. flywheel jog); the first
                 # one to claim it wins. Run in the executor so a plugin's
                 # blocking I/O never stalls the event loop. The client id lets
                 # a plugin scope per-connection state to the owning socket.
@@ -767,7 +767,7 @@ def create_app(
         finally:
             state.clients.discard(client)
             state.broadcast_presence()
-            # Let plugins react to this socket closing (e.g. the Arduino jog
+            # Let plugins react to this socket closing (e.g. the flywheel jog
             # clock stops if this client owned it, so a dropped connection
             # can't leave the motor spinning — but another client's jog is
             # left untouched). Off the event loop in case the hook blocks.
@@ -778,7 +778,7 @@ def create_app(
             with contextlib.suppress(asyncio.CancelledError):
                 await sender
 
-    # Plugin-contributed REST endpoints (e.g. Arduino's /api/serial/command).
+    # Plugin-contributed REST endpoints (e.g. flywheel's /api/serial/command).
     # Registered before the static catch-all mount at "/".
     for plugin in plugins.plugins:
         router = plugin.api_router()

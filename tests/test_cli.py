@@ -59,15 +59,15 @@ def test_list_cameras_emits_tab_separated_lines():
     assert emulated and all("\t" in line for line in emulated)
 
 
-def test_list_plugins_lists_bundled_arduino():
+def test_list_plugins_lists_bundled_flywheel():
     result = runner.invoke(app, ["list-plugins"])
     assert result.exit_code == 0
-    arduino = [
-        line for line in result.output.splitlines() if line.startswith("arduino\t")
+    flywheel = [
+        line for line in result.output.splitlines() if line.startswith("flywheel\t")
     ]
-    assert len(arduino) == 1
-    name, status, *_ = arduino[0].split("\t")
-    assert name == "arduino"
+    assert len(flywheel) == 1
+    name, status, *_ = flywheel[0].split("\t")
+    assert name == "flywheel"
     # `available` or `unavailable` depending on whether pyserial is installed.
     assert status in ("available", "unavailable")
 
@@ -333,7 +333,7 @@ def test_resolve_enabled():
     assert _resolve_enabled(None, False) is None
     assert _resolve_enabled([], False) is None
     # Explicit plugin names are passed through.
-    assert _resolve_enabled(["arduino"], False) == ["arduino"]
+    assert _resolve_enabled(["flywheel"], False) == ["flywheel"]
     # --no-plugins wins and disables everything.
-    assert _resolve_enabled(["arduino"], True) == []
+    assert _resolve_enabled(["flywheel"], True) == []
     assert _resolve_enabled(None, True) == []

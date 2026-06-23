@@ -1,15 +1,18 @@
-"""Arduino stepper-motor controller plugin (opt-in).
+"""Flywheel stepper-motor controller plugin (opt-in).
 
-Drives the Arduino stepper over a serial link. Enable it with a ``plugins:``
-entry in ``octacam_config.yml``::
+Drives the Arduino stepper over a serial link. Enable it with a ``[[plugins]]``
+entry in ``octacam_config.toml`` (settings go under a ``[plugins.options]``
+sub-table)::
 
-    plugins:
-      - arduino:
-          device: /dev/ttyACM0
-          baud: 115200
+    [[plugins]]
+    name = "flywheel"
 
-or with ``octacam gui --plugin arduino``. Requires the optional dependency:
-``pip install octacam[arduino]``.
+    [plugins.options]
+    device = "/dev/ttyACM0"
+    baud = 115200
+
+or with ``octacam gui --plugin flywheel``. Its serial dependency (pyserial)
+ships with octacam by default, so no extra install is needed.
 
 It contributes:
   * an ``on_first_frame`` hook that fires an armed loop command at the first
@@ -31,7 +34,7 @@ from octacam.plugins.base import Plugin
 
 try:
     import serial
-except ImportError:  # pyserial is the `arduino` extra; core runs without it
+except ImportError:  # pyserial ships by default; guard against a broken env
     serial = None  # type: ignore[assignment]
 
 log = logging.getLogger("octacam")
@@ -106,7 +109,7 @@ class SerialLink:
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
-            raise RuntimeError("pyserial not installed: pip install octacam[arduino]")
+            raise RuntimeError("pyserial not installed: pip install pyserial")
         self.close()
         self._serial = serial.Serial(device, baud, timeout=0.1, write_timeout=1)
 
@@ -190,7 +193,7 @@ class JogClock:
             self._thread = threading.Thread(
                 target=self._run,
                 args=(direction, interval_s, stop, generation),
-                name="arduino-jog",
+                name="flywheel-jog",
                 daemon=True,
             )
             self._thread.start()
@@ -242,7 +245,8 @@ class JogClock:
             else:
                 if steps >= self._max_steps:
                     log.warning(
-                        "Arduino jog: hit %d-step safety cap; stopping", self._max_steps
+                        "Flywheel jog: hit %d-step safety cap; stopping",
+                        self._max_steps,
                     )
         finally:
             # Release the coils only if a newer jog has not superseded us, so a
@@ -252,25 +256,25 @@ class JogClock:
                 self._write(release)
 
 
-@register("arduino")
-def _build(options: dict) -> ArduinoPlugin:
+@register("flywheel")
+def _build(options: dict) -> FlywheelPlugin:
     if serial is None:
-        raise RuntimeError("pyserial not installed: pip install octacam[arduino]")
+        raise RuntimeError("pyserial not installed: pip install pyserial")
     device = str(options.get("device", DEFAULT_DEVICE))
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))
     except (TypeError, ValueError):
         log.warning(
-            "Arduino plugin: invalid baud %r; using %d",
+            "Flywheel plugin: invalid baud %r; using %d",
             options.get("baud"),
             DEFAULT_BAUD,
         )
         baud = DEFAULT_BAUD
-    return ArduinoPlugin(device=device, baud=baud)
+    return FlywheelPlugin(device=device, baud=baud)
 
 
-class ArduinoPlugin(Plugin):
-    name = "arduino"
+class FlywheelPlugin(Plugin):
+    name = "flywheel"
 
     def __init__(self, device: str = DEFAULT_DEVICE, baud: int = DEFAULT_BAUD):
         self.device = device
@@ -302,9 +306,9 @@ class ArduinoPlugin(Plugin):
         try:
             self._link.open(self.device, self.baud)
         except Exception as e:
-            log.warning("Arduino plugin: failed to open %s: %s", self.device, e)
+            log.warning("Flywheel plugin: failed to open %s: %s", self.device, e)
             return str(e)
-        log.info("Arduino plugin: opened %s @ %d", self.device, self.baud)
+        log.info("Flywheel plugin: opened %s @ %d", self.device, self.baud)
         return None
 
     def teardown(self) -> None:
@@ -343,7 +347,7 @@ class ArduinoPlugin(Plugin):
         try:
             return Command.from_payload(spec)
         except (KeyError, TypeError, ValueError):
-            log.warning("Arduino plugin: ignoring invalid command %r", spec)
+            log.warning("Flywheel plugin: ignoring invalid command %r", spec)
             return None
 
     # --------------------------------------------------------- web contrib
@@ -360,7 +364,7 @@ class ArduinoPlugin(Plugin):
             Lets the operator recover from a board that was unplugged or absent
             at launch (and is now connected) without restarting the server. The
             response carries the resulting ``ready`` state so the GUI can flip
-            the Arduino tab from its "serial unavailable" notice to usable.
+            the Flywheel tab from its "serial unavailable" notice to usable.
             """
             error = self._open()
             return {"ready": self._link.is_open, "device": self.device, "error": error}

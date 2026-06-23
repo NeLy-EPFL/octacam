@@ -136,7 +136,7 @@ def test_system_and_settings_endpoints(client):
     assert validation["resolved"].startswith("/")
     assert validation["free_bytes"] > 0
 
-    # the serial endpoint is contributed by the (absent) arduino plugin, so it
+    # the serial endpoint is contributed by the (absent) flywheel plugin, so it
     # is not served here (404/405 from the static catch-all, never 200/503)
     command = dict.fromkeys(
         (

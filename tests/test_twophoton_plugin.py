@@ -152,7 +152,7 @@ def test_on_recording_start_does_not_arm_when_no_params():
 def test_on_recording_start_does_not_arm_when_plugin_key_absent():
     # A different plugin's params present but no "twophoton" key → do not arm.
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"arduino": {"n_steps": 100}})
+    plugin.on_recording_start({"flywheel": {"n_steps": 100}})
     assert link.snapshot() == []
 
 
@@ -318,7 +318,7 @@ def test_is_open_safe_when_serial_is_none():
 def test_builtin_not_overridden_by_entry_point(monkeypatch):
     """An external entry-point named 'twophoton' must not replace the builtin."""
     import octacam.plugins as registry_mod
-    from octacam.plugins import _BUILTINS, _REGISTRY
+    from octacam.plugins import _REGISTRY
 
     sentinel_factory = lambda opts: object()  # noqa: E731
 

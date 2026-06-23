@@ -4,7 +4,7 @@ import { api, sleep } from "./util.js";
 import { ReconnectingSocket } from "./ws.js";
 import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
-import { ArduinoTab } from "./arduino.js";
+import { FlywheelTab } from "./flywheel.js";
 import { TwoPhotonTab } from "./twophoton.js";
 import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
@@ -90,10 +90,10 @@ async function main() {
   // Show optional plugin tabs only when the plugin is loaded. A not-ready
   // plugin still shows its tab (with a "serial unavailable" notice and a
   // Reconnect button) so a missing/unplugged board is diagnosable.
-  const arduinoStatus = system.plugins?.arduino ?? null;
-  if (!arduinoStatus) {
-    document.querySelector('#tabs button[data-tab="arduino"]')?.remove();
-    document.getElementById("tab-arduino")?.remove();
+  const flywheelStatus = system.plugins?.flywheel ?? null;
+  if (!flywheelStatus) {
+    document.querySelector('#tabs button[data-tab="flywheel"]')?.remove();
+    document.getElementById("tab-flywheel")?.remove();
   }
   const twoPhotonStatus = system.plugins?.twophoton ?? null;
   if (!twoPhotonStatus) {
@@ -145,8 +145,8 @@ async function main() {
     onJson: (msg) => handleJson(msg),
   });
 
-  const arduino = arduinoStatus
-    ? new ArduinoTab({ send: (m) => sock.send(m), notify, status: arduinoStatus })
+  const flywheel = flywheelStatus
+    ? new FlywheelTab({ send: (m) => sock.send(m), notify, status: flywheelStatus })
     : null;
 
   // TwoPhotonTab needs record.settings, so record is created first and a
@@ -154,7 +154,7 @@ async function main() {
   // when record.settings is already populated.
   record = new RecordTab({
     formats: system.formats,
-    getArduinoCommand: () => (arduino ? arduino.getStartCommand() : null),
+    getFlywheelCommand: () => (flywheel ? flywheel.getStartCommand() : null),
     getTwoPhotonParams: () => (twophoton ? twophoton.getStartParams() : null),
     notify,
   });
@@ -223,10 +223,10 @@ async function main() {
     cameraTab?.setConnected(connected);
     saveDialog?.setConnected(connected);
     dirPicker?.setConnected(connected);
-    // The Arduino tab also gates its fields on the serial port being open, so
+    // The Flywheel tab also gates its fields on the serial port being open, so
     // it owns its own enable/disable (and jog stop); the view tab is a plain
     // connected/not toggle.
-    arduino?.setConnected(connected);
+    flywheel?.setConnected(connected);
     twophoton?.setConnected(connected);
     const viewFields = document.getElementById("view-fields");
     if (viewFields) viewFields.disabled = !connected;
