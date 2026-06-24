@@ -160,17 +160,23 @@ def _plugin_summary(name: str) -> str:
 
 
 def available_plugins() -> list[PluginInfo]:
-    """Describe every bundled plugin and whether it can load right now.
+    """Describe every loadable plugin and whether it can load right now.
 
-    Mirrors :func:`build_plugins`: each builtin is imported (running its
-    ``@register``) and dry-run built with no options. A plugin whose optional
-    dependency is missing raises during that build; it is reported as
-    ``available=False`` with the error as ``detail`` rather than propagating.
+    Mirrors :func:`build_plugins`: each bundled builtin (and any third-party
+    plugin discovered via the ``octacam.plugins`` entry-point group) is dry-run
+    built with no options. A plugin whose dependency is missing raises during
+    that build; it is reported as ``available=False`` with the error as
+    ``detail`` rather than propagating.
     """
     _discover_entry_points()
     infos: list[PluginInfo] = []
-    for name in _BUILTINS:
-        _import_builtin(name)
+    # Bundled builtins first, then any third-party names discovered via entry
+    # points, so `list-plugins` reflects everything build_plugins could load
+    # rather than only the builtins.
+    names = list(_BUILTINS) + [n for n in _REGISTRY if n not in _BUILTINS]
+    for name in names:
+        if name in _BUILTINS:
+            _import_builtin(name)
         summary = _plugin_summary(name)
         factory = _REGISTRY.get(name)
         if factory is None:
