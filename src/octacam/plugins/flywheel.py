@@ -106,14 +106,24 @@ class SerialLink:
     def __init__(self):
         self._serial = None
         self._lock = threading.Lock()
+        # Serializes open/close/reconnect so two concurrent reconnects (e.g. a
+        # double-clicked Reconnect button) cannot both create a port and leak
+        # the loser's file descriptor.
+        self._lifecycle_lock = threading.Lock()
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
             raise RuntimeError("pyserial not installed: pip install pyserial")
-        self.close()
-        self._serial = serial.Serial(device, baud, timeout=0.1, write_timeout=1)
+        with self._lifecycle_lock:
+            self._close_locked()
+            self._serial = serial.Serial(device, baud, timeout=0.1, write_timeout=1)
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Close the port. Caller must hold ``_lifecycle_lock``."""
         with self._lock:
             if self._serial is not None:
                 self._serial.close()
@@ -375,7 +385,10 @@ class FlywheelPlugin(Plugin):
                 raise HTTPException(503, "Serial port not available")
             try:
                 command = Command.from_payload(payload)
-            except (KeyError, TypeError, ValueError):
+                command.to_bytes()  # range-check the packed wire fields up front
+            except (KeyError, TypeError, ValueError, struct.error):
+                # struct.error (out-of-range field) is not a ValueError, so
+                # without it an out-of-range value would escape as a 500.
                 raise HTTPException(422, "Invalid stepper command") from None
             self._link.write_command(command)
             return {"status": "ok"}
