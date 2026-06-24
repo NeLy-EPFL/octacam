@@ -199,6 +199,13 @@ Bundled plugins:
   loop command at the first captured frame so motion is synced to capture. See
   [arduino/stepper_motor/](arduino/stepper_motor/) for the matching firmware.
   Uses pyserial, which ships with octacam by default.
+- **twophoton** — arms an Arduino hardware camera trigger for a 2-photon rig.
+  The Arduino waits for a ThorSync rising edge, then emits a square-wave trigger
+  at the recording's fps for its duration. Adds the web GUI's 2-Photon tab (live
+  Arduino state + "arm with recording") and arms at recording start so capture
+  is synced to the ThorSync edge. See
+  [arduino/2photon_trigger/](arduino/2photon_trigger/) for the firmware and
+  setup. Uses pyserial, which ships with octacam by default.
 
 ## Troubleshooting
 

@@ -106,9 +106,11 @@ regardless of USB port.
 2. Create `/etc/udev/rules.d/99-octacam.rules`:
    ```
    SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{serial}=="<SERIAL>", \
-     SYMLINK+="ArduinoCam", MODE="0666"
+     SYMLINK+="arduinoCams", MODE="0666"
    ```
-   Add a second line with `SYMLINK+="ArduinoStepper"` for the stepper Arduino.
+   The symlink name must match the plugin's default device `/dev/arduinoCams`
+   (override `device` in the config if you use a different name). Add a second
+   line with `SYMLINK+="arduinoStepper"` for the stepper Arduino.
 3. Reload rules and replug:
    ```bash
    sudo udevadm control --reload-rules && sudo udevadm trigger
