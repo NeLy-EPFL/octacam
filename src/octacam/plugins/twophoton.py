@@ -64,10 +64,10 @@ DEFAULT_FPS = 100
 DEFAULT_DURATION_MS = 10_000
 
 # Wire-format constants
-_ARM_MAGIC    = 0xA5
+_ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
 # magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) = 7 bytes
-_ARM_FORMAT   = "<BHI"
+_ARM_FORMAT = "<BHI"
 
 _STATUS_BYTES = frozenset(b"ATD")
 
@@ -81,7 +81,9 @@ class ArmParams:
         return struct.pack(_ARM_FORMAT, _ARM_MAGIC, self.fps, self.duration_ms)
 
     @classmethod
-    def from_payload(cls, payload: dict, default_fps: int, default_duration_ms: int) -> ArmParams:
+    def from_payload(
+        cls, payload: dict, default_fps: int, default_duration_ms: int
+    ) -> ArmParams:
         """Build from a plugin_params dict; falls back to defaults on missing keys."""
         try:
             fps = int(payload.get("fps", default_fps))
@@ -92,7 +94,10 @@ class ArmParams:
         except (TypeError, ValueError):
             duration_ms = default_duration_ms
         fps = max(1, min(10_000, fps))
-        duration_ms = max(1, duration_ms)
+        # Clamp to the uint32 wire field, mirroring the fps clamp. Without an
+        # upper bound an absurd duration makes struct.pack raise inside send_arm,
+        # which dispatch swallows — silently skipping the arm.
+        duration_ms = max(1, min(0xFFFF_FFFF, duration_ms))
         return cls(fps=fps, duration_ms=duration_ms)
 
 
@@ -107,6 +112,10 @@ class TwoPhotonLink:
     def __init__(self, on_status: Callable[[str], None]):
         self._serial = None
         self._write_lock = threading.Lock()
+        # Serializes the open/close/reconnect lifecycle so two concurrent
+        # reconnects (double-click, two browser tabs, or a reconnect racing
+        # teardown) cannot each create a port and leak the loser's FD + reader.
+        self._lifecycle_lock = threading.Lock()
         self._on_status = on_status
         self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
@@ -114,16 +123,22 @@ class TwoPhotonLink:
     def open(self, device: str, baud: int) -> None:
         if serial is None:
             raise RuntimeError("pyserial not installed: pip install pyserial")
-        self.close()
-        s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
-        self._serial = s
-        self._reader_stop.clear()
-        self._reader = threading.Thread(
-            target=self._read_loop, daemon=True, name="twophoton-reader"
-        )
-        self._reader.start()
+        with self._lifecycle_lock:
+            self._close_locked()
+            s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
+            self._serial = s
+            self._reader_stop.clear()
+            self._reader = threading.Thread(
+                target=self._read_loop, daemon=True, name="twophoton-reader"
+            )
+            self._reader.start()
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
+        """Tear down the port and reader. Caller must hold ``_lifecycle_lock``."""
         self._reader_stop.set()
         with self._write_lock:
             s, self._serial = self._serial, None
@@ -132,6 +147,22 @@ class TwoPhotonLink:
         if self._reader is not None:
             self._reader.join(timeout=1.0)
             self._reader = None
+
+    def _mark_broken(self) -> None:
+        """Drop the handle after the port dies under the reader thread.
+
+        Without this the reader exits but pyserial's ``is_open`` stays True, so
+        ``is_open``/``is_ready`` would report a dead link as usable forever and
+        the GUI would never offer reconnect. Touches only ``_write_lock`` (never
+        the lifecycle lock) so it can't deadlock a concurrent close() joining us.
+        """
+        with self._write_lock:
+            s, self._serial = self._serial, None
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
 
     @property
     def is_open(self) -> bool:
@@ -162,13 +193,21 @@ class TwoPhotonLink:
             try:
                 b = s.read(1)
             except serial.SerialException:  # pyright: ignore[reportOptionalMemberAccess]
+                # Port died under us (e.g. unplugged mid-run). Drop the handle so
+                # is_ready() turns False and the GUI surfaces the reconnect path,
+                # unless we are already shutting down cleanly.
+                if not self._reader_stop.is_set():
+                    self._mark_broken()
                 break
             except Exception:
                 # The port was closed under us (s.fd → None during shutdown),
                 # which surfaces as TypeError from os.read(None, 1). Any other
                 # unexpected exception should also not crash the daemon thread.
                 if not self._reader_stop.is_set():
-                    log.debug("2-photon trigger: read error in reader thread", exc_info=True)
+                    log.debug(
+                        "2-photon trigger: read error in reader thread", exc_info=True
+                    )
+                    self._mark_broken()
                 break
             if b and b[0] in _STATUS_BYTES:
                 try:
@@ -192,14 +231,20 @@ def _build(options: dict) -> TwoPhotonPlugin:
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))
     except (TypeError, ValueError):
-        log.warning("twophoton plugin: invalid baud %r; using %d", options.get("baud"), DEFAULT_BAUD)
+        log.warning(
+            "twophoton plugin: invalid baud %r; using %d",
+            options.get("baud"),
+            DEFAULT_BAUD,
+        )
         baud = DEFAULT_BAUD
     try:
         default_fps = int(options.get("default_fps", DEFAULT_FPS))
     except (TypeError, ValueError):
         default_fps = DEFAULT_FPS
     try:
-        default_duration_ms = int(options.get("default_duration_ms", DEFAULT_DURATION_MS))
+        default_duration_ms = int(
+            options.get("default_duration_ms", DEFAULT_DURATION_MS)
+        )
     except (TypeError, ValueError):
         default_duration_ms = DEFAULT_DURATION_MS
     return TwoPhotonPlugin(
@@ -243,11 +288,14 @@ class TwoPhotonPlugin(Plugin):
         self._broadcast = callback
 
     def _on_arduino_status(self, status: str) -> None:
-        self._arduino_state = _STATE_LABELS.get(status, "idle")
+        self._set_arduino_state(_STATE_LABELS.get(status, "idle"))
+
+    def _set_arduino_state(self, state: str) -> None:
+        self._arduino_state = state
         if self._broadcast is not None:
             self._broadcast(
                 "twophoton_state",
-                {"state": self._arduino_state, "device": self.device},
+                {"state": state, "device": self.device},
             )
 
     # -------------------------------------------------- process lifecycle
@@ -268,6 +316,7 @@ class TwoPhotonPlugin(Plugin):
     def teardown(self) -> None:
         self._link.send_cancel()
         self._link.close()
+        self._arduino_state = "idle"
 
     def is_ready(self) -> bool:
         return self._link.is_open
@@ -288,6 +337,15 @@ class TwoPhotonPlugin(Plugin):
         if spec is None:
             return
         arm = ArmParams.from_payload(spec, self._default_fps, self._default_duration_ms)
+        if not self._link.is_open:
+            # send_arm would silently no-op on a closed link, leaving the cameras
+            # waiting on an external trigger that never fires. Surface it instead.
+            log.warning(
+                "2-photon trigger: link to %s is not open; recording will NOT be "
+                "hardware-armed (cameras may wait for a trigger that never fires)",
+                self.device,
+            )
+            return
         log.info(
             "2-photon trigger: arming at %d fps for %d ms", arm.fps, arm.duration_ms
         )
@@ -296,6 +354,10 @@ class TwoPhotonPlugin(Plugin):
     def on_recording_stop(self, aborted: bool) -> None:
         if aborted:
             self._link.send_cancel()
+            # The firmware's cancel path returns to IDLE silently (no status
+            # byte, unlike the duration-elapsed 'D'), so reset here or the GUI
+            # would keep showing 'armed'/'triggered' until the next arm.
+            self._set_arduino_state("idle")
 
     # -------------------------------------------------- web contributions
 
