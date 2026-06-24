@@ -1,11 +1,12 @@
 """Plugin contract for octacam.
 
 A plugin is any object implementing (a subset of) the ``OctacamPlugin``
-Protocol. Hooks are called synchronously. The recording hooks
-(``on_recording_start``, ``on_first_frame``, ``on_recording_stop``) fire from
-the controller's monitor thread, so implementations must be thread-safe and
-fast — ``on_first_frame`` in particular runs at the t0 of the recording
-countdown, so it must not block.
+Protocol. Hooks are called synchronously and must be thread-safe and fast.
+``on_first_frame`` and ``on_recording_stop`` fire from the controller's monitor
+thread; ``on_recording_start`` fires on the caller's thread (the web executor or
+the CLI thread) just after a recording starts, off the controller lock.
+``on_first_frame`` in particular runs at the t0 of the recording countdown, so
+it must not block.
 
 Plugins are bundled in-repo under ``octacam.plugins.<name>`` and registered via
 the ``@register`` decorator (see :mod:`octacam.plugins`). They are opt-in: the
@@ -40,7 +41,9 @@ class OctacamPlugin(Protocol):
     def is_ready(self) -> bool: ...
     def status(self) -> dict: ...
 
-    # ---- recording lifecycle (called from the controller monitor thread) ----
+    # ---- recording lifecycle ----
+    # on_first_frame/on_recording_stop run on the controller monitor thread;
+    # on_recording_start runs on the caller's thread just after start.
     # params is this plugin's slice of the recording-start request, keyed by
     # plugin name (e.g. {"flywheel": {...}}).
     def on_recording_start(self, params: dict | None) -> None: ...

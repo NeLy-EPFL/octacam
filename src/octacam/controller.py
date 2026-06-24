@@ -600,7 +600,6 @@ class RecordingController:
             self._stop_event.clear()
             self._deadline = None
             self._set_state("waiting")
-            self.plugins.dispatch("on_recording_start", plugin_params)
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
                 args=(
@@ -612,7 +611,13 @@ class RecordingController:
                 daemon=True,
             )
             self._monitor.start()
-            return StartResult(StartResult.OK)
+        # Arm plugins off the controller lock — like on_first_frame below — so a
+        # plugin's blocking serial write (e.g. the twophoton arm, write_timeout=1
+        # s) can't stall snapshot()/telemetry while self._lock is held. The
+        # monitor only fires on_first_frame once cameras deliver a frame, which on
+        # an external-trigger rig cannot happen until this arm runs.
+        self.plugins.dispatch("on_recording_start", plugin_params)
+        return StartResult(StartResult.OK)
 
     def _resume_preview(self) -> None:
         """Return to preview (or idle) after a recording ends or fails."""
