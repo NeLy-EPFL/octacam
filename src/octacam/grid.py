@@ -1,17 +1,27 @@
-"""Composite 3×3 grid video from a recording folder's mp4 files.
+"""Composite grid video from a recording folder's mp4 files.
 
-Layout for the standard 2p rig (LF/LM/LH on the left, RF/RM/RH on the
-right, front camera centred in the middle row, remaining middle slots black):
+The layout is a 2D list of camera names (as defined in the config's
+``[[cameras]]`` entries), where an empty string ``""`` means a black fill cell.
+It is read from the config's ``[grid]`` section when ``--config`` is supplied to
+``octacam transcode --grid`` or ``octacam grid``; otherwise the built-in default
+below is used.
 
-      col → 0 (left)   1 (centre)  2 (right)
+Default layout for the 7-camera 2p rig:
+
+      col → 0 (left)    1 (centre)   2 (right)
   row ↓
-    0        LF          [black]      RF
-    1        LM            F          RM
-    2        LH          [black]      RH
+    0        camera_LF    [black]      camera_RF
+    1        camera_LM    camera_F     camera_RM
+    2        camera_LH    [black]      camera_RH
 
-Camera files are matched by the suffix after the last underscore in the stem
-(e.g. ``camera_LF.mp4`` matches suffix ``LF``).  Missing cameras are filled
-with a black frame so the grid is always produced even with a partial set.
+Define a custom layout in your ``octacam_config.toml``:
+
+    [grid]
+    layout = [
+        ["camera_LF", "",           "camera_RF"],
+        ["camera_LM", "camera_F",   "camera_RM"],
+        ["camera_LH", "camera_H",   "camera_RH"],
+    ]
 """
 
 from __future__ import annotations
@@ -25,26 +35,19 @@ log = logging.getLogger("octacam")
 
 GRID_FILENAME = "grid.mp4"
 
-# None = black fill cell; str = camera-name suffix to look up.
-_LAYOUT: list[list[str | None]] = [
-    ["LF", None, "RF"],
-    ["LM", "F",  "RM"],
-    ["LH", None, "RH"],
+# Built-in default: 3×3 grid for the standard 7-camera rig.
+# Each cell is either a full camera name (stem of the mp4 file) or "" (black).
+DEFAULT_LAYOUT: list[list[str]] = [
+    ["camera_LF", "",          "camera_RF"],
+    ["camera_LM", "camera_F",  "camera_RM"],
+    ["camera_LH", "",          "camera_RH"],
 ]
 
-_ROWS = len(_LAYOUT)
-_COLS = len(_LAYOUT[0])
-_N_CELLS = _ROWS * _COLS
 
-
-def _find_mp4(folder: Path, suffix: str) -> Path | None:
-    """First *.mp4 whose stem ends with ``_SUFFIX`` (case-insensitive)."""
-    needle = f"_{suffix.upper()}"
-    for p in sorted(folder.glob("*.mp4")):
-        stem = p.stem.upper()
-        if stem.endswith(needle) or stem == suffix.upper():
-            return p
-    return None
+def _find_mp4(folder: Path, camera_name: str) -> Path | None:
+    """Return ``folder / <camera_name>.mp4`` if it exists, else None."""
+    p = folder / f"{camera_name}.mp4"
+    return p if p.exists() else None
 
 
 def _probe_video(path: Path) -> tuple[int, int, str, float]:
@@ -72,33 +75,48 @@ def _probe_video(path: Path) -> tuple[int, int, str, float]:
 
 def build_grid_video(
     folder: Path,
+    layout: list[list[str]] | None = None,
     output: Path | None = None,
     crf: int = 20,
     preset: str = "veryslow",
     pix_fmt: str = "gray",
     dry_run: bool = False,
 ) -> Path | None:
-    """Write a 3×3 composite video to *output* (default: ``folder/grid.mp4``).
+    """Write a composite grid video to *output* (default: ``folder/grid.mp4``).
 
-    Missing cameras are replaced with black frames.  Returns the output path on
-    success, or None when no camera files are found or ffmpeg fails.
+    *layout* is a 2D list of camera names / empty strings matching
+    ``GridConfig.layout`` from the octacam config.  Omit to use the built-in
+    7-camera default.
+
+    Missing cameras (name set but mp4 not found) are replaced with black frames
+    so the grid is always produced even with a partial set.  Returns the output
+    path on success, or None when no camera files are found or ffmpeg fails.
 
     On *dry_run* the ffmpeg command is logged but not executed; the intended
     output path is still returned so callers can include it in NAS transfers.
     """
+    if layout is None:
+        layout = DEFAULT_LAYOUT
+    if not layout or not layout[0]:
+        log.warning("Grid layout is empty — skipping grid")
+        return None
     if output is None:
         output = folder / GRID_FILENAME
 
+    rows = len(layout)
+    cols = len(layout[0])
+    n_cells = rows * cols
+
     # Resolve each grid slot to a source mp4 (None → black/missing).
-    # Row-major order (left→right, top→bottom) must match xstack input order.
+    # Row-major order (left→right, top→bottom) matches xstack input order.
     slot_files: list[Path | None] = []
     found_any = False
-    for row in _LAYOUT:
-        for suffix in row:
-            if suffix is None:
+    for row in layout:
+        for cell in row:
+            if not cell:  # empty string = explicit black fill
                 slot_files.append(None)
             else:
-                p = _find_mp4(folder, suffix)
+                p = _find_mp4(folder, cell)
                 slot_files.append(p)
                 if p is not None:
                     found_any = True
@@ -117,8 +135,8 @@ def build_grid_video(
 
     # Build the ffmpeg command.
     # One -i per grid cell (real file or lavfi color source), in row-major order.
-    # The black lavfi source uses a large duration; xstack's shortest=1 will end
-    # the output when the first real video finishes.
+    # The black lavfi source uses a long duration; xstack's shortest=1 ends the
+    # output when the first real video finishes.
     cmd: list[str] = ["ffmpeg", "-y"]
     for p in slot_files:
         if p is not None:
@@ -132,7 +150,7 @@ def build_grid_video(
     # filter_complex: scale each input to the cell size → label, then xstack.
     filter_parts: list[str] = []
     labels: list[str] = []
-    for i in range(_N_CELLS):
+    for i in range(n_cells):
         lbl = f"c{i}"
         labels.append(lbl)
         filter_parts.append(f"[{i}:v]scale={W}:{H}[{lbl}]")
@@ -140,11 +158,11 @@ def build_grid_video(
     xstack_inputs = "".join(f"[{l}]" for l in labels)
     xstack_layout = "|".join(
         f"{c * W}_{r * H}"
-        for r in range(_ROWS)
-        for c in range(_COLS)
+        for r in range(rows)
+        for c in range(cols)
     )
     filter_parts.append(
-        f"{xstack_inputs}xstack=inputs={_N_CELLS}:layout={xstack_layout}:shortest=1[grid]"
+        f"{xstack_inputs}xstack=inputs={n_cells}:layout={xstack_layout}:shortest=1[grid]"
     )
 
     cmd += [

@@ -118,6 +118,28 @@ class GuiConfig(BaseModel):
         return _scalar_str(value)
 
 
+class GridConfig(BaseModel):
+    """Composite grid layout for ``octacam transcode --grid`` / ``octacam grid``.
+
+    *layout* is a 2D list (rows × cols) of camera names as they appear in the
+    ``[[cameras]]`` entries.  An empty string ``""`` means a black fill cell.
+    All rows must have the same length.
+
+    Example for a 3×3 grid on a 7-camera rig::
+
+        [grid]
+        layout = [
+            ["camera_LF", "",          "camera_RF"],
+            ["camera_LM", "camera_F",  "camera_RM"],
+            ["camera_LH", "",          "camera_RH"],
+        ]
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    layout: list[list[str]] = Field(default_factory=list)
+
+
 class PluginConfig(BaseModel):
     name: str
     options: dict = Field(default_factory=dict)
@@ -133,6 +155,46 @@ class OctacamConfig(BaseModel):
     gui: GuiConfig = Field(default_factory=GuiConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
+    grid: GridConfig | None = None
+
+
+def _parse_grid(grid_src: object) -> GridConfig | None:
+    """Parse the optional ``[grid]`` section, returning None on any problem."""
+    if grid_src is None:
+        return None
+    if not isinstance(grid_src, dict):
+        log.warning('Ignoring "grid" in octacam config as it is not a table')
+        return None
+    layout_src = grid_src.get("layout")
+    if layout_src is None:
+        log.warning('"grid" section is missing a "layout" key; ignoring it')
+        return None
+    if not isinstance(layout_src, list):
+        log.warning('"grid.layout" must be an array of arrays; ignoring it')
+        return None
+    layout: list[list[str]] = []
+    expected_cols: int | None = None
+    for row_i, row in enumerate(layout_src):
+        if not isinstance(row, list):
+            log.warning('"grid.layout" row %d is not an array; ignoring the grid', row_i)
+            return None
+        if not all(isinstance(cell, str) for cell in row):
+            log.warning('"grid.layout" row %d has non-string cells; ignoring the grid', row_i)
+            return None
+        if expected_cols is None:
+            expected_cols = len(row)
+        elif len(row) != expected_cols:
+            log.warning(
+                '"grid.layout" rows have inconsistent lengths (%d vs %d); ignoring the grid',
+                expected_cols,
+                len(row),
+            )
+            return None
+        layout.append([str(cell) for cell in row])
+    if not layout:
+        log.warning('"grid.layout" is empty; ignoring the grid')
+        return None
+    return GridConfig(layout=layout)
 
 
 def _parse_backend(value: object) -> str:
@@ -328,6 +390,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return _finalize(config)
 
     config.backend = _parse_backend(data.get("backend"))
+    config.grid = _parse_grid(data.get("grid"))
 
     gui_src = data.get("gui")
     if gui_src is not None:

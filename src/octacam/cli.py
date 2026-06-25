@@ -1083,9 +1083,24 @@ class _TranscodeProgressBar:
         return on_progress
 
 
+def _load_grid_layout(config_dir: Path) -> list[list[str]] | None:
+    """Return the grid layout from a config dir, or None if none is defined."""
+    from octacam.config import load_config_dir
+
+    cfg = load_config_dir(config_dir)
+    if cfg.grid is None:
+        log.warning(
+            "No [grid] layout found in %s — using the built-in default layout",
+            config_dir,
+        )
+        return None
+    return cfg.grid.layout
+
+
 def _post_process_folders(
     folder_outputs: dict[Path, list[Path]],
     do_grid: bool,
+    grid_layout: list[list[str]] | None,
     nas_path: Path | None,
     nas_local_base: Path | None,
     crf: int,
@@ -1101,7 +1116,12 @@ def _post_process_folders(
         grid_file: Path | None = None
         if do_grid:
             grid_file = build_grid_video(
-                folder, crf=crf, preset=preset, pix_fmt=pix_fmt, dry_run=dry_run
+                folder,
+                layout=grid_layout,
+                crf=crf,
+                preset=preset,
+                pix_fmt=pix_fmt,
+                dry_run=dry_run,
             )
         if nas_path is not None:
             nas_files = list(outputs)
@@ -1125,6 +1145,18 @@ def grid(
             help="Recording folders that already contain transcoded *.mp4 files.",
         ),
     ],
+    config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Config directory whose octacam_config.toml contains a [grid] "
+            "layout section.  When omitted the built-in 7-camera default is used.",
+        ),
+    ] = None,
     output_name: Annotated[
         str,
         typer.Option("--output-name", "-o", help="Output filename inside each folder."),
@@ -1137,21 +1169,33 @@ def grid(
         typer.Option("--dry-run", help="Log the ffmpeg command without running it."),
     ] = False,
 ) -> None:
-    """Generate a 3×3 composite grid video from an already-transcoded recording folder.
+    """Generate a composite grid video from an already-transcoded recording folder.
 
-    Expects *.mp4 files named after the standard camera convention
-    (camera_LF, camera_LM, camera_LH, camera_RF, camera_RM, camera_RH, camera_F).
-    Missing cameras are filled with black frames.
+    Camera names and their positions are read from the ``[grid]`` section of the
+    rig's ``octacam_config.toml`` (pass ``--config <config_dir>``).  When no
+    config is given the built-in default for the 7-camera 2p rig is used
+    (camera_LF/LM/LH on the left, camera_RF/RM/RH on the right, camera_F
+    centred).  Missing cameras are filled with black frames.
 
-    Use `octacam transcode --grid` to generate the grid as part of transcoding.
+    Use ``octacam transcode --grid`` to generate the grid as part of transcoding.
     """
     from octacam.grid import build_grid_video
+
+    layout: list[list[str]] | None = None
+    if config_dir is not None:
+        layout = _load_grid_layout(config_dir)
 
     any_ok = False
     for folder in paths:
         output = folder / output_name
         result = build_grid_video(
-            folder, output=output, crf=crf, preset=preset, pix_fmt=pix_fmt, dry_run=dry_run
+            folder,
+            layout=layout,
+            output=output,
+            crf=crf,
+            preset=preset,
+            pix_fmt=pix_fmt,
+            dry_run=dry_run,
         )
         if result is not None:
             typer.echo(result)
@@ -1255,11 +1299,24 @@ def transcode(
         bool,
         typer.Option(
             "--grid/--no-grid",
-            help="After transcoding each folder, generate a 3×3 composite grid "
-            "video (grid.mp4) arranged as LF/LM/LH on the left, RF/RM/RH on the "
-            "right, and the front camera (F) centred in the middle row.",
+            help="After transcoding each folder, generate a composite grid video "
+            "(grid.mp4).  The camera arrangement is read from the [grid] section "
+            "of the rig config (--config); without it the built-in 7-camera "
+            "default is used.",
         ),
     ] = False,
+    grid_config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Config directory whose octacam_config.toml contains a [grid] "
+            "layout section used by --grid.",
+        ),
+    ] = None,
     nas_path: Annotated[
         Path | None,
         typer.Option(
@@ -1373,9 +1430,13 @@ def transcode(
     # have been transcoded.  Skipped entirely when neither flag is active so
     # there is zero overhead on plain transcode runs.
     if (grid or nas_path is not None) and folder_outputs:
+        grid_layout: list[list[str]] | None = None
+        if grid and grid_config_dir is not None:
+            grid_layout = _load_grid_layout(grid_config_dir)
         _post_process_folders(
             folder_outputs=folder_outputs,
             do_grid=grid,
+            grid_layout=grid_layout,
             nas_path=nas_path,
             nas_local_base=nas_local_base,
             crf=crf,
