@@ -1267,6 +1267,92 @@ def grid(
 
 
 @app.command()
+def nas(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            help="Recording folders or parent directories (with -r) to copy.",
+        ),
+    ],
+    nas_path: Annotated[
+        Path,
+        typer.Option(
+            "--nas-path",
+            help="NAS destination root (e.g. /mnt/nas/matthias).",
+        ),
+    ],
+    nas_local_base: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-local-base",
+            help="Local root to strip when computing the NAS sub-path, so the "
+            "directory tree is mirrored. Example: with --nas-local-base "
+            "/home/nely/data/MD a recording at "
+            "/home/nely/data/MD/260624_/Fly1/001-bhv lands at "
+            "<nas-path>/260624_/Fly1/001-bhv. Omit to use only the folder name.",
+        ),
+    ] = None,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "-r",
+            "--recursive",
+            help="Search each path recursively for recording directories "
+            "(identified by recording_summary.json) and copy each one.",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Log what would be copied without touching any files.",
+        ),
+    ] = False,
+) -> None:
+    """Copy recordings to a NAS or any destination, preserving the directory tree.
+
+    Copies every *.mp4 (individual cameras and grid.mp4 if present) and the
+    recording_summary.json from each recording directory to the NAS, mirroring
+    the source path under --nas-local-base so fly and trial identity are kept:
+
+        octacam nas ~/data/MD/260624_ -r \\
+            --nas-path /mnt/nas/matthias \\
+            --nas-local-base ~/data/MD
+
+    results in /mnt/nas/matthias/260624_/Fly1/001-bhv/, and so on for every
+    trial found in the tree.  Use --dry-run first to verify the paths.
+    """
+    from octacam.nas import copy_folder_to_nas
+
+    recording_dirs = _find_recording_dirs(list(paths), recursive)
+    if not recording_dirs:
+        sys.exit("No recording directories found (missing recording_summary.json).")
+
+    log.info(
+        "Found %d recording director%s",
+        len(recording_dirs),
+        "y" if len(recording_dirs) == 1 else "ies",
+    )
+    if dry_run:
+        for d in recording_dirs:
+            log.info("[dry-run] would copy: %s", d)
+
+    failures = 0
+    for folder in recording_dirs:
+        result = copy_folder_to_nas(
+            folder,
+            nas_root=nas_path,
+            local_base=nas_local_base,
+            dry_run=dry_run,
+        )
+        if result is None:
+            failures += 1
+    if failures:
+        sys.exit(f"{failures} folder(s) failed to copy.")
+
+
+@app.command()
 def transcode(
     paths: Annotated[
         list[Path] | None,
