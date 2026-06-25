@@ -18,13 +18,74 @@ used, which is safe for flat layouts but may cause collisions for deep ones.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import shutil
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from octacam.transform import RECORDING_SUMMARY_FILENAME
 
 log = logging.getLogger("octacam")
+
+_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+
+
+@dataclasses.dataclass(frozen=True)
+class NasCopyProgress:
+    """Progress snapshot for one file-copy chunk."""
+
+    file_index: int   # 1-based index within the current folder
+    file_count: int   # total files being copied for this folder
+    filename: str     # basename of the file being copied
+    bytes_done: int   # bytes written so far for this file
+    file_size: int    # total file size in bytes
+    elapsed_s: float  # elapsed seconds since this file's copy started
+
+    @property
+    def speed_mbs(self) -> float:
+        if self.elapsed_s <= 0 or self.bytes_done <= 0:
+            return 0.0
+        return self.bytes_done / self.elapsed_s / 1_000_000
+
+    @property
+    def done(self) -> bool:
+        return self.bytes_done >= self.file_size
+
+
+NasCopyCallback = Callable[[NasCopyProgress], None]
+
+
+def _copy_with_progress(
+    src: Path,
+    dst: Path,
+    file_index: int,
+    file_count: int,
+    on_progress: NasCopyCallback,
+) -> None:
+    """Copy *src* to *dst* in chunks, calling *on_progress* after each chunk."""
+    file_size = src.stat().st_size
+    bytes_done = 0
+    start = time.monotonic()
+    with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+        while True:
+            chunk = fsrc.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            fdst.write(chunk)
+            bytes_done += len(chunk)
+            on_progress(
+                NasCopyProgress(
+                    file_index=file_index,
+                    file_count=file_count,
+                    filename=src.name,
+                    bytes_done=bytes_done,
+                    file_size=file_size,
+                    elapsed_s=time.monotonic() - start,
+                )
+            )
+    shutil.copystat(src, dst)
 
 
 def copy_folder_to_nas(
@@ -33,6 +94,7 @@ def copy_folder_to_nas(
     local_base: Path | None = None,
     files_only: list[Path] | None = None,
     dry_run: bool = False,
+    on_progress: NasCopyCallback | None = None,
 ) -> Path | None:
     """Copy mp4s (and recording_summary.json) from *folder* to *nas_root*.
 
@@ -51,6 +113,10 @@ def copy_folder_to_nas(
         *folder*).  ``recording_summary.json`` is always appended if present.
     dry_run:
         Log intended operations without touching the filesystem.
+    on_progress:
+        Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
+        When provided, the copy uses chunked I/O; otherwise ``shutil.copy2``
+        is used (faster for small files or when a progress bar is not needed).
 
     Returns the NAS destination directory on success, None on failure.
     """
@@ -88,11 +154,15 @@ def copy_folder_to_nas(
         log.error("Could not create NAS directory %s: %s", dest, e)
         return None
 
+    n = len(candidates)
     any_ok = False
-    for f in candidates:
+    for idx, f in enumerate(candidates, 1):
         target = dest / f.name
         try:
-            shutil.copy2(str(f), str(target))
+            if on_progress is not None:
+                _copy_with_progress(f, target, idx, n, on_progress)
+            else:
+                shutil.copy2(str(f), str(target))
             log.info("NAS: %s → %s", f.name, dest)
             any_ok = True
         except OSError as e:

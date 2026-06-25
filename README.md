@@ -122,6 +122,7 @@ the same number of columns.
 # configs/my_rig/octacam_config.toml
 
 [grid]
+default = true   # generate grid.mp4 automatically when --config is passed
 layout = [
     ["camera_LF", "",          "camera_RF"],
     ["camera_LM", "camera_F",  "camera_RM"],
@@ -129,18 +130,65 @@ layout = [
 ]
 ```
 
-When `--config` is omitted, the built-in default for the 7-camera 2p rig is
-used (same arrangement as above).  For an 8-camera rig add `camera_H` in the
-bottom-centre cell instead of the empty string — see the example configs for
-[2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
+Set `default = true` and the grid is generated automatically whenever
+`--config` is passed to `octacam transcode` — no `--grid` flag needed at
+the end of a recording session.  Omit it (or set `default = false`) to keep
+the grid opt-in via `--grid`.
+
+When `--config` is omitted entirely, the built-in default for the 7-camera 2p
+rig is used (same arrangement as above).  For an 8-camera rig add `camera_H`
+in the bottom-centre cell instead of the empty string — see the example configs
+for [2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
 [emulate_8_cameras](configs/emulate_8_cameras/octacam_config.toml) (8 cameras).
 
 To regenerate the grid for already-transcoded folders without re-running
 the full transcode:
 
 ```bash
+# single folder
 octacam grid /data/octacam/260620-wt/Fly1/001-bhv --config configs/2p_1
+
+# whole experiment tree at once
+octacam grid /data/octacam/260620-wt -r --config configs/2p_1
 ```
+
+### NAS export
+
+Copy all transcoded mp4s, grid videos, and `recording_summary.json` to a
+network drive while preserving the fly/trial directory tree:
+
+```bash
+octacam nas /data/octacam/260620-wt -r \
+    --nas-path /mnt/nas/matthias \
+    --nas-local-base /data/octacam
+```
+
+With `--nas-local-base` set, a recording at
+`/data/octacam/260620-wt/Fly1/001-bhv` lands at
+`/mnt/nas/matthias/260620-wt/Fly1/001-bhv` — fly and trial identity are
+preserved.  Omit it and only the last path component is used (fine for a flat
+layout, risky for deep trees with collisions).
+
+Configure the NAS once in the rig's `octacam_config.toml`:
+
+```toml
+[nas]
+path = "/mnt/nas/matthias"   # NAS mount point
+local_base = "/data/octacam" # local root to strip from paths
+```
+
+### One-command end-of-day workflow
+
+With `[grid] default = true` and `[nas]` filled in, the entire post-recording
+pipeline — transcode → grid → NAS — is a single command:
+
+```bash
+octacam transcode --all --config configs/2p_1
+```
+
+Each step shows a live progress bar (frame/fps/speed for transcode and grid;
+MB/s per file for NAS).  Use `--dry-run` first to validate paths on a new
+workstation without writing anything.
 
 `--dry-run` on both commands logs the intended ffmpeg call and NAS copy plan
 without writing anything — useful for validating paths on a new workstation.

@@ -30,6 +30,10 @@ import json
 import logging
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from octacam.writer import ProgressCallback
 
 log = logging.getLogger("octacam")
 
@@ -42,6 +46,12 @@ DEFAULT_LAYOUT: list[list[str]] = [
     ["camera_LM", "camera_F",  "camera_RM"],
     ["camera_LH", "",          "camera_RH"],
 ]
+
+
+def _fps_value(fps_str: str) -> float:
+    """Convert a ``num/den`` fraction string (from ffprobe) to a float."""
+    num, _, den = fps_str.partition("/")
+    return float(num) / float(den) if den else float(num)
 
 
 def _find_mp4(folder: Path, camera_name: str) -> Path | None:
@@ -81,6 +91,7 @@ def build_grid_video(
     preset: str = "veryslow",
     pix_fmt: str = "gray",
     dry_run: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> Path | None:
     """Write a composite grid video to *output* (default: ``folder/grid.mp4``).
 
@@ -128,16 +139,19 @@ def build_grid_video(
     # Probe the first real file for cell dimensions and fps.
     ref = next(p for p in slot_files if p is not None)
     try:
-        W, H, fps, _dur = _probe_video(ref)
+        W, H, fps, dur = _probe_video(ref)
     except (subprocess.CalledProcessError, KeyError, IndexError, ValueError) as e:
         log.warning("Could not probe %s: %s — skipping grid", ref, e)
         return None
+
+    total_frames = round(dur * _fps_value(fps))
 
     # Build the ffmpeg command.
     # One -i per grid cell (real file or lavfi color source), in row-major order.
     # The black lavfi source uses a long duration; xstack's shortest=1 ends the
     # output when the first real video finishes.
-    cmd: list[str] = ["ffmpeg", "-y"]
+    from octacam.writer import _run_ffmpeg, find_ffmpeg
+    cmd: list[str] = [find_ffmpeg(), "-y"]
     for p in slot_files:
         if p is not None:
             cmd += ["-i", str(p)]
@@ -181,13 +195,11 @@ def build_grid_video(
 
     log.info("Generating grid video → %s", output)
     try:
-        subprocess.run(cmd, capture_output=True, text=True, check=True)
-    except subprocess.CalledProcessError as e:
-        log.error(
-            "Grid generation failed (ffmpeg exit %d):\n%s",
-            e.returncode,
-            e.stderr[-3000:],
+        _run_ffmpeg(
+            cmd, folder, on_progress=on_progress, total_frames=total_frames
         )
+    except RuntimeError as e:
+        log.error("Grid generation failed: %s", e)
         return None
 
     return output
