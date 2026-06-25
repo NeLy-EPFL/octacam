@@ -1083,6 +1083,135 @@ class _TranscodeProgressBar:
         return on_progress
 
 
+class _GridProgressBar:
+    """Rich progress bar for grid video generation, driven by TranscodeProgress callbacks.
+
+    Mirrors ``_TranscodeProgressBar`` but labels each job as ``grid: <folder>``
+    to distinguish it from the transcode phase."""
+
+    def __init__(self, total_jobs: int):
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._total_jobs = total_jobs
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[stats]}"),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task: TaskID | None = None
+
+    def __enter__(self):
+        self._progress.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._progress.stop()
+
+    def folder(self, index: int, path: Path) -> "ProgressCallback":
+        """Start a fresh bar for one grid encode and return its progress callback."""
+        from octacam.writer import TranscodeProgress
+
+        if self._task is not None:
+            self._progress.remove_task(self._task)
+        desc = f"[{index}/{self._total_jobs}] grid: {path.name}"
+        task = self._progress.add_task(desc, total=None, stats="")
+        self._task = task
+
+        def on_progress(p: TranscodeProgress) -> None:
+            stats = [f"{p.frame} frames"]
+            if p.fps:
+                stats.append(f"{p.fps:.0f} fps")
+            if p.speed:
+                stats.append(f"{p.speed:.3g}x")
+            completed = p.frame
+            total = p.total_frames
+            if p.done:
+                total = max(p.frame, total or 0) or None
+                completed = p.frame if total is None else total
+            self._progress.update(
+                task,
+                total=total,
+                completed=completed,
+                stats="  ".join(stats),
+                refresh=p.done,
+            )
+
+        return on_progress
+
+
+class _NasProgressBar:
+    """Rich progress bar for NAS file copies, driven by NasCopyCallback events.
+
+    Shows one file at a time with byte-level progress and transfer speed.
+    A new task is created each time the file index changes, so the bar cycles
+    through the files in the folder without needing to know the list upfront."""
+
+    def __init__(self) -> None:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[speed]}"),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task: TaskID | None = None
+        self._current_file_index = -1
+
+    def __enter__(self):
+        self._progress.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._progress.stop()
+
+    def make_callback(self):
+        """Return a NasCopyCallback that updates this bar as files are copied."""
+        from octacam.nas import NasCopyProgress
+
+        def on_progress(p: NasCopyProgress) -> None:
+            if p.file_index != self._current_file_index:
+                if self._task is not None:
+                    self._progress.remove_task(self._task)
+                self._current_file_index = p.file_index
+                desc = f"[{p.file_index}/{p.file_count}] nas: {p.filename}"
+                self._task = self._progress.add_task(
+                    desc, total=p.file_size, speed="", completed=0
+                )
+            speed_str = f"{p.speed_mbs:.1f} MB/s" if p.speed_mbs > 0 else ""
+            self._progress.update(
+                self._task,
+                completed=p.bytes_done,
+                speed=speed_str,
+                refresh=p.done,
+            )
+
+        return on_progress
+
+
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     """Collect recording directories from *roots*.
 
@@ -1141,33 +1270,51 @@ def _post_process_folders(
     preset: str,
     pix_fmt: str,
     dry_run: bool,
+    show_bar: bool = False,
 ) -> None:
-    """Generate grid videos and/or copy to NAS for each successfully transcoded folder."""
+    """Generate grid videos and/or copy to NAS for each successfully transcoded folder.
+
+    Runs in two sequential phases — all grids first, then all NAS copies — so
+    each phase gets its own progress bar without them fighting over the console."""
     from octacam.grid import build_grid_video
     from octacam.nas import copy_folder_to_nas
 
-    for folder, outputs in folder_outputs.items():
-        grid_file: Path | None = None
-        if do_grid:
-            grid_file = build_grid_video(
-                folder,
-                layout=grid_layout,
-                crf=crf,
-                preset=preset,
-                pix_fmt=pix_fmt,
-                dry_run=dry_run,
-            )
-        if nas_path is not None:
-            nas_files = list(outputs)
-            if grid_file is not None:
-                nas_files.append(grid_file)
-            copy_folder_to_nas(
-                folder,
-                nas_root=nas_path,
-                local_base=nas_local_base,
-                files_only=nas_files,
-                dry_run=dry_run,
-            )
+    # --- Phase 1: grid generation -------------------------------------------
+    grid_files: dict[Path, Path | None] = {}
+    if do_grid:
+        n = len(folder_outputs)
+        grid_bar = _GridProgressBar(n) if (show_bar and not dry_run) else None
+        with (grid_bar or contextlib.nullcontext()):
+            for i, (folder, _) in enumerate(folder_outputs.items(), 1):
+                on_prog = grid_bar.folder(i, folder) if grid_bar else None
+                grid_files[folder] = build_grid_video(
+                    folder,
+                    layout=grid_layout,
+                    crf=crf,
+                    preset=preset,
+                    pix_fmt=pix_fmt,
+                    dry_run=dry_run,
+                    on_progress=on_prog,
+                )
+
+    # --- Phase 2: NAS copy --------------------------------------------------
+    if nas_path is not None:
+        nas_bar = _NasProgressBar() if (show_bar and not dry_run) else None
+        with (nas_bar or contextlib.nullcontext()):
+            nas_cb = nas_bar.make_callback() if nas_bar else None
+            for folder, outputs in folder_outputs.items():
+                nas_files = list(outputs)
+                gf = grid_files.get(folder)
+                if gf is not None:
+                    nas_files.append(gf)
+                copy_folder_to_nas(
+                    folder,
+                    nas_root=nas_path,
+                    local_base=nas_local_base,
+                    files_only=nas_files,
+                    dry_run=dry_run,
+                    on_progress=nas_cb,
+                )
 
 
 @app.command()
@@ -1241,27 +1388,35 @@ def grid(
         sys.exit("No recording directories found (missing recording_summary.json).")
 
     if recursive:
-        log.info("Found %d recording director%s", len(recording_dirs),
-                 "y" if len(recording_dirs) == 1 else "ies")
+        log.info(
+            "Found %d recording director%s",
+            len(recording_dirs),
+            "y" if len(recording_dirs) == 1 else "ies",
+        )
         if dry_run:
             for d in recording_dirs:
                 log.info("[dry-run] would process: %s", d)
 
+    show_bar = not dry_run and _stderr_console().is_terminal
+    bar = _GridProgressBar(len(recording_dirs)) if show_bar else None
     any_ok = False
-    for folder in recording_dirs:
-        output = folder / output_name
-        result = build_grid_video(
-            folder,
-            layout=layout,
-            output=output,
-            crf=crf,
-            preset=preset,
-            pix_fmt=pix_fmt,
-            dry_run=dry_run,
-        )
-        if result is not None:
-            typer.echo(result)
-            any_ok = True
+    with (bar or contextlib.nullcontext()):
+        for index, folder in enumerate(recording_dirs, 1):
+            output = folder / output_name
+            on_progress = bar.folder(index, folder) if bar else None
+            result = build_grid_video(
+                folder,
+                layout=layout,
+                output=output,
+                crf=crf,
+                preset=preset,
+                pix_fmt=pix_fmt,
+                dry_run=dry_run,
+                on_progress=on_progress,
+            )
+            if result is not None:
+                typer.echo(result)
+                any_ok = True
     if not any_ok:
         sys.exit("No grid videos could be generated.")
 
@@ -1338,16 +1493,21 @@ def nas(
         for d in recording_dirs:
             log.info("[dry-run] would copy: %s", d)
 
+    show_bar = not dry_run and _stderr_console().is_terminal
+    nas_bar = _NasProgressBar() if show_bar else None
     failures = 0
-    for folder in recording_dirs:
-        result = copy_folder_to_nas(
-            folder,
-            nas_root=nas_path,
-            local_base=nas_local_base,
-            dry_run=dry_run,
-        )
-        if result is None:
-            failures += 1
+    with (nas_bar or contextlib.nullcontext()):
+        nas_cb = nas_bar.make_callback() if nas_bar else None
+        for folder in recording_dirs:
+            result = copy_folder_to_nas(
+                folder,
+                nas_root=nas_path,
+                local_base=nas_local_base,
+                dry_run=dry_run,
+                on_progress=nas_cb,
+            )
+            if result is None:
+                failures += 1
     if failures:
         sys.exit(f"{failures} folder(s) failed to copy.")
 
@@ -1606,6 +1766,7 @@ def transcode(
             preset=preset,
             pix_fmt=pix_fmt,
             dry_run=dry_run,
+            show_bar=show_bar,
         )
 
     # Report outside the `with` so the message lands after the live bar is torn
