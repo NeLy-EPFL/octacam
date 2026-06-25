@@ -121,6 +121,9 @@ class GuiConfig(BaseModel):
 class GridConfig(BaseModel):
     """Composite grid layout for ``octacam transcode --grid`` / ``octacam grid``.
 
+    Set ``default = true`` so ``octacam transcode --config <dir>`` generates the
+    grid automatically without needing the ``--grid`` flag.
+
     *layout* is a 2D list (rows × cols) of camera names as they appear in the
     ``[[cameras]]`` entries.  An empty string ``""`` means a black fill cell.
     All rows must have the same length.
@@ -128,6 +131,7 @@ class GridConfig(BaseModel):
     Example for a 3×3 grid on a 7-camera rig::
 
         [grid]
+        default = true
         layout = [
             ["camera_LF", "",          "camera_RF"],
             ["camera_LM", "camera_F",  "camera_RM"],
@@ -137,7 +141,34 @@ class GridConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    default: bool = False
     layout: list[list[str]] = Field(default_factory=list)
+
+
+class NasConfig(BaseModel):
+    """NAS export settings for ``octacam transcode`` / ``octacam nas``.
+
+    When *path* is set and a config is passed to ``octacam transcode --config``,
+    recordings are copied to the NAS automatically after transcoding — no
+    ``--nas-path`` flag needed at the command line.
+
+    *local_base* is the local root stripped when computing the destination path,
+    so the directory tree is mirrored on the NAS::
+
+        [nas]
+        path = "/mnt/nas/matthias"
+        local_base = "/home/nely/data/MD"
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = ""
+    local_base: str = ""
+
+    @field_validator("path", "local_base", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
 
 
 class PluginConfig(BaseModel):
@@ -156,6 +187,17 @@ class OctacamConfig(BaseModel):
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
     grid: GridConfig | None = None
+    nas: NasConfig | None = None
+
+
+def _parse_nas(nas_src: object) -> NasConfig | None:
+    """Parse the optional ``[nas]`` section, returning None on any problem."""
+    if nas_src is None:
+        return None
+    if not isinstance(nas_src, dict):
+        log.warning('Ignoring "nas" in octacam config as it is not a table')
+        return None
+    return _lenient_validate(NasConfig, nas_src, "nas", NasConfig())
 
 
 def _parse_grid(grid_src: object) -> GridConfig | None:
@@ -194,7 +236,13 @@ def _parse_grid(grid_src: object) -> GridConfig | None:
     if not layout:
         log.warning('"grid.layout" is empty; ignoring the grid')
         return None
-    return GridConfig(layout=layout)
+
+    default_val = grid_src.get("default", False)  # type: ignore[union-attr]
+    if not isinstance(default_val, bool):
+        log.warning('"grid.default" must be a boolean; ignoring it')
+        default_val = False
+
+    return GridConfig(default=default_val, layout=layout)
 
 
 def _parse_backend(value: object) -> str:
@@ -391,6 +439,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
 
     config.backend = _parse_backend(data.get("backend"))
     config.grid = _parse_grid(data.get("grid"))
+    config.nas = _parse_nas(data.get("nas"))
 
     gui_src = data.get("gui")
     if gui_src is not None:

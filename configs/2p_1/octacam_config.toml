@@ -83,11 +83,17 @@ window_y = 0
 window_width = 1
 window_height = 0.25
 
-# Grid layout for `octacam transcode --grid --config configs/2p_1`
-# Empty strings become black fill cells.
 [grid]
+default = true   # auto-generate grid.mp4 when running `octacam transcode --config configs/2p_1`
 layout = [
     ["camera_LF", "",          "camera_RF"],
     ["camera_LM", "camera_F",  "camera_RM"],
     ["camera_LH", "",          "camera_RH"],
 ]
+
+# NAS export — fill in your mount point and local data root.
+# Once set, `octacam transcode --all --config configs/2p_1` copies
+# results automatically; no extra flags needed.
+[nas]
+path = ""          # e.g. /mnt/nas/matthias
+local_base = ""    # e.g. /home/nely/data/MD

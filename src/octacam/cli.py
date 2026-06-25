@@ -1444,15 +1444,14 @@ def transcode(
         ),
     ] = ProgressStyle.octacam,
     grid: Annotated[
-        bool,
+        bool | None,
         typer.Option(
             "--grid/--no-grid",
-            help="After transcoding each folder, generate a composite grid video "
-            "(grid.mp4).  The camera arrangement is read from the [grid] section "
-            "of the rig config (--config); without it the built-in 7-camera "
-            "default is used.",
+            help="Generate a composite grid video after each folder.  "
+            "When omitted, the [grid] default in --config decides.  "
+            "--no-grid always disables, even when the config says default = true.",
         ),
-    ] = False,
+    ] = None,
     grid_config_dir: Annotated[
         Path | None,
         typer.Option(
@@ -1461,27 +1460,25 @@ def transcode(
             exists=True,
             file_okay=False,
             dir_okay=True,
-            help="Config directory whose octacam_config.toml contains a [grid] "
-            "layout section used by --grid.",
+            help="Rig config directory (octacam_config.toml).  Supplies the grid "
+            "layout, whether grid/NAS run by default ([grid] default and [nas] "
+            "path), and the NAS local-base.  CLI flags override any config value.",
         ),
     ] = None,
     nas_path: Annotated[
         Path | None,
         typer.Option(
             "--nas-path",
-            help="Copy the transcoded mp4s, recording_summary.json, and (if "
-            "--grid) the grid video to this destination after each folder is done. "
-            "Typically a mounted NAS path such as /mnt/nas/matthias.",
+            help="Copy results to this destination after each folder.  "
+            "Overrides [nas] path from --config.",
         ),
     ] = None,
     nas_local_base: Annotated[
         Path | None,
         typer.Option(
             "--nas-local-base",
-            help="Local root stripped when computing the NAS sub-path.  Example: "
-            "with --nas-local-base /data/octacam a recording at "
-            "/data/octacam/260620-wt/Fly1/001-bhv lands at "
-            "<nas-path>/260620-wt/Fly1/001-bhv.  Omit to use only the folder name.",
+            help="Local root to strip for NAS path mirroring.  "
+            "Overrides [nas] local_base from --config.",
         ),
     ] = None,
     dry_run: Annotated[
@@ -1574,19 +1571,37 @@ def transcode(
                     _remove_source_files(input_path)
         except KeyboardInterrupt:
             interrupted = True
-    # Grid and NAS post-processing: run once per folder, after all its files
-    # have been transcoded.  Skipped entirely when neither flag is active so
-    # there is zero overhead on plain transcode runs.
-    if (grid or nas_path is not None) and folder_outputs:
-        grid_layout: list[list[str]] | None = None
-        if grid and grid_config_dir is not None:
-            grid_layout = _load_grid_layout(grid_config_dir)
+    # Resolve effective grid / NAS settings.
+    # Priority: explicit CLI flag > [grid]/[nas] config > off.
+    _cfg = None
+    if grid_config_dir is not None:
+        from octacam.config import load_config_dir as _load_cfg
+        _cfg = _load_cfg(grid_config_dir)
+
+    do_grid: bool = (
+        grid                                              # explicit --grid/--no-grid
+        if grid is not None
+        else bool(_cfg and _cfg.grid and _cfg.grid.default)  # config default
+    )
+    grid_layout: list[list[str]] | None = (
+        _cfg.grid.layout if (_cfg and _cfg.grid and _cfg.grid.layout) else None
+    )
+
+    effective_nas_path: Path | None = nas_path or (
+        Path(_cfg.nas.path) if (_cfg and _cfg.nas and _cfg.nas.path) else None
+    )
+    effective_nas_local_base: Path | None = nas_local_base or (
+        Path(_cfg.nas.local_base) if (_cfg and _cfg.nas and _cfg.nas.local_base) else None
+    )
+
+    # Post-processing: grid + NAS per folder.  Zero overhead when both are off.
+    if (do_grid or effective_nas_path is not None) and folder_outputs:
         _post_process_folders(
             folder_outputs=folder_outputs,
-            do_grid=grid,
+            do_grid=do_grid,
             grid_layout=grid_layout,
-            nas_path=nas_path,
-            nas_local_base=nas_local_base,
+            nas_path=effective_nas_path,
+            nas_local_base=effective_nas_local_base,
             crf=crf,
             preset=preset,
             pix_fmt=pix_fmt,
