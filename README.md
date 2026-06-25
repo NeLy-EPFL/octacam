@@ -103,6 +103,48 @@ and `--all` commands. Folders that were deleted between recording and transcodin
 are silently skipped. The cache prunes itself (entries older than 30 days are
 dropped on each write), so it never grows without bound.
 
+### Grid video
+
+After transcoding you can generate a single composite video that tiles all cameras
+in a configurable grid.  Pass `--grid` to `octacam transcode` to produce one
+`grid.mp4` per recording folder right after the individual files are transcoded:
+
+```bash
+octacam transcode --all --grid --config configs/2p_1
+```
+
+The camera arrangement is read from the `[grid]` section of the rig's
+`octacam_config.toml`.  Each cell is a camera name (as declared in
+`[[cameras]]`); an empty string `""` places a black fill.  All rows must have
+the same number of columns.
+
+```toml
+# configs/my_rig/octacam_config.toml
+
+[grid]
+layout = [
+    ["camera_LF", "",          "camera_RF"],
+    ["camera_LM", "camera_F",  "camera_RM"],
+    ["camera_LH", "",          "camera_RH"],
+]
+```
+
+When `--config` is omitted, the built-in default for the 7-camera 2p rig is
+used (same arrangement as above).  For an 8-camera rig add `camera_H` in the
+bottom-centre cell instead of the empty string — see the example configs for
+[2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
+[emulate_8_cameras](configs/emulate_8_cameras/octacam_config.toml) (8 cameras).
+
+To regenerate the grid for already-transcoded folders without re-running
+the full transcode:
+
+```bash
+octacam grid /data/octacam/260620-wt/Fly1/001-bhv --config configs/2p_1
+```
+
+`--dry-run` on both commands logs the intended ffmpeg call and NAS copy plan
+without writing anything — useful for validating paths on a new workstation.
+
 Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
 startup when a transcode is already running on the same machine (it competes with
 live capture/encoding and can cause dropped frames), so you can choose to wait for

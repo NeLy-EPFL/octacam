@@ -1083,6 +1083,127 @@ class _TranscodeProgressBar:
         return on_progress
 
 
+def _load_grid_layout(config_dir: Path) -> list[list[str]] | None:
+    """Return the grid layout from a config dir, or None if none is defined."""
+    from octacam.config import load_config_dir
+
+    cfg = load_config_dir(config_dir)
+    if cfg.grid is None:
+        log.warning(
+            "No [grid] layout found in %s — using the built-in default layout",
+            config_dir,
+        )
+        return None
+    return cfg.grid.layout
+
+
+def _post_process_folders(
+    folder_outputs: dict[Path, list[Path]],
+    do_grid: bool,
+    grid_layout: list[list[str]] | None,
+    nas_path: Path | None,
+    nas_local_base: Path | None,
+    crf: int,
+    preset: str,
+    pix_fmt: str,
+    dry_run: bool,
+) -> None:
+    """Generate grid videos and/or copy to NAS for each successfully transcoded folder."""
+    from octacam.grid import build_grid_video
+    from octacam.nas import copy_folder_to_nas
+
+    for folder, outputs in folder_outputs.items():
+        grid_file: Path | None = None
+        if do_grid:
+            grid_file = build_grid_video(
+                folder,
+                layout=grid_layout,
+                crf=crf,
+                preset=preset,
+                pix_fmt=pix_fmt,
+                dry_run=dry_run,
+            )
+        if nas_path is not None:
+            nas_files = list(outputs)
+            if grid_file is not None:
+                nas_files.append(grid_file)
+            copy_folder_to_nas(
+                folder,
+                nas_root=nas_path,
+                local_base=nas_local_base,
+                files_only=nas_files,
+                dry_run=dry_run,
+            )
+
+
+@app.command()
+def grid(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            help="Recording folders that already contain transcoded *.mp4 files.",
+        ),
+    ],
+    config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Config directory whose octacam_config.toml contains a [grid] "
+            "layout section.  When omitted the built-in 7-camera default is used.",
+        ),
+    ] = None,
+    output_name: Annotated[
+        str,
+        typer.Option("--output-name", "-o", help="Output filename inside each folder."),
+    ] = "grid.mp4",
+    crf: Annotated[int, typer.Option(help="x264 quality.")] = 20,
+    preset: Annotated[str, typer.Option(help="x264 speed preset.")] = "veryslow",
+    pix_fmt: Annotated[str, typer.Option("--pix-fmt", help="Pixel format.")] = "gray",
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Log the ffmpeg command without running it."),
+    ] = False,
+) -> None:
+    """Generate a composite grid video from an already-transcoded recording folder.
+
+    Camera names and their positions are read from the ``[grid]`` section of the
+    rig's ``octacam_config.toml`` (pass ``--config <config_dir>``).  When no
+    config is given the built-in default for the 7-camera 2p rig is used
+    (camera_LF/LM/LH on the left, camera_RF/RM/RH on the right, camera_F
+    centred).  Missing cameras are filled with black frames.
+
+    Use ``octacam transcode --grid`` to generate the grid as part of transcoding.
+    """
+    from octacam.grid import build_grid_video
+
+    layout: list[list[str]] | None = None
+    if config_dir is not None:
+        layout = _load_grid_layout(config_dir)
+
+    any_ok = False
+    for folder in paths:
+        output = folder / output_name
+        result = build_grid_video(
+            folder,
+            layout=layout,
+            output=output,
+            crf=crf,
+            preset=preset,
+            pix_fmt=pix_fmt,
+            dry_run=dry_run,
+        )
+        if result is not None:
+            typer.echo(result)
+            any_ok = True
+    if not any_ok:
+        sys.exit("No grid videos could be generated.")
+
+
 @app.command()
 def transcode(
     paths: Annotated[
@@ -1174,6 +1295,55 @@ def transcode(
             "ffmpeg's own output verbatim.",
         ),
     ] = ProgressStyle.octacam,
+    grid: Annotated[
+        bool,
+        typer.Option(
+            "--grid/--no-grid",
+            help="After transcoding each folder, generate a composite grid video "
+            "(grid.mp4).  The camera arrangement is read from the [grid] section "
+            "of the rig config (--config); without it the built-in 7-camera "
+            "default is used.",
+        ),
+    ] = False,
+    grid_config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Config directory whose octacam_config.toml contains a [grid] "
+            "layout section used by --grid.",
+        ),
+    ] = None,
+    nas_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-path",
+            help="Copy the transcoded mp4s, recording_summary.json, and (if "
+            "--grid) the grid video to this destination after each folder is done. "
+            "Typically a mounted NAS path such as /mnt/nas/matthias.",
+        ),
+    ] = None,
+    nas_local_base: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-local-base",
+            help="Local root stripped when computing the NAS sub-path.  Example: "
+            "with --nas-local-base /data/octacam a recording at "
+            "/data/octacam/260620-wt/Fly1/001-bhv lands at "
+            "<nas-path>/260620-wt/Fly1/001-bhv.  Omit to use only the folder name.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="For --grid and --nas-path: log what would be done without "
+            "running ffmpeg or copying any files.  Transcoding still runs normally.",
+        ),
+    ] = False,
 ) -> None:
     """Transcode recordings to compressed video.
 
@@ -1203,6 +1373,9 @@ def transcode(
     completed = 0
     interrupted = False
     raw_output = progress_style is ProgressStyle.ffmpeg
+    # Track which output files were produced per source folder so grid/NAS
+    # post-processing can run once per folder after all its files are done.
+    folder_outputs: dict[Path, list[Path]] = {}  # insertion-ordered (3.7+)
     # A live progress bar only makes sense on a terminal; piped/CI runs and the
     # raw-ffmpeg style skip it (ffmpeg paints its own output in raw mode).
     show_bar = not raw_output and _stderr_console().is_terminal
@@ -1247,10 +1420,31 @@ def transcode(
                     log.error("Failed to transcode %s: %s", input_path, e)
                     continue
                 completed += 1
+                folder = input_path.parent
+                folder_outputs.setdefault(folder, []).append(output)
                 if remove_source:
                     _remove_source_files(input_path)
         except KeyboardInterrupt:
             interrupted = True
+    # Grid and NAS post-processing: run once per folder, after all its files
+    # have been transcoded.  Skipped entirely when neither flag is active so
+    # there is zero overhead on plain transcode runs.
+    if (grid or nas_path is not None) and folder_outputs:
+        grid_layout: list[list[str]] | None = None
+        if grid and grid_config_dir is not None:
+            grid_layout = _load_grid_layout(grid_config_dir)
+        _post_process_folders(
+            folder_outputs=folder_outputs,
+            do_grid=grid,
+            grid_layout=grid_layout,
+            nas_path=nas_path,
+            nas_local_base=nas_local_base,
+            crf=crf,
+            preset=preset,
+            pix_fmt=pix_fmt,
+            dry_run=dry_run,
+        )
+
     # Report outside the `with` so the message lands after the live bar is torn
     # down (and after the activity marker is cleared) instead of under it.
     if interrupted:

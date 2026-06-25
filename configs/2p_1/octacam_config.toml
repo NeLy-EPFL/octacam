@@ -82,3 +82,12 @@ window_x = 0
 window_y = 0
 window_width = 1
 window_height = 0.25
+
+# Grid layout for `octacam transcode --grid --config configs/2p_1`
+# Empty strings become black fill cells.
+[grid]
+layout = [
+    ["camera_LF", "",          "camera_RF"],
+    ["camera_LM", "camera_F",  "camera_RM"],
+    ["camera_LH", "",          "camera_RH"],
+]
