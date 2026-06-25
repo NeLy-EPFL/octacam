@@ -1083,6 +1083,40 @@ class _TranscodeProgressBar:
         return on_progress
 
 
+def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
+    """Collect recording directories from *roots*.
+
+    A directory is considered a recording if it contains a
+    ``recording_summary.json``.  In non-recursive mode each element of *roots*
+    is used as-is (the caller is expected to pass recording dirs directly).  In
+    recursive mode every subdirectory that contains a summary is collected,
+    including *roots* themselves if they qualify.  Results are deduped and
+    returned in sorted order so the output is deterministic.
+    """
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    def _add(p: Path) -> None:
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+
+    for root in roots:
+        if not recursive:
+            _add(root)
+            continue
+        if (root / RECORDING_SUMMARY_FILENAME).exists():
+            _add(root)
+        for sub in sorted(root.rglob("*")):
+            if sub.is_dir() and (sub / RECORDING_SUMMARY_FILENAME).exists():
+                _add(sub)
+
+    return result
+
+
 def _load_grid_layout(config_dir: Path) -> list[list[str]] | None:
     """Return the grid layout from a config dir, or None if none is defined."""
     from octacam.config import load_config_dir
@@ -1142,9 +1176,20 @@ def grid(
         list[Path],
         typer.Argument(
             exists=True,
-            help="Recording folders that already contain transcoded *.mp4 files.",
+            help="Recording folders (or parent directories with -r) that contain "
+            "transcoded *.mp4 files.",
         ),
     ],
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "-r",
+            "--recursive",
+            help="Search each path recursively for recording directories "
+            "(identified by recording_summary.json) and generate a grid in each "
+            "one.  Without this flag every argument must be a recording directory.",
+        ),
+    ] = False,
     config_dir: Annotated[
         Path | None,
         typer.Option(
@@ -1166,16 +1211,22 @@ def grid(
     pix_fmt: Annotated[str, typer.Option("--pix-fmt", help="Pixel format.")] = "gray",
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Log the ffmpeg command without running it."),
+        typer.Option(
+            "--dry-run",
+            help="With -r: list the recording directories that would be processed. "
+            "Always: log the ffmpeg command without running it.",
+        ),
     ] = False,
 ) -> None:
-    """Generate a composite grid video from an already-transcoded recording folder.
+    """Generate a composite grid video from already-transcoded recording folders.
 
-    Camera names and their positions are read from the ``[grid]`` section of the
-    rig's ``octacam_config.toml`` (pass ``--config <config_dir>``).  When no
-    config is given the built-in default for the 7-camera 2p rig is used
-    (camera_LF/LM/LH on the left, camera_RF/RM/RH on the right, camera_F
-    centred).  Missing cameras are filled with black frames.
+    Pass a single experiment directory with ``-r`` to process every trial at once:
+
+        octacam grid ~/data/MD/260624_ -r --config configs/2p_2
+
+    Camera names and positions are read from the ``[grid]`` section of the rig's
+    ``octacam_config.toml`` (``--config``).  Without it the built-in 7-camera
+    default is used.  Missing cameras are filled with black frames.
 
     Use ``octacam transcode --grid`` to generate the grid as part of transcoding.
     """
@@ -1185,8 +1236,19 @@ def grid(
     if config_dir is not None:
         layout = _load_grid_layout(config_dir)
 
+    recording_dirs = _find_recording_dirs(list(paths), recursive)
+    if not recording_dirs:
+        sys.exit("No recording directories found (missing recording_summary.json).")
+
+    if recursive:
+        log.info("Found %d recording director%s", len(recording_dirs),
+                 "y" if len(recording_dirs) == 1 else "ies")
+        if dry_run:
+            for d in recording_dirs:
+                log.info("[dry-run] would process: %s", d)
+
     any_ok = False
-    for folder in paths:
+    for folder in recording_dirs:
         output = folder / output_name
         result = build_grid_video(
             folder,
