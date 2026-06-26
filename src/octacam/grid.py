@@ -89,7 +89,7 @@ def build_grid_video(
     output: Path | None = None,
     crf: int = 20,
     preset: str = "veryslow",
-    pix_fmt: str = "gray",
+    pix_fmt: str = "yuv420p",
     dry_run: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> Path | None:

@@ -1268,14 +1268,16 @@ def _post_process_folders(
     nas_local_base: Path | None,
     crf: int,
     preset: str,
-    pix_fmt: str,
     dry_run: bool,
     show_bar: bool = False,
 ) -> None:
     """Generate grid videos and/or copy to NAS for each successfully transcoded folder.
 
     Runs in two sequential phases — all grids first, then all NAS copies — so
-    each phase gets its own progress bar without them fighting over the console."""
+    each phase gets its own progress bar without them fighting over the console.
+
+    The grid always uses yuv420p regardless of the per-camera transcode pixel
+    format, so the composite is playable in QuickTime and Keynote."""
     from octacam.grid import build_grid_video
     from octacam.nas import copy_folder_to_nas
 
@@ -1292,7 +1294,9 @@ def _post_process_folders(
                     layout=grid_layout,
                     crf=crf,
                     preset=preset,
-                    pix_fmt=pix_fmt,
+                    # pix_fmt deliberately not forwarded from transcode: the grid
+                    # must be yuv420p (QuickTime / Keynote); individual camera files
+                    # can stay gray.
                     dry_run=dry_run,
                     on_progress=on_prog,
                 )
@@ -1355,7 +1359,14 @@ def grid(
     ] = "grid.mp4",
     crf: Annotated[int, typer.Option(help="x264 quality.")] = 20,
     preset: Annotated[str, typer.Option(help="x264 speed preset.")] = "veryslow",
-    pix_fmt: Annotated[str, typer.Option("--pix-fmt", help="Pixel format.")] = "gray",
+    pix_fmt: Annotated[
+        str,
+        typer.Option(
+            "--pix-fmt",
+            help="Pixel format for the grid video.  Default yuv420p is required "
+            "for QuickTime / Keynote compatibility.",
+        ),
+    ] = "yuv420p",
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -1764,7 +1775,6 @@ def transcode(
             nas_local_base=effective_nas_local_base,
             crf=crf,
             preset=preset,
-            pix_fmt=pix_fmt,
             dry_run=dry_run,
             show_bar=show_bar,
         )
