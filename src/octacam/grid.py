@@ -161,13 +161,19 @@ def build_grid_video(
                 "-i", f"color=black:size={W}x{H}:duration=86400:rate={fps}",
             ]
 
-    # filter_complex: scale each input to the cell size → label, then xstack.
+    # filter_complex: scale each input to the cell size, then normalise to the
+    # output pixel format *before* xstack.  Camera files are encoded as gray
+    # (full-range, 0-255 luma) while lavfi black cells are yuv420p
+    # (limited-range by default).  Without an explicit format= step xstack
+    # receives mixed pixel formats and ffmpeg's implicit conversion mis-tags the
+    # colour range, producing a washed-out image in VLC and a stalling bitstream
+    # in QuickTime / Apple decoders.
     filter_parts: list[str] = []
     labels: list[str] = []
     for i in range(n_cells):
         lbl = f"c{i}"
         labels.append(lbl)
-        filter_parts.append(f"[{i}:v]scale={W}:{H}[{lbl}]")
+        filter_parts.append(f"[{i}:v]scale={W}:{H},format={pix_fmt}[{lbl}]")
 
     xstack_inputs = "".join(f"[{l}]" for l in labels)
     xstack_layout = "|".join(
@@ -179,9 +185,11 @@ def build_grid_video(
         f"{xstack_inputs}xstack=inputs={n_cells}:layout={xstack_layout}:shortest=1[grid]"
     )
 
+    fps_int = max(1, round(_fps_value(fps)))
     cmd += [
         "-filter_complex", ";".join(filter_parts),
         "-map", "[grid]",
+        "-r", str(fps_int),        # pin integer fps — fractional fps confuses QuickTime
         "-c:v", "libx264",
         "-crf", str(crf),
         "-preset", preset,
