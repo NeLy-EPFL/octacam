@@ -158,12 +158,18 @@ class NasConfig(BaseModel):
         [nas]
         path = "/mnt/nas/matthias"
         local_base = "/home/nely/data/MD"
+        verify = true   # content-checksum each copy before promoting it (default)
+
+    *verify* on (the default) content-checksums every copied file before it is
+    swapped onto its final name; set it false for a faster size-only check on
+    trusted/fast links.  ``--nas-verify/--no-nas-verify`` overrides it.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     path: str = ""
     local_base: str = ""
+    verify: bool = True
 
     @field_validator("path", "local_base", mode="before")
     @classmethod
@@ -243,6 +249,33 @@ def _parse_grid(grid_src: object) -> GridConfig | None:
         default_val = False
 
     return GridConfig(default=default_val, layout=layout)
+
+
+def _validate_grid_layout_cameras(config: OctacamConfig) -> None:
+    """Warn about grid-layout cells naming a camera not in ``[[cameras]]``.
+
+    Runs only when both a grid and an explicit camera list exist (an empty
+    camera list means "use all detected", whose names aren't known here).  A
+    typo'd cell would otherwise silently render as a black tile with no hint.
+    """
+    if config.grid is None or not config.cameras:
+        return
+    known = {c.name for c in config.cameras if c.name}
+    unknown = sorted(
+        {
+            cell
+            for row in config.grid.layout
+            for cell in row
+            if cell and cell not in known
+        }
+    )
+    if unknown:
+        log.warning(
+            '"grid.layout" references unknown camera(s) %s — those cells will '
+            "render black. Known cameras: %s",
+            ", ".join(repr(u) for u in unknown),
+            ", ".join(sorted(known)) or "(none)",
+        )
 
 
 def _parse_backend(value: object) -> str:
@@ -467,6 +500,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return _finalize(config)
 
     log.info("Found %d camera(s) in octacam config file", len(config.cameras))
+    _validate_grid_layout_cameras(config)
     return _finalize(config)
 
 

@@ -134,13 +134,18 @@ layout = [
 Set `default = true` and the grid is generated automatically whenever
 `--config` is passed to `octacam transcode` — no `--grid` flag needed at
 the end of a recording session.  Omit it (or set `default = false`) to keep
-the grid opt-in via `--grid`.
+the grid opt-in via `--grid`.  Passing `--no-grid` always disables the grid,
+even when the config says `default = true`.
 
 When `--config` is omitted entirely, the built-in default for the 7-camera 2p
 rig is used (same arrangement as above).  For an 8-camera rig add `camera_H`
 in the bottom-centre cell instead of the empty string — see the example configs
 for [2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
 [emulate_8_cameras](configs/emulate_8_cameras/octacam_config.toml) (8 cameras).
+If a config lists `[[cameras]]` but has no usable `[grid] layout`, a near-square
+layout is derived from that rig's own cameras rather than falling back to the
+7-camera 2p default.  A layout cell naming a camera that isn't in `[[cameras]]`
+is reported (and renders black) instead of failing silently.
 
 To regenerate the grid for already-transcoded folders without re-running
 the full transcode:
@@ -167,8 +172,22 @@ octacam nas /data/octacam/260620-wt -r \
 With `--nas-local-base` set, a recording at
 `/data/octacam/260620-wt/Fly1/001-bhv` lands at
 `/mnt/nas/matthias/260620-wt/Fly1/001-bhv` — fly and trial identity are
-preserved.  Omit it and only the last path component is used (fine for a flat
-layout, risky for deep trees with collisions).
+preserved.  Omit it when copying a single folder and only the last path
+component is used; when copying several recordings at once (e.g. with `-r`),
+the tree above them is mirrored automatically (preserving the experiment/date
+folder), so distinct trials that share a name never collide on the NAS — within
+a run or across successive runs.
+
+**Integrity and resume.**  Each file is streamed to a temporary name and only
+swapped onto its final name once it is whole and content-verified (a blake2b
+checksum of the source is compared against the written copy), so an interrupted
+copy never leaves a truncated file masquerading as complete.  Re-running the
+same command skips files already present (by size), so a copy that was killed
+part-way simply resumes — at most the one in-progress file is redone.  Flags:
+
+- `--no-verify` — skip the checksum and do a faster size-only check (trusted/fast links).
+- `--checksum` — when a file already exists on the NAS, decide whether to skip it
+  by full checksum rather than size (repair mode: re-copies files whose bytes differ).
 
 Configure the NAS once in the rig's `octacam_config.toml`:
 
@@ -176,6 +195,7 @@ Configure the NAS once in the rig's `octacam_config.toml`:
 [nas]
 path = "/mnt/nas/matthias"   # NAS mount point
 local_base = "/data/octacam" # local root to strip from paths
+verify = true                # checksum each copy before promoting it (default)
 ```
 
 ### One-command end-of-day workflow
@@ -188,11 +208,9 @@ octacam transcode --all --config configs/2p_1
 ```
 
 Each step shows a live progress bar (frame/fps/speed for transcode and grid;
-MB/s per file for NAS).  Use `--dry-run` first to validate paths on a new
-workstation without writing anything.
-
-`--dry-run` on both commands logs the intended ffmpeg call and NAS copy plan
-without writing anything — useful for validating paths on a new workstation.
+MB/s per file for NAS, then a verify pass).  `--dry-run` on any of these
+commands logs the intended ffmpeg call and NAS copy plan without writing
+anything — useful for validating paths on a new workstation.
 
 Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
 startup when a transcode is already running on the same machine (it competes with

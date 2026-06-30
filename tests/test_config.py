@@ -1,9 +1,37 @@
+import logging
 import time
 from pathlib import Path
 
 from octacam.config import GuiConfig, load_config_dir, parse_config
 
 REPO_ROOT = Path(__file__).parent.parent
+
+
+class _LogCapture(logging.Handler):
+    """Capture ``octacam`` logger messages directly.
+
+    Attached to the logger itself rather than via ``caplog`` because another
+    test may leave ``propagate = False``, which would empty caplog's capture.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def __enter__(self):
+        logger = logging.getLogger("octacam")
+        self._prev = logger.level
+        logger.addHandler(self)
+        logger.setLevel(logging.WARNING)
+        return self
+
+    def __exit__(self, *exc):
+        logger = logging.getLogger("octacam")
+        logger.removeHandler(self)
+        logger.setLevel(self._prev)
 
 
 def test_missing_file_returns_defaults(tmp_path):
@@ -174,3 +202,37 @@ def test_backend_parsed_when_present(tmp_path):
 def test_unknown_backend_falls_back_to_basler(tmp_path):
     (tmp_path / "octacam_config.toml").write_text('backend = "nikon"\n')
     assert load_config_dir(tmp_path).backend == "basler"
+
+
+def test_nas_verify_defaults_true(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text('[nas]\npath = "/mnt/nas"\n')
+    cfg = load_config_dir(tmp_path)
+    assert cfg.nas is not None and cfg.nas.verify is True
+
+
+def test_nas_verify_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text("[nas]\nverify = false\n")
+    assert load_config_dir(tmp_path).nas.verify is False
+
+
+def test_grid_layout_unknown_camera_warns(tmp_path):
+    # A layout cell naming a camera that isn't declared must be reported, not
+    # silently rendered black.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "camera_LF"\n'
+        '[[cameras]]\nserial_number = "b"\nname = "camera_RF"\n'
+        '[grid]\nlayout = [["camera_LF", "camera_TYPO"]]\n'
+    )
+    with _LogCapture() as cap:
+        load_config_dir(tmp_path)
+    assert any("camera_TYPO" in m for m in cap.messages)
+
+
+def test_grid_layout_known_cameras_no_unknown_warning(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "camera_LF"\n'
+        '[grid]\nlayout = [["camera_LF", ""]]\n'
+    )
+    with _LogCapture() as cap:
+        load_config_dir(tmp_path)
+    assert not any("unknown camera" in m for m in cap.messages)

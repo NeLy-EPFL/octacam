@@ -108,3 +108,19 @@ def test_grid_yuv420p_preserves_full_range_end_to_end(tmp_path):
     ).stdout
     cell = np.frombuffer(dec, dtype=np.uint8)[: W * H].reshape(H, W)
     assert cell.min() <= 2 and cell.max() >= 250, (int(cell.min()), int(cell.max()))
+
+
+def test_auto_layout_shapes():
+    from octacam.grid import auto_layout
+
+    assert auto_layout([]) == []
+    assert auto_layout(["a"]) == [["a"]]
+    assert auto_layout(["a", "b", "c", "d"]) == [["a", "b"], ["c", "d"]]
+    # Empty cells aren't real cameras and don't count toward the geometry.
+    assert auto_layout(["a", "", "b"]) == [["a", "b"]]
+
+    seven = auto_layout([f"c{i}" for i in range(7)])
+    assert len(seven) == 3 and all(len(row) == 3 for row in seven)  # near-square
+    flat = [cell for row in seven for cell in row]
+    assert flat[:7] == [f"c{i}" for i in range(7)]
+    assert flat[7:] == ["", ""]  # last row padded with black cells

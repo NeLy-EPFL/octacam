@@ -97,3 +97,4 @@ layout = [
 [nas]
 path = ""          # e.g. /mnt/nas/matthias
 local_base = ""    # e.g. /home/nely/data/MD
+verify = true      # checksum each copy before promoting it (false = size-only)

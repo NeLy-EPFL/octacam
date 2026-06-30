@@ -109,3 +109,4 @@ layout = [
 [nas]
 path = ""
 local_base = ""
+verify = true      # checksum each copy before promoting it (false = size-only)

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -46,6 +47,23 @@ DEFAULT_LAYOUT: list[list[str]] = [
     ["camera_LM", "camera_F",  "camera_RM"],
     ["camera_LH", "",          "camera_RH"],
 ]
+
+
+def auto_layout(camera_names: list[str]) -> list[list[str]]:
+    """A near-square row-major layout for *camera_names*.
+
+    Used when a config has cameras but no usable ``[grid] layout``, so the grid
+    reflects this rig's actual cameras instead of the built-in 7-camera 2-photon
+    :data:`DEFAULT_LAYOUT`.  The last row is padded with ``""`` (black) cells to
+    keep every row the same length (required by ``xstack``).
+    """
+    names = [n for n in camera_names if n]
+    if not names:
+        return []
+    cols = math.ceil(math.sqrt(len(names)))
+    rows = math.ceil(len(names) / cols)
+    padded = names + [""] * (rows * cols - len(names))
+    return [padded[r * cols:(r + 1) * cols] for r in range(rows)]
 
 
 def _fps_value(fps_str: str) -> float:
@@ -184,7 +202,7 @@ def build_grid_video(
             f"[{i}:v]scale={W}:{H}{scale_range},format={pix_fmt}[{lbl}]"
         )
 
-    xstack_inputs = "".join(f"[{l}]" for l in labels)
+    xstack_inputs = "".join(f"[{lbl}]" for lbl in labels)
     xstack_layout = "|".join(
         f"{c * W}_{r * H}"
         for r in range(rows)
