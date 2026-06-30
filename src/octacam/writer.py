@@ -47,6 +47,45 @@ DEFAULT_PIX_FMT = "gray"
 DEFAULT_X264_PARAMS = ""
 
 
+def _is_limited_range_yuv(pix_fmt: str) -> bool:
+    """True for YUV formats that default to limited/"TV" range (16-235 luma).
+
+    Those squeeze our full-range (0-255) camera frames into 16-235 — an
+    irreversible ~3.6% loss that happens even with lossless encoding. ``gray``
+    (4:0:0) and the ``yuvj*`` aliases are already full range, so they're exempt.
+    """
+    return pix_fmt.startswith("yuv") and not pix_fmt.startswith("yuvj")
+
+
+def _color_range_args(pix_fmt: str) -> list[str]:
+    """ffmpeg output args tagging the stream FULL range for limited-range YUV.
+
+    ``-color_range pc`` writes the H.264 VUI full_range_flag / container tag so
+    decoders expand luma back to 0-255 instead of rendering washed-out. This is
+    only the *tag*: on its own (notably on ffmpeg 7.x) it does NOT change the
+    pixel data, which is why callers must also run :func:`_full_range_vf` to
+    force the conversion itself. The two together are the single source of truth
+    for full-range handling, shared by the capture writer, the offline
+    transcoders, and the grid compositor.
+    """
+    return ["-color_range", "pc"] if _is_limited_range_yuv(pix_fmt) else []
+
+
+def _full_range_vf(pix_fmt: str, vf: str = "") -> str:
+    """Append a full-range conversion filter to *vf* for limited-range YUV.
+
+    ``scale=out_range=full`` forces the gray→YUV conversion to keep 0-255 luma
+    instead of compressing to 16-235. Unlike the ``-color_range`` *flag*, a
+    filter reliably converts the data on every ffmpeg version we ship. A no-op
+    (returns *vf* unchanged) for ``gray``/``yuvj*`` outputs, which are already
+    full range. Pair with :func:`_color_range_args` so the result is also tagged.
+    """
+    if not _is_limited_range_yuv(pix_fmt):
+        return vf
+    frag = "scale=out_range=full"
+    return f"{vf},{frag}" if vf else frag
+
+
 @dataclass(frozen=True)
 class TranscodeProgress:
     """One progress sample parsed from ffmpeg's ``-progress pipe:1`` stream.
@@ -116,8 +155,11 @@ def build_x264_args(
 
     ``vf``, when non-empty, is a single ffmpeg ``-vf`` filter chain (e.g.
     ``transpose=1,hflip``) applied before encoding — used by `octacam
-    transcode --as-displayed` to bake a display orientation in.
+    transcode --as-displayed` to bake a display orientation in. For a
+    limited-range YUV ``pix_fmt`` a full-range conversion filter is appended so
+    0-255 luma survives (see :func:`_full_range_vf`).
     """
+    vf = _full_range_vf(pix_fmt, vf)
     return [
         ffmpeg,
         "-hide_banner",
@@ -143,6 +185,7 @@ def build_x264_args(
         *(["-x264-params", x264_params] if x264_params else []),
         "-pix_fmt",
         pix_fmt,
+        *_color_range_args(pix_fmt),
         "-y",
         str(output),
     ]
@@ -623,6 +666,7 @@ def transcode_encoded(
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
+    vf = _full_range_vf(pix_fmt, vf)
     with _atomic_output(output) as tmp:
         args = [
             ffmpeg,
@@ -642,6 +686,7 @@ def transcode_encoded(
             *(["-x264-params", x264_params] if x264_params else []),
             "-pix_fmt",
             pix_fmt,
+            *_color_range_args(pix_fmt),
             str(tmp),
         ]
         _run_ffmpeg(

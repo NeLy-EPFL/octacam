@@ -150,7 +150,7 @@ def build_grid_video(
     # One -i per grid cell (real file or lavfi color source), in row-major order.
     # The black lavfi source uses a long duration; xstack's shortest=1 ends the
     # output when the first real video finishes.
-    from octacam.writer import _run_ffmpeg, find_ffmpeg
+    from octacam.writer import _color_range_args, _run_ffmpeg, find_ffmpeg
     cmd: list[str] = [find_ffmpeg(), "-y"]
     for p in slot_files:
         if p is not None:
@@ -168,12 +168,21 @@ def build_grid_video(
     # receives mixed pixel formats and ffmpeg's implicit conversion mis-tags the
     # colour range, producing a washed-out image in VLC and a stalling bitstream
     # in QuickTime / Apple decoders.
+    #
+    # For limited-range YUV outputs we also pin the scale to full range
+    # (out_range=full) so the gray→yuv conversion keeps the 0-255 luma instead
+    # of squeezing it into 16-235; the matching -color_range pc on the output
+    # (below) tags the stream so players expand it back.  See
+    # writer._color_range_args.
+    scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
     filter_parts: list[str] = []
     labels: list[str] = []
     for i in range(n_cells):
         lbl = f"c{i}"
         labels.append(lbl)
-        filter_parts.append(f"[{i}:v]scale={W}:{H},format={pix_fmt}[{lbl}]")
+        filter_parts.append(
+            f"[{i}:v]scale={W}:{H}{scale_range},format={pix_fmt}[{lbl}]"
+        )
 
     xstack_inputs = "".join(f"[{l}]" for l in labels)
     xstack_layout = "|".join(
@@ -194,6 +203,7 @@ def build_grid_video(
         "-crf", str(crf),
         "-preset", preset,
         "-pix_fmt", pix_fmt,
+        *_color_range_args(pix_fmt),
         str(output),
     ]
 
