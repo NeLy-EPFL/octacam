@@ -20,6 +20,8 @@ import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fastapi import APIRouter
 
 log = logging.getLogger("octacam")
@@ -60,6 +62,11 @@ class OctacamPlugin(Protocol):
     ) -> bool: ...  # True = handled
     def on_ws_disconnect(self, client_id: int) -> None: ...  # a control socket closed
 
+    # Directory of static web assets (JS/CSS) the plugin ships alongside its
+    # Python. Served under /plugins/<name>/; the entry module is <name>.js and
+    # an optional stylesheet is <name>.css. None means the plugin has no UI.
+    def web_assets(self) -> Path | None: ...
+
 
 class Plugin:
     """Base class with safe no-op defaults for every hook.
@@ -98,6 +105,9 @@ class Plugin:
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
+
+    def web_assets(self) -> Path | None:
+        return None
 
 
 class PluginManager:

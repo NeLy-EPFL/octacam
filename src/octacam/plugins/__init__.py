@@ -175,16 +175,20 @@ class PluginInfo:
 def _plugin_summary(name: str) -> str:
     """First line of a plugin's module docstring (best-effort).
 
-    Bundled plugins live at ``octacam.plugins.<name>``; a third-party plugin
-    registered through the entry-point group lives in its own module, so fall
-    back to the registered factory's module when the bundled path misses."""
-    module = sys.modules.get(f"octacam.plugins.{name}")
-    if module is None:
+    Bundled plugins live at ``octacam.plugins.<name>`` (a package whose
+    ``__init__`` holds the implementation and its docstring). A third-party
+    plugin registered through the entry-point group may instead keep its
+    factory in a submodule (e.g. ``octacam_twophoton.plugin``), so fall back to
+    the factory's own module whenever the ``octacam.plugins.<name>`` docstring
+    is missing or blank."""
+    doc = getattr(sys.modules.get(f"octacam.plugins.{name}"), "__doc__", None) or ""
+    doc = doc.strip()
+    if not doc:
         factory = _REGISTRY.get(name)
-        module = (
+        factory_module = (
             sys.modules.get(getattr(factory, "__module__", "")) if factory else None
         )
-    doc = (getattr(module, "__doc__", None) or "").strip()
+        doc = (getattr(factory_module, "__doc__", None) or "").strip()
     return doc.splitlines()[0] if doc else ""
 
 

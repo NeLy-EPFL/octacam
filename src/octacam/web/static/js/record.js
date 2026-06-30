@@ -9,9 +9,10 @@ function trimNum(v) {
 }
 
 export class RecordTab {
-  constructor({ formats, getFlywheelCommand, getTwoPhotonParams, notify }) {
-    this.getFlywheelCommand = getFlywheelCommand;
-    this.getTwoPhotonParams = getTwoPhotonParams;
+  constructor({ formats, getPluginParams, notify }) {
+    // Returns {<plugin name>: <start-params slice>} for the loaded plugin tabs;
+    // packed into the recording-start request below. See app.js.
+    this.getPluginParams = getPluginParams;
     this.notify = notify;
     this.settings = null;
     this.state = "idle";
@@ -372,13 +373,8 @@ export class RecordTab {
 
   async _start() {
     const body = { confirm_overwrite: false };
-    const flywheelCommand = this.getFlywheelCommand();
-    const tpParams = this.getTwoPhotonParams?.();
-    if (flywheelCommand || tpParams) {
-      body.plugin_params = {};
-      if (flywheelCommand) body.plugin_params.flywheel = flywheelCommand;
-      if (tpParams) body.plugin_params.twophoton = tpParams;
-    }
+    const pluginParams = this.getPluginParams?.() ?? {};
+    if (Object.keys(pluginParams).length) body.plugin_params = pluginParams;
     let r = await api("POST", "/api/recording/start", body);
     if (r.status === 409 && r.data?.status === "needs_confirm") {
       if (!window.confirm(r.data.message)) return;

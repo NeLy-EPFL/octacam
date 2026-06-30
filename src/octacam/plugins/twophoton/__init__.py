@@ -47,6 +47,7 @@ import struct
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
@@ -301,7 +302,9 @@ class TwoPhotonPlugin(Plugin):
         self.baud = baud
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
-        self._link = TwoPhotonLink(self._on_arduino_status, on_broken=self._on_link_broken)
+        self._link = TwoPhotonLink(
+            self._on_arduino_status, on_broken=self._on_link_broken
+        )
         self._arduino_state = "idle"
         # Set by the status reader when the firmware acknowledges an arm ('A').
         # on_recording_start waits on it so a silently-dropped arm is surfaced
@@ -421,6 +424,10 @@ class TwoPhotonPlugin(Plugin):
         self._set_arduino_state("idle")
 
     # -------------------------------------------------- web contributions
+
+    def web_assets(self) -> Path:
+        """The plugin's co-located JS/CSS folder, served at /plugins/twophoton/."""
+        return Path(__file__).parent / "web"
 
     def api_router(self):
         from fastapi import APIRouter

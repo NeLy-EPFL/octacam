@@ -1,13 +1,17 @@
 // Flywheel tab: stepper loop command + hold-to-jog position adjustment.
-
-import { api, clampInput } from "./util.js";
+//
+// Served from /plugins/flywheel/, so it cannot import core "./util.js" (that
+// would 404). Shared helpers (api, clampInput) are passed in via the ctx the
+// host (app.js) constructs.
 
 const STEPS_PER_REVOLUTION = 4096;
 
-export class FlywheelTab {
-  constructor({ send, notify, status }) {
+export default class FlywheelTab {
+  constructor({ send, notify, status, api, clampInput }) {
     this.send = send; // sends a JSON message over the WS
     this.notify = notify;
+    this.api = api; // shared fetch helper (from util.js, injected by app.js)
+    this.clampInput = clampInput; // shared input clamp helper
     this.jogging = false;
     // Whether the serial port is open (from /api/system, updated by reconnect),
     // and whether the control WebSocket is up. Both must hold for the controls
@@ -41,7 +45,7 @@ export class FlywheelTab {
     ]) {
       input.addEventListener("input", () => this.updateInfo());
       input.addEventListener("change", () => {
-        clampInput(input);
+        this.clampInput(input);
         this.updateInfo();
       });
     }
@@ -83,7 +87,7 @@ export class FlywheelTab {
     this.reconnectBtn.disabled = true;
     let r;
     try {
-      r = await api("POST", "/api/serial/reconnect");
+      r = await this.api("POST", "/api/serial/reconnect");
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");
@@ -142,9 +146,10 @@ export class FlywheelTab {
     };
   }
 
-  // Command to attach to /api/recording/start, or null. Skipped when the
-  // serial port isn't open — there is no board to drive.
-  getStartCommand() {
+  // Params to attach to /api/recording/start under plugin_params.flywheel, or
+  // null. Skipped when the serial port isn't open — there is no board to drive.
+  // Named getStartParams() to match the generic record.js plugin loop.
+  getStartParams() {
     if (!this.ready) return null;
     return this.withRecording.checked ? this.command() : null;
   }
@@ -171,7 +176,7 @@ export class FlywheelTab {
     if (!cmd) return;
     let r;
     try {
-      r = await api("POST", "/api/serial/command", cmd);
+      r = await this.api("POST", "/api/serial/command", cmd);
     } catch {
       this.notify("error", "Serial command failed: server unreachable");
       return;
@@ -206,7 +211,7 @@ export class FlywheelTab {
         type: "jog",
         action: "start",
         direction,
-        interval_us: clampInput(this.jogInterval),
+        interval_us: this.clampInput(this.jogInterval),
       });
     });
     const stop = (e) => {

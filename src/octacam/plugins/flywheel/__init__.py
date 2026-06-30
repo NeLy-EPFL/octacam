@@ -28,6 +28,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
@@ -368,6 +369,10 @@ class FlywheelPlugin(Plugin):
             return None
 
     # --------------------------------------------------------- web contrib
+
+    def web_assets(self) -> Path:
+        """The plugin's co-located JS/CSS folder, served at /plugins/flywheel/."""
+        return Path(__file__).parent / "web"
 
     def api_router(self):
         from fastapi import APIRouter, Body, HTTPException

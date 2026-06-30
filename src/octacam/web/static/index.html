@@ -31,9 +31,9 @@
         title="Adjust per-camera sensor parameters (resolution, exposure, gain)">Camera</button>
       <button type="button" data-tab="view"
         title="Rotate, flip, and crosshair options for the live preview">View</button>
-      <button type="button" data-tab="flywheel"
+      <button type="button" data-tab="flywheel" data-plugin="flywheel"
         title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
-      <button type="button" data-tab="twophoton"
+      <button type="button" data-tab="twophoton" data-plugin="twophoton"
         title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
     </nav>
 
@@ -139,7 +139,7 @@
       <div id="camera-status"></div>
     </section>
 
-    <section id="tab-flywheel" class="tab">
+    <section id="tab-flywheel" class="tab" data-plugin="flywheel">
       <div id="flywheel-status" class="plugin-status hidden">
         <span id="flywheel-status-msg"></span>
         <button type="button" id="flywheel-reconnect" class="btn"
@@ -199,7 +199,7 @@
       </fieldset>
     </section>
 
-    <section id="tab-twophoton" class="tab">
+    <section id="tab-twophoton" class="tab" data-plugin="twophoton">
       <div id="twophoton-status" class="plugin-status hidden">
         <span id="twophoton-status-msg"></span>
         <button type="button" id="twophoton-reconnect" class="btn"

@@ -1,6 +1,8 @@
 // 2-Photon tab: Arduino hardware trigger status and arm-with-recording control.
-
-import { api } from "./util.js";
+//
+// Served from /plugins/twophoton/, so it cannot import core "./util.js" (that
+// would 404). The shared fetch helper (api) is passed in via the ctx the host
+// (app.js) constructs.
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -9,9 +11,10 @@ const STATE_LABELS = {
   done:      "Done",
 };
 
-export class TwoPhotonTab {
-  constructor({ notify, status, getRecordSettings }) {
+export default class TwoPhotonTab {
+  constructor({ notify, status, getRecordSettings, api }) {
     this.notify = notify;
+    this.api = api; // shared fetch helper (from util.js, injected by app.js)
     this._getRecordSettings = getRecordSettings;
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
@@ -97,7 +100,7 @@ export class TwoPhotonTab {
     this.reconnectBtn.disabled = true;
     let r;
     try {
-      r = await api("POST", "/api/twophoton/reconnect");
+      r = await this.api("POST", "/api/twophoton/reconnect");
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");

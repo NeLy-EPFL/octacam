@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import struct
 import time
@@ -55,6 +56,9 @@ from octacam.writer import FORMATS
 log = logging.getLogger("octacam")
 
 STATIC_DIR = Path(__file__).parent / "static"
+# A plugin name is interpolated into its asset mount path and the client-side
+# import() URL, so only allow names that can't escape the /plugins/ prefix.
+_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
 PREVIEW_MAX_DIM = 640  # longest preview edge after downscaling
 JPEG_QUALITY = 75
@@ -435,6 +439,32 @@ def create_app(
         if hasattr(plugin, "set_broadcast"):
             plugin.set_broadcast(state.broadcast_threadsafe)
 
+    # Plugins may ship their own static web assets (JS/CSS) co-located with
+    # their Python. Resolve them once so the asset mount (below) and the
+    # /api/system descriptor (in get_system) can never disagree about which
+    # plugins serve a UI. The name lands in a URL/mount path, so it is
+    # validated; a missing dir or a raising hook just means "no UI".
+    plugin_web: dict[str, Path] = {}
+    for plugin in plugins.plugins:
+        try:
+            adir = plugin.web_assets() if hasattr(plugin, "web_assets") else None
+        except Exception:
+            log.exception("Plugin %s web_assets() failed", getattr(plugin, "name", "?"))
+            adir = None
+        if adir is None:
+            continue
+        name = plugin.name
+        if not _PLUGIN_NAME_RE.match(name):
+            log.warning("Plugin %r: name is not URL-safe; not serving its assets", name)
+            continue
+        adir = Path(adir)
+        if not adir.is_dir():
+            log.warning(
+                "Plugin %r: web_assets dir %s does not exist; skipping", name, adir
+            )
+            continue
+        plugin_web[name] = adir
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         state.loop = asyncio.get_running_loop()
@@ -488,10 +518,23 @@ def create_app(
                     },
                 }
             )
+        # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
+        # dynamically import each plugin's <name>.js from its own folder instead
+        # of statically importing every plugin by name. Nested under the
+        # existing per-plugin object, so the top-level shape is unchanged.
+        plugins_status = state.plugins.status()
+        for name, adir in plugin_web.items():
+            entry = plugins_status.get(name)
+            if entry is None:
+                continue
+            web = {"module": f"/plugins/{name}/{name}.js"}
+            if (adir / f"{name}.css").is_file():
+                web["css"] = f"/plugins/{name}/{name}.css"
+            entry["web"] = web
         return {
             "version": octacam.__version__,
             "config_dir": config_dir,
-            "plugins": state.plugins.status(),
+            "plugins": plugins_status,
             "display_refresh_interval_ms": (
                 state.config.gui.display_refresh_interval_ms
             ),
@@ -784,6 +827,18 @@ def create_app(
         router = plugin.api_router()
         if router is not None:
             app.include_router(router)
+
+    # Per-plugin static assets at /plugins/<name>/. MUST be mounted before the
+    # "/" catch-all below: it has html=True (SPA fallback), so a /plugins/ path
+    # reaching it would return index.html (200, text/html) and the browser
+    # would refuse to run it as a module. No html=True here — a missing plugin
+    # asset must 404, not silently fall through to the SPA.
+    for name, adir in plugin_web.items():
+        app.mount(
+            f"/plugins/{name}",
+            StaticFiles(directory=adir),
+            name=f"plugin-{name}",
+        )
 
     if STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
