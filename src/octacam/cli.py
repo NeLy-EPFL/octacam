@@ -1221,11 +1221,13 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
 
     A directory is considered a recording if it contains a
     ``recording_summary.json``.  In non-recursive mode each *root* must itself be
-    a recording directory; if it is not, this exits with a hint (suggesting
-    ``-r`` when recordings exist beneath it) rather than silently doing nothing.
-    In recursive mode every subdirectory that contains a summary is collected,
-    including *roots* themselves if they qualify.  Results are deduped and
-    returned in sorted order so the output is deterministic.
+    a recording directory; a root that is not one is warned about and skipped
+    (so a stray folder mixed in with valid recordings never aborts the batch).
+    If that leaves *nothing* to do, this exits with a hint — suggesting ``-r``
+    when recordings exist beneath the given path(s).  In recursive mode every
+    subdirectory that contains a summary is collected, including *roots*
+    themselves if they qualify.  Results are deduped and returned in sorted
+    order so the output is deterministic.
     """
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
@@ -1247,27 +1249,41 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
             if sub.is_dir() and (sub / RECORDING_SUMMARY_FILENAME).exists()
         ]
 
+    saw_nested = False
     for root in roots:
-        if not recursive:
+        if recursive:
             if (root / RECORDING_SUMMARY_FILENAME).exists():
                 _add(root)
-                continue
-            # Not itself a recording — guide the user instead of a silent no-op.
-            nested = _nested_recordings(root)
-            if nested:
-                sys.exit(
-                    f"{root} is not a recording directory, but {len(nested)} "
-                    f"recording(s) were found beneath it — pass -r/--recursive "
-                    f"to include them."
-                )
-            sys.exit(
-                f"{root} is not a recording directory (no "
-                f"{RECORDING_SUMMARY_FILENAME}) and none were found beneath it."
-            )
+            for sub in _nested_recordings(root):
+                _add(sub)
+            continue
         if (root / RECORDING_SUMMARY_FILENAME).exists():
             _add(root)
-        for sub in _nested_recordings(root):
-            _add(sub)
+            continue
+        # Not itself a recording: warn and skip rather than abort, so valid
+        # recordings passed alongside it are still processed.
+        nested = _nested_recordings(root)
+        if nested:
+            saw_nested = True
+            log.warning(
+                "%s is not a recording directory; %d recording(s) found beneath "
+                "it — pass -r/--recursive to include them. Skipping.",
+                root,
+                len(nested),
+            )
+        else:
+            log.warning(
+                "%s is not a recording directory (no %s). Skipping.",
+                root,
+                RECORDING_SUMMARY_FILENAME,
+            )
+
+    # Nothing usable was given directly: turn the silent no-op into a hint.
+    if not recursive and not result and saw_nested:
+        sys.exit(
+            "No recording directory given directly — re-run with -r/--recursive "
+            "to copy the recordings found beneath the path(s) above."
+        )
 
     return result
 
@@ -1339,10 +1355,14 @@ def _resolve_grid_layout(cfg, source: str) -> list[list[str]] | None:
             len(names),
         )
         return auto_layout(names)
-    log.warning(
-        "No [grid] layout or cameras in %s — using the built-in default layout.",
-        source,
-    )
+    if cfg is None:
+        log.warning("No --config given — using the built-in default grid layout.")
+    else:
+        log.warning(
+            "No usable [grid] layout or cameras in %s — using the built-in "
+            "default grid layout.",
+            source,
+        )
     return None
 
 
@@ -1365,14 +1385,17 @@ def _post_process_folders(
     show_bar: bool = False,
     nas_verify: bool = True,
     nas_checksum: bool = False,
-) -> None:
+) -> int:
     """Generate grid videos and/or copy to NAS for each successfully transcoded folder.
 
     Runs in two sequential phases — all grids first, then all NAS copies — so
     each phase gets its own progress bar without them fighting over the console.
 
     The grid always uses yuv420p regardless of the per-camera transcode pixel
-    format, so the composite is playable in QuickTime and Keynote."""
+    format, so the composite is playable in QuickTime and Keynote.
+
+    Returns the number of files that failed to copy to the NAS (0 when NAS is
+    off or everything succeeded) so the caller can reflect it in the exit code."""
     from octacam.grid import build_grid_video
     from octacam.nas import copy_folder_to_nas
 
@@ -1397,10 +1420,12 @@ def _post_process_folders(
                 )
 
     # --- Phase 2: NAS copy --------------------------------------------------
+    nas_failed = 0
     if nas_path is not None:
         folders = list(folder_outputs.keys())
         local_base = _effective_nas_local_base(folders, nas_local_base)
         _check_nas_collisions(folders, nas_path, local_base)
+        n_copied = n_skipped = 0
         nas_bar = _NasProgressBar() if (show_bar and not dry_run) else None
         with (nas_bar or contextlib.nullcontext()):
             nas_cb = nas_bar.make_callback() if nas_bar else None
@@ -1409,7 +1434,7 @@ def _post_process_folders(
                 gf = grid_files.get(folder)
                 if gf is not None:
                     nas_files.append(gf)
-                copy_folder_to_nas(
+                result = copy_folder_to_nas(
                     folder,
                     nas_root=nas_path,
                     local_base=local_base,
@@ -1419,6 +1444,19 @@ def _post_process_folders(
                     checksum=nas_checksum,
                     on_progress=nas_cb,
                 )
+                n_copied += len(result.copied)
+                n_skipped += len(result.skipped)
+                nas_failed += len(result.failed)
+        if not dry_run:
+            log.info(
+                "NAS: %d copied, %d skipped, %d failed",
+                n_copied,
+                n_skipped,
+                nas_failed,
+            )
+            if nas_failed:
+                log.error("%d file(s) failed to copy to the NAS", nas_failed)
+    return nas_failed
 
 
 @app.command()
@@ -1928,8 +1966,9 @@ def transcode(
     )
 
     # Post-processing: grid + NAS per folder.  Zero overhead when both are off.
+    nas_failed = 0
     if (do_grid or effective_nas_path is not None) and folder_outputs:
-        _post_process_folders(
+        nas_failed = _post_process_folders(
             folder_outputs=folder_outputs,
             do_grid=do_grid,
             grid_layout=grid_layout,
@@ -1953,8 +1992,13 @@ def transcode(
             len(jobs),
         )
         raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
+    problems = []
     if failures:
-        sys.exit(f"{failures} file(s) failed to transcode")
+        problems.append(f"{failures} file(s) failed to transcode")
+    if nas_failed:
+        problems.append(f"{nas_failed} file(s) failed to copy to the NAS")
+    if problems:
+        sys.exit("; ".join(problems))
 
 
 def _remove_source_files(input_path: Path) -> None:

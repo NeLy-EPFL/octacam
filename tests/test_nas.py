@@ -156,6 +156,73 @@ def test_atomic_interrupt_then_resume(tmp_path, monkeypatch):
 # --- options / edge cases ---------------------------------------------------
 
 
+def test_copystat_failure_is_best_effort(tmp_path, monkeypatch):
+    # Many NAS mounts reject utime; a verified copy must still be promoted.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 200})
+
+    def boom(*_a, **_k):
+        raise OSError("utime rejected by the NAS")
+
+    monkeypatch.setattr(nas_mod.shutil, "copystat", boom)
+    result = copy_folder_to_nas(src, nas_root=tmp_path / "nas", local_base=tmp_path)
+    assert result and not result.failed
+    assert (tmp_path / "nas" / "rec" / "camera_LF.mp4").read_bytes() == b"x" * 200
+
+
+def test_sweep_only_reaps_old_temps(tmp_path):
+    import os as _os
+    import time as _time
+
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 100})
+    dest = tmp_path / "nas" / "rec"
+    dest.mkdir(parents=True)
+    fresh = dest / f".camera_LF.mp4{nas_mod._TEMP_INFIX}.999.fresh"
+    old = dest / f".camera_LF.mp4{nas_mod._TEMP_INFIX}.999.old"
+    fresh.write_bytes(b"a concurrent run's live temp")
+    old.write_bytes(b"a crash orphan")
+    old_t = _time.time() - nas_mod._STALE_TEMP_AGE_S - 100
+    _os.utime(old, (old_t, old_t))
+
+    copy_folder_to_nas(src, nas_root=tmp_path / "nas", local_base=tmp_path)
+    assert fresh.exists()  # a live/concurrent temp is never deleted
+    assert not old.exists()  # a genuine orphan is reaped
+
+
+def test_post_process_reports_nas_failures(tmp_path, monkeypatch):
+    # transcode --grid --nas must surface NAS failures, not swallow them.
+    from octacam.cli import _post_process_folders
+
+    rec = _make_recording(tmp_path / "data/exp/Fly1/001", {"camera_LF.mp4": b"x" * 100})
+    monkeypatch.setattr(nas_mod, "_file_digest", lambda *a, **k: "bad-digest")
+    failed = _post_process_folders(
+        folder_outputs={rec: [rec / "camera_LF.mp4"]},
+        do_grid=False,
+        grid_layout=None,
+        nas_path=tmp_path / "nas",
+        nas_local_base=tmp_path,
+        crf=20,
+        preset="ultrafast",
+        dry_run=False,
+        show_bar=False,
+        nas_verify=True,
+    )
+    assert failed >= 1
+
+
+def test_mixed_roots_skip_non_recording(tmp_path):
+    # A stray non-recording dir mixed with a valid recording must NOT abort.
+    from octacam.cli import _find_recording_dirs
+
+    rec = tmp_path / "recA"
+    rec.mkdir()
+    (rec / RECORDING_SUMMARY_FILENAME).write_text("{}")
+    stray = tmp_path / "notes"
+    stray.mkdir()
+
+    found = _find_recording_dirs([rec, stray], recursive=False)
+    assert found == [rec]  # valid kept, stray skipped, no SystemExit
+
+
 def test_no_verify_copies(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"hello" * 100})
     nas = tmp_path / "nas"
@@ -233,6 +300,26 @@ def test_effective_local_base(tmp_path):
     assert _effective_nas_local_base([a], None) is None
     # An explicit base always wins.
     assert _effective_nas_local_base([a, b], tmp_path) == tmp_path
+
+
+def test_relative_input_mirrors_without_collision(tmp_path, monkeypatch):
+    # Relative path inputs must still mirror against the resolved auto-base
+    # instead of collapsing to bare names and tripping the collision guard.
+    from octacam.cli import _check_nas_collisions, _effective_nas_local_base
+
+    (tmp_path / "data/260624/Fly1/001-bhv").mkdir(parents=True)
+    (tmp_path / "data/260624/Fly2/001-bhv").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    folders = [Path("data/260624/Fly1/001-bhv"), Path("data/260624/Fly2/001-bhv")]
+    base = _effective_nas_local_base(folders, None)
+    _check_nas_collisions(folders, Path("nas"), base)  # must NOT raise
+
+    d1 = nas_destination(folders[0], Path("nas"), base)
+    d2 = nas_destination(folders[1], Path("nas"), base)
+    assert d1 != d2
+    assert d1 == Path("nas/260624/Fly1/001-bhv")
+    assert d2 == Path("nas/260624/Fly2/001-bhv")
 
 
 def test_collision_guard(tmp_path):

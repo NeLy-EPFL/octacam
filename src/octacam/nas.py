@@ -47,6 +47,10 @@ _CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
 # stale temp a hard kill left behind is recognisable and swept on the next run.
 _TEMP_INFIX = ".octacam-part"
 
+# Only orphaned temps older than this are reaped, so a concurrent run's live
+# temp (or a slow multi-GB copy still touching its temp) is never deleted.
+_STALE_TEMP_AGE_S = 24 * 3600
+
 
 @dataclasses.dataclass(frozen=True)
 class NasCopyProgress:
@@ -175,10 +179,19 @@ def _stream_copy(
 
 
 def _sweep_stale_temps(final: Path) -> None:
-    """Remove only *final*'s own orphaned temps (never foreign / concurrent ones)."""
+    """Remove *final*'s own ORPHANED temps left by a hard kill / power loss.
+
+    Only temps older than :data:`_STALE_TEMP_AGE_S` are reaped, so a concurrent
+    run's in-flight temp — or a slow multi-GB copy still actively touching its
+    temp — is never deleted (it keeps a fresh mtime).  Genuine orphans are
+    cleaned on a later run.  The leading ``.`` in the pattern means a promoted
+    final file can never match.
+    """
+    cutoff = time.time() - _STALE_TEMP_AGE_S
     for stale in final.parent.glob(f".{final.name}{_TEMP_INFIX}.*"):
         try:
-            stale.unlink()
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink()
         except OSError:
             pass
 
@@ -209,9 +222,11 @@ def _copy_one(
                 src, tmp, size, file_index, file_count, on_progress, hash_src=verify
             )
         else:
-            # Fast path: no progress bar and no verify — let the stdlib do the
-            # copy, still landing in the temp for an atomic rename.
-            shutil.copy2(str(src), str(tmp))
+            # Fast path: no progress bar and no verify — copy bytes only (not
+            # metadata; shutil.copy2's copystat can raise on a NAS that rejects
+            # utime, which must not discard the copy) into the temp for the
+            # atomic rename.
+            shutil.copyfile(str(src), str(tmp))
             src_digest = None
 
         if verify:
@@ -241,7 +256,14 @@ def _copy_one(
             tmp.unlink(missing_ok=True)
             return False
 
-        shutil.copystat(str(src), str(tmp))
+        # Metadata is best-effort: many NAS mounts (SMB/CIFS/NFS) reject utime,
+        # and a verified copy must still be promoted even if its mtime can't be
+        # set.  Skip mode never relies on mtime (size/checksum only), so this is
+        # safe.
+        try:
+            shutil.copystat(str(src), str(tmp))
+        except OSError:
+            pass
         os.replace(tmp, final)
         return True
     except BaseException:
@@ -259,9 +281,13 @@ def _should_skip(src: Path, final: Path, *, checksum: bool) -> bool:
     """
     if not final.exists():
         return False
+    # Size first: a mismatch always means re-copy, and it short-circuits the
+    # (expensive, network-bound) double hash in --checksum mode.
+    if final.stat().st_size != src.stat().st_size:
+        return False
     if checksum:
         return _file_digest(final) == _file_digest(src)
-    return final.stat().st_size == src.stat().st_size
+    return True
 
 
 def nas_destination(
@@ -272,11 +298,17 @@ def nas_destination(
     When *local_base* is given and *folder* lies under it, the path relative to
     *local_base* is reproduced under *nas_root*; otherwise only *folder*'s name
     is used.  Shared with the CLI so its collision check matches the real copy.
+
+    Both paths are resolved before the relative computation so a relative input
+    (e.g. ``octacam nas data/260624 -r``) or one with ``..``/symlinks still
+    mirrors correctly against the (resolved) auto-derived base.
     """
-    try:
-        rel = folder.relative_to(local_base) if local_base else None
-    except ValueError:
-        rel = None
+    rel = None
+    if local_base is not None:
+        try:
+            rel = folder.resolve().relative_to(local_base.resolve())
+        except ValueError:
+            rel = None
     return nas_root / rel if rel is not None else nas_root / folder.name
 
 
