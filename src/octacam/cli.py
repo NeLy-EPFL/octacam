@@ -203,7 +203,7 @@ EnabledPlugins = Annotated[
     typer.Option(
         "--plugin",
         help="Enable a plugin (repeatable); adds to the config's `plugins` "
-        "(e.g. --plugin arduino). Requires its extra: pip install octacam[arduino].",
+        "(e.g. --plugin flywheel). See `octacam list-plugins`.",
     ),
 ]
 NoPlugins = Annotated[
@@ -617,9 +617,9 @@ def list_plugins() -> None:
     """List the bundled, opt-in plugins and whether each can load.
 
     Output is `name<TAB>status<TAB>summary`. `available` means the plugin's
-    optional dependency is installed; `unavailable` lines carry the install
-    hint. Enable one with `--plugin NAME` on `gui`/`record`, or a `[[plugins]]`
-    entry in the rig config.
+    dependencies are present (the bundled plugins' deps ship by default);
+    `unavailable` lines carry the reason. Enable one with `--plugin NAME` on
+    `gui`/`record`, or a `[[plugins]]` entry in the rig config.
     """
     from octacam.plugins import available_plugins
 

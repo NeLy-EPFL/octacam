@@ -15,8 +15,24 @@ def test_unknown_plugin_is_skipped():
 
 
 def test_no_plugins_override_disables_config():
-    config = OctacamConfig(plugins=[PluginConfig(name="arduino")])
+    config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
     assert build_plugins(config, enabled=[]).plugins == []
+
+
+def test_legacy_arduino_name_resolves_to_flywheel():
+    # The stepper plugin was renamed arduino -> flywheel; an existing rig config
+    # (or --plugin arduino) must still load it rather than silently dropping it.
+    config = OctacamConfig(plugins=[PluginConfig(name="arduino")])
+    manager = build_plugins(config)
+    assert [p.name for p in manager.plugins] == ["flywheel"]
+
+
+def test_legacy_alias_and_new_name_do_not_double_load():
+    # arduino aliases to flywheel, so config flywheel + --plugin arduino must
+    # resolve to a single flywheel instance, not two.
+    config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
+    manager = build_plugins(config, enabled=["arduino"])
+    assert [p.name for p in manager.plugins] == ["flywheel"]
 
 
 def test_register_and_build_with_options():
@@ -45,14 +61,14 @@ def test_cli_plugin_flag_adds_to_config():
     assert [p.name for p in manager.plugins] == ["spy_added"]
 
 
-def test_available_plugins_describes_bundled_arduino():
+def test_available_plugins_describes_bundled_flywheel():
     infos = {info.name: info for info in available_plugins()}
-    # Only in-repo builtins are discoverable; arduino is the one bundled plugin.
-    assert "arduino" in infos
-    info = infos["arduino"]
+    # Only in-repo builtins are discoverable; flywheel is one of the bundled plugins.
+    assert "flywheel" in infos
+    info = infos["flywheel"]
     assert isinstance(info.available, bool)
     assert info.summary  # first line of the module docstring
-    # When the optional dependency is missing, the reason is surfaced.
+    # When pyserial is missing (a broken env), the reason is surfaced.
     if not info.available:
         assert info.detail
 
@@ -78,7 +94,7 @@ def test_status_shape():
 
 
 class _FakeLink:
-    """Stand-in for arduino.SerialLink so tests need no real serial device."""
+    """Stand-in for flywheel.SerialLink so tests need no real serial device."""
 
     def __init__(self):
         self._open = False
@@ -98,11 +114,11 @@ class _FakeLink:
         return self._open
 
 
-def test_arduino_open_reports_success_and_failure():
+def test_flywheel_open_reports_success_and_failure():
     """_open never raises; it returns None on success, the message on failure."""
-    from octacam.plugins.arduino import ArduinoPlugin
+    from octacam.plugins.flywheel import FlywheelPlugin
 
-    plugin = ArduinoPlugin(device="/dev/test")
+    plugin = FlywheelPlugin(device="/dev/test")
     plugin._link = link = _FakeLink()
 
     assert plugin.is_ready() is False
@@ -114,14 +130,14 @@ def test_arduino_open_reports_success_and_failure():
     assert plugin.is_ready() is False  # a failed open leaves the port closed
 
 
-def test_arduino_reconnect_endpoint_surfaces_ready_state():
+def test_flywheel_reconnect_endpoint_surfaces_ready_state():
     """POST /api/serial/reconnect re-opens the port and reports the outcome."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from octacam.plugins.arduino import ArduinoPlugin
+    from octacam.plugins.flywheel import FlywheelPlugin
 
-    plugin = ArduinoPlugin(device="/dev/test")
+    plugin = FlywheelPlugin(device="/dev/test")
     plugin._link = link = _FakeLink()
 
     app = FastAPI()

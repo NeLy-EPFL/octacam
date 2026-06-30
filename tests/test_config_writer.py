@@ -64,7 +64,7 @@ def test_dumps_escapes_strings():
 def test_plugin_options_roundtrip():
     doc = {
         "plugins": [
-            {"name": "arduino", "options": {"port": "/dev/ttyUSB0", "baud": 9600}}
+            {"name": "flywheel", "options": {"port": "/dev/ttyUSB0", "baud": 9600}}
         ]
     }
     assert tomllib.loads(cw._dumps(doc)) == doc

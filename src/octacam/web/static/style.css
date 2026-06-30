@@ -304,6 +304,13 @@ body {
 
 .plugin-status button { flex: none; }
 
+.hint {
+  margin: 6px 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
 fieldset {
   margin: 0;
   padding: 0;
@@ -484,14 +491,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   font-size: 11px;
   color: var(--text-dim);
   text-align: right;
-}
-
-#loop-info {
-  margin: 8px 0;
-  min-height: 1.2em;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-dim);
 }
 
 /* event log + footer */

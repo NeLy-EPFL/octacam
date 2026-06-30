@@ -7,7 +7,7 @@ state machine:
     preview/idle -> waiting -> recording -> finishing -> preview/idle
 
 A monitor thread replaces the Qt timers: it polls for the first frame on
-every camera (dispatching plugin hooks at that moment — e.g. an Arduino
+every camera (dispatching plugin hooks at that moment — e.g. a flywheel
 stepper command), enforces the recording deadline, and runs the teardown
 sequence in the same order as the original code (stop trigger -> grab loops
 exit -> writers drain -> CSVs).
@@ -44,6 +44,11 @@ STARTED_POLL_INTERVAL_S = 0.1
 STARTED_WARN_AFTER_S = 3.0
 STARTED_FAIL_AFTER_S = 10.0  # then record with whatever cameras started
 STOP_GRACE_S = 0.5  # matches cli.py's in-flight frame grace period
+# Upper bound on how long the monitor waits for the off-lock on_recording_start
+# hooks to finish before firing on_first_frame / on_recording_stop. Bounds a
+# wedged start hook (e.g. a plugin serial write stalled on its write_timeout) so
+# it can never block recording teardown indefinitely.
+START_HOOKS_TIMEOUT_S = 5.0
 
 _TRAILING_NUMBER_RE = re.compile(r"\d{3}")
 
@@ -234,6 +239,12 @@ class RecordingController:
         self._reconfiguring = False
         self._aborted = False
         self._stop_event = threading.Event()
+        # Set once the off-lock on_recording_start plugin hooks have finished
+        # dispatching. The monitor waits on it before on_first_frame and
+        # on_recording_stop, so the start -> first_frame -> stop hook order holds
+        # even though the arm runs on the caller thread — closing the race where
+        # an abort's cancel could overtake a not-yet-sent hardware arm.
+        self._start_hooks_done = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
         # Host wall-clock (ns) captured when the current/last recording started,
@@ -598,9 +609,9 @@ class RecordingController:
 
             self._aborted = False
             self._stop_event.clear()
+            self._start_hooks_done.clear()
             self._deadline = None
             self._set_state("waiting")
-            self.plugins.dispatch("on_recording_start", plugin_params)
             self._monitor = threading.Thread(
                 target=self._monitor_loop,
                 args=(
@@ -612,7 +623,27 @@ class RecordingController:
                 daemon=True,
             )
             self._monitor.start()
-            return StartResult(StartResult.OK)
+        # Arm plugins off the controller lock — like on_first_frame below — so a
+        # plugin's blocking serial write (e.g. the twophoton arm, write_timeout=1
+        # s) can't stall snapshot()/telemetry while self._lock is held. The
+        # monitor only fires on_first_frame once cameras deliver a frame, which on
+        # an external-trigger rig cannot happen until this arm runs.
+        #
+        # Skip the arm if the recording was already stopped/aborted in the window
+        # between releasing the lock and reaching here: otherwise an abort's
+        # teardown (which dispatches on_recording_stop — e.g. the twophoton
+        # cancel) could race ahead of this arm and leave the hardware armed after
+        # the cameras have already stopped.
+        try:
+            if not self._stop_event.is_set():
+                self.plugins.dispatch("on_recording_start", plugin_params)
+        finally:
+            # Unblock the monitor's on_first_frame / on_recording_stop regardless
+            # of whether the arm ran or raised — the event guards ordering, not
+            # success. The monitor waits on it so a cancel can never overtake the
+            # arm even when this dispatch is slow (e.g. the bounded ack wait).
+            self._start_hooks_done.set()
+        return StartResult(StartResult.OK)
 
     def _resume_preview(self) -> None:
         """Return to preview (or idle) after a recording ends or fails."""
@@ -686,8 +717,12 @@ class RecordingController:
             self._stop_event.wait(STARTED_POLL_INTERVAL_S)
 
         if not self._stop_event.is_set():
+            # Let the off-lock on_recording_start hooks finish first (normally
+            # done long before a frame arrives; only blocks in the rare case a
+            # frame lands mid-arm) so first-frame motion can't precede the arm.
+            self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
             # Fire plugin first-frame hooks at the t0 of the countdown, in the
-            # same place the inline Arduino write used to live, so stepper
+            # same place the inline flywheel write used to live, so stepper
             # motion (or any plugin) stays synchronised to actual capture.
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
@@ -753,6 +788,10 @@ class RecordingController:
                     save_dir=increment_trailing_number(self._settings.save_dir),
                 )
             self._resume_preview()
+        # Wait out the on_recording_start hooks so a stop/abort cancel can never
+        # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when
+        # the recording is stopped in the window right after it starts.
+        self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
         self.plugins.dispatch("on_recording_stop", aborted)
         self._event("info", "Recording aborted" if aborted else "Recording finished")
 

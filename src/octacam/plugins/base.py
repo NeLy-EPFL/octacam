@@ -1,16 +1,17 @@
 """Plugin contract for octacam.
 
 A plugin is any object implementing (a subset of) the ``OctacamPlugin``
-Protocol. Hooks are called synchronously. The recording hooks
-(``on_recording_start``, ``on_first_frame``, ``on_recording_stop``) fire from
-the controller's monitor thread, so implementations must be thread-safe and
-fast — ``on_first_frame`` in particular runs at the t0 of the recording
-countdown, so it must not block.
+Protocol. Hooks are called synchronously and must be thread-safe and fast.
+``on_first_frame`` and ``on_recording_stop`` fire from the controller's monitor
+thread; ``on_recording_start`` fires on the caller's thread (the web executor or
+the CLI thread) just after a recording starts, off the controller lock.
+``on_first_frame`` in particular runs at the t0 of the recording countdown, so
+it must not block.
 
 Plugins are bundled in-repo under ``octacam.plugins.<name>`` and registered via
 the ``@register`` decorator (see :mod:`octacam.plugins`). They are opt-in: the
-default launch loads none. A user enables them through the ``plugins:`` section
-of ``octacam_config.yml`` or the ``--plugin`` CLI flag.
+default launch loads none. A user enables them through the ``[[plugins]]``
+section of ``octacam_config.toml`` or the ``--plugin`` CLI flag.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fastapi import APIRouter
 
 log = logging.getLogger("octacam")
@@ -40,9 +43,11 @@ class OctacamPlugin(Protocol):
     def is_ready(self) -> bool: ...
     def status(self) -> dict: ...
 
-    # ---- recording lifecycle (called from the controller monitor thread) ----
+    # ---- recording lifecycle ----
+    # on_first_frame/on_recording_stop run on the controller monitor thread;
+    # on_recording_start runs on the caller's thread just after start.
     # params is this plugin's slice of the recording-start request, keyed by
-    # plugin name (e.g. {"arduino": {...}}).
+    # plugin name (e.g. {"flywheel": {...}}).
     def on_recording_start(self, params: dict | None) -> None: ...
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
@@ -56,6 +61,11 @@ class OctacamPlugin(Protocol):
         self, message: dict, client_id: int
     ) -> bool: ...  # True = handled
     def on_ws_disconnect(self, client_id: int) -> None: ...  # a control socket closed
+
+    # Directory of static web assets (JS/CSS) the plugin ships alongside its
+    # Python. Served under /plugins/<name>/; the entry module is <name>.js and
+    # an optional stylesheet is <name>.css. None means the plugin has no UI.
+    def web_assets(self) -> Path | None: ...
 
 
 class Plugin:
@@ -95,6 +105,9 @@ class Plugin:
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
+
+    def web_assets(self) -> Path | None:
+        return None
 
 
 class PluginManager:

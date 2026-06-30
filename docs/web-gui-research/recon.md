@@ -159,7 +159,7 @@ Perfect! Now I have comprehensive coverage. Let me compile the complete feature 
 - n_repeats: uint8 (number of loop cycles, 1-255)
 - init_wait_duration_s: uint8 (initial wait before starting, 0-255 seconds)
 
-**Arduino Sketch** (arduino_script/arduino_script.ino)
+**Arduino Sketch** (arduino/stepper_motor/stepper_motor.ino)
 - 4-pin stepper control: IN1, IN2, IN3, IN4 on pins 8-11
 - Half-step sequence: 8-state array (0b0001, 0b0011, 0b0010, 0b0110, 0b0100, 0b1100, 0b1000, 0b1001)
 - Executes looping commands: n_steps → forward/backward → rest → repeat → release coils

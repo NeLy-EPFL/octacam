@@ -32,8 +32,9 @@ The Basler runtime is bundled, so a Basler rig works out of the box. **FLIR
 cameras need the Spinnaker SDK installed separately** (PySpin is not on PyPI) —
 see [FLIR / Teledyne setup](#flir--teledyne-setup).
 
-Optional plugins ship as extras — install the ones you need, e.g. the Arduino
-stepper controller: `pip install "octacam[arduino]"` (see [Plugins](#plugins)).
+Hardware/integration plugins (flywheel, two-photon trigger) are opt-in but
+their dependencies ship by default, so they work out of the box — just enable
+the ones a rig needs (see [Plugins](#plugins)).
 
 ## Usage
 
@@ -270,25 +271,31 @@ Optional hardware/integration features ship as opt-in plugins under
 rig needs. Enable a plugin persistently in the rig's `octacam_config.toml`:
 
 ```toml
-# bare names work too: plugins = ["arduino"]
+# bare names work too: plugins = ["flywheel"]
 [[plugins]]
-name = "arduino"
+name = "flywheel"
 options = { device = "/dev/ttyACM0", baud = 115200 }
 ```
 
-or per-launch with `--plugin arduino` (repeatable; adds to the config), and
-disable everything for one run with `--no-plugins`. Each plugin declares its
-own extra dependencies — install them with the matching extra, e.g.
-`pip install "octacam[arduino]"`. Run `octacam list-plugins` to see the bundled
-plugins and whether each one's dependency is installed.
+or per-launch with `--plugin flywheel` (repeatable; adds to the config), and
+disable everything for one run with `--no-plugins`. The bundled plugins'
+dependencies ship by default, so they need no extra install. Run
+`octacam list-plugins` to see the bundled plugins and whether each one can load.
 
 Bundled plugins:
 
-- **arduino** — drives an Arduino stepper-motor controller over serial. Adds
-  the web GUI's Arduino tab (loop program + hold-to-jog), and fires an armed
+- **flywheel** — drives an Arduino stepper-motor controller over serial. Adds
+  the web GUI's Flywheel tab (loop program + hold-to-jog), and fires an armed
   loop command at the first captured frame so motion is synced to capture. See
-  [arduino_script/](arduino_script/) for the matching firmware. Extra:
-  `octacam[arduino]` (pyserial).
+  [arduino/stepper_motor/](arduino/stepper_motor/) for the matching firmware.
+  Uses pyserial, which ships with octacam by default.
+- **twophoton** — arms an Arduino hardware camera trigger for a 2-photon rig.
+  The Arduino waits for a ThorSync rising edge, then emits a square-wave trigger
+  at the recording's fps for its duration. Adds the web GUI's 2-Photon tab (live
+  Arduino state + "arm with recording") and arms at recording start so capture
+  is synced to the ThorSync edge. See
+  [arduino/2photon_trigger/](arduino/2photon_trigger/) for the firmware and
+  setup. Uses pyserial, which ships with octacam by default.
 
 ## Troubleshooting
 
@@ -307,7 +314,7 @@ make sure `usbcore.usbfs_memory_mb=1000` is set (see
   rig.
 - **[benchmarks/](benchmarks/)** — Phase 0 performance benchmarks that gated the
   pure-Python architecture. See [benchmarks/README.md](benchmarks/README.md).
-- **[arduino_script/](arduino_script/)** — Arduino sketch for stepper motor control.
+- **[arduino/](arduino/)** — Arduino sketches: `stepper_motor/` (turntable stepper via the `flywheel` plugin) and `2photon_trigger/` (2-photon rig hardware trigger via the `twophoton` plugin).
 
 ## Development
 
