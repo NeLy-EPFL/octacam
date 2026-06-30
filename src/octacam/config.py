@@ -187,8 +187,8 @@ def _lenient_validate(
 def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
     """Parse the optional ``plugins`` array (opt-in plugin selection).
 
-    Each entry is either a bare name (``plugins = ["arduino"]``) or a table with
-    ``name`` and optional ``options`` (``[[plugins]]`` / ``name = "arduino"`` +
+    Each entry is either a bare name (``plugins = ["flywheel"]``) or a table with
+    ``name`` and optional ``options`` (``[[plugins]]`` / ``name = "flywheel"`` +
     ``[plugins.options]``). Malformed or duplicate entries are warned about and
     skipped — never raised — matching the rest of this module's tolerant
     parsing."""

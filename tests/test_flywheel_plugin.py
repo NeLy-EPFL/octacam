@@ -1,4 +1,4 @@
-"""Arduino plugin: command wire format + plugin hooks."""
+"""Flywheel plugin: command wire format + plugin hooks."""
 
 import threading
 import time
@@ -6,13 +6,13 @@ import time
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from octacam.plugins.arduino import (
+from octacam.plugins.flywheel import (
     COMMAND_FIELDS,
     JOG_DEFAULT_INTERVAL_US,
     JOG_MAX_INTERVAL_US,
     JOG_MIN_INTERVAL_US,
-    ArduinoPlugin,
     Command,
+    FlywheelPlugin,
     JogClock,
     _clamp_jog_interval_us,
 )
@@ -89,11 +89,11 @@ def test_command_from_payload():
 
 
 def test_on_first_frame_writes_armed_command():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
         {
-            "arduino": {
+            "flywheel": {
                 "n_steps": -4096,
                 "step_interval_us": 1465,
                 "rest_duration_ms": 1000,
@@ -106,12 +106,12 @@ def test_on_first_frame_writes_armed_command():
 
 
 def test_on_first_frame_without_params_is_noop():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     plugin.on_first_frame(None)
     plugin.on_first_frame({})
     plugin.on_first_frame({"other_plugin": {"n_steps": 1}})
-    plugin.on_first_frame({"arduino": {"bogus": "field"}})  # malformed -> skipped
+    plugin.on_first_frame({"flywheel": {"bogus": "field"}})  # malformed -> skipped
     assert link.written == []
 
 
@@ -151,7 +151,7 @@ def test_clamp_jog_interval():
 
 
 def test_jog_start_pulses_until_stop_then_releases():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     assert _start_jog(plugin, 1) is True
     time.sleep(0.03)  # let the backend clock emit several pulses
@@ -166,7 +166,7 @@ def test_jog_start_pulses_until_stop_then_releases():
 
 
 def test_jog_direction_sign():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, -1)
     assert _wait(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
@@ -174,7 +174,7 @@ def test_jog_direction_sign():
 
 
 def test_jog_ignores_bad_direction():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     assert _start_jog(plugin, 7) is True  # handled, but not a valid direction
     time.sleep(0.02)
@@ -182,7 +182,7 @@ def test_jog_ignores_bad_direction():
 
 
 def test_jog_noop_when_serial_closed():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink(is_open=False)
     assert _start_jog(plugin, 1) is True
     time.sleep(0.02)
@@ -190,7 +190,7 @@ def test_jog_noop_when_serial_closed():
 
 
 def test_jog_stopped_by_owner_ws_disconnect():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1, client_id=7)
     time.sleep(0.02)
@@ -202,7 +202,7 @@ def test_jog_stopped_by_owner_ws_disconnect():
 
 
 def test_jog_restart_switches_direction():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1)
     time.sleep(0.02)
@@ -222,7 +222,7 @@ def test_jog_restart_switches_direction():
 
 
 def test_jog_stop_ignored_from_non_owner():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1, client_id=1)  # operator A holds the button
     time.sleep(0.02)
@@ -234,7 +234,7 @@ def test_jog_stop_ignored_from_non_owner():
 
 
 def test_jog_other_client_disconnect_keeps_it_running():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1, client_id=1)
     time.sleep(0.02)
@@ -248,7 +248,7 @@ def test_jog_other_client_disconnect_keeps_it_running():
 
 
 def test_jog_takeover_by_second_client():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1, client_id=1)
     time.sleep(0.02)
@@ -264,7 +264,7 @@ def test_jog_takeover_by_second_client():
 
 
 def test_teardown_stops_jog_and_releases_before_close():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, 1, client_id=1)
     time.sleep(0.02)
@@ -274,7 +274,7 @@ def test_teardown_stops_jog_and_releases_before_close():
 
 
 def test_jog_start_refused_while_closing():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     plugin.teardown()  # marks the plugin closing (and closes the link)
     link.open(None, None)  # pretend the port came back after teardown
@@ -304,7 +304,7 @@ def test_stop_join_reports_wedged_thread(monkeypatch):
     # A thread wedged in a write past the join timeout cannot flush its release,
     # so stop(join=True) returns False and teardown must release the coils itself.
     monkeypatch.setattr(JogClock, "JOIN_TIMEOUT_S", 0.05)
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = StallingLink()
     try:
         _start_jog(plugin, 1)
@@ -315,7 +315,7 @@ def test_stop_join_reports_wedged_thread(monkeypatch):
 
 
 def test_non_jog_message_not_handled():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = FakeLink()
     assert plugin.on_ws_message({"type": "something-else"}, 1) is False
 
@@ -330,7 +330,7 @@ def _client(plugin) -> TestClient:
 
 
 def test_serial_command_endpoint_503_when_closed():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = FakeLink(is_open=False)
     response = _client(plugin).post(
         "/api/serial/command", json=dict.fromkeys(COMMAND_FIELDS, 1)
@@ -339,7 +339,7 @@ def test_serial_command_endpoint_503_when_closed():
 
 
 def test_serial_command_endpoint_writes_when_open():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = link = FakeLink(is_open=True)
     response = _client(plugin).post(
         "/api/serial/command", json=dict.fromkeys(COMMAND_FIELDS, 2)
@@ -349,7 +349,7 @@ def test_serial_command_endpoint_writes_when_open():
 
 
 def test_serial_command_endpoint_422_on_bad_payload():
-    plugin = ArduinoPlugin()
+    plugin = FlywheelPlugin()
     plugin._link = FakeLink(is_open=True)
     response = _client(plugin).post("/api/serial/command", json={"n_steps": 1})
     assert response.status_code == 422

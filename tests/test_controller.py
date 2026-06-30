@@ -281,6 +281,58 @@ def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
     assert ("stop", False) in calls  # completed, not aborted
 
 
+def test_stop_waits_for_start_hooks_before_dispatching(camera_system, tmp_path):
+    """Aborting in the window right after a recording starts must not let
+    on_recording_stop overtake a still-running on_recording_start — otherwise a
+    hardware cancel could be sent before its arm (leaving the rig armed after the
+    cameras stopped). The monitor waits for the off-lock start hooks to finish."""
+    import threading as _t
+
+    from octacam.plugins.base import Plugin, PluginManager
+
+    start_entered = _t.Event()
+    release_start = _t.Event()
+    stop_called = _t.Event()
+    order: list[str] = []
+
+    class Gate(Plugin):
+        name = "gate"
+
+        def on_recording_start(self, params):
+            order.append("start_enter")
+            start_entered.set()
+            release_start.wait(5)  # hold the start hook open
+            order.append("start_exit")
+
+        def on_recording_stop(self, aborted):
+            order.append("stop")
+            stop_called.set()
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=60.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        camera_system, settings, PluginManager([Gate()]), auto_preview=False
+    )
+    # start_recording dispatches on_recording_start synchronously (off-lock), so
+    # run it on its own thread while we abort from the main thread.
+    starter = _t.Thread(
+        target=lambda: controller.start_recording(plugin_params={"gate": {}})
+    )
+    starter.start()
+    assert start_entered.wait(5), "on_recording_start should have been dispatched"
+
+    controller.stop_recording(abort=True)  # abort while the start hook is held open
+    # on_recording_stop must stay blocked until the start hook completes.
+    assert not stop_called.wait(0.5), "on_recording_stop fired before start hooks finished"
+
+    release_start.set()  # let on_recording_start return
+    starter.join(timeout=10)
+    controller.join(timeout=20)
+    assert stop_called.wait(5)
+    assert order.index("stop") > order.index("start_exit"), order
+
+
 def test_needs_confirm_on_existing_dir(camera_system, tmp_path):
     save_dir = tmp_path / "exists"
     save_dir.mkdir()

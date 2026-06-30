@@ -136,7 +136,7 @@ def test_system_and_settings_endpoints(client):
     assert validation["resolved"].startswith("/")
     assert validation["free_bytes"] > 0
 
-    # the serial endpoint is contributed by the (absent) arduino plugin, so it
+    # the serial endpoint is contributed by the (absent) flywheel plugin, so it
     # is not served here (404/405 from the static catch-all, never 200/503)
     command = dict.fromkeys(
         (
@@ -266,6 +266,58 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             n, client_id = stub.jogs[0]
             assert n == 5
             assert isinstance(client_id, int) and client_id > 0
+    finally:
+        controller.close()
+
+
+def test_plugin_web_assets_served_and_advertised(tmp_path):
+    """A plugin's co-located JS/CSS are mounted at /plugins/<name>/ (before the
+    SPA catch-all) and advertised in /api/system so app.js can import them."""
+    from octacam.plugins.base import Plugin, PluginManager
+
+    assets = tmp_path / "stub_assets"
+    assets.mkdir()
+    (assets / "stub.js").write_text("export default class StubTab {}\n")
+    (assets / "stub.css").write_text(".stub {}\n")
+
+    class StubWebPlugin(Plugin):
+        name = "stub"
+
+        def web_assets(self):
+            return assets
+
+    system = CameraSystem(EMULATED_SERIALS)
+    system.load_config(tmp_path)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(system, settings)
+    controller.start_preview()
+    app = create_app(
+        controller,
+        OctacamConfig(),
+        PluginManager([StubWebPlugin()]),
+        config_dir=str(tmp_path),
+    )
+    try:
+        with TestClient(app) as client:
+            # /api/system advertises the entry module + css under the plugin entry
+            web = client.get("/api/system").json()["plugins"]["stub"]["web"]
+            assert web == {
+                "module": "/plugins/stub/stub.js",
+                "css": "/plugins/stub/stub.css",
+            }
+            # The JS is served as a script, NOT the SPA's index.html. A
+            # text/html response here would mean the "/" catch-all (html=True)
+            # shadowed the plugin mount — the browser would then refuse to run
+            # it as a module. This guards the mount ordering in create_app.
+            r = client.get("/plugins/stub/stub.js")
+            assert r.status_code == 200
+            assert "javascript" in r.headers["content-type"]
+            assert "<!doctype html" not in r.text.lower()
+            # A missing plugin asset 404s (no html=True on the plugin mount, so
+            # it must not fall through to the SPA).
+            assert client.get("/plugins/stub/missing.js").status_code == 404
     finally:
         controller.close()
 

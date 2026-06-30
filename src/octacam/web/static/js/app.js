@@ -1,10 +1,9 @@
 // Entry point: fetch system + state, build UI, open the WebSocket.
 
-import { api, sleep } from "./util.js";
+import { api, clampInput, sleep } from "./util.js";
 import { ReconnectingSocket } from "./ws.js";
 import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
-import { ArduinoTab } from "./arduino.js";
 import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
 import { initSidebarResize } from "./resize.js";
@@ -55,6 +54,17 @@ function wsUrl() {
   return `${proto}${location.host}/api/ws`;
 }
 
+// Inject a plugin's stylesheet (served from its own /plugins/<name>/ folder),
+// once per href. Plugin CSS lives with the plugin rather than in core style.css.
+function loadPluginCss(href) {
+  if (document.querySelector(`link[data-plugin-css="${href}"]`)) return;
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = href;
+  link.dataset.pluginCss = href;
+  document.head.appendChild(link);
+}
+
 async function loadInitial() {
   const banner = document.getElementById("banner");
   for (;;) {
@@ -86,15 +96,13 @@ async function main() {
   versionEl.title = system.config_dir;
 
   setupTabs();
-  // The Arduino tab is contributed by the opt-in `arduino` plugin. Show it
-  // whenever the plugin is loaded — even if its serial port could not be
-  // opened. A not-ready plugin shows a "serial unavailable" notice with a
-  // Reconnect button instead of vanishing, so a missing/unplugged board is
-  // diagnosable rather than looking like the plugin was never enabled.
-  const arduinoStatus = system.plugins?.arduino ?? null;
-  if (!arduinoStatus) {
-    document.querySelector('#tabs button[data-tab="arduino"]')?.remove();
-    document.getElementById("tab-arduino")?.remove();
+  // Show optional plugin tabs only when the plugin is loaded. A not-ready
+  // plugin still shows its tab (with a "serial unavailable" notice and a
+  // Reconnect button) so a missing/unplugged board is diagnosable. Plugin tab
+  // buttons and panels carry data-plugin="<name>" in index.html, so this is
+  // name-agnostic — no per-plugin code here.
+  for (const el of document.querySelectorAll("[data-plugin]")) {
+    if (!system.plugins?.[el.dataset.plugin]) el.remove();
   }
 
   let cameraTab = null;
@@ -141,15 +149,61 @@ async function main() {
     onJson: (msg) => handleJson(msg),
   });
 
-  const arduino = arduinoStatus
-    ? new ArduinoTab({ send: (m) => sock.send(m), notify, status: arduinoStatus })
-    : null;
+  // Plugin tabs are loaded dynamically below from each plugin's own folder.
+  // Declared before `record` so its getPluginParams closure captures this Map
+  // by reference; the Map is read only at start-recording time, by which point
+  // the loader loop has populated it.
+  const pluginTabs = new Map();
 
   record = new RecordTab({
     formats: system.formats,
-    getArduinoCommand: () => (arduino ? arduino.getStartCommand() : null),
+    // Collect each plugin's start-params slice ({name: params}); record.js
+    // packs it into POST /api/recording/start as plugin_params. No plugin names
+    // are hardcoded here.
+    getPluginParams: () => {
+      const params = {};
+      for (const [name, tab] of pluginTabs) {
+        const slice = tab.getStartParams?.();
+        if (slice != null) params[name] = slice;
+      }
+      return params;
+    },
     notify,
   });
+
+  // Each plugin that ships a UI advertises its entry module + optional CSS in
+  // /api/system; import it from the plugin's own /plugins/<name>/ folder and
+  // instantiate its tab. Per-plugin try/catch so one broken/missing module
+  // can't blank the page or block the others (mirrors the backend's "a broken
+  // plugin must not crash core"). The ctx is a superset bag each tab
+  // destructures — api/clampInput are passed in (the tab can't import core
+  // util.js once served from its own folder).
+  for (const [name, info] of Object.entries(system.plugins ?? {})) {
+    if (!info.web?.module) continue;
+    try {
+      if (info.web.css) loadPluginCss(info.web.css);
+      const mod = await import(info.web.module);
+      const Tab = mod.default;
+      if (typeof Tab !== "function") {
+        console.warn(`plugin ${name}: UI module has no default export`);
+        continue;
+      }
+      pluginTabs.set(
+        name,
+        new Tab({
+          name,
+          status: info,
+          send: (m) => sock.send(m),
+          notify,
+          api,
+          clampInput,
+          getRecordSettings: () => record.settings,
+        })
+      );
+    } catch (e) {
+      console.warn(`plugin ${name}: UI module failed to load`, e);
+    }
+  }
 
   cameraTab = new CameraTab({
     cameras: system.cameras,
@@ -207,10 +261,10 @@ async function main() {
     cameraTab?.setConnected(connected);
     saveDialog?.setConnected(connected);
     dirPicker?.setConnected(connected);
-    // The Arduino tab also gates its fields on the serial port being open, so
-    // it owns its own enable/disable (and jog stop); the view tab is a plain
-    // connected/not toggle.
-    arduino?.setConnected(connected);
+    // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
+    // gates its fields on the serial port being open and stops a jog on
+    // disconnect); just forward the connection state to each.
+    for (const tab of pluginTabs.values()) tab.setConnected?.(connected);
     const viewFields = document.getElementById("view-fields");
     if (viewFields) viewFields.disabled = !connected;
     // Presence is only meaningful while connected; the server resends the
@@ -278,6 +332,9 @@ async function main() {
       case "event":
         addEvent(msg);
         record.handleEvent(msg);
+        break;
+      case "twophoton_state":
+        pluginTabs.get("twophoton")?.applyState(msg);
         break;
     }
   }
