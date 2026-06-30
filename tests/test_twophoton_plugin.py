@@ -70,6 +70,9 @@ def _plugin_with_fake(is_open: bool = True) -> tuple[TwoPhotonPlugin, FakeLink]:
     )
     link = FakeLink(is_open=is_open)
     plugin._link = link
+    # FakeLink has no reader thread to send the 'A' ack, so skip the bounded
+    # ack wait in on_recording_start (exercised separately with a real link).
+    plugin._ack_timeout_s = 0.0
     return plugin, link
 
 
@@ -177,10 +180,15 @@ def test_on_recording_stop_abort_sends_cancel():
     assert written == [bytes([CANCEL_MAGIC])]
 
 
-def test_on_recording_stop_clean_does_not_send_cancel():
+def test_on_recording_stop_clean_also_cancels_and_resets():
+    # A manual early stop arrives with aborted=False while the firmware may still
+    # be RUNNING, so a clean stop must also cancel the hardware trigger (and reset
+    # local state); cancelling an already-IDLE board is a harmless no-op.
     plugin, link = _plugin_with_fake()
+    plugin._arduino_state = "triggered"
     plugin.on_recording_stop(aborted=False)
-    assert link.snapshot() == []
+    assert link.snapshot() == [bytes([CANCEL_MAGIC])]
+    assert plugin._arduino_state == "idle"
 
 
 def test_on_recording_start_silently_skips_when_port_closed():
@@ -210,11 +218,16 @@ def test_broadcast_called_on_status_change():
     plugin.set_broadcast(lambda kind, payload: received.append((kind, payload)))
 
     plugin._on_arduino_status("A")
-    assert received == [("twophoton_state", {"state": "armed", "device": "/dev/arduinoCams"})]
+    assert received == [
+        ("twophoton_state", {"state": "armed", "device": "/dev/arduinoCams", "ready": True})
+    ]
 
     received.clear()
     plugin._on_arduino_status("T")
-    assert received[0] == ("twophoton_state", {"state": "triggered", "device": "/dev/arduinoCams"})
+    assert received[0] == (
+        "twophoton_state",
+        {"state": "triggered", "device": "/dev/arduinoCams", "ready": True},
+    )
 
 
 def test_no_broadcast_when_callback_not_set():
@@ -324,8 +337,75 @@ def test_on_recording_stop_aborted_resets_state_and_broadcasts():
     plugin.on_recording_stop(aborted=True)
     # Firmware goes IDLE silently on cancel; the host must reset+broadcast itself.
     assert plugin._arduino_state == "idle"
-    assert ("twophoton_state", {"state": "idle", "device": "/dev/arduinoCams"}) in events
+    assert (
+        "twophoton_state",
+        {"state": "idle", "device": "/dev/arduinoCams", "ready": True},
+    ) in events
     assert link.snapshot() == [bytes([CANCEL_MAGIC])]
+
+
+def _capture_octacam_logs():
+    """Attach a handler to the octacam logger; returns (records, detach)."""
+    import logging
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    return records, lambda: logger.removeHandler(handler)
+
+
+def test_on_recording_start_warns_when_no_arm_ack():
+    # With no reader to send 'A', the bounded ack wait elapses and warns rather
+    # than letting a silently-dropped arm leave the cameras hanging.
+    records, detach = _capture_octacam_logs()
+    try:
+        plugin, link = _plugin_with_fake()
+        plugin._ack_timeout_s = 0.05
+        plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    finally:
+        detach()
+    assert link.snapshot()  # the arm packet was still sent
+    assert any("no arm acknowledgement" in r.getMessage() for r in records)
+
+
+def test_on_recording_start_no_warning_when_ack_arrives():
+    records, detach = _capture_octacam_logs()
+    try:
+        plugin, link = _plugin_with_fake()
+        plugin._ack_timeout_s = 1.0
+
+        def ack():
+            # Deliver the firmware 'A' as soon as the arm packet is written.
+            for _ in range(500):
+                if link.snapshot():
+                    plugin._on_arduino_status("A")
+                    return
+                time.sleep(0.001)
+
+        t = threading.Thread(target=ack)
+        t.start()
+        plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+        t.join(timeout=2.0)
+    finally:
+        detach()
+    assert plugin._armed_event.is_set()
+    assert not any("no arm acknowledgement" in r.getMessage() for r in records)
+
+
+def test_link_broken_broadcasts_not_ready():
+    # When the reader marks the port broken mid-session, the plugin must push a
+    # state with ready=False so the GUI disables the arm gate.
+    plugin, link = _plugin_with_fake()
+    events: list[tuple[str, dict]] = []
+    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    link._open = False  # reader saw the port die
+    plugin._on_link_broken()
+    assert events[-1] == (
+        "twophoton_state",
+        {"state": "idle", "device": "/dev/arduinoCams", "ready": False},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +574,50 @@ def test_link_close_swallows_shutdown_read_error(monkeypatch):
     link.close()
     assert link._reader is None
     assert link.is_open is False
+
+
+def test_link_reopen_starts_fresh_reader(monkeypatch):
+    """open -> close -> open must start a live reader. The reused _reader_stop
+    Event must be cleared so the second reader is not born already-stopped."""
+    import octacam.plugins.twophoton as m
+
+    created: list[_FakeSerial] = []
+
+    def make_serial(*a, **k):
+        fake = _FakeSerial()
+        created.append(fake)
+        return fake
+
+    monkeypatch.setattr(
+        m,
+        "serial",
+        SimpleNamespace(Serial=make_serial, SerialException=_FakeSerialError),
+    )
+    got: list[str] = []
+    link = m.TwoPhotonLink(on_status=got.append)
+    link.open("/dev/fake", 115200)
+    link.close()
+    link.open("/dev/fake", 115200)  # reopen reuses the same _reader_stop Event
+    assert link.is_open is True
+    assert link._reader is not None and link._reader.is_alive()
+    created[-1].feed(b"A")  # the second port's reader must still process bytes
+    assert _wait(lambda: got == ["A"])
+    link.close()
+
+
+def test_link_broken_invokes_on_broken_callback(monkeypatch):
+    """A mid-run read failure fires the on_broken hook so the owner can surface
+    the lost link (a clean close must NOT fire it)."""
+    import octacam.plugins.twophoton as m
+
+    fake = _FakeSerial()
+    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    broken: list[bool] = []
+    link = m.TwoPhotonLink(on_status=lambda s: None, on_broken=lambda: broken.append(True))
+    link.open("/dev/fake", 115200)
+    fake.raise_on_read = _FakeSerialError("device disconnected")
+    assert _wait(lambda: broken == [True])
+    link.close()
 
 
 # ---------------------------------------------------------------------------

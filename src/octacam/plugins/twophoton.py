@@ -63,6 +63,17 @@ DEFAULT_BAUD = 115200
 DEFAULT_FPS = 100
 DEFAULT_DURATION_MS = 10_000
 
+# How long on_recording_start waits for the firmware's 'A' acknowledgement
+# before warning that the arm may not have taken. The firmware acks within a
+# few ms; the wait runs off the controller lock, so it only delays the start
+# response, never telemetry.
+ACK_TIMEOUT_S = 1.0
+
+_NO_PYSERIAL_MSG = (
+    "pyserial is not importable (it ships with octacam by default, so the "
+    "environment may be broken); reinstall with: pip install pyserial"
+)
+
 # Wire-format constants
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
@@ -109,7 +120,11 @@ class TwoPhotonLink:
     that thread; callers must be thread-safe.
     """
 
-    def __init__(self, on_status: Callable[[str], None]):
+    def __init__(
+        self,
+        on_status: Callable[[str], None],
+        on_broken: Callable[[], None] | None = None,
+    ):
         self._serial = None
         self._write_lock = threading.Lock()
         # Serializes the open/close/reconnect lifecycle so two concurrent
@@ -117,12 +132,15 @@ class TwoPhotonLink:
         # teardown) cannot each create a port and leak the loser's FD + reader.
         self._lifecycle_lock = threading.Lock()
         self._on_status = on_status
+        # Called from the reader thread when the port dies mid-session (not on a
+        # clean close), so the owner can surface the lost link to the GUI.
+        self._on_broken = on_broken
         self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
-            raise RuntimeError("pyserial not installed: pip install pyserial")
+            raise RuntimeError(_NO_PYSERIAL_MSG)
         with self._lifecycle_lock:
             self._close_locked()
             s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
@@ -163,6 +181,13 @@ class TwoPhotonLink:
                     s.close()
                 except Exception:
                     pass
+        # Notify outside the write lock (and never the lifecycle lock) so a
+        # broadcast hook can't deadlock a concurrent close() that is joining us.
+        if self._on_broken is not None:
+            try:
+                self._on_broken()
+            except Exception:
+                log.exception("2-photon trigger: on_broken callback error")
 
     @property
     def is_open(self) -> bool:
@@ -226,7 +251,7 @@ _STATE_LABELS: dict[str, str] = {
 @register("twophoton")
 def _build(options: dict) -> TwoPhotonPlugin:
     if serial is None:
-        raise RuntimeError("pyserial not installed: pip install pyserial")
+        raise RuntimeError(_NO_PYSERIAL_MSG)
     device = str(options.get("device") or DEFAULT_DEVICE)
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))
@@ -276,8 +301,13 @@ class TwoPhotonPlugin(Plugin):
         self.baud = baud
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
-        self._link = TwoPhotonLink(self._on_arduino_status)
+        self._link = TwoPhotonLink(self._on_arduino_status, on_broken=self._on_link_broken)
         self._arduino_state = "idle"
+        # Set by the status reader when the firmware acknowledges an arm ('A').
+        # on_recording_start waits on it so a silently-dropped arm is surfaced
+        # instead of leaving the cameras waiting on a trigger that never fires.
+        self._armed_event = threading.Event()
+        self._ack_timeout_s = ACK_TIMEOUT_S
         # Injected by app.py via set_broadcast() once the web app is created.
         self._broadcast: Callable[[str, dict], None] | None = None
 
@@ -288,14 +318,27 @@ class TwoPhotonPlugin(Plugin):
         self._broadcast = callback
 
     def _on_arduino_status(self, status: str) -> None:
-        self._set_arduino_state(_STATE_LABELS.get(status, "idle"))
+        state = _STATE_LABELS.get(status, "idle")
+        if state == "armed":
+            self._armed_event.set()  # release a pending on_recording_start ack wait
+        self._set_arduino_state(state)
+
+    def _on_link_broken(self) -> None:
+        """Reader-thread hook: the serial port died mid-session. Re-broadcast the
+        state so the GUI sees ``ready=False`` and disables the arm gate (and shows
+        the reconnect notice) instead of carrying a stale ``ready`` that would arm
+        a dead link on the next recording."""
+        self._set_arduino_state("idle")
 
     def _set_arduino_state(self, state: str) -> None:
         self._arduino_state = state
         if self._broadcast is not None:
+            # Carry link readiness with every state push so a client that
+            # connected before the port opened (or after it died) keeps its arm
+            # gate in sync without a separate poll.
             self._broadcast(
                 "twophoton_state",
-                {"state": state, "device": self.device},
+                {"state": state, "device": self.device, "ready": self._link.is_open},
             )
 
     # -------------------------------------------------- process lifecycle
@@ -349,15 +392,33 @@ class TwoPhotonPlugin(Plugin):
         log.info(
             "2-photon trigger: arming at %d fps for %d ms", arm.fps, arm.duration_ms
         )
+        self._armed_event.clear()
         self._link.send_arm(arm)
+        # Wait briefly for the firmware's 'A' acknowledgement. A dropped or
+        # garbled arm packet (or one whose payload arrives too late for the
+        # firmware's parse window) otherwise fails silently and the cameras wait
+        # on an external trigger that never fires; warn so the operator knows.
+        if self._ack_timeout_s > 0 and not self._armed_event.wait(self._ack_timeout_s):
+            log.warning(
+                "2-photon trigger: no arm acknowledgement from %s within %.1f s; "
+                "the board may not have armed (cameras could wait for a trigger "
+                "that never fires)",
+                self.device,
+                self._ack_timeout_s,
+            )
 
     def on_recording_stop(self, aborted: bool) -> None:
-        if aborted:
-            self._link.send_cancel()
-            # The firmware's cancel path returns to IDLE silently (no status
-            # byte, unlike the duration-elapsed 'D'), so reset here or the GUI
-            # would keep showing 'armed'/'triggered' until the next arm.
-            self._set_arduino_state("idle")
+        # Stop the hardware trigger whenever a recording ends — abort, manual
+        # early stop, or clean duration-elapsed finish. A manual stop arrives
+        # with aborted=False while the firmware may still be RUNNING, so
+        # cancelling only on abort would leave the Arduino emitting trigger
+        # pulses for its full configured duration after the cameras stopped. A
+        # cancel sent to an already-IDLE board (clean completion that already
+        # sent 'D') is a harmless no-op. The firmware's cancel path returns to
+        # IDLE silently (no status byte), so reset+broadcast our own state too,
+        # or the GUI would keep showing 'armed'/'triggered' until the next arm.
+        self._link.send_cancel()
+        self._set_arduino_state("idle")
 
     # -------------------------------------------------- web contributions
 

@@ -42,6 +42,13 @@ export class TwoPhotonTab {
   applyState(msg) {
     this.arduinoState = msg.state || "idle";
     if (msg.device) this.device = msg.device;
+    // The backend reports link readiness with every state push, so a serial
+    // port that dies mid-session disables the arm gate (and shows the reconnect
+    // notice) instead of leaving a stale "ready" that would arm a dead link.
+    if (typeof msg.ready === "boolean") {
+      this.ready = msg.ready;
+      this._refresh();
+    }
     this._renderState();
   }
 

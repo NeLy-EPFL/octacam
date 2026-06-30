@@ -113,7 +113,11 @@ class SerialLink:
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
-            raise RuntimeError("pyserial not installed: pip install pyserial")
+            raise RuntimeError(
+                "pyserial is not importable (it ships with octacam by default, "
+                "so the environment may be broken); reinstall with: "
+                "pip install pyserial"
+            )
         with self._lifecycle_lock:
             self._close_locked()
             self._serial = serial.Serial(device, baud, timeout=0.1, write_timeout=1)
@@ -269,7 +273,10 @@ class JogClock:
 @register("flywheel")
 def _build(options: dict) -> FlywheelPlugin:
     if serial is None:
-        raise RuntimeError("pyserial not installed: pip install pyserial")
+        raise RuntimeError(
+            "pyserial is not importable (it ships with octacam by default, so "
+            "the environment may be broken); reinstall with: pip install pyserial"
+        )
     device = str(options.get("device", DEFAULT_DEVICE))
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))

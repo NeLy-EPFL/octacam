@@ -63,15 +63,42 @@ ISR(TIMER1_COMPA_vect) {
   digitalWrite(kSyncPin,   level);
 }
 
+// Timer1 prescaler options, finest first. A fixed /8 prescaler overflowed the
+// 16-bit OCR1A below ~15.3 fps and silently ran at ~15.3 fps; selecting the
+// smallest prescaler whose CTC TOP still fits in 16 bits lets the whole
+// host-accepted 1..10000 fps range map to an accurate rate (and keeps the best
+// resolution at high fps).
+struct Timer1Prescaler { uint16_t divisor; uint8_t cs_bits; };
+static const Timer1Prescaler kTimer1Prescalers[] = {
+  {1,    _BV(CS10)},               // /1
+  {8,    _BV(CS11)},               // /8
+  {64,   _BV(CS11) | _BV(CS10)},   // /64
+  {256,  _BV(CS12)},               // /256
+  {1024, _BV(CS12) | _BV(CS10)},   // /1024
+};
+
 static void timer1_start(const uint16_t fps) {
   // ISR toggles the pin → one full output cycle = 2 interrupts → fire at 2×fps.
-  const uint32_t ocr = (F_CPU / (8UL * 2UL * static_cast<uint32_t>(fps))) - 1UL;
+  // ticks = timer counts per half-period; CTC TOP (OCR1A) = ticks - 1.
+  uint32_t ocr     = 65535UL;                 // slowest fallback (never hit for
+  uint8_t  cs_bits = _BV(CS12) | _BV(CS10);   // fps in 1..10000, see range above)
+  for (uint8_t i = 0;
+       i < sizeof(kTimer1Prescalers) / sizeof(kTimer1Prescalers[0]); ++i) {
+    const uint32_t ticks =
+        F_CPU / (static_cast<uint32_t>(kTimer1Prescalers[i].divisor) * 2UL
+                 * static_cast<uint32_t>(fps));
+    if (ticks >= 1UL && ticks <= 65536UL) {
+      ocr     = ticks - 1UL;
+      cs_bits = kTimer1Prescalers[i].cs_bits;
+      break;
+    }
+  }
   cli();
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1  = 0;
-  OCR1A  = static_cast<uint16_t>(constrain(ocr, 1UL, 65535UL));
-  TCCR1B = _BV(WGM12) | _BV(CS11);  // CTC + prescaler /8
+  OCR1A  = static_cast<uint16_t>(ocr);
+  TCCR1B = _BV(WGM12) | cs_bits;  // CTC mode + selected prescaler
   TIMSK1 = _BV(OCIE1A);
   sei();
 }

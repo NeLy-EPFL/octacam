@@ -41,6 +41,12 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 # @register call. Listed here so build_plugins knows what it may import.
 _BUILTINS = ("flywheel", "twophoton")
 
+# Legacy plugin names → current name. The stepper plugin was renamed
+# arduino → flywheel; existing rig configs (name = "arduino") and
+# `--plugin arduino` still resolve, with a deprecation warning, so upgrading
+# does not silently drop a configured plugin.
+_ALIASES = {"arduino": "flywheel"}
+
 
 def _discover_entry_points() -> None:
     """Load third-party plugins registered under the ``octacam.plugins`` group.
@@ -123,7 +129,21 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     _discover_entry_points()
     selection = _resolve_selection(getattr(config, "plugins", []), enabled)
     plugins: list[OctacamPlugin] = []
+    seen: set[str] = set()
     for name, options in selection:
+        canonical = _ALIASES.get(name)
+        if canonical is not None:
+            log.warning(
+                "Plugin %r was renamed to %r; please update your config / "
+                "--plugin flag (loading %r for now).",
+                name,
+                canonical,
+                canonical,
+            )
+            name = canonical
+        if name in seen:
+            continue  # dedup after aliasing so arduino + flywheel don't double-load
+        seen.add(name)
         _import_builtin(name)
         factory = _REGISTRY.get(name)
         if factory is None:
@@ -153,8 +173,17 @@ class PluginInfo:
 
 
 def _plugin_summary(name: str) -> str:
-    """First line of a bundled plugin module's docstring (best-effort)."""
+    """First line of a plugin's module docstring (best-effort).
+
+    Bundled plugins live at ``octacam.plugins.<name>``; a third-party plugin
+    registered through the entry-point group lives in its own module, so fall
+    back to the registered factory's module when the bundled path misses."""
     module = sys.modules.get(f"octacam.plugins.{name}")
+    if module is None:
+        factory = _REGISTRY.get(name)
+        module = (
+            sys.modules.get(getattr(factory, "__module__", "")) if factory else None
+        )
     doc = (getattr(module, "__doc__", None) or "").strip()
     return doc.splitlines()[0] if doc else ""
 

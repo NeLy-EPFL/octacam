@@ -19,6 +19,22 @@ def test_no_plugins_override_disables_config():
     assert build_plugins(config, enabled=[]).plugins == []
 
 
+def test_legacy_arduino_name_resolves_to_flywheel():
+    # The stepper plugin was renamed arduino -> flywheel; an existing rig config
+    # (or --plugin arduino) must still load it rather than silently dropping it.
+    config = OctacamConfig(plugins=[PluginConfig(name="arduino")])
+    manager = build_plugins(config)
+    assert [p.name for p in manager.plugins] == ["flywheel"]
+
+
+def test_legacy_alias_and_new_name_do_not_double_load():
+    # arduino aliases to flywheel, so config flywheel + --plugin arduino must
+    # resolve to a single flywheel instance, not two.
+    config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
+    manager = build_plugins(config, enabled=["arduino"])
+    assert [p.name for p in manager.plugins] == ["flywheel"]
+
+
 def test_register_and_build_with_options():
     @register("spy_demo")
     def _factory(options):
