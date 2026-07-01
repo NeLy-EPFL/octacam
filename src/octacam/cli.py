@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Annotated
 if TYPE_CHECKING:
     from rich.progress import TaskID
 
+    from octacam.config import RecordConfig
     from octacam.controller import RecordingSettings
     from octacam.writer import ProgressCallback
 
@@ -1105,6 +1106,347 @@ def doctor(
     errors, warns = report.counts()
     if errors or (strict and warns):
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# `octacam config` — interactive first-run config wizard
+#
+# Scaffolds a new rig config dir (octacam_config.toml) by detecting the camera
+# backend and serials, then prompting for the record/transfer scalars. The
+# visual per-camera bits — window placement, rotation, the grid — are left to
+# `octacam gui`, which tunes them against a live preview; this wizard just
+# produces a good starting point and hands off. It never opens a camera
+# (enumeration only), so it is safe to run while another session is live.
+# ---------------------------------------------------------------------------
+
+
+def _available_backends() -> list[str]:
+    """Which SDK-backed backends (basler/flir) are installed here, in order.
+
+    Lets the wizard default to a backend this machine can actually use. ``fake``
+    is a synthetic test backend, never auto-detected. Selection imports the SDK
+    but never opens a device, so this is side-effect free."""
+    from octacam.cameras.registry import select_backend
+
+    available: list[str] = []
+    for name in ("basler", "flir"):
+        try:
+            select_backend(name)
+        except Exception:
+            continue
+        available.append(name)
+    return available
+
+
+def _prompt_backend(console, cli_backend: str | None) -> str:
+    """Resolve the camera backend from --backend or an interactive prompt."""
+    from rich.prompt import Prompt
+
+    from octacam.cameras.registry import BACKENDS
+
+    if cli_backend is not None:
+        key = cli_backend.strip().lower()
+        if key not in BACKENDS:
+            raise typer.BadParameter(
+                f"unknown backend {cli_backend!r}; expected one of "
+                f"{', '.join(BACKENDS)}",
+                param_hint="--backend",
+            )
+        return key
+    available = _available_backends()
+    if available:
+        console.print(
+            f"Detected camera backend(s): [bold]{', '.join(available)}[/bold]"
+        )
+    else:
+        console.print(
+            "[yellow]No camera SDK detected here[/yellow] — you can still write a "
+            "config now and detect cameras later on the rig."
+        )
+    return Prompt.ask(
+        "Camera backend",
+        choices=list(BACKENDS),
+        default=available[0] if available else "basler",
+        console=console,
+    )
+
+
+def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
+    """List (serial, model|None) for *backend*; [] if none or enumeration fails."""
+    try:
+        cams = _enumerate_backend(backend)
+    except Exception as e:
+        console.print(f"[yellow]Could not enumerate {backend} cameras:[/yellow] {e}")
+        return []
+    if cams:
+        console.print(f"Detected [bold]{len(cams)}[/bold] {backend} camera(s):")
+        for serial, model in cams:
+            console.print(f"  • {model + '  ' if model else ''}{serial}")
+    else:
+        console.print(f"[yellow]No {backend} cameras detected.[/yellow]")
+    return cams
+
+
+def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dict]:
+    """Build ``cameras`` entry dicts from detected serials (+ optional manual).
+
+    Each entry is ``{"serial_number": ...}`` plus a validated, unique ``name``
+    when the user gives one. Left empty when no serials are known, so the config
+    falls back to using every camera detected at record time."""
+    from rich.prompt import Confirm, Prompt
+
+    from octacam.config import _is_safe_camera_name
+
+    serials = [serial for serial, _model in detected]
+    if not serials and Confirm.ask(
+        "Add camera serial numbers manually?", default=False, console=console
+    ):
+        while True:
+            serial = Prompt.ask(
+                "  Serial number (blank to finish)", default="", console=console
+            ).strip()
+            if not serial:
+                break
+            serials.append(serial)
+    if not serials:
+        console.print(
+            "No cameras listed — the config will use every camera detected at "
+            "record time."
+        )
+        return []
+    if not Confirm.ask("Name these cameras now?", default=True, console=console):
+        return [{"serial_number": s} for s in serials]
+
+    entries: list[dict] = []
+    used: set[str] = set()
+    for serial in serials:
+        while True:
+            name = Prompt.ask(
+                f"  Name for {serial} (blank to use the serial)",
+                default="",
+                console=console,
+            ).strip()
+            if not name:
+                entries.append({"serial_number": serial})
+                break
+            if not _is_safe_camera_name(name):
+                console.print(
+                    r"    [red]Invalid name[/red] — no '/', '\', '.' or '..'."
+                )
+                continue
+            if name in used:
+                console.print(
+                    f"    [red]{name!r} is already used[/red] — pick another."
+                )
+                continue
+            used.add(name)
+            entries.append({"serial_number": serial, "name": name})
+            break
+    return entries
+
+
+def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
+    """Offer a single auto-arranged ``grid.mp4`` visualization from named cameras.
+
+    Only offered when at least two cameras are named (a grid of one is pointless);
+    the near-square layout reuses :func:`octacam.grid.auto_layout`."""
+    from rich.prompt import Confirm
+
+    from octacam.grid import auto_layout
+
+    names = [c["name"] for c in cameras if c.get("name")]
+    if len(names) < 2:
+        return []
+    if not Confirm.ask(
+        f"Add a visualization grid from the {len(names)} named camera(s)?",
+        default=True,
+        console=console,
+    ):
+        return []
+    return [{"name": "grid.mp4", "layout": auto_layout(names)}]
+
+
+def _prompt_record(console) -> "RecordConfig":
+    """Prompt for the [record] section, defaulting every field to the schema default."""
+    from rich.prompt import FloatPrompt, Prompt
+
+    from octacam.config import RecordConfig
+
+    d = RecordConfig()
+    fps = FloatPrompt.ask("Frame rate (fps)", default=d.fps, console=console)
+    duration = FloatPrompt.ask(
+        "Recording duration", default=d.duration, console=console
+    )
+    duration_unit = Prompt.ask(
+        "Duration unit",
+        choices=["frames", "seconds", "minutes", "hours"],
+        default=d.duration_unit,
+        console=console,
+    )
+    trigger_source = Prompt.ask(
+        "Trigger source",
+        choices=["software", "external"],
+        default=d.trigger_source,
+        console=console,
+    )
+    directory = Prompt.ask(
+        "Save directory (base)", default=d.directory, console=console
+    )
+    relative_directory = Prompt.ask(
+        "Relative directory template (strftime %-codes ok, blank for none)",
+        default=d.relative_directory,
+        console=console,
+    )
+    save_method = Prompt.ask(
+        "Save method",
+        choices=["ffmpeg", "raw"],
+        default=d.save_method,
+        console=console,
+    )
+    # model_validate (not the constructor) so pydantic narrows the choice strings
+    # to their Literal fields at runtime instead of pyright rejecting `str` here.
+    return RecordConfig.model_validate(
+        {
+            "fps": fps,
+            "duration": duration,
+            "duration_unit": duration_unit,
+            "trigger_source": trigger_source,
+            "directory": directory,
+            "relative_directory": relative_directory,
+            "save_method": save_method,
+        }
+    )
+
+
+def _prompt_transfer(console) -> dict | None:
+    """Optionally prompt for a transfer destination; None to leave it unset."""
+    from rich.prompt import Confirm, Prompt
+
+    if not Confirm.ask(
+        "Configure a transfer destination (mirror recordings elsewhere)?",
+        default=False,
+        console=console,
+    ):
+        return None
+    directory = Prompt.ask("  Transfer destination directory", console=console)
+    checksum = Confirm.ask(
+        "  Verify each copy with a checksum?", default=True, console=console
+    )
+    return {"directory": directory, "checksum": checksum}
+
+
+def _build_config_doc(
+    backend: str,
+    record_cfg: "RecordConfig",
+    cameras: list[dict],
+    visualization: list[dict],
+    transfer: dict | None,
+) -> dict:
+    """Assemble the raw-TOML dict the config writer serializes.
+
+    ``backend`` is written only when non-default (absent means basler), matching
+    how existing configs are kept clean; empty sections are omitted entirely."""
+    from octacam.config import TranscodeConfig
+
+    doc: dict = {}
+    if backend != "basler":
+        doc["backend"] = backend
+    doc["record"] = record_cfg.model_dump()
+    doc["transcode"] = TranscodeConfig().model_dump()
+    if cameras:
+        doc["cameras"] = cameras
+    if visualization:
+        doc["visualization"] = visualization
+    if transfer:
+        doc["transfer"] = transfer
+    return doc
+
+
+@app.command()
+def config(
+    config_dir: Annotated[
+        Path | None,
+        typer.Argument(
+            file_okay=False,
+            dir_okay=True,
+            help="Directory to create the config in. Omit to be prompted for one.",
+        ),
+    ] = None,
+    backend: Annotated[
+        str | None,
+        typer.Option(
+            "--backend",
+            help="Camera backend (basler/flir/fake). Default: auto-detect, else ask.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Overwrite an existing octacam_config.toml without asking.",
+        ),
+    ] = False,
+) -> None:
+    """Interactively scaffold a new rig config directory.
+
+    Detects the camera backend and serials, then prompts for the record and
+    transfer settings and writes an octacam_config.toml. The visual per-camera
+    bits — window placement, rotation, and the grid — are left to `octacam gui`,
+    which tunes them against a live preview; run it next on the new directory.
+    Never opens a camera, so it is safe to run while another session is live.
+    """
+    from rich.console import Console
+    from rich.prompt import Confirm, Prompt
+
+    from octacam import config_writer
+
+    console = Console()
+    console.print("[bold]octacam config[/bold] — set up a new rig config\n")
+
+    chosen_backend = _prompt_backend(console, backend)
+    detected = _detect_cameras(console, chosen_backend)
+    cameras = _prompt_cameras(console, detected)
+    visualization = _prompt_visualization(console, cameras)
+    console.print()
+    record_cfg = _prompt_record(console)
+    console.print()
+    transfer = _prompt_transfer(console)
+
+    if config_dir is None:
+        console.print()
+        target = Path(
+            Prompt.ask(
+                "Config directory to create", default="octacam-rig", console=console
+            )
+        ).expanduser()
+    else:
+        target = config_dir.expanduser()
+
+    cfg_file = target / "octacam_config.toml"
+    if (
+        cfg_file.exists()
+        and not force
+        and not Confirm.ask(
+            f"{cfg_file} already exists — overwrite?", default=False, console=console
+        )
+    ):
+        console.print("Aborted.")
+        raise typer.Exit(1)
+
+    doc = _build_config_doc(
+        chosen_backend, record_cfg, cameras, visualization, transfer
+    )
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        written = config_writer.write_config(target, doc)
+    except OSError as e:
+        sys.exit(f"Failed to write config: {e}")
+
+    console.print(f"\n[green]✓[/green] Wrote [bold]{written}[/bold]")
+    console.print("\nNext steps:")
+    console.print(f"  • Validate it:          octacam doctor {target}")
+    console.print(f"  • Place cameras & grid: octacam gui {target}")
+    console.print(f"  • Record headlessly:    octacam record {target}")
 
 
 @app.command()

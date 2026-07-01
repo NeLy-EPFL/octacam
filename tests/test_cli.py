@@ -34,7 +34,7 @@ def test_version():
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("gui", "doctor", "record", "process"):
+    for command in ("gui", "doctor", "config", "record", "process"):
         assert command in result.output
     # list-cameras/list-plugins were merged into `doctor`.
     assert "list-cameras" not in result.output
@@ -505,3 +505,142 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     dest = dest_root / folder.name
     assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
     assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
+
+
+# --- config: the interactive first-run wizard -------------------------------
+
+
+def test_config_help_documents_scaffolding():
+    result = runner.invoke(app, ["config", "-h"])
+    assert result.exit_code == 0
+    assert "Usage" in result.output
+    assert "CONFIG_DIR" in result.output
+    assert "--backend" in result.output
+
+
+def test_config_wizard_writes_roundtrippable_config(tmp_path):
+    # Full run over the `fake` backend (FAKE-0/FAKE-1): name both cameras, add a
+    # grid, take the record defaults, and configure a transfer destination. The
+    # written file must parse back to exactly what was entered.
+    from octacam.config import load_config_dir
+
+    target = tmp_path / "rig1"
+    inputs = (
+        "\n".join(
+            [
+                "y",  # name these cameras now?
+                "cam_a",  # FAKE-0 name
+                "cam_b",  # FAKE-1 name
+                "y",  # add a visualization grid?
+                "",  # fps -> default
+                "",  # duration -> default
+                "",  # duration unit -> default
+                "",  # trigger source -> default
+                "/data/rig1",  # save directory
+                "%y%m%d/001",  # relative directory template
+                "",  # save method -> default
+                "y",  # configure a transfer destination?
+                "/mnt/nas",  # transfer directory
+                "",  # checksum -> default (yes)
+            ]
+        )
+        + "\n"
+    )
+    result = runner.invoke(
+        app, ["config", str(target), "--backend", "fake"], input=inputs
+    )
+    assert result.exit_code == 0, result.output
+    assert (target / "octacam_config.toml").exists()
+
+    cfg = load_config_dir(target)
+    assert cfg.backend == "fake"
+    assert [(c.serial_number, c.name) for c in cfg.cameras] == [
+        ("FAKE-0", "cam_a"),
+        ("FAKE-1", "cam_b"),
+    ]
+    assert cfg.record.directory == "/data/rig1"
+    assert cfg.record.relative_directory == "%y%m%d/001"
+    assert [(v.name, v.layout) for v in cfg.visualization] == [
+        ("grid.mp4", [["cam_a", "cam_b"]])
+    ]
+    assert cfg.transfer is not None
+    assert cfg.transfer.directory == "/mnt/nas"
+    assert cfg.transfer.checksum is True
+
+
+def test_config_wizard_prompts_for_directory_when_omitted(tmp_path):
+    # With no CONFIG_DIR argument the wizard asks for one at the end.
+    target = tmp_path / "prompted"
+    inputs = (
+        "\n".join(
+            [
+                "n",  # name cameras? no (leaves the grid unoffered)
+                "",  # fps
+                "",  # duration
+                "",  # unit
+                "",  # trigger
+                "",  # directory
+                "",  # relative directory
+                "",  # save method
+                "n",  # transfer? no
+                str(target),  # config directory to create
+            ]
+        )
+        + "\n"
+    )
+    result = runner.invoke(app, ["config", "--backend", "fake"], input=inputs)
+    assert result.exit_code == 0, result.output
+    assert (target / "octacam_config.toml").exists()
+
+
+def test_config_wizard_aborts_without_overwriting(tmp_path):
+    # An existing config is never clobbered without consent: declining the
+    # overwrite prompt exits nonzero and leaves the file byte-for-byte intact.
+    target = tmp_path / "existing"
+    target.mkdir()
+    sentinel = "# do not touch\n"
+    (target / "octacam_config.toml").write_text(sentinel)
+    inputs = (
+        "\n".join(
+            [
+                "n",  # name cameras? no
+                "",  # fps
+                "",  # duration
+                "",  # unit
+                "",  # trigger
+                "",  # directory
+                "",  # relative directory
+                "",  # save method
+                "n",  # transfer? no
+                "n",  # overwrite existing? no
+            ]
+        )
+        + "\n"
+    )
+    result = runner.invoke(
+        app, ["config", str(target), "--backend", "fake"], input=inputs
+    )
+    assert result.exit_code == 1
+    assert (target / "octacam_config.toml").read_text() == sentinel
+
+
+def test_config_wizard_force_overwrites(tmp_path):
+    from octacam.config import load_config_dir
+
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "octacam_config.toml").write_text("# stale\n")
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    result = runner.invoke(
+        app, ["config", str(target), "--backend", "fake", "--force"], input=inputs
+    )
+    assert result.exit_code == 0, result.output
+    # The stale placeholder was replaced by a real, parseable config.
+    assert load_config_dir(target).backend == "fake"
+
+
+def test_config_rejects_unknown_backend(tmp_path):
+    result = runner.invoke(app, ["config", str(tmp_path / "rig"), "--backend", "nope"])
+    assert result.exit_code == 2
+    assert "unknown backend" in result.output
+    assert not (tmp_path / "rig").exists()

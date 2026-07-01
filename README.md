@@ -40,6 +40,7 @@ On a real rig, point octacam at a config directory (camera names, layout, and
 recording settings — see [configs/](configs/) for examples):
 
 ```bash
+octacam config <config_dir>    # scaffold a new rig config interactively
 octacam doctor <config_dir>    # check the install + validate the rig
 octacam gui <config_dir>       # live web GUI on http://127.0.0.1:8765
 octacam record <config_dir>    # headless recording (no browser)
@@ -54,6 +55,7 @@ config snapshot each recording saves alongside its videos.
 
 | Command | What it does |
 | --- | --- |
+| `octacam config [config_dir]` | Interactively scaffold a new rig config (`--backend`/`--force`) |
 | `octacam doctor [config_dir]` | Diagnose the install and list cameras/plugins; validate a rig |
 | `octacam gui <config_dir>` | Launch the live web GUI (`--host`/`--port`/`--no-browser`) |
 | `octacam record <config_dir>` | Record headlessly (`--fps`/`--duration`/`--output`) |

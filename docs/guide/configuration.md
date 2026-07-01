@@ -15,6 +15,23 @@ default rather than crashing the rig.
 See [configs/](https://github.com/NeLy-EPFL/octacam/tree/main/configs) for
 complete, working examples.
 
+## Scaffolding a config
+
+You rarely have to write the file by hand. `octacam config` walks you through it:
+it detects the camera backend and serials, prompts for the record and transfer
+settings, and writes an `octacam_config.toml` for you.
+
+```bash
+octacam config <config_dir>    # or omit the dir to be prompted for a name
+```
+
+It never opens a camera (enumeration only), so it is safe to run alongside a
+live session. Pass `--backend basler|flir|fake` to skip auto-detection, or
+`--force` to overwrite an existing file. The wizard deliberately leaves the
+**visual** settings — per-camera window placement, rotation, and the grid — to
+`octacam gui`, which tunes them against a live preview; run it next on the new
+directory. Everything the wizard writes stays hand-editable afterward.
+
 ## Top level
 
 ```toml
