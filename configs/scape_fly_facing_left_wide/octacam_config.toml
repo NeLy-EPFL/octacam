@@ -111,7 +111,8 @@ layout = [
     ["camera_LH", "camera_H",  "camera_RH"],
 ]
 
-# NAS export — fill in `directory` to enable transfer during `octacam process`.
+# Transfer — fill in `directory` to enable copying during `octacam process`.
+# The destination can be a network share or any writable path.
 # [transfer]
-# directory = "/mnt/nas/JSP"
+# directory = "/mnt/store/JSP"
 # checksum = true

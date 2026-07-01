@@ -53,7 +53,7 @@ octacam --help
 `--no-plugins` (see [Plugins](#plugins)).
 
 Everything after recording — transcoding, composite grid videos, and copying to
-the NAS — is one command, **`octacam process`**. It reads all its settings
+a shared destination — is one command, **`octacam process`**. It reads all its settings
 (encoder parameters, grid layouts, transfer destination) from a copy of the
 rig's `octacam_config.toml` that each recording saves into its own folder, so no
 `--config` is needed. Skip any step with `--no-transcode` / `--no-grid` /
@@ -156,11 +156,12 @@ octacam process /data/octacam/260620-wt/Fly1/001-bhv --no-transcode --no-transfe
 octacam process /data/octacam/260620-wt -r --no-transcode --no-transfer
 ```
 
-### NAS transfer
+### Transfer
 
 `octacam process` copies all transcoded mp4s, grid videos, and
-`recording_summary.json` to a network drive, mirroring the fly/trial directory
-tree. The destination is `transfer.directory` joined with the recording's
+`recording_summary.json` to the transfer destination (a network share or any
+writable path), mirroring the fly/trial directory tree. The destination is
+`transfer.directory` joined with the recording's
 `relative_directory` (the sub-path resolved at record time and stored in the
 summary), so a recording made under `.../260620-wt/Fly1/001-bhv` lands at
 `<transfer.directory>/260620-wt/Fly1/001-bhv` and distinct trials that share a
@@ -168,7 +169,7 @@ name never collide. Configure it once in the rig's `octacam_config.toml`:
 
 ```toml
 [transfer]
-directory = "/mnt/nas/matthias"                  # strftime %-codes expand here too
+directory = "/mnt/store/matthias"                # strftime %-codes expand here too
 checksum = true                                  # content-verify each copy (default)
 ```
 

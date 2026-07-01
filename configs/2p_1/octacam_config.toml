@@ -100,8 +100,9 @@ layout = [
     ["camera_LH", "",          "camera_RH"],
 ]
 
-# NAS export — fill in `directory` to enable transfer during `octacam process`.
+# Transfer — fill in `directory` to enable copying during `octacam process`.
 # record.directory/relative_directory is mirrored under transfer.directory.
+# The destination can be a network share or any writable path.
 # [transfer]
-# directory = "/mnt/nas/matthias"   # e.g. /mnt/nas/matthias
-# checksum = true                   # content-verify each copy before promoting it
+# directory = "/mnt/store/matthias"   # e.g. a mounted share or local disk
+# checksum = true                     # content-verify each copy before promoting it

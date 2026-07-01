@@ -184,14 +184,14 @@ def test_process_params_are_live_settings(client):
         "/api/settings",
         json={
             "transcode_ffmpeg_params": "-c:v libx264 -crf 20 -pix_fmt yuv420p",
-            "transfer_directory": "~/nas/TL",
+            "transfer_directory": "~/store/TL",
             "transfer_checksum": False,
         },
     )
     assert r.status_code == 200
     body = r.json()
     assert body["transcode_ffmpeg_params"] == "-c:v libx264 -crf 20 -pix_fmt yuv420p"
-    assert body["transfer_directory"] == "~/nas/TL"
+    assert body["transfer_directory"] == "~/store/TL"
     assert body["transfer_checksum"] is False
     # Unparseable transcode args (bad quoting) are rejected up front rather than
     # silently falling back to the default when `octacam process` runs.
@@ -435,7 +435,7 @@ def test_recording_with_split_directory(client, tmp_path):
     assert state is not None and state["state"] == "preview"
 
     # Videos land under base/relative, and the summary records the relative part
-    # verbatim (what the transfer step mirrors onto the NAS).
+    # verbatim (what the transfer step mirrors onto the destination).
     assert len(sorted(save_dir.glob("*.mkv"))) == 2
     summary = json.loads((save_dir / "recording_summary.json").read_text())
     assert summary["relative_directory"] == "day/001"

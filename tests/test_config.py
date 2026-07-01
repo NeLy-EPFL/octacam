@@ -236,7 +236,7 @@ def test_unknown_backend_falls_back_to_basler(tmp_path):
 
 def test_transfer_checksum_defaults_true(tmp_path):
     (tmp_path / "octacam_config.toml").write_text(
-        '[transfer]\ndirectory = "/mnt/nas"\n'
+        '[transfer]\ndirectory = "/mnt/store"\n'
     )
     cfg = load_config_dir(tmp_path)
     assert cfg.transfer is not None and cfg.transfer.checksum is True

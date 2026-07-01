@@ -113,7 +113,7 @@ class RecordingSettings:
     # and the relative sub-path (config record.relative_directory) under it. When
     # either is edited, save_dir is recomposed as record_directory/
     # relative_directory. relative_directory is what the transfer step mirrors
-    # onto the NAS; empty falls back to the save_dir's own basename.
+    # onto the destination; empty falls back to the save_dir's own basename.
     record_directory: str = ""
     relative_directory: str = ""
     trigger_source: str = "software"  # "software" | "external"
@@ -226,8 +226,8 @@ def build_recording_summary(
         "ffmpeg_params": settings.ffmpeg_params,
         "record_form": settings.record_form,
         # The sub-path (under record.directory) the transfer step mirrors onto
-        # the NAS; resolved once here so a later transfer never re-templates the
-        # date on a different day.
+        # the destination; resolved once here so a later transfer never
+        # re-templates the date on a different day.
         "relative_directory": _relative_directory(settings),
         "dropped_frames_note": _DROPPED_FRAMES_NOTE,
         "cameras": cams,

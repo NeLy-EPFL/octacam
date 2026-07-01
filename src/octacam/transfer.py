@@ -1,18 +1,22 @@
-"""Copy transcoded recordings to a NAS or any writable destination path.
+"""Copy transcoded recordings to any writable destination path.
 
 Typical call from the ``octacam process`` transfer step:
 
-    copy_folder_to_nas(
+    transfer_folder(
         folder=Path("/data/octacam/260620-genotype/Fly1/001-bhv"),
-        dest=Path("/mnt/nas/matthias/260620-genotype/Fly1/001-bhv"),
+        dest=Path("/mnt/store/matthias/260620-genotype/Fly1/001-bhv"),
         files_only=[Path(".../camera_LF.mp4"), ...],  # only the transcoded mp4s
     )
 
 Path mirroring:  the caller resolves *dest* — for ``octacam process`` that is
 ``transfer.directory`` joined with the recording's ``relative_directory`` (the
 sub-path resolved at record time and stored in recording_summary.json), so the
-NAS reproduces the local ``260620-genotype/Fly1/001-bhv`` hierarchy and distinct
-trials sharing a name never collide.
+destination reproduces the local ``260620-genotype/Fly1/001-bhv`` hierarchy and
+distinct trials sharing a name never collide.
+
+The destination is commonly a network share (an SMB/CIFS/NFS mount), but may be
+any writable path — a local disk, an external drive, a bind mount, etc. — so
+nothing here assumes a particular medium.
 
 Reliability:  each file is streamed to a unique sibling temp in the destination
 directory and only ``os.replace``-d onto its final name once whole and (by
@@ -50,7 +54,7 @@ _STALE_TEMP_AGE_S = 24 * 3600
 
 
 @dataclasses.dataclass(frozen=True)
-class NasCopyProgress:
+class TransferProgress:
     """Progress snapshot for one file-copy chunk."""
 
     file_index: int  # 1-based index within the current folder
@@ -72,12 +76,12 @@ class NasCopyProgress:
         return self.bytes_done >= self.file_size
 
 
-NasCopyCallback = Callable[[NasCopyProgress], None]
+TransferCallback = Callable[[TransferProgress], None]
 
 
 @dataclasses.dataclass
-class NasCopyResult:
-    """Outcome of copying one folder to the NAS.
+class TransferResult:
+    """Outcome of transferring one folder to its destination.
 
     Truthy iff nothing failed *and* at least one file was copied or skipped, so
     callers can keep using ``if not result:`` to detect a hard failure.
@@ -127,7 +131,7 @@ def _stream_copy(
     size: int,
     file_index: int,
     file_count: int,
-    on_progress: NasCopyCallback | None,
+    on_progress: TransferCallback | None,
     *,
     hash_src: bool,
 ) -> str | None:
@@ -135,7 +139,7 @@ def _stream_copy(
 
     Hashing the source here is free: it rides the read we already do.  The
     write is flushed and ``fsync``-ed before returning so the bytes are durable
-    on the NAS before the caller renames the temp onto its final name.
+    on the destination before the caller renames the temp onto its final name.
     """
     h = hashlib.blake2b() if hash_src else None
     bytes_done = 0
@@ -148,7 +152,7 @@ def _stream_copy(
             bytes_done += len(chunk)
             if on_progress is not None:
                 on_progress(
-                    NasCopyProgress(
+                    TransferProgress(
                         file_index=file_index,
                         file_count=file_count,
                         filename=src.name,
@@ -163,7 +167,7 @@ def _stream_copy(
     # registers it instead of showing nothing.
     if size == 0 and on_progress is not None:
         on_progress(
-            NasCopyProgress(
+            TransferProgress(
                 file_index=file_index,
                 file_count=file_count,
                 filename=src.name,
@@ -200,7 +204,7 @@ def _copy_one(
     file_count: int,
     *,
     verify: bool,
-    on_progress: NasCopyCallback | None,
+    on_progress: TransferCallback | None,
 ) -> bool:
     """Copy *src* → *final* atomically; return False on a verification mismatch.
 
@@ -220,9 +224,9 @@ def _copy_one(
             )
         else:
             # Fast path: no progress bar and no verify — copy bytes only (not
-            # metadata; shutil.copy2's copystat can raise on a NAS that rejects
-            # utime, which must not discard the copy) into the temp for the
-            # atomic rename.
+            # metadata; shutil.copy2's copystat can raise on a network share
+            # that rejects utime, which must not discard the copy) into the temp
+            # for the atomic rename.
             shutil.copyfile(str(src), str(tmp))
             src_digest = None
 
@@ -234,7 +238,7 @@ def _copy_one(
 
                 def _emit_verify(read: int) -> None:
                     emit(
-                        NasCopyProgress(
+                        TransferProgress(
                             file_index=file_index,
                             file_count=file_count,
                             filename=src.name,
@@ -253,10 +257,10 @@ def _copy_one(
             tmp.unlink(missing_ok=True)
             return False
 
-        # Metadata is best-effort: many NAS mounts (SMB/CIFS/NFS) reject utime,
-        # and a verified copy must still be promoted even if its mtime can't be
-        # set.  Skip mode never relies on mtime (size/checksum only), so this is
-        # safe.
+        # Metadata is best-effort: many network mounts (SMB/CIFS/NFS) reject
+        # utime, and a verified copy must still be promoted even if its mtime
+        # can't be set.  Skip mode never relies on mtime (size/checksum only),
+        # so this is safe.
         try:
             shutil.copystat(str(src), str(tmp))
         except OSError:
@@ -287,18 +291,18 @@ def _should_skip(src: Path, final: Path, *, checksum: bool) -> bool:
     return True
 
 
-def nas_destination(
-    folder: Path, nas_root: Path, local_base: Path | None = None
+def transfer_destination(
+    folder: Path, dest_root: Path, local_base: Path | None = None
 ) -> Path:
-    """Destination directory *folder* maps to under *nas_root*.
+    """Destination directory *folder* maps to under *dest_root*.
 
     When *local_base* is given and *folder* lies under it, the path relative to
-    *local_base* is reproduced under *nas_root*; otherwise only *folder*'s name
+    *local_base* is reproduced under *dest_root*; otherwise only *folder*'s name
     is used.  Shared with the CLI so its collision check matches the real copy.
 
     Both paths are resolved before the relative computation so a relative input
-    (e.g. ``octacam nas data/260624 -r``) or one with ``..``/symlinks still
-    mirrors correctly against the (resolved) auto-derived base.
+    (e.g. ``data/260624``) or one with ``..``/symlinks still mirrors correctly
+    against the (resolved) auto-derived base.
     """
     rel = None
     if local_base is not None:
@@ -306,18 +310,18 @@ def nas_destination(
             rel = folder.resolve().relative_to(local_base.resolve())
         except ValueError:
             rel = None
-    return nas_root / rel if rel is not None else nas_root / folder.name
+    return dest_root / rel if rel is not None else dest_root / folder.name
 
 
-def copy_folder_to_nas(
+def transfer_folder(
     folder: Path,
     dest: Path,
     files_only: list[Path] | None = None,
     dry_run: bool = False,
     verify: bool = True,
     checksum: bool = False,
-    on_progress: NasCopyCallback | None = None,
-) -> NasCopyResult:
+    on_progress: TransferCallback | None = None,
+) -> TransferResult:
     """Copy mp4s (and recording_summary.json) from *folder* to *dest*.
 
     Parameters
@@ -342,7 +346,7 @@ def copy_folder_to_nas(
     on_progress:
         Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
 
-    Returns a :class:`NasCopyResult` (truthy on success, falsy on hard failure
+    Returns a :class:`TransferResult` (truthy on success, falsy on hard failure
     or nothing to copy).
     """
     # --- Decide which files to copy -----------------------------------------
@@ -355,16 +359,16 @@ def copy_folder_to_nas(
     if summary.exists() and summary not in candidates:
         candidates.append(summary)
 
-    result = NasCopyResult(dest=dest)
+    result = TransferResult(dest=dest)
 
     if not candidates:
-        log.warning("Nothing to copy to NAS from %s", folder)
+        log.warning("Nothing to transfer from %s", folder)
         return result
 
     # --- Dry run: just log --------------------------------------------------
     if dry_run:
         for f in candidates:
-            log.info("[dry-run] NAS copy: %s → %s", f, dest / f.name)
+            log.info("[dry-run] transfer: %s → %s", f, dest / f.name)
             result.copied.append(f.name)
         return result
 
@@ -372,7 +376,7 @@ def copy_folder_to_nas(
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        log.error("Could not create NAS directory %s: %s", dest, e)
+        log.error("Could not create destination directory %s: %s", dest, e)
         result.failed.extend(f.name for f in candidates)
         return result
 
@@ -381,17 +385,17 @@ def copy_folder_to_nas(
         target = dest / f.name
         try:
             if _should_skip(f, target, checksum=checksum):
-                log.info("NAS: %s already up to date — skipping", f.name)
+                log.info("Transfer: %s already up to date — skipping", f.name)
                 result.skipped.append(f.name)
                 continue
             if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):
-                log.info("NAS: %s → %s", f.name, dest)
+                log.info("Transfer: %s → %s", f.name, dest)
                 result.copied.append(f.name)
             else:
-                log.error("NAS: %s failed verification — not copied", f.name)
+                log.error("Transfer: %s failed verification — not copied", f.name)
                 result.failed.append(f.name)
         except OSError as e:
-            log.error("Failed to copy %s to NAS: %s", f, e)
+            log.error("Failed to transfer %s: %s", f, e)
             result.failed.append(f.name)
 
     return result

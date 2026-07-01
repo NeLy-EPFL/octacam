@@ -272,7 +272,7 @@ def resolve_relative_directory(
 
     Unlike ``resolve_record_directory`` this is *not* absolutized: it is the
     sub-path that sits under the base directory (and that the transfer step
-    mirrors onto the NAS)."""
+    mirrors onto the destination)."""
     when = when or time.localtime()
     return _apply_template(record.relative_directory, when)
 

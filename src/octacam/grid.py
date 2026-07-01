@@ -138,7 +138,7 @@ def build_grid_video(
     distortion.
 
     On *dry_run* the ffmpeg command is logged but not executed; the intended
-    output path is still returned so callers can include it in NAS transfers.
+    output path is still returned so callers can include it in transfers.
     """
     if layout is None:
         layout = DEFAULT_LAYOUT

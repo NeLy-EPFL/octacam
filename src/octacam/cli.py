@@ -1115,8 +1115,8 @@ class _GridProgressBar:
         return on_progress
 
 
-class _NasProgressBar:
-    """Rich progress bar for NAS file copies, driven by NasCopyCallback events.
+class _TransferProgressBar:
+    """Rich progress bar for file transfers, driven by TransferCallback events.
 
     Shows one file at a time with byte-level progress and transfer speed.
     A new task is created each time the (file index, phase) changes, so the bar
@@ -1154,16 +1154,16 @@ class _NasProgressBar:
         self._progress.stop()
 
     def make_callback(self):
-        """Return a NasCopyCallback that updates this bar as files are copied."""
-        from octacam.nas import NasCopyProgress
+        """Return a TransferCallback that updates this bar as files are copied."""
+        from octacam.transfer import TransferProgress
 
-        def on_progress(p: NasCopyProgress) -> None:
+        def on_progress(p: TransferProgress) -> None:
             key = (p.file_index, p.phase)
             if key != self._current_key:
                 if self._task is not None:
                     self._progress.remove_task(self._task)
                 self._current_key = key
-                verb = "verify" if p.phase == "verify" else "nas"
+                verb = "verify" if p.phase == "verify" else "copy"
                 desc = f"[{p.file_index}/{p.file_count}] {verb}: {p.filename}"
                 self._task = self._progress.add_task(
                     desc, total=p.file_size, speed="", completed=0
@@ -1333,7 +1333,7 @@ def _grid_and_transfer(
     Two sequential phases (grids then transfers) so each gets its own progress
     bar. Returns the number of files that failed to transfer."""
     from octacam.grid import build_grid_video
-    from octacam.nas import copy_folder_to_nas
+    from octacam.transfer import transfer_folder
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
@@ -1369,39 +1369,39 @@ def _grid_and_transfer(
                 grid_files[folder] = built
 
     # --- Phase 2: transfer --------------------------------------------------
-    nas_failed = 0
+    transfer_failed = 0
     if do_transfer:
         n_copied = n_skipped = 0
-        nas_bar = _NasProgressBar() if (show_bar and not dry_run) else None
-        with nas_bar or contextlib.nullcontext():
-            nas_cb = nas_bar.make_callback() if nas_bar else None
+        transfer_bar = _TransferProgressBar() if (show_bar and not dry_run) else None
+        with transfer_bar or contextlib.nullcontext():
+            transfer_cb = transfer_bar.make_callback() if transfer_bar else None
             for folder, outputs in folder_outputs.items():
                 cfg = folder_cfgs[folder]
                 dest = _transfer_dest(cfg, folder)
                 if dest is None:
                     continue
                 files = list(outputs) + grid_files.get(folder, [])
-                result = copy_folder_to_nas(
+                result = transfer_folder(
                     folder,
                     dest,
                     files_only=files,
                     dry_run=dry_run,
                     verify=cfg.transfer.checksum,
-                    on_progress=nas_cb,
+                    on_progress=transfer_cb,
                 )
                 n_copied += len(result.copied)
                 n_skipped += len(result.skipped)
-                nas_failed += len(result.failed)
+                transfer_failed += len(result.failed)
         if not dry_run:
             log.info(
                 "Transfer: %d copied, %d skipped, %d failed",
                 n_copied,
                 n_skipped,
-                nas_failed,
+                transfer_failed,
             )
-            if nas_failed:
-                log.error("%d file(s) failed to transfer", nas_failed)
-    return nas_failed
+            if transfer_failed:
+                log.error("%d file(s) failed to transfer", transfer_failed)
+    return transfer_failed
 
 
 @app.command()
@@ -1502,7 +1502,7 @@ def process(
         ),
     ] = False,
 ) -> None:
-    """Post-recording pipeline: transcode, build grids, and transfer to the NAS.
+    """Post-recording pipeline: transcode, build grids, and transfer recordings.
 
     Every setting — encoder args, grid layouts, transfer destination — is read
     from each recording's own octacam_config.toml (copied in at record time), so
@@ -1599,9 +1599,9 @@ def process(
             folder_outputs.setdefault(folder, sorted(folder.glob("*.mp4")))
 
     # --- Grid + transfer phases ---------------------------------------------
-    nas_failed = 0
+    transfer_failed = 0
     if not interrupted and (do_grid or do_transfer) and folder_outputs:
-        nas_failed = _grid_and_transfer(
+        transfer_failed = _grid_and_transfer(
             folder_outputs, do_grid, do_transfer, config_dir, dry_run, show_bar
         )
 
@@ -1616,8 +1616,8 @@ def process(
     problems = []
     if failures:
         problems.append(f"{failures} file(s) failed to transcode")
-    if nas_failed:
-        problems.append(f"{nas_failed} file(s) failed to transfer")
+    if transfer_failed:
+        problems.append(f"{transfer_failed} file(s) failed to transfer")
     if problems:
         sys.exit("; ".join(problems))
 

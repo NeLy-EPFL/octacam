@@ -84,7 +84,7 @@ def test_visualization_and_transfer_sections_roundtrip():
                 ],
             }
         ],
-        "transfer": {"directory": "/mnt/nas", "checksum": False},
+        "transfer": {"directory": "/mnt/store", "checksum": False},
     }
     assert tomllib.loads(cw._dumps(doc)) == doc
 
@@ -159,7 +159,7 @@ def test_backend_key_preserved_through_save(tmp_path):
 def test_with_process_params_overlays_and_preserves_other_sections():
     raw = {
         "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
-        "transfer": {"directory": "~/nas", "checksum": True},
+        "transfer": {"directory": "~/store", "checksum": True},
         "visualization": [{"name": "grid.mp4", "layout": [["a", "b"]]}],
     }
     edited = cw.with_process_params(
@@ -182,13 +182,13 @@ def test_with_process_params_noop_when_values_match():
     raw = {
         "record": {"fps": 100.0},
         "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
-        "transfer": {"directory": "~/nas", "checksum": True},
+        "transfer": {"directory": "~/store", "checksum": True},
     }
     assert (
         cw.with_process_params(
             raw,
             transcode_ffmpeg_params="-c:v libx264 -crf 20",
-            transfer_directory="~/nas",
+            transfer_directory="~/store",
             transfer_checksum=True,
         )
         == raw
@@ -214,10 +214,10 @@ def test_with_process_params_adds_sections_only_when_diverging():
     added = cw.with_process_params(
         {},
         transcode_ffmpeg_params="-c:v ffv1",
-        transfer_directory="~/nas",
+        transfer_directory="~/store",
         transfer_checksum=False,
     )
     assert added == {
         "transcode": {"ffmpeg_params": "-c:v ffv1"},
-        "transfer": {"directory": "~/nas", "checksum": False},
+        "transfer": {"directory": "~/store", "checksum": False},
     }
