@@ -1,14 +1,36 @@
-[gui]
-fps_default = 100.0
-duration_default = 5.0
-duration_unit_default_index = 0
-save_directory_default = "~/data/TL/%y%m%d-genotype/Fly1/001-bhv"
-trigger_source_default_index = 0
-video_writer_default_index = 0
-# "display" bakes each camera's rotation/flips into the video; "sensor" saves
-# the raw image. save_frame_timestamps re-enables the per-frame timestamp CSV.
-record_form_default = "display"
-save_frame_timestamps_default = false
+[record]
+fps = 100.0
+duration = 5.0
+duration_unit = "seconds" # frames | seconds | minutes | hours
+trigger_source = "software" # software | external
+
+experimenter = "PR"
+experiment = "experiment"
+subject_number = 1
+trial_number = 1
+
+directory = "~/octacam_data/{experimenter}"
+relative_directory = "%y%m%d-{experiment}/Fly{subject_number}/{trial_number:03d}"
+
+save_method = "ffmpeg" # ffmpeg | raw
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+save_transformed = true # whether to save the transformed video (flips/rotations applied)
+save_timestamps = false # whether to save the timestamp CSV.
+
+[transcode]
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+
+[[visualization]]
+name = "grid.mp4"
+layout = [
+    ["camera_LF", "",         "camera_RF"],
+    ["camera_LM", "camera_F", "camera_RM"],
+    ["camera_LH", "camera_H", "camera_RH"],
+]
+
+[transfer]
+directory = "/mnt/upramdya/data/{experimenter}/octacam_data" # record.directory/record.relative_directory will be transferred to transfer.directory/record.relative_directory
+checksum = true      # checksum each copy before promoting it (false = size-only)
 
 [[cameras]]
 serial_number = "0815-0000"
@@ -97,16 +119,3 @@ window_x = 0.33333333
 window_y = 0.33333333
 window_width = 0.33333333
 window_height = 0.6666667
-
-[grid]
-default = true
-layout = [
-    ["camera_LF", "",          "camera_RF"],
-    ["camera_LM", "camera_F",  "camera_RM"],
-    ["camera_LH", "camera_H",  "camera_RH"],
-]
-
-[nas]
-path = ""
-local_base = ""
-verify = true      # checksum each copy before promoting it (false = size-only)

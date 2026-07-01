@@ -5,7 +5,6 @@ QuickTime playback), so it must force full colour range or it loses the
 0-255 → 16-235 squeeze on every cell. See writer._color_range_args.
 """
 
-import json
 import logging
 import os
 import subprocess
@@ -23,17 +22,25 @@ pytest.importorskip("cv2")  # parity with the other ffmpeg-backed suites
 W, H = 64, 48
 
 
+_GRAY_FFMPEG_PARAMS = "-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray"
+
+
 def _gray_mp4(folder, name, frame=None):
     """Write a tiny gray (full-range) mp4 cell named ``<name>.mp4``."""
     if frame is None:
         frame = np.tile(np.arange(W, dtype=np.uint8) * (255 // (W - 1)), (H, 1))
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.astype(np.uint8).tobytes())
-    raw.with_suffix(".json").write_text(
-        json.dumps({"width": W, "height": H, "pixel_format": "Mono8", "fps": 10.0})
-    )
     out = folder / f"{name}.mp4"
-    transcode_raw(raw, crf=0, preset="ultrafast", output=out, pix_fmt="gray")
+    transcode_raw(
+        raw,
+        output=out,
+        ffmpeg_params=_GRAY_FFMPEG_PARAMS,
+        width=W,
+        height=H,
+        fps=10.0,
+        pixel_format="Mono8",
+    )
     return out
 
 
@@ -47,11 +54,16 @@ def _gray_mp4_sized(folder, name, w, h, value):
     frame = np.full((h, w), value, dtype=np.uint8)
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.tobytes())
-    raw.with_suffix(".json").write_text(
-        json.dumps({"width": w, "height": h, "pixel_format": "Mono8", "fps": 10.0})
-    )
     out = folder / f"{name}.mp4"
-    transcode_raw(raw, crf=0, preset="ultrafast", output=out, pix_fmt="gray")
+    transcode_raw(
+        raw,
+        output=out,
+        ffmpeg_params=_GRAY_FFMPEG_PARAMS,
+        width=w,
+        height=h,
+        fps=10.0,
+        pixel_format="Mono8",
+    )
     return out
 
 
@@ -107,22 +119,51 @@ def test_grid_yuv420p_preserves_full_range_end_to_end(tmp_path):
     ramp = np.tile(np.arange(W, dtype=np.uint8) * (255 // (W - 1)), (H, 1))
     _gray_mp4(tmp_path, "a", frame=ramp)
     out = build_grid_video(
-        tmp_path, layout=[["a", ""]], crf=0, preset="ultrafast", pix_fmt="yuv420p"
+        tmp_path,
+        layout=[["a", ""]],
+        ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
+        pix_fmt="yuv420p",
     )
     assert out is not None and out.exists()
 
     tag = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=color_range", "-of", "default=nw=1:nk=1", str(out)],
-        capture_output=True, text=True, check=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_range",
+            "-of",
+            "default=nw=1:nk=1",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert tag == "pc", tag
 
     # Crop the ramp cell back out and decode to full-range gray.
     dec = subprocess.run(
-        [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", str(out),
-         "-vf", f"crop={W}:{H}:0:0", "-f", "rawvideo", "-pixel_format", "gray", "pipe:1"],
-        capture_output=True, check=True,
+        [
+            find_ffmpeg(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(out),
+            "-vf",
+            f"crop={W}:{H}:0:0",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "gray",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
     ).stdout
     cell = np.frombuffer(dec, dtype=np.uint8)[: W * H].reshape(H, W)
     assert cell.min() <= 2 and cell.max() >= 250, (int(cell.min()), int(cell.max()))
@@ -133,32 +174,56 @@ def test_grid_letterboxes_non_uniform_sizes(tmp_path):
     # each mismatched cell is letterboxed (centred, black bars), never stretched
     # to fill.  Reference cell "a" is 64x48 (first present, row-major), so every
     # cell is 64x48.  "b" is wide (horizontal bars); "c" is tall (vertical bars).
-    _gray_mp4_sized(tmp_path, "a", 64, 48, 100)   # reference size
+    _gray_mp4_sized(tmp_path, "a", 64, 48, 100)  # reference size
     _gray_mp4_sized(tmp_path, "b", 128, 24, 255)  # wide white -> top/bottom bars
     _gray_mp4_sized(tmp_path, "c", 24, 128, 255)  # tall white -> left/right bars
     out = build_grid_video(
         tmp_path,
         layout=[["a", "b"], ["c", ""]],
-        crf=0,
-        preset="ultrafast",
+        ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
         pix_fmt="yuv420p",
     )
     assert out is not None and out.exists()
 
     # 2x2 grid of uniform 64x48 cells -> 128x96.
     dims = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(out)],
-        capture_output=True, text=True, check=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
     assert dims == "128x96", dims
 
     def _cell(x, y):
         dec = subprocess.run(
-            [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", str(out),
-             "-vf", f"crop=64:48:{x}:{y}", "-f", "rawvideo",
-             "-pixel_format", "gray", "pipe:1"],
-            capture_output=True, check=True,
+            [
+                find_ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(out),
+                "-vf",
+                f"crop=64:48:{x}:{y}",
+                "-f",
+                "rawvideo",
+                "-pixel_format",
+                "gray",
+                "pipe:1",
+            ],
+            capture_output=True,
+            check=True,
         ).stdout
         return np.frombuffer(dec, dtype=np.uint8)[: 64 * 48].reshape(48, 64)
 
@@ -171,7 +236,9 @@ def test_grid_letterboxes_non_uniform_sizes(tmp_path):
     # Tall cell "c" (bottom-left): black bars left & right, and at least one
     # full-height white content column.
     c = _cell(0, 48)
-    assert c[:, 0].max() < 40 and c[:, -1].max() < 40, "tall cell stretched, not letterboxed"
+    assert c[:, 0].max() < 40 and c[:, -1].max() < 40, (
+        "tall cell stretched, not letterboxed"
+    )
     assert (c.min(axis=0) > 200).any(), "no full-height content column in tall cell"
 
     # Reference cell "a" (top-left) fills its cell (no bars): mid-gray throughout.

@@ -32,8 +32,12 @@ def test_version():
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("gui", "list-cameras", "list-plugins", "record", "transcode"):
+    for command in ("gui", "list-cameras", "list-plugins", "record", "process"):
         assert command in result.output
+    # The three old post-recording commands are gone (subsumed by `process`).
+    assert "transcode " not in result.output
+    assert "\n  grid" not in result.output
+    assert "\n  nas" not in result.output
 
 
 def test_no_args_prints_help():
@@ -72,11 +76,16 @@ def test_list_plugins_lists_bundled_flywheel():
     assert status in ("available", "unavailable")
 
 
-def test_record_help_shows_enum_choices():
+def test_record_help_has_identity_overrides():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
-    assert "[x264|raw]" in result.output
-    assert "[software|hardware]" in result.output
+    # Encoding is config-only now; the record overrides are the identity fields
+    # that feed the save-directory template plus fps/duration/output.
+    for opt in ("--experimenter", "--experiment", "--subject", "--trial"):
+        assert opt in result.output
+    # The old encoding/form enum options are gone.
+    assert "[x264|raw]" not in result.output
+    assert "--record-form" not in result.output
 
 
 def test_invalid_log_level_rejected():
@@ -244,27 +253,33 @@ def test_transcode_requires_paths():
     assert result.exit_code != 0
 
 
-def test_record_help_lists_new_options():
+def test_record_help_drops_encoding_options():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
-    assert "--record-form" in result.output
-    assert "--save-frame-timestamps" in result.output
+    for kept in ("--fps", "--duration", "--output"):
+        assert kept in result.output
+    for gone in ("--crf", "--preset", "--codec", "--save-frame-timestamps"):
+        assert gone not in result.output
 
 
-def test_transcode_help_lists_new_options():
-    result = runner.invoke(app, ["transcode", "--help"])
+def test_process_help_lists_options():
+    result = runner.invoke(app, ["process", "--help"])
     assert result.exit_code == 0
     for opt in (
         "--recursive",
-        "--as-displayed",
-        "--format",
+        "--no-transcode",
+        "--no-grid",
+        "--no-transfer",
         "--remove-source",
     ):
         assert opt in result.output
+    # Encoding is config-driven now: the old per-run encoding flags are gone.
+    for gone in ("--as-displayed", "--format", "--crf", "--pix-fmt"):
+        assert gone not in result.output
 
 
-def test_transcode_help_lists_cache_selectors():
-    result = runner.invoke(app, ["transcode", "--help"])
+def test_process_help_lists_cache_selectors():
+    result = runner.invoke(app, ["process", "--help"])
     assert result.exit_code == 0
     for opt in ("--last", "--session", "--session-id", "--all"):
         assert opt in result.output
@@ -299,7 +314,7 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
             cli._warn_if_transcoding()
     finally:
         logger.removeHandler(handler)
-    assert any("transcode" in m and "CPU-heavy" in m for m in handler.messages)
+    assert any("transcod" in m and "CPU-heavy" in m for m in handler.messages)
 
 
 def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):

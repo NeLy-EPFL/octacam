@@ -30,3 +30,6 @@ htmlcov/
 
 # Benchmark outputs
 benchmarks/results/
+
+# Recorded camera data
+data/

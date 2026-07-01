@@ -11,7 +11,7 @@ octacam is the successor to SeptaCam, a tool for previewing, recording, and savi
 - See live updates of all cameras while recording.
 - Save frames directly to videos: H.264 (ffmpeg/x264, true monochrome
   4:0:0, crash-safe MKV) by default, or raw Mono8 dumps for maximum
-  throughput with offline transcoding (`octacam transcode`).
+  throughput with offline transcoding (`octacam process`).
 - Web GUI (`octacam gui`): control the rig from any browser; opens automatically
   on the local machine, and works remotely through a plain SSH tunnel
   (`ssh -L 8765:127.0.0.1:8765 <rig-hostname>`).
@@ -40,11 +40,11 @@ the ones a rig needs (see [Plugins](#plugins)).
 
 ```bash
 octacam gui <config_dir>      # web GUI on http://127.0.0.1:8765 (--host/--port/--no-browser)
-octacam record <config_dir>   # headless recording (--fps/--duration/--output/--codec
-                              #   x264|raw/--crf/--preset/--x264-params/--trigger/
-                              #   --record-form sensor|display/--save-frame-timestamps)
-octacam transcode <paths...>  # transcode folders/videos offline (-r/--as-displayed)
-octacam transcode --last      # …or the last recording / --session / --today (no paths)
+octacam record <config_dir>   # headless recording (--fps/--duration/--output and
+                              #   --experimenter/--experiment/--subject/--trial overrides)
+octacam process <paths...>    # transcode + grid + transfer, all config-driven
+                              #   (-r/--no-transcode/--no-grid/--no-transfer/--dry-run)
+octacam process --last        # …or the last recording / --session / --all (no paths)
 octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
 octacam list-plugins          # show bundled plugins and whether each can load
 octacam --help
@@ -52,6 +52,13 @@ octacam --help
 
 `gui` and `record` also accept `--plugin <name>` (repeatable) and
 `--no-plugins` (see [Plugins](#plugins)).
+
+Everything after recording — transcoding, composite grid videos, and copying to
+the NAS — is one command, **`octacam process`**. It reads all its settings
+(encoder parameters, grid layouts, transfer destination) from a copy of the
+rig's `octacam_config.toml` that each recording saves into its own folder, so no
+`--config` is needed. Skip any step with `--no-transcode` / `--no-grid` /
+`--no-transfer`.
 
 ### Recording outputs
 
@@ -62,24 +69,31 @@ the session start wall-clock time and recording settings. It also documents what
 the `dropped` count does *not* include — only frames the encoder/writer queue
 could not accept are counted, not frames the camera or transport never delivered
 (e.g. USB bandwidth gaps). For the latter, turn on the per-frame timestamp CSV
-(`--save-frame-timestamps`, off by default) and inspect the inter-frame gaps.
+(`record.save_timestamps = true`, off by default) and inspect the inter-frame gaps.
 
-By default frames are saved in **display** form: each camera's rotation/flips
-(as configured in the GUI's View tab) are baked into the video so the file
-matches what you see on screen. Pass `--record-form sensor` (or set
-`gui.record_form_default = "sensor"`) to save the raw, untransformed sensor
-image instead. Both are toggleable live in the web GUI's Record tab.
+By default frames are saved **transformed**: each camera's rotation/flips (as
+configured in the GUI's View tab) are baked into the video so the file matches
+what you see on screen. Set `record.save_transformed = false` to save the raw,
+untransformed sensor image instead. This is toggleable live in the web GUI's
+Record tab. A raw recording (`record.save_method = "raw"`) writes only the
+`.raw` byte dump per camera; its width/height/pixel-format/fps live in
+`recording_summary.json`, so `octacam process` can transcode it later without a
+per-camera sidecar.
 
-`octacam transcode` accepts any mix of folders and video files (and `-r` to
-recurse). A folder is transcoded according to its `recording_summary.json` when
-present; otherwise its `.mkv`/`.raw` files are transcoded with default
-parameters and no transform (with a warning). `--as-displayed` applies each
-video's recorded transform (skipped automatically when it was already baked in
-at record time); the default reproduces the file as saved. Output container and
-encoder settings default to mp4, `preset=veryslow`, `crf=20`, `pix_fmt=gray` and
-are set per run with `--format/--crf/--preset/--pix-fmt/--x264-params`. Pass
-`--remove-source` to delete each `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar)
-once it transcodes successfully — the `recording_summary.json` is always kept.
+Each recording also saves a copy of the rig's `octacam_config.toml` into its own
+folder. That is what lets `octacam process` transcode, grid, and transfer with
+no `--config`: it reads the encoder args (`[transcode].ffmpeg_params`), grid
+layouts (`[[visualization]]`), and transfer destination (`[transfer]`) from that
+embedded copy.
+
+`octacam process` accepts any mix of recording folders (and `-r` to recurse). A
+folder is transcoded to mp4 according to its `recording_summary.json`; encoder
+settings come from the config, not the command line. Recordings are reproduced
+as saved (any display transform was already baked in at record time). Pass
+`--remove-source` to delete each `.mkv`/`.raw` once it transcodes successfully —
+the `recording_summary.json` is always kept. Skip any step with
+`--no-transcode` / `--no-grid` / `--no-transfer` (e.g. `--no-transcode
+--no-transfer` regenerates just the grids after a layout change).
 
 Progress is shown as an octacam-style bar (`[i/N] name`, percent, fps, speed,
 elapsed) reformatted live from ffmpeg's output. Pass `--progress-style ffmpeg`
@@ -87,43 +101,36 @@ to stream ffmpeg's own native output verbatim instead.
 
 Instead of typing paths, you can let octacam remember where it recorded. Every
 finished recording (from the GUI or `octacam record`) is noted in a small cache
-under `~/.cache/octacam` (override with `OCTACAM_CACHE_DIR`), so you can transcode
+under `~/.cache/octacam` (override with `OCTACAM_CACHE_DIR`), so you can process
 without retyping a single path:
 
 ```bash
-octacam transcode --last      # the most recent recording folder
-octacam transcode --session   # every folder from the last GUI session
-octacam transcode --all       # every folder still in the cache
+octacam process --last      # the most recent recording folder
+octacam process --session   # every folder from the last GUI session
+octacam process --all       # every folder still in the cache
 ```
 
-These combine with the encoding flags above (e.g. `octacam transcode --session
---format mkv`). `--session` means the *most recent* session; `--session-id <id>`
-names an exact one if a later recording would otherwise steal "most recent" out
-from under it. When a GUI session ends, octacam prints ready-to-run `--session`
-and `--all` commands. Folders that were deleted between recording and transcoding
-are silently skipped. The cache prunes itself (entries older than 30 days are
-dropped on each write), so it never grows without bound.
+`--session` means the *most recent* session; `--session-id <id>` names an exact
+one if a later recording would otherwise steal "most recent" out from under it.
+When a GUI session ends, octacam prints ready-to-run `--session` and `--all`
+commands. Folders that were deleted between recording and processing are silently
+skipped. The cache prunes itself (entries older than 30 days are dropped on each
+write), so it never grows without bound.
 
 ### Grid video
 
-After transcoding you can generate a single composite video that tiles all cameras
-in a configurable grid.  Pass `--grid` to `octacam transcode` to produce one
-`grid.mp4` per recording folder right after the individual files are transcoded:
-
-```bash
-octacam transcode --all --grid --config configs/2p_1
-```
-
-The camera arrangement is read from the `[grid]` section of the rig's
-`octacam_config.toml`.  Each cell is a camera name (as declared in
-`[[cameras]]`); an empty string `""` places a black fill.  All rows must have
-the same number of columns.
+`octacam process` generates one composite video per recording folder that tiles
+all cameras in a configurable grid, right after the individual files are
+transcoded. Each grid comes from a `[[visualization]]` entry in the rig's
+`octacam_config.toml`; list several to produce several composites. Each cell is a
+camera name (as declared in `[[cameras]]`); an empty string `""` places a black
+fill. All rows must have the same number of columns.
 
 ```toml
 # configs/my_rig/octacam_config.toml
 
-[grid]
-default = true   # generate grid.mp4 automatically when --config is passed
+[[visualization]]
+name = "grid.mp4"            # output filename inside each recording folder
 layout = [
     ["camera_LF", "",          "camera_RF"],
     ["camera_LM", "camera_F",  "camera_RM"],
@@ -131,91 +138,67 @@ layout = [
 ]
 ```
 
-Set `default = true` and the grid is generated automatically whenever
-`--config` is passed to `octacam transcode` — no `--grid` flag needed at
-the end of a recording session.  Omit it (or set `default = false`) to keep
-the grid opt-in via `--grid`.  Passing `--no-grid` always disables the grid,
-even when the config says `default = true`.
-
-When `--config` is omitted entirely, the built-in default for the 7-camera 2p
-rig is used (same arrangement as above).  For an 8-camera rig add `camera_H`
-in the bottom-centre cell instead of the empty string — see the example configs
-for [2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
+The grid is generated whenever `process` runs (skip it with `--no-grid`). If a
+config lists `[[cameras]]` but no `[[visualization]]`, a near-square layout is
+derived from that rig's own cameras. A layout cell naming a camera that isn't in
+`[[cameras]]` is reported (and renders black) instead of failing silently. For an
+8-camera rig add `camera_H` in the bottom-centre cell instead of the empty
+string — see [2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
 [emulate_8_cameras](configs/emulate_8_cameras/octacam_config.toml) (8 cameras).
-If a config lists `[[cameras]]` but has no usable `[grid] layout`, a near-square
-layout is derived from that rig's own cameras rather than falling back to the
-7-camera 2p default.  A layout cell naming a camera that isn't in `[[cameras]]`
-is reported (and renders black) instead of failing silently.
 
 To regenerate the grid for already-transcoded folders without re-running
 the full transcode:
 
 ```bash
-# single folder
-octacam grid /data/octacam/260620-wt/Fly1/001-bhv --config configs/2p_1
+# single folder — grid only (skip transcode + transfer)
+octacam process /data/octacam/260620-wt/Fly1/001-bhv --no-transcode --no-transfer
 
-# whole experiment tree at once
-octacam grid /data/octacam/260620-wt -r --config configs/2p_1
+# whole experiment tree at once — grids only
+octacam process /data/octacam/260620-wt -r --no-transcode --no-transfer
 ```
 
-### NAS export
+### NAS transfer
 
-Copy all transcoded mp4s, grid videos, and `recording_summary.json` to a
-network drive while preserving the fly/trial directory tree:
+`octacam process` copies all transcoded mp4s, grid videos, and
+`recording_summary.json` to a network drive, mirroring the fly/trial directory
+tree. The destination is `transfer.directory` joined with the recording's
+`relative_directory` (the sub-path resolved at record time and stored in the
+summary), so a recording made under `.../260620-wt/Fly1/001-bhv` lands at
+`<transfer.directory>/260620-wt/Fly1/001-bhv` and distinct trials that share a
+name never collide. Configure it once in the rig's `octacam_config.toml`:
 
-```bash
-octacam nas /data/octacam/260620-wt -r \
-    --nas-path /mnt/nas/matthias \
-    --nas-local-base /data/octacam
+```toml
+[transfer]
+directory = "/mnt/nas/matthias/{experimenter}"   # {experimenter} etc. expand
+checksum = true                                  # content-verify each copy (default)
 ```
-
-With `--nas-local-base` set, a recording at
-`/data/octacam/260620-wt/Fly1/001-bhv` lands at
-`/mnt/nas/matthias/260620-wt/Fly1/001-bhv` — fly and trial identity are
-preserved.  Omit it when copying a single folder and only the last path
-component is used; when copying several recordings at once (e.g. with `-r`),
-the tree above them is mirrored automatically (preserving the experiment/date
-folder), so distinct trials that share a name never collide on the NAS — within
-a run or across successive runs.
 
 **Integrity and resume.**  Each file is streamed to a temporary name and only
 swapped onto its final name once it is whole and content-verified (a blake2b
 checksum of the source is compared against the written copy), so an interrupted
-copy never leaves a truncated file masquerading as complete.  Re-running the
-same command skips files already present (by size), so a copy that was killed
-part-way simply resumes — at most the one in-progress file is redone.  Flags:
-
-- `--no-verify` — skip the checksum and do a faster size-only check (trusted/fast links).
-- `--checksum` — when a file already exists on the NAS, decide whether to skip it
-  by full checksum rather than size (repair mode: re-copies files whose bytes differ).
-
-Configure the NAS once in the rig's `octacam_config.toml`:
-
-```toml
-[nas]
-path = "/mnt/nas/matthias"   # NAS mount point
-local_base = "/data/octacam" # local root to strip from paths
-verify = true                # checksum each copy before promoting it (default)
-```
+copy never leaves a truncated file masquerading as complete.  Re-running skips
+files already present (by size), so a copy that was killed part-way simply
+resumes — at most the one in-progress file is redone. Set `checksum = false` for
+a faster size-only verify on trusted/fast links.
 
 ### One-command end-of-day workflow
 
-With `[grid] default = true` and `[nas]` filled in, the entire post-recording
-pipeline — transcode → grid → NAS — is a single command:
+Because each recording embeds its own config, the entire post-recording
+pipeline — transcode → grid → transfer — is a single command with no `--config`:
 
 ```bash
-octacam transcode --all --config configs/2p_1
+octacam process --all
 ```
 
 Each step shows a live progress bar (frame/fps/speed for transcode and grid;
-MB/s per file for NAS, then a verify pass).  `--dry-run` on any of these
-commands logs the intended ffmpeg call and NAS copy plan without writing
-anything — useful for validating paths on a new workstation.
+MB/s per file for transfer, then a verify pass).  `--dry-run` logs the intended
+grid ffmpeg call and transfer plan without writing anything — useful for
+validating paths on a new workstation.
 
 Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
-startup when a transcode is already running on the same machine (it competes with
-live capture/encoding and can cause dropped frames), so you can choose to wait for
-it to finish.
+startup when an `octacam process` is already transcoding on the same machine (it
+competes with live capture/encoding and can cause dropped frames), so you can
+choose to wait for it to finish.
 
 `octacam gui` opens the default browser automatically. It skips this over an SSH
 session or on a headless host (where the browser would launch on the rig instead
@@ -229,7 +212,8 @@ ssh -L 8765:127.0.0.1:8765 <rig-hostname> octacam gui <config_dir>
 ```
 
 `<config_dir>` contains an optional `octacam_config.toml` (camera names, display
-layout, GUI defaults, and the camera [`backend`](#camera-backends)) plus the
+layout, the `[record]`/`[transcode]`/`[[visualization]]`/`[transfer]` settings,
+and the camera [`backend`](#camera-backends)) plus the
 per-camera sensor-parameter files — `<serial>.pfs` for Basler, `<serial>.json`
 for FLIR — see [configs/](configs/) for examples.
 

@@ -2,17 +2,16 @@
 
 The stdlib ships ``tomllib`` for *reading* TOML but no writer, and octacam
 keeps its dependency set deliberately lean, so this module hand-serializes the
-small, fixed config schema (``[gui]`` / ``[[cameras]]`` / ``[[plugins]]`` /
-``[grid]`` / ``[nas]``).
+small, fixed config schema (``[record]`` / ``[transcode]`` / ``[gui]`` /
+``[[cameras]]`` / ``[[plugins]]`` / ``[[visualization]]`` / ``[transfer]``).
 
 Two design choices keep saves faithful:
 
 * The writer starts from the **raw parsed TOML** (``tomllib.loads`` of the
   existing file) and patches only the per-camera display fields the GUI
-  changed. ``[gui]`` and ``[[plugins]]`` are preserved verbatim. This matters
-  because :func:`octacam.config._finalize` ``strftime``-expands
-  ``gui.save_directory_default`` at parse time, so re-emitting it from the
-  parsed model would bake today's date into the saved template.
+  changed. Every other section is preserved verbatim, so a GUI camera-display
+  save never touches (or drops) the record/transcode/visualization/transfer
+  sections, and templated paths like ``record.directory`` stay unexpanded.
 * Every file is written through a temp file + ``os.replace`` so a crash can
   never leave a truncated config behind.
 """
@@ -112,21 +111,25 @@ def _dumps(data: dict) -> str:
     if scalars:
         blocks.append("\n".join(f"{k} = {_toml_value(v)}" for k, v in scalars.items()))
 
-    gui = data.get("gui")
-    if isinstance(gui, dict) and gui:
-        block("gui", gui)
+    # Single-table sections, in schema order; each preserved verbatim so a GUI
+    # camera-display save never wipes a section it doesn't touch.
+    for header in ("record", "transcode", "gui"):
+        table = data.get(header)
+        if isinstance(table, dict) and table:
+            block(header, table)
     for camera in data.get("cameras", []) or []:
         if isinstance(camera, dict):
             block("cameras", camera, array=True)
     for plugin in data.get("plugins", []) or []:
         if isinstance(plugin, dict):
             block("plugins", plugin, array=True)
-    # Preserve the [grid]/[nas] post-processing sections so a GUI save (which
-    # round-trips through here for camera-display tweaks) never wipes them.
-    for header in ("grid", "nas"):
-        table = data.get(header)
-        if isinstance(table, dict) and table:
-            block(header, table)
+    # [[visualization]] is an array of tables (multiple named grids).
+    for viz in data.get("visualization", []) or []:
+        if isinstance(viz, dict):
+            block("visualization", viz, array=True)
+    transfer = data.get("transfer")
+    if isinstance(transfer, dict) and transfer:
+        block("transfer", transfer)
 
     return "\n\n".join(blocks) + "\n" if blocks else ""
 

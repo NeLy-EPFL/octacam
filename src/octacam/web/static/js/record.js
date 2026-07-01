@@ -49,7 +49,7 @@ export class RecordTab {
 
     for (const f of formats) {
       const opt = document.createElement("option");
-      opt.value = f.codec;
+      opt.value = f.save_method;
       opt.textContent = f.label;
       this.format.appendChild(opt);
     }
@@ -70,7 +70,7 @@ export class RecordTab {
       this._put({ trigger_source: this.trigger.value }, [this.trigger])
     );
     this.format.addEventListener("change", () =>
-      this._put({ codec: this.format.value }, [this.format])
+      this._put({ save_method: this.format.value }, [this.format])
     );
     this.recordForm.addEventListener("change", () =>
       this._put({ record_form: this.recordForm.value }, [this.recordForm])
@@ -118,8 +118,8 @@ export class RecordTab {
     if (s.trigger_source && canSet(this.trigger)) {
       this.trigger.value = s.trigger_source;
     }
-    if (s.codec && canSet(this.format)) {
-      this.format.value = s.codec;
+    if (s.save_method && canSet(this.format)) {
+      this.format.value = s.save_method;
     }
     if (s.record_form && canSet(this.recordForm)) {
       this.recordForm.value = s.record_form;

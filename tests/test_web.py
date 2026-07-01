@@ -95,8 +95,8 @@ def test_system_and_settings_endpoints(client):
     system = client.get("/api/system").json()
     assert len(system["cameras"]) == 2
     assert system["cameras"][0]["width"] > 0
-    assert {f["codec"] for f in system["formats"]} == {
-        "x264",
+    assert {f["save_method"] for f in system["formats"]} == {
+        "ffmpeg",
         "raw",
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
@@ -108,9 +108,10 @@ def test_system_and_settings_endpoints(client):
     assert settings["record_form"] == "display"
     assert settings["save_frame_timestamps"] is False
 
-    response = client.put("/api/settings", json={"fps": 60.0, "crf": 18})
+    response = client.put("/api/settings", json={"fps": 60.0, "save_method": "raw"})
     assert response.status_code == 200
     assert response.json()["fps"] == 60.0
+    assert response.json()["save_method"] == "raw"
 
     # record_form/save_frame_timestamps patch; invalid record_form is rejected.
     patched = client.put(
@@ -121,14 +122,13 @@ def test_system_and_settings_endpoints(client):
     assert patched.json()["record_form"] == "sensor"
     assert patched.json()["save_frame_timestamps"] is True
     assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
-
-    # libx264 knobs (crf and the free-form -x264-params passthrough) patch too
-    patched = client.put("/api/settings", json={"x264_params": "keyint=30:scenecut=0"})
-    assert patched.status_code == 200
-    assert patched.json()["x264_params"] == "keyint=30:scenecut=0"
+    # Encoding params are config-only now, not live settings: a bad save_method
+    # is rejected, and dropped encoder knobs are unknown fields (422).
+    assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
     assert client.put("/api/settings", json={"fps": -1}).status_code == 422
     assert client.put("/api/settings", json={"bogus": 1}).status_code == 422
+    assert client.put("/api/settings", json={"crf": 18}).status_code == 422
 
     validation = client.post(
         "/api/save-dir/validate", json={"path": "~/somewhere"}

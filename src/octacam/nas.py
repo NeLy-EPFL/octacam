@@ -1,21 +1,18 @@
 """Copy transcoded recordings to a NAS or any writable destination path.
 
-Typical call after ``octacam transcode --grid --nas-path /mnt/nas/matthias``:
+Typical call from the ``octacam process`` transfer step:
 
     copy_folder_to_nas(
         folder=Path("/data/octacam/260620-genotype/Fly1/001-bhv"),
-        nas_root=Path("/mnt/nas/matthias"),
-        local_base=Path("/data/octacam"),  # optional: mirrors full path structure
+        dest=Path("/mnt/nas/matthias/260620-genotype/Fly1/001-bhv"),
         files_only=[Path(".../camera_LF.mp4"), ...],  # only the transcoded mp4s
     )
 
-Path mirroring:  when *local_base* is given and *folder* lies under it, the
-path relative to *local_base* is reproduced under *nas_root*, so the NAS gets
-the same ``260620-genotype/Fly1/001-bhv`` hierarchy.  If *local_base* is
-omitted (or *folder* is not under it), only the last component of *folder* is
-used.  The CLI derives a sensible *local_base* automatically when copying more
-than one recording at once, so distinct trials sharing a name never collide
-(see ``cli._effective_nas_local_base``).
+Path mirroring:  the caller resolves *dest* — for ``octacam process`` that is
+``transfer.directory`` joined with the recording's ``relative_directory`` (the
+sub-path resolved at record time and stored in recording_summary.json), so the
+NAS reproduces the local ``260620-genotype/Fly1/001-bhv`` hierarchy and distinct
+trials sharing a name never collide.
 
 Reliability:  each file is streamed to a unique sibling temp in the destination
 directory and only ``os.replace``-d onto its final name once whole and (by
@@ -56,11 +53,11 @@ _STALE_TEMP_AGE_S = 24 * 3600
 class NasCopyProgress:
     """Progress snapshot for one file-copy chunk."""
 
-    file_index: int   # 1-based index within the current folder
-    file_count: int   # total files being copied for this folder
-    filename: str     # basename of the file being copied
-    bytes_done: int   # bytes written (copy) or read back (verify) so far
-    file_size: int    # total file size in bytes
+    file_index: int  # 1-based index within the current folder
+    file_count: int  # total files being copied for this folder
+    filename: str  # basename of the file being copied
+    bytes_done: int  # bytes written (copy) or read back (verify) so far
+    file_size: int  # total file size in bytes
     elapsed_s: float  # elapsed seconds since this phase started
     phase: str = "copy"  # "copy" (writing) or "verify" (reading back to hash)
 
@@ -314,26 +311,22 @@ def nas_destination(
 
 def copy_folder_to_nas(
     folder: Path,
-    nas_root: Path,
-    local_base: Path | None = None,
+    dest: Path,
     files_only: list[Path] | None = None,
     dry_run: bool = False,
     verify: bool = True,
     checksum: bool = False,
     on_progress: NasCopyCallback | None = None,
 ) -> NasCopyResult:
-    """Copy mp4s (and recording_summary.json) from *folder* to *nas_root*.
+    """Copy mp4s (and recording_summary.json) from *folder* to *dest*.
 
     Parameters
     ----------
     folder:
         Source recording directory.
-    nas_root:
-        Root of the NAS destination (e.g. ``/mnt/nas/matthias``).
-    local_base:
-        Local root to strip when computing the NAS sub-path.  If *folder* is
-        ``/data/octacam/exp/Fly1`` and *local_base* is ``/data/octacam``, the
-        NAS destination becomes ``nas_root/exp/Fly1``.
+    dest:
+        The exact destination directory to copy into (the caller resolves it,
+        e.g. ``transfer.directory / relative_directory``).
     files_only:
         Explicit list of files to copy; overrides the default (all *.mp4 in
         *folder*).  ``recording_summary.json`` is always appended if present.
@@ -352,9 +345,6 @@ def copy_folder_to_nas(
     Returns a :class:`NasCopyResult` (truthy on success, falsy on hard failure
     or nothing to copy).
     """
-    # --- Compute destination path -------------------------------------------
-    dest = nas_destination(folder, nas_root, local_base)
-
     # --- Decide which files to copy -----------------------------------------
     if files_only is not None:
         candidates = list(files_only)

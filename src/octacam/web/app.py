@@ -70,9 +70,10 @@ FRAME_HEADER = struct.Struct("<BBBBIQfI")
 class SettingsPatch(BaseModel):
     """Partial update for RecordingSettings; unknown keys are rejected (422).
 
-    Cross-field rules (fps > 0, known codec, …) stay in
+    Cross-field rules (fps > 0, known save_method, …) stay in
     RecordingController.update_settings — only the fields actually sent are
-    forwarded, via model_dump(exclude_unset=True)."""
+    forwarded, via model_dump(exclude_unset=True). Encoding args are config-only
+    (record.ffmpeg_params); the GUI edits only these live-recording knobs."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -80,12 +81,7 @@ class SettingsPatch(BaseModel):
     duration_s: float | None = None
     save_dir: str | None = None
     trigger_source: str | None = None
-    codec: str | None = None
-    crf: int | None = None
-    preset: str | None = None
-    pix_fmt: str | None = None
-    remux_mp4: bool | None = None
-    x264_params: str | None = None
+    save_method: str | None = None
     record_form: str | None = None
     save_frame_timestamps: bool | None = None
 
@@ -539,8 +535,8 @@ def create_app(
                 state.config.gui.display_refresh_interval_ms
             ),
             "formats": [
-                {"codec": codec, "label": video_format.label}
-                for codec, video_format in FORMATS.items()
+                {"save_method": save_method, "label": video_format.label}
+                for save_method, video_format in FORMATS.items()
             ],
             "cameras": cameras,
         }

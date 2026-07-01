@@ -9,7 +9,8 @@ full (or once the sink has failed). Available sinks:
   entirely in the child process, outside the GIL. Validated on the rig:
   8 parallel ultrafast encoders sustain >1200 fps aggregate at 1080p
   (see docs/web-gui-plan.md).
-- RawVideoWriter: raw Mono8 dump + JSON sidecar, for `octacam transcode`.
+- RawVideoWriter: raw Mono8 dump, transcoded later by `octacam process`
+  (its geometry lives in the recording's recording_summary.json).
 """
 
 # The sink handles (_queue/_proc/_writer) follow an open -> use -> close
@@ -18,10 +19,10 @@ full (or once the sink has failed). Available sinks:
 # pyright: reportOptionalMemberAccess=false
 
 import contextlib
-import json
 import logging
 import os
 import queue
+import shlex
 import shutil
 import subprocess
 import threading
@@ -35,16 +36,37 @@ log = logging.getLogger("octacam")
 _SENTINEL = None
 FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 
-# Default libx264 encoder parameters. The single source of truth shared by the
-# writer, the RecordingSettings dataclass, the config (gui.*_default), and the
-# CLI, so the default can never drift between layers. CRF 18 is the capture
-# default (near-visually-lossless; offline transcoding can re-encode harder).
+# Building blocks for the default ffmpeg_params strings below. CRF 18 is the
+# capture default (near-visually-lossless; offline transcoding re-encodes
+# harder at a slower preset).
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
 DEFAULT_PIX_FMT = "gray"
 # Extra libx264 options passed verbatim to ffmpeg's -x264-params (e.g.
 # "keyint=30:scenecut=0"); empty means the flag is omitted entirely.
 DEFAULT_X264_PARAMS = ""
+
+# Encoder output args as a single ffmpeg string — the config's single source of
+# truth (record.ffmpeg_params / transcode.ffmpeg_params), shlex-split and
+# spliced verbatim after the derived input args (see build_encode_args). The
+# capture default uses a fast preset to keep up with the cameras; the transcode
+# default re-encodes harder offline.
+DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
+DEFAULT_TRANSCODE_FFMPEG_PARAMS = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+
+# Recorded pixel format -> ffmpeg rawvideo input pixel format / bytes-per-pixel.
+# Mono8 is the invariant every backend records today; the maps give a single
+# seam to extend if a backend ever records Mono10/RGB.
+_INPUT_PIX_FMT = {"Mono8": "gray"}
+_BYTES_PER_PIXEL = {"Mono8": 1}
+
+
+def _input_pix_fmt(pixel_format: str) -> str:
+    return _INPUT_PIX_FMT.get(pixel_format, "gray")
+
+
+def _bytes_per_pixel(pixel_format: str) -> int:
+    return _BYTES_PER_PIXEL.get(pixel_format, 1)
 
 
 def _is_limited_range_yuv(pix_fmt: str) -> bool:
@@ -129,37 +151,105 @@ def find_ffmpeg() -> str:
     )
 
 
-def build_x264_args(
+def _extract_opt(tokens: list[str], names: tuple[str, ...]) -> str | None:
+    """Return the value token following the first of ``names`` in ``tokens``."""
+    for i, tok in enumerate(tokens):
+        if tok in names and i + 1 < len(tokens):
+            return tokens[i + 1]
+    return None
+
+
+def _strip_opts(tokens: list[str], names: tuple[str, ...]) -> list[str]:
+    """Return ``tokens`` with each ``name`` option and its value token removed.
+
+    Used by the grid compositor, which owns its own ``-pix_fmt``/filter handling
+    and must drop those from a config ``ffmpeg_params`` string while keeping the
+    encoder choice (``-c:v``/``-preset``/``-crf``)."""
+    cleaned: list[str] = []
+    skip = False
+    for tok in tokens:
+        if skip:
+            skip = False
+            continue
+        if tok in names:
+            skip = True
+            continue
+        cleaned.append(tok)
+    return cleaned
+
+
+def _merge_vf(transform_vf: str, tokens: list[str]) -> tuple[list[str], str]:
+    """Pull any ``-vf``/``-filter:v`` out of ``tokens`` and merge with the
+    caller-owned transform filter.
+
+    ffmpeg accepts only one ``-vf``; the display-transform filter is octacam's
+    to inject, so a user filter inside ``ffmpeg_params`` must be merged rather
+    than left to silently override it. The transform runs first (rotate/flip),
+    the user's filter after — matching the numpy transform ordering. Returns the
+    tokens with ``-vf`` removed and the single merged filter chain ("" if none).
+    """
+    cleaned: list[str] = []
+    user_vf = ""
+    skip = False
+    for i, tok in enumerate(tokens):
+        if skip:
+            skip = False
+            continue
+        if tok in ("-vf", "-filter:v"):
+            if i + 1 < len(tokens):
+                user_vf = tokens[i + 1]
+                skip = True
+            continue
+        cleaned.append(tok)
+    return cleaned, ",".join(p for p in (transform_vf, user_vf) if p)
+
+
+def _output_args(ffmpeg_params: str, vf: str) -> tuple[list[str], str, list[str]]:
+    """Split a config ``ffmpeg_params`` string into the pieces ffmpeg needs.
+
+    Returns ``(encoder_tokens, merged_vf, color_range_args)``: the verbatim
+    encoder tokens (with any user ``-vf`` removed), the single merged filter
+    chain (transform + user filter + full-range conversion for limited-range
+    YUV), and the ``-color_range`` tag args. Shared by the raw-input encoder
+    (:func:`build_encode_args`) and :func:`transcode_encoded` so both apply the
+    ``-vf`` merge and full-range handling identically.
+    """
+    tokens = shlex.split(ffmpeg_params)
+    out_pix_fmt = _extract_opt(tokens, ("-pix_fmt", "-pixel_format")) or ""
+    tokens, merged_vf = _merge_vf(vf, tokens)
+    merged_vf = _full_range_vf(out_pix_fmt, merged_vf)
+    return tokens, merged_vf, _color_range_args(out_pix_fmt)
+
+
+def build_encode_args(
     ffmpeg: str,
     output: str,
     fps: float,
     width: int,
     height: int,
-    crf: int,
-    preset: str,
-    pix_fmt: str,
+    ffmpeg_params: str,
+    *,
     source: str = "pipe:0",
-    x264_params: str = "",
     vf: str = "",
+    input_pix_fmt: str = "gray",
 ) -> list[str]:
-    """ffmpeg argv encoding rawvideo GRAY8 (from `source`) to x264.
+    """ffmpeg argv encoding a rawvideo stream (from `source`) with `ffmpeg_params`.
 
-    pix_fmt "gray" produces true monochrome 4:0:0 H.264 (decodes in all
-    ffmpeg-based tools; browsers would need yuv420p). Note: ffprobe shows
-    such streams as yuvj420p because the H.264 decoder synthesizes neutral
-    chroma; the x264 encoder log ("4:0:0, 8-bit") is the source of truth.
+    The **input** args (``-f rawvideo -pixel_format … -video_size … -framerate
+    …``) are derived from the frame geometry; the **output/encoder** args come
+    verbatim from ``ffmpeg_params`` (shlex-split), e.g. ``-c:v libx264 -preset
+    ultrafast -crf 18 -pix_fmt gray``. Any ``-vf`` inside ``ffmpeg_params`` is
+    merged with the caller-owned ``vf`` (display transform) into one filter
+    chain (see :func:`_merge_vf`). For a limited-range YUV ``-pix_fmt`` a
+    full-range conversion filter + tag is injected so 0-255 luma survives (see
+    :func:`_full_range_vf`).
 
-    ``x264_params``, when non-empty, is passed verbatim as ffmpeg's
-    ``-x264-params`` (a single ``opt=val:opt2=val2`` token) so any libx264
-    knob beyond crf/preset can be set from config without a dedicated flag.
-
-    ``vf``, when non-empty, is a single ffmpeg ``-vf`` filter chain (e.g.
-    ``transpose=1,hflip``) applied before encoding — used by `octacam
-    transcode --as-displayed` to bake a display orientation in. For a
-    limited-range YUV ``pix_fmt`` a full-range conversion filter is appended so
-    0-255 luma survives (see :func:`_full_range_vf`).
+    ``-pix_fmt gray`` produces true monochrome 4:0:0 H.264 (decodes in all
+    ffmpeg-based tools; browsers would need yuv420p). Note: ffprobe shows such
+    streams as yuvj420p because the H.264 decoder synthesizes neutral chroma;
+    the x264 encoder log ("4:0:0, 8-bit") is the source of truth.
     """
-    vf = _full_range_vf(pix_fmt, vf)
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf)
     return [
         ffmpeg,
         "-hide_banner",
@@ -168,24 +258,16 @@ def build_x264_args(
         "-f",
         "rawvideo",
         "-pixel_format",
-        "gray",
+        input_pix_fmt,
         "-video_size",
         f"{width}x{height}",
         "-framerate",
         f"{fps:g}",
         "-i",
         source,
-        *(["-vf", vf] if vf else []),
-        "-c:v",
-        "libx264",
-        "-preset",
-        preset,
-        "-crf",
-        str(crf),
-        *(["-x264-params", x264_params] if x264_params else []),
-        "-pix_fmt",
-        pix_fmt,
-        *_color_range_args(pix_fmt),
+        *(["-vf", merged_vf] if merged_vf else []),
+        *tokens,
+        *color_args,
         "-y",
         str(output),
     ]
@@ -309,19 +391,13 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
     def __init__(
         self,
-        crf: int = DEFAULT_CRF,
-        preset: str = DEFAULT_PRESET,
-        pix_fmt: str = DEFAULT_PIX_FMT,
+        ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS,
         remux_mp4: bool = False,
         max_queue_size: int = 20,
-        x264_params: str = DEFAULT_X264_PARAMS,
     ):
         super().__init__(max_queue_size)
-        self.crf = crf
-        self.preset = preset
-        self.pix_fmt = pix_fmt
+        self.ffmpeg_params = ffmpeg_params
         self.remux_mp4 = remux_mp4
-        self.x264_params = x264_params
         self._proc: subprocess.Popen | None = None
         self._filename: str | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
@@ -333,16 +409,13 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
     def _open_sink(self, filename, fps, frame_size):
         width, height = frame_size
-        args = build_x264_args(
+        args = build_encode_args(
             find_ffmpeg(),
             filename,
             fps,
             width,
             height,
-            self.crf,
-            self.preset,
-            self.pix_fmt,
-            x264_params=self.x264_params,
+            self.ffmpeg_params,
         )
         self._filename = filename
         self._stderr_tail.clear()
@@ -445,27 +518,18 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
 
 class RawVideoWriter(AsyncFrameWriter):
-    """Dumps raw Mono8 frames + a JSON sidecar for `octacam transcode`."""
+    """Dumps raw Mono8 frames for later transcoding by `octacam process`.
+
+    The stream carries no geometry of its own; width/height/pixel_format/fps
+    for the transcode come from the recording's recording_summary.json.
+    """
 
     def __init__(self, max_queue_size: int = 20):
         super().__init__(max_queue_size)
         self._file = None
 
     def _open_sink(self, filename, fps, frame_size):
-        width, height = frame_size
-        path = Path(filename)
-        path.with_suffix(".json").write_text(
-            json.dumps(
-                {
-                    "width": width,
-                    "height": height,
-                    "pixel_format": "Mono8",
-                    "fps": fps,
-                }
-            )
-            + "\n"
-        )
-        self._file = open(path, "wb", buffering=0)
+        self._file = open(Path(filename), "wb", buffering=0)
 
     def _write_frame(self, frame):
         _write_all(self._file, frame)
@@ -483,58 +547,45 @@ class RawVideoWriter(AsyncFrameWriter):
 
 @dataclass(frozen=True)
 class VideoFormat:
-    """A recording format selectable from the GUI/CLI."""
+    """A recording method selectable from the GUI/CLI."""
 
-    codec: str  # "x264" | "raw"
+    save_method: str  # "ffmpeg" | "raw"
     extension: str
     label: str
-    crf: int = DEFAULT_CRF
-    preset: str = DEFAULT_PRESET
-    pix_fmt: str = DEFAULT_PIX_FMT
+    ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
     remux_mp4: bool = False
-    x264_params: str = DEFAULT_X264_PARAMS
 
     def create_writer(self, max_queue_size: int = 20) -> AsyncFrameWriter:
-        if self.codec == "x264":
+        if self.save_method == "ffmpeg":
             return FfmpegVideoWriter(
-                crf=self.crf,
-                preset=self.preset,
-                pix_fmt=self.pix_fmt,
+                ffmpeg_params=self.ffmpeg_params,
                 remux_mp4=self.remux_mp4,
                 max_queue_size=max_queue_size,
-                x264_params=self.x264_params,
             )
-        if self.codec == "raw":
+        if self.save_method == "raw":
             return RawVideoWriter(max_queue_size)
-        raise ValueError(f"Unknown codec: {self.codec}")
+        raise ValueError(f"Unknown save method: {self.save_method}")
 
 
-# Insertion order defines the GUI combo order; index 0 is the default
-# (config key video_writer_default_index).
+# Keyed by config `record.save_method`. "ffmpeg" encodes during capture;
+# "raw" dumps Mono8 for offline transcoding.
 FORMATS: dict[str, VideoFormat] = {
-    "x264": VideoFormat("x264", "mkv", "x264 mkv (ffmpeg)"),
+    "ffmpeg": VideoFormat("ffmpeg", "mkv", "x264 mkv (ffmpeg)"),
     "raw": VideoFormat("raw", "raw", "raw Mono8 (transcode later)"),
 }
 
 
-def default_codec(gui_config) -> str:
-    """Resolve the default codec key from a GuiConfig.
+def default_save_method(record_config) -> str:
+    """Resolve the recording save method key from a RecordConfig.
 
-    Prefers the explicit named `video_writer_default` (stable across changes
-    to the writer list); falls back to the positional
-    `video_writer_default_index`; else "x264".
+    Falls back to "ffmpeg" for an unknown value so a stray config can never
+    stop a recording.
     """
-    named = getattr(gui_config, "video_writer_default", "")
-    if named:
-        if named in FORMATS:
-            return named
-        log.warning("Unknown video_writer_default %r; using x264", named)
-        return "x264"
-    codecs = list(FORMATS)
-    index = getattr(gui_config, "video_writer_default_index", 0)
-    if 0 <= index < len(codecs):
-        return codecs[index]
-    return "x264"
+    method = getattr(record_config, "save_method", "") or "ffmpeg"
+    if method in FORMATS:
+        return method
+    log.warning("Unknown save_method %r; using ffmpeg", method)
+    return "ffmpeg"
 
 
 # Infix tagging an in-progress transcode's temp file (see _partial_path). Kept
@@ -586,47 +637,49 @@ def _atomic_output(output: Path):
 
 def transcode_raw(
     raw_path: Path,
-    crf: int = 20,
-    preset: str = "veryslow",
-    pix_fmt: str = DEFAULT_PIX_FMT,
     output: Path | None = None,
-    x264_params: str = DEFAULT_X264_PARAMS,
+    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     vf: str = "",
     *,
+    width: int | None = None,
+    height: int | None = None,
+    fps: float | None = None,
+    pixel_format: str = "Mono8",
+    frames: int | None = None,
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
 ) -> Path:
-    """Transcode a .raw Mono8 dump (with its .json sidecar) to x264.
+    """Transcode a .raw Mono8 dump to a compressed video with ``ffmpeg_params``.
 
-    ``output`` defaults to ``<raw>.mkv``; pass an explicit path to choose the
-    container. ``vf`` bakes in a display orientation (see build_x264_args).
-    ``on_progress``/``raw_output`` control progress reporting (see
-    :func:`_run_ffmpeg`); the exact frame total is derived from the Mono8 file
-    size so the bar is always determinate."""
+    The raw stream carries no geometry, so ``width``/``height``/``fps`` (from the
+    recording's recording_summary.json) are required; without them the frame
+    layout is unknown and a clear error is raised. ``frames`` (the summary's
+    exact count) makes the progress bar determinate; it falls back to the file
+    size / (w*h*bytes-per-pixel) when absent. ``output`` defaults to
+    ``<raw>.mkv``; ``vf`` bakes a display orientation (see build_encode_args).
+    """
     raw_path = Path(raw_path)
-    sidecar = raw_path.with_suffix(".json")
-    if not sidecar.exists():
-        raise FileNotFoundError(f"missing JSON sidecar for {raw_path}: {sidecar}")
-    meta = json.loads(sidecar.read_text())
     output = Path(output) if output else raw_path.with_suffix(".mkv")
-    width, height = meta["width"], meta["height"]
-    # Mono8 is exactly 1 byte/pixel, so the file size pins the frame count.
-    total_frames = (
-        raw_path.stat().st_size // (width * height) if width and height else None
-    )
+    if width is None or height is None or fps is None:
+        raise FileNotFoundError(
+            f"no recording_summary.json geometry for {raw_path}; cannot "
+            "determine width/height/fps to transcode the raw stream"
+        )
+    total_frames = frames
+    if total_frames is None and width and height:
+        bpp = _bytes_per_pixel(pixel_format)
+        total_frames = raw_path.stat().st_size // (width * height * bpp)
     with _atomic_output(output) as tmp:
-        args = build_x264_args(
+        args = build_encode_args(
             find_ffmpeg(),
             str(tmp),
-            meta["fps"],
+            fps,
             width,
             height,
-            crf,
-            preset,
-            pix_fmt,
+            ffmpeg_params,
             source=str(raw_path),
-            x264_params=x264_params,
             vf=vf,
+            input_pix_fmt=_input_pix_fmt(pixel_format),
         )
         _run_ffmpeg(
             args,
@@ -641,23 +694,20 @@ def transcode_raw(
 def transcode_encoded(
     src: Path,
     output: Path,
-    crf: int = 20,
-    preset: str = "veryslow",
-    pix_fmt: str = DEFAULT_PIX_FMT,
-    x264_params: str = DEFAULT_X264_PARAMS,
+    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     vf: str = "",
     *,
     total_frames: int | None = None,
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
 ) -> Path:
-    """Re-encode an already-encoded video (mkv/mp4) to ``output`` with libx264.
+    """Re-encode an already-encoded video (mkv/mp4) to ``output`` with ``ffmpeg_params``.
 
-    Always re-encodes with the given libx264 ``preset``/``crf``/``pix_fmt``
-    rather than stream-copying the source: captures are written with a fast
-    preset to keep up with the cameras, so this offline pass is where the slow
-    preset earns its compression. ``vf``, when non-empty, additionally bakes a
-    display transform in (see build_x264_args).
+    Always re-encodes with the given ``ffmpeg_params`` rather than
+    stream-copying the source: captures are written with a fast preset to keep
+    up with the cameras, so this offline pass is where a slow preset earns its
+    compression. ``vf``, when non-empty, additionally bakes a display transform
+    in (merged with any user ``-vf`` — see :func:`_output_args`).
 
     ``total_frames`` (e.g. from the recording summary) makes the progress bar
     determinate; without it the bar is indeterminate. ``on_progress``/
@@ -666,7 +716,7 @@ def transcode_encoded(
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
-    vf = _full_range_vf(pix_fmt, vf)
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf)
     with _atomic_output(output) as tmp:
         args = [
             ffmpeg,
@@ -676,17 +726,9 @@ def transcode_encoded(
             "-y",
             "-i",
             str(src),
-            *(["-vf", vf] if vf else []),
-            "-c:v",
-            "libx264",
-            "-preset",
-            preset,
-            "-crf",
-            str(crf),
-            *(["-x264-params", x264_params] if x264_params else []),
-            "-pix_fmt",
-            pix_fmt,
-            *_color_range_args(pix_fmt),
+            *(["-vf", merged_vf] if merged_vf else []),
+            *tokens,
+            *color_args,
             str(tmp),
         ]
         _run_ffmpeg(
@@ -702,12 +744,14 @@ def transcode_encoded(
 def transcode_file(
     input_path: Path,
     output: Path,
-    crf: int = 20,
-    preset: str = "veryslow",
-    pix_fmt: str = DEFAULT_PIX_FMT,
-    x264_params: str = DEFAULT_X264_PARAMS,
+    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     vf: str = "",
     *,
+    width: int | None = None,
+    height: int | None = None,
+    fps: float | None = None,
+    pixel_format: str = "Mono8",
+    frames: int | None = None,
     total_frames: int | None = None,
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
@@ -715,30 +759,29 @@ def transcode_file(
     """Transcode one ``.raw``/``.mkv``/``.mp4`` file to ``output``.
 
     Dispatches on the input suffix; ``vf`` (if any) bakes a display transform
-    in. The caller picks ``output`` (extension = desired container).
-    ``total_frames``/``on_progress``/``raw_output`` are forwarded to the
-    progress reporting (a ``.raw`` input derives its own exact total, so the
-    hint there is ignored)."""
+    in. The caller picks ``output`` (extension = desired container). A ``.raw``
+    input needs ``width``/``height``/``fps``/``pixel_format``/``frames`` from the
+    recording summary; encoded inputs read their own geometry so those are
+    ignored there and ``total_frames`` drives the bar instead."""
     input_path = Path(input_path)
     if input_path.suffix == ".raw":
         return transcode_raw(
             input_path,
-            crf=crf,
-            preset=preset,
-            pix_fmt=pix_fmt,
             output=output,
-            x264_params=x264_params,
+            ffmpeg_params=ffmpeg_params,
             vf=vf,
+            width=width,
+            height=height,
+            fps=fps,
+            pixel_format=pixel_format,
+            frames=frames,
             on_progress=on_progress,
             raw_output=raw_output,
         )
     return transcode_encoded(
         input_path,
         output,
-        crf=crf,
-        preset=preset,
-        pix_fmt=pix_fmt,
-        x264_params=x264_params,
+        ffmpeg_params=ffmpeg_params,
         vf=vf,
         total_frames=total_frames,
         on_progress=on_progress,

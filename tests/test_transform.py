@@ -1,7 +1,5 @@
 """DisplayTransform: orientation correctness and numpy <-> ffmpeg equivalence."""
 
-import json
-
 import numpy as np
 import pytest
 
@@ -97,14 +95,15 @@ def test_numpy_and_ffmpeg_agree_on_every_combo(tmp_path):
     for i, t in enumerate(combos):
         raw = tmp_path / f"c{i}.raw"
         raw.write_bytes(frame.tobytes())
-        raw.with_suffix(".json").write_text(
-            json.dumps(
-                {"width": width, "height": height, "pixel_format": "Mono8", "fps": 10.0}
-            )
-        )
         out = tmp_path / f"c{i}.mkv"
         transcode_raw(
-            raw, crf=0, preset="ultrafast", output=out, vf=display_vf_filter(t)
+            raw,
+            ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
+            output=out,
+            vf=display_vf_filter(t),
+            width=width,
+            height=height,
+            fps=10.0,
         )
         cap = cv2.VideoCapture(str(out))
         ok, decoded = cap.read()

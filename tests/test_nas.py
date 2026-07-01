@@ -1,11 +1,16 @@
 """NAS export: atomic copy, integrity verification, file-granularity resume.
 
 These exercise the reliability guarantees of ``octacam.nas`` and the CLI
-helpers that drive it (auto common-parent base, collision guard, discovery
-hint) — all with plain files in ``tmp_path``; no ffmpeg or real NAS needed.
+discovery helper that drives it — all with plain files in ``tmp_path``; no
+ffmpeg or real NAS needed.
+
+``copy_folder_to_nas`` now takes a single precomputed ``dest`` directory (the
+exact directory files are copied into); the old ``nas_root`` + ``local_base``
+mirroring pair is gone.  Tests compute the expected ``dest`` with the still-
+present ``nas_destination(folder, nas_root, local_base)`` helper so the
+destination path logic they used to rely on is preserved.
 """
 
-import os
 from pathlib import Path
 
 import pytest
@@ -56,9 +61,10 @@ def test_copy_happy_path_no_temp_left(tmp_path):
         {"camera_LF.mp4": b"abc" * 1000, "camera_RF.mp4": b"xyz" * 2000},
     )
     nas = tmp_path / "nas"
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
+    dest = nas_destination(src, nas, tmp_path)
+    result = copy_folder_to_nas(src, dest=dest)
 
-    dest = nas / "rec"
+    assert dest == nas / "rec"
     assert result  # truthy on success
     assert set(result.copied) == {
         "camera_LF.mp4",
@@ -75,7 +81,9 @@ def test_copy_happy_path_no_temp_left(tmp_path):
 def test_copy_bare_name_without_base(tmp_path):
     src = _make_recording(tmp_path / "deep" / "001", {"camera_LF.mp4": b"x" * 10})
     nas = tmp_path / "nas"
-    copy_folder_to_nas(src, nas_root=nas)  # no local_base, single folder
+    dest = nas_destination(src, nas)  # no local_base → bare name
+    assert dest == nas / "001"
+    copy_folder_to_nas(src, dest=dest)
     assert (nas / "001" / "camera_LF.mp4").read_bytes() == b"x" * 10
 
 
@@ -85,11 +93,11 @@ def test_copy_bare_name_without_base(tmp_path):
 def test_skip_on_rerun_size(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"data" * 500})
     nas = tmp_path / "nas"
-    copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
-    dest = nas / "rec"
+    dest = nas_destination(src, nas, tmp_path)
+    copy_folder_to_nas(src, dest=dest)
     mtimes = {p.name: p.stat().st_mtime_ns for p in dest.iterdir()}
 
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
+    result = copy_folder_to_nas(src, dest=dest)
     assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
     assert not result.copied
     # Skipped files are not rewritten.
@@ -100,17 +108,17 @@ def test_skip_on_rerun_size(tmp_path):
 def test_checksum_repair(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 1000})
     nas = tmp_path / "nas"
-    dest = nas / "rec"
+    dest = nas_destination(src, nas, tmp_path)
     dest.mkdir(parents=True)
     # Same size, different content — size-only can't tell, checksum can.
     (dest / "camera_LF.mp4").write_bytes(b"B" * 1000)
     (dest / RECORDING_SUMMARY_FILENAME).write_text("{}")
 
-    r1 = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path, checksum=False)
+    r1 = copy_folder_to_nas(src, dest=dest, checksum=False)
     assert "camera_LF.mp4" in r1.skipped
     assert (dest / "camera_LF.mp4").read_bytes() == b"B" * 1000  # not repaired
 
-    r2 = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path, checksum=True)
+    r2 = copy_folder_to_nas(src, dest=dest, checksum=True)
     assert "camera_LF.mp4" in r2.copied
     assert (dest / "camera_LF.mp4").read_bytes() == b"A" * 1000  # repaired
     assert _no_temps(dest)
@@ -125,8 +133,8 @@ def test_verify_mismatch_fails_and_cleans_up(tmp_path, monkeypatch):
     # Force every read-back digest to differ from the (real, inline) source digest.
     monkeypatch.setattr(nas_mod, "_file_digest", lambda *a, **k: "deadbeef")
 
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path, verify=True)
-    dest = nas / "rec"
+    dest = nas_destination(src, nas, tmp_path)
+    result = copy_folder_to_nas(src, dest=dest, verify=True)
     assert "camera_LF.mp4" in result.failed
     assert not (dest / "camera_LF.mp4").exists()  # never promoted
     assert _no_temps(dest)  # temp cleaned
@@ -136,19 +144,19 @@ def test_verify_mismatch_fails_and_cleans_up(tmp_path, monkeypatch):
 def test_atomic_interrupt_then_resume(tmp_path, monkeypatch):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 5000})
     nas = tmp_path / "nas"
+    dest = nas_destination(src, nas, tmp_path)
 
     def boom(_a, _b):
         raise OSError("simulated interruption at rename")
 
     monkeypatch.setattr(nas_mod.os, "replace", boom)
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
-    dest = nas / "rec"
+    result = copy_folder_to_nas(src, dest=dest)
     assert result.failed  # the rename never completed
     assert not (dest / "camera_LF.mp4").exists()  # no complete-looking partial
     assert _no_temps(dest)  # temp removed on the exception path
 
     monkeypatch.undo()  # "next run" with a working filesystem
-    result2 = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
+    result2 = copy_folder_to_nas(src, dest=dest)
     assert result2
     assert (dest / "camera_LF.mp4").read_bytes() == b"x" * 5000
 
@@ -164,7 +172,7 @@ def test_copystat_failure_is_best_effort(tmp_path, monkeypatch):
         raise OSError("utime rejected by the NAS")
 
     monkeypatch.setattr(nas_mod.shutil, "copystat", boom)
-    result = copy_folder_to_nas(src, nas_root=tmp_path / "nas", local_base=tmp_path)
+    result = copy_folder_to_nas(src, dest=tmp_path / "nas" / "rec")
     assert result and not result.failed
     assert (tmp_path / "nas" / "rec" / "camera_LF.mp4").read_bytes() == b"x" * 200
 
@@ -183,30 +191,9 @@ def test_sweep_only_reaps_old_temps(tmp_path):
     old_t = _time.time() - nas_mod._STALE_TEMP_AGE_S - 100
     _os.utime(old, (old_t, old_t))
 
-    copy_folder_to_nas(src, nas_root=tmp_path / "nas", local_base=tmp_path)
+    copy_folder_to_nas(src, dest=dest)
     assert fresh.exists()  # a live/concurrent temp is never deleted
     assert not old.exists()  # a genuine orphan is reaped
-
-
-def test_post_process_reports_nas_failures(tmp_path, monkeypatch):
-    # transcode --grid --nas must surface NAS failures, not swallow them.
-    from octacam.cli import _post_process_folders
-
-    rec = _make_recording(tmp_path / "data/exp/Fly1/001", {"camera_LF.mp4": b"x" * 100})
-    monkeypatch.setattr(nas_mod, "_file_digest", lambda *a, **k: "bad-digest")
-    failed = _post_process_folders(
-        folder_outputs={rec: [rec / "camera_LF.mp4"]},
-        do_grid=False,
-        grid_layout=None,
-        nas_path=tmp_path / "nas",
-        nas_local_base=tmp_path,
-        crf=20,
-        preset="ultrafast",
-        dry_run=False,
-        show_bar=False,
-        nas_verify=True,
-    )
-    assert failed >= 1
 
 
 def test_mixed_roots_skip_non_recording(tmp_path):
@@ -226,7 +213,7 @@ def test_mixed_roots_skip_non_recording(tmp_path):
 def test_no_verify_copies(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"hello" * 100})
     nas = tmp_path / "nas"
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path, verify=False)
+    result = copy_folder_to_nas(src, dest=nas / "rec", verify=False)
     assert result
     assert (nas / "rec" / "camera_LF.mp4").read_bytes() == b"hello" * 100
 
@@ -234,7 +221,7 @@ def test_no_verify_copies(tmp_path):
 def test_zero_byte_source(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b""})
     nas = tmp_path / "nas"
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path)
+    result = copy_folder_to_nas(src, dest=nas / "rec")
     target = nas / "rec" / "camera_LF.mp4"
     assert result
     assert target.exists() and target.stat().st_size == 0
@@ -243,7 +230,7 @@ def test_zero_byte_source(tmp_path):
 def test_dry_run_touches_nothing(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 10})
     nas = tmp_path / "nas"
-    result = copy_folder_to_nas(src, nas_root=nas, local_base=tmp_path, dry_run=True)
+    result = copy_folder_to_nas(src, dest=nas / "rec", dry_run=True)
     assert result  # lists intended copies
     assert not nas.exists()
 
@@ -251,7 +238,7 @@ def test_dry_run_touches_nothing(tmp_path):
 def test_nothing_to_copy_is_falsy(tmp_path):
     folder = tmp_path / "empty"
     folder.mkdir()
-    result = copy_folder_to_nas(folder, nas_root=tmp_path / "nas")
+    result = copy_folder_to_nas(folder, dest=tmp_path / "nas" / "empty")
     assert isinstance(result, NasCopyResult)
     assert not result
     assert not result.copied and not result.failed
@@ -260,9 +247,7 @@ def test_nothing_to_copy_is_falsy(tmp_path):
 def test_progress_phases(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"z" * 4096})
     events = []
-    copy_folder_to_nas(
-        src, nas_root=tmp_path / "nas", local_base=tmp_path, on_progress=events.append
-    )
+    copy_folder_to_nas(src, dest=tmp_path / "nas" / "rec", on_progress=events.append)
     phases = {e.phase for e in events}
     assert "copy" in phases and "verify" in phases
 
@@ -270,8 +255,7 @@ def test_progress_phases(tmp_path):
     src2 = _make_recording(tmp_path / "rec2", {"camera_LF.mp4": b"z" * 4096})
     copy_folder_to_nas(
         src2,
-        nas_root=tmp_path / "nas2",
-        local_base=tmp_path,
+        dest=tmp_path / "nas2" / "rec2",
         verify=False,
         on_progress=events_off.append,
     )
@@ -279,62 +263,6 @@ def test_progress_phases(tmp_path):
 
 
 # --- CLI driver helpers -----------------------------------------------------
-
-
-def test_effective_local_base(tmp_path):
-    from octacam.cli import _effective_nas_local_base
-
-    a = tmp_path / "exp" / "Fly1" / "001"
-    b = tmp_path / "exp" / "Fly2" / "001"
-    a.mkdir(parents=True)
-    b.mkdir(parents=True)
-
-    # One level above the common ancestor (tmp/exp), i.e. tmp — so "exp" itself
-    # is preserved on the NAS and successive experiments stay distinct.
-    common = Path(os.path.commonpath([str(a.resolve()), str(b.resolve())]))
-    base = _effective_nas_local_base([a, b], None)
-    assert base == common.parent
-    assert a.resolve().relative_to(base) == Path("exp/Fly1/001")
-    assert b.resolve().relative_to(base) == Path("exp/Fly2/001")
-    # A single folder keeps the bare-name behaviour.
-    assert _effective_nas_local_base([a], None) is None
-    # An explicit base always wins.
-    assert _effective_nas_local_base([a, b], tmp_path) == tmp_path
-
-
-def test_relative_input_mirrors_without_collision(tmp_path, monkeypatch):
-    # Relative path inputs must still mirror against the resolved auto-base
-    # instead of collapsing to bare names and tripping the collision guard.
-    from octacam.cli import _check_nas_collisions, _effective_nas_local_base
-
-    (tmp_path / "data/260624/Fly1/001-bhv").mkdir(parents=True)
-    (tmp_path / "data/260624/Fly2/001-bhv").mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
-
-    folders = [Path("data/260624/Fly1/001-bhv"), Path("data/260624/Fly2/001-bhv")]
-    base = _effective_nas_local_base(folders, None)
-    _check_nas_collisions(folders, Path("nas"), base)  # must NOT raise
-
-    d1 = nas_destination(folders[0], Path("nas"), base)
-    d2 = nas_destination(folders[1], Path("nas"), base)
-    assert d1 != d2
-    assert d1 == Path("nas/260624/Fly1/001-bhv")
-    assert d2 == Path("nas/260624/Fly2/001-bhv")
-
-
-def test_collision_guard(tmp_path):
-    from octacam.cli import _check_nas_collisions
-
-    a = tmp_path / "x" / "001"
-    b = tmp_path / "y" / "001"
-    a.mkdir(parents=True)
-    b.mkdir(parents=True)
-    nas = tmp_path / "nas"
-
-    with pytest.raises(SystemExit):
-        _check_nas_collisions([a, b], nas, None)  # both → nas/001
-    # Mirroring from a common base makes them distinct — no exit.
-    _check_nas_collisions([a, b], nas, tmp_path)
 
 
 def test_discovery_hint(tmp_path):

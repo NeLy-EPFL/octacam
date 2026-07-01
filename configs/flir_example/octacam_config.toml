@@ -7,10 +7,27 @@
 # <serial>.json (written by the web GUI's "Save…" dialog), not as Basler .pfs.
 backend = "flir"
 
-[gui]
-fps_default = 30.0
-duration_default = 10.0
-save_directory_default = "~/data/%y%m%d/flir/001"
+[record]
+fps = 30.0
+duration = 10.0
+duration_unit = "seconds"      # frames | seconds | minutes | hours
+trigger_source = "software"    # software | external
+
+experimenter = ""
+experiment = "experiment"
+subject_number = 1
+trial_number = 1
+
+directory = "~/data"
+relative_directory = "%y%m%d/flir/{trial_number:03d}"
+
+save_method = "ffmpeg"         # ffmpeg | raw
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+save_transformed = true
+save_timestamps = false
+
+[transcode]
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
 
 # Pin a camera's name and grid placement (optional). Sensor parameters
 # (exposure/gain/ROI) live in <serial>.json, set from the GUI.

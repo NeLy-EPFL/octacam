@@ -30,10 +30,7 @@ from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.transform import RECORDING_SUMMARY_FILENAME, DisplayTransform
 from octacam.writer import (
-    DEFAULT_CRF,
-    DEFAULT_PIX_FMT,
-    DEFAULT_PRESET,
-    DEFAULT_X264_PARAMS,
+    DEFAULT_FFMPEG_PARAMS,
     FORMATS,
     VideoFormat,
 )
@@ -97,13 +94,15 @@ class RecordingSettings:
     fps: float = 100.0
     duration_s: float = 20.0
     save_dir: str = "./"
+    # Resolved base directory (config record.directory) the save_dir sits under;
+    # used to derive the relative_directory the transfer step mirrors onto the
+    # NAS. Empty falls back to the save_dir's own basename.
+    record_directory: str = ""
     trigger_source: str = "software"  # "software" | "external"
-    codec: str = "x264"
-    crf: int = DEFAULT_CRF
-    preset: str = DEFAULT_PRESET
-    pix_fmt: str = DEFAULT_PIX_FMT
+    save_method: str = "ffmpeg"  # "ffmpeg" | "raw"
+    # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg".
+    ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
     remux_mp4: bool = False
-    x264_params: str = DEFAULT_X264_PARAMS
     # "display" bakes each camera's display transform into the video; "sensor"
     # saves the raw, untransformed image. save_frame_timestamps re-enables the
     # per-frame timestamp CSV (debugging; off by default).
@@ -111,15 +110,12 @@ class RecordingSettings:
     save_frame_timestamps: bool = False
 
     def video_format(self) -> VideoFormat:
-        video_format = FORMATS[self.codec]
-        if self.codec == "x264":
+        video_format = FORMATS[self.save_method]
+        if self.save_method == "ffmpeg":
             video_format = dataclasses.replace(
                 video_format,
-                crf=self.crf,
-                preset=self.preset,
-                pix_fmt=self.pix_fmt,
+                ffmpeg_params=self.ffmpeg_params,
                 remux_mp4=self.remux_mp4,
-                x264_params=self.x264_params,
             )
         return video_format
 
@@ -180,6 +176,7 @@ def build_recording_summary(
                 "file": f"{camera.name}.{extension}",
                 "width": size[0] if size else None,
                 "height": size[1] if size else None,
+                "pixel_format": camera.pixel_format,
                 "fps": round(camera.mean_fps, 3),
                 "frames": camera.frames_recorded,
                 "dropped": camera.dropped_count,
@@ -191,18 +188,39 @@ def build_recording_summary(
             }
         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
         "fps_target": settings.fps,
         "duration_s": settings.duration_s,
         "trigger_source": settings.trigger_source,
-        "codec": settings.codec,
+        "save_method": settings.save_method,
+        "ffmpeg_params": settings.ffmpeg_params,
         "record_form": settings.record_form,
+        # The sub-path (under record.directory) the transfer step mirrors onto
+        # the NAS; resolved once here so a later transfer never re-templates the
+        # date on a different day.
+        "relative_directory": _relative_directory(settings),
         "dropped_frames_note": _DROPPED_FRAMES_NOTE,
         "cameras": cams,
     }
+
+
+def _relative_directory(settings: RecordingSettings) -> str:
+    """The recording folder's path relative to the configured base directory.
+
+    Falls back to the folder's own basename when no base is known or the folder
+    lives outside it (e.g. an ad-hoc --output override)."""
+    base = settings.record_directory
+    if base:
+        try:
+            rel = os.path.relpath(settings.save_dir, base)
+            if not rel.startswith(".."):
+                return rel
+        except ValueError:  # e.g. different drives on Windows
+            pass
+    return Path(settings.save_dir).name
 
 
 class RecordingController:
@@ -221,11 +239,16 @@ class RecordingController:
         auto_preview: bool = True,
         session_id: str | None = None,
         record_kind: str = "gui",
+        config_dir: str | Path | None = None,
     ):
         self.camera_system = camera_system
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
+        # The rig config dir whose octacam_config.toml is copied into each
+        # recording folder (so `octacam process` needs no --config later). None
+        # skips the snapshot (e.g. unit tests constructing a controller directly).
+        self._config_dir = Path(config_dir) if config_dir is not None else None
         # When set, each finished recording's folder is noted in the session
         # cache (octacam.session_cache) under this id so `octacam transcode
         # --last/--session/--all` can find it later. None disables the cache
@@ -302,8 +325,8 @@ class RecordingController:
             }
             if unknown:
                 raise ValueError(f"Unknown settings: {sorted(unknown)}")
-            if "codec" in changes and changes["codec"] not in FORMATS:
-                raise ValueError(f"Unknown codec: {changes['codec']}")
+            if "save_method" in changes and changes["save_method"] not in FORMATS:
+                raise ValueError(f"Unknown save_method: {changes['save_method']}")
             if "fps" in changes and not changes["fps"] > 0:
                 raise ValueError("fps must be > 0")
             if "duration_s" in changes and not changes["duration_s"] > 0:
@@ -607,6 +630,14 @@ class RecordingController:
             if use_software_trigger:
                 self.camera_system.start_software_trigger(settings.duration_s)
 
+            # Snapshot the config and write an initial summary (pessimistically
+            # marked aborted, frames=0) as soon as the cameras start, so a raw
+            # recording keeps its geometry — and stays transcodable — even if the
+            # process is hard-killed before the final summary is written at
+            # teardown. Both are overwritten with final data when recording ends.
+            self._snapshot_config()
+            self._write_recording_summary(aborted=True)
+
             self._aborted = False
             self._stop_event.clear()
             self._start_hooks_done.clear()
@@ -794,6 +825,24 @@ class RecordingController:
         self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
         self.plugins.dispatch("on_recording_stop", aborted)
         self._event("info", "Recording aborted" if aborted else "Recording finished")
+
+    def _snapshot_config(self) -> None:
+        """Copy the rig config into the recording folder for `octacam process`.
+
+        A verbatim copy of octacam_config.toml (raw bytes, so its
+        directory/relative_directory templates stay unexpanded) lets the
+        post-recording step read every setting — encoding, grid layouts,
+        transfer destination — with no --config. Best-effort: a copy failure
+        never disturbs recording, and it no-ops without a config dir (tests)."""
+        if self._config_dir is None:
+            return
+        src = self._config_dir / "octacam_config.toml"
+        dst = Path(self._settings.save_dir) / "octacam_config.toml"
+        try:
+            if src.exists():
+                shutil.copyfile(src, dst)
+        except Exception:
+            log.exception("Failed to copy config snapshot to %s", dst)
 
     def _write_recording_summary(self, aborted: bool) -> None:
         """Write recording_summary.json into the recording's save directory."""

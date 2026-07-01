@@ -8,18 +8,18 @@ config can never stop the app from starting. pydantic validates the types;
 
 import datetime
 import logging
+import os
+import shlex
 import time
 import tomllib
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from octacam.writer import (
-    DEFAULT_CRF,
-    DEFAULT_PIX_FMT,
-    DEFAULT_PRESET,
-    DEFAULT_X264_PARAMS,
+    DEFAULT_FFMPEG_PARAMS,
+    DEFAULT_TRANSCODE_FFMPEG_PARAMS,
 )
 
 log = logging.getLogger("octacam")
@@ -61,120 +61,142 @@ class CameraConfig(BaseModel):
         return _scalar_str(value)
 
 
-class GuiConfig(BaseModel):
+def _valid_ffmpeg_params(value: str) -> str:
+    """Reject an ffmpeg_params string ffmpeg could never parse (bad quoting).
+
+    Raising here lets ``_lenient_validate`` fall the field back to its default
+    rather than letting the malformed string reach ffmpeg at record/transcode."""
+    try:
+        shlex.split(value)
+    except ValueError as e:
+        raise ValueError(f"invalid ffmpeg_params: {e}") from e
+    return value
+
+
+class RecordConfig(BaseModel):
+    """The ``[record]`` section: how and where recordings are captured.
+
+    ``directory``/``relative_directory`` are path templates resolved at record
+    start: they accept ``{experimenter}``/``{experiment}``/``{subject_number}``/
+    ``{trial_number}`` placeholders and strftime ``%``-codes (see
+    :func:`resolve_save_dir`). ``ffmpeg_params`` is the verbatim encoder arg
+    string used when ``save_method == "ffmpeg"``.
+    """
+
     model_config = ConfigDict(extra="ignore")
 
-    fps_default: float = 100.0
-    fps_min: float = 0.01
-    fps_max: float = 1000.0
-    duration_default: float = 5.0
-    duration_min: float = 0.01
-    duration_max: float = 1_000_000.0
-    duration_unit_default_index: int = 0
-    save_directory_default: str = "./"
-    trigger_source_default_index: int = 0
-    video_writer_default_index: int = 0
-    # Explicit codec key (x264/raw); when set it overrides the
-    # positional video_writer_default_index, which is fragile across changes
-    # to the writer list.
-    video_writer_default: str = ""
-
-    # libx264 capture defaults (used when the codec is x264). They seed the
-    # initial RecordingSettings and the `octacam record` fallbacks; the web UI
-    # and CLI can still override them per recording. x264_params is passed
-    # verbatim to ffmpeg's -x264-params (e.g. "keyint=30:scenecut=0").
-    crf_default: int = DEFAULT_CRF
-    preset_default: str = DEFAULT_PRESET
-    pix_fmt_default: str = DEFAULT_PIX_FMT
-    x264_params_default: str = DEFAULT_X264_PARAMS
-
-    # Recording outputs. By default each recording writes a compact
-    # recording_summary.json and bakes the per-camera display transform
-    # (rotation/flips) into the video ("display" form). save_frame_timestamps
-    # turns the legacy per-frame timestamp CSV back on (debugging only);
-    # record_form="sensor" keeps the raw, untransformed sensor image.
-    save_frame_timestamps_default: bool = False
-    record_form_default: str = "display"  # "display" | "sensor"
-
-    display_refresh_interval_ms: int = 33
-    record_countdown_timer_interval_ms: int = 1000
-    check_record_started_timer_interval_ms: int = 100
-
-    dock_min_width: int = 200
-    dock_max_width: int = 300
-    save_dir_edit_height_factor: int = 4
+    fps: float = 100.0
+    duration: float = 5.0
+    duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
+    trigger_source: Literal["software", "external"] = "software"
+    experimenter: str = ""
+    experiment: str = "experiment"
+    subject_number: int = 1
+    trial_number: int = 1
+    directory: str = "./"
+    relative_directory: str = ""
+    save_method: Literal["ffmpeg", "raw"] = "ffmpeg"
+    ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
+    # true bakes each camera's display transform (rotation/flips) into the video
+    # (old record_form "display"); false saves the raw sensor image ("sensor").
+    save_transformed: bool = True
+    save_timestamps: bool = False
 
     @field_validator(
-        "save_directory_default",
-        "video_writer_default",
-        "preset_default",
-        "pix_fmt_default",
-        "x264_params_default",
-        "record_form_default",
+        "experimenter",
+        "experiment",
+        "directory",
+        "relative_directory",
+        "ffmpeg_params",
         mode="before",
     )
     @classmethod
     def _as_scalar_str(cls, value: object) -> str:
         return _scalar_str(value)
 
+    @field_validator("ffmpeg_params")
+    @classmethod
+    def _check_ffmpeg_params(cls, value: str) -> str:
+        return _valid_ffmpeg_params(value)
 
-class GridConfig(BaseModel):
-    """Composite grid layout for ``octacam transcode --grid`` / ``octacam grid``.
 
-    Set ``default = true`` so ``octacam transcode --config <dir>`` generates the
-    grid automatically without needing the ``--grid`` flag.
+class TranscodeConfig(BaseModel):
+    """The ``[transcode]`` section: encoder args for `octacam process`."""
 
-    *layout* is a 2D list (rows × cols) of camera names as they appear in the
-    ``[[cameras]]`` entries.  An empty string ``""`` means a black fill cell.
-    All rows must have the same length.
+    model_config = ConfigDict(extra="ignore")
 
-    Example for a 3×3 grid on a 7-camera rig::
+    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
-        [grid]
-        default = true
+    @field_validator("ffmpeg_params", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
+
+    @field_validator("ffmpeg_params")
+    @classmethod
+    def _check_ffmpeg_params(cls, value: str) -> str:
+        return _valid_ffmpeg_params(value)
+
+
+class VisualizationConfig(BaseModel):
+    """One ``[[visualization]]`` entry: a named composite grid to generate.
+
+    ``octacam process`` builds ``<name>`` in each recording folder from
+    ``layout`` (a 2D list of camera names; ``""`` is a black fill cell, all rows
+    equal length). Optional ``ffmpeg_params`` overrides the encoder args for this
+    grid; empty falls back to ``[transcode].ffmpeg_params`` (with pix_fmt forced
+    to a widely-playable yuv420p).
+
+    Example for a 3×3 grid on an 8-camera rig::
+
+        [[visualization]]
+        name = "grid.mp4"
         layout = [
             ["camera_LF", "",          "camera_RF"],
             ["camera_LM", "camera_F",  "camera_RM"],
-            ["camera_LH", "",          "camera_RH"],
+            ["camera_LH", "camera_H",  "camera_RH"],
         ]
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    default: bool = False
+    name: str = "grid.mp4"
     layout: list[list[str]] = Field(default_factory=list)
+    ffmpeg_params: str = ""
+
+    @field_validator("name", "ffmpeg_params", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
 
 
-class NasConfig(BaseModel):
-    """NAS export settings for ``octacam transcode`` / ``octacam nas``.
+class TransferConfig(BaseModel):
+    """The ``[transfer]`` section: where `octacam process` mirrors recordings.
 
-    When *path* is set and a config is passed to ``octacam transcode --config``,
-    recordings are copied to the NAS automatically after transcoding — no
-    ``--nas-path`` flag needed at the command line.
-
-    *local_base* is the local root stripped when computing the destination path,
-    so the directory tree is mirrored on the NAS::
-
-        [nas]
-        path = "/mnt/nas/matthias"
-        local_base = "/home/nely/data/MD"
-        verify = true   # content-checksum each copy before promoting it (default)
-
-    *verify* on (the default) content-checksums every copied file before it is
-    swapped onto its final name; set it false for a faster size-only check on
-    trusted/fast links.  ``--nas-verify/--no-nas-verify`` overrides it.
+    Each recording folder is copied to ``directory``/``relative_directory`` (the
+    ``relative_directory`` resolved at record time and stored in the summary), so
+    the local tree is mirrored on the destination. ``directory`` supports the
+    same ``{experimenter}`` placeholders as ``record.directory``. ``checksum``
+    content-verifies each copy before promoting it (false = size-only).
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    path: str = ""
-    local_base: str = ""
-    verify: bool = True
+    directory: str = ""
+    checksum: bool = True
 
-    @field_validator("path", "local_base", mode="before")
+    @field_validator("directory", mode="before")
     @classmethod
     def _as_scalar_str(cls, value: object) -> str:
         return _scalar_str(value)
+
+
+class GuiConfig(BaseModel):
+    """The ``[gui]`` section: pure web-UI render settings (rig-tunable)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    display_refresh_interval_ms: int = 33
 
 
 class PluginConfig(BaseModel):
@@ -189,90 +211,206 @@ class OctacamConfig(BaseModel):
     # Which camera SDK this rig uses. One vendor per config directory; absent
     # means Basler so every existing config keeps working untouched.
     backend: str = "basler"
-    gui: GuiConfig = Field(default_factory=GuiConfig)
+    record: RecordConfig = Field(default_factory=RecordConfig)
+    transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
-    grid: GridConfig | None = None
-    nas: NasConfig | None = None
+    visualization: list[VisualizationConfig] = Field(default_factory=list)
+    transfer: TransferConfig | None = None
+    gui: GuiConfig = Field(default_factory=GuiConfig)
 
 
-def _parse_nas(nas_src: object) -> NasConfig | None:
-    """Parse the optional ``[nas]`` section, returning None on any problem."""
-    if nas_src is None:
-        return None
-    if not isinstance(nas_src, dict):
-        log.warning('Ignoring "nas" in octacam config as it is not a table')
-        return None
-    return _lenient_validate(NasConfig, nas_src, "nas", NasConfig())
+# ---------------------------------------------------------------------------
+# Save-directory templating (resolved at record start)
+# ---------------------------------------------------------------------------
+
+_DURATION_UNIT_SECONDS = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
 
 
-def _parse_grid(grid_src: object) -> GridConfig | None:
-    """Parse the optional ``[grid]`` section, returning None on any problem."""
-    if grid_src is None:
+def duration_to_seconds(duration: float, unit: str, fps: float) -> float:
+    """Convert a record ``duration`` in its ``unit`` to seconds.
+
+    ``"frames"`` divides by ``fps`` (a frame count at the recording rate); the
+    other units multiply by their seconds factor."""
+    if unit == "frames":
+        return duration / fps if fps > 0 else 0.0
+    return duration * _DURATION_UNIT_SECONDS.get(unit, 1.0)
+
+
+def _record_fields(record: RecordConfig) -> dict:
+    return {
+        "experimenter": record.experimenter,
+        "experiment": record.experiment,
+        "subject_number": record.subject_number,
+        "trial_number": record.trial_number,
+    }
+
+
+def _apply_template(text: str, fields: dict, when: time.struct_time) -> str:
+    """Expand ``{field}`` placeholders then strftime ``%``-codes in a template.
+
+    Tolerant: a bad placeholder or strftime code is warned about and the text is
+    left as-is rather than raising, matching the module's parsing philosophy."""
+    try:
+        text = text.format(**fields)
+    except (KeyError, IndexError, ValueError) as e:
+        log.warning("Could not expand placeholders in path template %r: %s", text, e)
+    try:
+        text = time.strftime(text, when)
+    except ValueError as e:
+        log.warning("Could not expand strftime codes in path template %r: %s", text, e)
+    return text
+
+
+def _normalize_dir(text: str) -> str:
+    """Strip, expand ``~``, make absolute, forward-slash — mirrors the GUI."""
+    return str(Path(text.strip()).expanduser().absolute()).replace("\\", "/")
+
+
+def resolve_dir_template(
+    template: str, record: RecordConfig, when: time.struct_time | None = None
+) -> str:
+    """Resolve any directory template against a record config's fields + date.
+
+    Used for ``record.directory`` and ``transfer.directory`` (both accept the
+    same ``{experimenter}`` placeholders and strftime codes)."""
+    when = when or time.localtime()
+    return _normalize_dir(_apply_template(template, _record_fields(record), when))
+
+
+def resolve_record_directory(
+    record: RecordConfig, when: time.struct_time | None = None
+) -> str:
+    """Resolve just ``record.directory`` (the base the save dir sits under)."""
+    return resolve_dir_template(record.directory, record, when)
+
+
+def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None) -> str:
+    """Resolve the absolute save directory from directory + relative_directory.
+
+    Templating happens at record start (pass a single ``when`` snapshot so both
+    parts share one date). Returns an absolute, ``~``-expanded path."""
+    when = when or time.localtime()
+    fields = _record_fields(record)
+    base = _apply_template(record.directory, fields, when)
+    rel = _apply_template(record.relative_directory, fields, when)
+    combined = os.path.join(base, rel) if rel else base
+    return _normalize_dir(combined)
+
+
+def _parse_transfer(transfer_src: object) -> TransferConfig | None:
+    """Parse the optional ``[transfer]`` section, returning None on any problem."""
+    if transfer_src is None:
         return None
-    if not isinstance(grid_src, dict):
-        log.warning('Ignoring "grid" in octacam config as it is not a table')
+    if not isinstance(transfer_src, dict):
+        log.warning('Ignoring "transfer" in octacam config as it is not a table')
         return None
-    layout_src = grid_src.get("layout")
+    return _lenient_validate(TransferConfig, transfer_src, "transfer", TransferConfig())
+
+
+def _parse_layout(layout_src: object, context: str) -> list[list[str]] | None:
+    """Validate a 2D camera-name grid layout, returning None on any problem."""
     if layout_src is None:
-        log.warning('"grid" section is missing a "layout" key; ignoring it')
+        log.warning('%s is missing a "layout" key; ignoring it', context)
         return None
     if not isinstance(layout_src, list):
-        log.warning('"grid.layout" must be an array of arrays; ignoring it')
+        log.warning('%s "layout" must be an array of arrays; ignoring it', context)
         return None
     layout: list[list[str]] = []
     expected_cols: int | None = None
     for row_i, row in enumerate(layout_src):
         if not isinstance(row, list):
-            log.warning('"grid.layout" row %d is not an array; ignoring the grid', row_i)
+            log.warning(
+                '%s "layout" row %d is not an array; ignoring it', context, row_i
+            )
             return None
         if not all(isinstance(cell, str) for cell in row):
-            log.warning('"grid.layout" row %d has non-string cells; ignoring the grid', row_i)
+            log.warning(
+                '%s "layout" row %d has non-string cells; ignoring it', context, row_i
+            )
             return None
         if expected_cols is None:
             expected_cols = len(row)
         elif len(row) != expected_cols:
             log.warning(
-                '"grid.layout" rows have inconsistent lengths (%d vs %d); ignoring the grid',
+                '%s "layout" rows have inconsistent lengths (%d vs %d); ignoring it',
+                context,
                 expected_cols,
                 len(row),
             )
             return None
         layout.append([str(cell) for cell in row])
     if not layout:
-        log.warning('"grid.layout" is empty; ignoring the grid')
+        log.warning('%s "layout" is empty; ignoring it', context)
         return None
-
-    default_val = grid_src.get("default", False)  # type: ignore[union-attr]
-    if not isinstance(default_val, bool):
-        log.warning('"grid.default" must be a boolean; ignoring it')
-        default_val = False
-
-    return GridConfig(default=default_val, layout=layout)
+    return layout
 
 
-def _validate_grid_layout_cameras(config: OctacamConfig) -> None:
-    """Warn about grid-layout cells naming a camera not in ``[[cameras]]``.
+def _parse_visualization(src: object) -> list[VisualizationConfig]:
+    """Parse the optional ``[[visualization]]`` array; each entry is generated.
 
-    Runs only when both a grid and an explicit camera list exist (an empty
-    camera list means "use all detected", whose names aren't known here).  A
-    typo'd cell would otherwise silently render as a black tile with no hint.
+    Malformed entries (missing/invalid layout, duplicate output name) are warned
+    about and skipped, never raised."""
+    if src is None:
+        return []
+    if not isinstance(src, list):
+        log.warning('Ignoring "visualization" in octacam config as it is not an array')
+        return []
+    result: list[VisualizationConfig] = []
+    seen_names: set[str] = set()
+    for index, entry in enumerate(src):
+        context = f'the {index}th "visualization" entry'
+        if not isinstance(entry, dict):
+            log.warning("Ignoring %s as it is not a table", context)
+            continue
+        layout = _parse_layout(entry.get("layout"), context)
+        if layout is None:
+            continue
+        try:
+            name = _scalar_str(entry.get("name", "grid.mp4"))
+        except ValueError:
+            log.warning('Ignoring invalid "name" in %s; using "grid.mp4"', context)
+            name = "grid.mp4"
+        try:
+            ffmpeg_params = _scalar_str(entry.get("ffmpeg_params", ""))
+        except ValueError:
+            log.warning('Ignoring invalid "ffmpeg_params" in %s', context)
+            ffmpeg_params = ""
+        if name in seen_names:
+            log.warning(
+                "Ignoring %s as its output name %r is already used", context, name
+            )
+            continue
+        seen_names.add(name)
+        result.append(
+            VisualizationConfig(name=name, layout=layout, ffmpeg_params=ffmpeg_params)
+        )
+    return result
+
+
+def _validate_visualization_cameras(config: OctacamConfig) -> None:
+    """Warn about visualization-layout cells naming a camera not in ``[[cameras]]``.
+
+    Runs only when both a visualization and an explicit camera list exist (an
+    empty camera list means "use all detected", whose names aren't known here).
+    A typo'd cell would otherwise silently render as a black tile with no hint.
     """
-    if config.grid is None or not config.cameras:
+    if not config.visualization or not config.cameras:
         return
     known = {c.name for c in config.cameras if c.name}
     unknown = sorted(
         {
             cell
-            for row in config.grid.layout
+            for viz in config.visualization
+            for row in viz.layout
             for cell in row
             if cell and cell not in known
         }
     )
     if unknown:
         log.warning(
-            '"grid.layout" references unknown camera(s) %s — those cells will '
-            "render black. Known cameras: %s",
+            "A [[visualization]] layout references unknown camera(s) %s — those "
+            "cells will render black. Known cameras: %s",
             ", ".join(repr(u) for u in unknown),
             ", ".join(sorted(known)) or "(none)",
         )
@@ -444,15 +582,15 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
     return cameras
 
 
-def _finalize(config: OctacamConfig) -> OctacamConfig:
-    # The save directory template may contain strftime codes (e.g. %y%m%d).
-    try:
-        config.gui.save_directory_default = time.strftime(
-            config.gui.save_directory_default
-        )
-    except ValueError:
-        pass
-    return config
+def _parse_section(data: dict, key: str, model_cls: type[_ModelT], default: _ModelT):
+    """Parse a single-table section (``[key]``) via lenient validation."""
+    src = data.get(key)
+    if src is None:
+        return default
+    if not isinstance(src, dict):
+        log.warning('Ignoring "%s" in octacam config as it is not a table', key)
+        return default
+    return _lenient_validate(model_cls, src, key, default)
 
 
 def parse_config(file_path: str | Path) -> OctacamConfig:
@@ -462,34 +600,32 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
     if not file_path.exists():
         log.info("octacam config file not found at %s.", file_path)
         log.info("All detected cameras will be used.")
-        return _finalize(config)
+        return config
 
     try:
         data = tomllib.loads(file_path.read_text())
     except tomllib.TOMLDecodeError as e:
         log.error("Failed to parse octacam config file: %s", e)
-        return _finalize(config)
+        return config
 
     config.backend = _parse_backend(data.get("backend"))
-    config.grid = _parse_grid(data.get("grid"))
-    config.nas = _parse_nas(data.get("nas"))
-
-    gui_src = data.get("gui")
-    if gui_src is not None:
-        if not isinstance(gui_src, dict):
-            log.warning('Ignoring "gui" in octacam config as it is not a table')
-        else:
-            config.gui = _lenient_validate(GuiConfig, gui_src, "gui", GuiConfig())
+    config.record = _parse_section(data, "record", RecordConfig, RecordConfig())
+    config.transcode = _parse_section(
+        data, "transcode", TranscodeConfig, TranscodeConfig()
+    )
+    config.gui = _parse_section(data, "gui", GuiConfig, GuiConfig())
+    config.visualization = _parse_visualization(data.get("visualization"))
+    config.transfer = _parse_transfer(data.get("transfer"))
 
     # Parsed before the cameras block, which has several early returns.
     config.plugins = _parse_plugins(data.get("plugins"))
 
     cameras_src = data.get("cameras")
     if cameras_src is None:
-        return _finalize(config)
+        return config
     if not isinstance(cameras_src, list):
         log.warning('Ignoring "cameras" in octacam config as it is not an array')
-        return _finalize(config)
+        return config
 
     config.cameras = _parse_cameras(cameras_src)
     if not config.cameras:
@@ -497,11 +633,11 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
             "No cameras found in octacam config file. All detected cameras "
             "will be used."
         )
-        return _finalize(config)
+        return config
 
     log.info("Found %d camera(s) in octacam config file", len(config.cameras))
-    _validate_grid_layout_cameras(config)
-    return _finalize(config)
+    _validate_visualization_cameras(config)
+    return config
 
 
 def find_config_file(config_dir: str | Path) -> Path:

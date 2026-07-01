@@ -244,6 +244,14 @@ class Camera:
         return self._recorded_frame_size
 
     @property
+    def pixel_format(self) -> str:
+        """Pixel format of recorded frames. Mono8 is the invariant across every
+        backend today (FLIR forces it; Basler/fake frames are GRAY8); it is
+        recorded into recording_summary.json so a later transcode of a raw dump
+        knows how to interpret the byte stream."""
+        return "Mono8"
+
+    @property
     def writer_failed(self) -> bool:
         return self._video_writer is not None and self._video_writer.failed
 

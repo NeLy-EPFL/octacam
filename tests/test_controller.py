@@ -33,6 +33,7 @@ def test_build_recording_summary():
         name="cam0",
         serial_number="S0",
         recorded_frame_size=(240, 320),
+        pixel_format="Mono8",
         mean_fps=99.97,
         frames_recorded=500,
         dropped_count=2,
@@ -42,17 +43,20 @@ def test_build_recording_summary():
         display_transform=DisplayTransform(rotation_deg=90),
     )
     settings = RecordingSettings(
-        fps=100.0, duration_s=5.0, codec="x264", record_form="display"
+        fps=100.0, duration_s=5.0, save_method="ffmpeg", record_form="display"
     )
     summary = build_recording_summary(
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
+    assert summary["schema_version"] == 2
     assert summary["fps_target"] == 100.0
+    assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
     assert "USB" in summary["dropped_frames_note"]
     assert summary["start_time"].startswith("20")
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
+    assert entry["pixel_format"] == "Mono8"
     assert entry["dropped_indices"] == [137, 411]
     assert (entry["width"], entry["height"]) == (240, 320)
     assert entry["transform"] == {"rotation_deg": 90, "flip_h": False, "flip_v": False}
@@ -144,25 +148,26 @@ def test_browse_directory(tmp_path):
     )
 
 
-def test_video_format_carries_x264_options():
+def test_video_format_carries_ffmpeg_params():
     settings = RecordingSettings(
-        codec="x264",
-        crf=20,
-        preset="superfast",
-        pix_fmt="yuv420p",
-        x264_params="keyint=30:scenecut=0",
+        save_method="ffmpeg",
+        ffmpeg_params="-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p",
     )
     video_format = settings.video_format()
-    assert (video_format.crf, video_format.preset) == (20, "superfast")
-    assert video_format.pix_fmt == "yuv420p"
-    assert video_format.x264_params == "keyint=30:scenecut=0"
-    assert RecordingSettings(codec="raw").video_format().extension == "raw"
+    assert video_format.save_method == "ffmpeg"
+    assert (
+        video_format.ffmpeg_params
+        == "-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p"
+    )
+    assert RecordingSettings(save_method="raw").video_format().extension == "raw"
 
 
-def test_recording_settings_default_crf_is_18():
-    # The capture default tracks writer.DEFAULT_CRF (CRF 18, near visually
-    # lossless); raising it shrinks files/CPU for the same perceptual quality.
-    assert RecordingSettings().crf == 18
+def test_recording_settings_default_ffmpeg_params():
+    # The capture default tracks writer.DEFAULT_FFMPEG_PARAMS (CRF 18 ultrafast,
+    # near visually lossless); config's record.ffmpeg_params overrides it.
+    from octacam.writer import DEFAULT_FFMPEG_PARAMS
+
+    assert RecordingSettings().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
 
 
 # ------------------------------------------------- emulator integration
@@ -324,7 +329,9 @@ def test_stop_waits_for_start_hooks_before_dispatching(camera_system, tmp_path):
 
     controller.stop_recording(abort=True)  # abort while the start hook is held open
     # on_recording_stop must stay blocked until the start hook completes.
-    assert not stop_called.wait(0.5), "on_recording_stop fired before start hooks finished"
+    assert not stop_called.wait(0.5), (
+        "on_recording_stop fired before start hooks finished"
+    )
 
     release_start.set()  # let on_recording_start return
     starter.join(timeout=10)
