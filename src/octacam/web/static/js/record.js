@@ -36,10 +36,14 @@ export class RecordTab {
     this.durationValue = document.getElementById("duration-value");
     this.durationUnit = document.getElementById("duration-unit");
     this.fpsInput = document.getElementById("fps");
-    this.saveDir = document.getElementById("save-dir");
+    // The save path is split into a base directory (record_directory) and a
+    // relative sub-path (relative_directory); the server recomposes save_dir.
+    this.recordDir = document.getElementById("record-dir");
+    this.relativeDir = document.getElementById("relative-dir");
     this.diskFree = document.getElementById("disk-free");
     this.trigger = document.getElementById("trigger-source");
     this.format = document.getElementById("format");
+    this.ffmpegParams = document.getElementById("ffmpeg-params");
     this.recordForm = document.getElementById("record-form");
     this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
     this.button = document.getElementById("record-button");
@@ -50,7 +54,7 @@ export class RecordTab {
     for (const f of formats) {
       const opt = document.createElement("option");
       opt.value = f.save_method;
-      opt.textContent = f.label;
+      opt.textContent = f.save_method;
       this.format.appendChild(opt);
     }
 
@@ -59,18 +63,29 @@ export class RecordTab {
     this.fpsInput.addEventListener("change", () =>
       this._put({ fps: clampInput(this.fpsInput) }, [this.fpsInput])
     );
-    this.saveDir.addEventListener("keydown", (e) => {
+    this.recordDir.addEventListener("keydown", (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        this.saveDir.blur(); // triggers change
+        this.recordDir.blur(); // triggers change
       }
     });
-    this.saveDir.addEventListener("change", () => this._commitSaveDir());
+    this.recordDir.addEventListener("change", () => this._commitRecordDir());
+    this.relativeDir.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.relativeDir.blur(); // triggers change
+      }
+    });
+    this.relativeDir.addEventListener("change", () => this._commitRelativeDir());
     this.trigger.addEventListener("change", () =>
       this._put({ trigger_source: this.trigger.value }, [this.trigger])
     );
-    this.format.addEventListener("change", () =>
-      this._put({ save_method: this.format.value }, [this.format])
+    this.format.addEventListener("change", () => {
+      this._put({ save_method: this.format.value }, [this.format]);
+      this._syncFfmpegEnabled();
+    });
+    this.ffmpegParams.addEventListener("change", () =>
+      this._put({ ffmpeg_params: this.ffmpegParams.value }, [this.ffmpegParams])
     );
     this.recordForm.addEventListener("change", () =>
       this._put({ record_form: this.recordForm.value }, [this.recordForm])
@@ -112,14 +127,20 @@ export class RecordTab {
       const factor = Number(this.durationUnit.value) || 1;
       this.durationValue.value = trimNum(s.duration_s / factor);
     }
-    if (typeof s.save_dir === "string" && canSet(this.saveDir)) {
-      this.saveDir.value = s.save_dir;
+    if (typeof s.record_directory === "string" && canSet(this.recordDir)) {
+      this.recordDir.value = s.record_directory;
+    }
+    if (typeof s.relative_directory === "string" && canSet(this.relativeDir)) {
+      this.relativeDir.value = s.relative_directory;
     }
     if (s.trigger_source && canSet(this.trigger)) {
       this.trigger.value = s.trigger_source;
     }
     if (s.save_method && canSet(this.format)) {
       this.format.value = s.save_method;
+    }
+    if (typeof s.ffmpeg_params === "string" && canSet(this.ffmpegParams)) {
+      this.ffmpegParams.value = s.ffmpeg_params;
     }
     if (s.record_form && canSet(this.recordForm)) {
       this.recordForm.value = s.record_form;
@@ -130,6 +151,14 @@ export class RecordTab {
     ) {
       this.saveFrameTimestamps.checked = s.save_frame_timestamps;
     }
+    this._syncFfmpegEnabled();
+  }
+
+  // The ffmpeg parameters box only applies to the ffmpeg save method; grey it
+  // out for raw so it reads as inert (the fieldset's recording-lock disable is
+  // independent and layers on top).
+  _syncFfmpegEnabled() {
+    this.ffmpegParams.disabled = this.format.value !== "ffmpeg";
   }
 
   applyState(snap) {
@@ -293,37 +322,43 @@ export class RecordTab {
     ]);
   }
 
-  // Current save-dir text (possibly uncommitted), so the directory picker can
-  // open near wherever the operator is pointing.
-  getSaveDir() {
-    return this.saveDir.value;
+  // Current base-directory text (possibly uncommitted), so the directory picker
+  // opens near wherever the operator is pointing.
+  getRecordDir() {
+    return this.recordDir.value;
   }
 
-  // Adopt a path chosen in the directory picker and commit it like a manual
-  // edit (PUT + revalidate, updating the disk-free readout).
-  setSaveDir(path) {
-    this.saveDir.value = path;
-    this._commitSaveDir();
+  // Adopt a base folder chosen in the directory picker and commit it like a
+  // manual edit (PUT + revalidate, updating the disk-free readout).
+  setRecordDir(path) {
+    this.recordDir.value = path;
+    this._commitRecordDir();
   }
 
-  async _commitSaveDir() {
-    const path = this.saveDir.value.trim();
-    if (this.settings && path === this.settings.save_dir) return;
-    const ok = await this._put({ save_dir: path }, [this.saveDir]);
-    if (ok) this._validateSaveDir();
+  async _commitRecordDir() {
+    const path = this.recordDir.value.trim();
+    if (this.settings && path === this.settings.record_directory) return;
+    const ok = await this._put({ record_directory: path }, [this.recordDir]);
+    if (ok) this._validateRecordDir();
   }
 
-  async _validateSaveDir() {
+  _commitRelativeDir() {
+    const rel = this.relativeDir.value.trim();
+    if (this.settings && rel === this.settings.relative_directory) return;
+    this._put({ relative_directory: rel }, [this.relativeDir]);
+  }
+
+  async _validateRecordDir() {
     try {
       const r = await api("POST", "/api/save-dir/validate", {
-        path: this.settings.save_dir,
+        path: this.settings.record_directory,
       });
       if (!r.ok || !r.data) return;
       this.diskFree.textContent = `${formatBytes(r.data.free_bytes)} free`;
       if (!r.data.exists && !r.data.creatable) {
         this.notify(
           "warning",
-          `Save directory cannot be created: ${r.data.resolved}`
+          `Directory cannot be created: ${r.data.resolved}`
         );
       }
     } catch {

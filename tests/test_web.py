@@ -122,8 +122,11 @@ def test_system_and_settings_endpoints(client):
     assert patched.json()["record_form"] == "sensor"
     assert patched.json()["save_frame_timestamps"] is True
     assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
-    # Encoding params are config-only now, not live settings: a bad save_method
-    # is rejected, and dropped encoder knobs are unknown fields (422).
+    # ffmpeg_params is a live setting (the GUI's Advanced box edits it); a bad
+    # save_method is still rejected, and other encoder knobs stay unknown (422).
+    ffmpeg = client.put("/api/settings", json={"ffmpeg_params": "-c:v ffv1"})
+    assert ffmpeg.status_code == 200
+    assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
     assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
     assert client.put("/api/settings", json={"fps": -1}).status_code == 422
@@ -149,6 +152,29 @@ def test_system_and_settings_endpoints(client):
         1,
     )
     assert client.post("/api/serial/command", json=command).status_code in (404, 405)
+
+
+def test_directory_split_recomposes_save_dir(client, tmp_path):
+    base = str(tmp_path / "data" / "TL")
+    # Setting the base directory alone recomposes save_dir under it (no relative
+    # part yet, so save_dir == the normalized base).
+    r = client.put("/api/settings", json={"record_directory": base})
+    assert r.status_code == 200
+    assert r.json()["record_directory"] == base
+    assert r.json()["save_dir"] == base
+
+    # Adding a relative sub-path joins it onto the base; the base is untouched.
+    r = client.put("/api/settings", json={"relative_directory": "250701/Fly1/001"})
+    assert r.status_code == 200
+    assert r.json()["record_directory"] == base
+    assert r.json()["relative_directory"] == "250701/Fly1/001"
+    assert r.json()["save_dir"] == f"{base}/250701/Fly1/001"
+
+    # Repointing the base keeps the relative part and re-joins under the new base.
+    other = str(tmp_path / "scratch")
+    r = client.put("/api/settings", json={"record_directory": other})
+    assert r.status_code == 200
+    assert r.json()["save_dir"] == f"{other}/250701/Fly1/001"
 
 
 def _wait_for_presence(ws, tries=200):
@@ -357,6 +383,42 @@ def test_recording_cycle_over_rest(client, tmp_path):
     needs_confirm = client.post("/api/recording/start", json={})
     assert needs_confirm.status_code == 409
     assert needs_confirm.json()["status"] == "needs_confirm"
+
+
+def test_recording_with_split_directory(client, tmp_path):
+    base = tmp_path / "data" / "TL"
+    assert (
+        client.put(
+            "/api/settings",
+            json={"record_directory": str(base), "relative_directory": "day/001"},
+        ).status_code
+        == 200
+    )
+    save_dir = base / "day" / "001"
+
+    response = client.post("/api/recording/start", json={"confirm_overwrite": False})
+    assert response.status_code == 202, response.text
+
+    deadline = time.monotonic() + 25
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get("/api/state").json()
+        if state["state"] == "preview" and state["cameras"][0]["frames"]:
+            break
+        time.sleep(0.2)
+    assert state is not None and state["state"] == "preview"
+
+    # Videos land under base/relative, and the summary records the relative part
+    # verbatim (what the transfer step mirrors onto the NAS).
+    assert len(sorted(save_dir.glob("*.mkv"))) == 2
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["relative_directory"] == "day/001"
+
+    # Both halves increment together; the base stays fixed.
+    settings = client.get("/api/settings").json()
+    assert settings["record_directory"] == str(base)
+    assert settings["relative_directory"] == "day/002"
+    assert settings["save_dir"] == f"{base}/day/002"
 
 
 def test_recording_writes_csv_when_enabled(client, tmp_path):

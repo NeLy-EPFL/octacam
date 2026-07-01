@@ -8,7 +8,7 @@ directory = "~/octacam/data/TL"
 relative_directory = "%y%m%d/Fly1/001"
 
 save_method = "ffmpeg" # ffmpeg | raw
-ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray" # ignored if save_method = "raw"
 save_transformed = true # whether to save the transformed video (flips/rotations applied)
 save_timestamps = false # whether to save the timestamp CSV.
 

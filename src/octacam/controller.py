@@ -66,6 +66,17 @@ def normalize_save_dir(text: str) -> str:
     return str(path.absolute()).replace("\\", "/")
 
 
+def compose_save_dir(record_directory: str, relative_directory: str) -> str:
+    """Join a base directory and relative sub-path into a normalized save_dir.
+
+    Mirrors config.resolve_save_dir's join semantics (an absolute
+    relative_directory discards the base) so the live-edited GUI values and the
+    config-resolved ones land on the same path."""
+    rel = relative_directory.strip()
+    combined = os.path.join(record_directory, rel) if rel else record_directory
+    return normalize_save_dir(combined)
+
+
 def sanitize_camera_name(name: str) -> str:
     """Validate a camera name as a safe, single-segment video filename stem.
 
@@ -94,10 +105,13 @@ class RecordingSettings:
     fps: float = 100.0
     duration_s: float = 20.0
     save_dir: str = "./"
-    # Resolved base directory (config record.directory) the save_dir sits under;
-    # used to derive the relative_directory the transfer step mirrors onto the
-    # NAS. Empty falls back to the save_dir's own basename.
+    # Resolved base directory (config record.directory) the save_dir sits under,
+    # and the relative sub-path (config record.relative_directory) under it. When
+    # either is edited, save_dir is recomposed as record_directory/
+    # relative_directory. relative_directory is what the transfer step mirrors
+    # onto the NAS; empty falls back to the save_dir's own basename.
     record_directory: str = ""
+    relative_directory: str = ""
     trigger_source: str = "software"  # "software" | "external"
     save_method: str = "ffmpeg"  # "ffmpeg" | "raw"
     # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg".
@@ -210,8 +224,12 @@ def build_recording_summary(
 def _relative_directory(settings: RecordingSettings) -> str:
     """The recording folder's path relative to the configured base directory.
 
-    Falls back to the folder's own basename when no base is known or the folder
-    lives outside it (e.g. an ad-hoc --output override)."""
+    Prefers the explicit ``relative_directory`` (the value save_dir was composed
+    from), then falls back to computing it from save_dir, and finally to the
+    folder's own basename when no base is known or the folder lives outside it
+    (e.g. an ad-hoc --output override)."""
+    if settings.relative_directory.strip():
+        return settings.relative_directory
     base = settings.record_directory
     if base:
         try:
@@ -341,9 +359,24 @@ class RecordingController:
                 "sensor",
             ):
                 raise ValueError("record_form must be display or sensor")
+            if "record_directory" in changes:
+                changes["record_directory"] = normalize_save_dir(
+                    changes["record_directory"]
+                )
             if "save_dir" in changes:
                 changes["save_dir"] = normalize_save_dir(changes["save_dir"])
-            self._settings = dataclasses.replace(self._settings, **changes)
+            merged = dataclasses.replace(self._settings, **changes)
+            # Editing either half of the split path re-derives the combined
+            # save_dir the recording machinery uses (config.resolve_save_dir does
+            # the same join at record time).
+            if "record_directory" in changes or "relative_directory" in changes:
+                merged = dataclasses.replace(
+                    merged,
+                    save_dir=compose_save_dir(
+                        merged.record_directory, merged.relative_directory
+                    ),
+                )
+            self._settings = merged
             if "fps" in changes:  # live-updates the preview trigger rate
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
             return dataclasses.replace(self._settings)
@@ -814,10 +847,26 @@ class RecordingController:
             self._deadline = None
             aborted = self._aborted
             if not aborted:
-                self._settings = dataclasses.replace(
-                    self._settings,
-                    save_dir=increment_trailing_number(self._settings.save_dir),
-                )
+                # Bump the trailing 3-digit run so the next recording lands in a
+                # fresh folder. Increment the relative sub-path (keeping the base
+                # fixed) and recompose so both halves stay consistent; fall back
+                # to bumping save_dir directly when there is no relative part.
+                if self._settings.relative_directory.strip():
+                    next_rel = increment_trailing_number(
+                        self._settings.relative_directory
+                    )
+                    self._settings = dataclasses.replace(
+                        self._settings,
+                        relative_directory=next_rel,
+                        save_dir=compose_save_dir(
+                            self._settings.record_directory, next_rel
+                        ),
+                    )
+                else:
+                    self._settings = dataclasses.replace(
+                        self._settings,
+                        save_dir=increment_trailing_number(self._settings.save_dir),
+                    )
             self._resume_preview()
         # Wait out the on_recording_start hooks so a stop/abort cancel can never
         # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when

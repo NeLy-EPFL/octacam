@@ -72,16 +72,20 @@ class SettingsPatch(BaseModel):
 
     Cross-field rules (fps > 0, known save_method, …) stay in
     RecordingController.update_settings — only the fields actually sent are
-    forwarded, via model_dump(exclude_unset=True). Encoding args are config-only
-    (record.ffmpeg_params); the GUI edits only these live-recording knobs."""
+    forwarded, via model_dump(exclude_unset=True). Editing record_directory or
+    relative_directory recomposes save_dir server-side (the two halves of the
+    split save path)."""
 
     model_config = ConfigDict(extra="forbid")
 
     fps: float | None = None
     duration_s: float | None = None
     save_dir: str | None = None
+    record_directory: str | None = None
+    relative_directory: str | None = None
     trigger_source: str | None = None
     save_method: str | None = None
+    ffmpeg_params: str | None = None
     record_form: str | None = None
     save_frame_timestamps: bool | None = None
 

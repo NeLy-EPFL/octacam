@@ -221,8 +221,8 @@ async function main() {
   });
   dirPicker = new DirPicker({
     notify,
-    onPick: (path) => record.setSaveDir(path),
-    getStart: () => record.getSaveDir(),
+    onPick: (path) => record.setRecordDir(path),
+    getStart: () => record.getRecordDir(),
   });
 
   // Establish an initial current camera so the grid highlight and both pickers

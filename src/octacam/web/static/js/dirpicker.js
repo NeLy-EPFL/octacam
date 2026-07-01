@@ -8,8 +8,8 @@ import { api } from "./util.js";
 
 export class DirPicker {
   // `onPick(path)` receives the chosen directory; `getStart()` returns the
-  // path to open at (the current save-dir text, possibly uncommitted/blank —
-  // the server falls back to the active save directory when it is blank).
+  // path to open at (the current base-directory text, possibly uncommitted/blank
+  // — the server falls back to the active save directory when it is blank).
   constructor({ notify, onPick, getStart }) {
     this.notify = notify;
     this.onPick = onPick;

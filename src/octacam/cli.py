@@ -225,6 +225,7 @@ def _settings_from_record(record) -> "RecordingSettings":
     from octacam.config import (
         duration_to_seconds,
         resolve_record_directory,
+        resolve_relative_directory,
         resolve_save_dir,
     )
     from octacam.controller import RecordingSettings
@@ -237,6 +238,7 @@ def _settings_from_record(record) -> "RecordingSettings":
         ),
         save_dir=resolve_save_dir(record, when),
         record_directory=resolve_record_directory(record, when),
+        relative_directory=resolve_relative_directory(record, when),
         trigger_source=record.trigger_source,
         save_method=record.save_method,
         ffmpeg_params=record.ffmpeg_params,
@@ -687,9 +689,11 @@ def record(
         settings.duration_s = duration
     if output is not None:
         # An explicit save dir bypasses the template; drop the record_directory
-        # base so the summary's relative_directory falls back to the folder name.
+        # base and relative sub-path so the summary's relative_directory falls
+        # back to the folder name.
         settings.save_dir = normalize_save_dir(str(output))
         settings.record_directory = ""
+        settings.relative_directory = ""
 
     # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()

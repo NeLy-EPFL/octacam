@@ -54,15 +54,21 @@
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>
         <div class="col">
-          <label class="col-label" for="save-dir"
-            title="Folder on the rig where the video files are written">Save directory:</label>
-          <textarea id="save-dir" rows="3" spellcheck="false"
-            title="Folder on the rig where the video files are written"></textarea>
+          <label class="col-label" for="record-dir"
+            title="Base folder on the rig that recordings are written under">Directory:</label>
+          <textarea id="record-dir" rows="2" spellcheck="false"
+            title="Base folder on the rig that recordings are written under"></textarea>
           <div class="save-dir-foot">
             <button type="button" id="browse-dir-btn" class="btn"
-              title="Browse the rig's filesystem to pick a save folder">Browse…</button>
-            <span id="disk-free" title="Free space available on the save folder's drive"></span>
+              title="Browse the rig's filesystem to pick the base folder">Browse…</button>
+            <span id="disk-free" title="Free space available on the base folder's drive"></span>
           </div>
+        </div>
+        <div class="col">
+          <label class="col-label" for="relative-dir"
+            title="Sub-path under the base directory for this recording; also mirrored onto the NAS by the transfer step">Relative directory:</label>
+          <textarea id="relative-dir" rows="2" spellcheck="false"
+            title="Sub-path under the base directory for this recording; also mirrored onto the NAS by the transfer step"></textarea>
         </div>
         <label class="row"
           title="software: the server starts each frame on a timer. external: every frame is driven by a hardware trigger signal."><span>Trigger source:</span>
@@ -71,20 +77,30 @@
             <option value="external">external</option>
           </select>
         </label>
-        <label class="row" title="Container and codec used for the saved video files"><span>Format:</span>
-          <select id="format"></select>
-        </label>
-        <label class="row"
-          title="display: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Saved image:</span>
-          <select id="record-form">
-            <option value="display">display (rotated/flipped)</option>
-            <option value="sensor">sensor (raw)</option>
-          </select>
-        </label>
-        <label class="row"
-          title="Also write a CSV listing the capture timestamp of every frame, per camera"><span>Per-frame timestamp CSV:</span>
-          <input id="save-frame-timestamps" type="checkbox">
-        </label>
+        <details id="record-advanced" class="advanced">
+          <summary title="Less-common recording options">Advanced</summary>
+          <label class="row"
+            title="How the saved video files are written. ffmpeg: encode now. raw: store Mono8 to transcode later."><span>Save method:</span>
+            <select id="format"></select>
+          </label>
+          <div class="col">
+            <label class="col-label" for="ffmpeg-params"
+              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg">ffmpeg parameters:</label>
+            <textarea id="ffmpeg-params" rows="2" spellcheck="false"
+              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg"></textarea>
+          </div>
+          <label class="row"
+            title="displayed: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Save frames as:</span>
+            <select id="record-form">
+              <option value="display">displayed</option>
+              <option value="sensor">sensor</option>
+            </select>
+          </label>
+          <label class="row"
+            title="Also write a CSV listing the capture timestamp of every frame, per camera"><span>Save timestamps:</span>
+            <input id="save-frame-timestamps" type="checkbox">
+          </label>
+        </details>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
         title="Start or stop recording on all cameras at once">Start recording</button>
@@ -118,7 +134,7 @@
           </span>
         </label>
         <span class="node-range" id="cam-exposure-range"></span>
-        <details id="cam-advanced">
+        <details id="cam-advanced" class="advanced">
           <summary title="Show less-common sensor controls (gain and ROI offset)">Advanced</summary>
           <label class="row" title="Brightness gain applied to the sensor signal (in the camera's gain units)"><span>Gain:</span>
             <input id="cam-gain" type="number" step="any">

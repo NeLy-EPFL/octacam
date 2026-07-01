@@ -265,6 +265,18 @@ def resolve_record_directory(
     return resolve_dir_template(record.directory, when)
 
 
+def resolve_relative_directory(
+    record: RecordConfig, when: time.struct_time | None = None
+) -> str:
+    """Resolve ``record.relative_directory`` (strftime codes expanded, kept relative).
+
+    Unlike ``resolve_record_directory`` this is *not* absolutized: it is the
+    sub-path that sits under the base directory (and that the transfer step
+    mirrors onto the NAS)."""
+    when = when or time.localtime()
+    return _apply_template(record.relative_directory, when)
+
+
 def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None) -> str:
     """Resolve the absolute save directory from directory + relative_directory.
 
