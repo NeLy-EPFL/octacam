@@ -1,28 +1,39 @@
 # Camera backends
 
-octacam drives more than one camera vendor through a common interface. You pick
-the backend **per rig** with a top-level `backend` key in `octacam_config.toml`
-(one vendor per config directory):
+octacam drives more than one camera vendor through a common interface. By
+default a rig **auto-detects every installed backend** and simply uses whatever
+is connected, so a single rig can mix Basler and FLIR cameras — you don't have
+to choose. The optional top-level `backend` key only *pins* a rig to one vendor:
 
 ```toml
-backend = "basler"   # default — omit the key and Basler is assumed
-# backend = "flir"   # FLIR / Teledyne (Spinnaker / PySpin)
+# backend = "auto"   # default (also what an absent key means): use every
+#                    # installed backend — Basler and FLIR together if both fit
+# backend = "basler" # pin to Basler only
+# backend = "flir"   # pin to FLIR / Teledyne (Spinnaker / PySpin) only
 ```
 
 | `backend` | SDK | Per-camera parameter file | Notes |
 | --- | --- | --- | --- |
-| `basler` | pypylon (bundled) | `<serial>.pfs` | Default. |
-| `flir` | Spinnaker / PySpin | `<serial>.json` | Runs the sensor in Mono8. |
+| `auto` | any installed | per camera (see below) | **Default.** Sweeps Basler + FLIR. |
+| `basler` | pypylon (bundled) | `<serial>.pfs` | Pin to Basler. |
+| `flir` | Spinnaker / PySpin | `<serial>.json` | Pin to FLIR; runs the sensor in Mono8. |
 | `fake` | none (in-memory) | `<serial>.json` | Synthetic frames for tests/CI. |
 
-Everything else behaves identically across backends — preview, recording
-(monochrome H.264 or raw), the software trigger, the per-camera
-exposure/gain/ROI controls, the recording summary (and opt-in timestamp CSVs),
-and the web GUI.
+In a mixed rig each camera keeps its own vendor's parameter-file format — a
+Basler camera persists as `<serial>.pfs`, a FLIR camera as `<serial>.json`, side
+by side in the same config directory. Everything else behaves identically across
+vendors — preview, recording (monochrome H.264 or raw), the software trigger,
+the per-camera exposure/gain/ROI controls, the recording summary (and opt-in
+timestamp CSVs), and the web GUI.
 
-`doctor` takes a matching `--backend` to enumerate just one vendor:
+On a single-vendor machine `auto` resolves to just that vendor, so existing
+configs (which omit the key, or set `backend = "basler"`) keep working unchanged.
+
+`doctor` sweeps every available backend by default; pass `--backend` to
+enumerate just one vendor:
 
 ```bash
+octacam doctor              # every installed backend
 octacam doctor --backend flir
 ```
 

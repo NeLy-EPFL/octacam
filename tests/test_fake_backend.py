@@ -22,7 +22,7 @@ FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 def previewing_system(tmp_path):
     system = CameraSystem(FAKE_SERIALS, backend="fake")
     assert len(system) == 2
-    assert system.extension == "fake"
+    assert system.extensions == ("fake",)
     system.load_config(tmp_path)  # no param files: defaults
     system.start_preview()
     yield system

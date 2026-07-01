@@ -14,6 +14,11 @@ from collections.abc import Callable
 
 BACKENDS = ("basler", "flir", "fake")
 
+# The hardware backends an auto-detecting rig sweeps. ``fake`` is synthetic (it
+# always reports FAKE-* serials regardless of hardware), so it is never part of
+# the auto set — it is only ever used when named explicitly.
+REAL_BACKENDS = ("basler", "flir")
+
 
 class BackendUnavailable(RuntimeError):
     """A requested camera backend is unknown or its SDK is not installed."""
@@ -60,6 +65,22 @@ def select_backend(name: str) -> tuple[Callable, Callable, str]:
         flir.ensure_available()
         return flir.enumerate_flir, flir.FlirBackend, flir.FlirBackend.extension
     raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
+
+
+def resolve_backend_names(name: str | None) -> list[str]:
+    """Expand a backend selector into the concrete backend names to try.
+
+    ``"auto"`` (or an empty/absent selector) means "every hardware backend" —
+    the multi-vendor default, so a rig can run Basler and FLIR cameras together
+    and simply use whatever is plugged in. Any other value is treated as a
+    single explicit backend (including ``"fake"`` and unknown names, which
+    :func:`select_backend` then accepts or rejects). ``"all"`` is an alias for
+    ``"auto"``.
+    """
+    key = (name or "auto").strip().lower()
+    if key in ("auto", "all", ""):
+        return list(REAL_BACKENDS)
+    return [key]
 
 
 def teardown_backend(name: str) -> None:

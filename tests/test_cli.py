@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("PYLON_CAMEMU", "2")
 
 from typer.testing import CliRunner
@@ -17,7 +19,9 @@ from octacam.cli import (
     _LOCK_UNAVAILABLE,
     _acquire_instance_lock,
     _browser_skip_reason,
+    _build_config_doc,
     _port_available,
+    _resolve_backend,
     _resolve_enabled,
     app,
 )
@@ -516,6 +520,66 @@ def test_config_help_documents_scaffolding():
     assert "Usage" in result.output
     assert "CONFIG_DIR" in result.output
     assert "--backend" in result.output
+
+
+def _quiet_console():
+    import io
+
+    from rich.console import Console
+
+    return Console(file=io.StringIO())
+
+
+def test_resolve_backend_defaults_to_auto_without_prompting(monkeypatch):
+    # No --backend must not ask which vendor to use: the rig auto-detects every
+    # installed backend. (A prompt would block here since no input is provided.)
+    monkeypatch.setattr("octacam.cli._available_backends", lambda: ["basler", "flir"])
+    assert _resolve_backend(_quiet_console(), None) == "auto"
+
+
+def test_resolve_backend_honors_explicit_and_rejects_unknown():
+    import typer
+
+    assert _resolve_backend(_quiet_console(), "flir") == "flir"
+    assert _resolve_backend(_quiet_console(), "fake") == "fake"
+    with pytest.raises(typer.BadParameter):
+        _resolve_backend(_quiet_console(), "nikon")
+
+
+def test_build_config_doc_omits_auto_backend_but_writes_explicit():
+    from octacam.config import RecordConfig
+
+    record = RecordConfig()
+    auto_doc = _build_config_doc("auto", record, [], [], None)
+    assert "backend" not in auto_doc  # the default is left implicit
+    flir_doc = _build_config_doc("flir", record, [], [], None)
+    assert flir_doc["backend"] == "flir"
+
+
+def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
+    tmp_path, monkeypatch
+):
+    # The user's scenario: run `octacam config` with no --backend, and cameras
+    # from different vendors are detected together. No backend question is asked,
+    # and no backend key is pinned into the file (it stays auto-detecting).
+    from octacam.config import load_config_dir
+
+    monkeypatch.setattr("octacam.cli._available_backends", lambda: ["basler", "flir"])
+    monkeypatch.setattr(
+        "octacam.cli._enumerate_backend",
+        lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],
+    )
+    target = tmp_path / "mixed-rig"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    result = runner.invoke(
+        app, ["config", str(target), "--no-snapshot-params"], input=inputs
+    )
+    assert result.exit_code == 0, result.output
+    text = (target / "octacam_config.toml").read_text()
+    assert "backend" not in text
+    cfg = load_config_dir(target)
+    assert cfg.backend == "auto"
+    assert [c.serial_number for c in cfg.cameras] == ["BAS-1", "FLIR-1"]
 
 
 def test_config_wizard_writes_roundtrippable_config(tmp_path):

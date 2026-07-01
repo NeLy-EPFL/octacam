@@ -18,9 +18,10 @@ complete, working examples.
 ## Scaffolding a config
 
 You rarely have to write the file by hand. `octacam config` walks you through it:
-it detects the camera backend and serials, prompts for the record and transfer
-settings, writes an `octacam_config.toml`, and snapshots each camera's current
-sensor parameters into a per-camera file.
+it auto-detects the connected cameras (across every installed backend, so a
+mixed Basler+FLIR rig is picked up in one go), prompts for the record and
+transfer settings, writes an `octacam_config.toml`, and snapshots each camera's
+current sensor parameters into a per-camera file.
 
 ```bash
 octacam config <config_dir>    # or omit the dir to be prompted for a name
@@ -31,8 +32,9 @@ parameters into a `<serial>.pfs` (Basler) or `<serial>.json` (FLIR) file. A
 camera that is busy — held by a live session — is skipped with a warning; you
 can capture its parameters later from the GUI's *Save…* dialog. Pass
 `--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
-opened). Pass `--backend basler|flir|fake` to skip auto-detection, or `--force`
-to overwrite an existing file. The wizard deliberately leaves the **visual**
+opened). Pass `--backend basler|flir|fake` to pin the rig to one vendor instead
+of auto-detecting, or `--force` to overwrite an existing file. The wizard
+deliberately leaves the **visual**
 settings — per-camera window placement, rotation, and the grid — to `octacam
 gui`, which tunes them against a live preview; run it next on the new directory.
 Everything the wizard writes stays hand-editable afterward.
@@ -40,11 +42,14 @@ Everything the wizard writes stays hand-editable afterward.
 ## Top level
 
 ```toml
-backend = "basler"   # "basler" (default) | "flir" | "fake"
+# backend = "auto"   # "auto" (default) | "basler" | "flir" | "fake"
 ```
 
-`backend` picks the camera vendor for the whole directory (one vendor per
-config). Omit it and Basler is assumed. See [Camera backends](backends.md).
+`backend` is optional. Omit it (or set `"auto"`) and the rig auto-detects every
+installed backend and uses whatever is connected — Basler and FLIR cameras can
+run together in one config, each keeping its own parameter-file format. Set a
+concrete value to pin the rig to a single vendor. See
+[Camera backends](backends.md).
 
 ## `[record]`
 

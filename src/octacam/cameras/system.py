@@ -8,6 +8,7 @@ rest of the system only ever sees :class:`~octacam.cameras.base.Camera`.
 """
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -15,7 +16,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from octacam.cameras.base import BackendError, Camera
-from octacam.cameras.registry import select_backend, teardown_backend
+from octacam.cameras.registry import (
+    BackendUnavailable,
+    resolve_backend_names,
+    select_backend,
+    teardown_backend,
+)
 from octacam.transform import DisplayTransform, from_camera_config
 from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
@@ -30,21 +36,22 @@ class CameraSystem:
     def __init__(
         self,
         requested_serial_numbers: list[str] | None = None,
-        backend: str = "basler",
+        backend: str = "auto",
     ):
         self.cameras: list[Camera] = []
         self._trigger_timer = PreciseTimer(self._trigger_all)
 
-        enumerate_fn, make_backend, extension = select_backend(backend)
+        # ``backend`` is a selector: "auto" (the default) sweeps every installed
+        # hardware backend so one rig can mix vendors; a concrete name restricts
+        # to it. Track the backends we actually enumerate so close() releases
+        # each one's session resources (only FLIR needs it).
         self.backend = backend
-        self.extension = extension
+        self._backends_used: set[str] = set()
 
-        # Enumerate on this thread (the factory is shared and creating device
-        # handles is cheap), then open them all at once below.
-        entries = enumerate_fn(requested_serial_numbers)
+        entries = self._enumerate(backend, requested_serial_numbers)
         if not entries:
             return
-        for _serial, handle in entries:
+        for _serial, handle, make_backend in entries:
             self.cameras.append(Camera(make_backend(handle)))
 
         # Open in parallel: each open() blocks on USB round-trips with the GIL
@@ -57,10 +64,84 @@ class CameraSystem:
         if failures:
             for camera in self.cameras:
                 camera.close()  # close() no-ops on cameras that never opened
-            teardown_backend(self.backend)
+            self._teardown_backends()
             camera, exc = failures[0]
             log.error("Failed to open camera %s", camera.serial_number)
             raise exc
+
+    def _enumerate(
+        self, backend: str, requested_serial_numbers: list[str] | None
+    ) -> list[tuple[str, object, "Callable"]]:
+        """Resolve the selector to ``[(serial, handle, backend_factory), ...]``.
+
+        With a single active backend (a concrete selector, or "auto" on a
+        single-vendor box) the requested serials are passed straight to that
+        backend's enumeration, preserving its ordering and its "not found"
+        warnings. With several active backends we enumerate each in full and
+        filter to the requested serials afterwards, so a Basler serial does not
+        make the FLIR enumeration cry "not found" (and vice versa).
+        """
+        active = []  # (name, enumerate_fn, factory)
+        unavailable: list[BackendUnavailable] = []
+        for name in resolve_backend_names(backend):
+            try:
+                enumerate_fn, make_backend, _extension = select_backend(name)
+            except BackendUnavailable as e:
+                unavailable.append(e)
+                continue
+            active.append((name, enumerate_fn, make_backend))
+        if not active:
+            # An explicit backend whose SDK is missing (or an unknown name) must
+            # surface as it did before; "auto" with nothing installed is its own
+            # clear error rather than a silent empty system.
+            if unavailable:
+                raise unavailable[0]
+            raise BackendUnavailable(backend, "no camera backend is available")
+
+        # Release order matters for FLIR; record every backend we enumerate.
+        self._backends_used = {name for name, _fn, _mk in active}
+
+        if len(active) == 1:
+            name, enumerate_fn, make_backend = active[0]
+            return [
+                (serial, handle, make_backend)
+                for serial, handle in enumerate_fn(requested_serial_numbers)
+            ]
+
+        # Multiple vendors: enumerate each fully, then select the requested set.
+        collected: list[tuple[str, object, Callable]] = []
+        for _name, enumerate_fn, make_backend in active:
+            for serial, handle in enumerate_fn(None):
+                collected.append((serial, handle, make_backend))
+        if not requested_serial_numbers:
+            return collected
+        by_serial = {entry[0]: entry for entry in collected}
+        ordered: list[tuple[str, object, Callable]] = []
+        for serial in requested_serial_numbers:
+            entry = by_serial.get(serial)
+            if entry is None:
+                log.warning("Camera with serial number %s not found", serial)
+                continue
+            ordered.append(entry)
+        return ordered
+
+    def _teardown_backends(self) -> None:
+        """Release session resources for every backend we enumerated."""
+        for name in self._backends_used:
+            teardown_backend(name)
+
+    @property
+    def extensions(self) -> tuple[str, ...]:
+        """The distinct parameter-file suffixes across the opened cameras.
+
+        A single-vendor rig has one (``("pfs",)``); a mixed rig has several.
+        Used to glob every camera's parameter files out of a config dir.
+        """
+        return tuple(sorted({camera.extension for camera in self.cameras}))
+
+    def extension_by_serial(self) -> dict[str, str]:
+        """Map each opened camera's serial to its parameter-file suffix."""
+        return {camera.serial_number: camera.extension for camera in self.cameras}
 
     def __len__(self) -> int:
         return len(self.cameras)
@@ -121,7 +202,7 @@ class CameraSystem:
         directory = Path(directory)
 
         def load_one(camera: Camera) -> None:
-            config_path = directory / f"{camera.serial_number}.{self.extension}"
+            config_path = directory / f"{camera.serial_number}.{camera.extension}"
             if config_path.exists():
                 log.info("Loading parameters for camera: %s", camera.serial_number)
                 camera.load_params(config_path.read_text())
@@ -231,7 +312,7 @@ class CameraSystem:
         self.stop_software_trigger()
         for camera in self.cameras:
             camera.close()
-        teardown_backend(self.backend)
+        self._teardown_backends()
 
     def _trigger_all(self) -> None:
         for camera in self.cameras:

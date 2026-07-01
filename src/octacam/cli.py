@@ -413,7 +413,7 @@ def main_callback(
         ),
     ] = False,
 ) -> None:
-    """octacam: preview, record, and save video streams from multiple Basler cameras.
+    """octacam: preview, record, and save video streams from multiple cameras.
 
     Run `octacam gui <config_dir>` for the web GUI, or see the commands below.
     """
@@ -628,18 +628,31 @@ class _Report:
 def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     """``[(serial, model|None), ...]`` for a backend without opening any camera.
 
-    Basler goes through the pylon TL factory directly so model names come along;
-    other backends expose only serials via their
-    enumeration function. Enumeration never opens/grabs a device, so this is safe
-    to run alongside a live session."""
-    key = (name or "basler").strip().lower()
+    ``"auto"`` (or an empty selector) sweeps every installed hardware backend and
+    concatenates the results, so a mixed Basler+FLIR rig is detected in one call;
+    a backend whose SDK is missing is skipped. Basler goes through the pylon TL
+    factory directly so model names come along; other backends expose only
+    serials via their enumeration function. Enumeration never opens/grabs a
+    device, so this is safe to run alongside a live session."""
+    from octacam.cameras import select_backend
+
+    key = (name or "auto").strip().lower()
+    if key in ("auto", "all", ""):
+        from octacam.cameras.registry import REAL_BACKENDS, BackendUnavailable
+
+        combined: list[tuple[str, str | None]] = []
+        for backend in REAL_BACKENDS:
+            try:
+                select_backend(backend)  # skip a backend whose SDK is absent
+            except BackendUnavailable:
+                continue
+            combined.extend(_enumerate_backend(backend))
+        return combined
     if key == "basler":
         from pypylon import pylon
 
         devices = pylon.TlFactory.GetInstance().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
-    from octacam.cameras import select_backend
-
     enumerate_fn, _factory, _extension = select_backend(name)
     return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
 
@@ -863,17 +876,16 @@ def _doctor_cameras_vs_config(report: _Report, cfg, only_backend: str | None) ->
         report.add("info", "config declares no serials; all detected cameras are used")
         return
     backend = only_backend or cfg.backend
+    where = "across all backends" if backend in ("auto", "all", "") else f"on {backend}"
     try:
         detected = {serial for serial, _model in _enumerate_backend(backend)}
     except Exception as e:
-        report.add("warn", f"could not enumerate {backend} to cross-check ({e})")
+        report.add("warn", f"could not enumerate {where} to cross-check ({e})")
         return
     missing = [s for s in declared if s not in detected]
     extra = sorted(detected - set(declared))
     if not missing:
-        report.add(
-            "ok", f"all {len(declared)} declared camera(s) detected on {backend}"
-        )
+        report.add("ok", f"all {len(declared)} declared camera(s) detected {where}")
     for serial in missing:
         report.add(
             "error",
@@ -1123,13 +1135,13 @@ def doctor(
 def _available_backends() -> list[str]:
     """Which SDK-backed backends (basler/flir) are installed here, in order.
 
-    Lets the wizard default to a backend this machine can actually use. ``fake``
-    is a synthetic test backend, never auto-detected. Selection imports the SDK
-    but never opens a device, so this is side-effect free."""
-    from octacam.cameras.registry import select_backend
+    Lets the wizard tell the user which vendors it will auto-detect. ``fake`` is
+    a synthetic test backend, never auto-detected. Selection imports the SDK but
+    never opens a device, so this is side-effect free."""
+    from octacam.cameras.registry import REAL_BACKENDS, select_backend
 
     available: list[str] = []
-    for name in ("basler", "flir"):
+    for name in REAL_BACKENDS:
         try:
             select_backend(name)
         except Exception:
@@ -1138,17 +1150,22 @@ def _available_backends() -> list[str]:
     return available
 
 
-def _prompt_backend(console, cli_backend: str | None) -> str:
-    """Resolve the camera backend from --backend or an interactive prompt."""
-    from rich.prompt import Prompt
+def _resolve_backend(console, cli_backend: str | None) -> str:
+    """Resolve the wizard's backend selector; no interactive prompt.
 
+    Without ``--backend`` the wizard does not ask which vendor to use: a rig
+    auto-detects every installed backend (Basler, FLIR) and simply uses whatever
+    is plugged in, so mixing vendors just works. ``--backend`` still pins the rig
+    to one vendor, or selects the synthetic ``fake`` backend for tests/CI."""
     from octacam.cameras.registry import BACKENDS
 
     if cli_backend is not None:
         key = cli_backend.strip().lower()
+        if key in ("auto", "all"):
+            return "auto"
         if key not in BACKENDS:
             raise typer.BadParameter(
-                f"unknown backend {cli_backend!r}; expected one of "
+                f"unknown backend {cli_backend!r}; expected 'auto' or one of "
                 f"{', '.join(BACKENDS)}",
                 param_hint="--backend",
             )
@@ -1156,34 +1173,33 @@ def _prompt_backend(console, cli_backend: str | None) -> str:
     available = _available_backends()
     if available:
         console.print(
-            f"Detected camera backend(s): [bold]{', '.join(available)}[/bold]"
+            f"Auto-detecting cameras from: [bold]{', '.join(available)}[/bold]"
         )
     else:
         console.print(
             "[yellow]No camera SDK detected here[/yellow] — you can still write a "
             "config now and detect cameras later on the rig."
         )
-    return Prompt.ask(
-        "Camera backend",
-        choices=list(BACKENDS),
-        default=available[0] if available else "basler",
-        console=console,
-    )
+    return "auto"
 
 
 def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
-    """List (serial, model|None) for *backend*; [] if none or enumeration fails."""
+    """List (serial, model|None) for *backend*; [] if none or enumeration fails.
+
+    ``backend`` may be ``"auto"``, in which case every installed backend is swept
+    and the combined list returned."""
+    label = "" if backend in ("auto", "all", "") else f"{backend} "
     try:
         cams = _enumerate_backend(backend)
     except Exception as e:
-        console.print(f"[yellow]Could not enumerate {backend} cameras:[/yellow] {e}")
+        console.print(f"[yellow]Could not enumerate {label}cameras:[/yellow] {e}")
         return []
     if cams:
-        console.print(f"Detected [bold]{len(cams)}[/bold] {backend} camera(s):")
+        console.print(f"Detected [bold]{len(cams)}[/bold] {label}camera(s):")
         for serial, model in cams:
             console.print(f"  • {model + '  ' if model else ''}{serial}")
     else:
-        console.print(f"[yellow]No {backend} cameras detected.[/yellow]")
+        console.print(f"[yellow]No {label}cameras detected.[/yellow]")
     return cams
 
 
@@ -1344,12 +1360,13 @@ def _build_config_doc(
 ) -> dict:
     """Assemble the raw-TOML dict the config writer serializes.
 
-    ``backend`` is written only when non-default (absent means basler), matching
-    how existing configs are kept clean; empty sections are omitted entirely."""
+    ``backend`` is written only when the user pinned a vendor with ``--backend``;
+    the default ``"auto"`` is left absent (auto-detect all) so the rig keeps
+    picking up whatever is plugged in. Empty sections are omitted entirely."""
     from octacam.config import TranscodeConfig
 
     doc: dict = {}
-    if backend != "basler":
+    if backend not in ("auto", "all", ""):
         doc["backend"] = backend
     doc["record"] = record_cfg.model_dump()
     doc["transcode"] = TranscodeConfig().model_dump()
@@ -1397,8 +1414,11 @@ def _snapshot_camera_params(
         pfs = system.save_all_params()
         if not pfs:
             return []
-        config_writer.write_pfs_files(target, pfs, system.extension)
-        return [f"{serial}.{system.extension}" for serial in pfs]
+        # Each camera persists in its own backend's format (.pfs / .json), so a
+        # mixed rig writes per-serial rather than one shared extension.
+        ext_by_serial = system.extension_by_serial()
+        config_writer.write_pfs_files(target, pfs, ext_by_serial)
+        return [f"{serial}.{ext_by_serial.get(serial, 'pfs')}" for serial in pfs]
     finally:
         system.close()
 
@@ -1417,7 +1437,8 @@ def config(
         str | None,
         typer.Option(
             "--backend",
-            help="Camera backend (basler/flir/fake). Default: auto-detect, else ask.",
+            help="Pin the rig to one camera backend (basler/flir/fake). Default: "
+            "auto-detect every installed backend and use whatever is connected.",
         ),
     ] = None,
     force: Annotated[
@@ -1438,10 +1459,11 @@ def config(
 ) -> None:
     """Interactively scaffold a new rig config directory.
 
-    Detects the camera backend and serials, then prompts for the record and
-    transfer settings and writes an octacam_config.toml. The visual per-camera
-    bits — window placement, rotation, and the grid — are left to `octacam gui`,
-    which tunes them against a live preview; run it next on the new directory.
+    Auto-detects the connected cameras (across every installed backend, so a
+    Basler+FLIR rig just works), then prompts for the record and transfer
+    settings and writes an octacam_config.toml. The visual per-camera bits —
+    window placement, rotation, and the grid — are left to `octacam gui`, which
+    tunes them against a live preview; run it next on the new directory.
 
     By default it also opens each detected camera once to snapshot its current
     sensor parameters into a per-camera file; a busy camera is skipped with a
@@ -1455,7 +1477,7 @@ def config(
     console = Console()
     console.print("[bold]octacam config[/bold] — set up a new rig config\n")
 
-    chosen_backend = _prompt_backend(console, backend)
+    chosen_backend = _resolve_backend(console, backend)
     detected = _detect_cameras(console, chosen_backend)
     cameras = _prompt_cameras(console, detected)
     visualization = _prompt_visualization(console, cameras)

@@ -631,7 +631,7 @@ def create_app(
             raise HTTPException(400, "No config directory is set for this session")
         payload = payload or CameraParamReset()
         pfs_by_serial = config_writer.read_pfs_files(
-            config_dir, controller.camera_system.extension
+            config_dir, controller.camera_system.extensions
         )
         try:
             result = controller.reset_camera_params(index, pfs_by_serial, payload.scope)
@@ -691,11 +691,11 @@ def create_app(
                 )
                 target.mkdir(parents=True, exist_ok=True)
                 config_writer.copy_auxiliary_pfs(
-                    active, target, set(pfs), controller.camera_system.extension
+                    active, target, set(pfs), controller.camera_system.extensions
                 )
             if req.save_sensor:
                 config_writer.write_pfs_files(
-                    target, pfs, controller.camera_system.extension
+                    target, pfs, controller.camera_system.extension_by_serial()
                 )
             if req.save_display and doc is not None:
                 config_writer.write_config(target, doc)

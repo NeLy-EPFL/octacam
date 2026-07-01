@@ -215,9 +215,11 @@ def test_duration_to_seconds():
     assert duration_to_seconds(200.0, "frames", 100.0) == 2.0
 
 
-def test_backend_defaults_to_basler(tmp_path):
+def test_backend_defaults_to_auto(tmp_path):
+    # An absent backend key means auto-detect every installed vendor, so a rig
+    # can mix Basler and FLIR and just use whatever is connected.
     (tmp_path / "octacam_config.toml").write_text("[record]\nfps = 1\n")
-    assert load_config_dir(tmp_path).backend == "basler"
+    assert load_config_dir(tmp_path).backend == "auto"
 
 
 def test_backend_parsed_when_present(tmp_path):
@@ -229,9 +231,9 @@ def test_backend_parsed_when_present(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
-def test_unknown_backend_falls_back_to_basler(tmp_path):
+def test_unknown_backend_falls_back_to_auto(tmp_path):
     (tmp_path / "octacam_config.toml").write_text('backend = "nikon"\n')
-    assert load_config_dir(tmp_path).backend == "basler"
+    assert load_config_dir(tmp_path).backend == "auto"
 
 
 def test_transfer_checksum_defaults_true(tmp_path):

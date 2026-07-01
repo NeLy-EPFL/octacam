@@ -147,6 +147,29 @@ def test_pfs_helpers_honor_a_non_pfs_extension(tmp_path):
     assert cw.read_pfs_files(tmp_path) == {}
 
 
+def test_pfs_helpers_handle_a_mixed_vendor_rig(tmp_path):
+    # A Basler+FLIR rig writes each camera's params in its own format and reads
+    # them all back: write_pfs_files takes a per-serial extension map, and
+    # read_pfs_files / copy_auxiliary_pfs take the set of suffixes in play.
+    ext_by_serial = {"BAS-1": "pfs", "FLIR-1": "json"}
+    cw.write_pfs_files(tmp_path, {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}, ext_by_serial)
+    assert (tmp_path / "BAS-1.pfs").exists()
+    assert (tmp_path / "FLIR-1.json").exists()
+
+    both = cw.read_pfs_files(tmp_path, ("pfs", "json"))
+    assert both == {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}
+    # A single suffix still reads only its own files.
+    assert cw.read_pfs_files(tmp_path, "json") == {"FLIR-1": "{}\n"}
+
+    # copy_auxiliary_pfs preserves non-live per-camera files across both formats.
+    (tmp_path / "aux.pfs").write_text("<aux/>\n")
+    dst = tmp_path / "dst"
+    cw.copy_auxiliary_pfs(tmp_path, dst, {"BAS-1", "FLIR-1"}, ("pfs", "json"))
+    assert (dst / "aux.pfs").exists()
+    assert not (dst / "BAS-1.pfs").exists()  # a live serial is not copied
+    assert not (dst / "FLIR-1.json").exists()
+
+
 def test_backend_key_preserved_through_save(tmp_path):
     raw = {"backend": "flir", "gui": {"fps_default": 30.0}, "cameras": []}
     doc = cw.merge_camera_display(raw, [{"serial": "A", "rotation_deg": 90.0}])

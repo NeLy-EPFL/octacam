@@ -3,12 +3,33 @@
 import pytest
 
 from octacam.cameras import select_backend
-from octacam.cameras.registry import BackendUnavailable, teardown_backend
+from octacam.cameras.registry import (
+    REAL_BACKENDS,
+    BackendUnavailable,
+    resolve_backend_names,
+    teardown_backend,
+)
 
 
 def test_select_unknown_backend_raises():
     with pytest.raises(BackendUnavailable):
         select_backend("nikon")
+
+
+def test_resolve_backend_names_auto_sweeps_hardware_backends():
+    # "auto" (and its aliases / an absent selector) means "every hardware
+    # backend", so a rig picks up Basler and FLIR together. fake is never swept.
+    assert resolve_backend_names("auto") == list(REAL_BACKENDS)
+    assert resolve_backend_names("all") == list(REAL_BACKENDS)
+    assert resolve_backend_names(None) == list(REAL_BACKENDS)
+    assert resolve_backend_names("  ") == list(REAL_BACKENDS)
+    assert "fake" not in resolve_backend_names("auto")
+
+
+def test_resolve_backend_names_concrete_is_single():
+    assert resolve_backend_names("basler") == ["basler"]
+    assert resolve_backend_names("FLIR") == ["flir"]
+    assert resolve_backend_names("fake") == ["fake"]
 
 
 def test_select_fake_backend():

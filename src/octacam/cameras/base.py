@@ -195,6 +195,15 @@ class Camera:
         """
         return getattr(self._backend, "raw", None)
 
+    @property
+    def extension(self) -> str:
+        """The parameter-file suffix this camera's backend persists (no dot).
+
+        Per-camera (``pfs`` for Basler, ``json`` for FLIR) so a rig mixing
+        vendors reads and writes each camera's sensor params in its own format.
+        """
+        return type(self._backend).extension
+
     def open(self) -> None:
         """Open the underlying device (a blocking USB round-trip)."""
         self._backend.open()

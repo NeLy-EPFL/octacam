@@ -21,6 +21,7 @@ import copy
 import os
 import tempfile
 import tomllib
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from octacam.config import find_config_file
@@ -247,33 +248,58 @@ def write_config(config_dir: str | Path, doc: dict) -> Path:
     return path
 
 
+def _extensions(extension: str | Iterable[str]) -> tuple[str, ...]:
+    """Normalize an extension argument to a tuple of suffixes.
+
+    A plain string is a single suffix; an iterable (a mixed rig's set of
+    per-vendor suffixes) is used as given. Empty tuples are tolerated (a system
+    with no cameras) — the caller just globs nothing.
+    """
+    if isinstance(extension, str):
+        return (extension,)
+    return tuple(extension)
+
+
 def write_pfs_files(
-    target_dir: str | Path, pfs_by_serial: dict[str, str], extension: str = "pfs"
+    target_dir: str | Path,
+    pfs_by_serial: dict[str, str],
+    extension: str | Mapping[str, str] = "pfs",
 ) -> None:
+    """Write each ``<serial> -> param text`` to ``<serial>.<extension>``.
+
+    ``extension`` is the single suffix for a one-vendor rig, or a
+    ``serial -> suffix`` map for a mixed rig so each camera's params land in its
+    own backend's format (``pfs`` for Basler, ``json`` for FLIR, ...).
+    """
     target_dir = Path(target_dir)
     for serial, text in pfs_by_serial.items():
-        atomic_write_text(target_dir / f"{serial}.{extension}", text)
+        ext = extension if isinstance(extension, str) else extension.get(serial, "pfs")
+        atomic_write_text(target_dir / f"{serial}.{ext}", text)
 
 
-def read_pfs_files(config_dir: str | Path, extension: str = "pfs") -> dict[str, str]:
+def read_pfs_files(
+    config_dir: str | Path, extension: str | Iterable[str] = "pfs"
+) -> dict[str, str]:
     """Map ``<serial> -> param text`` for every per-camera file in ``config_dir``.
 
     The inverse of :func:`write_pfs_files`, used to reset live cameras back to
-    the parameters the active config shipped. ``extension`` is the active
-    backend's parameter-file suffix (``pfs`` for Basler, ``json`` for FLIR, ...).
-    Keyed by file stem (the serial for a ``<serial>.<extension>``), so auxiliary
-    files like ``fictrac_camera_config.pfs`` are read too but simply never match
-    a live serial.
+    the parameters the active config shipped. ``extension`` is the backend's
+    parameter-file suffix (``pfs`` for Basler, ``json`` for FLIR, ...), or the
+    set of suffixes for a mixed-vendor rig. Keyed by file stem (the serial for a
+    ``<serial>.<extension>``), so auxiliary files like
+    ``fictrac_camera_config.pfs`` are read too but simply never match a live
+    serial.
     """
     config_dir = Path(config_dir)
     out: dict[str, str] = {}
     if not config_dir.is_dir():
         return out
-    for path in sorted(config_dir.glob(f"*.{extension}")):
-        try:
-            out[path.stem] = path.read_text()
-        except OSError:
-            continue
+    for ext in _extensions(extension):
+        for path in sorted(config_dir.glob(f"*.{ext}")):
+            try:
+                out[path.stem] = path.read_text()
+            except OSError:
+                continue
     return out
 
 
@@ -281,20 +307,22 @@ def copy_auxiliary_pfs(
     src_dir: str | Path,
     target_dir: str | Path,
     live_serials: set[str],
-    extension: str = "pfs",
+    extension: str | Iterable[str] = "pfs",
 ) -> None:
     """Copy per-camera files that are not ``<live-serial>.<extension>`` to a new dir.
 
     Preserves helper configs (e.g. ``fictrac_camera_config.pfs``) and the
     parameter files of cameras not currently opened, so the new dir is a
-    complete preset.
+    complete preset. ``extension`` may be a single suffix or the set of suffixes
+    a mixed-vendor rig uses.
     """
     src_dir, target_dir = Path(src_dir), Path(target_dir)
     if src_dir.resolve() == target_dir.resolve():
         return
-    for src in sorted(src_dir.glob(f"*.{extension}")):
-        if src.stem not in live_serials:
-            atomic_write_text(target_dir / src.name, src.read_text())
+    for ext in _extensions(extension):
+        for src in sorted(src_dir.glob(f"*.{ext}")):
+            if src.stem not in live_serials:
+                atomic_write_text(target_dir / src.name, src.read_text())
 
 
 # ----------------------------------------------------------------- new config dir

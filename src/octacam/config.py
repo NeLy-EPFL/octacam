@@ -197,13 +197,16 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-_BACKENDS = ("basler", "flir", "fake")
+_BACKENDS = ("auto", "basler", "flir", "fake")
 
 
 class OctacamConfig(BaseModel):
-    # Which camera SDK this rig uses. One vendor per config directory; absent
-    # means Basler so every existing config keeps working untouched.
-    backend: str = "basler"
+    # Which camera SDK(s) this rig uses. "auto" (the default, and what an absent
+    # key means) sweeps every installed hardware backend, so a rig can mix Basler
+    # and FLIR cameras and just use whatever is plugged in. A concrete name pins
+    # the rig to one vendor. On a single-vendor box "auto" resolves to that
+    # vendor, so every existing config keeps working untouched.
+    backend: str = "auto"
     record: RecordConfig = Field(default_factory=RecordConfig)
     transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
@@ -247,9 +250,7 @@ def _normalize_dir(text: str) -> str:
     return str(Path(text.strip()).expanduser().absolute()).replace("\\", "/")
 
 
-def resolve_dir_template(
-    template: str, when: time.struct_time | None = None
-) -> str:
+def resolve_dir_template(template: str, when: time.struct_time | None = None) -> str:
     """Resolve a directory template to an absolute path.
 
     Used for ``record.directory`` and ``transfer.directory`` (both accept
@@ -408,19 +409,19 @@ def _validate_visualization_cameras(config: OctacamConfig) -> None:
 
 
 def _parse_backend(value: object) -> str:
-    """Parse the optional top-level ``backend`` key, tolerantly (defaults basler)."""
+    """Parse the optional top-level ``backend`` key, tolerantly (defaults auto)."""
     if value is None:
-        return "basler"
+        return "auto"
     try:
         name = _scalar_str(value).strip().lower()
     except ValueError:
         log.warning('Ignoring "backend" in octacam config as it is not a string')
-        return "basler"
+        return "auto"
     if name not in _BACKENDS:
         log.warning(
-            'Ignoring unknown "backend" %r in octacam config; using "basler"', name
+            'Ignoring unknown "backend" %r in octacam config; using "auto"', name
         )
-        return "basler"
+        return "auto"
     return name
 
 
