@@ -121,6 +121,12 @@ def build_grid_video(
     so the grid is always produced even with a partial set.  Returns the output
     path on success, or None when no camera files are found or ffmpeg fails.
 
+    Every cell is one uniform size, taken from the first present camera in
+    row-major order.  Cameras whose native resolution / aspect ratio differs
+    from that reference are letterboxed to fit (centred, with black bars) rather
+    than stretched, so a rig with mixed frame sizes composites without
+    distortion.
+
     On *dry_run* the ffmpeg command is logged but not executed; the intended
     output path is still returned so callers can include it in NAS transfers.
     """
@@ -179,8 +185,9 @@ def build_grid_video(
                 "-i", f"color=black:size={W}x{H}:duration=86400:rate={fps}",
             ]
 
-    # filter_complex: scale each input to the cell size, then normalise to the
-    # output pixel format *before* xstack.  Camera files are encoded as gray
+    # filter_complex: scale each input to fit the cell (preserving its aspect
+    # ratio, padding the remainder with black), then normalise to the output
+    # pixel format *before* xstack.  Camera files are encoded as gray
     # (full-range, 0-255 luma) while lavfi black cells are yuv420p
     # (limited-range by default).  Without an explicit format= step xstack
     # receives mixed pixel formats and ffmpeg's implicit conversion mis-tags the
@@ -192,6 +199,13 @@ def build_grid_video(
     # of squeezing it into 16-235; the matching -color_range pc on the output
     # (below) tags the stream so players expand it back.  See
     # writer._color_range_args.
+    #
+    # Cells whose native resolution / aspect ratio differs from the reference
+    # W×H are letterboxed, not stretched: force_original_aspect_ratio=decrease
+    # fits the frame inside the cell, force_divisible_by=2 keeps the fitted
+    # dimensions even (required by chroma-subsampled outputs like yuv420p), and
+    # pad centres it with black bars.  The pad respects the full-range tagging,
+    # so the bars come out true black (luma 0) rather than washed-out 16.
     scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
     filter_parts: list[str] = []
     labels: list[str] = []
@@ -199,7 +213,9 @@ def build_grid_video(
         lbl = f"c{i}"
         labels.append(lbl)
         filter_parts.append(
-            f"[{i}:v]scale={W}:{H}{scale_range},format={pix_fmt}[{lbl}]"
+            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=decrease:"
+            f"force_divisible_by=2{scale_range},format={pix_fmt},"
+            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2[{lbl}]"
         )
 
     xstack_inputs = "".join(f"[{lbl}]" for lbl in labels)
