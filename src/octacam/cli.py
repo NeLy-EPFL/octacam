@@ -657,22 +657,6 @@ def record(
             "relative_directory from config.",
         ),
     ] = None,
-    experimenter: Annotated[
-        str | None,
-        typer.Option(help="Override record.experimenter (feeds the path template)."),
-    ] = None,
-    experiment: Annotated[
-        str | None,
-        typer.Option(help="Override record.experiment (feeds the path template)."),
-    ] = None,
-    subject: Annotated[
-        int | None,
-        typer.Option(help="Override record.subject_number (feeds the path template)."),
-    ] = None,
-    trial: Annotated[
-        int | None,
-        typer.Option(help="Override record.trial_number (feeds the path template)."),
-    ] = None,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
 ) -> None:
@@ -680,8 +664,7 @@ def record(
 
     Encoding, save method, transform, and the save-directory template all come
     from the config's [record] section; the options here override only the
-    day-to-day values (fps, duration, and the experimenter/experiment/subject/
-    trial that feed the directory template, or an explicit --output).
+    day-to-day values (fps and duration, or an explicit --output save directory).
     """
     from octacam import session_cache
     from octacam.cameras import BackendUnavailable, CameraSystem
@@ -691,21 +674,12 @@ def record(
 
     config = load_config_dir(config_dir)
 
-    # Apply the identity/fps overrides to the [record] section before resolving
-    # the templated save directory from it.
-    overrides = {
-        k: v
-        for k, v in (
-            ("experimenter", experimenter),
-            ("experiment", experiment),
-            ("subject_number", subject),
-            ("trial_number", trial),
-            ("fps", fps),
-        )
-        if v is not None
-    }
+    # Apply the fps override to the [record] section before resolving the
+    # templated save directory from it.
     record_cfg = (
-        config.record.model_copy(update=overrides) if overrides else config.record
+        config.record.model_copy(update={"fps": fps})
+        if fps is not None
+        else config.record
     )
 
     settings = _settings_from_record(record_cfg)
@@ -1330,7 +1304,7 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
             "No [transfer].directory resolvable for %s; skipping transfer", folder
         )
         return None
-    base = resolve_dir_template(transfer.directory, cfg.record)
+    base = resolve_dir_template(transfer.directory)
     summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
     rel = summary.get("relative_directory") or folder.name
     return Path(base) / rel

@@ -40,8 +40,7 @@ the ones a rig needs (see [Plugins](#plugins)).
 
 ```bash
 octacam gui <config_dir>      # web GUI on http://127.0.0.1:8765 (--host/--port/--no-browser)
-octacam record <config_dir>   # headless recording (--fps/--duration/--output and
-                              #   --experimenter/--experiment/--subject/--trial overrides)
+octacam record <config_dir>   # headless recording (--fps/--duration/--output overrides)
 octacam process <paths...>    # transcode + grid + transfer, all config-driven
                               #   (-r/--no-transcode/--no-grid/--no-transfer/--dry-run)
 octacam process --last        # …or the last recording / --session / --all (no paths)
@@ -169,7 +168,7 @@ name never collide. Configure it once in the rig's `octacam_config.toml`:
 
 ```toml
 [transfer]
-directory = "/mnt/nas/matthias/{experimenter}"   # {experimenter} etc. expand
+directory = "/mnt/nas/matthias"                  # strftime %-codes expand here too
 checksum = true                                  # content-verify each copy (default)
 ```
 

@@ -13,13 +13,8 @@ duration = 10.0
 duration_unit = "seconds"      # frames | seconds | minutes | hours
 trigger_source = "software"    # software | external
 
-experimenter = ""
-experiment = "experiment"
-subject_number = 1
-trial_number = 1
-
 directory = "~/data"
-relative_directory = "%y%m%d/flir/{trial_number:03d}"
+relative_directory = "%y%m%d/flir/001"
 
 save_method = "ffmpeg"         # ffmpeg | raw
 ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"

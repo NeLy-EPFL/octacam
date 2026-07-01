@@ -76,14 +76,16 @@ def test_list_plugins_lists_bundled_flywheel():
     assert status in ("available", "unavailable")
 
 
-def test_record_help_has_identity_overrides():
+def test_record_help_has_day_to_day_overrides():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
-    # Encoding is config-only now; the record overrides are the identity fields
-    # that feed the save-directory template plus fps/duration/output.
-    for opt in ("--experimenter", "--experiment", "--subject", "--trial"):
+    # Only the day-to-day overrides remain (fps/duration/output).
+    for opt in ("--fps", "--duration", "--output"):
         assert opt in result.output
-    # The old encoding/form enum options are gone.
+    # The identity fields that used to feed the save-directory template were
+    # removed as redundant, as were the old encoding/form enum options.
+    for opt in ("--experimenter", "--experiment", "--subject", "--trial"):
+        assert opt not in result.output
     assert "[x264|raw]" not in result.output
     assert "--record-form" not in result.output
 

@@ -77,10 +77,9 @@ class RecordConfig(BaseModel):
     """The ``[record]`` section: how and where recordings are captured.
 
     ``directory``/``relative_directory`` are path templates resolved at record
-    start: they accept ``{experimenter}``/``{experiment}``/``{subject_number}``/
-    ``{trial_number}`` placeholders and strftime ``%``-codes (see
-    :func:`resolve_save_dir`). ``ffmpeg_params`` is the verbatim encoder arg
-    string used when ``save_method == "ffmpeg"``.
+    start: they accept strftime ``%``-codes (see :func:`resolve_save_dir`).
+    ``ffmpeg_params`` is the verbatim encoder arg string used when
+    ``save_method == "ffmpeg"``.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -89,10 +88,6 @@ class RecordConfig(BaseModel):
     duration: float = 5.0
     duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
     trigger_source: Literal["software", "external"] = "software"
-    experimenter: str = ""
-    experiment: str = "experiment"
-    subject_number: int = 1
-    trial_number: int = 1
     directory: str = "./"
     relative_directory: str = ""
     save_method: Literal["ffmpeg", "raw"] = "ffmpeg"
@@ -103,8 +98,6 @@ class RecordConfig(BaseModel):
     save_timestamps: bool = False
 
     @field_validator(
-        "experimenter",
-        "experiment",
         "directory",
         "relative_directory",
         "ffmpeg_params",
@@ -176,7 +169,7 @@ class TransferConfig(BaseModel):
     Each recording folder is copied to ``directory``/``relative_directory`` (the
     ``relative_directory`` resolved at record time and stored in the summary), so
     the local tree is mirrored on the destination. ``directory`` supports the
-    same ``{experimenter}`` placeholders as ``record.directory``. ``checksum``
+    same strftime ``%``-codes as ``record.directory``. ``checksum``
     content-verifies each copy before promoting it (false = size-only).
     """
 
@@ -237,29 +230,16 @@ def duration_to_seconds(duration: float, unit: str, fps: float) -> float:
     return duration * _DURATION_UNIT_SECONDS.get(unit, 1.0)
 
 
-def _record_fields(record: RecordConfig) -> dict:
-    return {
-        "experimenter": record.experimenter,
-        "experiment": record.experiment,
-        "subject_number": record.subject_number,
-        "trial_number": record.trial_number,
-    }
+def _apply_template(text: str, when: time.struct_time) -> str:
+    """Expand strftime ``%``-codes in a path template.
 
-
-def _apply_template(text: str, fields: dict, when: time.struct_time) -> str:
-    """Expand ``{field}`` placeholders then strftime ``%``-codes in a template.
-
-    Tolerant: a bad placeholder or strftime code is warned about and the text is
-    left as-is rather than raising, matching the module's parsing philosophy."""
+    Tolerant: a bad strftime code is warned about and the text is left as-is
+    rather than raising, matching the module's parsing philosophy."""
     try:
-        text = text.format(**fields)
-    except (KeyError, IndexError, ValueError) as e:
-        log.warning("Could not expand placeholders in path template %r: %s", text, e)
-    try:
-        text = time.strftime(text, when)
+        return time.strftime(text, when)
     except ValueError as e:
         log.warning("Could not expand strftime codes in path template %r: %s", text, e)
-    return text
+        return text
 
 
 def _normalize_dir(text: str) -> str:
@@ -268,21 +248,21 @@ def _normalize_dir(text: str) -> str:
 
 
 def resolve_dir_template(
-    template: str, record: RecordConfig, when: time.struct_time | None = None
+    template: str, when: time.struct_time | None = None
 ) -> str:
-    """Resolve any directory template against a record config's fields + date.
+    """Resolve a directory template to an absolute path.
 
-    Used for ``record.directory`` and ``transfer.directory`` (both accept the
-    same ``{experimenter}`` placeholders and strftime codes)."""
+    Used for ``record.directory`` and ``transfer.directory`` (both accept
+    strftime ``%``-codes, expanded at record time)."""
     when = when or time.localtime()
-    return _normalize_dir(_apply_template(template, _record_fields(record), when))
+    return _normalize_dir(_apply_template(template, when))
 
 
 def resolve_record_directory(
     record: RecordConfig, when: time.struct_time | None = None
 ) -> str:
     """Resolve just ``record.directory`` (the base the save dir sits under)."""
-    return resolve_dir_template(record.directory, record, when)
+    return resolve_dir_template(record.directory, when)
 
 
 def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None) -> str:
@@ -291,9 +271,8 @@ def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None)
     Templating happens at record start (pass a single ``when`` snapshot so both
     parts share one date). Returns an absolute, ``~``-expanded path."""
     when = when or time.localtime()
-    fields = _record_fields(record)
-    base = _apply_template(record.directory, fields, when)
-    rel = _apply_template(record.relative_directory, fields, when)
+    base = _apply_template(record.directory, when)
+    rel = _apply_template(record.relative_directory, when)
     combined = os.path.join(base, rel) if rel else base
     return _normalize_dir(combined)
 
