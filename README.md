@@ -76,12 +76,3 @@ Run `octacam --help` (or `<command> --help`) for the full option list.
 | [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | Basler, FLIR/Teledyne, and the fake test backend |
 | [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable and 2-photon trigger |
 | [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |
-
-## Repository layout
-
-- [src/octacam/](src/octacam/) — the Python package
-- [configs/](configs/) — example rig configs (`octacam_config.toml` + per-camera sensor files)
-- [docs/](docs/) — documentation site source ([Material for MkDocs](https://squidfunk.github.io/mkdocs-material/))
-- [arduino/](arduino/) — firmware for the `flywheel` and `twophoton` plugins
-- [benchmarks/](benchmarks/) — performance benchmarks
-- [design/](design/) — internal design notes and research
