@@ -93,3 +93,16 @@ window_x = 0.333333
 window_y = 0.5
 window_width = 0.333333
 window_height = 0.5
+
+[grid]
+default = true
+layout = [
+    ["camera_LF", "",          "camera_RF"],
+    ["camera_LM", "camera_F",  "camera_RM"],
+    ["camera_LH", "camera_H",  "camera_RH"],
+]
+
+[nas]
+path = ""
+local_base = ""
+verify = true      # checksum each copy before promoting it (false = size-only)

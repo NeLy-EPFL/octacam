@@ -104,6 +104,114 @@ and `--all` commands. Folders that were deleted between recording and transcodin
 are silently skipped. The cache prunes itself (entries older than 30 days are
 dropped on each write), so it never grows without bound.
 
+### Grid video
+
+After transcoding you can generate a single composite video that tiles all cameras
+in a configurable grid.  Pass `--grid` to `octacam transcode` to produce one
+`grid.mp4` per recording folder right after the individual files are transcoded:
+
+```bash
+octacam transcode --all --grid --config configs/2p_1
+```
+
+The camera arrangement is read from the `[grid]` section of the rig's
+`octacam_config.toml`.  Each cell is a camera name (as declared in
+`[[cameras]]`); an empty string `""` places a black fill.  All rows must have
+the same number of columns.
+
+```toml
+# configs/my_rig/octacam_config.toml
+
+[grid]
+default = true   # generate grid.mp4 automatically when --config is passed
+layout = [
+    ["camera_LF", "",          "camera_RF"],
+    ["camera_LM", "camera_F",  "camera_RM"],
+    ["camera_LH", "",          "camera_RH"],
+]
+```
+
+Set `default = true` and the grid is generated automatically whenever
+`--config` is passed to `octacam transcode` — no `--grid` flag needed at
+the end of a recording session.  Omit it (or set `default = false`) to keep
+the grid opt-in via `--grid`.  Passing `--no-grid` always disables the grid,
+even when the config says `default = true`.
+
+When `--config` is omitted entirely, the built-in default for the 7-camera 2p
+rig is used (same arrangement as above).  For an 8-camera rig add `camera_H`
+in the bottom-centre cell instead of the empty string — see the example configs
+for [2p_1](configs/2p_1/octacam_config.toml) (7 cameras) and
+[emulate_8_cameras](configs/emulate_8_cameras/octacam_config.toml) (8 cameras).
+If a config lists `[[cameras]]` but has no usable `[grid] layout`, a near-square
+layout is derived from that rig's own cameras rather than falling back to the
+7-camera 2p default.  A layout cell naming a camera that isn't in `[[cameras]]`
+is reported (and renders black) instead of failing silently.
+
+To regenerate the grid for already-transcoded folders without re-running
+the full transcode:
+
+```bash
+# single folder
+octacam grid /data/octacam/260620-wt/Fly1/001-bhv --config configs/2p_1
+
+# whole experiment tree at once
+octacam grid /data/octacam/260620-wt -r --config configs/2p_1
+```
+
+### NAS export
+
+Copy all transcoded mp4s, grid videos, and `recording_summary.json` to a
+network drive while preserving the fly/trial directory tree:
+
+```bash
+octacam nas /data/octacam/260620-wt -r \
+    --nas-path /mnt/nas/matthias \
+    --nas-local-base /data/octacam
+```
+
+With `--nas-local-base` set, a recording at
+`/data/octacam/260620-wt/Fly1/001-bhv` lands at
+`/mnt/nas/matthias/260620-wt/Fly1/001-bhv` — fly and trial identity are
+preserved.  Omit it when copying a single folder and only the last path
+component is used; when copying several recordings at once (e.g. with `-r`),
+the tree above them is mirrored automatically (preserving the experiment/date
+folder), so distinct trials that share a name never collide on the NAS — within
+a run or across successive runs.
+
+**Integrity and resume.**  Each file is streamed to a temporary name and only
+swapped onto its final name once it is whole and content-verified (a blake2b
+checksum of the source is compared against the written copy), so an interrupted
+copy never leaves a truncated file masquerading as complete.  Re-running the
+same command skips files already present (by size), so a copy that was killed
+part-way simply resumes — at most the one in-progress file is redone.  Flags:
+
+- `--no-verify` — skip the checksum and do a faster size-only check (trusted/fast links).
+- `--checksum` — when a file already exists on the NAS, decide whether to skip it
+  by full checksum rather than size (repair mode: re-copies files whose bytes differ).
+
+Configure the NAS once in the rig's `octacam_config.toml`:
+
+```toml
+[nas]
+path = "/mnt/nas/matthias"   # NAS mount point
+local_base = "/data/octacam" # local root to strip from paths
+verify = true                # checksum each copy before promoting it (default)
+```
+
+### One-command end-of-day workflow
+
+With `[grid] default = true` and `[nas]` filled in, the entire post-recording
+pipeline — transcode → grid → NAS — is a single command:
+
+```bash
+octacam transcode --all --config configs/2p_1
+```
+
+Each step shows a live progress bar (frame/fps/speed for transcode and grid;
+MB/s per file for NAS, then a verify pass).  `--dry-run` on any of these
+commands logs the intended ffmpeg call and NAS copy plan without writing
+anything — useful for validating paths on a new workstation.
+
 Because transcoding is CPU-heavy, `octacam gui` and `octacam record` warn at
 startup when a transcode is already running on the same machine (it competes with
 live capture/encoding and can cause dropped frames), so you can choose to wait for

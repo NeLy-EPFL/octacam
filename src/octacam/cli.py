@@ -1083,6 +1083,623 @@ class _TranscodeProgressBar:
         return on_progress
 
 
+class _GridProgressBar:
+    """Rich progress bar for grid video generation, driven by TranscodeProgress callbacks.
+
+    Mirrors ``_TranscodeProgressBar`` but labels each job as ``grid: <folder>``
+    to distinguish it from the transcode phase."""
+
+    def __init__(self, total_jobs: int):
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._total_jobs = total_jobs
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[stats]}"),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task: TaskID | None = None
+
+    def __enter__(self):
+        self._progress.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._progress.stop()
+
+    def folder(self, index: int, path: Path) -> "ProgressCallback":
+        """Start a fresh bar for one grid encode and return its progress callback."""
+        from octacam.writer import TranscodeProgress
+
+        if self._task is not None:
+            self._progress.remove_task(self._task)
+        desc = f"[{index}/{self._total_jobs}] grid: {path.name}"
+        task = self._progress.add_task(desc, total=None, stats="")
+        self._task = task
+
+        def on_progress(p: TranscodeProgress) -> None:
+            stats = [f"{p.frame} frames"]
+            if p.fps:
+                stats.append(f"{p.fps:.0f} fps")
+            if p.speed:
+                stats.append(f"{p.speed:.3g}x")
+            completed = p.frame
+            total = p.total_frames
+            if p.done:
+                total = max(p.frame, total or 0) or None
+                completed = p.frame if total is None else total
+            self._progress.update(
+                task,
+                total=total,
+                completed=completed,
+                stats="  ".join(stats),
+                refresh=p.done,
+            )
+
+        return on_progress
+
+
+class _NasProgressBar:
+    """Rich progress bar for NAS file copies, driven by NasCopyCallback events.
+
+    Shows one file at a time with byte-level progress and transfer speed.
+    A new task is created each time the (file index, phase) changes, so the bar
+    cycles through each file's copy then its verify read-back without needing to
+    know the list upfront."""
+
+    def __init__(self) -> None:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("{task.fields[speed]}"),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task: TaskID | None = None
+        self._current_key: tuple[int, str] = (-1, "")
+
+    def __enter__(self):
+        self._progress.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._progress.stop()
+
+    def make_callback(self):
+        """Return a NasCopyCallback that updates this bar as files are copied."""
+        from octacam.nas import NasCopyProgress
+
+        def on_progress(p: NasCopyProgress) -> None:
+            key = (p.file_index, p.phase)
+            if key != self._current_key:
+                if self._task is not None:
+                    self._progress.remove_task(self._task)
+                self._current_key = key
+                verb = "verify" if p.phase == "verify" else "nas"
+                desc = f"[{p.file_index}/{p.file_count}] {verb}: {p.filename}"
+                self._task = self._progress.add_task(
+                    desc, total=p.file_size, speed="", completed=0
+                )
+            assert self._task is not None  # set on the first event for each key
+            speed_str = f"{p.speed_mbs:.1f} MB/s" if p.speed_mbs > 0 else ""
+            self._progress.update(
+                self._task,
+                completed=p.bytes_done,
+                speed=speed_str,
+                refresh=p.done,
+            )
+
+        return on_progress
+
+
+def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
+    """Collect recording directories from *roots*.
+
+    A directory is considered a recording if it contains a
+    ``recording_summary.json``.  In non-recursive mode each *root* must itself be
+    a recording directory; a root that is not one is warned about and skipped
+    (so a stray folder mixed in with valid recordings never aborts the batch).
+    If that leaves *nothing* to do, this exits with a hint — suggesting ``-r``
+    when recordings exist beneath the given path(s).  In recursive mode every
+    subdirectory that contains a summary is collected, including *roots*
+    themselves if they qualify.  Results are deduped and returned in sorted
+    order so the output is deterministic.
+    """
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    seen: set[Path] = set()
+    result: list[Path] = []
+
+    def _add(p: Path) -> None:
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            result.append(p)
+
+    def _nested_recordings(root: Path) -> list[Path]:
+        if not root.is_dir():
+            return []
+        return [
+            sub
+            for sub in sorted(root.rglob("*"))
+            if sub.is_dir() and (sub / RECORDING_SUMMARY_FILENAME).exists()
+        ]
+
+    saw_nested = False
+    for root in roots:
+        if recursive:
+            if (root / RECORDING_SUMMARY_FILENAME).exists():
+                _add(root)
+            for sub in _nested_recordings(root):
+                _add(sub)
+            continue
+        if (root / RECORDING_SUMMARY_FILENAME).exists():
+            _add(root)
+            continue
+        # Not itself a recording: warn and skip rather than abort, so valid
+        # recordings passed alongside it are still processed.
+        nested = _nested_recordings(root)
+        if nested:
+            saw_nested = True
+            log.warning(
+                "%s is not a recording directory; %d recording(s) found beneath "
+                "it — pass -r/--recursive to include them. Skipping.",
+                root,
+                len(nested),
+            )
+        else:
+            log.warning(
+                "%s is not a recording directory (no %s). Skipping.",
+                root,
+                RECORDING_SUMMARY_FILENAME,
+            )
+
+    # Nothing usable was given directly: turn the silent no-op into a hint.
+    if not recursive and not result and saw_nested:
+        sys.exit(
+            "No recording directory given directly — re-run with -r/--recursive "
+            "to copy the recordings found beneath the path(s) above."
+        )
+
+    return result
+
+
+def _effective_nas_local_base(
+    folders: list[Path], explicit_base: Path | None
+) -> Path | None:
+    """Local base to mirror under the NAS, derived when not given explicitly.
+
+    With an explicit base, use it.  Otherwise, when copying more than one
+    recording, mirror the tree from one level *above* their common ancestor — so
+    that ancestor (typically the experiment/date folder) is itself preserved on
+    the NAS.  This keeps same-named trials (e.g. two ``001-bhv``) distinct, keeps
+    successive experiments distinct across separate runs, and reproduces what an
+    explicit ``--nas-local-base`` one level up would give.  A single folder with
+    no base keeps the bare-name behaviour.
+    """
+    if explicit_base is not None:
+        return explicit_base
+    if len(folders) <= 1:
+        return None
+    try:
+        common = Path(os.path.commonpath([str(f.resolve()) for f in folders]))
+    except ValueError:
+        # Different drives/anchors (Windows): no common base; the collision
+        # guard below still protects against same-name overwrites.
+        return None
+    base = common.parent
+    log.info("Mirroring NAS tree from %s (common ancestor: %s)", base, common)
+    return base
+
+
+def _check_nas_collisions(
+    folders: list[Path], nas_root: Path, local_base: Path | None
+) -> None:
+    """Exit if two source folders would map to the same NAS destination."""
+    from octacam.nas import nas_destination
+
+    seen: dict[Path, Path] = {}
+    for f in folders:
+        dest = nas_destination(f, nas_root, local_base).resolve()
+        if dest in seen:
+            sys.exit(
+                f"NAS destination collision: {f} and {seen[dest]} both map to "
+                f"{dest}. Pass --nas-local-base to mirror the directory tree."
+            )
+        seen[dest] = f
+
+
+def _resolve_grid_layout(cfg, source: str) -> list[list[str]] | None:
+    """Grid layout for *cfg*: explicit ``[grid]`` layout, else one derived from
+    the configured cameras, else None (``build_grid_video`` then uses its
+    built-in default).
+
+    Deriving from the rig's own cameras avoids the footgun of silently falling
+    back to the 7-camera 2-photon :data:`grid.DEFAULT_LAYOUT` for a different rig
+    when its ``[grid]`` section is missing or malformed.
+    """
+    if cfg is not None and cfg.grid is not None and cfg.grid.layout:
+        return cfg.grid.layout
+    names = [c.name for c in cfg.cameras if c.name] if cfg is not None else []
+    if names:
+        from octacam.grid import auto_layout
+
+        log.warning(
+            "No valid [grid] layout in %s — deriving a layout from the %d "
+            "configured camera(s).",
+            source,
+            len(names),
+        )
+        return auto_layout(names)
+    if cfg is None:
+        log.warning("No --config given — using the built-in default grid layout.")
+    else:
+        log.warning(
+            "No usable [grid] layout or cameras in %s — using the built-in "
+            "default grid layout.",
+            source,
+        )
+    return None
+
+
+def _load_grid_layout(config_dir: Path) -> list[list[str]] | None:
+    """Return the grid layout for a config dir (see :func:`_resolve_grid_layout`)."""
+    from octacam.config import load_config_dir
+
+    return _resolve_grid_layout(load_config_dir(config_dir), str(config_dir))
+
+
+def _post_process_folders(
+    folder_outputs: dict[Path, list[Path]],
+    do_grid: bool,
+    grid_layout: list[list[str]] | None,
+    nas_path: Path | None,
+    nas_local_base: Path | None,
+    crf: int,
+    preset: str,
+    dry_run: bool,
+    show_bar: bool = False,
+    nas_verify: bool = True,
+    nas_checksum: bool = False,
+) -> int:
+    """Generate grid videos and/or copy to NAS for each successfully transcoded folder.
+
+    Runs in two sequential phases — all grids first, then all NAS copies — so
+    each phase gets its own progress bar without them fighting over the console.
+
+    The grid always uses yuv420p regardless of the per-camera transcode pixel
+    format, so the composite is playable in QuickTime and Keynote.
+
+    Returns the number of files that failed to copy to the NAS (0 when NAS is
+    off or everything succeeded) so the caller can reflect it in the exit code."""
+    from octacam.grid import build_grid_video
+    from octacam.nas import copy_folder_to_nas
+
+    # --- Phase 1: grid generation -------------------------------------------
+    grid_files: dict[Path, Path | None] = {}
+    if do_grid:
+        n = len(folder_outputs)
+        grid_bar = _GridProgressBar(n) if (show_bar and not dry_run) else None
+        with (grid_bar or contextlib.nullcontext()):
+            for i, (folder, _) in enumerate(folder_outputs.items(), 1):
+                on_prog = grid_bar.folder(i, folder) if grid_bar else None
+                grid_files[folder] = build_grid_video(
+                    folder,
+                    layout=grid_layout,
+                    crf=crf,
+                    preset=preset,
+                    # pix_fmt deliberately not forwarded from transcode: the grid
+                    # must be yuv420p (QuickTime / Keynote); individual camera files
+                    # can stay gray.
+                    dry_run=dry_run,
+                    on_progress=on_prog,
+                )
+
+    # --- Phase 2: NAS copy --------------------------------------------------
+    nas_failed = 0
+    if nas_path is not None:
+        folders = list(folder_outputs.keys())
+        local_base = _effective_nas_local_base(folders, nas_local_base)
+        _check_nas_collisions(folders, nas_path, local_base)
+        n_copied = n_skipped = 0
+        nas_bar = _NasProgressBar() if (show_bar and not dry_run) else None
+        with (nas_bar or contextlib.nullcontext()):
+            nas_cb = nas_bar.make_callback() if nas_bar else None
+            for folder, outputs in folder_outputs.items():
+                nas_files = list(outputs)
+                gf = grid_files.get(folder)
+                if gf is not None:
+                    nas_files.append(gf)
+                result = copy_folder_to_nas(
+                    folder,
+                    nas_root=nas_path,
+                    local_base=local_base,
+                    files_only=nas_files,
+                    dry_run=dry_run,
+                    verify=nas_verify,
+                    checksum=nas_checksum,
+                    on_progress=nas_cb,
+                )
+                n_copied += len(result.copied)
+                n_skipped += len(result.skipped)
+                nas_failed += len(result.failed)
+        if not dry_run:
+            log.info(
+                "NAS: %d copied, %d skipped, %d failed",
+                n_copied,
+                n_skipped,
+                nas_failed,
+            )
+            if nas_failed:
+                log.error("%d file(s) failed to copy to the NAS", nas_failed)
+    return nas_failed
+
+
+@app.command()
+def grid(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            help="Recording folders (or parent directories with -r) that contain "
+            "transcoded *.mp4 files.",
+        ),
+    ],
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "-r",
+            "--recursive",
+            help="Search each path recursively for recording directories "
+            "(identified by recording_summary.json) and generate a grid in each "
+            "one.  Without this flag every argument must be a recording directory.",
+        ),
+    ] = False,
+    config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Config directory whose octacam_config.toml contains a [grid] "
+            "layout section.  When omitted the built-in 7-camera default is used.",
+        ),
+    ] = None,
+    output_name: Annotated[
+        str,
+        typer.Option("--output-name", "-o", help="Output filename inside each folder."),
+    ] = "grid.mp4",
+    crf: Annotated[int, typer.Option(help="x264 quality.")] = 20,
+    preset: Annotated[str, typer.Option(help="x264 speed preset.")] = "veryslow",
+    pix_fmt: Annotated[
+        str,
+        typer.Option(
+            "--pix-fmt",
+            help="Pixel format for the grid video.  Default yuv420p is required "
+            "for QuickTime / Keynote compatibility.",
+        ),
+    ] = "yuv420p",
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="With -r: list the recording directories that would be processed. "
+            "Always: log the ffmpeg command without running it.",
+        ),
+    ] = False,
+) -> None:
+    """Generate a composite grid video from already-transcoded recording folders.
+
+    Pass a single experiment directory with ``-r`` to process every trial at once:
+
+        octacam grid ~/data/MD/260624_ -r --config configs/2p_2
+
+    Camera names and positions are read from the ``[grid]`` section of the rig's
+    ``octacam_config.toml`` (``--config``).  Without it the built-in 7-camera
+    default is used.  Missing cameras are filled with black frames.
+
+    Use ``octacam transcode --grid`` to generate the grid as part of transcoding.
+    """
+    from octacam.grid import build_grid_video
+
+    layout: list[list[str]] | None = None
+    if config_dir is not None:
+        layout = _load_grid_layout(config_dir)
+
+    recording_dirs = _find_recording_dirs(list(paths), recursive)
+    if not recording_dirs:
+        sys.exit("No recording directories found (missing recording_summary.json).")
+
+    if recursive:
+        log.info(
+            "Found %d recording director%s",
+            len(recording_dirs),
+            "y" if len(recording_dirs) == 1 else "ies",
+        )
+        if dry_run:
+            for d in recording_dirs:
+                log.info("[dry-run] would process: %s", d)
+
+    show_bar = not dry_run and _stderr_console().is_terminal
+    bar = _GridProgressBar(len(recording_dirs)) if show_bar else None
+    any_ok = False
+    with (bar or contextlib.nullcontext()):
+        for index, folder in enumerate(recording_dirs, 1):
+            output = folder / output_name
+            on_progress = bar.folder(index, folder) if bar else None
+            result = build_grid_video(
+                folder,
+                layout=layout,
+                output=output,
+                crf=crf,
+                preset=preset,
+                pix_fmt=pix_fmt,
+                dry_run=dry_run,
+                on_progress=on_progress,
+            )
+            if result is not None:
+                typer.echo(result)
+                any_ok = True
+    if not any_ok:
+        sys.exit("No grid videos could be generated.")
+
+
+@app.command()
+def nas(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            help="Recording folders or parent directories (with -r) to copy.",
+        ),
+    ],
+    nas_path: Annotated[
+        Path,
+        typer.Option(
+            "--nas-path",
+            help="NAS destination root (e.g. /mnt/nas/matthias).",
+        ),
+    ],
+    nas_local_base: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-local-base",
+            help="Local root to strip when computing the NAS sub-path, so the "
+            "directory tree is mirrored. Example: with --nas-local-base "
+            "/home/nely/data/MD a recording at "
+            "/home/nely/data/MD/260624_/Fly1/001-bhv lands at "
+            "<nas-path>/260624_/Fly1/001-bhv. Omit to use only the folder name.",
+        ),
+    ] = None,
+    recursive: Annotated[
+        bool,
+        typer.Option(
+            "-r",
+            "--recursive",
+            help="Search each path recursively for recording directories "
+            "(identified by recording_summary.json) and copy each one.",
+        ),
+    ] = False,
+    verify: Annotated[
+        bool,
+        typer.Option(
+            "--verify/--no-verify",
+            help="Content-verify each copied file (checksum) before promoting it "
+            "to its final name. On by default; --no-verify falls back to a "
+            "size-only check for trusted/fast links.",
+        ),
+    ] = True,
+    checksum: Annotated[
+        bool,
+        typer.Option(
+            "--checksum",
+            help="When a file already exists on the NAS, decide whether to skip "
+            "it by full checksum rather than size (repair mode: re-copies files "
+            "whose bytes differ).",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Log what would be copied without touching any files.",
+        ),
+    ] = False,
+) -> None:
+    """Copy recordings to a NAS or any destination, preserving the directory tree.
+
+    Copies every *.mp4 (individual cameras and grid.mp4 if present) and the
+    recording_summary.json from each recording directory to the NAS, mirroring
+    the source path under --nas-local-base so fly and trial identity are kept:
+
+        octacam nas ~/data/MD/260624_ -r \\
+            --nas-path /mnt/nas/matthias \\
+            --nas-local-base ~/data/MD
+
+    results in /mnt/nas/matthias/260624_/Fly1/001-bhv/, and so on for every
+    trial found in the tree.  Use --dry-run first to verify the paths.
+
+    Copies are atomic and resumable: each file is written to a temp and only
+    swapped onto its final name once whole and (by default) checksum-verified,
+    and a re-run skips files already present, so an interrupted copy never leaves
+    a truncated file and never has to start over from scratch.  When
+    --nas-local-base is omitted and several recordings are copied at once, their
+    common parent is used as the base automatically so same-named trials do not
+    collide.
+    """
+    from octacam.nas import copy_folder_to_nas
+
+    recording_dirs = _find_recording_dirs(list(paths), recursive)
+    if not recording_dirs:
+        sys.exit("No recording directories found (missing recording_summary.json).")
+
+    log.info(
+        "Found %d recording director%s",
+        len(recording_dirs),
+        "y" if len(recording_dirs) == 1 else "ies",
+    )
+
+    local_base = _effective_nas_local_base(recording_dirs, nas_local_base)
+    _check_nas_collisions(recording_dirs, nas_path, local_base)
+
+    if dry_run:
+        for d in recording_dirs:
+            log.info("[dry-run] would copy: %s", d)
+
+    show_bar = not dry_run and _stderr_console().is_terminal
+    nas_bar = _NasProgressBar() if show_bar else None
+    failures = 0
+    n_copied = n_skipped = n_failed = 0
+    with (nas_bar or contextlib.nullcontext()):
+        nas_cb = nas_bar.make_callback() if nas_bar else None
+        for folder in recording_dirs:
+            result = copy_folder_to_nas(
+                folder,
+                nas_root=nas_path,
+                local_base=local_base,
+                dry_run=dry_run,
+                verify=verify,
+                checksum=checksum,
+                on_progress=nas_cb,
+            )
+            n_copied += len(result.copied)
+            n_skipped += len(result.skipped)
+            n_failed += len(result.failed)
+            if not result:
+                failures += 1
+    log.info(
+        "NAS: %d copied, %d skipped, %d failed", n_copied, n_skipped, n_failed
+    )
+    if failures:
+        sys.exit(f"{failures} folder(s) failed to copy.")
+
+
 @app.command()
 def transcode(
     paths: Annotated[
@@ -1174,6 +1791,68 @@ def transcode(
             "ffmpeg's own output verbatim.",
         ),
     ] = ProgressStyle.octacam,
+    grid: Annotated[
+        bool | None,
+        typer.Option(
+            "--grid/--no-grid",
+            help="Generate a composite grid video after each folder.  "
+            "When omitted, the [grid] default in --config decides.  "
+            "--no-grid always disables, even when the config says default = true.",
+        ),
+    ] = None,
+    grid_config_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-C",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Rig config directory (octacam_config.toml).  Supplies the grid "
+            "layout, whether grid/NAS run by default ([grid] default and [nas] "
+            "path), and the NAS local-base.  CLI flags override any config value.",
+        ),
+    ] = None,
+    nas_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-path",
+            help="Copy results to this destination after each folder.  "
+            "Overrides [nas] path from --config.",
+        ),
+    ] = None,
+    nas_local_base: Annotated[
+        Path | None,
+        typer.Option(
+            "--nas-local-base",
+            help="Local root to strip for NAS path mirroring.  "
+            "Overrides [nas] local_base from --config.",
+        ),
+    ] = None,
+    nas_verify: Annotated[
+        bool | None,
+        typer.Option(
+            "--nas-verify/--no-nas-verify",
+            help="Content-verify each NAS copy (checksum) before promoting it.  "
+            "When omitted, the [nas] verify value in --config decides (default on).",
+        ),
+    ] = None,
+    nas_checksum: Annotated[
+        bool,
+        typer.Option(
+            "--nas-checksum",
+            help="Decide whether an already-present NAS file can be skipped by "
+            "full checksum rather than size (repair mode).",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="For --grid and --nas-path: log what would be done without "
+            "running ffmpeg or copying any files.  Transcoding still runs normally.",
+        ),
+    ] = False,
 ) -> None:
     """Transcode recordings to compressed video.
 
@@ -1203,6 +1882,9 @@ def transcode(
     completed = 0
     interrupted = False
     raw_output = progress_style is ProgressStyle.ffmpeg
+    # Track which output files were produced per source folder so grid/NAS
+    # post-processing can run once per folder after all its files are done.
+    folder_outputs: dict[Path, list[Path]] = {}  # insertion-ordered (3.7+)
     # A live progress bar only makes sense on a terminal; piped/CI runs and the
     # raw-ffmpeg style skip it (ffmpeg paints its own output in raw mode).
     show_bar = not raw_output and _stderr_console().is_terminal
@@ -1247,10 +1929,59 @@ def transcode(
                     log.error("Failed to transcode %s: %s", input_path, e)
                     continue
                 completed += 1
+                folder = input_path.parent
+                folder_outputs.setdefault(folder, []).append(output)
                 if remove_source:
                     _remove_source_files(input_path)
         except KeyboardInterrupt:
             interrupted = True
+    # Resolve effective grid / NAS settings.
+    # Priority: explicit CLI flag > [grid]/[nas] config > off.
+    _cfg = None
+    if grid_config_dir is not None:
+        from octacam.config import load_config_dir as _load_cfg
+        _cfg = _load_cfg(grid_config_dir)
+
+    do_grid: bool = (
+        grid                                              # explicit --grid/--no-grid
+        if grid is not None
+        else bool(_cfg and _cfg.grid and _cfg.grid.default)  # config default
+    )
+    grid_layout: list[list[str]] | None = (
+        _resolve_grid_layout(_cfg, str(grid_config_dir or "the config"))
+        if do_grid
+        else None
+    )
+
+    effective_nas_path: Path | None = nas_path or (
+        Path(_cfg.nas.path) if (_cfg and _cfg.nas and _cfg.nas.path) else None
+    )
+    effective_nas_local_base: Path | None = nas_local_base or (
+        Path(_cfg.nas.local_base) if (_cfg and _cfg.nas and _cfg.nas.local_base) else None
+    )
+    effective_nas_verify: bool = (
+        nas_verify                                        # explicit --nas-verify/--no-nas-verify
+        if nas_verify is not None
+        else (_cfg.nas.verify if (_cfg and _cfg.nas) else True)  # config, else on
+    )
+
+    # Post-processing: grid + NAS per folder.  Zero overhead when both are off.
+    nas_failed = 0
+    if (do_grid or effective_nas_path is not None) and folder_outputs:
+        nas_failed = _post_process_folders(
+            folder_outputs=folder_outputs,
+            do_grid=do_grid,
+            grid_layout=grid_layout,
+            nas_path=effective_nas_path,
+            nas_local_base=effective_nas_local_base,
+            crf=crf,
+            preset=preset,
+            dry_run=dry_run,
+            show_bar=show_bar,
+            nas_verify=effective_nas_verify,
+            nas_checksum=nas_checksum,
+        )
+
     # Report outside the `with` so the message lands after the live bar is torn
     # down (and after the activity marker is cleared) instead of under it.
     if interrupted:
@@ -1261,8 +1992,13 @@ def transcode(
             len(jobs),
         )
         raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
+    problems = []
     if failures:
-        sys.exit(f"{failures} file(s) failed to transcode")
+        problems.append(f"{failures} file(s) failed to transcode")
+    if nas_failed:
+        problems.append(f"{nas_failed} file(s) failed to copy to the NAS")
+    if problems:
+        sys.exit("; ".join(problems))
 
 
 def _remove_source_files(input_path: Path) -> None:

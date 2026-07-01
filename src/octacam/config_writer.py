@@ -2,7 +2,8 @@
 
 The stdlib ships ``tomllib`` for *reading* TOML but no writer, and octacam
 keeps its dependency set deliberately lean, so this module hand-serializes the
-small, fixed config schema (``[gui]`` / ``[[cameras]]`` / ``[[plugins]]``).
+small, fixed config schema (``[gui]`` / ``[[cameras]]`` / ``[[plugins]]`` /
+``[grid]`` / ``[nas]``).
 
 Two design choices keep saves faithful:
 
@@ -120,6 +121,12 @@ def _dumps(data: dict) -> str:
     for plugin in data.get("plugins", []) or []:
         if isinstance(plugin, dict):
             block("plugins", plugin, array=True)
+    # Preserve the [grid]/[nas] post-processing sections so a GUI save (which
+    # round-trips through here for camera-display tweaks) never wipes them.
+    for header in ("grid", "nas"):
+        table = data.get(header)
+        if isinstance(table, dict) and table:
+            block(header, table)
 
     return "\n\n".join(blocks) + "\n" if blocks else ""
 

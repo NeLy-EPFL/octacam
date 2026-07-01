@@ -118,6 +118,65 @@ class GuiConfig(BaseModel):
         return _scalar_str(value)
 
 
+class GridConfig(BaseModel):
+    """Composite grid layout for ``octacam transcode --grid`` / ``octacam grid``.
+
+    Set ``default = true`` so ``octacam transcode --config <dir>`` generates the
+    grid automatically without needing the ``--grid`` flag.
+
+    *layout* is a 2D list (rows × cols) of camera names as they appear in the
+    ``[[cameras]]`` entries.  An empty string ``""`` means a black fill cell.
+    All rows must have the same length.
+
+    Example for a 3×3 grid on a 7-camera rig::
+
+        [grid]
+        default = true
+        layout = [
+            ["camera_LF", "",          "camera_RF"],
+            ["camera_LM", "camera_F",  "camera_RM"],
+            ["camera_LH", "",          "camera_RH"],
+        ]
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    default: bool = False
+    layout: list[list[str]] = Field(default_factory=list)
+
+
+class NasConfig(BaseModel):
+    """NAS export settings for ``octacam transcode`` / ``octacam nas``.
+
+    When *path* is set and a config is passed to ``octacam transcode --config``,
+    recordings are copied to the NAS automatically after transcoding — no
+    ``--nas-path`` flag needed at the command line.
+
+    *local_base* is the local root stripped when computing the destination path,
+    so the directory tree is mirrored on the NAS::
+
+        [nas]
+        path = "/mnt/nas/matthias"
+        local_base = "/home/nely/data/MD"
+        verify = true   # content-checksum each copy before promoting it (default)
+
+    *verify* on (the default) content-checksums every copied file before it is
+    swapped onto its final name; set it false for a faster size-only check on
+    trusted/fast links.  ``--nas-verify/--no-nas-verify`` overrides it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str = ""
+    local_base: str = ""
+    verify: bool = True
+
+    @field_validator("path", "local_base", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
+
+
 class PluginConfig(BaseModel):
     name: str
     options: dict = Field(default_factory=dict)
@@ -133,6 +192,90 @@ class OctacamConfig(BaseModel):
     gui: GuiConfig = Field(default_factory=GuiConfig)
     cameras: list[CameraConfig] = Field(default_factory=list)
     plugins: list[PluginConfig] = Field(default_factory=list)
+    grid: GridConfig | None = None
+    nas: NasConfig | None = None
+
+
+def _parse_nas(nas_src: object) -> NasConfig | None:
+    """Parse the optional ``[nas]`` section, returning None on any problem."""
+    if nas_src is None:
+        return None
+    if not isinstance(nas_src, dict):
+        log.warning('Ignoring "nas" in octacam config as it is not a table')
+        return None
+    return _lenient_validate(NasConfig, nas_src, "nas", NasConfig())
+
+
+def _parse_grid(grid_src: object) -> GridConfig | None:
+    """Parse the optional ``[grid]`` section, returning None on any problem."""
+    if grid_src is None:
+        return None
+    if not isinstance(grid_src, dict):
+        log.warning('Ignoring "grid" in octacam config as it is not a table')
+        return None
+    layout_src = grid_src.get("layout")
+    if layout_src is None:
+        log.warning('"grid" section is missing a "layout" key; ignoring it')
+        return None
+    if not isinstance(layout_src, list):
+        log.warning('"grid.layout" must be an array of arrays; ignoring it')
+        return None
+    layout: list[list[str]] = []
+    expected_cols: int | None = None
+    for row_i, row in enumerate(layout_src):
+        if not isinstance(row, list):
+            log.warning('"grid.layout" row %d is not an array; ignoring the grid', row_i)
+            return None
+        if not all(isinstance(cell, str) for cell in row):
+            log.warning('"grid.layout" row %d has non-string cells; ignoring the grid', row_i)
+            return None
+        if expected_cols is None:
+            expected_cols = len(row)
+        elif len(row) != expected_cols:
+            log.warning(
+                '"grid.layout" rows have inconsistent lengths (%d vs %d); ignoring the grid',
+                expected_cols,
+                len(row),
+            )
+            return None
+        layout.append([str(cell) for cell in row])
+    if not layout:
+        log.warning('"grid.layout" is empty; ignoring the grid')
+        return None
+
+    default_val = grid_src.get("default", False)  # type: ignore[union-attr]
+    if not isinstance(default_val, bool):
+        log.warning('"grid.default" must be a boolean; ignoring it')
+        default_val = False
+
+    return GridConfig(default=default_val, layout=layout)
+
+
+def _validate_grid_layout_cameras(config: OctacamConfig) -> None:
+    """Warn about grid-layout cells naming a camera not in ``[[cameras]]``.
+
+    Runs only when both a grid and an explicit camera list exist (an empty
+    camera list means "use all detected", whose names aren't known here).  A
+    typo'd cell would otherwise silently render as a black tile with no hint.
+    """
+    if config.grid is None or not config.cameras:
+        return
+    known = {c.name for c in config.cameras if c.name}
+    unknown = sorted(
+        {
+            cell
+            for row in config.grid.layout
+            for cell in row
+            if cell and cell not in known
+        }
+    )
+    if unknown:
+        log.warning(
+            '"grid.layout" references unknown camera(s) %s — those cells will '
+            "render black. Known cameras: %s",
+            ", ".join(repr(u) for u in unknown),
+            ", ".join(sorted(known)) or "(none)",
+        )
 
 
 def _parse_backend(value: object) -> str:
@@ -328,6 +471,8 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return _finalize(config)
 
     config.backend = _parse_backend(data.get("backend"))
+    config.grid = _parse_grid(data.get("grid"))
+    config.nas = _parse_nas(data.get("nas"))
 
     gui_src = data.get("gui")
     if gui_src is not None:
@@ -355,6 +500,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return _finalize(config)
 
     log.info("Found %d camera(s) in octacam config file", len(config.cameras))
+    _validate_grid_layout_cameras(config)
     return _finalize(config)
 
 

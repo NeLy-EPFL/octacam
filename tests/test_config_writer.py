@@ -70,6 +70,19 @@ def test_plugin_options_roundtrip():
     assert tomllib.loads(cw._dumps(doc)) == doc
 
 
+def test_grid_and_nas_sections_roundtrip():
+    # A GUI save round-trips through _dumps; it must not wipe the [grid]/[nas]
+    # post-processing sections (incl. the nested layout list-of-lists).
+    doc = {
+        "grid": {
+            "default": True,
+            "layout": [["camera_LF", "", "camera_RF"], ["camera_LM", "camera_F", ""]],
+        },
+        "nas": {"path": "/mnt/nas", "local_base": "/data", "verify": False},
+    }
+    assert tomllib.loads(cw._dumps(doc)) == doc
+
+
 @pytest.mark.parametrize("name", ["", "  ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
 def test_safe_config_name_rejects(name):
     with pytest.raises(ValueError):

@@ -13,8 +13,10 @@ from octacam.writer import (
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
+    _color_range_args,
     build_x264_args,
     default_codec,
+    find_ffmpeg,
     transcode_raw,
 )
 
@@ -193,6 +195,56 @@ def test_build_x264_args_threads_x264_params():
         **common,
     )
     assert extra[extra.index("-x264-params") + 1] == "keyint=30:scenecut=0"
+
+
+def test_color_range_args_only_for_limited_range_yuv():
+    # YUV pixel formats default to limited/TV range (luma squeezed into 16-235);
+    # we force full range so 0-255 frames survive. gray (4:0:0) and the yuvj*
+    # aliases are already full range and need no flag.
+    assert _color_range_args("yuv420p") == ["-color_range", "pc"]
+    assert _color_range_args("yuv444p") == ["-color_range", "pc"]
+    assert _color_range_args("gray") == []
+    assert _color_range_args("yuvj420p") == []
+
+
+def test_build_x264_args_forces_full_range_for_yuv_only():
+    common = dict(
+        ffmpeg="ffmpeg", output="o.mp4", fps=30.0, width=64, height=48,
+        crf=0, preset="ultrafast",
+    )
+    yuv = build_x264_args(pix_fmt="yuv420p", **common)
+    assert yuv[yuv.index("-color_range") + 1] == "pc"
+    # gray is already full range: no stray -color_range flag.
+    assert "-color_range" not in build_x264_args(pix_fmt="gray", **common)
+
+
+def test_yuv420p_transcode_preserves_full_range(tmp_path):
+    # Regression: a 0-255 ramp transcoded to yuv420p (lossless) must come back
+    # spanning the full range, NOT clamped into limited range's 16-235. Decodes
+    # straight to full-range gray and inspects the actual luma span.
+    import subprocess
+
+    w, h = 256, 16
+    ramp = np.tile(np.arange(256, dtype=np.uint8), (h, 1))
+    raw = tmp_path / "ramp.raw"
+    raw.write_bytes(ramp.tobytes())
+    raw.with_suffix(".json").write_text(
+        json.dumps({"width": w, "height": h, "pixel_format": "Mono8", "fps": 10.0})
+    )
+
+    out = transcode_raw(
+        raw, crf=0, preset="ultrafast", output=tmp_path / "ramp.mp4", pix_fmt="yuv420p"
+    )
+
+    dec = subprocess.run(
+        [find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", str(out),
+         "-f", "rawvideo", "-pixel_format", "gray", "pipe:1"],
+        capture_output=True, check=True,
+    ).stdout
+    back = np.frombuffer(dec, dtype=np.uint8)[: w * h].reshape(h, w)
+    # The old limited-range default clamped to [16, 235]; full range reaches the
+    # extremes (lossless crf 0, so this is effectively exact).
+    assert back.min() <= 2 and back.max() >= 253, (int(back.min()), int(back.max()))
 
 
 def test_capture_default_crf_is_18():
