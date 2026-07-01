@@ -365,11 +365,17 @@ def transfer_folder(
         log.warning("Nothing to transfer from %s", folder)
         return result
 
-    # --- Dry run: just log --------------------------------------------------
+    # --- Dry run: log intended copies; note files already at the destination -
     if dry_run:
         for f in candidates:
-            log.info("[dry-run] transfer: %s → %s", f, dest / f.name)
-            result.copied.append(f.name)
+            target = dest / f.name
+            if _should_skip(f, target, checksum=checksum):
+                # Already present (size/checksum match): a real run would skip
+                # it, so the preview must report a skip — not a phantom copy.
+                result.skipped.append(f.name)
+            else:
+                log.info("[dry-run] transfer: %s → %s", f, target)
+                result.copied.append(f.name)
         return result
 
     # --- Real copy ----------------------------------------------------------
@@ -385,7 +391,9 @@ def transfer_folder(
         target = dest / f.name
         try:
             if _should_skip(f, target, checksum=checksum):
-                log.info("Transfer: %s already up to date — skipping", f.name)
+                # Present and matching — counted in the run summary rather than
+                # logged per file, so a full re-run doesn't spam one line for
+                # every already-copied output.
                 result.skipped.append(f.name)
                 continue
             if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):

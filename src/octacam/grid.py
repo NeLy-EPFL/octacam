@@ -190,6 +190,7 @@ def build_grid_video(
 
     from octacam.writer import (
         DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+        _atomic_output,
         _color_range_args,
         _run_ffmpeg,
         _strip_opts,
@@ -276,7 +277,13 @@ def build_grid_video(
 
     log.info("Generating grid video → %s", output)
     try:
-        _run_ffmpeg(cmd, folder, on_progress=on_progress, total_frames=total_frames)
+        # Encode into a sibling temp promoted onto `output` only once whole, so
+        # an interrupted or failed grid never leaves a partial grid.mp4 at the
+        # final name — which ``octacam process``'s skip-if-exists would otherwise
+        # mistake for a finished grid. Mirrors writer._atomic_output for transcodes.
+        with _atomic_output(output) as tmp:
+            cmd[-1] = str(tmp)  # last token is the output path appended above
+            _run_ffmpeg(cmd, folder, on_progress=on_progress, total_frames=total_frames)
     except RuntimeError as e:
         log.error("Grid generation failed: %s", e)
         return None

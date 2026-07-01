@@ -44,11 +44,15 @@ def _no_temps(dest: Path) -> bool:
 def test_transfer_destination_mirror_and_bare():
     base = Path("/data/octacam")
     folder = Path("/data/octacam/exp/Fly1/001")
-    assert transfer_destination(folder, Path("/dest"), base) == Path("/dest/exp/Fly1/001")
+    assert transfer_destination(folder, Path("/dest"), base) == Path(
+        "/dest/exp/Fly1/001"
+    )
     # No base → only the last component.
     assert transfer_destination(folder, Path("/dest"), None) == Path("/dest/001")
     # Folder not under the base → falls back to the last component.
-    assert transfer_destination(Path("/other/001"), Path("/dest"), base) == Path("/dest/001")
+    assert transfer_destination(Path("/other/001"), Path("/dest"), base) == Path(
+        "/dest/001"
+    )
 
 
 # --- happy path / atomicity hygiene -----------------------------------------
@@ -232,6 +236,18 @@ def test_dry_run_touches_nothing(tmp_path):
     result = transfer_folder(src, dest=dest_root / "rec", dry_run=True)
     assert result  # lists intended copies
     assert not dest_root.exists()
+
+
+def test_dry_run_reports_already_transferred_as_skipped(tmp_path):
+    # A dry run over an already-transferred recording must show the files as
+    # skipped, not claim it would (re-)copy them.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"data" * 500})
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    transfer_folder(src, dest=dest)  # first, real transfer
+
+    result = transfer_folder(src, dest=dest, dry_run=True)
+    assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
+    assert not result.copied
 
 
 def test_nothing_to_copy_is_falsy(tmp_path):

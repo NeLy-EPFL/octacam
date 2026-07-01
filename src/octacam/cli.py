@@ -646,9 +646,7 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
 def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
     """Run a fast, read-only ffmpeg query and return its combined output ("" on error)."""
     try:
-        out = subprocess.run(
-            [exe, *args], capture_output=True, text=True, timeout=10
-        )
+        out = subprocess.run([exe, *args], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (out.stdout or "") + (out.stderr or "")
@@ -740,9 +738,7 @@ def _doctor_system(report: _Report) -> None:
             f"8-camera rig needs ~{need}",
         )
     elif soft < hard:
-        report.add(
-            "ok", f"open-file limit {soft}→{hard} (raised to hard at launch)"
-        )
+        report.add("ok", f"open-file limit {soft}→{hard} (raised to hard at launch)")
     else:
         report.add("ok", f"open-file limit {soft}")
 
@@ -755,7 +751,9 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
     # `fake` is a synthetic test/CI backend that always reports FAKE-* serials
     # regardless of hardware, so it is only enumerated when explicitly requested
     # (--backend fake) — never in the default all-backends sweep.
-    backends = (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
+    backends = (
+        (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
+    )
     for name in backends:
         try:
             select_backend(name)
@@ -776,7 +774,10 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
         for serial, model in cams:
             report.add("list", f"{model}  {serial}" if model else serial)
     if not only_backend and os.environ.get("PYLON_CAMEMU"):
-        report.add("info", f"PYLON_CAMEMU={os.environ['PYLON_CAMEMU']} (emulated Basler cameras)")
+        report.add(
+            "info",
+            f"PYLON_CAMEMU={os.environ['PYLON_CAMEMU']} (emulated Basler cameras)",
+        )
 
 
 def _doctor_encoding(report: _Report) -> None:
@@ -869,7 +870,9 @@ def _doctor_cameras_vs_config(report: _Report, cfg, only_backend: str | None) ->
     missing = [s for s in declared if s not in detected]
     extra = sorted(detected - set(declared))
     if not missing:
-        report.add("ok", f"all {len(declared)} declared camera(s) detected on {backend}")
+        report.add(
+            "ok", f"all {len(declared)} declared camera(s) detected on {backend}"
+        )
     for serial in missing:
         report.add(
             "error",
@@ -939,7 +942,9 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     report.section("Recording cache & runtime")
     cdir = session_cache.cache_dir()
     try:
-        tracked = {e["folder"] for e in session_cache._read_entries() if e.get("folder")}
+        tracked = {
+            e["folder"] for e in session_cache._read_entries() if e.get("folder")
+        }
     except Exception:
         tracked = set()
     existing = session_cache.all_folders()
@@ -978,7 +983,8 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
         report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
     if _in_ssh_session():
         report.add(
-            "info", "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel"
+            "info",
+            "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel",
         )
     elif sys.platform.startswith("linux") and not (
         os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
@@ -1009,7 +1015,10 @@ def _render_doctor(report: _Report) -> None:
     console.print()
     if errors or warns:
         console.print(
-            Text(f"{errors} error(s), {warns} warning(s)", style="bold red" if errors else "bold yellow")
+            Text(
+                f"{errors} error(s), {warns} warning(s)",
+                style="bold red" if errors else "bold yellow",
+            )
         )
     else:
         console.print(Text("All checks passed.", style="bold green"))
@@ -1055,7 +1064,9 @@ def doctor(
     ] = None,
     json_output: Annotated[
         bool,
-        typer.Option("--json", help="Emit machine-readable JSON instead of the report."),
+        typer.Option(
+            "--json", help="Emit machine-readable JSON instead of the report."
+        ),
     ] = False,
     strict: Annotated[
         bool,
@@ -1786,6 +1797,7 @@ def _grid_and_transfer(
     cli_config_dir: Path | None,
     dry_run: bool,
     show_bar: bool,
+    force: bool = False,
 ) -> int:
     """Build visualization grids and/or transfer each folder to its destination.
 
@@ -1805,6 +1817,7 @@ def _grid_and_transfer(
             if (show_bar and not dry_run)
             else None
         )
+        grid_skipped = 0
         with grid_bar or contextlib.nullcontext():
             for i, folder in enumerate(folder_outputs, 1):
                 cfg = folder_cfgs[folder]
@@ -1814,11 +1827,21 @@ def _grid_and_transfer(
                 ]
                 built: list[Path] = []
                 for name, layout, ff in _visualizations_for(cfg, summary_cams):
+                    out_path = folder / name
+                    if out_path.exists() and not force:
+                        # Idempotent re-run: the grid is already built. Grid
+                        # generation is atomic (temp + rename), so a present file
+                        # is complete — skip rebuilding, but still hand it to the
+                        # transfer phase (which skips it if already copied).
+                        # Counted for the summary rather than logged per grid.
+                        grid_skipped += 1
+                        built.append(out_path)
+                        continue
                     on_prog = grid_bar.folder(i, folder) if grid_bar else None
                     out = build_grid_video(
                         folder,
                         layout=layout,
-                        output=folder / name,
+                        output=out_path,
                         ffmpeg_params=ff or cfg.transcode.ffmpeg_params,
                         dry_run=dry_run,
                         on_progress=on_prog,
@@ -1826,6 +1849,12 @@ def _grid_and_transfer(
                     if out is not None:
                         built.append(out)
                 grid_files[folder] = built
+        if grid_skipped:
+            log.info(
+                "%sGrid: %d already exist — skipping (use --force to rebuild)",
+                "[dry-run] " if dry_run else "",
+                grid_skipped,
+            )
 
     # --- Phase 2: transfer --------------------------------------------------
     transfer_failed = 0
@@ -1851,7 +1880,13 @@ def _grid_and_transfer(
                 n_copied += len(result.copied)
                 n_skipped += len(result.skipped)
                 transfer_failed += len(result.failed)
-        if not dry_run:
+        if dry_run:
+            log.info(
+                "[dry-run] Transfer: %d to copy, %d already up to date",
+                n_copied,
+                n_skipped,
+            )
+        else:
             log.info(
                 "Transfer: %d copied, %d skipped, %d failed",
                 n_copied,
@@ -1924,6 +1959,15 @@ def process(
             "--no-transfer", help=r"Skip transferring to the \[transfer] destination."
         ),
     ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Re-transcode and rebuild grids even when the output already "
+            "exists. By default existing transcode/grid outputs are skipped (as "
+            "the transfer step skips files already at the destination).",
+        ),
+    ] = False,
     config_dir: Annotated[
         Path | None,
         typer.Option(
@@ -1968,12 +2012,18 @@ def process(
     no --config is needed. All three steps run by default; disable any with
     --no-transcode / --no-grid / --no-transfer.
 
+    Re-running is safe and resumes where it left off: each step skips outputs
+    that already exist — a finished transcode .mp4, a built grid, or a file
+    already at the transfer destination — so only missing work is redone. Pass
+    --force to rebuild existing transcodes and grids anyway (e.g. after changing
+    the encoder params or grid layout).
+
     Instead of PATHS, pass --last (the most recent recording), --session (the
     last GUI session), --session-id (an exact session), or --all (every cached
     folder). Deleted folders are silently skipped.
     """
     from octacam import session_cache
-    from octacam.writer import transcode_file
+    from octacam.writer import is_partial_transcode, transcode_file
 
     do_transcode = not no_transcode
     do_grid = not no_grid
@@ -1993,6 +2043,7 @@ def process(
     cfg_cache: dict[Path, object] = {}
     failures = 0
     completed = 0
+    skipped = 0
     interrupted = False
 
     # --- Transcode phase ----------------------------------------------------
@@ -2022,6 +2073,16 @@ def process(
                             )
                             continue
                         folder = input_path.parent
+                        if output.exists() and not force:
+                            # Idempotent re-run: a finished .mp4 already sits at
+                            # the target. Transcoding is atomic (temp + rename),
+                            # so its presence means a complete encode — skip
+                            # re-encoding, but still feed it to grid/transfer.
+                            # Counted for the summary rather than logged per file
+                            # so a full re-run doesn't spam one line per output.
+                            skipped += 1
+                            folder_outputs.setdefault(folder, []).append(output)
+                            continue
                         cfg = cfg_cache.get(folder)
                         if cfg is None:
                             cfg = _config_for_recording(folder, config_dir)
@@ -2052,16 +2113,30 @@ def process(
                             _remove_source_files(input_path)
                 except KeyboardInterrupt:
                     interrupted = True
+            if not interrupted:
+                log.info(
+                    "Transcode: %d done, %d skipped, %d failed%s",
+                    completed,
+                    skipped,
+                    failures,
+                    " (use --force to re-transcode existing)"
+                    if skipped and not force
+                    else "",
+                )
     else:
-        # No transcode: grid/transfer act on the mp4s already present.
+        # No transcode: grid/transfer act on the mp4s already present, ignoring
+        # any orphaned partial (.octacam-part) temp a hard kill may have left.
         for folder in _find_recording_dirs(folders, recursive):
-            folder_outputs.setdefault(folder, sorted(folder.glob("*.mp4")))
+            folder_outputs.setdefault(
+                folder,
+                sorted(p for p in folder.glob("*.mp4") if not is_partial_transcode(p)),
+            )
 
     # --- Grid + transfer phases ---------------------------------------------
     transfer_failed = 0
     if not interrupted and (do_grid or do_transfer) and folder_outputs:
         transfer_failed = _grid_and_transfer(
-            folder_outputs, do_grid, do_transfer, config_dir, dry_run, show_bar
+            folder_outputs, do_grid, do_transfer, config_dir, dry_run, show_bar, force
         )
 
     # Report outside the `with` so messages land after the live bar is gone.

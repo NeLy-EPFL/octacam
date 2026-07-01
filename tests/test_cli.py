@@ -1,9 +1,11 @@
 """CLI smoke tests for the typer app (no real recording is started)."""
 
+import json
 import logging
 import os
 import socket
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("PYLON_CAMEMU", "2")
@@ -254,6 +256,7 @@ def test_process_help_lists_options():
         "--no-grid",
         "--no-transfer",
         "--remove-source",
+        "--force",
     ):
         assert opt in result.output
     # Encoding is config-driven now: the old per-run encoding flags are gone.
@@ -378,3 +381,127 @@ def test_doctor_flags_undetected_camera_and_exits_nonzero(tmp_path):
     assert result.exit_code == 1, result.output
     assert "declared but NOT detected" in result.output
     assert "99999999" in result.output
+
+
+# --- process: idempotent re-runs (skip existing outputs) --------------------
+
+
+def _make_recording(folder, *, with_outputs, extra_toml=""):
+    """A recording folder with one camera's source .mkv and its summary.
+
+    When *with_outputs*, also drop a finished ``camera_LF.mp4`` and ``grid.mp4``
+    so ``octacam process``'s skip-on-exists path is exercised. *extra_toml*, if
+    given, is written as the embedded ``octacam_config.toml`` snapshot.
+    """
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "camera_LF.mkv").write_bytes(b"source-bytes")
+    (folder / RECORDING_SUMMARY_FILENAME).write_text(
+        json.dumps(
+            {
+                "fps_target": 100,
+                "relative_directory": folder.name,
+                "cameras": [
+                    {
+                        "name": "camera_LF",
+                        "file": "camera_LF.mkv",
+                        "width": 64,
+                        "height": 48,
+                        "fps": 100,
+                        "frames": 10,
+                    }
+                ],
+            }
+        )
+    )
+    if extra_toml:
+        (folder / "octacam_config.toml").write_text(extra_toml)
+    if with_outputs:
+        (folder / "camera_LF.mp4").write_bytes(b"finished-transcode")
+        (folder / "grid.mp4").write_bytes(b"finished-grid")
+
+
+def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    before_mp4 = (folder / "camera_LF.mp4").read_bytes()
+    before_grid = (folder / "grid.mp4").read_bytes()
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
+    assert result.exit_code == 0, result.output
+    # Neither the transcoder nor the grid builder ran — both outputs pre-existed.
+    assert calls == {"transcode": 0, "grid": 0}
+    # And the existing outputs are left byte-for-byte untouched.
+    assert (folder / "camera_LF.mp4").read_bytes() == before_mp4
+    assert (folder / "grid.mp4").read_bytes() == before_grid
+
+
+def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        Path(output).write_bytes(b"reencoded")
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--force"])
+    assert result.exit_code == 0, result.output
+    # --force re-runs both steps even though the outputs already existed.
+    assert calls == {"transcode": 1, "grid": 1}
+
+
+def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
+    # A skipped transcode/grid must still flow to the transfer step, so a
+    # re-run finishes the pipeline for a partially-transferred recording.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\nchecksum = false\n'
+        ),
+    )
+
+    def fake_transcode(input_path, output, **kwargs):
+        raise AssertionError("transcode should be skipped, not run")
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        raise AssertionError("grid should be skipped, not run")
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder)])
+    assert result.exit_code == 0, result.output
+    dest = dest_root / folder.name
+    assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
+    assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
