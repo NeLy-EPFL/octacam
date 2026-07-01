@@ -39,6 +39,8 @@ export class CameraTab {
     this.target = document.getElementById("cam-target");
     this.status = document.getElementById("camera-status");
     this.resetBtn = document.getElementById("cam-reset");
+    this.nameInput = document.getElementById("cam-name");
+    this.renameBtn = document.getElementById("cam-rename");
     this.inputs = {};
     this.ranges = {};
     for (const name of PARAMS) {
@@ -62,6 +64,20 @@ export class CameraTab {
       this.inputs[name].addEventListener("change", () => this._commit(name));
     }
     this.resetBtn.addEventListener("click", () => this._reset());
+    // Rename commits on the button or Enter; Escape discards the edit. There is
+    // deliberately no blur-commit — tabbing away must not rename by surprise.
+    this.renameBtn.addEventListener("click", () => this._commitName());
+    this.nameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this._commitName();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        const cam = this.cameras[this.selected];
+        if (cam) this.nameInput.value = cam.name;
+        this.nameInput.blur();
+      }
+    });
 
     this.render();
   }
@@ -115,6 +131,9 @@ export class CameraTab {
   render() {
     const cam = this.cameras[this.selected];
     if (!cam) return;
+    // Don't clobber an in-progress edit (e.g. a camera_params broadcast for the
+    // selected camera re-renders while the operator is typing a new name).
+    if (document.activeElement !== this.nameInput) this.nameInput.value = cam.name;
     for (const name of PARAMS) {
       const input = this.inputs[name];
       const range = this.ranges[name];
@@ -181,6 +200,21 @@ export class CameraTab {
     }
     this.notify("error", r.data?.detail || `Rename failed (HTTP ${r.status})`);
     return null;
+  }
+
+  // Commit the Name field (Rename button / Enter). Shares renameCamera with the
+  // grid's inline editor, so a rename here also relabels the tile and picker.
+  // Locks the tab during the PUT (like a param commit), then shows the server's
+  // canonical (trimmed) name on success or reverts to the current name.
+  async _commitName() {
+    const cam = this.cameras[this.selected];
+    if (!cam) return;
+    this.busy = true;
+    this._updateDisabled();
+    const canonical = await this.renameCamera(this.selected, this.nameInput.value);
+    this.busy = false;
+    this._updateDisabled();
+    this.nameInput.value = canonical ?? cam.name;
   }
 
   async _commit(name) {

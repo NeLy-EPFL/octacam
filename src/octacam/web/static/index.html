@@ -132,6 +132,13 @@
         <label class="row" title="Which camera these sensor parameters are read from and applied to"><span>Camera:</span>
           <select id="cam-target"></select>
         </label>
+        <div class="row" title="Rename the selected camera. The name becomes its per-camera video filename, so it must be unique and contain no slashes or dots."><span>Name:</span>
+          <span class="name-edit">
+            <input id="cam-name" type="text" maxlength="64" spellcheck="false"
+              title="A safe filename stem — unique across cameras, no path separators">
+            <button id="cam-rename" type="button" class="btn">Rename</button>
+          </span>
+        </div>
         <div class="row" title="Apply a change to just the selected camera, or to every camera at once"><span>Apply to:</span>
           <span class="radio-group">
             <label title="Change only the selected camera"><input type="radio" name="cam-apply-to" value="selected" checked> Selected</label>

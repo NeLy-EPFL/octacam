@@ -578,6 +578,10 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   color: var(--text-dim);
 }
 
+.name-edit { display: flex; gap: 6px; }
+.name-edit input { flex: 1; }
+.name-edit .btn { flex: none; }
+
 #cam-reset { margin-top: 12px; }
 
 .advanced { margin-top: 6px; }

@@ -516,15 +516,28 @@ export class CameraGrid {
   // click so a drag/resize doesn't also (de)select the tile.
   _startDrag(e, tile, start, move) {
     this._raise(tile);
+    // Capture the pointer only once the gesture becomes a real drag (past the
+    // threshold). Capturing on pointerdown retargets the trailing click AND
+    // dblclick to the capture element (the tile), which swallowed the
+    // tile-name double-click that opens the rename editor (and the title-bar
+    // double-click that maximizes). No capture on a click => events keep their
+    // real target; a genuine drag still captures so it tracks outside the tile.
+    let captured = false;
+    const onMove = (ev) => {
+      move(ev);
+      if (start.moved && !captured) {
+        captured = true;
+        tile.el.setPointerCapture(e.pointerId);
+      }
+    };
     const up = () => {
-      tile.el.removeEventListener("pointermove", move);
+      tile.el.removeEventListener("pointermove", onMove);
       tile.el.removeEventListener("pointerup", up);
       tile.el.removeEventListener("pointercancel", up);
-      tile.el.releasePointerCapture?.(e.pointerId);
+      if (captured) tile.el.releasePointerCapture?.(e.pointerId);
       if (start.moved) tile.suppressClick = true;
     };
-    tile.el.setPointerCapture(e.pointerId);
-    tile.el.addEventListener("pointermove", move);
+    tile.el.addEventListener("pointermove", onMove);
     tile.el.addEventListener("pointerup", up);
     tile.el.addEventListener("pointercancel", up);
   }
