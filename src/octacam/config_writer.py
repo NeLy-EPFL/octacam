@@ -24,6 +24,7 @@ import tomllib
 from pathlib import Path
 
 from octacam.config import find_config_file
+from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (
@@ -169,6 +170,53 @@ def merge_camera_display(raw_base: dict, patches: list[dict]) -> dict:
         for field in DISPLAY_FIELDS:
             if patch.get(field) is not None:
                 target[field] = patch[field]
+    return doc
+
+
+def with_process_params(
+    raw: dict,
+    *,
+    transcode_ffmpeg_params: str,
+    transfer_directory: str,
+    transfer_checksum: bool,
+) -> dict:
+    """Return a copy of ``raw`` with the GUI's post-recording params overlaid.
+
+    Sets ``[transcode].ffmpeg_params`` and ``[transfer].directory``/``checksum``
+    to the live (Process-section) values so the recording folder's config
+    snapshot drives ``octacam process``. Faithfully a *no-op* — the returned dict
+    compares equal to ``raw`` — when the values already match the config, so an
+    untouched snapshot stays a byte-verbatim copy. A missing
+    ``[transcode]``/``[transfer]`` section is created only when a value actually
+    diverges from its config default, so a rig with no ``[transfer]`` and a blank
+    transfer directory never gains an empty section.
+    """
+    doc = copy.deepcopy(raw) if raw else {}
+
+    transcode = doc.get("transcode")
+    has_transcode = isinstance(transcode, dict)
+    current_ff = (
+        transcode.get("ffmpeg_params", DEFAULT_TRANSCODE_FFMPEG_PARAMS)
+        if has_transcode
+        else DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    )
+    if transcode_ffmpeg_params != current_ff:
+        if not has_transcode:
+            transcode = {}
+            doc["transcode"] = transcode
+        transcode["ffmpeg_params"] = transcode_ffmpeg_params
+
+    transfer = doc.get("transfer")
+    has_transfer = isinstance(transfer, dict)
+    current_dir = transfer.get("directory", "") if has_transfer else ""
+    current_checksum = transfer.get("checksum", True) if has_transfer else True
+    if transfer_directory != current_dir or transfer_checksum != current_checksum:
+        if not has_transfer:
+            transfer = {}
+            doc["transfer"] = transfer
+        transfer["directory"] = transfer_directory
+        transfer["checksum"] = transfer_checksum
+
     return doc
 
 

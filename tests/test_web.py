@@ -177,6 +177,32 @@ def test_directory_split_recomposes_save_dir(client, tmp_path):
     assert r.json()["save_dir"] == f"{other}/250701/Fly1/001"
 
 
+def test_process_params_are_live_settings(client):
+    # The Process section's transcode/transfer knobs are live settings that the
+    # snapshot bakes into each recording for `octacam process`.
+    r = client.put(
+        "/api/settings",
+        json={
+            "transcode_ffmpeg_params": "-c:v libx264 -crf 20 -pix_fmt yuv420p",
+            "transfer_directory": "~/nas/TL",
+            "transfer_checksum": False,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["transcode_ffmpeg_params"] == "-c:v libx264 -crf 20 -pix_fmt yuv420p"
+    assert body["transfer_directory"] == "~/nas/TL"
+    assert body["transfer_checksum"] is False
+    # Unparseable transcode args (bad quoting) are rejected up front rather than
+    # silently falling back to the default when `octacam process` runs.
+    assert (
+        client.put(
+            "/api/settings", json={"transcode_ffmpeg_params": 'a "b'}
+        ).status_code
+        == 422
+    )
+
+
 def _wait_for_presence(ws, tries=200):
     """Return the client count from the next presence message on ``ws``.
 

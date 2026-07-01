@@ -154,3 +154,70 @@ def test_backend_key_preserved_through_save(tmp_path):
     written = (tmp_path / "octacam_config.toml").read_text()
     assert tomllib.loads(written)["backend"] == "flir"
     assert parse_config(tmp_path / "octacam_config.toml").backend == "flir"
+
+
+def test_with_process_params_overlays_and_preserves_other_sections():
+    raw = {
+        "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
+        "transfer": {"directory": "~/nas", "checksum": True},
+        "visualization": [{"name": "grid.mp4", "layout": [["a", "b"]]}],
+    }
+    edited = cw.with_process_params(
+        raw,
+        transcode_ffmpeg_params="-c:v ffv1",
+        transfer_directory="~/other",
+        transfer_checksum=False,
+    )
+    assert edited["transcode"]["ffmpeg_params"] == "-c:v ffv1"
+    assert edited["transfer"] == {"directory": "~/other", "checksum": False}
+    # Untouched sections (incl. the 2D visualization layout) are preserved and
+    # the input dict is not mutated.
+    assert edited["visualization"] == raw["visualization"]
+    assert raw["transcode"]["ffmpeg_params"] == "-c:v libx264 -crf 20"
+
+
+def test_with_process_params_noop_when_values_match():
+    # Unchanged values -> the copy compares equal, so the snapshot stays a
+    # byte-verbatim copy rather than a re-emit.
+    raw = {
+        "record": {"fps": 100.0},
+        "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
+        "transfer": {"directory": "~/nas", "checksum": True},
+    }
+    assert (
+        cw.with_process_params(
+            raw,
+            transcode_ffmpeg_params="-c:v libx264 -crf 20",
+            transfer_directory="~/nas",
+            transfer_checksum=True,
+        )
+        == raw
+    )
+
+
+def test_with_process_params_adds_sections_only_when_diverging():
+    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+
+    # No [transcode]/[transfer] and default/blank values -> no sections added,
+    # so a rig without a transfer destination never grows an empty one.
+    base = {"record": {"fps": 100.0}}
+    assert (
+        cw.with_process_params(
+            base,
+            transcode_ffmpeg_params=DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+            transfer_directory="",
+            transfer_checksum=True,
+        )
+        == base
+    )
+    # A non-default transcode arg / non-blank transfer dir creates the sections.
+    added = cw.with_process_params(
+        {},
+        transcode_ffmpeg_params="-c:v ffv1",
+        transfer_directory="~/nas",
+        transfer_checksum=False,
+    )
+    assert added == {
+        "transcode": {"ffmpeg_params": "-c:v ffv1"},
+        "transfer": {"directory": "~/nas", "checksum": False},
+    }

@@ -46,6 +46,14 @@ export class RecordTab {
     this.ffmpegParams = document.getElementById("ffmpeg-params");
     this.recordForm = document.getElementById("record-form");
     this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
+    // Process section: post-recording knobs seeded from the config's
+    // [transcode]/[transfer] sections and baked into each recording's config
+    // snapshot for `octacam process`.
+    this.transcodeFfmpegParams = document.getElementById(
+      "transcode-ffmpeg-params"
+    );
+    this.transferDir = document.getElementById("transfer-dir");
+    this.transferChecksum = document.getElementById("transfer-checksum");
     this.button = document.getElementById("record-button");
     this.status = document.getElementById("record-status");
     this.progress = document.getElementById("record-progress");
@@ -94,6 +102,24 @@ export class RecordTab {
       this._put(
         { save_frame_timestamps: this.saveFrameTimestamps.checked },
         [this.saveFrameTimestamps]
+      )
+    );
+    this.transcodeFfmpegParams.addEventListener("change", () =>
+      this._put(
+        { transcode_ffmpeg_params: this.transcodeFfmpegParams.value },
+        [this.transcodeFfmpegParams]
+      )
+    );
+    this.transferDir.addEventListener("change", () =>
+      this._put(
+        { transfer_directory: this.transferDir.value.trim() },
+        [this.transferDir]
+      )
+    );
+    this.transferChecksum.addEventListener("change", () =>
+      this._put(
+        { transfer_checksum: this.transferChecksum.checked },
+        [this.transferChecksum]
       )
     );
     this.button.addEventListener("click", () => this._onButton());
@@ -150,6 +176,21 @@ export class RecordTab {
       canSet(this.saveFrameTimestamps)
     ) {
       this.saveFrameTimestamps.checked = s.save_frame_timestamps;
+    }
+    if (
+      typeof s.transcode_ffmpeg_params === "string" &&
+      canSet(this.transcodeFfmpegParams)
+    ) {
+      this.transcodeFfmpegParams.value = s.transcode_ffmpeg_params;
+    }
+    if (typeof s.transfer_directory === "string" && canSet(this.transferDir)) {
+      this.transferDir.value = s.transfer_directory;
+    }
+    if (
+      typeof s.transfer_checksum === "boolean" &&
+      canSet(this.transferChecksum)
+    ) {
+      this.transferChecksum.checked = s.transfer_checksum;
     }
     this._syncFfmpegEnabled();
   }

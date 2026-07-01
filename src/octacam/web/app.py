@@ -74,7 +74,9 @@ class SettingsPatch(BaseModel):
     RecordingController.update_settings — only the fields actually sent are
     forwarded, via model_dump(exclude_unset=True). Editing record_directory or
     relative_directory recomposes save_dir server-side (the two halves of the
-    split save path)."""
+    split save path). The transcode_*/transfer_* fields are the Process
+    section's post-recording knobs, baked into each recording's config snapshot
+    for `octacam process`."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -88,6 +90,9 @@ class SettingsPatch(BaseModel):
     ffmpeg_params: str | None = None
     record_form: str | None = None
     save_frame_timestamps: bool | None = None
+    transcode_ffmpeg_params: str | None = None
+    transfer_directory: str | None = None
+    transfer_checksum: bool | None = None
 
 
 class SaveDirValidateRequest(BaseModel):

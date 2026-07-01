@@ -57,8 +57,8 @@ def test_record_defaults():
 
 def test_parses_emulate_8_cameras_config():
     config = load_config_dir(REPO_ROOT / "configs" / "emulate_8_cameras")
-    assert config.record.fps == 100.0
-    assert config.record.duration == 5.0
+    assert config.record.fps == 30.0
+    assert config.record.duration == 1.0
     assert len(config.cameras) == 8
     assert config.cameras[0].serial_number == "0815-0000"
     assert config.cameras[0].name == "camera_LF"

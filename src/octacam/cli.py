@@ -213,13 +213,16 @@ def _resolve_enabled(enabled_plugins, no_plugins):
     return list(enabled_plugins) if enabled_plugins else None
 
 
-def _settings_from_record(record) -> "RecordingSettings":
-    """Build RecordingSettings from a config ``[record]`` section.
+def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
+    """Build RecordingSettings from the config's record/transcode/transfer sections.
 
     Resolves the templated save directory at *this* moment (a single ``when``
     snapshot so directory and relative_directory share one date) and translates
     the config's ``save_transformed``/``save_timestamps`` booleans to the
-    internal ``record_form``/``save_frame_timestamps`` vocabulary."""
+    internal ``record_form``/``save_frame_timestamps`` vocabulary. The
+    ``[transcode]``/``[transfer]`` values seed the GUI's Process fields, which
+    are baked into each recording's config snapshot for ``octacam process``
+    (``transfer`` is ``None`` when the rig has no ``[transfer]`` section)."""
     import time as _time
 
     from octacam.config import (
@@ -244,6 +247,9 @@ def _settings_from_record(record) -> "RecordingSettings":
         ffmpeg_params=record.ffmpeg_params,
         record_form="display" if record.save_transformed else "sensor",
         save_frame_timestamps=record.save_timestamps,
+        transcode_ffmpeg_params=transcode.ffmpeg_params,
+        transfer_directory=transfer.directory if transfer else "",
+        transfer_checksum=transfer.checksum if transfer else True,
     )
 
 
@@ -514,7 +520,7 @@ def gui(
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
     plugins.setup_all()
 
-    settings = _settings_from_record(config.record)
+    settings = _settings_from_record(config.record, config.transcode, config.transfer)
     # One session id for this GUI run; every recording made before shutdown is
     # tagged with it in the session cache so `octacam process --session` can
     # find the whole batch later (and we print the commands on the way out).
@@ -684,7 +690,7 @@ def record(
         else config.record
     )
 
-    settings = _settings_from_record(record_cfg)
+    settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
     if duration is not None:
         settings.duration_s = duration
     if output is not None:

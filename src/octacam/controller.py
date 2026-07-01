@@ -13,12 +13,14 @@ sequence in the same order as the original code (stop trigger -> grab loops
 exit -> writers drain -> CSVs).
 """
 
+import contextlib
 import dataclasses
 import datetime
 import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import threading
 import time
@@ -26,11 +28,13 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import config_writer
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.transform import RECORDING_SUMMARY_FILENAME, DisplayTransform
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
+    DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     FORMATS,
     VideoFormat,
 )
@@ -122,6 +126,15 @@ class RecordingSettings:
     # per-frame timestamp CSV (debugging; off by default).
     record_form: str = "display"
     save_frame_timestamps: bool = False
+    # Post-recording (`octacam process`) params. Not used during capture; they
+    # are patched into the recording folder's octacam_config.toml snapshot
+    # (_snapshot_config) so a later `octacam process` transcodes and transfers
+    # with exactly the values shown in the GUI. Sourced from the config's
+    # [transcode]/[transfer] sections at startup; empty transfer_directory
+    # disables the transfer step.
+    transcode_ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    transfer_directory: str = ""
+    transfer_checksum: bool = True
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
@@ -359,6 +372,14 @@ class RecordingController:
                 "sensor",
             ):
                 raise ValueError("record_form must be display or sensor")
+            if "transcode_ffmpeg_params" in changes:
+                # Reject args ffmpeg could never parse (bad quoting) up front:
+                # the config loader would otherwise silently drop them back to
+                # the default when `octacam process` reads the snapshot.
+                try:
+                    shlex.split(changes["transcode_ffmpeg_params"])
+                except ValueError as e:
+                    raise ValueError(f"invalid transcode_ffmpeg_params: {e}") from e
             if "record_directory" in changes:
                 changes["record_directory"] = normalize_save_dir(
                     changes["record_directory"]
@@ -878,20 +899,40 @@ class RecordingController:
     def _snapshot_config(self) -> None:
         """Copy the rig config into the recording folder for `octacam process`.
 
-        A verbatim copy of octacam_config.toml (raw bytes, so its
-        directory/relative_directory templates stay unexpanded) lets the
-        post-recording step read every setting — encoding, grid layouts,
-        transfer destination — with no --config. Best-effort: a copy failure
-        never disturbs recording, and it no-ops without a config dir (tests)."""
+        The snapshot carries the GUI's live [transcode]/[transfer] values (the
+        Process section), patched into the folder's octacam_config.toml so the
+        post-recording step transcodes and transfers with exactly what the
+        operator set — no --config, no touching the rig's own config file. When
+        those fields are untouched the copy is byte-verbatim (comments and the
+        unexpanded directory/relative_directory templates preserved); only a
+        real edit triggers a re-emit. Best-effort: any failure falls back to the
+        verbatim copy and never disturbs recording; no-ops without a config dir
+        (tests)."""
         if self._config_dir is None:
             return
         src = self._config_dir / "octacam_config.toml"
         dst = Path(self._settings.save_dir) / "octacam_config.toml"
+        if not src.exists():
+            return
+        s = self._settings
         try:
-            if src.exists():
+            raw = config_writer.load_raw_config(self._config_dir)
+            patched = config_writer.with_process_params(
+                raw,
+                transcode_ffmpeg_params=s.transcode_ffmpeg_params,
+                transfer_directory=s.transfer_directory,
+                transfer_checksum=s.transfer_checksum,
+            )
+            if raw and patched != raw:
+                config_writer.write_config(s.save_dir, patched)
+            else:
                 shutil.copyfile(src, dst)
         except Exception:
-            log.exception("Failed to copy config snapshot to %s", dst)
+            # A re-emit edge (e.g. an exotic value the writer can't serialize)
+            # must not lose the snapshot: fall back to the verbatim copy.
+            log.exception("Failed to write patched config snapshot to %s", dst)
+            with contextlib.suppress(Exception):
+                shutil.copyfile(src, dst)
 
     def _write_recording_summary(self, aborted: bool) -> None:
         """Write recording_summary.json into the recording's save directory."""

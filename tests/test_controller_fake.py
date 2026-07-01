@@ -58,6 +58,51 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert all(c["frames"] > 0 for c in snapshot["cameras"])
 
 
+def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path):
+    import tomllib
+
+    from octacam.config_writer import write_config
+
+    # A rig config the GUI has *not* edited on disk, but whose transcode/transfer
+    # the operator overrode live in the Process section.
+    config_dir = tmp_path / "cfg"
+    write_config(
+        config_dir,
+        {
+            "record": {"fps": 50.0, "directory": "~/data/%y%m%d"},
+            "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
+            "visualization": [{"name": "grid.mp4", "layout": [["FAKE-0", "FAKE-1"]]}],
+            "transfer": {"directory": "~/nas", "checksum": True},
+        },
+    )
+
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(
+        fps=50.0,
+        duration_s=1.0,
+        save_dir=str(save_dir),
+        transcode_ffmpeg_params="-c:v ffv1 -level 3",
+        transfer_directory="~/other-nas",
+        transfer_checksum=False,
+    )
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    # The live Process values land in the recording folder's config snapshot...
+    snap = tomllib.loads((save_dir / "octacam_config.toml").read_text())
+    assert snap["transcode"]["ffmpeg_params"] == "-c:v ffv1 -level 3"
+    assert snap["transfer"] == {"directory": "~/other-nas", "checksum": False}
+    # ...while the untouched sections survive the patched re-emit and the
+    # directory template stays unexpanded (a `~`/strftime path, not a date).
+    assert snap["visualization"] == [
+        {"name": "grid.mp4", "layout": [["FAKE-0", "FAKE-1"]]}
+    ]
+    assert snap["record"]["directory"] == "~/data/%y%m%d"
+
+
 def test_fake_recording_writes_csv_when_enabled(fake_system, tmp_path):
     save_dir = tmp_path / "rec" / "001"
     settings = RecordingSettings(

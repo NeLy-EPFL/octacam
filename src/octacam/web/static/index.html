@@ -101,6 +101,25 @@
             <input id="save-frame-timestamps" type="checkbox">
           </label>
         </details>
+        <details id="record-process" class="advanced" open>
+          <summary title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Process</summary>
+          <div class="col">
+            <label class="col-label" for="transcode-ffmpeg-params"
+              title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
+            <textarea id="transcode-ffmpeg-params" rows="2" spellcheck="false"
+              title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings"></textarea>
+          </div>
+          <div class="col">
+            <label class="col-label" for="transfer-dir"
+              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
+            <textarea id="transfer-dir" rows="2" spellcheck="false"
+              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
+          </div>
+          <label class="row"
+            title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
+            <input id="transfer-checksum" type="checkbox">
+          </label>
+        </details>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
         title="Start or stop recording on all cameras at once">Start recording</button>
