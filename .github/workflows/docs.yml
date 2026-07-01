@@ -1,0 +1,41 @@
+name: Deploy docs
+
+# Builds the Material for MkDocs site and publishes it to GitHub Pages on every
+# push to main that touches the docs. Requires the repo's Pages source to be set
+# to "Deploy from a branch → gh-pages" (Settings → Pages), which `mkdocs
+# gh-deploy` populates.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Configure git for gh-deploy
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # --no-project avoids building octacam (and its camera deps) just to render
+      # Markdown; mkdocs-material pulls in mkdocs + the pymdownx extensions.
+      - name: Build & deploy to GitHub Pages
+        run: uv run --no-project --with mkdocs-material mkdocs gh-deploy --force

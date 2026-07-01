@@ -33,3 +33,8 @@ benchmarks/results/
 
 # Recorded camera data
 data/
+# Local transfer destination used for testing `octacam process`
+server/
+
+# MkDocs build output
+site/

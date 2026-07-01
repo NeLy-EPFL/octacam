@@ -1,0 +1,88 @@
+site_name: octacam
+site_description: Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR).
+site_url: https://nely-epfl.github.io/octacam/
+site_author: NeLy-EPFL
+
+repo_name: NeLy-EPFL/octacam
+repo_url: https://github.com/NeLy-EPFL/octacam
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+# Turn broken internal links / anchors / nav into hard errors under --strict.
+validation:
+  links:
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quickstart: quickstart.md
+  - User Guide:
+      - Web GUI: guide/gui.md
+      - Recording: guide/recording.md
+      - Processing recordings: guide/processing.md
+      - Configuration: guide/configuration.md
+      - Camera backends: guide/backends.md
+      - Plugins: guide/plugins.md
+  - Reference:
+      - CLI reference: reference/cli.md
+      - Troubleshooting: reference/troubleshooting.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/NeLy-EPFL/octacam

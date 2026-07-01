@@ -7,8 +7,7 @@ full (or once the sink has failed). Available sinks:
 - FfmpegVideoWriter (default): pipes raw GRAY8 frames to an ffmpeg child
   encoding H.264 with libx264 in true monochrome 4:0:0. Encoding happens
   entirely in the child process, outside the GIL. Validated on the rig:
-  8 parallel ultrafast encoders sustain >1200 fps aggregate at 1080p
-  (see docs/web-gui-plan.md).
+  8 parallel ultrafast encoders sustain >1200 fps aggregate at 1080p.
 - RawVideoWriter: raw Mono8 dump, transcoded later by `octacam process`
   (its geometry lives in the recording's recording_summary.json).
 """
