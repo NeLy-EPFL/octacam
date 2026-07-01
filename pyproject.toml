@@ -1,6 +1,6 @@
 [project]
 name = "octacam"
-version = "0.2.0.dev0"
+version = "0.3.0.dev0"
 description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR)"
 readme = "README.md"
 requires-python = ">=3.11"
