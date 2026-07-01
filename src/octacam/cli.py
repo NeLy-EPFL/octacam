@@ -171,7 +171,9 @@ def _acquire_instance_lock(config_dir: Path):
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
-    rich_markup_mode=None,
+    # "rich" gives the coloured help panels. It also treats `[...]` in help text
+    # as markup, so literal TOML section names below are escaped as `\[record]`.
+    rich_markup_mode="rich",
     # Accept `-h` alongside `--help` on the root and every subcommand.
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -616,12 +618,12 @@ def list_cameras(
 
 @app.command("list-plugins")
 def list_plugins() -> None:
-    """List the bundled, opt-in plugins and whether each can load.
+    r"""List the bundled, opt-in plugins and whether each can load.
 
     Output is `name<TAB>status<TAB>summary`. `available` means the plugin's
     dependencies are present (the bundled plugins' deps ship by default);
     `unavailable` lines carry the reason. Enable one with `--plugin NAME` on
-    `gui`/`record`, or a `[[plugins]]` entry in the rig config.
+    `gui`/`record`, or a `\[\[plugins]]` entry in the rig config.
     """
     from octacam.plugins import available_plugins
 
@@ -645,14 +647,14 @@ def record(
     ] = Path("."),
     fps: Annotated[
         float | None,
-        typer.Option("--fps", "-f", help="Frame rate [default: from config]."),
+        typer.Option("--fps", "-f", help=r"Frame rate \[default: from config]."),
     ] = None,
     duration: Annotated[
         float | None,
         typer.Option(
             "--duration",
             "-d",
-            help="Recording duration in seconds [default: from config's "
+            help=r"Recording duration in seconds \[default: from config's "
             "duration/duration_unit].",
         ),
     ] = None,
@@ -668,10 +670,10 @@ def record(
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
 ) -> None:
-    """Record videos headlessly from the cameras in CONFIG_DIR.
+    r"""Record videos headlessly from the cameras in CONFIG_DIR.
 
     Encoding, save method, transform, and the save-directory template all come
-    from the config's [record] section; the options here override only the
+    from the config's \[record] section; the options here override only the
     day-to-day values (fps and duration, or an explicit --output save directory).
     """
     from octacam import session_cache
@@ -1462,7 +1464,7 @@ def process(
     no_transfer: Annotated[
         bool,
         typer.Option(
-            "--no-transfer", help="Skip transferring to the [transfer] destination."
+            "--no-transfer", help=r"Skip transferring to the \[transfer] destination."
         ),
     ] = False,
     config_dir: Annotated[
