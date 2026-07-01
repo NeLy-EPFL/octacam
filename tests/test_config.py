@@ -62,7 +62,7 @@ def test_parses_emulate_8_cameras_config():
     assert len(config.cameras) == 8
     assert config.cameras[0].serial_number == "0815-0000"
     assert config.cameras[0].name == "camera_LF"
-    assert config.cameras[7].window_height == 0.6666667
+    assert config.cameras[7].window_height == 0.666667
     # directory/relative_directory carry strftime codes that are only expanded
     # at record time via resolve_save_dir, not at parse time.
     assert "%y" in config.record.relative_directory

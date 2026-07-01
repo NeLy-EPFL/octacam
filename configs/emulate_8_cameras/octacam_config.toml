@@ -1,10 +1,10 @@
 [record]
-fps = 100.0
-duration = 5.0
+fps = 30.0
+duration = 1.0
 duration_unit = "seconds" # frames | seconds | minutes | hours
 trigger_source = "software" # software | external
 
-directory = "~/octacam_data/TL"
+directory = "~/octacam/data/TL"
 relative_directory = "%y%m%d/Fly1/001"
 
 save_method = "ffmpeg" # ffmpeg | raw
@@ -24,7 +24,7 @@ layout = [
 ]
 
 [transfer]
-directory = "/mnt/upramdya/data/TL/octacam_data" # record.directory/record.relative_directory will be transferred to transfer.directory/record.relative_directory
+directory = "~/octacam/server/TL" # record.directory/record.relative_directory will be transferred to transfer.directory/record.relative_directory
 checksum = true      # checksum each copy before promoting it (false = size-only)
 
 [[cameras]]
@@ -33,10 +33,10 @@ name = "camera_LF"
 scale_x = 1
 scale_y = 1
 rotation_deg = 0
-window_x = 0.6666667
+window_x =  0.666667
 window_y = 0
-window_width = 0.33333333
-window_height = 0.33333333
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0001"
@@ -44,10 +44,10 @@ name = "camera_LM"
 scale_x = 1
 scale_y = 1
 rotation_deg = 0
-window_x = 0.6666667
-window_y = 0.33333333
-window_width = 0.33333333
-window_height = 0.33333333
+window_x = 0.666667
+window_y = 0.333333
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0002"
@@ -55,10 +55,10 @@ name = "camera_LH"
 scale_x = 1
 scale_y = 1
 rotation_deg = 0
-window_x = 0.6666667
-window_y = 0.6666667
-window_width = 0.33333333
-window_height = 0.33333333
+window_x = 0.666667
+window_y = 0.666667
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0003"
@@ -68,8 +68,8 @@ scale_y = 1
 rotation_deg = 0
 window_x = 0
 window_y = 0
-window_width = 0.33333333
-window_height = 0.33333333
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0004"
@@ -78,9 +78,9 @@ scale_x = 1
 scale_y = 1
 rotation_deg = 0
 window_x = 0
-window_y = 0.33333333
-window_width = 0.33333333
-window_height = 0.33333333
+window_y = 0.333333
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0005"
@@ -89,9 +89,9 @@ scale_x = 1
 scale_y = 1
 rotation_deg = 0
 window_x = 0
-window_y = 0.6666667
-window_width = 0.33333333
-window_height = 0.33333333
+window_y = 0.666667
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0006"
@@ -99,10 +99,10 @@ name = "camera_F"
 scale_x = 1
 scale_y = 1
 rotation_deg = 0
-window_x = 0.33333333
+window_x = 0.333333
 window_y = 0
-window_width = 0.33333333
-window_height = 0.33333333
+window_width = 0.333333
+window_height = 0.333333
 
 [[cameras]]
 serial_number = "0815-0007"
@@ -110,7 +110,7 @@ name = "camera_H"
 scale_x = 1
 scale_y = 1
 rotation_deg = 0
-window_x = 0.33333333
-window_y = 0.33333333
-window_width = 0.33333333
-window_height = 0.6666667
+window_x = 0.333333
+window_y = 0.333333
+window_width = 0.333333
+window_height = 0.666667
