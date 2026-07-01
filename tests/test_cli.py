@@ -32,8 +32,11 @@ def test_version():
 def test_help_lists_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("gui", "list-cameras", "list-plugins", "record", "process"):
+    for command in ("gui", "doctor", "record", "process"):
         assert command in result.output
+    # list-cameras/list-plugins were merged into `doctor`.
+    assert "list-cameras" not in result.output
+    assert "list-plugins" not in result.output
     # The three old post-recording commands are gone (subsumed by `process`).
     assert "transcode " not in result.output
     assert "\n  grid" not in result.output
@@ -48,32 +51,10 @@ def test_no_args_prints_help():
 
 def test_dash_h_is_a_help_alias():
     # `-h` works on the root and on every subcommand (via context_settings).
-    for args in (["-h"], ["gui", "-h"], ["list-plugins", "-h"]):
+    for args in (["-h"], ["gui", "-h"], ["doctor", "-h"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, args
         assert "Usage" in result.output
-
-
-def test_list_cameras_emits_tab_separated_lines():
-    result = runner.invoke(app, ["list-cameras"])
-    assert result.exit_code == 0
-    # PYLON_CAMEMU=2 guarantees the emulated cameras show up.
-    assert "0815-0000" in result.output
-    emulated = [line for line in result.output.splitlines() if "0815-" in line]
-    assert emulated and all("\t" in line for line in emulated)
-
-
-def test_list_plugins_lists_bundled_flywheel():
-    result = runner.invoke(app, ["list-plugins"])
-    assert result.exit_code == 0
-    flywheel = [
-        line for line in result.output.splitlines() if line.startswith("flywheel\t")
-    ]
-    assert len(flywheel) == 1
-    name, status, *_ = flywheel[0].split("\t")
-    assert name == "flywheel"
-    # `available` or `unavailable` depending on whether pyserial is installed.
-    assert status in ("available", "unavailable")
 
 
 def test_record_help_has_day_to_day_overrides():
@@ -91,7 +72,7 @@ def test_record_help_has_day_to_day_overrides():
 
 
 def test_invalid_log_level_rejected():
-    result = runner.invoke(app, ["--log-level", "bogus", "list-cameras"])
+    result = runner.invoke(app, ["--log-level", "bogus", "doctor"])
     assert result.exit_code != 0
 
 
@@ -354,3 +335,46 @@ def test_resolve_enabled():
     # --no-plugins wins and disables everything.
     assert _resolve_enabled(["flywheel"], True) == []
     assert _resolve_enabled(None, True) == []
+
+
+def test_doctor_lists_cameras_plugins_and_toolchain():
+    # `doctor` lists cameras + plugins and adds diagnostics.
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    for heading in ("Camera backends", "Encoding toolchain", "Plugins"):
+        assert heading in result.output
+    # PYLON_CAMEMU=2 guarantees the emulated cameras (and thus the basler
+    # backend) show up, and the bundled flywheel plugin is always listed.
+    assert "0815-0000" in result.output
+    assert "flywheel" in result.output
+
+
+def test_doctor_json_is_machine_readable():
+    import json
+
+    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["octacam_version"] == octacam.__version__
+    titles = [s["title"] for s in payload["sections"]]
+    assert "Camera backends" in titles and "Encoding toolchain" in titles
+    assert payload["errors"] == 0
+
+
+def test_doctor_help_documents_config_dir():
+    result = runner.invoke(app, ["doctor", "-h"])
+    assert result.exit_code == 0
+    assert "Usage" in result.output
+    assert "CONFIG_DIR" in result.output
+
+
+def test_doctor_flags_undetected_camera_and_exits_nonzero(tmp_path):
+    # A rig config declaring a serial that isn't among the emulated cameras is a
+    # hard error: doctor lists it and exits nonzero so scripts can pre-flight.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "99999999"\nname = "ghost"\n'
+    )
+    result = runner.invoke(app, ["--log-level", "error", "doctor", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "declared but NOT detected" in result.output
+    assert "99999999" in result.output

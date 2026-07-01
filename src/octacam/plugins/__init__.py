@@ -204,7 +204,7 @@ def available_plugins() -> list[PluginInfo]:
     _discover_entry_points()
     infos: list[PluginInfo] = []
     # Bundled builtins first, then any third-party names discovered via entry
-    # points, so `list-plugins` reflects everything build_plugins could load
+    # points, so `octacam doctor` reflects everything build_plugins could load
     # rather than only the builtins.
     names = list(_BUILTINS) + [n for n in _REGISTRY if n not in _BUILTINS]
     for name in names:

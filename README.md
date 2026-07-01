@@ -44,8 +44,8 @@ octacam record <config_dir>   # headless recording (--fps/--duration/--output ov
 octacam process <paths...>    # transcode + grid + transfer, all config-driven
                               #   (-r/--no-transcode/--no-grid/--no-transfer/--dry-run)
 octacam process --last        # …or the last recording / --session / --all (no paths)
-octacam list-cameras          # show detected cameras (--backend basler|flir|fake)
-octacam list-plugins          # show bundled plugins and whether each can load
+octacam doctor                # diagnose install + list cameras/plugins; validate a
+                              #   rig with `octacam doctor <config_dir>` (--json/--check)
 octacam --help
 ```
 
@@ -242,11 +242,11 @@ backend = "basler"   # default — omit the key and Basler is assumed
 
 Everything else — preview, recording (monochrome H.264 or raw), the software
 trigger, the per-camera exposure/gain/ROI controls, the recording summary (and
-opt-in timestamp CSVs), and the web GUI — behaves identically across backends. `list-cameras` takes a matching
+opt-in timestamp CSVs), and the web GUI — behaves identically across backends. `doctor` takes a matching
 `--backend`:
 
 ```bash
-octacam list-cameras --backend flir
+octacam doctor --backend flir
 ```
 
 ### FLIR / Teledyne setup
@@ -282,7 +282,7 @@ options = { device = "/dev/ttyACM0", baud = 115200 }
 or per-launch with `--plugin flywheel` (repeatable; adds to the config), and
 disable everything for one run with `--no-plugins`. The bundled plugins'
 dependencies ship by default, so they need no extra install. Run
-`octacam list-plugins` to see the bundled plugins and whether each one can load.
+`octacam doctor` to see the bundled plugins and whether each one can load.
 
 Bundled plugins:
 

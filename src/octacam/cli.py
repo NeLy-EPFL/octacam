@@ -64,7 +64,7 @@ def _setup_logging(level: LogLevel) -> None:
     """Route the "octacam" logger through rich (colored level, pretty tracebacks).
 
     Logs go to stderr so stdout stays clean for the machine-readable output of
-    `list-cameras`/`record`/`transcode`."""
+    `record`/`doctor --json`."""
     from rich.logging import RichHandler
 
     handler = RichHandler(
@@ -192,7 +192,7 @@ EnabledPlugins = Annotated[
     typer.Option(
         "--plugin",
         help="Enable a plugin (repeatable); adds to the config's `plugins` "
-        "(e.g. --plugin flywheel). See `octacam list-plugins`.",
+        "(e.g. --plugin flywheel). See `octacam doctor`.",
     ),
 ]
 NoPlugins = Annotated[
@@ -583,60 +583,517 @@ def gui(
         log.info("octacam stopped.")
 
 
-@app.command("list-cameras")
-def list_cameras(
-    backend: Annotated[
-        str,
-        typer.Option(help="Camera backend to enumerate: basler, flir, or fake."),
-    ] = "basler",
-) -> None:
-    """List detected cameras (set PYLON_CAMEMU=N for emulated Basler ones)."""
-    if backend == "basler":
+# ---------------------------------------------------------------------------
+# `octacam doctor` — environment + rig diagnostics
+#
+# Lists detected cameras and bundled plugins and adds pass/warn/fail checks for
+# the toolchain, storage, recording cache, and runtime conflicts. It never
+# *opens* a camera (vendor SDKs open USB3 devices exclusively), so it is safe to
+# run while a GUI/record session is live: it only enumerates and reads locks.
+# ---------------------------------------------------------------------------
+
+# status -> (marker, rich style). "list" is a plain indented enumeration line.
+_MARKERS = {
+    "ok": ("✓", "green"),
+    "warn": ("⚠", "yellow"),
+    "error": ("✗", "red"),
+    "info": ("•", "cyan"),
+    "list": ("", ""),
+}
+
+
+class _Report:
+    """Accumulates doctor findings as ordered sections of (status, text) lines."""
+
+    def __init__(self) -> None:
+        self.sections: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def section(self, title: str) -> None:
+        self.sections.append((title, []))
+
+    def add(self, status: str, text: str) -> None:
+        self.sections[-1][1].append((status, text))
+
+    def counts(self) -> tuple[int, int]:
+        """(errors, warnings) across every section, for the exit code."""
+        errors = warns = 0
+        for _title, items in self.sections:
+            for status, _text in items:
+                errors += status == "error"
+                warns += status == "warn"
+        return errors, warns
+
+
+def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
+    """``[(serial, model|None), ...]`` for a backend without opening any camera.
+
+    Basler goes through the pylon TL factory directly so model names come along;
+    other backends expose only serials via their
+    enumeration function. Enumeration never opens/grabs a device, so this is safe
+    to run alongside a live session."""
+    key = (name or "basler").strip().lower()
+    if key == "basler":
         from pypylon import pylon
 
         devices = pylon.TlFactory.GetInstance().EnumerateDevices()
-        if not devices:
-            typer.echo("No cameras detected.")
-            return
-        for device in devices:
-            typer.echo(f"{device.GetModelName()}\t{device.GetSerialNumber()}")
-        return
+        return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
+    from octacam.cameras import select_backend
 
-    from octacam.cameras import BackendUnavailable, select_backend
+    enumerate_fn, _factory, _extension = select_backend(name)
+    return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
 
+
+def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
+    """Run a fast, read-only ffmpeg query and return its combined output ("" on error)."""
     try:
-        enumerate_fn, _factory, _extension = select_backend(backend)
-        entries = enumerate_fn(None)
-    except BackendUnavailable as e:
-        sys.exit(str(e))
-    if not entries:
-        typer.echo("No cameras detected.")
+        out = subprocess.run(
+            [exe, *args], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "") + (out.stderr or "")
+
+
+def _ffmpeg_version(exe: str) -> str:
+    """The version token from ``ffmpeg -version`` (e.g. "7.0.2"), or ""."""
+    for line in _run_ffmpeg_probe(exe, ["-hide_banner", "-version"]).splitlines():
+        line = line.strip()
+        if line.startswith("ffmpeg version"):
+            toks = line.split()
+            return toks[2] if len(toks) >= 3 else line
+    return ""
+
+
+def _ffmpeg_source(exe: str) -> str:
+    """Where the resolved ffmpeg came from, matching find_ffmpeg's precedence."""
+    if os.environ.get("OCTACAM_FFMPEG"):
+        return "OCTACAM_FFMPEG override"
+    try:
+        import imageio_ffmpeg
+
+        if os.path.realpath(imageio_ffmpeg.get_ffmpeg_exe()) == os.path.realpath(exe):
+            from importlib.metadata import PackageNotFoundError, version
+
+            try:
+                return f"bundled imageio-ffmpeg {version('imageio-ffmpeg')}"
+            except PackageNotFoundError:
+                return "bundled imageio-ffmpeg"
+    except Exception:  # pragma: no cover - depends on environment
+        pass
+    return "system PATH"
+
+
+def _instance_lock_holder(config_dir: Path) -> str | None:
+    """The PID holding this rig's instance lock, or None if it is free.
+
+    Read-only: we try a non-blocking flock and release it immediately if we win,
+    so probing never steals the lock from — nor blocks — a running session. A
+    failed acquire means another octacam owns the rig; its PID is read from the
+    file (purely informational, so "unknown" if the file is empty)."""
+    path = _instance_lock_path(config_dir)
+    try:
+        handle = open(path)
+    except OSError:
+        return None  # never created -> nobody has ever locked this rig
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return handle.read().strip() or "unknown"
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return None
+    finally:
+        handle.close()
+
+
+def _report_free_space(report: _Report, path: Path, label: str) -> None:
+    """Report free space on the filesystem holding ``path`` (or its nearest parent)."""
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError as e:
+        report.add("warn", f"{label}: could not check free space on {probe} ({e})")
         return
-    for serial, _handle in entries:
-        typer.echo(f"{serial}\t{backend}")
+    free_gb = usage.free / 1e9
+    report.add(
+        "warn" if free_gb < 5 else "ok",
+        f"{label}: {free_gb:.1f} GB free on {probe}",
+    )
 
 
-@app.command("list-plugins")
-def list_plugins() -> None:
-    r"""List the bundled, opt-in plugins and whether each can load.
+def _doctor_system(report: _Report) -> None:
+    import platform
 
-    Output is `name<TAB>status<TAB>summary`. `available` means the plugin's
-    dependencies are present (the bundled plugins' deps ship by default);
-    `unavailable` lines carry the reason. Enable one with `--plugin NAME` on
-    `gui`/`record`, or a `\[\[plugins]]` entry in the rig config.
-    """
-    from octacam.plugins import available_plugins
+    report.section("System")
+    report.add("info", f"octacam {octacam.__version__}")
+    report.add(
+        "info", f"Python {platform.python_version()} on {platform.platform(terse=True)}"
+    )
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    need = 1200  # ~150 fds/camera (pylon USB stack) for an 8-camera rig
+    if hard != resource.RLIM_INFINITY and hard < need:
+        report.add(
+            "warn",
+            f"open-file hard limit is low ({hard}); ~150 fds/camera means an "
+            f"8-camera rig needs ~{need}",
+        )
+    elif soft < hard:
+        report.add(
+            "ok", f"open-file limit {soft}→{hard} (raised to hard at launch)"
+        )
+    else:
+        report.add("ok", f"open-file limit {soft}")
 
-    infos = available_plugins()
-    if not infos:
-        typer.echo("No plugins bundled.")
+
+def _doctor_backends(report: _Report, only_backend: str | None) -> None:
+    from octacam.cameras import BackendUnavailable
+    from octacam.cameras.registry import BACKENDS, select_backend
+
+    report.section("Camera backends")
+    # `fake` is a synthetic test/CI backend that always reports FAKE-* serials
+    # regardless of hardware, so it is only enumerated when explicitly requested
+    # (--backend fake) — never in the default all-backends sweep.
+    backends = (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
+    for name in backends:
+        try:
+            select_backend(name)
+        except BackendUnavailable as e:
+            # A backend whose SDK isn't installed is expected on a single-vendor
+            # rig — report it, but don't cry wolf.
+            report.add("info", str(e))
+            continue
+        except Exception as e:
+            report.add("warn", f"{name}: could not select backend ({e})")
+            continue
+        try:
+            cams = _enumerate_backend(name)
+        except Exception as e:
+            report.add("warn", f"{name}: available, but enumeration failed ({e})")
+            continue
+        report.add("ok", f"{name}: available — {len(cams)} camera(s) detected")
+        for serial, model in cams:
+            report.add("list", f"{model}  {serial}" if model else serial)
+    if not only_backend and os.environ.get("PYLON_CAMEMU"):
+        report.add("info", f"PYLON_CAMEMU={os.environ['PYLON_CAMEMU']} (emulated Basler cameras)")
+
+
+def _doctor_encoding(report: _Report) -> None:
+    from octacam.writer import (
+        DEFAULT_FFMPEG_PARAMS,
+        DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+        find_ffmpeg,
+    )
+
+    report.section("Encoding toolchain")
+    try:
+        exe = find_ffmpeg()
+    except RuntimeError as e:
+        report.add("error", str(e))
         return
+    version = _ffmpeg_version(exe)
+    report.add(
+        "ok" if version else "warn",
+        f"ffmpeg {version or 'version unknown'} ({_ffmpeg_source(exe)})",
+    )
+    report.add("list", exe)
+    has_x264 = "libx264" in _run_ffmpeg_probe(exe, ["-hide_banner", "-encoders"])
+    report.add(
+        "ok" if has_x264 else "error",
+        "libx264 encoder present"
+        if has_x264
+        else "libx264 encoder MISSING — the default record/transcode params need it",
+    )
+    system = shutil.which("ffmpeg")
+    if system and os.path.realpath(system) != os.path.realpath(exe):
+        sysver = _ffmpeg_version(system)
+        report.add(
+            "info",
+            f"system ffmpeg on PATH: {sysver or system} (unused; the resolved "
+            "binary takes precedence — colour-range flags can differ by version)",
+        )
+    report.add("info", f"default record params:    {DEFAULT_FFMPEG_PARAMS}")
+    report.add("info", f"default transcode params: {DEFAULT_TRANSCODE_FFMPEG_PARAMS}")
+
+
+def _doctor_config(report: _Report, config_dir: Path):
+    import tomllib
+
+    from octacam.config import (
+        find_config_file,
+        load_config_dir,
+        resolve_dir_template,
+        resolve_save_dir,
+    )
+
+    report.section(f"Config ({config_dir})")
+    cfg_file = find_config_file(config_dir)
+    if not cfg_file.exists():
+        report.add(
+            "warn",
+            f"no {cfg_file.name} here — all detected cameras would be used, with defaults",
+        )
+        return None
+    try:
+        tomllib.loads(cfg_file.read_text())
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        report.add("error", f"{cfg_file.name} could not be parsed: {e}")
+        return None
+    cfg = load_config_dir(config_dir)
+    report.add(
+        "ok",
+        f"{cfg_file.name} loaded (backend={cfg.backend}, "
+        f"{len(cfg.cameras)} camera(s) declared)",
+    )
+    report.add("info", f"next recording → {resolve_save_dir(cfg.record)}")
+    if cfg.transfer and cfg.transfer.directory:
+        report.add("info", f"transfer → {resolve_dir_template(cfg.transfer.directory)}")
+    else:
+        report.add("info", "no [transfer] destination configured")
+    return cfg
+
+
+def _doctor_cameras_vs_config(report: _Report, cfg, only_backend: str | None) -> None:
+    report.section("Cameras vs config")
+    declared = [c.serial_number for c in cfg.cameras]
+    if not declared:
+        report.add("info", "config declares no serials; all detected cameras are used")
+        return
+    backend = only_backend or cfg.backend
+    try:
+        detected = {serial for serial, _model in _enumerate_backend(backend)}
+    except Exception as e:
+        report.add("warn", f"could not enumerate {backend} to cross-check ({e})")
+        return
+    missing = [s for s in declared if s not in detected]
+    extra = sorted(detected - set(declared))
+    if not missing:
+        report.add("ok", f"all {len(declared)} declared camera(s) detected on {backend}")
+    for serial in missing:
+        report.add(
+            "error",
+            f"serial {serial} declared but NOT detected (unplugged? wrong serial?)",
+        )
+    for serial in extra:
+        report.add("info", f"serial {serial} detected but not in config (won't record)")
+
+
+def _doctor_storage(report: _Report, cfg) -> None:
+    from octacam.config import resolve_dir_template, resolve_save_dir
+
+    report.section("Storage & transfer")
+    _report_free_space(report, Path(resolve_save_dir(cfg.record)), "record dir")
+    transfer = cfg.transfer
+    if transfer is None or not transfer.directory:
+        report.add("info", "no [transfer] destination configured")
+        return
+    dest = Path(resolve_dir_template(transfer.directory))
+    if not dest.exists():
+        report.add(
+            "warn",
+            f"transfer dest not present/mounted: {dest} (local recording still works)",
+        )
+        return
+    if not os.access(dest, os.W_OK):
+        report.add("error", f"transfer dest not writable: {dest}")
+        return
+    _report_free_space(report, dest, "transfer dest")
+    report.add(
+        "info", f"checksum verify: {'on' if transfer.checksum else 'off (size-only)'}"
+    )
+
+
+def _doctor_plugins(report: _Report, cfg) -> None:
+    from octacam import plugins as plugins_mod
+
+    report.section("Plugins")
+    infos = plugins_mod.available_plugins()
+    by_name = {info.name: info for info in infos}
     for info in infos:
-        status = "available" if info.available else "unavailable"
-        summary = info.summary
-        if not info.available and info.detail:
-            summary = f"{summary} [{info.detail}]" if summary else info.detail
-        typer.echo(f"{info.name}\t{status}\t{summary}")
+        if info.available:
+            suffix = f" ({info.summary})" if info.summary else ""
+            report.add("ok", f"{info.name} — available{suffix}")
+        else:
+            suffix = f" ({info.detail})" if info.detail else ""
+            report.add("info", f"{info.name} — unavailable{suffix}")
+    if cfg is None:
+        return
+    for pc in cfg.plugins:
+        name = plugins_mod._ALIASES.get(pc.name, pc.name)
+        info = by_name.get(name)
+        if info is None:
+            report.add("error", f"config enables unknown plugin {pc.name!r}")
+        elif not info.available:
+            report.add(
+                "error",
+                f"config enables {name!r} but it is unavailable ({info.detail})",
+            )
+        else:
+            report.add("ok", f"config enables {name!r} (available)")
+
+
+def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
+    from octacam import session_cache
+
+    report.section("Recording cache & runtime")
+    cdir = session_cache.cache_dir()
+    try:
+        tracked = {e["folder"] for e in session_cache._read_entries() if e.get("folder")}
+    except Exception:
+        tracked = set()
+    existing = session_cache.all_folders()
+    stale = len(tracked - {str(p) for p in existing})
+    writable = os.access(cdir if cdir.exists() else cdir.parent, os.W_OK)
+    report.add(
+        "ok" if writable else "warn",
+        f"cache {cdir} — {len(existing)} recording(s)"
+        + (f", {stale} stale (deleted)" if stale else ""),
+    )
+    try:
+        running = session_cache.transcode_running()
+    except Exception:
+        running = 0
+    if running:
+        report.add(
+            "warn",
+            f"{running} transcode(s) running here — CPU-heavy, may cause dropped "
+            "frames if you start recording now",
+        )
+    else:
+        report.add("ok", "no transcode running on this machine")
+    if config_dir is not None:
+        holder = _instance_lock_holder(config_dir.resolve())
+        if holder:
+            report.add(
+                "warn",
+                f"another octacam holds this rig's lock (pid {holder}) — its "
+                "cameras are in use",
+            )
+        else:
+            report.add("ok", "no other octacam instance holds this rig")
+    if _port_available("127.0.0.1", 8765):
+        report.add("ok", "GUI port 8765 is free")
+    else:
+        report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
+    if _in_ssh_session():
+        report.add(
+            "info", "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel"
+        )
+    elif sys.platform.startswith("linux") and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        report.add("info", "no local display — the GUI won't auto-open a browser")
+
+
+def _render_doctor(report: _Report) -> None:
+    from rich.console import Console
+    from rich.text import Text
+
+    console = Console()
+    console.print()
+    console.print(Text(f"octacam doctor — octacam {octacam.__version__}", style="bold"))
+    for title, items in report.sections:
+        console.print()
+        console.print(Text(title, style="bold"))
+        for status, text in items:
+            marker, style = _MARKERS[status]
+            if not marker:  # a plain listing line
+                console.print(Text("      " + text))
+                continue
+            line = Text("  ")
+            line.append(marker + " ", style=style or None)
+            line.append(text)
+            console.print(line)
+    errors, warns = report.counts()
+    console.print()
+    if errors or warns:
+        console.print(
+            Text(f"{errors} error(s), {warns} warning(s)", style="bold red" if errors else "bold yellow")
+        )
+    else:
+        console.print(Text("All checks passed.", style="bold green"))
+
+
+def _emit_doctor_json(report: _Report) -> None:
+    errors, warns = report.counts()
+    payload = {
+        "octacam_version": octacam.__version__,
+        "sections": [
+            {
+                "title": title,
+                "findings": [{"status": s, "text": t} for s, t in items],
+            }
+            for title, items in report.sections
+        ],
+        "errors": errors,
+        "warnings": warns,
+    }
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command()
+def doctor(
+    config_dir: Annotated[
+        Path | None,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Optional rig config dir. When given, doctor also validates that "
+            "rig's config, resolves its save/transfer paths, cross-checks declared "
+            "vs detected cameras, and reports the plugin selection.",
+        ),
+    ] = None,
+    backend: Annotated[
+        str | None,
+        typer.Option(
+            "--backend",
+            help="Only enumerate this backend (basler/flir/fake). Default: every "
+            "available backend.",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit machine-readable JSON instead of the report."),
+    ] = False,
+    strict: Annotated[
+        bool,
+        typer.Option(
+            "--check",
+            help="Exit nonzero on warnings too (for CI), not only on errors.",
+        ),
+    ] = False,
+) -> None:
+    """Diagnose the octacam install and, optionally, a rig config.
+
+    Lists detected cameras and bundled plugins, and checks the encoding toolchain,
+    storage, recording cache, and runtime conflicts. Pass a CONFIG_DIR to also
+    validate that rig. doctor never opens the cameras, so it is safe to run while
+    a GUI or `record` session is live.
+
+    Exits 0 when no errors are found (nonzero on errors, or on warnings too with
+    --check), so it is usable as a pre-flight check in scripts.
+    """
+    report = _Report()
+    _doctor_system(report)
+    _doctor_backends(report, backend)
+    _doctor_encoding(report)
+    cfg = _doctor_config(report, config_dir) if config_dir is not None else None
+    if cfg is not None:
+        _doctor_cameras_vs_config(report, cfg, backend)
+        _doctor_storage(report, cfg)
+    _doctor_plugins(report, cfg)
+    _doctor_runtime(report, config_dir)
+
+    if json_output:
+        _emit_doctor_json(report)
+    else:
+        _render_doctor(report)
+
+    errors, warns = report.counts()
+    if errors or (strict and warns):
+        raise typer.Exit(1)
 
 
 @app.command()
