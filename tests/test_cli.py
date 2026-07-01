@@ -566,6 +566,44 @@ def test_config_wizard_writes_roundtrippable_config(tmp_path):
     assert cfg.transfer is not None
     assert cfg.transfer.directory == "/mnt/nas"
     assert cfg.transfer.checksum is True
+    # Snapshotting is on by default: each detected camera's sensor params were
+    # saved next to the config (the fake backend persists as `<serial>.fake`).
+    assert {p.name for p in target.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
+
+
+def test_config_wizard_no_snapshot_params_skips_parameter_files(tmp_path):
+    # --no-snapshot-params keeps the wizard enumeration-only: it writes the
+    # config but never opens a camera, so no per-camera parameter file appears.
+    target = tmp_path / "rig-noparams"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    result = runner.invoke(
+        app,
+        ["config", str(target), "--backend", "fake", "--no-snapshot-params"],
+        input=inputs,
+    )
+    assert result.exit_code == 0, result.output
+    assert (target / "octacam_config.toml").exists()
+    assert not list(target.glob("*.fake"))
+
+
+def test_config_wizard_skips_params_when_cameras_busy(tmp_path, monkeypatch):
+    # A camera held by a live session cannot be opened: the wizard warns and
+    # skips the parameter files rather than failing, leaving a valid config.
+    from octacam.cameras.base import BackendError
+
+    def busy(*_args, **_kwargs):
+        raise BackendError("device is already exclusively opened by another client")
+
+    monkeypatch.setattr("octacam.cameras.system.CameraSystem", busy)
+    target = tmp_path / "rig-busy"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    result = runner.invoke(
+        app, ["config", str(target), "--backend", "fake"], input=inputs
+    )
+    assert result.exit_code == 0, result.output
+    assert (target / "octacam_config.toml").exists()
+    assert not list(target.glob("*.fake"))
+    assert "Skipping sensor parameters" in result.output
 
 
 def test_config_wizard_prompts_for_directory_when_omitted(tmp_path):

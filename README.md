@@ -55,7 +55,7 @@ config snapshot each recording saves alongside its videos.
 
 | Command | What it does |
 | --- | --- |
-| `octacam config [config_dir]` | Interactively scaffold a new rig config (`--backend`/`--force`) |
+| `octacam config [config_dir]` | Interactively scaffold a new rig config (`--backend`/`--force`/`--no-snapshot-params`) |
 | `octacam doctor [config_dir]` | Diagnose the install and list cameras/plugins; validate a rig |
 | `octacam gui <config_dir>` | Launch the live web GUI (`--host`/`--port`/`--no-browser`) |
 | `octacam record <config_dir>` | Record headlessly (`--fps`/`--duration`/`--output`) |

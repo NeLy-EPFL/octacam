@@ -1362,6 +1362,47 @@ def _build_config_doc(
     return doc
 
 
+def _snapshot_camera_params(
+    console, backend: str, serials: list[str], target: Path
+) -> list[str]:
+    """Open the given cameras once and save each one's sensor params into *target*.
+
+    This is the wizard's only step that needs exclusive camera access, so a
+    camera already held by a live session (or otherwise un-openable) is never
+    fatal: we warn and skip, leaving a valid but parameter-less config the GUI's
+    Save… dialog can complete later. Returns the parameter filenames written
+    (``[]`` when skipped or there was nothing to snapshot)."""
+    if not serials:
+        return []
+    from octacam import config_writer
+    from octacam.cameras.base import BackendError
+    from octacam.cameras.system import CameraSystem
+
+    try:
+        system = CameraSystem(requested_serial_numbers=serials, backend=backend)
+    except BackendError as e:
+        console.print(
+            f"[yellow]Skipping sensor parameters[/yellow] — could not open the "
+            f"camera(s): {e}\n  A camera is likely in use by another session; run "
+            "`octacam gui` and use Save… to capture them later."
+        )
+        return []
+    except Exception as e:  # missing SDK, unknown serial, … — never fatal here
+        console.print(
+            f"[yellow]Skipping sensor parameters[/yellow] — could not open the "
+            f"camera(s): {e}"
+        )
+        return []
+    try:
+        pfs = system.save_all_params()
+        if not pfs:
+            return []
+        config_writer.write_pfs_files(target, pfs, system.extension)
+        return [f"{serial}.{system.extension}" for serial in pfs]
+    finally:
+        system.close()
+
+
 @app.command()
 def config(
     config_dir: Annotated[
@@ -1386,6 +1427,14 @@ def config(
             help="Overwrite an existing octacam_config.toml without asking.",
         ),
     ] = False,
+    snapshot_params: Annotated[
+        bool,
+        typer.Option(
+            "--snapshot-params/--no-snapshot-params",
+            help="Open each detected camera once to save its current sensor "
+            "parameters (.pfs/.json). Skipped when a camera is busy. On by default.",
+        ),
+    ] = True,
 ) -> None:
     """Interactively scaffold a new rig config directory.
 
@@ -1393,7 +1442,10 @@ def config(
     transfer settings and writes an octacam_config.toml. The visual per-camera
     bits — window placement, rotation, and the grid — are left to `octacam gui`,
     which tunes them against a live preview; run it next on the new directory.
-    Never opens a camera, so it is safe to run while another session is live.
+
+    By default it also opens each detected camera once to snapshot its current
+    sensor parameters into a per-camera file; a busy camera is skipped with a
+    warning. Pass --no-snapshot-params to skip that and never open a camera.
     """
     from rich.console import Console
     from rich.prompt import Confirm, Prompt
@@ -1443,6 +1495,13 @@ def config(
         sys.exit(f"Failed to write config: {e}")
 
     console.print(f"\n[green]✓[/green] Wrote [bold]{written}[/bold]")
+    if snapshot_params:
+        serials = [c["serial_number"] for c in cameras] or [s for s, _ in detected]
+        saved = _snapshot_camera_params(console, chosen_backend, serials, target)
+        if saved:
+            console.print(
+                f"[green]✓[/green] Saved sensor parameters: {', '.join(saved)}"
+            )
     console.print("\nNext steps:")
     console.print(f"  • Validate it:          octacam doctor {target}")
     console.print(f"  • Place cameras & grid: octacam gui {target}")

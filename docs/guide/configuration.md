@@ -19,18 +19,23 @@ complete, working examples.
 
 You rarely have to write the file by hand. `octacam config` walks you through it:
 it detects the camera backend and serials, prompts for the record and transfer
-settings, and writes an `octacam_config.toml` for you.
+settings, writes an `octacam_config.toml`, and snapshots each camera's current
+sensor parameters into a per-camera file.
 
 ```bash
 octacam config <config_dir>    # or omit the dir to be prompted for a name
 ```
 
-It never opens a camera (enumeration only), so it is safe to run alongside a
-live session. Pass `--backend basler|flir|fake` to skip auto-detection, or
-`--force` to overwrite an existing file. The wizard deliberately leaves the
-**visual** settings — per-camera window placement, rotation, and the grid — to
-`octacam gui`, which tunes them against a live preview; run it next on the new
-directory. Everything the wizard writes stays hand-editable afterward.
+By default the wizard opens each detected camera once to save its current sensor
+parameters into a `<serial>.pfs` (Basler) or `<serial>.json` (FLIR) file. A
+camera that is busy — held by a live session — is skipped with a warning; you
+can capture its parameters later from the GUI's *Save…* dialog. Pass
+`--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
+opened). Pass `--backend basler|flir|fake` to skip auto-detection, or `--force`
+to overwrite an existing file. The wizard deliberately leaves the **visual**
+settings — per-camera window placement, rotation, and the grid — to `octacam
+gui`, which tunes them against a live preview; run it next on the new directory.
+Everything the wizard writes stays hand-editable afterward.
 
 ## Top level
 
