@@ -59,8 +59,7 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
 
 
 def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path):
-    import tomllib
-
+    from octacam._compat import tomllib
     from octacam.config_writer import write_config
 
     # A rig config the GUI has *not* edited on disk, but whose transcode/transfer

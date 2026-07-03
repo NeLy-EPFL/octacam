@@ -1,23 +1,42 @@
-"""Camera backend selection.
+"""Camera backend selection and the auto-detect cascade.
 
 Maps a backend name (from the rig config's ``backend`` field) to the trio the
 :class:`~octacam.cameras.system.CameraSystem` needs: an enumeration function, a
 per-device backend factory, and the config-file extension that backend persists
 parameters as. Backend modules are imported lazily so a backend whose SDK is not
-installed (e.g. FLIR/PySpin on a Basler-only box) costs nothing until selected,
-and raising :class:`BackendUnavailable` keeps a missing SDK from surfacing as a
-raw ``ImportError`` traceback.
+installed (e.g. FLIR/PySpin on a box without the Spinnaker SDK) costs nothing
+until selected, and raising :class:`BackendUnavailable` keeps a missing SDK from
+surfacing as a raw ``ImportError`` traceback.
+
+``"auto"`` resolves to the :data:`CASCADE`: a per-camera preference order where
+each camera is claimed by the highest-priority tier that enumerates its serial.
+The tiers, best-to-floor:
+
+1. **Vendor SDK** — ``basler`` (pypylon) / ``flir`` (Spinnaker + PySpin). Best
+   features/perf; the SDK is user-installed and not always available on modern
+   Python (PySpin is cp310-only), so the tier simply drops out of the cascade
+   when its import fails.
+2. **harvesters** — any installed GenTL producer (a vendor-neutral ``.cti``).
+   Full bounds + hardware timestamps for any GenICam camera.
+3. **pycameleon** — libusb-only, a core dependency, so it is always present and
+   the guaranteed final fallback.
 """
 
 import importlib
 from collections.abc import Callable
 
-BACKENDS = ("basler", "flir", "fake")
+BACKENDS = ("basler", "flir", "harvesters", "pycameleon", "fake")
 
-# The hardware backends an auto-detecting rig sweeps. ``fake`` is synthetic (it
-# always reports FAKE-* serials regardless of hardware), so it is never part of
-# the auto set — it is only ever used when named explicitly.
-REAL_BACKENDS = ("basler", "flir")
+# The per-camera preference order for "auto": a camera is claimed by the highest
+# tier here that enumerates its serial (see CameraSystem._enumerate). Vendor SDKs
+# (basler/flir) rank above the producer-agnostic harvesters tier, which ranks
+# above the always-available pycameleon floor.
+CASCADE = ("basler", "flir", "harvesters", "pycameleon")
+
+# The real (non-``fake``) backends an auto-detecting rig sweeps, in cascade
+# priority order. ``fake`` is synthetic (it always reports FAKE-* serials
+# regardless of hardware), so it is never swept — only used when named.
+REAL_BACKENDS = CASCADE
 
 
 class BackendUnavailable(RuntimeError):
@@ -41,7 +60,12 @@ def select_backend(name: str) -> tuple[Callable, Callable, str]:
     """
     key = (name or "basler").strip().lower()
     if key == "basler":
-        basler = importlib.import_module("octacam.cameras.basler")
+        try:
+            basler = importlib.import_module("octacam.cameras.basler")
+        except ImportError as e:
+            raise BackendUnavailable(
+                "basler", "the 'pypylon' package is not installed"
+            ) from e
         return (
             basler.enumerate_basler,
             basler.BaslerBackend,
@@ -64,37 +88,89 @@ def select_backend(name: str) -> tuple[Callable, Callable, str]:
             ) from e
         flir.ensure_available()
         return flir.enumerate_flir, flir.FlirBackend, flir.FlirBackend.extension
+    if key == "harvesters":
+        try:
+            harvesters = importlib.import_module("octacam.cameras.harvesters")
+        except ImportError as e:
+            raise BackendUnavailable(
+                "harvesters",
+                "the 'harvesters' and 'genicam' packages must be installed",
+            ) from e
+        harvesters.ensure_available()
+        return (
+            harvesters.enumerate_harvesters,
+            harvesters.HarvestersBackend,
+            harvesters.HarvestersBackend.extension,
+        )
+    if key == "pycameleon":
+        try:
+            pycameleon = importlib.import_module("octacam.cameras.pycameleon")
+        except ImportError as e:
+            raise BackendUnavailable(
+                "pycameleon", "the 'pycameleon' package is not installed"
+            ) from e
+        pycameleon.ensure_available()
+        return (
+            pycameleon.enumerate_pycameleon,
+            pycameleon.PycameleonBackend,
+            pycameleon.PycameleonBackend.extension,
+        )
     raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
+
+
+def available_backends() -> list[str]:
+    """The :data:`CASCADE` tiers whose SDK/deps import here, in priority order.
+
+    This is what ``"auto"`` sweeps: an unavailable tier (a missing vendor SDK, or
+    no GenTL producer's Python deps) is skipped. ``pycameleon`` is a core
+    dependency, so the result is never empty on a normal install.
+    """
+    out: list[str] = []
+    for name in CASCADE:
+        try:
+            select_backend(name)
+        except BackendUnavailable:
+            continue
+        out.append(name)
+    return out
 
 
 def resolve_backend_names(name: str | None) -> list[str]:
     """Expand a backend selector into the concrete backend names to try.
 
-    ``"auto"`` (or an empty/absent selector) means "every hardware backend" —
-    the multi-vendor default, so a rig can run Basler and FLIR cameras together
-    and simply use whatever is plugged in. Any other value is treated as a
-    single explicit backend (including ``"fake"`` and unknown names, which
-    :func:`select_backend` then accepts or rejects). ``"all"`` is an alias for
-    ``"auto"``.
+    ``"auto"`` (or an empty/absent selector, and its alias ``"all"``) means "the
+    available cascade" — :func:`available_backends`, in priority order — so a rig
+    picks the best backend per camera from whatever is installed. Any other value
+    is treated as a single explicit backend (including ``"fake"`` and unknown
+    names, which :func:`select_backend` then accepts or rejects).
     """
     key = (name or "auto").strip().lower()
     if key in ("auto", "all", ""):
-        return list(REAL_BACKENDS)
+        return available_backends()
     return [key]
+
+
+# Backends that hold session-wide SDK resources needing an explicit release after
+# every camera is closed, mapped to their module (each exposes ``teardown()``).
+_TEARDOWN_MODULES = {
+    "flir": "octacam.cameras.flir",
+    "harvesters": "octacam.cameras.harvesters",
+}
 
 
 def teardown_backend(name: str) -> None:
     """Release any session-wide SDK resources held by ``name`` (once).
 
-    Only the FLIR backend needs this (the Spinnaker ``System`` singleton must be
-    released after every camera is closed); for every other backend it is a
-    no-op. Called by :meth:`CameraSystem.close`.
+    FLIR (the Spinnaker ``System`` singleton) and harvesters (the GenTL
+    ``Harvester`` singleton) must be released after every camera is closed; for
+    every other backend this is a no-op. Called by :meth:`CameraSystem.close`.
     """
     key = (name or "basler").strip().lower()
-    if key != "flir":
+    module = _TEARDOWN_MODULES.get(key)
+    if module is None:
         return
     try:
-        flir = importlib.import_module("octacam.cameras.flir")
+        mod = importlib.import_module(module)
     except ImportError:  # pragma: no cover - nothing to release if it never loaded
         return
-    flir.teardown()
+    mod.teardown()

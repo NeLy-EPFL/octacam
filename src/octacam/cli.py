@@ -15,9 +15,10 @@ import threading
 import time
 import webbrowser
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+
+from octacam._compat import StrEnum
 
 if TYPE_CHECKING:
     from rich.progress import TaskID
@@ -628,26 +629,18 @@ class _Report:
 def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     """``[(serial, model|None), ...]`` for a backend without opening any camera.
 
-    ``"auto"`` (or an empty selector) sweeps every installed hardware backend and
-    concatenates the results, so a mixed Basler+FLIR rig is detected in one call;
-    a backend whose SDK is missing is skipped. Basler goes through the pylon TL
-    factory directly so model names come along; other backends expose only
-    serials via their enumeration function. Enumeration never opens/grabs a
-    device, so this is safe to run alongside a live session."""
+    ``"auto"`` (or an empty selector) sweeps the available backend cascade and
+    returns each camera once, claimed by the highest-priority tier that sees it
+    (so a Basler served by the vendor tier is not also listed under harvesters/
+    pycameleon) — mirroring how :class:`CameraSystem` opens them. Basler goes
+    through the pylon TL factory directly so model names come along; other
+    backends expose only serials via their enumeration function. Enumeration
+    never opens/grabs a device, so this is safe to run alongside a live session."""
     from octacam.cameras import select_backend
 
     key = (name or "auto").strip().lower()
     if key in ("auto", "all", ""):
-        from octacam.cameras.registry import REAL_BACKENDS, BackendUnavailable
-
-        combined: list[tuple[str, str | None]] = []
-        for backend in REAL_BACKENDS:
-            try:
-                select_backend(backend)  # skip a backend whose SDK is absent
-            except BackendUnavailable:
-                continue
-            combined.extend(_enumerate_backend(backend))
-        return combined
+        return [(serial, model) for serial, _backend, model in _cascade_assignment()]
     if key == "basler":
         from pypylon import pylon
 
@@ -655,6 +648,30 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
     enumerate_fn, _factory, _extension = select_backend(name)
     return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
+
+
+def _cascade_assignment() -> list[tuple[str, str, str | None]]:
+    """``[(serial, backend, model|None), ...]``: the tier that would claim each camera.
+
+    Sweeps the available cascade in priority order and claims each serial for the
+    first tier that enumerates it, so the result shows exactly which backend
+    :class:`CameraSystem` would open each detected camera through under ``auto``.
+    A backend whose enumeration fails is skipped."""
+    from octacam.cameras.registry import available_backends
+
+    claimed: dict[str, tuple[str, str | None]] = {}
+    order: list[str] = []
+    for backend in available_backends():
+        try:
+            cams = _enumerate_backend(backend)
+        except Exception:
+            continue
+        for serial, model in cams:
+            if serial in claimed:
+                continue
+            claimed[serial] = (backend, model)
+            order.append(serial)
+    return [(serial, claimed[serial][0], claimed[serial][1]) for serial in order]
 
 
 def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
@@ -757,6 +774,24 @@ def _doctor_system(report: _Report) -> None:
         report.add("ok", f"open-file limit {soft}")
 
 
+def _report_harvesters_producers(report: _Report) -> None:
+    """List the GenTL producer ``.cti`` files the harvesters tier will load."""
+    try:
+        from octacam.cameras.harvesters import _find_cti_files
+
+        cti = _find_cti_files()
+    except Exception:  # pragma: no cover - defensive; harvesters is a core dep
+        return
+    if cti:
+        report.add("list", "GenTL producer(s): " + ", ".join(cti))
+    else:
+        report.add(
+            "list",
+            "no GenTL producer found — set GENICAM_GENTL64_PATH (or OCTACAM_GENTL_CTI) "
+            "to a Vimba X / mvIMPACT .cti to enable this tier",
+        )
+
+
 def _doctor_backends(report: _Report, only_backend: str | None) -> None:
     from octacam.cameras import BackendUnavailable
     from octacam.cameras.registry import BACKENDS, select_backend
@@ -772,13 +807,17 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
         try:
             select_backend(name)
         except BackendUnavailable as e:
-            # A backend whose SDK isn't installed is expected on a single-vendor
-            # rig — report it, but don't cry wolf.
+            # A backend whose SDK isn't installed is expected — report it as info,
+            # not a warning (the cascade simply skips that tier).
             report.add("info", str(e))
             continue
         except Exception as e:
             report.add("warn", f"{name}: could not select backend ({e})")
             continue
+        # harvesters is importable regardless of hardware; whether it can drive a
+        # camera depends on an installed GenTL producer, so surface which one(s).
+        if name == "harvesters":
+            _report_harvesters_producers(report)
         try:
             cams = _enumerate_backend(name)
         except Exception as e:
@@ -792,6 +831,14 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
             "info",
             f"PYLON_CAMEMU={os.environ['PYLON_CAMEMU']} (emulated Basler cameras)",
         )
+    # Under "auto" a camera may be seen by several tiers; show which one wins.
+    if not only_backend:
+        assignment = _cascade_assignment()
+        if assignment:
+            report.add("info", "cascade selection (backend each camera opens through):")
+            for serial, backend, model in assignment:
+                label = f"{model}  {serial}" if model else serial
+                report.add("list", f"{label} → {backend}")
 
 
 def _doctor_encoding(report: _Report) -> None:
@@ -833,8 +880,7 @@ def _doctor_encoding(report: _Report) -> None:
 
 
 def _doctor_config(report: _Report, config_dir: Path):
-    import tomllib
-
+    from octacam._compat import tomllib
     from octacam.config import (
         find_config_file,
         load_config_dir,
@@ -1071,8 +1117,8 @@ def doctor(
         str | None,
         typer.Option(
             "--backend",
-            help="Only enumerate this backend (basler/flir/fake). Default: every "
-            "available backend.",
+            help="Only enumerate this backend (basler/flir/harvesters/pycameleon/"
+            "fake). Default: the whole available cascade.",
         ),
     ] = None,
     json_output: Annotated[
@@ -1133,21 +1179,15 @@ def doctor(
 
 
 def _available_backends() -> list[str]:
-    """Which SDK-backed backends (basler/flir) are installed here, in order.
+    """The cascade tiers installed here, in priority order.
 
-    Lets the wizard tell the user which vendors it will auto-detect. ``fake`` is
-    a synthetic test backend, never auto-detected. Selection imports the SDK but
+    Lets the wizard tell the user which backends it will auto-detect through
+    (vendor SDKs, harvesters, the always-present pycameleon floor). ``fake`` is a
+    synthetic test backend, never auto-detected. Selection imports the SDK but
     never opens a device, so this is side-effect free."""
-    from octacam.cameras.registry import REAL_BACKENDS, select_backend
+    from octacam.cameras.registry import available_backends
 
-    available: list[str] = []
-    for name in REAL_BACKENDS:
-        try:
-            select_backend(name)
-        except Exception:
-            continue
-        available.append(name)
-    return available
+    return available_backends()
 
 
 def _resolve_backend(console, cli_backend: str | None) -> str:
@@ -1437,8 +1477,9 @@ def config(
         str | None,
         typer.Option(
             "--backend",
-            help="Pin the rig to one camera backend (basler/flir/fake). Default: "
-            "auto-detect every installed backend and use whatever is connected.",
+            help="Pin the rig to one camera backend (basler/flir/harvesters/"
+            "pycameleon/fake). Default: auto-detect through the cascade and use "
+            "whatever is connected.",
         ),
     ] = None,
     force: Annotated[

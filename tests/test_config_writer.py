@@ -1,12 +1,12 @@
 """TOML config writer: round-trip fidelity, strftime safety, atomic writes."""
 
 import glob
-import tomllib
 from pathlib import Path
 
 import pytest
 
 from octacam import config_writer as cw
+from octacam._compat import tomllib
 from octacam.config import parse_config
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))

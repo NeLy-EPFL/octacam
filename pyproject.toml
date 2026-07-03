@@ -1,11 +1,22 @@
 [project]
 name = "octacam"
 version = "0.3.0.dev0"
-description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR)"
+description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR, and any GenICam USB3-Vision camera)"
 readme = "README.md"
-requires-python = ">=3.11"
+# 3.10 is the floor because the FLIR vendor tier's PySpin wheel is cp310-only; a
+# rig that wants that tier is pinned to 3.10. The rest of the backend cascade
+# (harvesters + a GenTL producer, pycameleon) runs on any modern Python.
+requires-python = ">=3.10"
 dependencies = [
+    # Basler vendor tier (uv-installable, so it lives in core).
     "pypylon>=4.0",
+    # Tier-2 GenTL consumer: harvesters drives any camera through an installed
+    # GenTL producer; genicam is its node-map runtime.
+    "harvesters>=1.4.3",
+    "genicam>=1.2",
+    # Tier-3 floor: libusb-only USB3-Vision, always present so the cascade has a
+    # guaranteed backend on any Python where no vendor SDK / producer is set up.
+    "pycameleon>=0.2.11",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
     "pydantic>=2",
@@ -21,6 +32,8 @@ dependencies = [
     # light, pure-Python dep needed by every bundled plugin, so it ships by
     # default rather than as an extra people can forget to install.
     "pyserial>=3.5",
+    # Python 3.10 has no stdlib tomllib (the TOML reader); tomli is the drop-in.
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -59,7 +72,7 @@ requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py310"
 line-length = 88
 
 [tool.ruff.lint]
@@ -75,7 +88,7 @@ extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.Query"]
 # The library is the type-check surface; tests use stubs/fakes and monkeypatch
 # private attributes, which intentionally fight static typing.
 include = ["src"]
-pythonVersion = "3.11"
+pythonVersion = "3.10"
 typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]

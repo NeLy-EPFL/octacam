@@ -20,10 +20,10 @@ import contextlib
 import copy
 import os
 import tempfile
-import tomllib
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from octacam._compat import tomllib
 from octacam.config import find_config_file
 from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 

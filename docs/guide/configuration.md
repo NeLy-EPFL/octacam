@@ -18,8 +18,8 @@ complete, working examples.
 ## Scaffolding a config
 
 You rarely have to write the file by hand. `octacam config` walks you through it:
-it auto-detects the connected cameras (across every installed backend, so a
-mixed Basler+FLIR rig is picked up in one go), prompts for the record and
+it auto-detects the connected cameras (through the backend cascade, so a mixed
+Basler + FLIR + GenICam rig is picked up in one go), prompts for the record and
 transfer settings, writes an `octacam_config.toml`, and snapshots each camera's
 current sensor parameters into a per-camera file.
 
@@ -32,8 +32,9 @@ parameters into a `<serial>.pfs` (Basler) or `<serial>.json` (FLIR) file. A
 camera that is busy — held by a live session — is skipped with a warning; you
 can capture its parameters later from the GUI's *Save…* dialog. Pass
 `--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
-opened). Pass `--backend basler|flir|fake` to pin the rig to one vendor instead
-of auto-detecting, or `--force` to overwrite an existing file. The wizard
+opened). Pass `--backend basler|flir|harvesters|pycameleon|fake` to pin the rig
+to one backend instead of auto-detecting, or `--force` to overwrite an existing
+file. The wizard
 deliberately leaves the **visual**
 settings — per-camera window placement, rotation, and the grid — to `octacam
 gui`, which tunes them against a live preview; run it next on the new directory.
@@ -42,14 +43,15 @@ Everything the wizard writes stays hand-editable afterward.
 ## Top level
 
 ```toml
-# backend = "auto"   # "auto" (default) | "basler" | "flir" | "fake"
+# backend = "auto"   # "auto" (default) | "basler" | "flir" | "harvesters" | "pycameleon" | "fake"
 ```
 
-`backend` is optional. Omit it (or set `"auto"`) and the rig auto-detects every
-installed backend and uses whatever is connected — Basler and FLIR cameras can
-run together in one config, each keeping its own parameter-file format. Set a
-concrete value to pin the rig to a single vendor. See
-[Camera backends](backends.md).
+`backend` is optional. Omit it (or set `"auto"`) and the rig runs the preference
+cascade: each camera is claimed by the best available driver that sees it (vendor
+SDK → a GenTL producer via harvesters → the always-present pycameleon floor), so
+Basler, FLIR, and other GenICam cameras can run together in one config, each
+keeping its own parameter-file format. Set a concrete value to pin the rig to a
+single backend. See [Camera backends](backends.md).
 
 ## `[record]`
 

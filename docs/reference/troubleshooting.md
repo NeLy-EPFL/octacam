@@ -49,9 +49,12 @@ octacam gui <config_dir> --port 8766
 
 ## FLIR: PySpin missing
 
-If a `flir` config is served without PySpin installed, octacam exits with a clear
-message. Install the Spinnaker SDK and its PySpin wheel — see
-[FLIR / Teledyne setup](../guide/backends.md#flir-teledyne). Confirm with:
+If a config pins `backend = "flir"` without PySpin installed, octacam exits with a
+clear message. The FLIR vendor tier needs the Spinnaker SDK and its PySpin wheel
+(Python ≤3.10) — see
+[Tier 1 — FLIR / Teledyne](../guide/backends.md#tier-1-flir-teledyne-spinnaker-pyspin).
+Under the default `auto` cascade octacam instead drives FLIR cameras through the
+harvesters or pycameleon tiers, so no pin is needed. Confirm with:
 
 ```bash
 octacam doctor --backend flir

@@ -186,7 +186,7 @@ def build_recording_summary(
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
-            start_wall_ns / 1e9, tz=datetime.UTC
+            start_wall_ns / 1e9, tz=datetime.timezone.utc
         ).isoformat()
         if start_wall_ns
         else None

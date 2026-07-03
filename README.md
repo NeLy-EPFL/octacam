@@ -1,9 +1,11 @@
 # octacam
 
 Preview, record, and save synchronized video from many scientific cameras
-through one fast, simple interface. octacam drives **Basler** (USB3, via pypylon)
-and **FLIR / Teledyne** (USB3, via Spinnaker/PySpin) cameras from a live web GUI,
-and turns a day's recordings into archived videos with one command. It is the
+through one fast, simple interface. octacam drives **Basler**, **FLIR /
+Teledyne**, and **any GenICam USB3-Vision** camera from a live web GUI, and turns
+a day's recordings into archived videos with one command. It auto-detects the
+best available driver per camera (a [backend cascade](https://nely-epfl.github.io/octacam/guide/backends/))
+with a pip-installable floor, so it just works on modern Python. It is the
 successor to SeptaCam.
 
 <p align="center">
@@ -24,9 +26,12 @@ successor to SeptaCam.
 uv tool install git+https://github.com/NeLy-EPFL/octacam.git
 ```
 
-The Basler runtime is bundled, so a Basler rig works out of the box. FLIR /
-Teledyne cameras need the Spinnaker SDK installed separately — see the
-[installation guide](https://nely-epfl.github.io/octacam/installation/).
+The Python-installable backends (pypylon, harvesters, and the always-on
+pycameleon floor) all ship in core, so **a rig works out of the box** on Python
+3.10+. Two tiers are optional manual installs: a GenTL producer for the
+harvesters tier, and the FLIR vendor SDK (Spinnaker/PySpin, Python ≤3.10). See
+the [installation guide](https://nely-epfl.github.io/octacam/installation/) and
+[camera backends](https://nely-epfl.github.io/octacam/guide/backends/).
 
 ## Quickstart
 
@@ -73,6 +78,6 @@ Run `octacam --help` (or `<command> --help`) for the full option list.
 | [Recording](https://nely-epfl.github.io/octacam/guide/recording/) | Outputs, the recording summary, transformed vs raw |
 | [Processing](https://nely-epfl.github.io/octacam/guide/processing/) | Transcode, grid videos, and transfer to storage |
 | [Configuration](https://nely-epfl.github.io/octacam/guide/configuration/) | The `octacam_config.toml` reference |
-| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | Basler, FLIR/Teledyne, and the fake test backend |
+| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade: Basler, FLIR, GenTL producers, pycameleon |
 | [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable and 2-photon trigger |
 | [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |

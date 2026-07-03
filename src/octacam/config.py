@@ -11,12 +11,12 @@ import logging
 import os
 import shlex
 import time
-import tomllib
 from pathlib import Path
 from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from octacam._compat import tomllib
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
@@ -197,15 +197,16 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-_BACKENDS = ("auto", "basler", "flir", "fake")
+_BACKENDS = ("auto", "basler", "flir", "harvesters", "pycameleon", "fake")
 
 
 class OctacamConfig(BaseModel):
-    # Which camera SDK(s) this rig uses. "auto" (the default, and what an absent
-    # key means) sweeps every installed hardware backend, so a rig can mix Basler
-    # and FLIR cameras and just use whatever is plugged in. A concrete name pins
-    # the rig to one vendor. On a single-vendor box "auto" resolves to that
-    # vendor, so every existing config keeps working untouched.
+    # Which camera backend(s) this rig uses. "auto" (the default, and what an
+    # absent key means) resolves to the preference cascade: each camera is claimed
+    # by the best available tier that sees it — vendor SDK (basler/flir), then a
+    # GenTL producer via harvesters, then the always-present pycameleon floor — so
+    # a rig just uses whatever is plugged in with whatever is installed. A concrete
+    # name pins the rig to one backend. Every existing config keeps working.
     backend: str = "auto"
     record: RecordConfig = Field(default_factory=RecordConfig)
     transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)

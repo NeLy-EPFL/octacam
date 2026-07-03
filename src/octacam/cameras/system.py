@@ -74,14 +74,16 @@ class CameraSystem:
     ) -> list[tuple[str, object, "Callable"]]:
         """Resolve the selector to ``[(serial, handle, backend_factory), ...]``.
 
-        With a single active backend (a concrete selector, or "auto" on a
-        single-vendor box) the requested serials are passed straight to that
+        With a single active backend (a concrete selector, or "auto" resolving to
+        one available tier) the requested serials are passed straight to that
         backend's enumeration, preserving its ordering and its "not found"
-        warnings. With several active backends we enumerate each in full and
-        filter to the requested serials afterwards, so a Basler serial does not
-        make the FLIR enumeration cry "not found" (and vice versa).
+        warnings. With several active backends (the cascade) each is enumerated
+        in full, in priority order, and a camera is claimed by the *first*
+        backend that reports its serial — a lower tier that also sees an
+        already-claimed serial is skipped, so a camera served by a vendor SDK is
+        never double-opened by the harvesters or pycameleon tiers.
         """
-        active = []  # (name, enumerate_fn, factory)
+        active = []  # (name, enumerate_fn, factory), in cascade priority order
         unavailable: list[BackendUnavailable] = []
         for name in resolve_backend_names(backend):
             try:
@@ -98,7 +100,8 @@ class CameraSystem:
                 raise unavailable[0]
             raise BackendUnavailable(backend, "no camera backend is available")
 
-        # Release order matters for FLIR; record every backend we enumerate.
+        # Release order matters for FLIR/harvesters; record every backend we
+        # enumerate (as a set — teardown order is not significant among them).
         self._backends_used = {name for name, _fn, _mk in active}
 
         if len(active) == 1:
@@ -108,10 +111,16 @@ class CameraSystem:
                 for serial, handle in enumerate_fn(requested_serial_numbers)
             ]
 
-        # Multiple vendors: enumerate each fully, then select the requested set.
+        # The cascade: enumerate every active tier in priority order and let the
+        # highest one claim each serial. Lower tiers still enumerate (so a camera
+        # a vendor tier missed can fall through) but skip serials already claimed.
+        claimed: set[str] = set()
         collected: list[tuple[str, object, Callable]] = []
         for _name, enumerate_fn, make_backend in active:
             for serial, handle in enumerate_fn(None):
+                if serial in claimed:
+                    continue  # a higher-priority tier already owns this camera
+                claimed.add(serial)
                 collected.append((serial, handle, make_backend))
         if not requested_serial_numbers:
             return collected

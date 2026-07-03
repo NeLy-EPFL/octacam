@@ -46,7 +46,7 @@ opens a camera, so it is safe to run while a session is live.
 
 | Option | Purpose |
 | --- | --- |
-| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`fake`). Default: every available backend. |
+| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`harvesters`/`pycameleon`/`fake`). Default: the whole available cascade. |
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
 

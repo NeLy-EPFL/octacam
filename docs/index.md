@@ -1,10 +1,12 @@
 # octacam
 
 Preview, record, and save synchronized video from many scientific cameras
-through one fast, simple interface. octacam drives **Basler** (USB3, via
-[pypylon](https://github.com/basler/pypylon)) and **FLIR / Teledyne** (USB3, via
-Spinnaker / PySpin) cameras from a live web GUI, and turns a day's recordings
-into archived videos with one command. It is the successor to SeptaCam.
+through one fast, simple interface. octacam drives **Basler**, **FLIR /
+Teledyne**, and **any GenICam USB3-Vision** camera from a live web GUI, and turns
+a day's recordings into archived videos with one command. It auto-detects the
+best available driver per camera (a [backend cascade](guide/backends.md)) with a
+pip-installable floor, so it just works on modern Python. It is the successor to
+SeptaCam.
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a7b6ac6e-5ae3-45fa-ae5a-2e3f5281e5c3" width="560"/>
@@ -59,7 +61,7 @@ or remote runs.
 | [Recording](guide/recording.md) | Outputs, the recording summary, transformed vs raw |
 | [Processing](guide/processing.md) | Transcode, grid videos, and transfer to storage |
 | [Configuration](guide/configuration.md) | The `octacam_config.toml` reference |
-| [Camera backends](guide/backends.md) | Basler, FLIR/Teledyne, and the fake test backend |
+| [Camera backends](guide/backends.md) | The auto-detect cascade: Basler, FLIR, GenTL producers, pycameleon |
 | [Plugins](guide/plugins.md) | Flywheel turntable and 2-photon trigger |
 | [CLI reference](reference/cli.md) | Every command and option |
 | [Troubleshooting](reference/troubleshooting.md) | Common errors and fixes |
