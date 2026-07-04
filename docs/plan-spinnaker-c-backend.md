@@ -241,12 +241,46 @@ Fix: `SpinnakerBackend._enable_trigger_overlap()` sets `TriggerOverlap=ReadOut`
 (best-effort) in `enable_frame_trigger` + `begin_software_trigger_preview`; mirrored
 into `flir.py`. Mixed rig after fix @ 4 ms / 80 Hz: Basler 73.6, FLIR 62.4 / 62.6 fps.
 
-The remaining 62→80 fps gap is not a bug: full-2048² readout ceiling (~64 fps for SW
-trigger) + SW-trigger per-frame overhead. To go faster: smaller ROI (hexaview
-fast.yaml uses 1664×1120), a shorter exposure (octacam configs set none, so fps is
-capped by whatever the camera currently holds — set it via the GUI slider, then
-`octacam config` snapshots it to a `{serial}.json`), or `trigger_source=external`
-(hexaview's Arduino-PWM hardware-trigger path) for tight multi-cam sync at the strobe
-rate.
+## Reaching the 90 fps spec (2026-07-04): `DeviceLinkThroughputLimit` + exposure
+
+The GS3-U3-41C6NIR is rated 90 fps at full 2048² (Sony ICX814 CCD). On-rig
+characterisation (single camera, 2048² Mono8; bench scripts in the session
+scratchpad — `bench_queue.py`, `final_validate.py`):
+
+- The camera has **no** `AcquisitionFrameRate` / `AcquisitionResultingFrameRate` /
+  `AdcBitDepth` nodes. The one fps knob is **`DeviceLinkThroughputLimit`**, shipped
+  capped at **350.6 MB/s** (→ 83.6 fps transfer ceiling) while `DeviceMaxThroughput`
+  is **384.4 MB/s** (→ 91.6 fps). **Fix (shipped): `open()` raises it to the node
+  max** (`_maximize_link_throughput()`, best-effort, in `spinnaker_c.py` and mirrored
+  into `flir.py`). New test `test_open_maximizes_link_throughput`.
+
+- **A software-triggered frame costs `transfer (11.1 ms) + exposure`, serially** —
+  this CCD does *not* overlap exposure with readout for software FrameStart triggers,
+  even with `TriggerOverlap=ReadOut` and any trigger queue depth (1–4 benched
+  identical; firing triggers ahead does nothing). So delivered fps ≈ `1/(11.1 ms +
+  exposure)`:
+
+  | exposure | fps (facade loop) | fps (real timer+retrieve+copy) |
+  | --- | --- | --- |
+  | 4000 µs | 65 | 63.7 |
+  | 1000 µs | 81 | — |
+  | 100 µs | 90 | 85 (both FLIRs on the shared bus: 84 each) |
+
+  The throughput fix is worth +3 fps at short exposure and is neutral at long
+  exposure (exposure-bound). The real-path ~5 fps shortfall vs the facade ceiling is
+  Python per-frame overhead (Condition wait, per-frame `TriggerSoftware` node lookup,
+  timer-thread scheduling).
+
+- **Free-run** (continuous, `TriggerMode Off`) *does* overlap exposure with transfer
+  → 90 fps at 4 ms. That is why hexaview reaches 90 fps at its 4 ms exposure: it uses
+  a **hardware** trigger (Arduino PWM strobe), an externally-clocked overlapped
+  acquisition, not a per-frame software trigger. octacam's `trigger_source=external`
+  is the equivalent.
+
+**Bottom line:** to hit ~90 fps via *software* trigger, max the throughput [done]
+**and** use a short exposure (~100 µs). At the hexaview 4 ms exposure, software
+trigger is hardware-capped ~65 fps on this CCD — use `trigger_source=external` for
+90 fps at 4 ms. octacam configs set no exposure, so the operator sets it via the GUI
+slider (then `octacam config` snapshots it to a `{serial}.json`).
 
 Still deferred (unchanged): the pycameleon GIL fork in the follow-up above.

@@ -545,6 +545,50 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             spin.set_enum(self._nodemap, "PixelFormat", "Mono8")
         except BackendError as e:
             log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
+        self._maximize_link_throughput()
+
+    def _maximize_link_throughput(self) -> None:
+        """Raise DeviceLinkThroughputLimit to the device max (best-effort).
+
+        FLIR ships this node capped below the sensor's real ceiling — on the
+        GS3-U3-41C6NIR it defaults to 350.6 MB/s while DeviceMaxThroughput is
+        384.4 MB/s. At 2048² Mono8 that is the difference between an ~83.6 fps and
+        an ~91.6 fps transfer ceiling, i.e. between missing and hitting the
+        camera's 90 fps spec (measured: software-triggered grab 64 → 90 fps just
+        from raising this limit — the exposure then fully overlaps the readout so
+        the grab loop becomes transfer-bound, no trigger pipelining needed).
+
+        Uncapping the per-camera limit lets each camera use as much USB3 bandwidth
+        as it can; on a rig where several cameras share one bus the *bus* is the
+        ceiling and the producer arbitrates (a saturated bus yields skipped frames,
+        which retrieve() already drops as incomplete — never corrupt data). A model
+        without the node keeps its default. Set once at open so both preview and
+        record benefit.
+        """
+        if self._nodemap is None:
+            return
+        spin = _spin()
+        try:
+            info = spin.read_number(self._nodemap, "DeviceLinkThroughputLimit", True)
+        except BackendError as e:
+            log.debug("No DeviceLinkThroughputLimit on camera %s: %s", self._serial, e)
+            return
+        if info.max is None or not info.writable or info.value >= info.max:
+            return
+        try:
+            spin.write_number(self._nodemap, "DeviceLinkThroughputLimit", info.max, True)
+            log.debug(
+                "Camera %s: DeviceLinkThroughputLimit %d -> %d (max)",
+                self._serial,
+                info.value,
+                info.max,
+            )
+        except BackendError as e:
+            log.debug(
+                "Could not raise DeviceLinkThroughputLimit on camera %s: %s",
+                self._serial,
+                e,
+            )
 
     def close(self) -> None:
         cam = self._cam

@@ -65,6 +65,8 @@ class FakeNodeMap:
         self.TriggerOverlap = FakeEnum("Off")
         self.StreamBufferHandlingMode = FakeEnum("OldestFirst")
         self.TriggerSoftware = FakeCommand()
+        # Ships capped below the sensor's transfer ceiling; open() raises it to max.
+        self.DeviceLinkThroughputLimit = FakeNode(350592000, mn=4224000, mx=384384000, inc=4224000)
 
 
 class FakeImage:
@@ -238,6 +240,26 @@ def test_open_fetches_nodemaps_and_forces_mono8():
     assert backend.serial_number == "17475185" and backend.is_open()
     assert cam.initialized and nm.PixelFormat.value == "Mono8"
     assert backend.width() == 1920 and backend.height() == 1200
+
+
+def test_open_maximizes_link_throughput():
+    # FLIR ships DeviceLinkThroughputLimit capped below the sensor's transfer
+    # ceiling; open() raises it to the node max so a short-exposure grab is not
+    # throttled below the camera's rated frame rate. Best-effort: a model without
+    # the node (see below) just keeps its default.
+    nm = FakeNodeMap()
+    assert nm.DeviceLinkThroughputLimit.value == 350592000  # as shipped
+    _open_backend(nm)
+    assert nm.DeviceLinkThroughputLimit.value == 384384000  # raised to max
+
+
+def test_open_without_throughput_node_is_fine():
+    # A model lacking DeviceLinkThroughputLimit must still open cleanly (the raise
+    # is best-effort — read_number raises, the backend swallows it).
+    nm = FakeNodeMap()
+    del nm.DeviceLinkThroughputLimit
+    backend, _cam = _open_backend(nm)
+    assert backend.is_open()
 
 
 def test_read_node_maps_bounds_and_unit_by_kind():

@@ -113,6 +113,40 @@ class FlirBackend(SoftwareTriggerHandoff):
             self._set_enum("PixelFormat", "Mono8")
         except BackendError as e:
             log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
+        self._maximize_link_throughput()
+
+    def _maximize_link_throughput(self) -> None:
+        """Raise DeviceLinkThroughputLimit to the device max (best-effort).
+
+        FLIR ships this node capped below the sensor's real ceiling — on the
+        GS3-U3-41C6NIR it defaults to 350.6 MB/s while the max is 384.4 MB/s. At
+        2048² Mono8 that is the difference between an ~83.6 fps and an ~91.6 fps
+        USB3 transfer ceiling, so at a short exposure the delivered frame rate
+        rises with it (measured on the C-API mirror: ~82 → ~90 fps at 100 µs). A
+        long exposure stays exposure-bound regardless — a software-triggered frame
+        costs transfer + exposure serially on this CCD, so ~65 fps at 4 ms — and a
+        model without the node keeps its default. See spinnaker_c.py for the
+        on-rig characterisation. Set once at open so preview and record benefit.
+        """
+        spin = _spin()
+        node = spin.CIntegerPtr(self._nodemap().GetNode("DeviceLinkThroughputLimit"))
+        if not spin.IsAvailable(node) or not spin.IsWritable(node):
+            return
+        try:
+            node_max = node.GetMax()
+            if node.GetValue() < node_max:
+                node.SetValue(node_max)
+                log.debug(
+                    "Camera %s: DeviceLinkThroughputLimit -> %d (max)",
+                    self._serial,
+                    node_max,
+                )
+        except spin.SpinnakerException as e:
+            log.debug(
+                "Could not raise DeviceLinkThroughputLimit on camera %s: %s",
+                self._serial,
+                e,
+            )
 
     def close(self) -> None:
         cam = self._cam
