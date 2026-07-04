@@ -16,22 +16,42 @@ The tiers, best-to-floor:
    features/perf; the SDK is user-installed and not always available on modern
    Python (PySpin is cp310-only), so the tier simply drops out of the cascade
    when its import fails.
-2. **harvesters** — any installed GenTL producer (a vendor-neutral ``.cti``).
-   Full bounds + hardware timestamps for any GenICam camera.
+2. **spinnaker** — the Spinnaker SDK's C API (``libSpinnaker_C.so``) driven via
+   ``ctypes``. Same FLIR cameras as ``flir`` but with no cp310 wheel limit, so it
+   claims the FLIRs on modern Python where ``flir`` (PySpin) drops out. Faster
+   and watermark-free vs the pycameleon floor because ctypes releases the GIL on
+   the blocking grab. Self-disables when the SDK is not installed.
 3. **pycameleon** — libusb-only, a core dependency, so it is always present and
    the guaranteed final fallback.
+
+The ``harvesters`` GenTL tier is deliberately **NOT** in the auto cascade. The
+only freely-installable U3V GenTL producer we found is Balluff's mvIMPACT, whose
+free evaluation licence expires after ~8 s of streaming and stamps a "BALLUFF …
+unsupported third party device / evaluation period ended" watermark onto the
+frames (its EULA also restricts third-party-hardware use to paid licensing). So
+auto-selecting harvesters would silently route any GenICam camera lacking a
+vendor SDK (e.g. a FLIR on modern Python) through a watermarking, time-limited
+producer. harvesters remains fully supported but only when a rig **explicitly**
+names ``backend = "harvesters"`` — i.e. the operator has a licensed/non-expiring
+producer and opts in. Everything the cascade would have sent to harvesters now
+lands on the always-free pycameleon floor instead.
 """
 
 import importlib
 from collections.abc import Callable
 
-BACKENDS = ("basler", "flir", "harvesters", "pycameleon", "fake")
+BACKENDS = ("basler", "flir", "spinnaker", "harvesters", "pycameleon", "fake")
 
 # The per-camera preference order for "auto": a camera is claimed by the highest
 # tier here that enumerates its serial (see CameraSystem._enumerate). Vendor SDKs
-# (basler/flir) rank above the producer-agnostic harvesters tier, which ranks
-# above the always-available pycameleon floor.
-CASCADE = ("basler", "flir", "harvesters", "pycameleon")
+# (basler/flir) rank above the always-available pycameleon floor; ``spinnaker``
+# (the Spinnaker C API via ctypes) sits at the FLIR-vendor position just below
+# ``flir`` so it claims the FLIRs on modern Python where PySpin is unavailable,
+# before they fall through to the pycameleon floor. ``harvesters`` is
+# intentionally absent (see the module docstring): the only freely-installable
+# GenTL producer (mvIMPACT) watermarks frames after an ~8 s evaluation window, so
+# it must never be picked automatically — a rig opts into it by name.
+CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 
 # The real (non-``fake``) backends an auto-detecting rig sweeps, in cascade
 # priority order. ``fake`` is synthetic (it always reports FAKE-* serials
@@ -88,6 +108,20 @@ def select_backend(name: str) -> tuple[Callable, Callable, str]:
             ) from e
         flir.ensure_available()
         return flir.enumerate_flir, flir.FlirBackend, flir.FlirBackend.extension
+    if key == "spinnaker":
+        try:
+            spinnaker = importlib.import_module("octacam.cameras.spinnaker_c")
+        except ImportError as e:  # pragma: no cover - module has no import-time deps
+            raise BackendUnavailable(
+                "spinnaker",
+                "the Spinnaker SDK (libSpinnaker_C.so) is not installed",
+            ) from e
+        spinnaker.ensure_available()
+        return (
+            spinnaker.enumerate_spinnaker,
+            spinnaker.SpinnakerBackend,
+            spinnaker.SpinnakerBackend.extension,
+        )
     if key == "harvesters":
         try:
             harvesters = importlib.import_module("octacam.cameras.harvesters")
@@ -154,6 +188,7 @@ def resolve_backend_names(name: str | None) -> list[str]:
 # every camera is closed, mapped to their module (each exposes ``teardown()``).
 _TEARDOWN_MODULES = {
     "flir": "octacam.cameras.flir",
+    "spinnaker": "octacam.cameras.spinnaker_c",
     "harvesters": "octacam.cameras.harvesters",
 }
 
@@ -161,9 +196,10 @@ _TEARDOWN_MODULES = {
 def teardown_backend(name: str) -> None:
     """Release any session-wide SDK resources held by ``name`` (once).
 
-    FLIR (the Spinnaker ``System`` singleton) and harvesters (the GenTL
-    ``Harvester`` singleton) must be released after every camera is closed; for
-    every other backend this is a no-op. Called by :meth:`CameraSystem.close`.
+    FLIR/spinnaker (the Spinnaker ``System`` singleton, held by PySpin or the C
+    API respectively) and harvesters (the GenTL ``Harvester`` singleton) must be
+    released after every camera is closed; for every other backend this is a
+    no-op. Called by :meth:`CameraSystem.close`.
     """
     key = (name or "basler").strip().lower()
     module = _TEARDOWN_MODULES.get(key)

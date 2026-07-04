@@ -24,6 +24,7 @@ import json
 import logging
 from typing import Any
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
@@ -75,7 +76,7 @@ def _safe(getter):
         return None
 
 
-class FlirBackend:
+class FlirBackend(SoftwareTriggerHandoff):
     """A single FLIR camera, driven through PySpin."""
 
     extension = "json"
@@ -86,6 +87,10 @@ class FlirBackend:
         self._cam: Any = cam
         self._serial = _read_serial(cam)
         self._original_trigger_source: str | None = None
+        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
+        # the device TriggerSoftware execute moves into retrieve() on the grab
+        # thread so the shared trigger timer never blocks on this camera.
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -130,7 +135,9 @@ class FlirBackend:
         return self._cam is not None and self._cam.IsInitialized()
 
     def is_grabbing(self) -> bool:
-        return self._cam is not None and self._cam.IsStreaming()
+        # The hand-off flag is authoritative (see BaslerBackend.is_grabbing):
+        # stop_grab flips it and wakes a blocked retrieve before EndAcquisition().
+        return self._cam is not None and self._grabbing
 
     def width(self) -> int:
         return int(self._int_node("Width").GetValue())
@@ -237,11 +244,27 @@ class FlirBackend:
 
     # ----------------------------------------------------------- triggering
 
+    def _enable_trigger_overlap(self) -> None:
+        """Let a trigger be accepted during the previous frame's readout.
+
+        Without this (``TriggerOverlap=Off``, the FLIR default) a FrameStart
+        software trigger fired mid-readout is silently ignored, so the camera
+        accepts only ~every other trigger — roughly halving the software-triggered
+        frame rate. ``ReadOut`` pipelines back-to-back triggers and restores the
+        sensor's real rate. Best-effort: a model without the node keeps its
+        default. (Verified on the Spinnaker C-API mirror; see spinnaker_c.py.)
+        """
+        try:
+            self._set_enum("TriggerOverlap", "ReadOut")
+        except BackendError as e:
+            log.debug("Could not set TriggerOverlap on camera %s: %s", self._serial, e)
+
     def enable_frame_trigger(self) -> None:
         if not self.is_open():
             return
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
+        self._enable_trigger_overlap()
 
     def set_trigger_source(self, use_software: bool) -> None:
         if not self.is_open():
@@ -260,16 +283,12 @@ class FlirBackend:
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._set_enum("TriggerSource", "Software")
+        self._enable_trigger_overlap()
 
     def trigger_once(self) -> None:
-        if not self.is_grabbing():
-            return
-        spin = _spin()
-        node = spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware"))
-        try:
-            node.Execute()
-        except spin.SpinnakerException as e:
-            raise BackendError(str(e)) from e
+        # Only bump the pending counter; retrieve() fires the device trigger on
+        # the grab thread so the shared trigger timer never blocks on this camera.
+        self._bump_trigger()
 
     # ------------------------------------------------------------- grabbing
 
@@ -290,6 +309,7 @@ class FlirBackend:
             # Name the camera (mirrors the Basler "insufficient resources" hint).
             log.error("Failed to start streaming on camera %s: %s", self._serial, e)
             raise BackendError(str(e)) from e
+        self._begin_grab()
 
     def start_grab_preview(self) -> None:
         self._begin_acquisition("NewestOnly")
@@ -301,6 +321,9 @@ class FlirBackend:
         return True
 
     def stop_grab(self) -> None:
+        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
+        # stop, so the grab loop sees "not grabbing" immediately.
+        self._end_grab()
         if self._cam is not None and self._cam.IsStreaming():
             try:
                 self._cam.EndAcquisition()
@@ -309,8 +332,23 @@ class FlirBackend:
 
     def retrieve(self, timeout_ms: int, wants_array) -> Frame | None:
         spin = _spin()
+        # Wait for a pending software trigger, then fire exactly one device
+        # trigger and fetch exactly one frame on this camera's own grab thread.
+        if not self._wait_pending(timeout_ms):
+            return None
+        cam = self._cam
+        if cam is None or not self._grabbing:
+            return None
+        # Fire the device trigger here (not on the caught _trigger_all path). The
+        # grab loop does not wrap retrieve() in try/except, so a stop-race or a
+        # trigger failure must return None, never raise — a lost trigger is one
+        # lost frame, the same as the GetNextImage timeout below.
         try:
-            image = self._cam.GetNextImage(timeout_ms)
+            spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
+        except spin.SpinnakerException:
+            return None
+        try:
+            image = cam.GetNextImage(timeout_ms)
         except spin.SpinnakerException:
             return None  # timeout: the analogue of pylon's empty result
         try:
@@ -357,7 +395,9 @@ def enumerate_flir(requested_serials: list[str] | None = None):
     if count == 0:
         teardown()
         return []
-    log.info("Detected %d camera(s)", count)
+    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
+    # logs the single attributed "Detected N" summary (see basler backend).
+    log.debug("flir enumerated %d camera(s)", count)
 
     by_serial: dict[str, object] = {}
     detected: list[str] = []

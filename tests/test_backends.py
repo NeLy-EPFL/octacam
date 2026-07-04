@@ -19,12 +19,23 @@ from octacam.cameras.registry import (
 
 
 def test_backends_and_cascade_membership():
-    # The cascade is the real (non-fake) tiers, in preference order; fake is
-    # listed in BACKENDS but never part of the auto cascade.
-    assert CASCADE == ("basler", "flir", "harvesters", "pycameleon")
+    # The cascade is the auto-selected tiers, in preference order; fake is listed
+    # in BACKENDS but never part of the auto cascade.
+    assert CASCADE == ("basler", "flir", "spinnaker", "pycameleon")
     assert "fake" in BACKENDS and "fake" not in CASCADE
     # pycameleon is a core dep, so it is the guaranteed floor of the cascade.
     assert CASCADE[-1] == "pycameleon"
+    # spinnaker (the Spinnaker C API via ctypes) sits at the FLIR-vendor position,
+    # just below flir, so it claims the FLIRs on modern Python where PySpin drops.
+    assert CASCADE.index("spinnaker") == CASCADE.index("flir") + 1
+    assert "spinnaker" in BACKENDS
+    # harvesters is DELIBERATELY excluded from the auto cascade: the only
+    # freely-installable GenTL producer (Balluff mvIMPACT) watermarks frames after
+    # an ~8 s eval window, so it must never be auto-selected — only opted into by
+    # name. It stays a known backend and remains selectable explicitly.
+    assert "harvesters" not in CASCADE
+    assert "harvesters" in BACKENDS
+    assert resolve_backend_names("harvesters") == ["harvesters"]
 
 
 def test_select_unknown_backend_raises():
@@ -50,6 +61,7 @@ def test_resolve_backend_names_auto_is_available_cascade():
 def test_resolve_backend_names_concrete_is_single():
     assert resolve_backend_names("basler") == ["basler"]
     assert resolve_backend_names("FLIR") == ["flir"]
+    assert resolve_backend_names("spinnaker") == ["spinnaker"]
     assert resolve_backend_names("harvesters") == ["harvesters"]
     assert resolve_backend_names("pycameleon") == ["pycameleon"]
     assert resolve_backend_names("fake") == ["fake"]
@@ -101,6 +113,30 @@ def test_flir_module_imports_without_pyspin():
     import octacam.cameras.flir as flir
 
     assert flir.FlirBackend.extension == "json"
+
+
+def test_spinnaker_module_imports_without_sdk():
+    # The ctypes binding module has no import-time dependency on the SDK (ctypes
+    # is stdlib; the .so is loaded lazily), so it always imports — the registry
+    # converts a missing libSpinnaker_C.so to BackendUnavailable at selection.
+    import octacam.cameras.spinnaker_c as spinnaker_c
+
+    assert spinnaker_c.SpinnakerBackend.extension == "json"
+
+
+def test_select_spinnaker_without_sdk_raises(monkeypatch):
+    # libSpinnaker_C.so ships with the Spinnaker SDK and is not pip-installable,
+    # so it is absent in CI; selecting it must surface a clean BackendUnavailable,
+    # never a raw OSError. Force the missing-SDK path so the test is deterministic
+    # whether or not the SDK happens to be installed on the box running it.
+    import octacam.cameras.spinnaker_c as spinnaker_c
+
+    # A never-loaded facade + a soname that does not exist makes ctypes.CDLL fail
+    # exactly as it would on a box without the SDK, regardless of this host.
+    monkeypatch.setattr(spinnaker_c, "_facade", None)
+    monkeypatch.setattr(spinnaker_c, "_LIB_NAME", "libSpinnaker_C_absent_for_test.so")
+    with pytest.raises(BackendUnavailable):
+        select_backend("spinnaker")
 
 
 def test_select_flir_without_pyspin_raises():

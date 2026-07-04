@@ -1,0 +1,28 @@
+[record]
+fps = 30.0
+duration = 1.0
+duration_unit = "seconds" # frames | seconds | minutes | hours
+trigger_source = "software" # software | external
+
+directory = "~/octacam/data/TL"
+relative_directory = "%y%m%d/Fly1/001"
+
+save_method = "ffmpeg" # ffmpeg | raw
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray" # ignored if save_method = "raw"
+save_transformed = true # whether to save the transformed video (flips/rotations applied)
+save_timestamps = false # whether to save the timestamp CSV.
+
+[transcode]
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+
+[transfer]
+directory = "~/octacam/server/TL" # record.directory/record.relative_directory will be transferred to transfer.directory/record.relative_directory
+checksum = true      # checksum each copy before promoting it (false = size-only)
+
+[[cameras]]
+serial_number = "17475185"
+name = "camera_bottom"
+
+[[cameras]]
+serial_number = "17475187"
+name = "camera_top"
