@@ -106,23 +106,29 @@ class CameraSystem:
 
         if len(active) == 1:
             name, enumerate_fn, make_backend = active[0]
-            return [
+            entries = [
                 (serial, handle, make_backend)
                 for serial, handle in enumerate_fn(requested_serial_numbers)
             ]
+            if entries:
+                log.info("Detected %d camera(s) via %s", len(entries), name)
+            return entries
 
         # The cascade: enumerate every active tier in priority order and let the
         # highest one claim each serial. Lower tiers still enumerate (so a camera
         # a vendor tier missed can fall through) but skip serials already claimed.
         claimed: set[str] = set()
+        claimed_by: dict[str, str] = {}  # serial -> winning backend name (for logs)
         collected: list[tuple[str, object, Callable]] = []
-        for _name, enumerate_fn, make_backend in active:
+        for name, enumerate_fn, make_backend in active:
             for serial, handle in enumerate_fn(None):
                 if serial in claimed:
                     continue  # a higher-priority tier already owns this camera
                 claimed.add(serial)
+                claimed_by[serial] = name
                 collected.append((serial, handle, make_backend))
         if not requested_serial_numbers:
+            self._log_detected(collected, claimed_by)
             return collected
         by_serial = {entry[0]: entry for entry in collected}
         ordered: list[tuple[str, object, Callable]] = []
@@ -132,7 +138,28 @@ class CameraSystem:
                 log.warning("Camera with serial number %s not found", serial)
                 continue
             ordered.append(entry)
+        self._log_detected(ordered, claimed_by)
         return ordered
+
+    @staticmethod
+    def _log_detected(
+        entries: list[tuple[str, object, "Callable"]], claimed_by: dict[str, str]
+    ) -> None:
+        """Log one attributed "Detected N camera(s)" line for the cascade.
+
+        Rolls the per-tier enumeration (each tier logs only at debug) into a
+        single summary that also says which backend won each camera, e.g.
+        ``Detected 3 camera(s): 2 via harvesters, 1 via basler`` — instead of
+        the several overlapping per-tier counts that confused operators.
+        """
+        if not entries:
+            return
+        counts: dict[str, int] = {}
+        for serial, _handle, _make in entries:
+            name = claimed_by.get(serial, "?")
+            counts[name] = counts.get(name, 0) + 1
+        breakdown = ", ".join(f"{n} via {name}" for name, n in counts.items())
+        log.info("Detected %d camera(s): %s", len(entries), breakdown)
 
     def _teardown_backends(self) -> None:
         """Release session resources for every backend we enumerated."""

@@ -95,7 +95,7 @@ class FakeIA:
     def stop(self):
         self._acquiring = False
 
-    def fetch(self, timeout=0):
+    def try_fetch(self, *, timeout=0):
         return self._buffer
 
     def destroy(self):
@@ -145,7 +145,10 @@ def test_params_round_trip():
     assert data["params"]["exposure"] == 2222.0
 
 
-def test_triggering_and_grab_state():
+def test_trigger_once_is_a_pure_bump_not_a_device_call():
+    # The device TriggerSoftware.execute() now happens in retrieve() on the grab
+    # thread, NOT in trigger_once() on the shared timer thread — so one camera's
+    # slow trigger can never block another's. trigger_once only bumps the counter.
     nm = FakeNodeMap()
     backend = _backend(nm)
     backend.begin_software_trigger_preview()
@@ -153,12 +156,13 @@ def test_triggering_and_grab_state():
     backend.start_grab_preview()
     assert backend.is_grabbing()
     backend.trigger_once()
-    assert nm.TriggerSoftware.executed == 1
+    assert nm.TriggerSoftware.executed == 0  # NOT fired yet — retrieve fires it
+    assert backend._pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
 
 
-def test_retrieve_reshapes_and_requeues():
+def test_retrieve_fires_trigger_reshapes_and_requeues():
     nm = FakeNodeMap()
     backend = _backend(nm)
     component = types.SimpleNamespace(
@@ -166,17 +170,34 @@ def test_retrieve_reshapes_and_requeues():
     )
     buffer = FakeBuffer(component, timestamp_ns=123)
     backend._ia._buffer = buffer
+    backend.start_grab_preview()
+    backend.trigger_once()  # arm one pending frame
     frame = backend.retrieve(100, lambda: True)
     assert frame is not None
     array, timestamp = frame
     assert timestamp == 123 and array.shape == (2, 3)
     assert buffer.queued  # returned to the producer pool
+    assert nm.TriggerSoftware.executed == 1  # retrieve fired the device trigger
+    assert backend._pending == 0  # consumed
+
+
+def test_retrieve_none_without_a_pending_trigger():
+    # No trigger armed: retrieve must not fire the device or block indefinitely.
+    nm = FakeNodeMap()
+    backend = _backend(nm)
+    backend.start_grab_preview()
+    assert backend.retrieve(1, lambda: True) is None
+    assert nm.TriggerSoftware.executed == 0
 
 
 def test_retrieve_none_on_no_buffer():
-    backend = _backend()
+    nm = FakeNodeMap()
+    backend = _backend(nm)
     backend._ia._buffer = None
+    backend.start_grab_preview()
+    backend.trigger_once()
     assert backend.retrieve(1, lambda: True) is None
+    assert nm.TriggerSoftware.executed == 1  # trigger fired; frame just didn't arrive
 
 
 def test_close_is_bounded_and_idempotent():

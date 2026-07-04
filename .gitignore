@@ -38,3 +38,6 @@ server/
 
 # MkDocs build output
 site/
+
+# Vendor SDK packages (user-installed, not vendored in-repo)
+spinnaker-*-pkg.tar.gz

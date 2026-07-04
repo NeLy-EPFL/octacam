@@ -562,11 +562,18 @@ def gui(
         # timeout". Give the pong a generous window; the ping still runs at the
         # default interval, so a genuinely dead (half-open) client is reaped and
         # its preview encoding stops.
+        # ws="websockets-sansio": uvicorn's default "auto" still selects its
+        # legacy websockets implementation, which imports the deprecated
+        # websockets.legacy / WebSocketServerProtocol APIs and prints
+        # DeprecationWarnings on startup and on every connection (removed in a
+        # future websockets release). The sansio implementation is the supported
+        # successor and speaks the same protocol to the browser.
         uvicorn.run(
             app,
             host=host,
             port=port,
             log_level="warning",
+            ws="websockets-sansio",
             ws_ping_timeout=60.0,
         )
     finally:

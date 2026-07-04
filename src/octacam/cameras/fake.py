@@ -16,12 +16,12 @@ cameras.
 import json
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 
 import numpy as np
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import BackendError, Frame, NodeInfo
 
 log = logging.getLogger("octacam")
@@ -52,7 +52,7 @@ def _default_nodes() -> dict[str, dict]:
     }
 
 
-class FakeBackend:
+class FakeBackend(SoftwareTriggerHandoff):
     """A single in-memory camera driven by software triggers."""
 
     extension = "fake"
@@ -60,11 +60,9 @@ class FakeBackend:
     def __init__(self, serial: str):
         self._serial = serial
         self._open = False
-        self._grabbing = False
         self._nodes = _default_nodes()
         self._frame_index = 0
-        self._pending = 0
-        self._cond = threading.Condition()
+        self._init_trigger_handoff()
         self._original_trigger_source = "Line1"
 
     @property
@@ -150,36 +148,26 @@ class FakeBackend:
         pass
 
     def trigger_once(self) -> None:
-        with self._cond:
-            if self._grabbing:
-                self._pending += 1
-                self._cond.notify()
+        self._bump_trigger()
 
     # ------------------------------------------------------------- grabbing
 
     def start_grab_preview(self) -> None:
-        with self._cond:
-            self._pending = 0
-            self._grabbing = True
+        self._begin_grab()
 
     def start_grab_record(self) -> bool:
         self.start_grab_preview()
         return True
 
     def stop_grab(self) -> None:
-        with self._cond:
-            self._grabbing = False
-            self._cond.notify_all()
+        self._end_grab()
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
+        if not self._wait_pending(timeout_ms):
+            return None
         with self._cond:
-            if self._pending <= 0 and self._grabbing:
-                self._cond.wait(timeout_ms / 1000.0)
-            if self._pending <= 0 or not self._grabbing:
-                return None
-            self._pending -= 1
             self._frame_index += 1
             index = self._frame_index
             width = int(self._nodes["width"]["value"])
@@ -209,7 +197,9 @@ def enumerate_fake(requested_serials: list[str] | None = None):
     available = _available_serials()
     if not available:
         return []
-    log.info("Detected %d camera(s)", len(available))
+    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
+    # logs the single attributed "Detected N" summary (see basler backend).
+    log.debug("fake enumerated %d camera(s)", len(available))
     final = sorted(available) if not requested_serials else list(requested_serials)
     out = []
     for serial in final:

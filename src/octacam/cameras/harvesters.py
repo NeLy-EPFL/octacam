@@ -44,9 +44,11 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
@@ -71,6 +73,18 @@ _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 # Seconds to wait for a device close before giving up (defends against the
 # Spinnaker producer's DevClose deadlock — see the module docstring).
 _CLOSE_TIMEOUT_S = 5.0
+
+# Grab pacing (see retrieve). A GenTL producer's buffer wait is a native call
+# that holds the Python GIL for its whole duration, so one long blocking
+# ``fetch(timeout=0.1)`` freezes every other Python thread — including the
+# asyncio web server that pumps the preview WebSocket — for up to ~100 ms per
+# frame. Empirically that starves the event loop enough to stall previews and
+# drop the WebSocket over a latent link (e.g. an ``ssh -L`` tunnel). Instead we
+# poll with a *short* native wait and a ``time.sleep`` between attempts:
+# ``time.sleep`` releases the GIL, so the process stays responsive (event-loop
+# stalls drop from ~25 ms to ~3 ms) while still capturing every frame.
+_FETCH_POLL_S = 0.002  # each native try_fetch waits at most this (GIL held)
+_FETCH_SLEEP_S = 0.003  # GIL-released nap between polls
 
 # The GenTL System, held for the whole session and reset once in teardown().
 _harvester = None
@@ -232,7 +246,7 @@ def _device_info_for(harvester, serial: str):
     return None
 
 
-class HarvestersBackend:
+class HarvestersBackend(SoftwareTriggerHandoff):
     """A single camera driven through Harvesters over a GenTL producer."""
 
     extension = "json"
@@ -244,8 +258,11 @@ class HarvestersBackend:
         # created-in-open lifecycle (and the untyped GenTL buffer payloads) do not
         # trip the checker on every access.
         self._ia: Any = None
-        self._grabbing = False
         self._original_trigger_source: str | None = None
+        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
+        # the device TriggerSoftware.execute moves into retrieve() on the grab
+        # thread so the shared trigger timer never blocks on this camera.
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -312,12 +329,10 @@ class HarvestersBackend:
         return self._ia is not None
 
     def is_grabbing(self) -> bool:
-        if self._ia is None:
-            return False
-        try:
-            return bool(self._ia.is_acquiring())
-        except Exception:
-            return self._grabbing
+        # The hand-off flag is authoritative (see BaslerBackend.is_grabbing):
+        # stop_grab flips it and wakes a blocked retrieve before the native
+        # ia.stop(), so the grab loop must agree from that instant.
+        return self._ia is not None and self._grabbing
 
     def width(self) -> int:
         return int(self._nodemap().Width.value)
@@ -435,12 +450,9 @@ class HarvestersBackend:
         self._set_enum("TriggerSource", "Software")
 
     def trigger_once(self) -> None:
-        if not self.is_grabbing():
-            return
-        try:
-            self._nodemap().TriggerSoftware.execute()
-        except Exception as e:
-            raise BackendError(str(e)) from e
+        # Only bump the pending counter; retrieve() fires the device trigger on
+        # the grab thread so the shared trigger timer never blocks on this camera.
+        self._bump_trigger()
 
     # ------------------------------------------------------------- grabbing
 
@@ -450,7 +462,7 @@ class HarvestersBackend:
         except Exception as e:
             log.error("Failed to start streaming on camera %s: %s", self._serial, e)
             raise BackendError(str(e)) from e
-        self._grabbing = True
+        self._begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start()
@@ -460,7 +472,9 @@ class HarvestersBackend:
         return True
 
     def stop_grab(self) -> None:
-        self._grabbing = False
+        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
+        # stop, so the grab loop sees "not grabbing" immediately.
+        self._end_grab()
         if self._ia is None:
             return
         try:
@@ -470,15 +484,37 @@ class HarvestersBackend:
             pass
 
     def retrieve(self, timeout_ms: int, wants_array) -> Frame | None:
+        # Wait for a pending software trigger, then fire exactly one device
+        # trigger and fetch exactly one frame on this camera's own grab thread.
+        if not self._wait_pending(timeout_ms):
+            return None
         ia = self._ia
-        if ia is None:
+        if ia is None or not self._grabbing:
             return None
+        # Fire the device trigger here (not on the caught _trigger_all path). The
+        # grab loop does not wrap retrieve() in try/except, so a stop-race or a
+        # trigger failure must return None, never raise — a lost trigger is one
+        # lost frame, the same as the try_fetch timeout below.
         try:
-            buffer = ia.fetch(timeout=timeout_ms / 1000.0)
+            self._nodemap().TriggerSoftware.execute()
         except Exception:
-            return None  # timeout / transient producer error
-        if buffer is None:
             return None
+        # Poll for a buffer with short native waits and GIL-releasing sleeps
+        # (see _FETCH_POLL_S) rather than one long blocking fetch, so the rest
+        # of the process (notably the asyncio preview server) is not frozen
+        # while this camera waits for its next triggered frame.
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        buffer = None
+        while True:
+            try:
+                buffer = ia.try_fetch(timeout=_FETCH_POLL_S)
+            except Exception:
+                return None  # transient producer error
+            if buffer is not None:
+                break
+            if time.monotonic() >= deadline:
+                return None  # no frame within the caller's window
+            time.sleep(_FETCH_SLEEP_S)
         try:
             timestamp = getattr(buffer, "timestamp_ns", 0) or 0
             array = None
@@ -529,7 +565,9 @@ def enumerate_harvesters(requested_serials: list[str] | None = None):
         by_serial[serial] = info
     if not detected:
         return []
-    log.info("Detected %d camera(s)", len(detected))
+    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
+    # logs the single attributed "Detected N" summary (see basler backend).
+    log.debug("harvesters enumerated %d camera(s)", len(detected))
 
     final = sorted(detected) if not requested_serials else list(requested_serials)
     out = []

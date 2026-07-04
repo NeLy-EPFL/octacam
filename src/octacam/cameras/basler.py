@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from pypylon import genicam, pylon
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
@@ -87,7 +88,7 @@ def _drop_empty_pfs_values(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class BaslerBackend:
+class BaslerBackend(SoftwareTriggerHandoff):
     """A single Basler camera, driven through pypylon."""
 
     extension = "pfs"
@@ -101,6 +102,11 @@ class BaslerBackend:
         # Count grabs that pylon flagged as incomplete/failed (USB bandwidth
         # gaps, packet loss) so a rig delivering partial frames can be spotted.
         self._incomplete_grabs = 0
+        # Software-trigger hand-off (shared mixin): trigger_once only bumps a
+        # counter; the device ExecuteSoftwareTrigger moves into retrieve() on the
+        # grab thread so the shared trigger timer never blocks on this camera and
+        # cannot throttle the others.
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -141,7 +147,12 @@ class BaslerBackend:
         return self.raw is not None and self.raw.IsOpen()
 
     def is_grabbing(self) -> bool:
-        return self.raw is not None and self.raw.IsGrabbing()
+        # The hand-off flag (set under the cond by start/stop) is authoritative,
+        # not the native IsGrabbing(): stop_grab flips the flag and wakes a blocked
+        # retrieve *before* the native StopGrabbing(), so the grab loop must see
+        # "not grabbing" from the same instant, and the shared trigger timer must
+        # never make a native call on the wait path.
+        return self.raw is not None and self._grabbing
 
     def width(self) -> int:
         return self.raw.Width.Value
@@ -219,11 +230,9 @@ class BaslerBackend:
         self.raw.TriggerSource.Value = "Software"
 
     def trigger_once(self) -> None:
-        if self.raw.IsGrabbing():
-            try:
-                self.raw.ExecuteSoftwareTrigger()
-            except genicam.GenericException as e:
-                raise BackendError(str(e)) from e
+        # Only bump the pending counter; retrieve() fires the device trigger on
+        # the grab thread. Keeps the shared trigger timer off this device.
+        self._bump_trigger()
 
     # ------------------------------------------------------------- grabbing
 
@@ -241,23 +250,48 @@ class BaslerBackend:
                 self._serial,
             )
             raise BackendError(str(e)) from e
+        self._begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start_grabbing(pylon.GrabStrategy_LatestImageOnly)
 
     def start_grab_record(self) -> bool:
         self._start_grabbing(pylon.GrabStrategy_OneByOne)
+        # One-time ready gate: covers the first software trigger. retrieve()
+        # serializes execute→RetrieveResult on the single grab thread thereafter,
+        # so at most one exposure is ever in flight and OneByOne's bounded output
+        # queue can never overflow.
         return self.raw.WaitForFrameTriggerReady(
             TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
         )
 
     def stop_grab(self) -> None:
-        self.raw.StopGrabbing()
+        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
+        # stop, so the grab loop sees "not grabbing" at once (no full-timeout stall).
+        self._end_grab()
+        if self.raw is not None:
+            self.raw.StopGrabbing()
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        result = self.raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        # Wait for a pending software trigger, then fire exactly one device
+        # trigger and fetch exactly one frame on this camera's own grab thread.
+        if not self._wait_pending(timeout_ms):
+            return None
+        # The device call now lives here (not on the caught _trigger_all path), and
+        # the grab loop does not wrap retrieve() in a try/except — so a stop-race
+        # or trigger failure must return None, never raise, or the grab thread dies
+        # uncaught and the ffmpeg writer child is orphaned. A trigger lost to such
+        # an error is one lost frame, the same as a grab timeout.
+        raw = self.raw
+        if raw is None or not self._grabbing:
+            return None
+        try:
+            raw.ExecuteSoftwareTrigger()
+        except genicam.GenericException:
+            return None
+        result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
         try:
             # IsValid is the pypylon equivalent of C++'s `if (grab_result)`:
             # a timed-out RetrieveResult returns an empty result whose other
@@ -297,7 +331,10 @@ def enumerate_basler(requested_serials: list[str] | None = None):
     devices = tl_factory.EnumerateDevices()
     if not devices:
         return []
-    log.info("Detected %d camera(s)", len(devices))
+    # Debug, not info: in the auto cascade every tier enumerates in turn, so
+    # per-tier info lines would print several confusing, overlapping counts.
+    # CameraSystem logs one attributed "Detected N" summary instead.
+    log.debug("basler enumerated %d camera(s)", len(devices))
 
     detected = [str(device.GetSerialNumber()) for device in devices]
     final = sorted(detected) if not requested_serials else list(requested_serials)

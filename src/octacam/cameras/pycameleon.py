@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
@@ -77,7 +78,7 @@ def ensure_available() -> None:
     _pycameleon()
 
 
-class PycameleonBackend:
+class PycameleonBackend(SoftwareTriggerHandoff):
     """A single USB3-Vision camera driven through pycameleon/libusb."""
 
     extension = "json"
@@ -90,7 +91,6 @@ class PycameleonBackend:
         self._cam: Any = cam
         self._serial = _read_serial(cam)
         self._open = False
-        self._grabbing = False
         self._original_trigger_source: str | None = None
         # Cached GenApi XML: fetched once from the camera on the first open so a
         # later re-open can use the faster/safer load_context_from_xml.
@@ -100,10 +100,11 @@ class PycameleonBackend:
         # Serializes every device call (pycameleon allows only one at a time).
         # Reentrant so composed methods (read_node → _read_int_opt) can nest.
         self._lock = threading.RLock()
-        # Software-trigger hand-off, exactly like the fake backend: trigger_once
-        # bumps _pending; retrieve consumes it and does the execute+receive.
-        self._cond = threading.Condition()
-        self._pending = 0
+        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
+        # retrieve consumes it and does the execute+receive under _lock. pycameleon
+        # *requires* this — an exclusive borrow forbids execute() on one thread
+        # while receive() runs on another.
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -285,10 +286,7 @@ class PycameleonBackend:
         # Only bump the pending counter — the device call (TriggerSoftware) is
         # done by retrieve(), so the trigger timer thread never touches the camera
         # while the grab loop's receive() holds the borrow.
-        with self._cond:
-            if self._grabbing:
-                self._pending += 1
-                self._cond.notify()
+        self._bump_trigger()
 
     # ------------------------------------------------------------- grabbing
 
@@ -299,9 +297,7 @@ class PycameleonBackend:
             except Exception as e:
                 log.error("Failed to start streaming on camera %s: %s", self._serial, e)
                 raise BackendError(str(e)) from e
-        with self._cond:
-            self._pending = 0
-            self._grabbing = True
+        self._begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start_streaming()
@@ -311,11 +307,8 @@ class PycameleonBackend:
         return True
 
     def stop_grab(self) -> None:
-        with self._cond:
-            if not self._grabbing:
-                return
-            self._grabbing = False
-            self._cond.notify_all()  # wake any retrieve() blocked on a trigger
+        if not self._end_grab():  # flips _grabbing + wakes any blocked retrieve
+            return
         with self._lock:
             if self._receiver is not None:
                 try:
@@ -329,12 +322,8 @@ class PycameleonBackend:
         # execute+receive back-to-back under the device lock so nothing else
         # touches the camera in between. A 0 timestamp makes Camera fall back to
         # host time.
-        with self._cond:
-            if self._pending <= 0 and self._grabbing:
-                self._cond.wait(timeout_ms / 1000.0)
-            if self._pending <= 0 or not self._grabbing:
-                return None
-            self._pending -= 1
+        if not self._wait_pending(timeout_ms):
+            return None
         with self._lock:
             if not self._grabbing or self._receiver is None or self._cam is None:
                 return None
@@ -370,7 +359,9 @@ def enumerate_pycameleon(requested_serials: list[str] | None = None):
     cams = p.enumerate_cameras()
     if not cams:
         return []
-    log.info("Detected %d camera(s)", len(cams))
+    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
+    # logs the single attributed "Detected N" summary (see basler backend).
+    log.debug("pycameleon enumerated %d camera(s)", len(cams))
 
     by_serial: dict[str, object] = {}
     detected: list[str] = []
