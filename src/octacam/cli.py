@@ -1703,6 +1703,256 @@ def record(
         typer.echo(f"{Path(settings.save_dir) / camera.name}.{extension}")
 
 
+# ---------------------------------------------------------------------------
+# `octacam benchmark` — frame-rate diagnostic / stress-test
+#
+# A short instrumented dry-run against the real cameras: is the target fps
+# achievable, what is the maximum achievable rate, and which pipeline stage
+# (acquisition / encoding / host) is the bottleneck. No video is kept. Unlike
+# `doctor` (which only enumerates and never opens a camera), this opens and
+# drives the cameras, so it needs exclusive access like `record`/`gui`.
+# ---------------------------------------------------------------------------
+
+
+def _bottleneck_label(bottleneck: str) -> str:
+    from octacam import diagnostics as diag
+
+    return {
+        diag.ACQUISITION: "acquisition (camera can't deliver fast enough)",
+        diag.ENCODE: "encoding (the encoder can't keep up)",
+        diag.HOST: "host contention (shared USB bus / CPU / GIL)",
+        diag.NONE: "none",
+    }.get(bottleneck, bottleneck)
+
+
+def _render_benchmark(report) -> None:
+    """Render a DiagnosticReport as a human report on stdout (rich)."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+    r = report
+    console.print()
+    console.print(
+        Text(
+            f"octacam benchmark — {r.n_cameras} camera(s) via {r.backend}", style="bold"
+        )
+    )
+    encoder = r.save_method + (f" ({r.ffmpeg_params})" if r.ffmpeg_params else "")
+    console.print(
+        f"target {r.target_fps:g} fps · {r.trigger_source} trigger · sink={encoder}"
+    )
+    console.print()
+
+    if r.achievable:
+        console.print(Text(f"✓ {r.target_fps:g} fps is ACHIEVABLE", style="bold green"))
+    else:
+        console.print(
+            Text(
+                f"✗ {r.target_fps:g} fps is NOT achievable — "
+                f"bottleneck: {_bottleneck_label(r.bottleneck)}",
+                style="bold red",
+            )
+        )
+
+    if r.ceilings is not None:
+        grab = r.ceilings.grab_min
+        line = f"  acquisition ceiling: {grab:.0f} fps/cam"
+        if r.ceilings.encode_fps:
+            line += f"    encode ceiling: {r.ceilings.encode_min:.0f} fps/cam"
+        else:
+            line += "    (encode not measured — null sink)"
+        console.print(line)
+    if r.measured_max_fps is not None:
+        console.print(
+            f"  max achievable (measured): {r.measured_max_fps:.0f} fps/cam "
+            f"(predicted {r.predicted_max_fps:.0f})"
+        )
+    elif r.predicted_max_fps:
+        console.print(f"  predicted max: {r.predicted_max_fps:.0f} fps/cam")
+
+    console.print()
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("camera")
+    table.add_column("size", justify="right")
+    table.add_column("fps", justify="right")
+    table.add_column("drop%", justify="right")
+    table.add_column("qmax", justify="right")
+    table.add_column("acquire p50/p99 ms", justify="right")
+    table.add_column("encode p50/p99 ms", justify="right")
+    for t in r.trials:
+        acq = t.stages.get("acquire")
+        enc = t.stages.get("encode")
+        table.add_row(
+            t.name,
+            f"{t.width}×{t.height}",
+            f"{t.achieved_fps:.1f}",
+            f"{100 * t.drop_rate:.2f}",
+            str(t.max_queue_depth),
+            f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "-",
+            f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}" if enc and enc.samples else "-",
+        )
+    console.print(table)
+
+    extras = []
+    if r.cpu_percent is not None:
+        extras.append(f"cpu {r.cpu_percent:.0f}%")
+    if r.jitter_p99_ms is not None:
+        extras.append(f"scheduler jitter p99 {r.jitter_p99_ms:.2f} ms")
+    if extras:
+        console.print("  " + " · ".join(extras))
+
+    if r.recommendations:
+        console.print()
+        for rec in r.recommendations:
+            console.print(Text(f"  → {rec}", style="yellow"))
+    for note in r.notes:
+        console.print(Text(f"  • {note}", style="dim"))
+    console.print()
+
+
+@app.command()
+def benchmark(
+    config_dir: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+    ] = Path("."),
+    fps: Annotated[
+        float | None,
+        typer.Option(
+            "--fps", "-f", help=r"Target fps to test \[default: from config]."
+        ),
+    ] = None,
+    duration: Annotated[
+        float,
+        typer.Option(
+            "--duration", "-d", help="Seconds per measurement window (each scenario)."
+        ),
+    ] = 5.0,
+    find_max: Annotated[
+        bool,
+        typer.Option(
+            "--find-max/--no-find-max",
+            help="Search for the maximum achievable fps (software trigger only).",
+        ),
+    ] = True,
+    sink: Annotated[
+        str,
+        typer.Option(
+            "--sink",
+            help="What to write through: 'config' (the rig's real save_method, so "
+            "the encode cost is measured) or 'null' (discard frames — isolate "
+            "acquisition, skip the encoder).",
+        ),
+    ] = "config",
+    backend: Annotated[
+        str | None,
+        typer.Option("--backend", help="Override the config's camera backend."),
+    ] = None,
+    record_form: Annotated[
+        str | None,
+        typer.Option(
+            "--record-form",
+            help=r"'display' (bake the transform) or 'sensor' \[default: from config].",
+        ),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit the report as JSON instead of the table."),
+    ] = False,
+) -> None:
+    """Benchmark a rig: is the target fps achievable, what is the max, and what limits it.
+
+    Runs a short, instrumented dry-run against the cameras in CONFIG_DIR — an
+    acquisition-ceiling sweep, an encoder-ceiling sweep, and an end-to-end trial
+    at the target fps — then reports the achievable rate, the maximum, and the
+    per-stage throughput so you can see the bottleneck. No video is kept. It opens
+    the cameras (like `record`), so it cannot run at the same time as a live GUI or
+    recording on the same rig.
+
+    Exits nonzero when the target fps is not achievable, so it is usable as a
+    pre-flight check in scripts.
+    """
+    from octacam import diagnostics as diag
+    from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
+    from octacam.config import load_config_dir
+
+    if sink not in ("config", "null"):
+        raise typer.BadParameter("expected 'config' or 'null'", param_hint="--sink")
+    if record_form is not None and record_form not in ("display", "sensor"):
+        raise typer.BadParameter(
+            "expected 'display' or 'sensor'", param_hint="--record-form"
+        )
+
+    config = load_config_dir(config_dir)
+    record_cfg = (
+        config.record.model_copy(update={"fps": fps})
+        if fps is not None
+        else config.record
+    )
+    settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
+    if record_form is not None:
+        settings.record_form = record_form
+
+    # A transcode running here would fight the benchmark for the CPU and skew it.
+    _warn_if_transcoding()
+
+    try:
+        system = CameraSystem(
+            [c.serial_number for c in config.cameras],
+            backend=backend or config.backend,
+        )
+    except BackendUnavailable as e:
+        sys.exit(str(e))
+    except BackendError as e:
+        sys.exit(
+            f"Could not open the cameras: {e}\n"
+            "They may already be in use by another octacam instance on this rig, "
+            "or disconnected — only one process can open them at a time."
+        )
+    if len(system) == 0:
+        log.warning("No cameras opened. Exiting.")
+        sys.exit(1)
+
+    names = {c.serial_number: c.name for c in config.cameras if c.name}
+    for camera in system:
+        camera.name = names.get(camera.serial_number, camera.name)
+    system.load_config(config_dir)
+    system.apply_display_config(config.cameras)
+
+    log.info(
+        "Benchmarking %d camera(s) at %g fps (%s trigger, sink=%s)…",
+        len(system),
+        settings.fps,
+        settings.trigger_source,
+        sink,
+    )
+
+    def progress(phase: str, detail: str) -> None:
+        log.info("… %s %s", phase, detail)
+
+    try:
+        report = diag.diagnose(
+            system,
+            settings,
+            duration_s=duration,
+            find_max=find_max,
+            sink=sink,
+            progress_cb=progress,
+        )
+    finally:
+        system.close()
+
+    if json_output:
+        typer.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        _render_benchmark(report)
+
+    if not report.achievable:
+        raise typer.Exit(1)
+
+
 def _read_summary(path: Path) -> dict | None:
     """Load a recording_summary.json, or None (with a warning) if unreadable."""
     try:

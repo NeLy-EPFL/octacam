@@ -196,6 +196,19 @@ class Camera:
         return getattr(self._backend, "raw", None)
 
     @property
+    def backend(self) -> CameraBackend:
+        """The underlying :class:`CameraBackend` (for diagnostics/advanced drivers).
+
+        The normal grab/record lifecycle goes through this ``Camera``'s own
+        methods; this read-only accessor exists so the diagnostics engine
+        (:mod:`octacam.diagnostics`) can drive the *real* acquisition path
+        (``trigger_once``/``retrieve``) in its own instrumented measurement
+        loops without reaching into a private attribute. It must not be used to
+        bypass the recording state machine during normal operation.
+        """
+        return self._backend
+
+    @property
     def extension(self) -> str:
         """The parameter-file suffix this camera's backend persists (no dot).
 

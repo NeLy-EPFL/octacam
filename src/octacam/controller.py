@@ -309,6 +309,12 @@ class RecordingController:
         self._recording_seq = 0
         self._listeners: list = []
         self.events: deque = deque(maxlen=100)
+        # Benchmark (octacam.diagnostics): the last report (as a dict, for the
+        # GUI's Benchmark tab and the last-diagnostic endpoint) plus the
+        # background thread that runs it and the flag that cancels it on shutdown.
+        self._last_diagnostic: dict | None = None
+        self._diag_thread: threading.Thread | None = None
+        self._diag_cancel = threading.Event()
 
     # ------------------------------------------------------------ listeners
 
@@ -341,6 +347,21 @@ class RecordingController:
     @property
     def recording_active(self) -> bool:
         return self._state in ("waiting", "recording", "finishing")
+
+    @property
+    def diagnosing(self) -> bool:
+        """True while a benchmark (octacam.diagnostics) is running."""
+        return self._state == "diagnosing"
+
+    @property
+    def _camera_locked(self) -> bool:
+        """Camera control is locked while recording *or* benchmarking.
+
+        A benchmark drives the cameras directly (its own grab loops + trigger
+        timer), so any device-touching operation — starting a recording/preview,
+        writing sensor parameters, snapshotting the nodemap — must be refused
+        until it finishes, exactly as during a recording."""
+        return self.recording_active or self.diagnosing
 
     def get_settings(self) -> RecordingSettings:
         with self._lock:
@@ -479,8 +500,10 @@ class RecordingController:
         if name not in PARAM_NODES:
             raise ValueError(f"Unknown camera parameter: {name}")
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Camera parameters are locked while recording")
+            if self._camera_locked:
+                raise RuntimeError(
+                    "Camera parameters are locked while recording or benchmarking"
+                )
             if self._reconfiguring:
                 raise RuntimeError("A camera reconfiguration is already in progress")
             if scope == "all":
@@ -527,8 +550,10 @@ class RecordingController:
         mid-cycle.
         """
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Camera parameters are locked while recording")
+            if self._camera_locked:
+                raise RuntimeError(
+                    "Camera parameters are locked while recording or benchmarking"
+                )
             if self._reconfiguring:
                 raise RuntimeError("A camera reconfiguration is already in progress")
             if scope == "all":
@@ -564,10 +589,12 @@ class RecordingController:
         return {"updated": updated}
 
     def export_camera_params(self) -> dict[str, str]:
-        """Snapshot every camera's .pfs text; rejected while recording."""
+        """Snapshot every camera's .pfs text; rejected while recording/benchmarking."""
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Cannot save camera parameters while recording")
+            if self._camera_locked:
+                raise RuntimeError(
+                    "Cannot save camera parameters while recording or benchmarking"
+                )
         return self.camera_system.save_all_params()
 
     def set_camera_name(self, index: int, name: str) -> dict:
@@ -616,8 +643,10 @@ class RecordingController:
     def start_preview(self) -> None:
         """(Re)start live preview with the free-running software trigger."""
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Cannot start preview while recording")
+            if self._camera_locked:
+                raise RuntimeError(
+                    "Cannot start preview while recording or benchmarking"
+                )
             self.camera_system.set_software_trigger_frequency(self._settings.fps)
             self.camera_system.start_preview()
             self.camera_system.start_software_trigger()
@@ -633,6 +662,8 @@ class RecordingController:
         with self._lock:
             if self.recording_active:
                 return StartResult(StartResult.BUSY, "Recording in progress")
+            if self.diagnosing:
+                return StartResult(StartResult.BUSY, "A benchmark is in progress")
             if self._reconfiguring:
                 return StartResult(
                     StartResult.BUSY, "Camera reconfiguration in progress"
@@ -757,7 +788,111 @@ class RecordingController:
     def close(self) -> None:
         self.stop_recording(abort=True)
         self.join()
+        # Cancel a running benchmark and wait for it to unwind (it drives the
+        # cameras directly, so it must finish before we close them). Cancellation
+        # is checked at every measurement-window boundary, so this returns
+        # quickly; the timeout is a backstop against a wedged SDK call.
+        self._diag_cancel.set()
+        diag = self._diag_thread
+        if diag is not None and diag.is_alive():
+            diag.join(timeout=30)
         self.camera_system.close()
+
+    # ---------------------------------------------------------- benchmark
+
+    def run_diagnostic(
+        self,
+        *,
+        target_fps: float | None = None,
+        duration_s: float = 5.0,
+        find_max: bool = True,
+        sink: str = "config",
+    ) -> StartResult:
+        """Start a background benchmark (:mod:`octacam.diagnostics`).
+
+        Pauses live preview, runs the diagnostic on its own thread, then resumes
+        preview. Returns immediately with ``StartResult.OK`` once launched, or
+        ``BUSY`` if a recording, reconfiguration, or another benchmark is active.
+        Progress is emitted as events; the final report is broadcast to listeners
+        under the ``"diagnostics"`` kind and cached for :meth:`get_last_diagnostic`.
+        """
+        with self._lock:
+            if self.recording_active:
+                return StartResult(StartResult.BUSY, "Recording in progress")
+            if self.diagnosing:
+                return StartResult(StartResult.BUSY, "A benchmark is already running")
+            if self._reconfiguring:
+                return StartResult(
+                    StartResult.BUSY, "Camera reconfiguration in progress"
+                )
+            # Snapshot the settings so a concurrent edit can't shift the target
+            # mid-run, and flip to the diagnosing state (which locks camera
+            # control) before releasing the lock.
+            settings = dataclasses.replace(self._settings)
+            self._diag_cancel.clear()
+            self._set_state("diagnosing")
+            self._diag_thread = threading.Thread(
+                target=self._diagnostic_loop,
+                args=(settings, target_fps, duration_s, find_max, sink),
+                name="octacam-benchmark",
+                daemon=True,
+            )
+            self._diag_thread.start()
+        return StartResult(StartResult.OK)
+
+    def _diagnostic_loop(
+        self, settings, target_fps, duration_s, find_max, sink
+    ) -> None:
+        from octacam import diagnostics
+
+        try:
+            # Stop live preview (and its trigger) off the lock — the diagnostic
+            # owns the cameras for its duration via its own grab loops + timer.
+            self.camera_system.stop_software_trigger()
+            self.camera_system.stop()
+
+            def progress(phase: str, detail: str) -> None:
+                self._event("info", f"Benchmark: {phase} {detail}".strip())
+
+            report = diagnostics.diagnose(
+                self.camera_system,
+                settings,
+                target_fps=target_fps,
+                duration_s=duration_s,
+                find_max=find_max,
+                sink=sink,
+                progress_cb=progress,
+                cancel=self._diag_cancel,
+            )
+            self._last_diagnostic = report.to_dict()
+            self._notify("diagnostics", self._last_diagnostic)
+            if self._diag_cancel.is_set():
+                self._event("info", "Benchmark cancelled")
+            elif report.achievable:
+                self._event(
+                    "info", f"Benchmark: {report.target_fps:g} fps is achievable"
+                )
+            else:
+                self._event(
+                    "warning",
+                    f"Benchmark: {report.target_fps:g} fps is NOT achievable "
+                    f"(bottleneck: {report.bottleneck})",
+                )
+        except Exception:
+            log.exception("Benchmark failed")
+            self._event("error", "Benchmark failed (see the log for details)")
+        finally:
+            # Always return to preview/idle, even on failure or cancel.
+            with self._lock:
+                self._resume_preview()
+
+    def cancel_diagnostic(self) -> None:
+        """Ask a running benchmark to stop early (no-op if none is running)."""
+        self._diag_cancel.set()
+
+    def get_last_diagnostic(self) -> dict | None:
+        """The most recent benchmark report (as a dict), or None if none has run."""
+        return self._last_diagnostic
 
     def _monitor_loop(
         self, duration_s, plugin_params, expected_started, external_trigger

@@ -6,6 +6,7 @@ import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
 import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
+import { BenchmarkTab } from "./diagnose.js";
 import { initSidebarResize } from "./resize.js";
 import { initTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
@@ -214,6 +215,7 @@ async function main() {
       viewTab?.applyName(i, name);
     },
   });
+  const benchmark = new BenchmarkTab({ notify });
   saveDialog = new SaveDialog({
     grid,
     notify,
@@ -259,6 +261,7 @@ async function main() {
     record.setConnected(connected);
     grid.setConnected(connected);
     cameraTab?.setConnected(connected);
+    benchmark.setConnected(connected);
     saveDialog?.setConnected(connected);
     dirPicker?.setConnected(connected);
     // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
@@ -313,12 +316,17 @@ async function main() {
           msg.state
         );
         record.applyState(msg);
+        benchmark.applyState(msg);
         grid.setRecording(recordingActive);
         cameraTab?.setRecording(recordingActive);
         if (Array.isArray(msg.cameras)) applyCameraStats(msg.cameras);
         break;
       case "settings":
         record.applySettings(msg);
+        benchmark.applySettings(msg);
+        break;
+      case "diagnostics":
+        benchmark.applyReport(msg);
         break;
       case "camera_params":
         cameraTab?.applyParams(msg);
@@ -393,6 +401,7 @@ async function main() {
   });
 
   record.applyState(snap);
+  benchmark.applyState(snap);
   sock.connect();
 }
 

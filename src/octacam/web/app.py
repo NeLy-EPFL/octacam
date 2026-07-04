@@ -122,6 +122,32 @@ class RecordingStartRequest(BaseModel):
     plugin_params: dict | None = None
 
 
+class DiagnosticRunRequest(BaseModel):
+    """Parameters for a Benchmark run (octacam.diagnostics)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # None targets the current Record-tab fps; a value overrides it for this run.
+    target_fps: float | None = None
+    duration_s: float = 5.0
+    find_max: bool = True
+    sink: Literal["config", "null"] = "config"
+
+    @field_validator("duration_s")
+    @classmethod
+    def _duration_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("duration_s must be > 0")
+        return value
+
+    @field_validator("target_fps")
+    @classmethod
+    def _fps_positive(cls, value: float | None) -> float | None:
+        if value is not None and value <= 0:
+            raise ValueError("target_fps must be > 0")
+        return value
+
+
 class CameraParamPatch(BaseModel):
     """Set one sensor parameter on the selected camera or all cameras."""
 
@@ -761,15 +787,40 @@ def create_app(
         controller.stop_recording(abort=True)
         return JSONResponse({"status": "ok"}, status_code=202)
 
+    @app.post("/api/diagnostics/run")
+    def run_diagnostic(payload: DiagnosticRunRequest | None = None):
+        # A benchmark pauses preview and drives the cameras for a few seconds, then
+        # broadcasts its report (WS "diagnostics") and resumes preview. Returns 202
+        # immediately; 409 if a recording/benchmark/reconfigure is already active.
+        payload = payload or DiagnosticRunRequest()
+        result = controller.run_diagnostic(
+            target_fps=payload.target_fps,
+            duration_s=payload.duration_s,
+            find_max=payload.find_max,
+            sink=payload.sink,
+        )
+        body = {"status": result.status, "message": result.message}
+        return JSONResponse(body, status_code=202 if result.ok else 409)
+
+    @app.post("/api/diagnostics/cancel")
+    def cancel_diagnostic():
+        controller.cancel_diagnostic()
+        return JSONResponse({"status": "ok"}, status_code=202)
+
+    @app.get("/api/diagnostics/last")
+    def last_diagnostic():
+        return controller.get_last_diagnostic() or {}
+
     @app.post("/api/shutdown")
     def shutdown(background_tasks: BackgroundTasks):
         # Shutting down releases the cameras for everyone, so refuse while a
         # recording is in progress rather than discarding it (controller.close
         # aborts). The background task runs after the 202 is flushed, so the
         # client always learns the request was accepted before the server dies.
-        if controller.recording_active:
+        if controller.recording_active or controller.diagnosing:
             raise HTTPException(
-                409, "Stop the recording before shutting down the server"
+                409,
+                "Stop the recording or benchmark before shutting down the server",
             )
         background_tasks.add_task(shutdown_callback)
         return JSONResponse({"status": "shutting_down"}, status_code=202)
@@ -794,6 +845,13 @@ def create_app(
                     }
                 ),
             )
+            # Replay the last benchmark report so a (re)connecting browser shows
+            # it immediately instead of a blank Benchmark tab.
+            last_diag = controller.get_last_diagnostic()
+            if last_diag:
+                client.queue_text(
+                    "diagnostics", json.dumps({"type": "diagnostics", **last_diag})
+                )
             while True:
                 text = await ws.receive_text()
                 try:

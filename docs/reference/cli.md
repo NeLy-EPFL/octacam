@@ -70,6 +70,34 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 
+## `benchmark`
+
+```bash
+octacam benchmark [CONFIG_DIR]
+```
+
+A short instrumented dry-run against the cameras in `CONFIG_DIR` (no video is
+kept): tests whether the target frame rate is achievable, searches for the
+maximum achievable rate, and measures each pipeline stage — **acquire** (trigger
++ exposure + USB transfer), **transform**, **enqueue**, **encode** — so you can
+see the limiting step. It reports the acquisition and encode ceilings, a verdict
+(achievable / not, with the bottleneck), and targeted recommendations.
+
+Like `record` it opens the cameras, so it cannot run at the same time as a live
+GUI or recording on the same rig. Exits nonzero when the target fps is not
+achievable, so it works as a pre-flight check in scripts. The same benchmark is
+available from the GUI's **Benchmark** tab.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--fps`, `-f` | from config | Target fps to test. |
+| `--duration`, `-d` | `5` | Seconds spent measuring each scenario. |
+| `--find-max` / `--no-find-max` | on | Search for the maximum achievable fps (software trigger only). |
+| `--sink` | `config` | `config` (encode through the rig's real save method — measures the encode cost) or `null` (discard frames to isolate acquisition). |
+| `--record-form` | from config | `display` (bake the transform) or `sensor`. |
+| `--backend` | from config | Override the camera backend. |
+| `--json` | off | Emit the report as JSON instead of the table. |
+
 ## `process`
 
 ```bash

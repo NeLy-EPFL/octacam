@@ -25,6 +25,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -288,15 +289,25 @@ class AsyncFrameWriter:
     write() takes ownership of the frame array (the caller must not mutate
     it afterwards); callers pass a freshly owned copy from GrabResult.Array.
     Subclasses implement _open_sink/_write_frame/_close_sink.
+
+    ``profile`` (off by default, so a normal recording pays nothing) turns on
+    lightweight per-frame instrumentation for the diagnostics engine: the writer
+    thread times each ``_write_frame`` (the real encode/disk cost) into
+    :attr:`encode_ns_samples`, and :meth:`write` tracks the high-water queue
+    depth in :attr:`max_queue_depth`. Both are read after a short diagnostic
+    trial, so the sample list stays bounded.
     """
 
-    def __init__(self, max_queue_size: int = 20):
+    def __init__(self, max_queue_size: int = 20, *, profile: bool = False):
         self._max_queue_size = max_queue_size
         self._queue: queue.Queue | None = None
         self._thread: threading.Thread | None = None
         self._running = False
         self._failed = False
         self._written = 0
+        self._profile = profile
+        self._encode_ns_samples: list[int] = []
+        self._max_queue_depth = 0
 
     @property
     def failed(self) -> bool:
@@ -310,6 +321,23 @@ class AsyncFrameWriter:
         keep the CSV's per-frame `dropped` column accurate."""
         return self._written
 
+    @property
+    def encode_ns_samples(self) -> list[int]:
+        """Per-frame ``_write_frame`` durations (ns), when ``profile`` is on.
+
+        Empty unless the writer was constructed with ``profile=True``. This is
+        the real encode (ffmpeg pipe write) / disk-write cost the diagnostics
+        engine turns into percentiles."""
+        return self._encode_ns_samples
+
+    @property
+    def max_queue_depth(self) -> int:
+        """High-water queue occupancy seen by :meth:`write`, when profiling.
+
+        A queue that repeatedly fills (approaching ``max_queue_size``) is the
+        signature of an encoder that cannot keep up with the grab rate."""
+        return self._max_queue_depth
+
     def open(self, filename: str, fps: float, frame_size: tuple[int, int]) -> bool:
         """Open `filename` for writing. frame_size is (width, height)."""
         self.close()
@@ -320,6 +348,8 @@ class AsyncFrameWriter:
             return False
         self._failed = False
         self._written = 0
+        self._encode_ns_samples = []
+        self._max_queue_depth = 0
         self._queue = queue.Queue(maxsize=self._max_queue_size)
         self._running = True
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
@@ -330,6 +360,10 @@ class AsyncFrameWriter:
         """Enqueue a frame; returns False if it was dropped."""
         if not self._running or self._failed:
             return False
+        if self._profile:
+            depth = self._queue.qsize()
+            if depth > self._max_queue_depth:
+                self._max_queue_depth = depth
         try:
             self._queue.put_nowait(frame)
             return True
@@ -358,7 +392,12 @@ class AsyncFrameWriter:
             if self._failed:
                 continue  # keep draining so close() semantics are unchanged
             try:
-                self._write_frame(frame)
+                if self._profile:
+                    t0 = time.perf_counter_ns()
+                    self._write_frame(frame)
+                    self._encode_ns_samples.append(time.perf_counter_ns() - t0)
+                else:
+                    self._write_frame(frame)
                 self._written += 1
             except Exception as e:
                 self._failed = True
@@ -393,8 +432,10 @@ class FfmpegVideoWriter(AsyncFrameWriter):
         ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS,
         remux_mp4: bool = False,
         max_queue_size: int = 20,
+        *,
+        profile: bool = False,
     ):
-        super().__init__(max_queue_size)
+        super().__init__(max_queue_size, profile=profile)
         self.ffmpeg_params = ffmpeg_params
         self.remux_mp4 = remux_mp4
         self._proc: subprocess.Popen | None = None
@@ -523,8 +564,8 @@ class RawVideoWriter(AsyncFrameWriter):
     for the transcode come from the recording's recording_summary.json.
     """
 
-    def __init__(self, max_queue_size: int = 20):
-        super().__init__(max_queue_size)
+    def __init__(self, max_queue_size: int = 20, *, profile: bool = False):
+        super().__init__(max_queue_size, profile=profile)
         self._file = None
 
     def _open_sink(self, filename, fps, frame_size):
@@ -554,15 +595,18 @@ class VideoFormat:
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
     remux_mp4: bool = False
 
-    def create_writer(self, max_queue_size: int = 20) -> AsyncFrameWriter:
+    def create_writer(
+        self, max_queue_size: int = 20, *, profile: bool = False
+    ) -> AsyncFrameWriter:
         if self.save_method == "ffmpeg":
             return FfmpegVideoWriter(
                 ffmpeg_params=self.ffmpeg_params,
                 remux_mp4=self.remux_mp4,
                 max_queue_size=max_queue_size,
+                profile=profile,
             )
         if self.save_method == "raw":
-            return RawVideoWriter(max_queue_size)
+            return RawVideoWriter(max_queue_size, profile=profile)
         raise ValueError(f"Unknown save method: {self.save_method}")
 
 

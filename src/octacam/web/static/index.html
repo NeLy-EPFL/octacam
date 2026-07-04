@@ -31,6 +31,8 @@
         title="Adjust per-camera sensor parameters (resolution, exposure, gain)">Camera</button>
       <button type="button" data-tab="view"
         title="Rotate, flip, and crosshair options for the live preview">View</button>
+      <button type="button" data-tab="benchmark"
+        title="Test whether a frame rate is achievable and find the limiting step">Benchmark</button>
       <button type="button" data-tab="flywheel" data-plugin="flywheel"
         title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
       <button type="button" data-tab="twophoton" data-plugin="twophoton"
@@ -298,6 +300,39 @@
         <label class="center" title="Overlay centering crosshairs on every preview tile">
           <input type="checkbox" id="display-cross"> Display cross</label>
       </fieldset>
+    </section>
+
+    <section id="tab-benchmark" class="tab">
+      <p class="hint">
+        A short dry-run drives the cameras (no video is kept) to test whether the
+        target frame rate is achievable, find the maximum, and measure each pipeline
+        stage so you can see the limiting step. Live preview pauses during the run.
+      </p>
+      <fieldset id="bench-fields" disabled>
+        <label class="row" title="Frame rate to test. Blank uses the Record tab's FPS."><span>Target FPS:</span>
+          <input id="bench-fps" type="number" min="0.01" max="1000" step="1"
+            placeholder="Record FPS">
+        </label>
+        <label class="row" title="Seconds spent measuring each scenario (longer = steadier numbers)"><span>Duration:</span>
+          <span class="suffixed">
+            <input id="bench-duration" type="number" min="0.5" max="60" step="0.5" value="5">
+            <span class="suffix">s</span>
+          </span>
+        </label>
+        <label class="row"
+          title="config: encode through the rig's real save method (measures the true encode cost). null: discard frames to isolate acquisition."><span>Encode through:</span>
+          <select id="bench-sink">
+            <option value="config">config encoder</option>
+            <option value="null">null (acquisition only)</option>
+          </select>
+        </label>
+        <label class="center" title="Also search for the maximum achievable frame rate (software trigger only)">
+          <input id="bench-find-max" type="checkbox" checked> Find max FPS</label>
+      </fieldset>
+      <button type="button" id="bench-run" class="btn wide" disabled
+        title="Run the benchmark on all cameras">Run benchmark</button>
+      <div id="bench-status"></div>
+      <div id="bench-results"></div>
     </section>
 
     <div id="events"></div>
