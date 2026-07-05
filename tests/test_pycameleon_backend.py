@@ -131,6 +131,9 @@ def test_triggering_sets_software_and_defers_execute():
     assert cam._enum["TriggerSelector"] == "FrameStart"
     assert cam._enum["TriggerMode"] == "On"
     assert cam._enum["TriggerSource"] == "Software"
+    # TriggerOverlap=ReadOut lets triggers pipeline during readout — without it the
+    # FLIR ignores every other software trigger (~halved fps; measured 4.7->64 fps).
+    assert cam._enum["TriggerOverlap"] == "ReadOut"
     backend.start_grab_preview()
     assert backend.is_grabbing()
     # trigger_once only bumps the pending counter — it must NOT touch the device

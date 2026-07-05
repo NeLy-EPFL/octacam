@@ -425,11 +425,31 @@ class HarvestersBackend(SoftwareTriggerHandoff):
 
     # ----------------------------------------------------------- triggering
 
+    def _enable_trigger_overlap(self) -> None:
+        """Let a trigger be accepted during the previous frame's readout.
+
+        Without this (``TriggerOverlap=Off``, the FLIR default) a FrameStart
+        software trigger fired while the sensor is still reading out the previous
+        frame is **silently ignored**, so the camera accepts only ~every other
+        trigger — roughly halving the software-triggered frame rate and adding a
+        full grab-timeout stall on each dropped one. ``ReadOut`` pipelines
+        back-to-back triggers and restores the sensor's real rate (measured on
+        the Spinnaker backends: ~4.7 → ~64 fps at 4 ms exposure; see
+        ``docs/plan-spinnaker-c-backend.md``). Mirrors the same fix in
+        :mod:`~octacam.cameras.spinnaker_c` / :mod:`~octacam.cameras.flir`.
+        Best-effort: a producer/model without the node keeps its default.
+        """
+        try:
+            self._set_enum("TriggerOverlap", "ReadOut")
+        except BackendError as e:
+            log.debug("Could not set TriggerOverlap on camera %s: %s", self._serial, e)
+
     def enable_frame_trigger(self) -> None:
         if not self.is_open():
             return
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
+        self._enable_trigger_overlap()
 
     def set_trigger_source(self, use_software: bool) -> None:
         if not self.is_open():
@@ -448,6 +468,7 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._set_enum("TriggerSource", "Software")
+        self._enable_trigger_overlap()
 
     def trigger_once(self) -> None:
         # Only bump the pending counter; retrieve() fires the device trigger on
