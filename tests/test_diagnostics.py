@@ -140,6 +140,59 @@ def test_classify_achievable_is_none():
     assert recs == []
 
 
+def test_classify_transfer_bound_when_cameras_throttle_each_other():
+    # Acquisition-limited AND the concurrent rate is well below the solo rate
+    # (cameras share more bus bandwidth than the link provides) → TRANSFER, not
+    # a per-camera ACQUISITION limit.
+    ceilings = dg.Ceilings(
+        grab_fps={"A": 50.0, "B": 50.0},
+        encode_fps={"A": 500.0, "B": 500.0},
+        grab_solo_fps={"A": 100.0, "B": 100.0},  # 50 << 100*0.85 → contended
+    )
+    achievable, bottleneck, recs = dg._classify(
+        200.0, ceilings, _outcome(50.0, 200.0), throughput_total=400.0
+    )
+    assert not achievable
+    assert bottleneck == dg.TRANSFER
+    assert any("Transfer-bound" in r and "400 MB/s" in r for r in recs)
+
+
+def test_classify_host_vs_transfer_split():
+    # Both stages clear the target alone, but the system falls short. With no
+    # solo evidence of contention it's HOST; with concurrent << solo it's TRANSFER.
+    base = dict(grab_fps={"S": 500.0}, encode_fps={"S": 500.0})
+    host = dg.Ceilings(**base)
+    _, b_host, _ = dg._classify(200.0, host, _outcome(150.0, 200.0, drop=0.05))
+    assert b_host == dg.HOST
+
+    transfer = dg.Ceilings(**base, grab_solo_fps={"S": 700.0})  # 500 < 700*0.85
+    _, b_transfer, _ = dg._classify(200.0, transfer, _outcome(150.0, 200.0, drop=0.05))
+    assert b_transfer == dg.TRANSFER
+
+
+def test_ceilings_bus_contended_property():
+    contended = dg.Ceilings(
+        grab_fps={"S": 50.0}, encode_fps={}, grab_solo_fps={"S": 100.0}
+    )
+    assert contended.bus_contended
+    clear = dg.Ceilings(
+        grab_fps={"S": 95.0}, encode_fps={}, grab_solo_fps={"S": 100.0}
+    )
+    assert not clear.bus_contended  # 95 > 100 * CONTENTION_RATIO
+    no_solo = dg.Ceilings(grab_fps={"S": 50.0}, encode_fps={})
+    assert not no_solo.bus_contended  # inert without a solo measurement
+
+
+def test_throughput_mbps():
+    per_cam, total = dg._throughput_mbps(
+        {"A": 100.0, "B": 50.0}, {"A": (1000, 1000), "B": (1000, 1000)}
+    )
+    # 1e6 px (Mono8 = 1 B/px) × 100 fps / 1e6 = 100 MB/s.
+    assert per_cam["A"] == pytest.approx(100.0)
+    assert per_cam["B"] == pytest.approx(50.0)
+    assert total == pytest.approx(150.0)
+
+
 def test_find_max_fps_bisects_to_threshold():
     # A probe that passes below 137 fps; the bisection should land just under it.
     calls = []
@@ -438,6 +491,70 @@ def test_diagnose_freerun_unsupported_backend_noted(fake_system):
     assert report.ceilings.freerun_fps == {}
     assert report.freerun_max_fps is None
     assert any("does not support free-run" in n for n in report.notes)
+
+
+def test_measure_grab_ceiling_solo(fake_system):
+    solo = dg.measure_grab_ceiling_solo(list(fake_system), 0.2, warmup_s=0.1)
+    assert set(solo) == set(FAKE_SERIALS)
+    assert all(v > 0 for v in solo.values())
+
+
+def test_diagnose_measures_solo_ceiling_and_throughput(fake_system):
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        sink="null",
+    )
+    # ≥2 cameras → the solo pass runs, and throughput is derived from the ceiling.
+    assert set(report.ceilings.grab_solo_fps) == set(FAKE_SERIALS)
+    assert set(report.throughput_mbps) == set(FAKE_SERIALS)
+    assert report.throughput_mbps_total > 0
+    payload = json.loads(json.dumps(report.to_dict(), allow_nan=False))
+    assert payload["throughput_mbps_total"] is not None
+    assert payload["ceilings"]["grab_solo_min"] is not None
+
+
+def test_diagnose_freerun_trial_measures_hardware_max(fake_system):
+    # A real sink runs the free-run end-to-end trial (encoder in the loop), which
+    # upgrades the hardware max to a measured, drop-adjusted rate.
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        measure_freerun=True,
+        sink="config",
+    )
+    assert len(report.freerun_trials) == len(FAKE_SERIALS)
+    assert report.hardware_max_fps is not None and report.hardware_max_fps > 0
+    payload = json.loads(json.dumps(report.to_dict(), allow_nan=False))
+    assert len(payload["freerun_trials"]) == len(FAKE_SERIALS)
+    # The trial leaves every backend stopped, like the software scenarios.
+    for camera in fake_system:
+        assert not camera.backend.is_grabbing()
+
+
+def test_diagnose_warns_on_high_machine_load(fake_system, monkeypatch):
+    # A machine already busy before the run skews results → a warning is emitted.
+    monkeypatch.setattr(dg, "_probe_system_load", lambda: (95.0, 3.0))
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        sink="null",
+    )
+    assert report.system_cpu_percent == 95.0
+    assert report.load_per_core == 3.0
+    assert any("CPU-busy" in r for r in report.recommendations)
 
 
 def test_diagnose_emits_monotonic_progress(fake_system):

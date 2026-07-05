@@ -1719,8 +1719,9 @@ def _bottleneck_label(bottleneck: str) -> str:
 
     return {
         diag.ACQUISITION: "acquisition (camera can't deliver fast enough)",
+        diag.TRANSFER: "transfer (cameras share more bus bandwidth than the link provides)",
         diag.ENCODE: "encoding (the encoder can't keep up)",
-        diag.HOST: "host contention (shared USB bus / CPU / GIL)",
+        diag.HOST: "host contention (CPU / GIL)",
         diag.NONE: "none",
     }.get(bottleneck, bottleneck)
 
@@ -1804,14 +1805,31 @@ class _BenchmarkProgressBar:
             self._progress.update(self._task, completed=frac * 1000)
 
 
+def _fps(value) -> str:
+    """Format an fps/ceiling for the report ("–" for None/inf)."""
+    import math
+
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return "–"
+    return f"{value:.0f}"
+
+
 def _render_benchmark(report) -> None:
-    """Render a DiagnosticReport as a human report on stdout (rich)."""
+    """Render a DiagnosticReport as a human report on stdout (rich).
+
+    Inverted pyramid: the two numbers an operator acts on first (KEY RESULTS),
+    then which pipeline stage caps the system (BY STAGE), then the per-camera
+    detail (BY CAMERA).
+    """
     from rich.console import Console
     from rich.table import Table
     from rich.text import Text
 
+    from octacam import diagnostics as diag
+
     console = Console()
     r = report
+    c = r.ceilings
     console.print()
     console.print(
         Text(
@@ -1822,68 +1840,142 @@ def _render_benchmark(report) -> None:
     console.print(
         f"target {r.target_fps:g} fps · {r.trigger_source} trigger · sink={encoder}"
     )
-    console.print()
 
+    # ---- KEY RESULTS: the two headline max rates + the target verdict ----
+    console.print()
+    console.print(Text("KEY RESULTS", style="bold"))
+    if r.measured_max_fps is not None:
+        confidence = "confirmed" if r.max_confirmed else "safety margin"
+        console.print(
+            f"  Synchronized (software) max:  {_fps(r.measured_max_fps)} fps/cam "
+            f"({confidence})"
+        )
+    else:
+        console.print(
+            f"  Synchronized (software) max:  {_fps(r.predicted_max_fps)} fps/cam "
+            "(predicted)"
+        )
+    if r.hardware_max_fps is not None:
+        measured = " (measured)" if r.freerun_trials else ""
+        console.print(
+            f"  Free-run / hardware max:      {_fps(r.hardware_max_fps)} fps/cam"
+            f"{measured}"
+        )
     if r.achievable:
-        console.print(Text(f"✓ {r.target_fps:g} fps is ACHIEVABLE", style="bold green"))
+        console.print(
+            Text(f"  ✓ {r.target_fps:g} fps is ACHIEVABLE", style="bold green")
+        )
     else:
         console.print(
             Text(
-                f"✗ {r.target_fps:g} fps is NOT achievable — "
-                f"bottleneck: {_bottleneck_label(r.bottleneck)}",
+                f"  ✗ {r.target_fps:g} fps is NOT achievable — "
+                f"limited by {_bottleneck_label(r.bottleneck)}",
                 style="bold red",
             )
         )
 
-    if r.ceilings is not None:
-        line = f"  acquisition ceiling: {r.ceilings.grab_min:.0f} fps/cam (software)"
-        if r.ceilings.freerun_fps:
-            line += f"    free-run: {r.ceilings.freerun_min:.0f} fps/cam"
-        if r.ceilings.encode_fps:
-            line += f"    encode: {r.ceilings.encode_min:.0f} fps/cam"
-        else:
-            line += "    (encode not measured — null sink)"
-        console.print(line)
-    if r.measured_max_fps is not None:
-        confidence = "confirmed" if r.max_confirmed else "with safety margin"
+    # ---- BY STAGE: which pipeline stage caps the synchronized rate ----
+    if c is not None:
+        console.print()
         console.print(
-            f"  stable max (measured): {r.measured_max_fps:.0f} fps/cam "
-            f"({confidence}; predicted {r.predicted_max_fps:.0f})"
+            Text("BY STAGE", style="bold"),
+            Text("  (system ceiling = slowest camera)", style="dim"),
         )
-    elif r.predicted_max_fps:
-        console.print(f"  predicted max: {r.predicted_max_fps:.0f} fps/cam")
-    if r.hardware_max_fps is not None:
-        console.print(
-            "  external/hardware-trigger max (from free-run): "
-            f"{r.hardware_max_fps:.0f} fps/cam"
-        )
+        def mark(name):
+            return Text("  ← limits", style="red") if r.bottleneck == name else Text("")
 
+        console.print(
+            Text(f"  acquisition  {_fps(c.grab_min):>4} fps/cam  "),
+            Text("(software; exposure+transfer serial)", style="dim"),
+            mark(diag.ACQUISITION),
+        )
+        if r.throughput_mbps_total:
+            per_cam = (
+                r.throughput_mbps_total / r.n_cameras if r.n_cameras else 0.0
+            )
+            solo = f" · alone {_fps(c.grab_solo_min)} fps/cam" if c.grab_solo_fps else ""
+            console.print(
+                Text(
+                    f"  transfer     {per_cam:>4.0f} MB/s/cam · "
+                    f"{r.throughput_mbps_total:.0f} MB/s total"
+                ),
+                Text(f"(derived from frame size × fps{solo})", style="dim"),
+                mark(diag.TRANSFER),
+            )
+        if c.encode_fps:
+            console.print(f"  encode       {_fps(c.encode_min):>4} fps/cam")
+        else:
+            console.print(
+                Text("  encode        n/a  (null sink — encoder not measured)", style="dim")
+            )
+
+    # ---- BY CAMERA: per-camera ceilings + end-to-end trial detail ----
     console.print()
+    console.print(Text("BY CAMERA", style="bold"))
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
     table.add_column("camera")
     table.add_column("size", justify="right")
+    table.add_column("acq", justify="right")
+    table.add_column("free", justify="right")
+    table.add_column("enc", justify="right")
     table.add_column("fps", justify="right")
     table.add_column("drop%", justify="right")
-    table.add_column("qmax", justify="right")
+    table.add_column("queue peak", justify="right")
     table.add_column("acquire p50/p99 ms", justify="right")
     table.add_column("encode p50/p99 ms", justify="right")
     for t in r.trials:
         acq = t.stages.get("acquire")
         enc = t.stages.get("encode")
+        s = t.serial
         table.add_row(
             t.name,
             f"{t.width}×{t.height}",
+            _fps(c.grab_fps.get(s)) if c else "–",
+            _fps(c.freerun_fps.get(s)) if c and c.freerun_fps else "–",
+            _fps(c.encode_fps.get(s)) if c and c.encode_fps else "–",
             f"{t.achieved_fps:.1f}",
             f"{100 * t.drop_rate:.2f}",
-            str(t.max_queue_depth),
-            f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "-",
-            f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}" if enc and enc.samples else "-",
+            f"{t.max_queue_depth} of {diag.WRITER_QUEUE_SIZE}",
+            f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "–",
+            f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}" if enc and enc.samples else "–",
         )
     console.print(table)
+    console.print(
+        Text(
+            "  acq/free/enc = per-camera ceilings (concurrent / free-run / encode); "
+            "fps/drop%/queue = the end-to-end trial at the target. drop% counts only "
+            "frames the encoder queue refused (host couldn't keep up), not camera "
+            "transport gaps.",
+            style="dim",
+        )
+    )
+
+    # ---- Free-run trial (measured real free-run pipeline, encoder in loop) ----
+    if r.freerun_trials:
+        console.print()
+        console.print(
+            Text("  Free-run trial", style="bold"),
+            Text("(real free-run pipeline, encoder in the loop)", style="dim"),
+        )
+        ft = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+        ft.add_column("  camera")
+        ft.add_column("fps", justify="right")
+        ft.add_column("drop%", justify="right")
+        ft.add_column("queue peak", justify="right")
+        for t in r.freerun_trials:
+            ft.add_row(
+                f"  {t.name}",
+                f"{t.achieved_fps:.1f}",
+                f"{100 * t.drop_rate:.2f}",
+                f"{t.max_queue_depth} of {diag.WRITER_QUEUE_SIZE}",
+            )
+        console.print(ft)
 
     extras = []
+    if r.system_cpu_percent is not None:
+        extras.append(f"machine load (pre-run) {r.system_cpu_percent:.0f}% cpu")
     if r.cpu_percent is not None:
-        extras.append(f"cpu {r.cpu_percent:.0f}%")
+        extras.append(f"benchmark cpu {r.cpu_percent:.0f}%")
     if r.jitter_p99_ms is not None:
         extras.append(f"scheduler jitter p99 {r.jitter_p99_ms:.2f} ms")
     if extras:

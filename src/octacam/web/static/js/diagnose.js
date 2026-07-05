@@ -4,8 +4,9 @@ import { api } from "./util.js";
 
 const BOTTLENECK_LABEL = {
   acquisition: "acquisition — the camera can't deliver frames fast enough",
+  transfer: "transfer — the cameras share more bus bandwidth than the link provides",
   encode: "encoding — the encoder can't keep up",
-  host: "host contention — shared USB bus / CPU / GIL",
+  host: "host contention — CPU / GIL",
   none: "none",
 };
 
@@ -170,8 +171,10 @@ export class BenchmarkTab {
 
   _render(rep) {
     const nodes = [];
+    const c = rep.ceilings;
 
-    // Verdict banner.
+    // ---- KEY RESULTS: verdict + the two headline max rates ----
+    nodes.push(el("div", "bench-section-title", "Key results"));
     const verdict = el("div", "bench-verdict");
     if (rep.achievable) {
       verdict.classList.add("ok");
@@ -180,58 +183,92 @@ export class BenchmarkTab {
       verdict.classList.add("bad");
       const label = BOTTLENECK_LABEL[rep.bottleneck] || rep.bottleneck;
       verdict.textContent =
-        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — bottleneck: ${label}`;
+        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — limited by ${label}`;
     }
     nodes.push(verdict);
 
-    // Ceilings + max.
-    const summary = el("div", "bench-summary");
-    if (rep.ceilings) {
-      let line = `Acquisition ceiling: ${fmt(rep.ceilings.grab_min)} fps/cam (software)`;
-      if (rep.ceilings.freerun_min != null) {
-        line += ` · free-run ${fmt(rep.ceilings.freerun_min)} fps/cam`;
-      }
-      if (rep.ceilings.encode_min != null) {
-        line += ` · encode ${fmt(rep.ceilings.encode_min)} fps/cam`;
-      }
-      summary.append(el("div", null, line));
-    }
+    const maxes = el("div", "bench-summary");
     if (rep.measured_max_fps != null) {
       const conf = rep.max_confirmed ? "confirmed" : "safety margin";
-      summary.append(
+      maxes.append(
         el(
           "div",
           null,
-          `Stable max (measured): ${fmt(rep.measured_max_fps)} fps/cam ` +
-            `(${conf}; predicted ${fmt(rep.predicted_max_fps)})`
+          `Synchronized (software) max: ${fmt(rep.measured_max_fps)} fps/cam (${conf})`
         )
       );
     } else if (rep.predicted_max_fps != null) {
-      summary.append(
-        el("div", null, `Predicted max: ${fmt(rep.predicted_max_fps)} fps/cam`)
-      );
-    }
-    if (rep.hardware_max_fps != null) {
-      summary.append(
+      maxes.append(
         el(
           "div",
           null,
-          `External/hardware-trigger max (free-run): ` +
-            `${fmt(rep.hardware_max_fps)} fps/cam`
+          `Synchronized (software) max: ${fmt(rep.predicted_max_fps)} fps/cam (predicted)`
         )
       );
     }
-    nodes.push(summary);
+    if (rep.hardware_max_fps != null) {
+      const measured = (rep.freerun_trials || []).length ? " (measured)" : "";
+      maxes.append(
+        el(
+          "div",
+          null,
+          `Free-run / hardware max: ${fmt(rep.hardware_max_fps)} fps/cam${measured}`
+        )
+      );
+    }
+    nodes.push(maxes);
 
-    // Per-camera per-stage table.
+    // ---- BY STAGE: which pipeline stage caps the synchronized rate ----
+    if (c) {
+      nodes.push(
+        el("div", "bench-section-title", "By stage — system ceiling = slowest camera")
+      );
+      const stages = el("div", "bench-summary");
+      const stageRow = (name, text, key) => {
+        const row = el("div", "bench-stage");
+        row.append(el("span", null, text));
+        if (rep.bottleneck === key) row.append(el("span", "bench-limits", " ← limits"));
+        stages.append(row);
+      };
+      stageRow(
+        "acquisition",
+        `Acquisition: ${fmt(c.grab_min)} fps/cam (software; exposure+transfer serial)`,
+        "acquisition"
+      );
+      if (rep.throughput_mbps_total != null) {
+        const perCam = rep.n_cameras ? rep.throughput_mbps_total / rep.n_cameras : 0;
+        const solo =
+          c.grab_solo_min != null ? ` · alone ${fmt(c.grab_solo_min)} fps/cam` : "";
+        stageRow(
+          "transfer",
+          `Transfer: ${fmt(perCam)} MB/s/cam · ${fmt(rep.throughput_mbps_total)} ` +
+            `MB/s total (derived from frame size × fps${solo})`,
+          "transfer"
+        );
+      }
+      stageRow(
+        "encode",
+        c.encode_min != null
+          ? `Encode: ${fmt(c.encode_min)} fps/cam`
+          : "Encode: n/a (null sink — encoder not measured)",
+        "encode"
+      );
+      nodes.push(stages);
+    }
+
+    // ---- BY CAMERA: per-camera ceilings + end-to-end trial detail ----
+    nodes.push(el("div", "bench-section-title", "By camera"));
     const table = el("table", "bench-table");
     const head = el("tr");
     for (const h of [
       "camera",
       "size",
+      "acq",
+      "free",
+      "enc",
       "fps",
       "drop%",
-      "qmax",
+      "queue peak",
       "acquire p50/p99",
       "encode p50/p99",
     ]) {
@@ -241,24 +278,73 @@ export class BenchmarkTab {
     for (const t of rep.trials || []) {
       const acq = t.stages?.acquire;
       const enc = t.stages?.encode;
+      const s = t.serial;
       const row = el("tr");
       const cells = [
         t.name,
         `${t.width}×${t.height}`,
+        fmt(c?.grab_fps?.[s]),
+        fmt(c?.freerun_fps?.[s]),
+        fmt(c?.encode_fps?.[s]),
         fmt(t.achieved_fps, 1),
         fmt(100 * t.drop_rate, 2),
-        String(t.max_queue_depth),
+        `${t.max_queue_depth} of 20`,
         acq ? `${fmt(acq.p50_ms, 1)}/${fmt(acq.p99_ms, 1)} ms` : "–",
         enc && enc.samples ? `${fmt(enc.p50_ms, 2)}/${fmt(enc.p99_ms, 2)} ms` : "–",
       ];
-      cells.forEach((c, i) => row.append(el("td", i === 0 ? "bench-cam" : null, c)));
+      cells.forEach((cell, i) =>
+        row.append(el("td", i === 0 ? "bench-cam" : null, cell))
+      );
       table.append(row);
     }
     nodes.push(table);
+    nodes.push(
+      el(
+        "div",
+        "bench-note",
+        "acq/free/enc = per-camera ceilings (concurrent / free-run / encode); " +
+          "fps/drop%/queue = the end-to-end trial at the target. drop% counts only " +
+          "frames the encoder queue refused (host couldn't keep up), not camera " +
+          "transport gaps."
+      )
+    );
 
-    // Host probes.
+    // ---- Free-run trial (real free-run pipeline, encoder in the loop) ----
+    if ((rep.freerun_trials || []).length) {
+      nodes.push(
+        el(
+          "div",
+          "bench-section-title",
+          "Free-run trial — real free-run pipeline, encoder in the loop"
+        )
+      );
+      const ft = el("table", "bench-table");
+      const fhead = el("tr");
+      for (const h of ["camera", "fps", "drop%", "queue peak"]) {
+        fhead.append(el("th", null, h));
+      }
+      ft.append(fhead);
+      for (const t of rep.freerun_trials) {
+        const row = el("tr");
+        const cells = [
+          t.name,
+          fmt(t.achieved_fps, 1),
+          fmt(100 * t.drop_rate, 2),
+          `${t.max_queue_depth} of 20`,
+        ];
+        cells.forEach((cell, i) =>
+          row.append(el("td", i === 0 ? "bench-cam" : null, cell))
+        );
+        ft.append(row);
+      }
+      nodes.push(ft);
+    }
+
+    // Host / machine probes.
     const extras = [];
-    if (rep.cpu_percent != null) extras.push(`cpu ${fmt(rep.cpu_percent)}%`);
+    if (rep.system_cpu_percent != null)
+      extras.push(`machine load (pre-run) ${fmt(rep.system_cpu_percent)}% cpu`);
+    if (rep.cpu_percent != null) extras.push(`benchmark cpu ${fmt(rep.cpu_percent)}%`);
     if (rep.jitter_p99_ms != null)
       extras.push(`scheduler jitter p99 ${fmt(rep.jitter_p99_ms, 2)} ms`);
     if (extras.length) nodes.push(el("div", "bench-extras", extras.join(" · ")));
