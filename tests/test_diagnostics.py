@@ -37,7 +37,9 @@ def fake_system(tmp_path):
 # --------------------------------------------------------------------- helpers
 
 
-def _trial(achieved: float, target: float, drop: float = 0.0) -> dg.CameraTrial:
+def _trial(
+    achieved: float, target: float, drop: float = 0.0, qmax: int = 0
+) -> dg.CameraTrial:
     return dg.CameraTrial(
         serial="S",
         name="cam",
@@ -48,14 +50,18 @@ def _trial(achieved: float, target: float, drop: float = 0.0) -> dg.CameraTrial:
         grabbed=int(achieved),
         dropped=int(achieved * drop),
         drop_rate=drop,
-        max_queue_depth=0,
+        max_queue_depth=qmax,
         stages={},
     )
 
 
-def _outcome(achieved: float, target: float, drop: float = 0.0) -> dg.TrialOutcome:
+def _outcome(
+    achieved: float, target: float, drop: float = 0.0, qmax: int = 0
+) -> dg.TrialOutcome:
     return dg.TrialOutcome(
-        trials=[_trial(achieved, target, drop)], jitter_p99_ms=None, cpu_percent=None
+        trials=[_trial(achieved, target, drop, qmax)],
+        jitter_p99_ms=None,
+        cpu_percent=None,
     )
 
 
@@ -150,6 +156,119 @@ def test_find_max_fps_bisects_to_threshold():
 def test_find_max_fps_hi_passes_returns_hi():
     result = dg.find_max_fps(lambda fps: True, lo=100.0, hi=200.0)
     assert result == 200.0
+
+
+def test_reconcile_stable_max_reports_achieved_not_target():
+    # A trial passes at 97% of its target, so the winning *target* (64) can sit
+    # above what was actually acquired (63). The reported max must be the achieved
+    # rate, never the target — otherwise it reads above the acquisition ceiling.
+    confirm = _outcome(achieved=63.0, target=64.0)
+    assert confirm.stable_passed
+    fps, confirmed = dg._reconcile_stable_max(64.0, confirm, lo=30.0, ceiling_cap=90.0)
+    assert confirmed
+    assert fps == pytest.approx(63.0)
+
+
+def test_reconcile_stable_max_capped_by_ceiling():
+    # Even a high sustained rate cannot exceed the isolated acquisition/encode cap.
+    confirm = _outcome(achieved=99.0, target=100.0)
+    fps, confirmed = dg._reconcile_stable_max(100.0, confirm, lo=30.0, ceiling_cap=63.0)
+    assert confirmed
+    assert fps == pytest.approx(63.0)
+
+
+def test_reconcile_stable_max_unconfirmed_backs_off():
+    # A candidate that fails the longer confirmation is reported below the target.
+    confirm = _outcome(achieved=63.0, target=64.0, drop=0.005)  # >0.1% -> not stable
+    assert confirm.passed and not confirm.stable_passed
+    fps, confirmed = dg._reconcile_stable_max(64.0, confirm, lo=30.0, ceiling_cap=90.0)
+    assert not confirmed
+    assert fps < 64.0
+
+
+# ------------------------------------------------------------- stable pass bar
+
+
+def test_stable_passed_requires_headroom():
+    # A queue climbing toward its bound is unstable even with no drops yet.
+    guard_trip = int(dg.WRITER_QUEUE_SIZE * dg.QUEUE_SATURATION_FRACTION)
+    hot = _outcome(100.0, 100.0, drop=0.0, qmax=guard_trip)
+    assert hot.passed  # meets the loose achievable bar
+    assert not hot.stable_passed  # ...but the queue is saturating
+
+    cool = _outcome(100.0, 100.0, drop=0.0, qmax=1)
+    assert cool.passed and cool.stable_passed
+
+
+def test_stable_passed_tighter_drop_bar():
+    # 0.5% drops: achievable (<1%) but not stable (>0.1%).
+    marginal = _outcome(100.0, 100.0, drop=0.005, qmax=0)
+    assert marginal.passed
+    assert not marginal.stable_passed
+
+
+def test_outcome_max_queue_depth_is_worst_camera():
+    outcome = dg.TrialOutcome(
+        trials=[_trial(100, 100, qmax=3), _trial(100, 100, qmax=17)],
+        jitter_p99_ms=None,
+        cpu_percent=None,
+    )
+    assert outcome.max_queue_depth == 17
+
+
+# ----------------------------------------------------------------- progress
+
+
+def test_progress_plan_advances_and_animates():
+    plan = dg._ProgressPlan([("a", 1.0), ("b", 3.0)])
+    p1 = plan.step("a", "x")
+    assert p1.fraction == 0.0 and p1.target == pytest.approx(0.25) and p1.eta_s == 1.0
+    # Re-emitting the same phase keeps the fractions but updates the detail.
+    p1b = plan.step("a", "y")
+    assert p1b.detail == "y" and p1b.fraction == 0.0
+    p2 = plan.step("b", "")
+    assert p2.fraction == pytest.approx(0.25) and p2.target == pytest.approx(1.0)
+    done = plan.done()
+    assert done.fraction == 1.0 and done.target == 1.0
+
+
+def test_progress_plan_advance_creeps_forward_without_reset():
+    # A multi-probe phase (the max-fps search) must ease forward across emits, not
+    # re-emit its start fraction — that reset is what jerked the bar backwards.
+    plan = dg._ProgressPlan([("trial", 1.0), ("max", 3.0)])  # total 4
+    plan.step("trial", "")
+    emits = [plan.step("max", f"probe {i}", advance=True, eta=0.5) for i in range(4)]
+    fracs = [e.fraction for e in emits]
+    targets = [e.target for e in emits]
+    assert fracs == sorted(fracs)  # never regresses
+    assert targets == sorted(targets)
+    assert fracs[0] == pytest.approx(0.25)  # the max phase starts at 1/4
+    # Each probe picks up exactly where the previous one was heading.
+    for i in range(1, len(emits)):
+        assert fracs[i] == pytest.approx(targets[i - 1])
+    assert all(e.eta_s == 0.5 for e in emits)
+    assert all(0.25 <= f < 1.0 for f in fracs)
+    assert targets[-1] < 1.0  # leaves headroom for the Done sentinel to finish
+
+
+def test_progress_plan_skips_absent_phase():
+    # A label that jumps ahead (a conditional phase that did not run) still lands.
+    plan = dg._ProgressPlan([("a", 1.0), ("b", 1.0), ("c", 2.0)])
+    plan.step("a", "")
+    p = plan.step("c", "")  # 'b' skipped
+    assert p.fraction == pytest.approx(0.5)  # (1 + 1) / 4
+
+
+def test_progress_to_dict_is_strict_json():
+    d = dg.Progress("phase", "detail", 0.25, 0.5, 2.0).to_dict()
+    assert d == {
+        "phase": "phase",
+        "detail": "detail",
+        "fraction": 0.25,
+        "target": 0.5,
+        "eta_s": 2.0,
+    }
+    json.dumps(d, allow_nan=False)
 
 
 def test_null_writer_counts_frames():
@@ -258,6 +377,89 @@ def test_diagnose_external_trigger_skips_max_search(fake_system):
     assert report.ceilings is not None
     assert report.measured_max_fps is None
     assert any("external hardware trigger" in n for n in report.notes)
+    # ...but the free-run ceiling still gives the external rig a hardware max.
+    assert report.ceilings.freerun_fps
+    assert report.hardware_max_fps is not None
+
+
+# --------------------------------------------------------------- free-run ceiling
+
+
+def test_diagnose_measures_freerun_and_hardware_max(fake_system):
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        measure_freerun=True,
+        sink="null",
+    )
+    assert set(report.ceilings.freerun_fps) == set(FAKE_SERIALS)
+    assert all(v > 0 for v in report.ceilings.freerun_fps.values())
+    assert report.freerun_max_fps is not None and report.freerun_max_fps > 0
+    # null sink -> the encoder is not measured, so the hardware max is the
+    # free-run acquisition ceiling alone.
+    assert report.hardware_max_fps == pytest.approx(report.freerun_max_fps)
+    # The whole report (with the new free-run/hardware fields) is strict JSON.
+    payload = json.loads(json.dumps(report.to_dict(), allow_nan=False))
+    assert payload["ceilings"]["freerun_min"] is not None
+
+
+def test_diagnose_freerun_disabled(fake_system):
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        duration_s=0.3,
+        find_max=False,
+        measure_freerun=False,
+        sink="null",
+    )
+    assert report.ceilings.freerun_fps == {}
+    assert report.freerun_max_fps is None
+    assert report.hardware_max_fps is None
+
+
+def test_diagnose_freerun_unsupported_backend_noted(fake_system):
+    # A backend without the free-run seam is skipped with a note, never a crash.
+    for camera in fake_system:
+        camera.backend.begin_freerun = None  # shadow the method → "unsupported"
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        duration_s=0.3,
+        find_max=False,
+        measure_freerun=True,
+        sink="null",
+    )
+    assert report.ceilings.freerun_fps == {}
+    assert report.freerun_max_fps is None
+    assert any("does not support free-run" in n for n in report.notes)
+
+
+def test_diagnose_emits_monotonic_progress(fake_system):
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    updates: list[dg.Progress] = []
+    dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        measure_freerun=True,
+        sink="null",
+        progress_cb=updates.append,
+    )
+    assert updates
+    fracs = [u.fraction for u in updates]
+    assert fracs == sorted(fracs)  # never regresses
+    assert updates[-1].fraction == 1.0  # the Done sentinel
+    labels = {u.phase for u in updates}
+    assert dg.PHASE_ACQUIRE in labels
+    assert dg.PHASE_FREERUN in labels
 
 
 # ------------------------------------------------------- controller integration
@@ -292,6 +494,28 @@ def test_run_diagnostic_via_controller(fake_system):
     assert got and got[0]["backend"] == "fake"
     # camera control works again once the benchmark is done
     controller.set_camera_param(0, "exposure", 2000.0)
+
+
+def test_run_diagnostic_emits_progress_notifications(fake_system):
+    settings = RecordingSettings(fps=80.0, trigger_source="software")
+    controller = RecordingController(fake_system, settings, auto_preview=True)
+    controller.start_preview()
+
+    progress: list[dict] = []
+    controller.add_listener(
+        lambda kind, payload: (
+            progress.append(payload) if kind == "diagnostics_progress" else None
+        )
+    )
+
+    controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null")
+    deadline = time.time() + 30
+    while controller.diagnosing and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert progress  # the Benchmark tab's determinate bar is fed these
+    assert all({"phase", "fraction", "target", "eta_s"} <= set(p) for p in progress)
+    assert progress[-1]["fraction"] == 1.0  # ends on the Done sentinel
 
 
 def test_run_diagnostic_rejected_while_recording(fake_system, tmp_path):

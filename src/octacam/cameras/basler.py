@@ -234,6 +234,45 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # the grab thread. Keeps the shared trigger timer off this device.
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+
+        Best-effort: any failure returns False so the benchmark skips the free-run
+        ceiling for this camera rather than aborting. A subsequent
+        ``begin_software_trigger_preview`` re-arms the FrameStart trigger, so no
+        explicit restore is needed.
+        """
+        raw = self.raw
+        if raw is None:
+            return False
+        try:
+            raw.TriggerMode.Value = "Off"
+            try:
+                raw.AcquisitionMode.Value = "Continuous"
+            except genicam.GenericException:
+                pass  # Continuous is the grabbing default; a rejected write is fine
+            return True
+        except genicam.GenericException as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        # Like retrieve(), but the camera free-runs so no software trigger is
+        # fired: just fetch the next frame it pushed. Never raises (mirrors
+        # retrieve): a stop-race or bad grab is one lost frame.
+        raw = self.raw
+        if raw is None or not self._grabbing:
+            return None
+        result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        try:
+            if not result.IsValid() or not result.GrabSucceeded():
+                return None
+            return (result.Array if wants_array() else None, result.TimeStamp)
+        finally:
+            result.Release()
+
     # ------------------------------------------------------------- grabbing
 
     def _start_grabbing(self, strategy) -> None:

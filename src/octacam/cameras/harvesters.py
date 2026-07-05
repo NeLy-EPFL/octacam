@@ -475,6 +475,34 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         # the grab thread so the shared trigger timer never blocks on this camera.
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+
+        Best-effort: a failure returns False so the benchmark skips the free-run
+        ceiling for this camera. A later ``begin_software_trigger_preview`` re-arms
+        the FrameStart trigger, so no explicit restore is needed.
+        """
+        if not self.is_open():
+            return False
+        try:
+            self._set_enum("TriggerMode", "Off")
+            try:
+                self._set_enum("AcquisitionMode", "Continuous")
+            except BackendError:
+                pass
+            return True
+        except BackendError as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(self, timeout_ms: int, wants_array) -> Frame | None:
+        # Free-run: the camera pushes frames continuously, so fetch the next one
+        # without waiting on / firing a software trigger.
+        ia = self._ia
+        if ia is None or not self._grabbing:
+            return None
+        return self._fetch_frame(ia, timeout_ms, wants_array)
+
     # ------------------------------------------------------------- grabbing
 
     def _start(self) -> None:
@@ -520,10 +548,15 @@ class HarvestersBackend(SoftwareTriggerHandoff):
             self._nodemap().TriggerSoftware.execute()
         except Exception:
             return None
+        return self._fetch_frame(ia, timeout_ms, wants_array)
+
+    def _fetch_frame(self, ia, timeout_ms: int, wants_array) -> Frame | None:
         # Poll for a buffer with short native waits and GIL-releasing sleeps
         # (see _FETCH_POLL_S) rather than one long blocking fetch, so the rest
         # of the process (notably the asyncio preview server) is not frozen
-        # while this camera waits for its next triggered frame.
+        # while this camera waits for its next frame. Never raises: a transient
+        # producer error or bad payload is one lost frame (as the grab loop
+        # expects), the same as the fetch timeout.
         deadline = time.monotonic() + timeout_ms / 1000.0
         buffer = None
         while True:

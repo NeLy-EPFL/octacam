@@ -309,6 +309,38 @@ class PycameleonBackend(SoftwareTriggerHandoff):
         # while the grab loop's receive() holds the borrow.
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+
+        Best-effort: a failure returns False so the benchmark skips the free-run
+        ceiling for this camera. A later ``begin_software_trigger_preview`` re-arms
+        the FrameStart trigger, so no explicit restore is needed.
+        """
+        try:
+            self._set_enum("TriggerMode", "Off")
+            try:
+                self._set_enum("AcquisitionMode", "Continuous")
+            except BackendError:
+                pass
+            return True
+        except BackendError as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(self, timeout_ms: int, wants_array) -> Frame | None:
+        # Free-run: the camera streams continuously, so receive the next frame
+        # without waiting on / executing a software trigger.
+        with self._lock:
+            if not self._grabbing or self._receiver is None or self._cam is None:
+                return None
+            try:
+                array = self._cam.receive(self._receiver)
+            except Exception as e:
+                log.debug("receive failed on camera %s: %s", self._serial, e)
+                return None
+        out = np.array(array, copy=True) if wants_array() else None
+        return (out, 0)
+
     # ------------------------------------------------------------- grabbing
 
     def _start_streaming(self) -> None:

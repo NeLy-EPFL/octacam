@@ -851,8 +851,11 @@ class RecordingController:
             self.camera_system.stop_software_trigger()
             self.camera_system.stop()
 
-            def progress(phase: str, detail: str) -> None:
-                self._event("info", f"Benchmark: {phase} {detail}".strip())
+            def progress(p) -> None:
+                # Structured progress for the Benchmark tab's determinate bar
+                # (broadcast newest-only, so intermediate updates collapse). The
+                # bar replaces the per-phase log spam; start/finish still log.
+                self._notify("diagnostics_progress", p.to_dict())
 
             report = diagnostics.diagnose(
                 self.camera_system,

@@ -1725,6 +1725,85 @@ def _bottleneck_label(bottleneck: str) -> str:
     }.get(bottleneck, bottleneck)
 
 
+class _BenchmarkProgressBar:
+    """Determinate benchmark progress bar, animated between phase boundaries.
+
+    The diagnostic only reports progress at phase boundaries (each measurement
+    window blocks for a few seconds), so a background ticker interpolates the bar
+    from the phase's start ``fraction`` toward its ``target`` over the phase's
+    expected ``eta_s`` — the bar keeps moving during a window instead of freezing.
+    Fed by :class:`octacam.diagnostics.Progress` via :meth:`update`.
+    """
+
+    def __init__(self) -> None:
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TaskProgressColumn,
+            TextColumn,
+            TimeElapsedColumn,
+        )
+
+        self._progress = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=_stderr_console(),
+            transient=True,
+        )
+        self._task = self._progress.add_task("Benchmarking…", total=1000)
+        self._lock = threading.Lock()
+        self._shown = 0.0  # last displayed fraction (monotonic, never regresses)
+        self._anchor = 0.0  # bar position when the current goal was set
+        self._goal = 0.0  # fraction to ease toward (monotonic)
+        self._eta = 0.0
+        self._phase_start = time.monotonic()
+        self._stop = threading.Event()
+        self._ticker = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self) -> "_BenchmarkProgressBar":
+        self._progress.start()
+        self._ticker.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._ticker.join(timeout=1.0)
+        self._progress.update(self._task, completed=1000)
+        self._progress.stop()
+
+    def update(self, p) -> None:
+        """Phase-boundary update (an :class:`octacam.diagnostics.Progress`).
+
+        Eases toward the phase target from wherever the bar currently sits — the
+        goal is clamped monotonic and the bar is never snapped back to the phase
+        start, so the many probe updates in the max-fps search keep it moving
+        forward instead of resetting it each time.
+        """
+        with self._lock:
+            self._goal = max(self._goal, p.target)
+            self._anchor = self._shown
+            self._eta = p.eta_s
+            self._phase_start = time.monotonic()
+            desc = p.phase if not p.detail else f"{p.phase} {p.detail}"
+            self._progress.update(
+                self._task, description=desc, completed=self._shown * 1000
+            )
+
+    def _run(self) -> None:
+        while not self._stop.wait(0.05):
+            with self._lock:
+                if self._eta > 0 and self._goal > self._anchor:
+                    ratio = min(1.0, (time.monotonic() - self._phase_start) / self._eta)
+                    frac = self._anchor + (self._goal - self._anchor) * ratio
+                else:
+                    frac = self._goal
+                frac = min(1.0, max(self._shown, frac))  # monotonic, never regress
+                self._shown = frac
+            self._progress.update(self._task, completed=frac * 1000)
+
+
 def _render_benchmark(report) -> None:
     """Render a DiagnosticReport as a human report on stdout (rich)."""
     from rich.console import Console
@@ -1757,20 +1836,27 @@ def _render_benchmark(report) -> None:
         )
 
     if r.ceilings is not None:
-        grab = r.ceilings.grab_min
-        line = f"  acquisition ceiling: {grab:.0f} fps/cam"
+        line = f"  acquisition ceiling: {r.ceilings.grab_min:.0f} fps/cam (software)"
+        if r.ceilings.freerun_fps:
+            line += f"    free-run: {r.ceilings.freerun_min:.0f} fps/cam"
         if r.ceilings.encode_fps:
-            line += f"    encode ceiling: {r.ceilings.encode_min:.0f} fps/cam"
+            line += f"    encode: {r.ceilings.encode_min:.0f} fps/cam"
         else:
             line += "    (encode not measured — null sink)"
         console.print(line)
     if r.measured_max_fps is not None:
+        confidence = "confirmed" if r.max_confirmed else "with safety margin"
         console.print(
-            f"  max achievable (measured): {r.measured_max_fps:.0f} fps/cam "
-            f"(predicted {r.predicted_max_fps:.0f})"
+            f"  stable max (measured): {r.measured_max_fps:.0f} fps/cam "
+            f"({confidence}; predicted {r.predicted_max_fps:.0f})"
         )
     elif r.predicted_max_fps:
         console.print(f"  predicted max: {r.predicted_max_fps:.0f} fps/cam")
+    if r.hardware_max_fps is not None:
+        console.print(
+            "  external/hardware-trigger max (from free-run): "
+            f"{r.hardware_max_fps:.0f} fps/cam"
+        )
 
     console.print()
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
@@ -1834,7 +1920,14 @@ def benchmark(
         bool,
         typer.Option(
             "--find-max/--no-find-max",
-            help="Search for the maximum achievable fps (software trigger only).",
+            help="Search for the maximum *stable* fps (software trigger only).",
+        ),
+    ] = True,
+    freerun: Annotated[
+        bool,
+        typer.Option(
+            "--freerun/--no-freerun",
+            help="Also measure the free-run (external-trigger-equivalent) ceiling.",
         ),
     ] = True,
     sink: Annotated[
@@ -1929,18 +2022,28 @@ def benchmark(
         sink,
     )
 
-    def progress(phase: str, detail: str) -> None:
-        log.info("… %s %s", phase, detail)
-
     try:
-        report = diag.diagnose(
-            system,
-            settings,
-            duration_s=duration,
-            find_max=find_max,
-            sink=sink,
-            progress_cb=progress,
-        )
+        if json_output:
+            # JSON mode: no progress bar (keep stdout clean for the machine reader).
+            report = diag.diagnose(
+                system,
+                settings,
+                duration_s=duration,
+                find_max=find_max,
+                measure_freerun=freerun,
+                sink=sink,
+            )
+        else:
+            with _BenchmarkProgressBar() as bar:
+                report = diag.diagnose(
+                    system,
+                    settings,
+                    duration_s=duration,
+                    find_max=find_max,
+                    measure_freerun=freerun,
+                    sink=sink,
+                    progress_cb=bar.update,
+                )
     finally:
         system.close()
 

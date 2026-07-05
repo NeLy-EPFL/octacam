@@ -35,6 +35,9 @@ export class BenchmarkTab {
     this.button = document.getElementById("bench-run");
     this.status = document.getElementById("bench-status");
     this.results = document.getElementById("bench-results");
+    this.progress = document.getElementById("bench-progress");
+    this.progressLabel = document.getElementById("bench-progress-label");
+    this.progressFill = document.getElementById("bench-progress-fill");
 
     this.button.addEventListener("click", () => this._onButton());
     this.updateControls();
@@ -59,11 +62,53 @@ export class BenchmarkTab {
     if (running !== this.running) {
       this.running = running;
       if (running && !this.results.dataset.forThisRun) {
-        this.status.textContent = "Benchmark running… (see the log below for progress)";
+        this.status.textContent = "Benchmark running…";
         this.status.className = "";
+        this._showProgress();
       }
+      if (!running) this._hideProgress();
       this.updateControls();
     }
+  }
+
+  _showProgress() {
+    this.progress.hidden = false;
+    this.progressLabel.textContent = "Starting…";
+    this._progressGoal = 0;
+    const fill = this.progressFill;
+    fill.style.transition = "none";
+    fill.style.width = "0%";
+    void fill.offsetWidth; // commit 0% so the first animation eases up from empty
+  }
+
+  _hideProgress() {
+    this.progress.hidden = true;
+  }
+
+  // A structured progress update (msg.type === "diagnostics_progress"). Animates
+  // the bar from its CURRENT width toward the phase's end target over the phase's
+  // expected duration. The goal is clamped monotonic and the animation is never
+  // reset to the phase start, so the bar keeps moving forward — repeated updates
+  // within a phase (the max-fps probes) no longer snap it backward.
+  applyProgress(msg) {
+    if (this.results.dataset.forThisRun) return; // a report is already shown
+    this.progress.hidden = false;
+    const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+    const goal = Math.max(
+      this._progressGoal || 0,
+      clamp(msg.target != null ? msg.target : msg.fraction)
+    );
+    this._progressGoal = goal;
+    if (msg.phase === "Done") {
+      this.progressLabel.textContent = "Finishing…";
+    } else {
+      const label = msg.detail ? `${msg.phase} — ${msg.detail}` : msg.phase;
+      this.progressLabel.textContent = `${label} · ${Math.round(goal * 100)}%`;
+    }
+    const eta = Math.max(0, Number(msg.eta_s) || 0);
+    const fill = this.progressFill;
+    fill.style.transition = `width ${eta > 0 ? eta : 0.3}s linear`;
+    fill.style.width = `${goal * 100}%`;
   }
 
   updateControls() {
@@ -103,9 +148,11 @@ export class BenchmarkTab {
     delete this.results.dataset.forThisRun;
     this.status.textContent = "Starting benchmark…";
     this.status.className = "";
+    this._showProgress();
     const r = await api("POST", "/api/diagnostics/run", body);
     if (r.status !== 202) {
       this.status.textContent = "";
+      this._hideProgress();
       this.notify(
         "error",
         r.data?.message || `Benchmark could not start (HTTP ${r.status})`
@@ -116,6 +163,7 @@ export class BenchmarkTab {
   // A finished report pushed over the WebSocket (msg.type === "diagnostics").
   applyReport(rep) {
     this.status.textContent = "";
+    this._hideProgress();
     this.results.dataset.forThisRun = "1";
     this.results.replaceChildren(...this._render(rep));
   }
@@ -139,24 +187,38 @@ export class BenchmarkTab {
     // Ceilings + max.
     const summary = el("div", "bench-summary");
     if (rep.ceilings) {
-      let line = `Acquisition ceiling: ${fmt(rep.ceilings.grab_min)} fps/cam`;
+      let line = `Acquisition ceiling: ${fmt(rep.ceilings.grab_min)} fps/cam (software)`;
+      if (rep.ceilings.freerun_min != null) {
+        line += ` · free-run ${fmt(rep.ceilings.freerun_min)} fps/cam`;
+      }
       if (rep.ceilings.encode_min != null) {
-        line += ` · Encode ceiling: ${fmt(rep.ceilings.encode_min)} fps/cam`;
+        line += ` · encode ${fmt(rep.ceilings.encode_min)} fps/cam`;
       }
       summary.append(el("div", null, line));
     }
     if (rep.measured_max_fps != null) {
+      const conf = rep.max_confirmed ? "confirmed" : "safety margin";
       summary.append(
         el(
           "div",
           null,
-          `Max achievable (measured): ${fmt(rep.measured_max_fps)} fps/cam ` +
-            `(predicted ${fmt(rep.predicted_max_fps)})`
+          `Stable max (measured): ${fmt(rep.measured_max_fps)} fps/cam ` +
+            `(${conf}; predicted ${fmt(rep.predicted_max_fps)})`
         )
       );
     } else if (rep.predicted_max_fps != null) {
       summary.append(
         el("div", null, `Predicted max: ${fmt(rep.predicted_max_fps)} fps/cam`)
+      );
+    }
+    if (rep.hardware_max_fps != null) {
+      summary.append(
+        el(
+          "div",
+          null,
+          `External/hardware-trigger max (free-run): ` +
+            `${fmt(rep.hardware_max_fps)} fps/cam`
+        )
       );
     }
     nodes.push(summary);

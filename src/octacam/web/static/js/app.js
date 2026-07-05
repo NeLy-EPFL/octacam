@@ -328,6 +328,9 @@ async function main() {
       case "diagnostics":
         benchmark.applyReport(msg);
         break;
+      case "diagnostics_progress":
+        benchmark.applyProgress(msg);
+        break;
       case "camera_params":
         cameraTab?.applyParams(msg);
         break;

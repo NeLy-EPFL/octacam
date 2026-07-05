@@ -150,6 +150,24 @@ class FakeBackend(SoftwareTriggerHandoff):
     def trigger_once(self) -> None:
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        # The fake has no exposure pipeline, so free-run is simply "produce a
+        # frame per fetch with no trigger" — always supported.
+        return True
+
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        if not self._grabbing:
+            return None
+        with self._cond:
+            self._frame_index += 1
+            index = self._frame_index
+            width = int(self._nodes["width"]["value"])
+            height = int(self._nodes["height"]["value"])
+        array = _render(width, height, index) if wants_array() else None
+        return (array, time.time_ns())
+
     # ------------------------------------------------------------- grabbing
 
     def start_grab_preview(self) -> None:

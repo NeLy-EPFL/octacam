@@ -204,7 +204,9 @@ class _Spinnaker:
         """Fetch a node handle by name; raise BackendError if it is absent."""
         h = ctypes.c_void_p()
         _chk(
-            self._lib.spinNodeMapGetNode(nodemap, name.encode("ascii"), ctypes.byref(h)),
+            self._lib.spinNodeMapGetNode(
+                nodemap, name.encode("ascii"), ctypes.byref(h)
+            ),
             f"GetNode {name}",
         )
         if not h.value:
@@ -230,11 +232,19 @@ class _Spinnaker:
 
     def _opt_i64(self, fn, handle) -> int | None:
         val = ctypes.c_int64()
-        return val.value if fn(handle, ctypes.byref(val)) == SPINNAKER_ERR_SUCCESS else None
+        return (
+            val.value
+            if fn(handle, ctypes.byref(val)) == SPINNAKER_ERR_SUCCESS
+            else None
+        )
 
     def _opt_f64(self, fn, handle) -> float | None:
         val = ctypes.c_double()
-        return val.value if fn(handle, ctypes.byref(val)) == SPINNAKER_ERR_SUCCESS else None
+        return (
+            val.value
+            if fn(handle, ctypes.byref(val)) == SPINNAKER_ERR_SUCCESS
+            else None
+        )
 
     # ------------------------------------------------------- system / cameras
     def get_system(self):
@@ -247,7 +257,10 @@ class _Spinnaker:
 
     def create_camera_list(self):
         h = ctypes.c_void_p()
-        _chk(self._lib.spinCameraListCreateEmpty(ctypes.byref(h)), "spinCameraListCreateEmpty")
+        _chk(
+            self._lib.spinCameraListCreateEmpty(ctypes.byref(h)),
+            "spinCameraListCreateEmpty",
+        )
         return h
 
     def system_get_cameras(self, hsystem, hcamlist) -> None:
@@ -255,13 +268,18 @@ class _Spinnaker:
 
     def camera_list_size(self, hcamlist) -> int:
         n = ctypes.c_size_t()
-        _chk(self._lib.spinCameraListGetSize(hcamlist, ctypes.byref(n)), "spinCameraListGetSize")
+        _chk(
+            self._lib.spinCameraListGetSize(hcamlist, ctypes.byref(n)),
+            "spinCameraListGetSize",
+        )
         return int(n.value)
 
     def camera_list_get(self, hcamlist, index: int):
         h = ctypes.c_void_p()
         _chk(
-            self._lib.spinCameraListGet(hcamlist, ctypes.c_size_t(index), ctypes.byref(h)),
+            self._lib.spinCameraListGet(
+                hcamlist, ctypes.c_size_t(index), ctypes.byref(h)
+            ),
             "spinCameraListGet",
         )
         return h
@@ -287,7 +305,10 @@ class _Spinnaker:
             pass
         buf = ctypes.create_string_buffer(_MAX_BUFF_LEN)
         n = ctypes.c_size_t(_MAX_BUFF_LEN)
-        if self._lib.spinCameraGetDeviceID(hcam, buf, ctypes.byref(n)) == SPINNAKER_ERR_SUCCESS:
+        if (
+            self._lib.spinCameraGetDeviceID(hcam, buf, ctypes.byref(n))
+            == SPINNAKER_ERR_SUCCESS
+        ):
             return buf.value.decode("ascii", "replace")
         return ""
 
@@ -332,7 +353,9 @@ class _Spinnaker:
         writable = self._writable(node)
         if is_int:
             value = ctypes.c_int64()
-            _chk(self._lib.spinIntegerGetValue(node, ctypes.byref(value)), f"read {name}")
+            _chk(
+                self._lib.spinIntegerGetValue(node, ctypes.byref(value)), f"read {name}"
+            )
             return NodeInfo(
                 value=int(value.value),
                 min=self._opt_i64(self._lib.spinIntegerGetMin, node),
@@ -357,9 +380,15 @@ class _Spinnaker:
         if not self._writable(node):
             raise BackendError(f"node {name} is not writable")
         if is_int:
-            _chk(self._lib.spinIntegerSetValue(node, ctypes.c_int64(int(value))), f"set {name}")
+            _chk(
+                self._lib.spinIntegerSetValue(node, ctypes.c_int64(int(value))),
+                f"set {name}",
+            )
         else:
-            _chk(self._lib.spinFloatSetValue(node, ctypes.c_double(float(value))), f"set {name}")
+            _chk(
+                self._lib.spinFloatSetValue(node, ctypes.c_double(float(value))),
+                f"set {name}",
+            )
 
     def read_string(self, nodemap, name: str) -> str | None:
         try:
@@ -437,13 +466,19 @@ class _Spinnaker:
         b = ctypes.c_uint8(0)
         # Treat an unreadable status as incomplete (skip the frame) rather than
         # trusting a garbage buffer.
-        if self._lib.spinImageIsIncomplete(himage, ctypes.byref(b)) != SPINNAKER_ERR_SUCCESS:
+        if (
+            self._lib.spinImageIsIncomplete(himage, ctypes.byref(b))
+            != SPINNAKER_ERR_SUCCESS
+        ):
             return True
         return bool(b.value)
 
     def image_timestamp(self, himage) -> int:
         v = ctypes.c_uint64()
-        if self._lib.spinImageGetTimeStamp(himage, ctypes.byref(v)) == SPINNAKER_ERR_SUCCESS:
+        if (
+            self._lib.spinImageGetTimeStamp(himage, ctypes.byref(v))
+            == SPINNAKER_ERR_SUCCESS
+        ):
             return int(v.value)
         return 0
 
@@ -452,7 +487,9 @@ class _Spinnaker:
         w = ctypes.c_size_t()
         h = ctypes.c_size_t()
         _chk(self._lib.spinImageGetWidth(himage, ctypes.byref(w)), "spinImageGetWidth")
-        _chk(self._lib.spinImageGetHeight(himage, ctypes.byref(h)), "spinImageGetHeight")
+        _chk(
+            self._lib.spinImageGetHeight(himage, ctypes.byref(h)), "spinImageGetHeight"
+        )
         width, height = int(w.value), int(h.value)
         data = ctypes.c_void_p()
         _chk(self._lib.spinImageGetData(himage, ctypes.byref(data)), "spinImageGetData")
@@ -461,7 +498,10 @@ class _Spinnaker:
         # Honour the row stride so a padded buffer (stride > width) reshapes
         # correctly; Mono8 from a USB3 FLIR is usually unpadded (stride == width).
         stride = ctypes.c_size_t(0)
-        ok = self._lib.spinImageGetStride(himage, ctypes.byref(stride)) == SPINNAKER_ERR_SUCCESS
+        ok = (
+            self._lib.spinImageGetStride(himage, ctypes.byref(stride))
+            == SPINNAKER_ERR_SUCCESS
+        )
         row = stride.value if (ok and stride.value >= width) else width
         buffer = (ctypes.c_ubyte * (row * height)).from_address(data.value)
         # as_array views the SDK buffer in place; .copy() owns the pixels before
@@ -576,7 +616,9 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         if info.max is None or not info.writable or info.value >= info.max:
             return
         try:
-            spin.write_number(self._nodemap, "DeviceLinkThroughputLimit", info.max, True)
+            spin.write_number(
+                self._nodemap, "DeviceLinkThroughputLimit", info.max, True
+            )
             log.debug(
                 "Camera %s: DeviceLinkThroughputLimit %d -> %d (max)",
                 self._serial,
@@ -652,12 +694,16 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
     def read_node(self, name: str) -> NodeInfo:
         if self._nodemap is None:
             raise BackendError("camera is not open")
-        return _spin().read_number(self._nodemap, PARAM_NODES[name], name in _INT_PARAMS)
+        return _spin().read_number(
+            self._nodemap, PARAM_NODES[name], name in _INT_PARAMS
+        )
 
     def write_node(self, name: str, value: float) -> None:
         if self._nodemap is None:
             raise BackendError("camera is not open")
-        _spin().write_number(self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS)
+        _spin().write_number(
+            self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS
+        )
 
     def load_params(self, config_str: str) -> None:
         if config_str:
@@ -746,6 +792,32 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         # the grab thread so the shared trigger timer never blocks on this camera.
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+
+        Best-effort: a failure returns False so the benchmark skips the free-run
+        ceiling for this camera. A later ``begin_software_trigger_preview`` re-arms
+        the FrameStart trigger, so no explicit restore is needed.
+        """
+        try:
+            self._set_enum("TriggerMode", "Off")
+            try:
+                self._set_enum("AcquisitionMode", "Continuous")
+            except BackendError:
+                pass
+            return True
+        except BackendError as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(self, timeout_ms: int, wants_array) -> Frame | None:
+        # Free-run: the camera acquires continuously, so fetch the next image
+        # without waiting on / firing a software trigger.
+        cam = self._cam
+        if cam is None or not self._grabbing:
+            return None
+        return self._fetch_image(cam, timeout_ms, wants_array)
+
     # ------------------------------------------------------------- grabbing
 
     def _begin_acquisition(self, buffer_mode: str) -> None:
@@ -759,7 +831,9 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         # for preview (≈ LatestImageOnly), OldestFirst for recording (≈ OneByOne).
         if self._stream_nodemap is not None:
             try:
-                spin.set_enum(self._stream_nodemap, "StreamBufferHandlingMode", buffer_mode)
+                spin.set_enum(
+                    self._stream_nodemap, "StreamBufferHandlingMode", buffer_mode
+                )
             except BackendError as e:
                 log.debug(
                     "Could not set buffer mode %s on camera %s: %s",
@@ -815,6 +889,12 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             spin.execute_command(self._nodemap, "TriggerSoftware")
         except BackendError:
             return None
+        return self._fetch_image(cam, timeout_ms, wants_array)
+
+    def _fetch_image(self, cam, timeout_ms: int, wants_array) -> Frame | None:
+        # Fetch exactly one image; never raises (a timeout, incomplete or bad
+        # frame is one lost frame, as the grab loop expects).
+        spin = _spin()
         image = spin.get_next_image(cam, timeout_ms)  # None on timeout — GIL-free
         if image is None:
             return None

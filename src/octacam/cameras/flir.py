@@ -324,6 +324,32 @@ class FlirBackend(SoftwareTriggerHandoff):
         # the grab thread so the shared trigger timer never blocks on this camera.
         self._bump_trigger()
 
+    def begin_freerun(self) -> bool:
+        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+
+        Best-effort: a failure returns False so the benchmark skips the free-run
+        ceiling for this camera. A later ``begin_software_trigger_preview`` re-arms
+        the FrameStart trigger, so no explicit restore is needed.
+        """
+        try:
+            self._set_enum("TriggerMode", "Off")
+            try:
+                self._set_enum("AcquisitionMode", "Continuous")
+            except BackendError:
+                pass
+            return True
+        except BackendError as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(self, timeout_ms, wants_array) -> Frame | None:
+        # Free-run: the camera acquires continuously, so fetch the next image
+        # without waiting on / firing a software trigger.
+        cam = self._cam
+        if cam is None or not self._grabbing:
+            return None
+        return self._fetch_image(cam, timeout_ms, wants_array)
+
     # ------------------------------------------------------------- grabbing
 
     def _begin_acquisition(self, buffer_mode: str) -> None:
@@ -381,6 +407,12 @@ class FlirBackend(SoftwareTriggerHandoff):
             spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
         except spin.SpinnakerException:
             return None
+        return self._fetch_image(cam, timeout_ms, wants_array)
+
+    def _fetch_image(self, cam, timeout_ms, wants_array) -> Frame | None:
+        # Fetch exactly one image; never raises (a timeout or incomplete frame is
+        # one lost frame, as the grab loop expects).
+        spin = _spin()
         try:
             image = cam.GetNextImage(timeout_ms)
         except spin.SpinnakerException:

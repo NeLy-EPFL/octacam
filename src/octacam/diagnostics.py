@@ -27,11 +27,22 @@ The per-camera pipeline ceiling is ``min(grab, encode)``; the synchronized syste
 ceiling is the slowest camera's, because one timer triggers every camera at the
 same rate. The bottleneck is classified from where the target lands relative to
 those ceilings (see :func:`_classify`), and :func:`find_max_fps` bisects short
-end-to-end trials to confirm the empirical maximum.
+end-to-end trials to find the empirical maximum.
 
-Only the **software-trigger** path can be swept for a maximum: an
-external-trigger rig runs at whatever rate the hardware source clocks, so the
-engine measures what actually arrives and skips the ceiling search.
+The max search targets a **stable** rate, not the marginal pass/fail edge a plain
+bisection converges to: it uses a stricter bar (a tighter drop budget plus a
+queue-saturation guard — a queue climbing toward its bound is the earliest sign
+the producer is outrunning the encoder) and confirms the candidate over a longer
+window before reporting it (:attr:`TrialOutcome.stable_passed`).
+
+Two acquisition ceilings are measured. The **software-trigger** ceiling
+(:func:`measure_grab_ceiling`) runs exposure and transfer serially. The
+**free-run** ceiling (:func:`measure_freerun_ceiling`) drives the camera in
+continuous mode, which overlaps exposure with readout exactly as an external
+hardware trigger does — so it is the honest acquisition ceiling for a
+hardware-triggered rig, measurable on the bench with no external wiring. The
+software max-fps *sweep* is still skipped for an external rig (its production rate
+is set by the hardware source), but the free-run ceiling gives it a hardware max.
 """
 
 from __future__ import annotations
@@ -68,14 +79,125 @@ WARMUP_S = 0.5  # discarded settle time before every measurement window
 ACHIEVE_FRACTION = 0.97
 DROP_THRESHOLD = 0.01
 
+# Stricter bars for the *stable* max-fps search (see TrialOutcome.stable_passed).
+# A bisection converges to the pass/fail boundary — the marginal, least
+# reproducible rate — so the search uses tighter criteria and a longer
+# confirmation trial to report a rate that actually holds on a re-run:
+#  - a tenth of the "achievable" drop budget (0.1% vs 1%), and
+#  - the writer queue must stay clear of saturation: a queue climbing toward its
+#    bound is the *earliest* sign the producer is outrunning the encoder, and it
+#    shows up before drops do, so a short probe that would otherwise "pass" is
+#    rejected while it still has headroom.
+STABLE_DROP_THRESHOLD = 0.001
+QUEUE_SATURATION_FRACTION = 0.75  # reject once max depth reaches 75% of the bound
+# If the bisection's short-probe candidate fails the longer confirmation window,
+# report it reduced by this margin rather than the unconfirmed edge.
+STABILITY_MARGIN = 0.05
+# Bisection depth for the max-fps search (also used to size the progress plan).
+FIND_MAX_ITERATIONS = 4
+
 # Bottleneck labels (also the vocabulary the GUI/report render).
 ACQUISITION = "acquisition"
 ENCODE = "encode"
 HOST = "host"
 NONE = "none"
 
-# Progress phases reported through the optional callback.
-ProgressCallback = Callable[[str, str], None]
+# Progress phase labels — shared between the plan (which weights them by expected
+# wall-clock) and the emit() calls, so a determinate progress bar can be driven
+# from the fraction each Progress carries. Matched by exact string in _ProgressPlan.
+PHASE_ACQUIRE = "Measuring acquisition ceiling"
+PHASE_FREERUN = "Measuring free-run ceiling"
+PHASE_ENCODE = "Measuring encode ceiling"
+PHASE_TRIAL = "Running end-to-end trial"
+PHASE_MAX = "Searching for the stable max fps"
+
+
+@dataclass
+class Progress:
+    """One progress update: which phase, and how far through the whole run.
+
+    ``fraction`` is the overall completion at the *start* of this phase and
+    ``target`` at its *end*; a front-end animates the bar from ``fraction`` toward
+    ``target`` over ``eta_s`` seconds (the phase's expected duration), giving a
+    smooth determinate bar even though updates only arrive at phase boundaries.
+    """
+
+    phase: str
+    detail: str
+    fraction: float
+    target: float
+    eta_s: float
+
+    def to_dict(self) -> dict:
+        return {
+            "phase": self.phase,
+            "detail": self.detail,
+            "fraction": round(self.fraction, 4),
+            "target": round(self.target, 4),
+            "eta_s": round(self.eta_s, 3),
+        }
+
+
+ProgressCallback = Callable[["Progress"], None]
+
+
+class _ProgressPlan:
+    """Weighted phase plan that turns a phase label into a :class:`Progress`.
+
+    Built up front from the phases that will actually run (encode/free-run/max are
+    conditional) and their expected wall-clock weights. ``step`` advances the
+    cursor when the label changes. A phase that only reports once spans its whole
+    weight in a single emit. A phase that reports many times (the max-fps search
+    probes) passes ``advance=True``: each emit then eases *forward* within the
+    phase span — closing a fixed fraction of the remaining gap — so the bar keeps
+    creeping ahead across probes and never snaps back to the phase start, however
+    many probes the search happens to run.
+    """
+
+    _SUB_ADVANCE = 0.5  # an advancing re-emit closes half the remaining gap
+
+    def __init__(self, phases: list[tuple[str, float]]):
+        self._phases = phases
+        self._total = sum(w for _, w in phases) or 1.0
+        self._idx = -1
+        self._before = 0.0
+        self._within = 0.0  # progress within the current phase span, in [0, 1)
+
+    def step(
+        self,
+        label: str,
+        detail: str,
+        *,
+        advance: bool = False,
+        eta: float | None = None,
+    ) -> Progress:
+        if self._idx < 0 or self._phases[self._idx][0] != label:
+            if self._idx >= 0:
+                self._before += self._phases[self._idx][1]
+            self._idx += 1
+            # Tolerate a label that skips ahead (a conditional phase not run).
+            while self._idx < len(self._phases) and self._phases[self._idx][0] != label:
+                self._before += self._phases[self._idx][1]
+                self._idx += 1
+            self._within = 0.0
+        if self._idx >= len(self._phases):
+            return Progress(label, detail, 1.0, 1.0, 0.0)
+        weight = self._phases[self._idx][1]
+        start = self._before / self._total
+        span = weight / self._total
+        eta_s = eta if eta is not None else weight
+        if advance:
+            before = self._within
+            self._within = before + (1.0 - before) * self._SUB_ADVANCE
+            return Progress(
+                label, detail, start + span * before, start + span * self._within, eta_s
+            )
+        return Progress(label, detail, start + span * self._within, start + span, eta_s)
+
+    def done(self) -> Progress:
+        # A short eta so the final sliver (a phase can finish a touch under its
+        # target) eases to 100% instead of snapping.
+        return Progress("Done", "", 1.0, 1.0, 0.3)
 
 
 # ---------------------------------------------------------------------------
@@ -162,10 +284,18 @@ class CameraTrial:
 
 @dataclass
 class Ceilings:
-    """Isolated per-camera acquisition and encode ceilings (fps)."""
+    """Isolated per-camera acquisition and encode ceilings (fps).
+
+    ``grab_fps`` is the *software*-triggered acquisition ceiling (exposure and
+    transfer run serially). ``freerun_fps`` is the continuous / free-run ceiling
+    where the camera overlaps exposure with readout exactly as an external
+    hardware trigger does, so it is the honest acquisition ceiling for a
+    hardware-triggered rig — measurable on the bench with no external wiring.
+    """
 
     grab_fps: dict[str, float]
     encode_fps: dict[str, float]
+    freerun_fps: dict[str, float] = field(default_factory=dict)
 
     @property
     def grab_min(self) -> float:
@@ -175,12 +305,18 @@ class Ceilings:
     def encode_min(self) -> float:
         return min(self.encode_fps.values()) if self.encode_fps else float("inf")
 
+    @property
+    def freerun_min(self) -> float:
+        return min(self.freerun_fps.values()) if self.freerun_fps else float("inf")
+
     def to_dict(self) -> dict:
         return {
             "grab_fps": {s: _finite(v) for s, v in self.grab_fps.items()},
             "encode_fps": {s: _finite(v) for s, v in self.encode_fps.items()},
+            "freerun_fps": {s: _finite(v) for s, v in self.freerun_fps.items()},
             "grab_min": _finite(self.grab_min),
             "encode_min": _finite(self.encode_min),
+            "freerun_min": _finite(self.freerun_min),
         }
 
 
@@ -202,7 +338,12 @@ class DiagnosticReport:
     bottleneck: str
     ceilings: Ceilings | None = None
     predicted_max_fps: float = 0.0
-    measured_max_fps: float | None = None
+    measured_max_fps: float | None = None  # STABLE software-trigger max (confirmed)
+    max_confirmed: bool = False  # did measured_max hold the longer confirmation trial
+    freerun_max_fps: float | None = None  # free-run acquisition ceiling (slowest cam)
+    hardware_max_fps: float | None = (
+        None  # external/free-run system max = min(freerun, encode)
+    )
     recommendations: list[str] = field(default_factory=list)
     jitter_p99_ms: float | None = None
     cpu_percent: float | None = None
@@ -227,6 +368,17 @@ class DiagnosticReport:
             "measured_max_fps": (
                 _finite(self.measured_max_fps)
                 if self.measured_max_fps is not None
+                else None
+            ),
+            "max_confirmed": self.max_confirmed,
+            "freerun_max_fps": (
+                _finite(self.freerun_max_fps)
+                if self.freerun_max_fps is not None
+                else None
+            ),
+            "hardware_max_fps": (
+                _finite(self.hardware_max_fps)
+                if self.hardware_max_fps is not None
                 else None
             ),
             "recommendations": self.recommendations,
@@ -435,6 +587,87 @@ def measure_grab_ceiling(
 
 
 # ---------------------------------------------------------------------------
+# Scenario 1b: free-run ceiling (external-trigger-equivalent acquisition ceiling)
+# ---------------------------------------------------------------------------
+
+
+def measure_freerun_ceiling(
+    cameras: list[Camera],
+    duration_s: float,
+    warmup_s: float = WARMUP_S,
+    cancel: threading.Event | None = None,
+) -> tuple[dict[str, float], list[str]]:
+    """Max continuous / free-run acquisition fps per camera (no software trigger).
+
+    Puts each camera into free-run (``TriggerMode Off``, continuous) via the
+    backend's optional ``begin_freerun`` seam and pulls frames as fast as the
+    camera pushes them with ``retrieve_freerun`` — no per-frame trigger. Because
+    free-run overlaps exposure with readout the same way an external hardware
+    trigger does, the delivered rate is the honest acquisition ceiling for a
+    hardware-triggered rig, measured with no external wiring.
+
+    Returns ``({serial: fps}, notes)``. A camera whose backend does not support
+    free-run (or fails to arm it) is skipped and named in ``notes`` rather than
+    failing the whole benchmark; the record/preview paths are never touched.
+    """
+    results: dict[str, tuple[int, float]] = {}
+    unsupported: list[str] = []
+    stop = threading.Event()
+
+    def loop(camera: Camera) -> None:
+        backend = camera.backend
+        begin = getattr(backend, "begin_freerun", None)
+        fetch = getattr(backend, "retrieve_freerun", None)
+        if begin is None or fetch is None:
+            unsupported.append(camera.name)
+            return
+        try:
+            if not begin():
+                unsupported.append(camera.name)
+                return
+        except Exception:
+            log.debug("free-run arm failed on %s", camera.serial_number, exc_info=True)
+            unsupported.append(camera.name)
+            return
+        backend.start_grab_record()  # all-frames buffering, like a recording
+        try:
+            warm_deadline = time.perf_counter() + warmup_s
+            while time.perf_counter() < warm_deadline and not stop.is_set():
+                fetch(GRAB_TIMEOUT_MS, _wants_array)
+            grabbed = 0
+            t0 = time.perf_counter()
+            while not stop.is_set():
+                if fetch(GRAB_TIMEOUT_MS, _wants_array) is not None:
+                    grabbed += 1
+            elapsed = time.perf_counter() - t0
+            results[camera.serial_number] = (grabbed, elapsed)
+        finally:
+            backend.stop_grab()
+
+    threads = [
+        threading.Thread(target=loop, args=(c,), name=f"freerun-{c.serial_number}")
+        for c in cameras
+    ]
+    for t in threads:
+        t.start()
+    _wait(warmup_s + duration_s, cancel)
+    stop.set()
+    for t in threads:
+        t.join()
+    fps = {
+        serial: (grabbed / elapsed if elapsed > 0 else 0.0)
+        for serial, (grabbed, elapsed) in results.items()
+    }
+    notes: list[str] = []
+    if unsupported:
+        notes.append(
+            "Free-run (external-trigger-equivalent) ceiling not measured for "
+            f"{', '.join(unsupported)}: this backend does not support free-run."
+        )
+    return fps, notes
+
+
+# ---------------------------------------------------------------------------
 # Scenario 2: encode ceiling (max encoder drain rate, synthetic frames)
 # ---------------------------------------------------------------------------
 
@@ -533,12 +766,35 @@ class TrialOutcome:
         return max((t.drop_rate for t in self.trials), default=0.0)
 
     @property
+    def max_queue_depth(self) -> int:
+        return max((t.max_queue_depth for t in self.trials), default=0)
+
+    @property
     def passed(self) -> bool:
+        """Loose 'achievable' bar: enough fps delivered, drops under 1%."""
         if not self.trials:
             return False
         return all(
             t.achieved_fps >= t.target_fps * ACHIEVE_FRACTION
             and t.drop_rate <= DROP_THRESHOLD
+            for t in self.trials
+        )
+
+    @property
+    def stable_passed(self) -> bool:
+        """Strict bar for the max-fps search: passes *and* leaves headroom.
+
+        Adds a tighter drop budget and a queue-saturation guard on top of
+        :attr:`passed`, so the search converges on a rate that is sustainable
+        rather than one balanced on the pass/fail edge. The queue guard is inert
+        for the null sink (no encoder → the queue never fills), which is correct:
+        an acquisition-only run has nothing to back up.
+        """
+        if not self.passed:
+            return False
+        guard = WRITER_QUEUE_SIZE * QUEUE_SATURATION_FRACTION
+        return all(
+            t.drop_rate <= STABLE_DROP_THRESHOLD and t.max_queue_depth < guard
             for t in self.trials
         )
 
@@ -730,6 +986,27 @@ def find_max_fps(
     return best
 
 
+def _reconcile_stable_max(
+    candidate: float, confirm: TrialOutcome, lo: float, ceiling_cap: float
+) -> tuple[float, bool]:
+    """Reported stable max (fps) + confirmed flag from the winning target's trial.
+
+    The search returns the highest *target* fps that still passed, but a trial
+    passes at :data:`ACHIEVE_FRACTION` (97%) of its target — so the winning target
+    can sit a few percent above the rate the pipeline actually delivered, which
+    would read as a "stable max" *above* the acquisition ceiling (you cannot record
+    faster than you acquire). Report the **sustained achieved** rate instead, and
+    cap it at the isolated ceilings (``ceiling_cap = min(grab, encode)``): a rate
+    neither the camera nor the encoder can sustain in isolation is not a stable
+    maximum. This keeps the reported max internally consistent with the ceiling
+    line. Returns ``(fps, confirmed)``.
+    """
+    if confirm.stable_passed:
+        return min(candidate, confirm.achieved_fps, ceiling_cap), True
+    backed_off = max(lo, candidate * (1 - STABILITY_MARGIN))
+    return min(backed_off, confirm.achieved_fps, ceiling_cap), False
+
+
 # ---------------------------------------------------------------------------
 # Verdict
 # ---------------------------------------------------------------------------
@@ -761,12 +1038,20 @@ def _classify(
         bottleneck = NONE
 
     if bottleneck == ACQUISITION:
-        recs += [
+        rec = (
             "Acquisition-bound: the camera cannot deliver frames fast enough "
-            f"(≈{grab_min:.0f} fps ceiling). Shorten the exposure, raise "
-            "DeviceLinkThroughputLimit, shrink the ROI, or use an external "
-            "hardware trigger (which overlaps exposure with transfer).",
-        ]
+            f"(≈{grab_min:.0f} fps software-trigger ceiling). Shorten the exposure, "
+            "raise DeviceLinkThroughputLimit, shrink the ROI, or use an external "
+            "hardware trigger (which overlaps exposure with transfer)."
+        )
+        freerun_min = ceilings.freerun_min
+        if ceilings.freerun_fps and freerun_min > grab_min * 1.05:
+            rec += (
+                f" The measured free-run ceiling is ≈{freerun_min:.0f} fps/cam — an "
+                "external hardware trigger would reach roughly that, since it "
+                "overlaps exposure with transfer just like free-run does."
+            )
+        recs.append(rec)
     elif bottleneck == ENCODE:
         recs += [
             "Encode-bound: the encoder cannot keep up "
@@ -803,6 +1088,7 @@ def diagnose(
     target_fps: float | None = None,
     duration_s: float = 5.0,
     find_max: bool = True,
+    measure_freerun: bool = True,
     sink: str = "config",
     progress_cb: ProgressCallback | None = None,
     cancel: threading.Event | None = None,
@@ -813,8 +1099,11 @@ def diagnose(
     end-to-end and encode-ceiling scenarios write through: ``"config"`` uses the
     settings' real video format (the truthful encode cost), ``"null"`` discards
     frames (isolates acquisition + host overhead, skipping the encoder). ``find_max``
-    bisects for the empirical maximum (software trigger only). ``progress_cb`` is
-    called ``(phase, detail)`` at each stage so a CLI/GUI can show progress.
+    bisects for the *stable* software-trigger maximum (confirmed over a longer
+    window). ``measure_freerun`` also measures the free-run acquisition ceiling —
+    the external-hardware-trigger-equivalent rate — with no external wiring.
+    ``progress_cb`` receives a :class:`Progress` at each stage so a CLI/GUI can
+    show a determinate progress bar.
 
     The cameras must be open with their parameters loaded; the caller owns their
     lifecycle (this never opens or closes the system, and leaves every backend
@@ -825,13 +1114,37 @@ def diagnose(
     record_form = settings.record_form
     external = settings.trigger_source == "external"
 
-    def emit(phase: str, detail: str = "") -> None:
-        log.info("benchmark: %s %s", phase, detail)
-        if progress_cb is not None:
-            progress_cb(phase, detail)
-
     video_format = None if sink == "null" else settings.video_format()
     sizes = {c.serial_number: _frame_size(c, record_form) for c in cameras}
+
+    run_freerun = measure_freerun
+    run_encode = video_format is not None
+    run_search = find_max and not external
+
+    # Weighted progress plan: each phase's expected wall-clock drives a determinate
+    # bar. The max search is sized for its worst case (a full bisection + the
+    # confirmation trial); it completes the bar early if it converges sooner.
+    window = WARMUP_S + duration_s
+    probe_dur = max(1.5, duration_s / 2.0)
+    phases: list[tuple[str, float]] = [(PHASE_ACQUIRE, window)]
+    if run_freerun:
+        phases.append((PHASE_FREERUN, window))
+    if run_encode:
+        phases.append((PHASE_ENCODE, window))
+    phases.append((PHASE_TRIAL, window))
+    if run_search:
+        phases.append(
+            (PHASE_MAX, (1 + FIND_MAX_ITERATIONS) * (WARMUP_S + probe_dur) + window)
+        )
+    plan = _ProgressPlan(phases)
+
+    def emit(
+        phase: str, detail: str = "", *, advance: bool = False, eta: float | None = None
+    ) -> None:
+        p = plan.step(phase, detail, advance=advance, eta=eta)
+        log.debug("benchmark: %s %s (%.0f%%)", phase, detail, p.fraction * 100)
+        if progress_cb is not None:
+            progress_cb(p)
 
     report = DiagnosticReport(
         backend=system.backend,
@@ -852,38 +1165,56 @@ def diagnose(
         report.notes.append("No cameras are open; nothing to diagnose.")
         return report
 
-    # The diagnostic always drives the cameras with software triggers (it arms
-    # the software FrameStart trigger for every scenario), so the ceilings and
-    # trial measure the software-triggered pipeline capacity even on a rig that
-    # records with an external hardware trigger. That is an honest *lower bound*
-    # for an external rig (a hardware trigger overlaps exposure with transfer and
-    # is usually faster), and the encode/host figures apply unchanged — but the
-    # production frame rate of an external rig is set by the hardware source, not
-    # by us, so the max-fps sweep is meaningless there and is skipped.
+    # The diagnostic drives the cameras with software triggers for the grab
+    # ceiling, encode ceiling and end-to-end trial, so those measure the
+    # software-triggered pipeline capacity even on a rig that records with an
+    # external hardware trigger. The free-run ceiling is the honest
+    # external-trigger-equivalent acquisition rate (free-run overlaps exposure
+    # with transfer the same way), so a hardware max can still be reported. The
+    # *software* max-fps sweep is skipped for external rigs (their production rate
+    # is set by the hardware source, not by us).
     if external:
-        report.notes.append(
-            "This rig records with an external hardware trigger. The benchmark "
-            "drives the cameras with software triggers, so the acquisition ceiling "
-            "below is a software-triggered lower bound (external triggering overlaps "
-            "exposure with transfer and is usually faster); the encode ceiling and "
-            "host capacity apply unchanged. The production frame rate is set by the "
-            "external trigger source, so the max-fps search is skipped."
-        )
-        find_max = False
+        if run_freerun:
+            report.notes.append(
+                "This rig records with an external hardware trigger. The "
+                "software-triggered acquisition ceiling below is a lower bound; the "
+                "free-run ceiling is the external-trigger-equivalent acquisition rate "
+                "(free-run overlaps exposure with transfer the same way), so the "
+                "hardware max is derived from it. The software max-fps search is "
+                "skipped — the production rate is set by the external source."
+            )
+        else:
+            report.notes.append(
+                "This rig records with an external hardware trigger, so the "
+                "acquisition ceiling below is a software-triggered lower bound and "
+                "the software max-fps search is skipped. Enable the free-run ceiling "
+                "to estimate the external-trigger acquisition rate."
+            )
 
-    emit("Measuring acquisition ceiling", f"({duration_s:g}s)")
+    emit(PHASE_ACQUIRE, f"({duration_s:g}s)")
     grab_fps = measure_grab_ceiling(cameras, duration_s, cancel=cancel)
+
+    freerun_fps: dict[str, float] = {}
+    if run_freerun and not _cancelled(cancel):
+        emit(PHASE_FREERUN, f"({duration_s:g}s)")
+        freerun_fps, freerun_notes = measure_freerun_ceiling(
+            cameras, duration_s, cancel=cancel
+        )
+        report.notes.extend(freerun_notes)
+
     encode_fps: dict[str, float] = {}
-    if video_format is not None and not _cancelled(cancel):
-        emit("Measuring encode ceiling", f"({duration_s:g}s)")
+    if run_encode and not _cancelled(cancel):
+        emit(PHASE_ENCODE, f"({duration_s:g}s)")
         encode_fps = measure_encode_ceiling(
             video_format, sizes, target_fps, duration_s, cancel=cancel
         )
-    ceilings = Ceilings(grab_fps=grab_fps, encode_fps=encode_fps)
+    ceilings = Ceilings(
+        grab_fps=grab_fps, encode_fps=encode_fps, freerun_fps=freerun_fps
+    )
     report.ceilings = ceilings
 
     # --- end-to-end at the target fps ---
-    emit("Running end-to-end trial", f"@ {target_fps:g} fps ({duration_s:g}s)")
+    emit(PHASE_TRIAL, f"@ {target_fps:g} fps ({duration_s:g}s)")
     outcome = run_target_trial(
         cameras, video_format, target_fps, duration_s, record_form, cancel=cancel
     )
@@ -902,27 +1233,55 @@ def diagnose(
     encode_min = ceilings.encode_min if video_format is not None else float("inf")
     report.predicted_max_fps = min(ceilings.grab_min, encode_min)
 
-    # --- empirical max-fps search ---
-    if find_max and not _cancelled(cancel):
+    # Hardware (external / free-run) system max: the free-run acquisition ceiling,
+    # capped by the encoder when one is measured.
+    if freerun_fps:
+        report.freerun_max_fps = ceilings.freerun_min
+        report.hardware_max_fps = min(ceilings.freerun_min, encode_min)
+
+    # --- empirical STABLE max-fps search (software trigger) ---
+    if run_search and not _cancelled(cancel):
         predicted = report.predicted_max_fps
         hi = predicted * 1.1
-        # A short probe trial (half the main duration, floored) keeps the search
-        # bounded; lo is a rate we already know passes when the target did.
-        probe_dur = max(1.5, duration_s / 2.0)
-        lo = target_fps if outcome.passed else min(target_fps, predicted * 0.5)
+        # lo is a rate already known to be *stable* when the target was.
+        lo = target_fps if outcome.stable_passed else min(target_fps, predicted * 0.5)
+        # A stable record rate cannot exceed what the camera can acquire or the
+        # encoder can drain in isolation, so the reported max is capped here.
+        ceiling_cap = predicted
 
         def probe(fps: float) -> bool:
             if _cancelled(cancel):
                 return False
-            emit("Searching max fps", f"probing {fps:.0f} fps")
+            emit(PHASE_MAX, f"probing {fps:.0f} fps", advance=True, eta=WARMUP_S + probe_dur)
             result = run_target_trial(
                 cameras, video_format, fps, probe_dur, record_form, cancel=cancel
             )
-            return result.passed
+            return result.stable_passed
 
-        report.measured_max_fps = find_max_fps(probe, lo, hi)
+        candidate = find_max_fps(probe, lo, hi, iterations=FIND_MAX_ITERATIONS)
+        # Confirm over the full (longer) window: a short probe can miss queue
+        # buildup that only manifests after several seconds, so the bisection's
+        # marginal edge is retested before it is reported.
+        if _cancelled(cancel):
+            report.measured_max_fps = min(candidate, ceiling_cap)
+        else:
+            emit(PHASE_MAX, f"confirming {candidate:.0f} fps", advance=True, eta=window)
+            confirm = run_target_trial(
+                cameras, video_format, candidate, duration_s, record_form, cancel=cancel
+            )
+            report.measured_max_fps, report.max_confirmed = _reconcile_stable_max(
+                candidate, confirm, lo, ceiling_cap
+            )
+            if not report.max_confirmed:
+                report.notes.append(
+                    "The stable-max candidate did not hold over the longer "
+                    f"confirmation window; reported with a {STABILITY_MARGIN:.0%} "
+                    "safety margin."
+                )
 
     if _cancelled(cancel):
         report.notes.append("Benchmark was cancelled before it finished.")
+    elif progress_cb is not None:
+        progress_cb(plan.done())
 
     return report
