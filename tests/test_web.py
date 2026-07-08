@@ -92,6 +92,24 @@ def test_shutdown_refused_while_recording(shutdown_client):
     shutdown_client.controller.stop_recording(abort=True)
 
 
+def test_static_assets_served_no_cache(client):
+    # The GUI's static assets are unversioned, so they are served with
+    # Cache-Control: no-cache and the browser revalidates on every reload —
+    # development always sees up-to-date pages instead of a stale cached copy.
+    for path in ("/", "/style.css", "/js/app.js"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "no-cache" in response.headers.get("cache-control", ""), path
+
+    # no-cache is not no-store: an unchanged asset still revalidates to a cheap
+    # 304 (via ETag), so nothing is re-downloaded unless it actually changed.
+    fresh = client.get("/style.css")
+    etag = fresh.headers.get("etag")
+    assert etag, "static assets should carry an ETag for revalidation"
+    revalidated = client.get("/style.css", headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+
+
 def test_system_and_settings_endpoints(client):
     system = client.get("/api/system").json()
     assert len(system["cameras"]) == 2

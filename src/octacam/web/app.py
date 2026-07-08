@@ -37,7 +37,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.websockets import WebSocketState
@@ -86,6 +86,26 @@ JPEG_QUALITY = 75
 # the client's version check meaningful (an old client fails closed).
 FRAME_HEADER = struct.Struct("<BBBBIQfIHHHHHH")
 FRAME_VERSION = 2
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """Serve static assets with ``Cache-Control: no-cache``.
+
+    The GUI ships as unversioned JS/CSS/HTML (no cache-busting query string), so
+    a plain browser reload can otherwise serve a stale copy from the HTTP cache
+    after the frontend is edited — the classic "my change didn't show up, do a
+    hard refresh". ``no-cache`` forces the browser to revalidate on every load,
+    so a reload always reflects the latest source. It is *not* ``no-store``: the
+    file's ETag/Last-Modified still produce a cheap ``304 Not Modified`` when
+    nothing changed, so unchanged assets aren't re-downloaded. Assets are a
+    handful of small files over localhost/LAN, so the extra round-trips cost
+    nothing noticeable, while development always sees up-to-date pages.
+    """
+
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1275,11 +1295,11 @@ def create_app(
     for name, adir in plugin_web.items():
         app.mount(
             f"/plugins/{name}",
-            StaticFiles(directory=adir),
+            _NoCacheStaticFiles(directory=adir),
             name=f"plugin-{name}",
         )
 
     if STATIC_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+        app.mount("/", _NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
 
     return app
