@@ -110,12 +110,34 @@ async function main() {
   let viewTab = null;
   let saveDialog = null;
   let dirPicker = null;
+
+  // The grid reports (via onViewChange) whenever the resolution/pause state the
+  // server should honor changes — a tile resized, maximized, or zoomed. Coalesce
+  // a burst of those into one WS message per animation frame, and skip the send
+  // when the composed spec is unchanged.
+  let viewRaf = 0;
+  let lastViewJson = "";
+  function sendViewNow() {
+    viewRaf = 0;
+    const cameras = grid.getViewSpec();
+    const json = JSON.stringify(cameras);
+    if (json === lastViewJson) return;
+    if (sock.send({ type: "view", cameras })) lastViewJson = json;
+  }
+  function scheduleViewSend() {
+    if (!viewRaf) viewRaf = requestAnimationFrame(sendViewNow);
+  }
+  // devicePixelRatio can change (browser zoom, dragging the window between
+  // monitors) with no element resize, so refresh the spec on window resize too.
+  window.addEventListener("resize", scheduleViewSend);
+
   const grid = new CameraGrid(document.getElementById("grid"), system.cameras, {
     onSelect: (i) => {
       cameraTab?.selectCamera(i);
       viewTab?.selectCamera(i);
     },
     onRename: (i, name) => cameraTab?.renameCamera(i, name),
+    onViewChange: scheduleViewSend,
   });
   viewTab = new ViewTab({
     cameras: system.cameras,
@@ -137,7 +159,13 @@ async function main() {
   let peerCount = 1; // browsers connected to the server (control is shared)
 
   const sock = new ReconnectingSocket(wsUrl(), {
-    onOpen: () => setConnectionMode("connected"),
+    onOpen: () => {
+      setConnectionMode("connected");
+      // A (re)connected socket starts with no server-side view state, so resend
+      // the current spec unconditionally.
+      lastViewJson = "";
+      scheduleViewSend();
+    },
     onClose: () =>
       setConnectionMode(
         serverStopped

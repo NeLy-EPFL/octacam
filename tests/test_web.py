@@ -948,3 +948,116 @@ def test_client_is_ready_for_tracks_unsent_frames():
     # Draining the pending dict (what sender() does on each wakeup) clears it.
     client.frames.clear()
     assert client.is_ready_for(0)
+
+
+def test_preview_factor_policy():
+    """Adaptive decimation: a client that sends nothing is unchanged; a normal
+    tile may only go coarser than the 640 baseline; a focused tile may go
+    finer, bounded to a mid resolution while recording."""
+    from octacam.web.app import _preview_factor, _DEFAULT_VIEW, _ViewSpec
+
+    W, H = 2048, 1536  # long edge 2048, baseline ceil(2048/640) = 4
+    # Default/legacy spec == today's baseline (backward compatible).
+    assert _preview_factor(W, H, _DEFAULT_VIEW, False) == 4
+    # A small unfocused tile sends less data (coarser)...
+    assert _preview_factor(W, H, _ViewSpec(need=300), False) == 7
+    # ...but a large unfocused tile is still capped at the baseline, so a HiDPI
+    # client can't silently upgrade every camera above today's cost.
+    assert _preview_factor(W, H, _ViewSpec(need=1500), False) == 4
+    # A focused (maximized/zoomed) tile may exceed the baseline, up to sensor.
+    assert _preview_factor(W, H, _ViewSpec(need=1500, full=True), False) == 1
+    assert _preview_factor(W, H, _ViewSpec(need=100000, full=True), False) == 1
+    # While recording, a focused tile is bounded so the preview encode can't
+    # starve the writer (ceil(2048/1280) = 2 -> 1024 px <= 1280 cap).
+    assert _preview_factor(W, H, _ViewSpec(need=100000, full=True), True) == 2
+    # The recording cap is a true ceiling: a mid-band sensor whose long edge
+    # falls in (1280, 2*1280) must still be bounded, not encoded full-res
+    # (regression guard — round() here would leak factor 1 = full 1600 px).
+    assert _preview_factor(1600, 1200, _ViewSpec(need=100000, full=True), True) == 2
+
+
+def test_client_apply_view_is_tolerant():
+    """apply_view stores per-camera specs and never raises on garbage input."""
+    from octacam.web.app import _Client, _DEFAULT_VIEW, _ViewSpec
+
+    client = _Client(Mock())
+    client.apply_view(
+        {
+            "type": "view",
+            "cameras": {
+                "0": {"want": True, "need": 512, "full": True},
+                "1": {"want": False},
+                "2": {"need": -5},  # invalid need -> treated as baseline (None)
+                "bad": {"need": 100},  # non-int key -> skipped
+                "3": "notadict",  # non-dict entry -> skipped
+            },
+        }
+    )
+    assert client.view_for(0) == _ViewSpec(want=True, need=512, full=True)
+    assert client.view_for(1).want is False
+    assert client.view_for(2).need is None
+    assert client.view_for(9) is _DEFAULT_VIEW  # never set -> default
+    # Malformed top-level payloads are ignored, not raised.
+    client.apply_view({"cameras": "nope"})
+    client.apply_view({})
+
+
+def test_cap_variants_bounds_encode_count():
+    """Beyond the per-camera cap, the sharpest extra factors fold onto the
+    sharpest survivor so encode count stays bounded and no client is dropped."""
+    from octacam.web.app import _AppState, MAX_PREVIEW_VARIANTS_PER_CAMERA
+
+    groups = {f: [f"client{f}"] for f in (1, 2, 3, 5, 8, 12)}
+    total_clients = sum(len(v) for v in groups.values())
+    _AppState._cap_variants(groups)
+    assert len(groups) == MAX_PREVIEW_VARIANTS_PER_CAMERA
+    # Every client is still served (none dropped).
+    assert sum(len(v) for v in groups.values()) == total_clients
+    # The sharpest surviving factor absorbed the dropped sharper requests.
+    assert min(groups) == sorted((1, 2, 3, 5, 8, 12))[-MAX_PREVIEW_VARIANTS_PER_CAMERA]
+
+
+def test_view_message_selects_resolution_and_pauses(client):
+    """A `view` message maximizes one camera to full resolution and pauses the
+    other: the server sends full-res frames for the focused camera and stops
+    sending the paused one."""
+    import cv2
+
+    cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
+    long0 = max(cams[0]["width"], cams[0]["height"])
+    assert long0 > 640, "emulator sensor should exceed the preview cap"
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "view",
+                    "cameras": {
+                        "0": {"want": True, "need": 100000, "full": True},
+                        "1": {"want": False},
+                    },
+                }
+            )
+        )
+        full_seen = False
+        cam1_after_full = 0
+        for _ in range(150):
+            message = ws.receive()
+            buf = message.get("bytes")
+            if not buf:
+                continue
+            index = buf[2]  # header byte 2 is the camera index
+            jpeg = np.frombuffer(buf[FRAME_HEADER.size :], np.uint8)
+            image = cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE)
+            if index == 0 and max(image.shape) == long0:
+                full_seen = True  # only reachable with the view spec applied
+            elif full_seen and index == 1:
+                # A stale pre-view frame arrives strictly before the first
+                # full-res frame (later tick), so any cam-1 frame after that
+                # means the pause was ignored.
+                cam1_after_full += 1
+            if full_seen and _ > 80:
+                break
+
+    assert full_seen, "camera 0 never reached full resolution after the view"
+    assert cam1_after_full == 0, "paused camera 1 kept sending frames"

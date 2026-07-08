@@ -60,11 +60,77 @@ STATIC_DIR = Path(__file__).parent / "static"
 # import() URL, so only allow names that can't escape the /plugins/ prefix.
 _PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
-PREVIEW_MAX_DIM = 640  # longest preview edge after downscaling
+# Longest preview edge for a normal (unfocused) tile. A client's adaptive
+# request may only make its preview *coarser* than this; going finer than the
+# baseline is reserved for a focused tile (maximized or zoomed, see _ViewSpec).
+PREVIEW_MAX_DIM = 640
+# While recording, a focused tile's preview is capped here rather than allowed
+# up to full sensor resolution, so a large preview JPEG encode can't starve the
+# recording writer's CPU. Idle, a focused tile may go all the way to sensor res.
+PREVIEW_FOCUS_MAX_DIM_RECORDING = 1280
+# Safety bound: at most this many distinct resolution variants of ONE camera are
+# encoded per tick. Beyond it, the sharpest (most expensive) extra requests are
+# coalesced onto the sharpest kept variant, so many clients each asking for a
+# different resolution of the same camera can't multiply encode cost without
+# bound. In normal use (clients with similar layouts) there is one variant.
+MAX_PREVIEW_VARIANTS_PER_CAMERA = 4
 JPEG_QUALITY = 75
 # u8 version | u8 kind | u8 camera | u8 flags(bit0=recording) |
 # u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
 FRAME_HEADER = struct.Struct("<BBBBIQfI")
+
+
+@dataclasses.dataclass(frozen=True)
+class _ViewSpec:
+    """What one client currently needs for one camera (sent up over the WS).
+
+    ``want`` is False for a camera hidden behind another client's maximized
+    tile — the server then skips grabbing and encoding it entirely for that
+    client. ``need`` is the longest source edge (in device pixels) the client
+    can actually display; ``full`` marks a focused tile (maximized/zoomed) that
+    is allowed to exceed the ``PREVIEW_MAX_DIM`` baseline up to sensor
+    resolution. A default spec reproduces the pre-feature behavior exactly, so a
+    client that never sends a view message is byte-for-byte unchanged."""
+
+    want: bool = True
+    need: int | None = None  # requested longest source edge in px; None = baseline
+    full: bool = False  # focused tile may request finer than the baseline
+
+
+_DEFAULT_VIEW = _ViewSpec()
+
+
+def _preview_factor(width: int, height: int, spec: _ViewSpec, recording: bool) -> int:
+    """Integer decimation factor for one camera given a client's view spec.
+
+    A default/legacy spec (no ``need``) returns today's baseline factor,
+    ``ceil(long_edge / PREVIEW_MAX_DIM)``, so unspecified clients are unchanged.
+    A normal tile may only go *coarser* than the baseline (a small tile sends
+    less data); a focused tile may go *finer*, up to sensor resolution when idle
+    and up to ``PREVIEW_FOCUS_MAX_DIM_RECORDING`` while recording.
+    """
+    long_edge = max(width, height, 1)
+    baseline = max(1, math.ceil(long_edge / PREVIEW_MAX_DIM))
+    if spec.need is None:
+        return baseline
+    need = max(1, spec.need)
+    if not spec.full:
+        # Unfocused tile: honor a smaller need (coarser preview), but never
+        # sharper than today's baseline — this is what keeps a single HiDPI
+        # (devicePixelRatio > 1) client from silently upgrading every camera.
+        return max(baseline, max(1, round(long_edge / need)))
+    # Focused tile: may exceed the baseline, up to the sensor itself. round()
+    # matches the requested resolution while biasing a maximized tile toward
+    # full detail (send a little extra rather than a little soft).
+    need = min(need, long_edge)  # never finer than the sensor
+    factor = max(1, round(long_edge / need))
+    if recording:
+        # A *hard* resolution ceiling while recording, so a large preview encode
+        # can't starve the writer's CPU — ceil (a true upper bound) rather than
+        # the need-matching round above, which could leave the effective
+        # resolution up to ~1.5x over the cap for mid-band sensor sizes.
+        factor = max(factor, math.ceil(long_edge / PREVIEW_FOCUS_MAX_DIM_RECORDING))
+    return factor
 
 
 class SettingsPatch(BaseModel):
@@ -254,6 +320,45 @@ class _Client:
         self.texts: dict[str, str] = {}
         self.events: deque[str] = deque(maxlen=50)  # events are not dropped
         self.wakeup = asyncio.Event()
+        # Per-camera-index display request (resolution / paused). Absent => the
+        # default spec, which reproduces the pre-feature preview exactly. Only
+        # read/written on the event-loop thread (receive loop + preview loop),
+        # so it needs no lock.
+        self.views: dict[int, _ViewSpec] = {}
+
+    def view_for(self, camera_index: int) -> _ViewSpec:
+        return self.views.get(camera_index, _DEFAULT_VIEW)
+
+    def apply_view(self, message: dict) -> None:
+        """Update per-camera view specs from a ``{"type": "view", ...}`` message.
+
+        Tolerant of missing/garbage fields so a malformed message can never
+        raise inside the receive loop and tear down the socket; a bad per-camera
+        entry is simply skipped."""
+        cameras = message.get("cameras")
+        if not isinstance(cameras, dict):
+            return
+        for key, spec in cameras.items():
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(spec, dict):
+                continue
+            need = spec.get("need")
+            if need is not None:
+                try:
+                    need = int(need)
+                except (TypeError, ValueError):
+                    need = None
+                else:
+                    if need <= 0:
+                        need = None
+            self.views[index] = _ViewSpec(
+                want=bool(spec.get("want", True)),
+                need=need,
+                full=bool(spec.get("full", False)),
+            )
 
     def queue_frame(self, camera_index: int, message: bytes) -> None:
         self.frames[camera_index] = message
@@ -380,45 +485,71 @@ class _AppState:
             clients = list(self.clients)
             if not clients:
                 continue
-            # Only spend a frame grab and a JPEG encode on cameras at least one
-            # client has drained. A client still sending the previous frame for
-            # a camera would just have it overwritten (newest-only), so skipping
-            # the encode keeps server load matched to what clients can actually
-            # consume: a slow or stalled ssh -L tunnel can't make the rig burn
-            # CPU encoding previews nobody is keeping up with (which would
-            # otherwise contend with the live recording encode path).
-            grabbed = []
-            ready_by_index: dict[int, list[_Client]] = {}
+            recording = self.controller.recording_active
+            # Per camera, group the clients that are both drained (newest-only
+            # backpressure, is_ready_for) AND still want it by the decimation
+            # factor each one needs. Each distinct factor is encoded once and
+            # shared by every client that asked for it, so encode cost tracks
+            # the number of *distinct resolutions* on screen, not the number of
+            # clients. A camera no ready client wants (hidden behind someone's
+            # maximized tile) is skipped entirely — no grab, no encode. A slow
+            # or stalled ssh -L tunnel still can't make the rig burn CPU on
+            # previews nobody is keeping up with.
+            jobs = []  # (index, camera, frame, {factor: [clients]})
             for index, camera in enumerate(self.controller.camera_system):
-                ready = [c for c in clients if c.is_ready_for(index)]
-                if not ready:
+                groups: dict[int, list[_Client]] = {}
+                for client in clients:
+                    if not client.is_ready_for(index):
+                        continue
+                    spec = client.view_for(index)
+                    if not spec.want:
+                        continue
+                    factor = _preview_factor(
+                        camera.width, camera.height, spec, recording
+                    )
+                    groups.setdefault(factor, []).append(client)
+                if not groups:
                     continue
+                self._cap_variants(groups)
                 frame = camera.frame_for_display.pop()
                 if frame is None:
                     continue
-                grabbed.append((index, camera, frame))
-                ready_by_index[index] = ready
-            if not grabbed:
+                jobs.append((index, camera, frame, groups))
+            if not jobs:
                 continue
-            messages = await loop.run_in_executor(None, self._encode_batch, grabbed)
-            for camera_index, message in messages:
-                for client in ready_by_index[camera_index]:
+            messages = await loop.run_in_executor(
+                None, self._encode_jobs, jobs, recording
+            )
+            for camera_index, message, group in messages:
+                for client in group:
                     client.queue_frame(camera_index, message)
 
-    def _encode_batch(self, grabbed) -> list[tuple[int, bytes]]:
+    @staticmethod
+    def _cap_variants(groups: dict[int, list["_Client"]]) -> None:
+        """Bound distinct resolution variants of one camera to the safety cap.
+
+        Drops the sharpest (most expensive) extra factors and folds their
+        clients onto the sharpest surviving factor, so those clients still get a
+        correct — if slightly softer — image while total encode cost stays
+        bounded regardless of how many clients diverge."""
+        if len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA:
+            return
+        factors = sorted(groups)  # ascending: sharpest (smallest factor) first
+        keep = factors[-MAX_PREVIEW_VARIANTS_PER_CAMERA:]  # the cheapest to encode
+        target = keep[0]  # sharpest survivor
+        for factor in factors[:-MAX_PREVIEW_VARIANTS_PER_CAMERA]:
+            groups[target].extend(groups.pop(factor))
+
+    def _encode_jobs(
+        self, jobs, recording: bool
+    ) -> list[tuple[int, bytes, list["_Client"]]]:
         import cv2
 
-        flags = 1 if self.controller.recording_active else 0
+        flags = 1 if recording else 0
         messages = []
-        for index, camera, frame in grabbed:
-            height, width = frame.shape
-            factor = max(1, math.ceil(max(width, height) / PREVIEW_MAX_DIM))
-            small = np.ascontiguousarray(frame[::factor, ::factor])
-            ok, jpeg = cv2.imencode(
-                ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-            )
-            if not ok:
-                continue
+        for index, camera, frame, groups in jobs:
+            # One monotonic frame number and one telemetry snapshot per camera
+            # per tick, shared across that camera's resolution variants.
             count = self._frame_counters.get(index, 0) + 1
             self._frame_counters[index] = count
             header = FRAME_HEADER.pack(
@@ -431,7 +562,18 @@ class _AppState:
                 camera.resulting_fps,
                 camera.dropped_count,
             )
-            messages.append((index, header + jpeg.tobytes()))
+            for factor, group in groups.items():
+                small = (
+                    np.ascontiguousarray(frame[::factor, ::factor])
+                    if factor > 1
+                    else np.ascontiguousarray(frame)
+                )
+                ok, jpeg = cv2.imencode(
+                    ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                )
+                if not ok:
+                    continue
+                messages.append((index, header + jpeg.tobytes(), group))
         return messages
 
     async def telemetry_loop(self) -> None:
@@ -880,6 +1022,13 @@ def create_app(
                 try:
                     message = json.loads(text)
                 except ValueError:
+                    continue
+                # A "view" message is core-owned (per-camera preview resolution /
+                # pause). Handle it inline on the event-loop thread — it is cheap
+                # in-memory dict work, unlike plugin hooks which may block on I/O
+                # — and don't pass it to plugins.
+                if isinstance(message, dict) and message.get("type") == "view":
+                    client.apply_view(message)
                     continue
                 # Hand the message to plugins (e.g. flywheel jog); the first
                 # one to claim it wins. Run in the executor so a plugin's

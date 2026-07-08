@@ -14,13 +14,20 @@ const hasSize = (l) => l.window_width > 0 && l.window_height > 0;
 
 // A pointer travel (px) below this is a click (select), not a drag.
 const DRAG_THRESHOLD = 4;
+// Deepest scroll-zoom. 1 is the tight fit (you can't zoom out smaller than
+// that); each wheel notch multiplies by ZOOM_STEP.
+const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.15;
 const norm360 = (deg) => ((deg % 360) + 360) % 360;
 
 export class CameraGrid {
-  constructor(container, cameras, { onSelect, onRename } = {}) {
+  constructor(container, cameras, { onSelect, onRename, onViewChange } = {}) {
     this.container = container;
     this.onSelect = onSelect;
     this.onRename = onRename; // async (index, name) -> canonical name | null
+    // Called (debounced by the caller) whenever the resolution/crop the server
+    // should send changes: tile resized, maximized/restored, or zoomed.
+    this.onViewChange = onViewChange;
     this.tiles = [];
     this.indexBySerial = new Map();
     this.selected = -1;
@@ -92,6 +99,13 @@ export class CameraGrid {
       runtime: { rot: 0, fx: 1, fy: 1 },
       natW: 0,
       natH: 0,
+      // On-screen footprint (px) of the fitted, un-zoomed canvas, used to clamp
+      // the pan so a zoomed image can never be dragged off its own tile.
+      fitW: 0,
+      fitH: 0,
+      zoom: 1,
+      panX: 0,
+      panY: 0,
       busy: false,
       pendingBlob: null,
       suppressClick: false,
@@ -131,6 +145,16 @@ export class CameraGrid {
         this._onResizeStart(e, tile, h.dataset.dir)
       );
     }
+    tile.body.addEventListener("wheel", (e) => this._onWheel(e, tile), {
+      passive: false,
+    });
+    // Catch any size change to this tile (drag-resize, maximize, container
+    // reflow): re-fit the canvas, re-clamp the pan, and tell the server the
+    // resolution this tile now needs.
+    new ResizeObserver(() => {
+      this._layoutCanvas(tile);
+      this._notifyView();
+    }).observe(tile.body);
     this._applyTransform(tile);
   }
 
@@ -330,7 +354,12 @@ export class CameraGrid {
     const sx = (b.scale_x || 1) * t.runtime.fx;
     const sy = (b.scale_y || 1) * t.runtime.fy;
     const deg = (b.rotation_deg || 0) + t.runtime.rot;
-    t.canvas.style.transform = `scale(${sx}, ${sy}) rotate(${deg}deg)`;
+    // Scroll-zoom/pan act in screen space, so they compose OUTSIDE the
+    // orientation transform (CSS applies the rightmost function first): the
+    // sensor image is rotated/flipped, then the result is scaled up and panned.
+    t.canvas.style.transform =
+      `translate(${t.panX}px, ${t.panY}px) scale(${t.zoom}) ` +
+      `scale(${sx}, ${sy}) rotate(${deg}deg)`;
   }
 
   // Size the canvas so the (possibly rotated/scaled) frame fits the tile
@@ -352,6 +381,73 @@ export class CameraGrid {
     const k = Math.min(bw / boundW, bh / boundH);
     t.canvas.style.width = `${t.natW * k}px`;
     t.canvas.style.height = `${t.natH * k}px`;
+    // The rotated content's on-screen footprint — the box the pan is clamped
+    // against so a zoomed image can't be dragged past its own edges.
+    t.fitW = boundW * k;
+    t.fitH = boundH * k;
+    this._clampPan(t);
+  }
+
+  // Keep the (possibly zoomed) canvas covering its tile: pan is limited to the
+  // overflow on each axis, so it snaps back to centered at the tight fit.
+  _clampPan(t) {
+    const maxX = Math.max(0, (t.zoom * t.fitW - t.body.clientWidth) / 2);
+    const maxY = Math.max(0, (t.zoom * t.fitH - t.body.clientHeight) / 2);
+    t.panX = clamp(t.panX, -maxX, maxX);
+    t.panY = clamp(t.panY, -maxY, maxY);
+  }
+
+  // Scroll to zoom toward the cursor. Zoom is clamped to [1, ZOOM_MAX]; 1 is
+  // the tight fit, so the image can never be scrolled smaller than its
+  // original size. The point under the cursor stays fixed across the zoom.
+  _onWheel(e, t) {
+    e.preventDefault();
+    const rect = t.body.getBoundingClientRect();
+    const cx = e.clientX - (rect.left + rect.width / 2);
+    const cy = e.clientY - (rect.top + rect.height / 2);
+    const z0 = t.zoom;
+    const z1 = clamp(
+      z0 * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP),
+      1,
+      ZOOM_MAX
+    );
+    if (z1 === z0) return;
+    // Solve for the pan that pins the on-screen cursor point across the zoom;
+    // in screen space this is correct regardless of rotation/flip.
+    t.panX = cx - (z1 / z0) * (cx - t.panX);
+    t.panY = cy - (z1 / z0) * (cy - t.panY);
+    t.zoom = z1;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
+  }
+
+  _notifyView() {
+    this.onViewChange?.();
+  }
+
+  // Per-camera resolution / pause request for the server: the longest source
+  // edge each tile can actually display (its on-screen size × devicePixelRatio
+  // × zoom), whether it is focused (maximized/zoomed, so allowed to exceed the
+  // default preview resolution up to the sensor's), and want=false for a tile
+  // hidden behind another's maximized window (the server then stops sending it).
+  getViewSpec() {
+    const anyMax = this.tiles.some((t) => t.maximized);
+    const dpr = window.devicePixelRatio || 1;
+    const spec = {};
+    for (const t of this.tiles) {
+      if (anyMax && !t.maximized) {
+        spec[t.index] = { want: false };
+        continue;
+      }
+      const longEdge = Math.max(t.body.clientWidth, t.body.clientHeight);
+      spec[t.index] = {
+        want: true,
+        need: Math.max(1, Math.ceil(longEdge * dpr * t.zoom)),
+        full: t.maximized || t.zoom > 1,
+      };
+    }
+    return spec;
   }
 
   _applyTileBox(t) {
@@ -397,6 +493,9 @@ export class CameraGrid {
     this._setMaximized(tile, next);
     this._raise(tile);
     this._layoutCanvas(tile);
+    // Maximizing flips want=false on every other tile and lets this one request
+    // full resolution; restoring undoes both. Report the whole new view.
+    this._notifyView();
   }
 
   _setMaximized(tile, on) {
