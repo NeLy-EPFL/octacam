@@ -828,6 +828,7 @@ def create_app(
             "display_refresh_interval_ms": (
                 state.config.gui.display_refresh_interval_ms
             ),
+            "theme": state.config.gui.theme,
             "formats": [
                 {"save_method": save_method, "label": video_format.label}
                 for save_method, video_format in FORMATS.items()

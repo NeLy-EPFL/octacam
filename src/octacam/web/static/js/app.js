@@ -8,7 +8,7 @@ import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
 import { BenchmarkTab } from "./diagnose.js";
 import { initSidebarResize } from "./resize.js";
-import { initTheme } from "./theme.js";
+import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
 
@@ -91,6 +91,10 @@ async function main() {
   initTheme();
   initSidebarResize();
   const [system, snap] = await loadInitial();
+
+  // Apply the rig's configured default theme now that the config has loaded
+  // (a per-browser toggle choice in localStorage still wins).
+  applyConfigTheme(system.theme);
 
   const versionEl = document.getElementById("version");
   versionEl.textContent = `octacam ${system.version}`;

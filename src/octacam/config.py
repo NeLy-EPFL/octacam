@@ -195,6 +195,10 @@ class GuiConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     display_refresh_interval_ms: int = 33
+    # Default colour theme for the web GUI ("dark" or "light"). Applied on load
+    # as the rig default; a per-browser choice made with the header toggle (kept
+    # in localStorage) always overrides it.
+    theme: Literal["dark", "light"] = "dark"
 
 
 class PluginConfig(BaseModel):

@@ -102,6 +102,8 @@ def test_system_and_settings_endpoints(client):
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
     assert system["plugins"] == {}
+    # the rig's default GUI theme is surfaced for the client (defaults to dark)
+    assert system["theme"] == "dark"
 
     settings = client.get("/api/settings").json()
     assert settings["fps"] == 50.0

@@ -115,6 +115,16 @@ def test_center_flags_parse(tmp_path):
     assert config.cameras[1].center_x is False and config.cameras[1].center_y is False
 
 
+def test_gui_theme_parse(tmp_path):
+    # [gui].theme defaults to "dark", accepts "light", and falls back to the
+    # default on an unknown value (lenient validation).
+    assert GuiConfig().theme == "dark"
+    (tmp_path / "octacam_config.toml").write_text('[gui]\ntheme = "light"\n')
+    assert load_config_dir(tmp_path).gui.theme == "light"
+    (tmp_path / "octacam_config.toml").write_text('[gui]\ntheme = "chartreuse"\n')
+    assert load_config_dir(tmp_path).gui.theme == "dark"
+
+
 def test_integer_serial_and_name_coerced_to_string(tmp_path):
     # TOML keeps types explicit, but an unquoted integer serial/name should
     # still be read as text rather than rejected.
