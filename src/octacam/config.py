@@ -197,16 +197,33 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-_BACKENDS = ("auto", "basler", "flir", "harvesters", "pycameleon", "fake")
+# Backend names accepted in the TOML ``backend`` key: "auto" plus every concrete
+# backend the registry knows (kept in sync with ``registry.BACKENDS``). Listing
+# them as a literal here avoids importing the cameras package (and its heavy SDK
+# deps) just to validate a config. ``spinnaker`` (the Spinnaker C-API tier) is
+# included so a modern-Python rig, where the PySpin ``flir`` tier drops out, can
+# still pin its FLIRs to it by name instead of only reaching it via "auto".
+_BACKENDS = (
+    "auto",
+    "basler",
+    "flir",
+    "spinnaker",
+    "harvesters",
+    "pycameleon",
+    "fake",
+)
 
 
 class OctacamConfig(BaseModel):
     # Which camera backend(s) this rig uses. "auto" (the default, and what an
     # absent key means) resolves to the preference cascade: each camera is claimed
-    # by the best available tier that sees it — vendor SDK (basler/flir), then a
-    # GenTL producer via harvesters, then the always-present pycameleon floor — so
-    # a rig just uses whatever is plugged in with whatever is installed. A concrete
-    # name pins the rig to one backend. Every existing config keeps working.
+    # by the best available tier that sees it — vendor SDK (basler/flir), then the
+    # Spinnaker C-API tier (spinnaker) that claims the FLIRs on modern Python where
+    # PySpin drops out, then the always-present pycameleon floor — so a rig just
+    # uses whatever is plugged in with whatever is installed. A concrete name pins
+    # the rig to one backend (including "spinnaker" for the FLIR C-API tier and
+    # "harvesters", which is opt-in only — it is never chosen by "auto"). Every
+    # existing config keeps working.
     backend: str = "auto"
     record: RecordConfig = Field(default_factory=RecordConfig)
     transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)

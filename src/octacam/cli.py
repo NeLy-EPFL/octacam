@@ -633,6 +633,48 @@ class _Report:
         return errors, warns
 
 
+def _enumerate_harvesters_serials() -> list[str]:
+    """Enumerate the harvesters (GenTL) tier's serials in a child process.
+
+    A GenTL producer's device scan runs third-party native code that can hard
+    crash the process — a broken producer SIGSEGVs inside ``IFUpdateDeviceList``
+    (observed with Balluff mvIMPACT), and a native crash cannot be caught by a
+    Python ``try/except``, so an in-process scan takes all of ``octacam doctor``
+    down with it (no output, just "Segmentation fault"). Running the scan in a
+    subprocess contains the blast radius: on a clean exit we read the serials it
+    printed; on a crashed/killed/timed-out child we raise so the caller reports
+    the tier as broken and the rest of the diagnostic still runs."""
+    import subprocess
+
+    code = (
+        "from octacam.cameras.harvesters import enumerate_harvesters, teardown\n"
+        "try:\n"
+        "    for serial, _h in enumerate_harvesters(None):\n"
+        "        print(serial)\n"
+        "finally:\n"
+        "    teardown()\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            "the GenTL producer hung during the device scan (>30s); this is a bug "
+            "in the third-party .cti, not octacam"
+        ) from e
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"the GenTL producer crashed during the device scan "
+            f"(exit {proc.returncode}); this is a bug in the third-party .cti, "
+            f"not octacam"
+        )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     """``[(serial, model|None), ...]`` for a backend without opening any camera.
 
@@ -642,7 +684,11 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     pycameleon) — mirroring how :class:`CameraSystem` opens them. Basler goes
     through the pylon TL factory directly so model names come along; other
     backends expose only serials via their enumeration function. Enumeration
-    never opens/grabs a device, so this is safe to run alongside a live session."""
+    never opens/grabs a device, so this is safe to run alongside a live session.
+
+    The ``harvesters`` (GenTL) tier scans in a subprocess — its producer can hard
+    crash the process, which must not take down the caller (see
+    :func:`_enumerate_harvesters_serials`)."""
     from octacam.cameras import select_backend
 
     key = (name or "auto").strip().lower()
@@ -653,6 +699,8 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
 
         devices = pylon.TlFactory.GetInstance().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
+    if key == "harvesters":
+        return [(serial, None) for serial in _enumerate_harvesters_serials()]
     enumerate_fn, _factory, _extension = select_backend(name)
     return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
 
@@ -1881,6 +1929,7 @@ def _render_benchmark(report) -> None:
             Text("BY STAGE", style="bold"),
             Text("  (system ceiling = slowest camera)", style="dim"),
         )
+
         def mark(name):
             return Text("  ← limits", style="red") if r.bottleneck == name else Text("")
 
@@ -1890,10 +1939,10 @@ def _render_benchmark(report) -> None:
             mark(diag.ACQUISITION),
         )
         if r.throughput_mbps_total:
-            per_cam = (
-                r.throughput_mbps_total / r.n_cameras if r.n_cameras else 0.0
+            per_cam = r.throughput_mbps_total / r.n_cameras if r.n_cameras else 0.0
+            solo = (
+                f" · alone {_fps(c.grab_solo_min)} fps/cam" if c.grab_solo_fps else ""
             )
-            solo = f" · alone {_fps(c.grab_solo_min)} fps/cam" if c.grab_solo_fps else ""
             console.print(
                 Text(
                     f"  transfer     {per_cam:>4.0f} MB/s/cam · "
@@ -1906,7 +1955,10 @@ def _render_benchmark(report) -> None:
             console.print(f"  encode       {_fps(c.encode_min):>4} fps/cam")
         else:
             console.print(
-                Text("  encode        n/a  (null sink — encoder not measured)", style="dim")
+                Text(
+                    "  encode        n/a  (null sink — encoder not measured)",
+                    style="dim",
+                )
             )
 
     # ---- BY CAMERA: per-camera ceilings + end-to-end trial detail ----

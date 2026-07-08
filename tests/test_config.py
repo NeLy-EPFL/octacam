@@ -231,6 +231,14 @@ def test_backend_parsed_when_present(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
+def test_spinnaker_backend_is_pinnable(tmp_path):
+    # The Spinnaker C-API tier must be nameable in TOML: on modern Python the
+    # PySpin "flir" tier drops out, so pinning FLIRs to "spinnaker" is the only
+    # way to force the vendor C API instead of leaving it to "auto".
+    (tmp_path / "octacam_config.toml").write_text('backend = "spinnaker"\n')
+    assert load_config_dir(tmp_path).backend == "spinnaker"
+
+
 def test_unknown_backend_falls_back_to_auto(tmp_path):
     (tmp_path / "octacam_config.toml").write_text('backend = "nikon"\n')
     assert load_config_dir(tmp_path).backend == "auto"

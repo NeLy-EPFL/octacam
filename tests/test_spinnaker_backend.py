@@ -23,7 +23,9 @@ from octacam.cameras.spinnaker_c import SpinnakerBackend
 class FakeNode:
     """A numeric node with bounds, unit, and read/write access flags."""
 
-    def __init__(self, value, mn=None, mx=None, inc=None, unit=None, readable=True, writable=True):
+    def __init__(
+        self, value, mn=None, mx=None, inc=None, unit=None, readable=True, writable=True
+    ):
         self.value = value
         self.min = mn
         self.max = mx
@@ -66,7 +68,9 @@ class FakeNodeMap:
         self.StreamBufferHandlingMode = FakeEnum("OldestFirst")
         self.TriggerSoftware = FakeCommand()
         # Ships capped below the sensor's transfer ceiling; open() raises it to max.
-        self.DeviceLinkThroughputLimit = FakeNode(350592000, mn=4224000, mx=384384000, inc=4224000)
+        self.DeviceLinkThroughputLimit = FakeNode(
+            350592000, mn=4224000, mx=384384000, inc=4224000
+        )
 
 
 class FakeImage:
@@ -162,12 +166,20 @@ class FakeSpin:
             raise BackendError(f"node {name} is not readable")
         if is_int:
             return NodeInfo(
-                value=int(node.value), min=node.min, max=node.max, inc=node.inc,
-                unit=None, writable=node.writable,
+                value=int(node.value),
+                min=node.min,
+                max=node.max,
+                inc=node.inc,
+                unit=None,
+                writable=node.writable,
             )
         return NodeInfo(
-            value=float(node.value), min=node.min, max=node.max, inc=None,
-            unit=node.unit, writable=node.writable,
+            value=float(node.value),
+            min=node.min,
+            max=node.max,
+            inc=None,
+            unit=node.unit,
+            writable=node.writable,
         )
 
     def write_number(self, nodemap, name, value, is_int):
@@ -215,6 +227,7 @@ def fake_facade(monkeypatch):
     monkeypatch.setattr(sc, "_facade", FakeSpin())
     monkeypatch.setattr(sc, "_system", None)
     monkeypatch.setattr(sc, "_cam_list", None)
+    monkeypatch.setattr(sc, "_outstanding", {})
     yield sc._facade
 
 
@@ -403,6 +416,51 @@ def test_enumerate_selects_requested_and_releases_the_rest(fake_facade):
     assert out[0][1] is cams[1]
     # Handles not handed to a backend are released 1:1; the selected one is not.
     assert cams[0].released and cams[2].released and not cams[1].released
+
+
+def test_teardown_releases_leaked_handle(fake_facade):
+    # A handle enumerate hands out but that is never close()d (an enumerate-only
+    # probe, or a killed/hung record) must be released by teardown() — otherwise
+    # the System is released with a dangling device reference and Spinnaker's
+    # libusb transport aborts the process (usbi_mutex_destroy assertion, 134).
+    cams = [FakeCam("A")]
+    fake_facade.cameras = cams
+    out = sc.enumerate_spinnaker(["A"])
+    assert out[0][1] is cams[0] and not cams[0].released  # handed out, still open
+    sc.teardown()
+    assert cams[0].released  # teardown released the leaked handle
+    assert not sc._outstanding  # and forgot it
+
+
+def test_teardown_does_not_double_release_closed_handle(fake_facade):
+    # close() drops its handle from the outstanding set, so teardown() must not
+    # release it a second time (a double spinCameraRelease is itself an error).
+    cams = [FakeCam("A")]
+    fake_facade.cameras = cams
+    out = sc.enumerate_spinnaker(["A"])
+    backend = SpinnakerBackend(out[0][1])
+    backend.close()
+    assert cams[0].released
+    cams[0].released = False  # sentinel: detect any further release in teardown
+    sc.teardown()
+    assert cams[0].released is False  # teardown left the already-closed handle alone
+
+
+def test_reenumerate_releases_prior_session(fake_facade):
+    # octacam doctor enumerates spinnaker twice (the backend sweep AND the cascade
+    # assignment). The second enumeration must release the first session's System
+    # and handles instead of orphaning them — a stale System released only at
+    # process exit aborts via a libusb assertion (exit 134).
+    first = [FakeCam("A")]
+    fake_facade.cameras = first
+    out1 = sc.enumerate_spinnaker(["A"])
+    assert out1[0][1] is first[0] and not first[0].released  # handed out, tracked
+    second = [FakeCam("A")]
+    fake_facade.cameras = second
+    sc.enumerate_spinnaker(["A"])
+    assert first[0].released  # prior session's handle released by the re-enumerate
+    assert fake_facade.system_released  # and its System
+    assert not second[0].released  # the fresh handle is now the outstanding one
 
 
 def test_enumerate_sorts_when_unrequested():

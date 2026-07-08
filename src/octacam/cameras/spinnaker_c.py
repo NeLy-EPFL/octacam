@@ -36,6 +36,7 @@ Structure:
   on boxes without Spinnaker — exactly like the FLIR/PySpin tier.
 """
 
+import atexit
 import ctypes
 import json
 import logging
@@ -95,6 +96,18 @@ _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 # released exactly once in teardown(), after every camera has been de-inited.
 _system: Any = None
 _cam_list: Any = None
+
+# Camera handles enumerate_spinnaker() has handed out that are not yet released,
+# keyed by id() (a spinCamera is an opaque ctypes handle, so its identity — not
+# a value — is the key; works for the fake handle in tests too). A handle left
+# outstanding when the System is released makes Spinnaker's USB transport abort
+# the whole process with a libusb ``usbi_mutex_destroy`` pthread assertion (exit
+# 134): the dangling device reference trips libusb's own teardown. In the normal
+# path SpinnakerBackend.close() releases every handle, but an enumerate-only
+# probe (``octacam doctor``, a scratch script) or a killed/hung record never
+# closes — teardown() releases whatever is still here first, so an abnormal
+# shutdown degrades to a clean release instead of SIGABRT.
+_outstanding: dict[int, Any] = {}
 
 # The loaded binding, created lazily by _spin(). Tests replace it with a fake so
 # the backend orchestration is exercised without the SDK or hardware.
@@ -656,6 +669,9 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             spin.camera_release(cam)
         except Exception:
             pass
+        # Drop it from the outstanding set so teardown() does not release it a
+        # second time (a double spinCameraRelease is itself an error).
+        _outstanding.pop(id(cam), None)
         self._cam = None
         self._nodemap = None
         self._stream_nodemap = None
@@ -931,6 +947,14 @@ def enumerate_spinnaker(requested_serials: list[str] | None = None):
     """
     spin = _spin()
     global _system, _cam_list
+    # Release any prior session first. Re-enumerating without this (e.g. octacam
+    # doctor sweeps the backend list AND the cascade, so it enumerates twice)
+    # would overwrite _system/_cam_list and orphan the previous System with its
+    # camera handles still referenced; releasing that stale System late — at
+    # process exit — aborts via a libusb assertion. teardown() is idempotent and
+    # clears the outstanding-handle set, so a fresh enumeration starts clean.
+    if _system is not None or _cam_list is not None:
+        teardown()
     _system = spin.get_system()
     _cam_list = spin.create_camera_list()
     spin.system_get_cameras(_system, _cam_list)
@@ -959,6 +983,9 @@ def enumerate_spinnaker(requested_serials: list[str] | None = None):
             continue
         out.append((serial, hcam))
         used.add(serial)
+        # Track the handed-out handle so teardown() can release it if the caller
+        # never close()s the camera (see _outstanding); close() removes it again.
+        _outstanding[id(hcam)] = hcam
     # Release the handles we will not open, so they do not leak until teardown.
     for serial, hcam in all_cams:
         if serial not in used:
@@ -979,6 +1006,19 @@ def teardown() -> None:
     """
     global _system, _cam_list
     spin = _facade
+    # Release any handles enumerate handed out that were never close()d, so the
+    # System is not released with a dangling device reference (which aborts the
+    # process via a libusb pthread assertion — see _outstanding). Best-effort and
+    # idempotent: close() already dropped the handles it released, so in the
+    # normal CameraSystem.close() path (every camera closes before teardown) this
+    # loop is empty; it only fires for a leaked handle (probe / abnormal exit).
+    if spin is not None and _outstanding:
+        for handle in list(_outstanding.values()):
+            try:
+                spin.camera_release(handle)
+            except Exception:
+                pass
+    _outstanding.clear()
     if _cam_list is not None:
         if spin is not None:
             try:
@@ -997,3 +1037,13 @@ def teardown() -> None:
             except Exception:
                 pass
         _system = None
+
+
+# Safety net: guarantee the System (and any handle enumerate handed out) is
+# released at interpreter shutdown even for a caller that enumerates but never
+# runs teardown() — notably ``octacam doctor``/``benchmark``, which read serials
+# and drop the handles. Without this such a path leaves a dangling device
+# reference that aborts the whole process with a libusb ``usbi_mutex_destroy``
+# assertion at exit. teardown() is idempotent and a no-op when the SDK was never
+# loaded, so this composes with CameraSystem.close() already calling it.
+atexit.register(teardown)

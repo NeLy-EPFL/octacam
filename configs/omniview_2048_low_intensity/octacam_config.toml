@@ -58,9 +58,10 @@ name = "basler_4"
 
 # 2× FLIR Grasshopper3 GS3-U3-41C6NIR (2048×2048) — the "2048" cameras.
 # Sensor params (2048² ROI, 2 ms exposure, hardware trigger line) persist as
-# <serial>.json, set from the GUI "Save…" dialog. NOTE: on this branch the
-# Spinnaker-C backend currently aborts on teardown (libusb cleanup assertion);
-# resolve that before relying on the FLIRs in a headless recording.
+# <serial>.json, set from the GUI "Save…" dialog. Under backend = "auto" the
+# FLIRs open through the Spinnaker C-API tier (PySpin is unavailable on modern
+# Python); it records and tears down cleanly (verified 4 Basler + 2 FLIR headless
+# record, clean exit).
 
 [[cameras]]
 serial_number = "17475185"
