@@ -53,6 +53,7 @@ from octacam.cameras._genicam_config import (
 )
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -754,6 +755,11 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         # The hand-off flag is authoritative (see FlirBackend.is_grabbing):
         # stop_grab flips it and wakes a blocked retrieve before EndAcquisition().
         return self._cam is not None and self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # Same FLIR cameras as the PySpin tier: only Width/Height are locked
+        # during acquisition; the ROI offsets stay live-writable while grabbing.
+        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         return int(_spin().read_number(self._nodemap, "Width", True).value)

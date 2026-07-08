@@ -58,6 +58,7 @@ from octacam.cameras._genicam_config import (
 )
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -266,6 +267,10 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         # created-in-open lifecycle (and the untyped GenTL buffer payloads) do not
         # trip the checker on every access.
         self._ia: Any = None
+        # DeviceVendorName, read once at open(). Harvesters serves any vendor
+        # through a GenTL producer, so the ROI offsets' grab-lock policy is
+        # decided per device (see grab_locked_features).
+        self._vendor: str | None = None
         self._original_trigger_source: str | None = None
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware.execute moves into retrieve() on the grab
@@ -294,6 +299,7 @@ class HarvestersBackend(SoftwareTriggerHandoff):
             self._set_enum("PixelFormat", "Mono8")
         except BackendError as e:
             log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
+        self._vendor = self._read_vendor_name()
 
     def close(self) -> None:
         ia = self._ia
@@ -341,6 +347,21 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         # stop_grab flips it and wakes a blocked retrieve before the native
         # ia.stop(), so the grab loop must agree from that instant.
         return self._ia is not None and self._grabbing
+
+    def _read_vendor_name(self) -> str | None:
+        try:
+            return str(self._nodemap().DeviceVendorName.value)
+        except Exception:  # optional node / read failure — treat as unknown
+            return None
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # Width/Height are locked mid-acquisition on every GenICam camera. Basler
+        # additionally locks the ROI offsets while grabbing (unlike FLIR/Teledyne,
+        # which keep them live-writable), so decide per device from the vendor
+        # name; an unknown vendor keeps the live-offset default.
+        if self._vendor and "basler" in self._vendor.lower():
+            return GEOMETRY_FEATURES | {"OffsetX", "OffsetY"}
+        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         return int(self._nodemap().Width.value)

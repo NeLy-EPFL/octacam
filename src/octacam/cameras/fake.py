@@ -23,6 +23,7 @@ import numpy as np
 from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -162,6 +163,12 @@ class FakeBackend(SoftwareTriggerHandoff):
 
     def is_grabbing(self) -> bool:
         return self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # The fake models a live-offset camera (FLIR-like): only Width/Height are
+        # grab-locked. A test can monkeypatch this to exercise the Basler-style
+        # offset-grab-lock path.
+        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         return int(self._nodes["Width"]["value"])

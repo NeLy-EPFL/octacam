@@ -14,6 +14,7 @@ from pypylon import genicam, pylon
 
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -251,6 +252,13 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # "not grabbing" from the same instant, and the shared trigger timer must
         # never make a native call on the wait path.
         return self.raw is not None and self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # Basler locks the whole ROI — Width/Height *and* the offsets — while
+        # grabbing (pylon sets TLParamsLocked on StartGrabbing), so IsWritable is
+        # False for all four mid-preview. The offsets join the size nodes on the
+        # grab-cycle path so the Camera tab can still edit them.
+        return GEOMETRY_FEATURES | {"OffsetX", "OffsetY"}
 
     def width(self) -> int:
         return self.raw.Width.Value

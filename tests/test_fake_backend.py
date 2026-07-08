@@ -196,3 +196,37 @@ def test_reset_feature_prefers_config(previewing_system):
     cam.set_feature("Gain", 3.0)
     cam.reset_feature("Gain", config_text)  # config value wins over factory
     assert abs(cam.read_feature("Gain")["value"] - 7.0) < 0.2
+
+
+def test_fake_offsets_are_live_writable(previewing_system):
+    # The fake models a FLIR-like camera: only Width/Height are grab-locked, so a
+    # ROI-offset write happens live on the running camera (no grab cycle).
+    cam = previewing_system.camera_at(0)
+    assert cam.backend.grab_locked_features() == frozenset({"Width", "Height"})
+    cam.set_feature("OffsetX", 8)
+    assert cam.read_feature("OffsetX")["value"] == 8
+    assert cam.backend.is_grabbing()  # never stopped
+
+
+def test_grab_locked_offset_write_cycles_the_preview(previewing_system, monkeypatch):
+    # Model a Basler-style camera whose ROI offsets lock during acquisition.
+    cam = previewing_system.camera_at(0)
+    monkeypatch.setattr(
+        cam.backend,
+        "grab_locked_features",
+        lambda: frozenset({"Width", "Height", "OffsetX", "OffsetY"}),
+    )
+    cam.set_feature("Width", 512)  # make room for a non-zero origin
+    # The offset is now presented editable while previewing...
+    by = {f["name"]: f for f in cam.list_features()}
+    assert by["OffsetX"]["writable"] is True
+    # ...and its write cycles the preview grab (stop -> write -> restart).
+    starts: list[int] = []
+    real_start = cam.start_preview
+    monkeypatch.setattr(
+        cam, "start_preview", lambda: (starts.append(1), real_start())[1]
+    )
+    cam.set_feature("OffsetX", 8)
+    assert starts, "offset write did not cycle the preview grab"
+    assert cam.backend.is_grabbing()
+    assert cam.read_feature("OffsetX")["value"] == 8

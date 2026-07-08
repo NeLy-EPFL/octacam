@@ -307,3 +307,32 @@ def test_enumerate_dedups_serials_seen_by_multiple_producers(monkeypatch):
     infos = [FakeDeviceInfo("A"), FakeDeviceInfo("A"), FakeDeviceInfo("B")]
     monkeypatch.setattr(hv, "_get_harvester", lambda: FakeHarvester(infos))
     assert hv.enumerate_harvesters() == [("A", "A"), ("B", "B")]
+
+
+# --- per-device offset grab-lock (harvesters serves any vendor) ------------
+
+
+def test_grab_locked_defaults_to_size_only_for_unknown_vendor():
+    backend = _backend()  # open() not called, so the vendor is unknown
+    assert backend.grab_locked_features() == frozenset({"Width", "Height"})
+
+
+def test_grab_locked_includes_offsets_for_basler():
+    backend = _backend()
+    backend._vendor = "Basler acA1920-40um"
+    assert {"Width", "Height", "OffsetX", "OffsetY"} <= backend.grab_locked_features()
+
+
+def test_grab_locked_is_size_only_for_flir():
+    backend = _backend()
+    backend._vendor = "FLIR"
+    assert backend.grab_locked_features() == frozenset({"Width", "Height"})
+
+
+def test_read_vendor_name_drives_offset_grab_lock():
+    node_map = FakeNodeMap()
+    node_map.DeviceVendorName = FakeEnum("Basler")
+    backend = _backend(node_map)
+    backend._vendor = backend._read_vendor_name()
+    assert backend._vendor == "Basler"
+    assert {"OffsetX", "OffsetY"} <= backend.grab_locked_features()

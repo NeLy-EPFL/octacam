@@ -42,6 +42,7 @@ import numpy as np
 from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -153,6 +154,11 @@ class PycameleonBackend(SoftwareTriggerHandoff):
 
     def is_grabbing(self) -> bool:
         return self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # libusb FLIR floor: only Width/Height are locked during acquisition;
+        # the ROI offsets stay live-writable while grabbing.
+        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         with self._lock:

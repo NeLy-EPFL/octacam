@@ -239,3 +239,25 @@ def test_execute_command_runs(previewing_system):
     commands = [f["name"] for f in cam.list_features() if f["type"] == "command"]
     assert commands  # the emulator exposes command nodes
     cam.execute_command(commands[0])  # must not raise
+
+
+def test_basler_declares_offsets_grab_locked(previewing_system):
+    # Basler locks the whole ROI (size + offsets) during acquisition, so the
+    # offsets ride the grab-cycle path alongside Width/Height.
+    locked = previewing_system.camera_at(0).backend.grab_locked_features()
+    assert {"Width", "Height", "OffsetX", "OffsetY"} <= locked
+
+
+def test_offset_editable_and_written_via_grab_cycle(previewing_system):
+    cam = previewing_system.camera_at(0)
+    # Make room for a non-zero origin, then the ROI offset is presented editable
+    # in the node-map browser even while previewing (Basler locks it mid-grab).
+    cam.set_feature("Width", 512)
+    by = {f["name"]: f for f in cam.list_features()}
+    assert by["OffsetX"]["writable"] is True
+    # A write cycles the grab (like Width/Height), lands, and preview resumes —
+    # a plain mid-grab write would be rejected by the SDK.
+    cam.set_feature("OffsetX", 16)
+    assert cam._camera.IsGrabbing()
+    off = cam.read_feature("OffsetX")
+    assert abs(off["value"] - 16) <= (off["inc"] or 1)

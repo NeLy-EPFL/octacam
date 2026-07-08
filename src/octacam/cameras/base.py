@@ -237,6 +237,14 @@ class CameraBackend(Protocol):
     def write_feature(self, name: str, value: object) -> None: ...
     def execute_command(self, name: str) -> None: ...
 
+    # The SFNC node names this camera can write only while it is NOT grabbing
+    # (the SDK/firmware locks them during acquisition). Width/Height are locked
+    # on every GenICam camera; some vendors (Basler) additionally lock the ROI
+    # offsets, while others (FLIR/Teledyne) leave them live-writable. The shared
+    # Camera layer presents these editable whenever the camera is open and routes
+    # their writes through a preview grab cycle. Defaults to Width/Height.
+    def grab_locked_features(self) -> frozenset[str]: ...
+
     def load_params(self, config_str: str) -> None: ...
     def save_params(self) -> str: ...
 
@@ -603,22 +611,34 @@ class Camera:
 
     # ------------------------------------------------- full device node map
 
-    def _annotate(self, feature: FeatureInfo) -> FeatureInfo:
+    def _grab_locked_features(self) -> frozenset[str]:
+        """SFNC nodes this camera can write only while not grabbing.
+
+        Declared by the backend (Width/Height universally; Basler also locks the
+        ROI offsets during acquisition). The Camera tab presents these editable
+        whenever the camera is open and routes their writes through a grab cycle.
+        A backend that predates the seam falls back to Width/Height."""
+        getter = getattr(self._backend, "grab_locked_features", None)
+        return frozenset(getter()) if getter else GEOMETRY_FEATURES
+
+    def _annotate(self, feature: FeatureInfo, grab_locked: frozenset[str]) -> FeatureInfo:
         """Apply octacam's cross-backend policy to one raw backend feature.
 
         Marks runtime-managed nodes read-only (so the operator sees them but
-        cannot break preview/recording), keeps the two ROI-size nodes editable
-        while the camera is open even though the SDK reports them non-writable
-        mid-grab (set_geometry cycles the grab), and locks an offset node whose
-        axis is auto-centered."""
+        cannot break preview/recording); locks an offset node whose axis is
+        auto-centered; and keeps a grab-locked node (one the SDK refuses to write
+        mid-preview — Width/Height everywhere, plus the ROI offsets on vendors
+        like Basler that lock them during acquisition) editable while the camera
+        is open, since set_feature cycles the grab to write it. A node the SDK
+        reports writable mid-grab (e.g. a FLIR offset) keeps that live writability
+        untouched."""
         if feature.name in RUNTIME_MANAGED_FEATURES:
             feature.managed = True
             feature.writable = False
-        elif feature.name in GEOMETRY_FEATURES:
+        elif feature.name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[feature.name]):
+            feature.writable = False  # octacam derives it; UI shows locked
+        elif feature.name in grab_locked:
             feature.writable = self._backend.is_open()
-        elif feature.name in OFFSET_FEATURES:
-            if getattr(self, OFFSET_FEATURES[feature.name]):
-                feature.writable = False  # octacam derives it; UI shows locked
         if feature.value is not None:
             # Cache the first-seen value as the factory-default fallback (see
             # _default_cache); managed nodes are never reset so are irrelevant.
@@ -632,13 +652,15 @@ class Camera:
         Camera tab then falls back to the curated PARAM_NODES quick controls."""
         with self._param_lock:
             features = self._backend.list_features()
-        return [self._annotate(f).as_dict() for f in features]
+            grab_locked = self._grab_locked_features()
+        return [self._annotate(f, grab_locked).as_dict() for f in features]
 
     def read_feature(self, name: str) -> dict:
         """One node's current descriptor, annotated with octacam's policy."""
         with self._param_lock:
             feature = self._backend.read_feature(name)
-        return self._annotate(feature).as_dict()
+            grab_locked = self._grab_locked_features()
+        return self._annotate(feature, grab_locked).as_dict()
 
     def _centered_offset(self, node_name: str) -> int | None:
         """The offset value that centers the ROI on ``node_name``'s axis.
@@ -681,25 +703,59 @@ class Camera:
             except BackendError as e:
                 log.debug("Could not center %s on %s: %s", node_name, self.serial_number, e)
 
+    def _run_stopped(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` with the preview grab stopped, restoring it afterwards.
+
+        Caller holds ``_param_lock``. For node writes the SDK refuses mid-grab
+        (a Basler ROI offset, like Width/Height): the preview is stopped and — if
+        it was running — restarted around ``fn``, whose exception still propagates
+        after the restart (mirrors set_geometry's restore-on-error guarantee)."""
+        was_grabbing = self._backend.is_grabbing()
+        if was_grabbing:
+            self.stop()
+            self.join()
+        try:
+            fn()
+        finally:
+            if was_grabbing:
+                self.start_preview()
+
+    def _write_feature_stopped(self, name: str, value: object) -> None:
+        """Write a node the backend locks mid-grab, cycling the preview around it."""
+        def _write() -> None:
+            try:
+                self._backend.write_feature(name, value)
+            except BackendError as e:
+                raise ValueError(str(e)) from None
+
+        self._run_stopped(_write)
+
     def set_center(self, axis: str, enabled: bool) -> dict:
         """Toggle ROI auto-centering on an axis and re-center it immediately.
 
         ``axis`` is ``"x"`` or ``"y"``. Enabling derives the offset now (and on
-        every later geometry change); disabling frees the field. Offsets are
-        live-writable, so no grab cycle is needed."""
+        every later geometry change); disabling frees the field. Backends that
+        lock the offsets mid-grab (Basler) need the preview cycled around the
+        write; where the offsets stay live-writable (FLIR) it happens in place."""
         if axis not in ("x", "y"):
             raise ValueError(f"Unknown center axis: {axis}")
         with self._param_lock:
             setattr(self, f"center_{axis}", bool(enabled))
             if enabled:
-                self._recenter_offsets_locked()
+                if OFFSET_FEATURES.keys() & self._grab_locked_features():
+                    self._run_stopped(self._recenter_offsets_locked)
+                else:
+                    self._recenter_offsets_locked()
         return {"center_x": self.center_x, "center_y": self.center_y}
 
     def set_feature(self, name: str, value: object) -> None:
-        """Write one arbitrary node, routing ROI size through the grab cycle.
+        """Write one arbitrary node, routing grab-locked nodes through a grab cycle.
 
         Rejects nodes octacam manages and offset nodes on an auto-centered axis.
-        A geometry write recomputes any auto-centered offset."""
+        ROI size (Width/Height) and any other node the backend locks mid-grab
+        (e.g. a Basler ROI offset) are written with the preview grab cycled; a
+        geometry resize also recomputes any auto-centered offset. Everything else
+        is written live on the running camera."""
         if name in RUNTIME_MANAGED_FEATURES:
             raise ValueError(f"{name} is managed by octacam and cannot be edited")
         if name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[name]):
@@ -711,10 +767,13 @@ class Camera:
             self.set_geometry(height=int(float(value)))  # type: ignore[arg-type]
             return
         with self._param_lock:
-            try:
-                self._backend.write_feature(name, value)
-            except BackendError as e:
-                raise ValueError(str(e)) from None
+            if name in self._grab_locked_features():
+                self._write_feature_stopped(name, value)
+            else:
+                try:
+                    self._backend.write_feature(name, value)
+                except BackendError as e:
+                    raise ValueError(str(e)) from None
 
     def reset_feature(self, name: str, config_str: str) -> None:
         """Reset one node to its saved-config value, else its factory default.

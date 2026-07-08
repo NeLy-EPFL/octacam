@@ -32,6 +32,7 @@ from octacam.cameras._genicam_config import (
 )
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
     FeatureInfo,
@@ -181,6 +182,12 @@ class FlirBackend(SoftwareTriggerHandoff):
         # The hand-off flag is authoritative (see BaslerBackend.is_grabbing):
         # stop_grab flips it and wakes a blocked retrieve before EndAcquisition().
         return self._cam is not None and self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # FLIR/Teledyne lock only Width/Height during acquisition; the ROI
+        # offsets stay writable while grabbing (live ROI pan), so only the size
+        # nodes need the grab-cycle path.
+        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         return int(self._int_node("Width").GetValue())
