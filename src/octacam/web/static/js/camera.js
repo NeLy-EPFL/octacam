@@ -436,11 +436,6 @@ export class CameraTab {
 
   // -------------------------------------------------------------- helpers
 
-  _scope() {
-    const el = document.querySelector('input[name="cam-apply-to"]:checked');
-    return el ? el.value : "selected";
-  }
-
   // A node is locked if the tab is locked, or the node is managed/read-only, or
   // it's an offset whose axis is auto-centered.
   _locked(f) {
@@ -486,7 +481,7 @@ export class CameraTab {
     const cam = this.cameras[this.selected];
     if (!cam) return;
     await this._request(
-      () => api("PUT", `/api/cameras/${cam.index}/features`, { name, value, scope: this._scope() }),
+      () => api("PUT", `/api/cameras/${cam.index}/features`, { name, value }),
       "Parameter update"
     );
   }
@@ -495,7 +490,7 @@ export class CameraTab {
     const cam = this.cameras[this.selected];
     if (!cam) return;
     await this._request(
-      () => api("POST", `/api/cameras/${cam.index}/features/reset`, { name, scope: this._scope() }),
+      () => api("POST", `/api/cameras/${cam.index}/features/reset`, { name }),
       "Reset"
     );
   }
@@ -504,7 +499,7 @@ export class CameraTab {
     const cam = this.cameras[this.selected];
     if (!cam) return;
     await this._request(
-      () => api("PUT", `/api/cameras/${cam.index}/center`, { axis, enabled, scope: this._scope() }),
+      () => api("PUT", `/api/cameras/${cam.index}/center`, { axis, enabled }),
       "Centering"
     );
   }

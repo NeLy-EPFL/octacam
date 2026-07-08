@@ -256,7 +256,7 @@ async function main() {
   });
 
   // Establish an initial current camera so the grid highlight and both pickers
-  // agree from the start (and "Apply to: Selected" always has a target).
+  // agree from the start.
   if (system.cameras.length) grid.select(0);
 
   // Connection has four modes: "connected", "reconnecting" (unexpected drop),
