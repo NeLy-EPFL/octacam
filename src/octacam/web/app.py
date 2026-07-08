@@ -576,6 +576,29 @@ def create_app(
             "cameras": cameras,
         }
 
+    @app.get("/api/serial/ports")
+    def get_serial_ports():
+        """Detected serial ports, for the plugin tabs' port picker.
+
+        Enumeration only (never opens a port), so it is safe to call while a
+        board is armed. Microcontroller-class ports are flagged so the UI can
+        surface the plausible Arduino candidates first."""
+        from octacam import serial_ports
+
+        return {
+            "ports": [
+                {
+                    "device": p.device,
+                    "board_name": p.board_name,
+                    "vid_pid": p.vid_pid,
+                    "serial_number": p.serial_number,
+                    "likely_arduino": p.likely_arduino,
+                    "likely_microcontroller": p.likely_microcontroller,
+                }
+                for p in serial_ports.list_serial_ports()
+            ]
+        }
+
     @app.get("/api/state")
     def get_state():
         return controller.snapshot()

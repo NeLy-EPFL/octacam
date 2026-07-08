@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
 
@@ -295,6 +296,9 @@ class FlywheelPlugin(Plugin):
     name = "flywheel"
 
     def __init__(self, device: str = DEFAULT_DEVICE, baud: int = DEFAULT_BAUD):
+        # _configured_device is what the config asked for (a path, or "auto");
+        # self.device is the currently-active/display device, resolved on open.
+        self._configured_device = device
         self.device = device
         self.baud = baud
         self._link = SerialLink()
@@ -320,13 +324,24 @@ class FlywheelPlugin(Plugin):
         """(Re)open the serial link, returning an error message on failure (else
         None). Never raises: a missing board must not stop the GUI launching,
         and it can be retried at runtime via the reconnect endpoint once the
-        board is plugged in."""
+        board is plugged in.
+
+        Resolves ``device="auto"`` to a single detected board and enriches an
+        open failure with the detected candidate ports."""
+        device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+        if device is None:
+            log.warning("Flywheel plugin: %s", reason)
+            return reason
+        if device != self.device:
+            log.info("Flywheel plugin: %s", reason)
+            self.device = device
         try:
-            self._link.open(self.device, self.baud)
+            self._link.open(device, self.baud)
         except Exception as e:
-            log.warning("Flywheel plugin: failed to open %s: %s", self.device, e)
-            return str(e)
-        log.info("Flywheel plugin: opened %s @ %d", self.device, self.baud)
+            msg = serial_ports.explain_open_failure(device, e)
+            log.warning("Flywheel plugin: %s", msg)
+            return msg
+        log.info("Flywheel plugin: opened %s @ %d", device, self.baud)
         return None
 
     def teardown(self) -> None:
@@ -380,14 +395,19 @@ class FlywheelPlugin(Plugin):
         router = APIRouter()
 
         @router.post("/api/serial/reconnect")
-        def serial_reconnect():
+        def serial_reconnect(payload: dict = Body(default={})):
             """Re-attempt opening the serial port.
 
             Lets the operator recover from a board that was unplugged or absent
-            at launch (and is now connected) without restarting the server. The
-            response carries the resulting ``ready`` state so the GUI can flip
-            the Flywheel tab from its "serial unavailable" notice to usable.
+            at launch (and is now connected) without restarting the server. An
+            optional ``{"device": "/dev/…"}`` body switches to a different port
+            (e.g. picked from the GUI dropdown) before reopening. The response
+            carries the resulting ``ready`` state so the GUI can flip the
+            Flywheel tab from its "serial unavailable" notice to usable.
             """
+            device = payload.get("device") if isinstance(payload, dict) else None
+            if isinstance(device, str) and device.strip():
+                self._configured_device = device.strip()
             error = self._open()
             return {"ready": self._link.is_open, "device": self.device, "error": error}
 

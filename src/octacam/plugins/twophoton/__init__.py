@@ -49,6 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
 
@@ -298,6 +299,9 @@ class TwoPhotonPlugin(Plugin):
         default_fps: int = DEFAULT_FPS,
         default_duration_ms: int = DEFAULT_DURATION_MS,
     ):
+        # _configured_device is what the config asked for (a path, or "auto");
+        # self.device is the currently-active/display device, resolved on open.
+        self._configured_device = device
         self.device = device
         self.baud = baud
         self._default_fps = default_fps
@@ -350,13 +354,24 @@ class TwoPhotonPlugin(Plugin):
         self._open()
 
     def _open(self) -> str | None:
-        """(Re)open the serial link; returns an error message on failure, else None."""
+        """(Re)open the serial link; returns an error message on failure, else None.
+
+        Resolves ``device="auto"`` to a single detected board and enriches an
+        open failure with the detected candidate ports."""
+        device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+        if device is None:
+            log.warning("2-photon trigger: %s", reason)
+            return reason
+        if device != self.device:
+            log.info("2-photon trigger: %s", reason)
+            self.device = device
         try:
-            self._link.open(self.device, self.baud)
+            self._link.open(device, self.baud)
         except Exception as e:
-            log.warning("2-photon trigger: failed to open %s: %s", self.device, e)
-            return str(e)
-        log.info("2-photon trigger: opened %s @ %d", self.device, self.baud)
+            msg = serial_ports.explain_open_failure(device, e)
+            log.warning("2-photon trigger: %s", msg)
+            return msg
+        log.info("2-photon trigger: opened %s @ %d", device, self.baud)
         return None
 
     def teardown(self) -> None:
@@ -430,13 +445,19 @@ class TwoPhotonPlugin(Plugin):
         return Path(__file__).parent / "web"
 
     def api_router(self):
-        from fastapi import APIRouter
+        from fastapi import APIRouter, Body
 
         router = APIRouter()
 
         @router.post("/api/twophoton/reconnect")
-        def reconnect():
-            """Re-attempt opening the serial port after an unplug/replug."""
+        def reconnect(payload: dict = Body(default={})):
+            """Re-attempt opening the serial port after an unplug/replug.
+
+            An optional ``{"device": "/dev/…"}`` body switches to a different
+            port before reopening; with no body it reopens the configured one."""
+            device = payload.get("device") if isinstance(payload, dict) else None
+            if isinstance(device, str) and device.strip():
+                self._configured_device = device.strip()
             error = self._open()
             return {
                 "ready": self._link.is_open,

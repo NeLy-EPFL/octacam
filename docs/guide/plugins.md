@@ -52,3 +52,33 @@ The firmware and wiring notes are in
 
 Both plugins talk to their Arduino over serial via pyserial, which ships with
 octacam.
+
+## Finding the serial device
+
+Each serial plugin's `device` option is the OS path to the board (e.g.
+`/dev/ttyACM0`, `/dev/arduinoCams`, `COM3`). To see what's connected and how
+octacam classifies it, run:
+
+```bash
+octacam doctor            # lists a "Serial devices" section (board, path, VID:PID)
+octacam doctor --probe-serial   # also reads each board's firmware identity
+```
+
+`octacam doctor <config_dir>` cross-checks the device each enabled plugin is
+configured for against what's actually plugged in, and flags a missing or wrong
+one (with a suggested udev rule for a stable path).
+
+Instead of a fixed path you can set `device = "auto"`: the plugin picks the sole
+microcontroller-class port at launch, and reports a clear error if zero or more
+than one is present (so it never grabs the wrong board). An explicit path always
+wins over `"auto"`.
+
+```toml
+[[plugins]]
+name = "omniview"
+options = { device = "auto" }   # or "/dev/ttyACM0", or a udev symlink
+```
+
+In the GUI, each plugin tab's connection panel has a **port dropdown** so you can
+pick a detected board and (re)connect to it without editing the config — handy
+after an unplug/replug or when the path changed.

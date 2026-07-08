@@ -387,6 +387,108 @@ def test_doctor_flags_undetected_camera_and_exits_nonzero(tmp_path):
     assert "99999999" in result.output
 
 
+# --- doctor: serial / Arduino devices ---------------------------------------
+
+
+def _fake_serial_port(device, *, vid=0x2341, pid=0x0070, sn="SN123", arduino=True,
+                      mcu=True, board="Arduino Nano ESP32"):
+    from octacam.serial_ports import SerialPort
+
+    return SerialPort(
+        device=device, description="", manufacturer="Arduino", product=None,
+        vid=vid, pid=pid, serial_number=sn, hwid="", board_name=board,
+        likely_microcontroller=mcu, likely_arduino=arduino,
+    )
+
+
+def test_doctor_lists_serial_devices(monkeypatch):
+    ports = [
+        _fake_serial_port("/dev/ttyACM0"),
+        _fake_serial_port("/dev/ttyS0", vid=None, pid=None, sn=None,
+                          arduino=False, mcu=False, board="generic serial"),
+    ]
+    monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: ports)
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "Serial devices" in result.output
+    assert "Arduino Nano ESP32" in result.output
+    assert "2341:0070" in result.output
+    # The single generic port is collapsed into an "other" summary line.
+    assert "other/generic serial port" in result.output
+
+
+def test_doctor_serial_flags_missing_configured_device(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "octacam.serial_ports.list_serial_ports",
+        lambda: [_fake_serial_port("/dev/ttyACM0")],
+    )
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[plugins]]\nname = "omniview"\n[plugins.options]\ndevice = "/dev/ttyACM9"\n'
+    )
+    result = runner.invoke(app, ["--log-level", "error", "doctor", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert "not found among connected serial ports" in result.output
+    # A detected board not used by any plugin is reported as info, not an error.
+    assert "detected but not used by any plugin" in result.output
+
+
+def test_doctor_serial_section_in_json(monkeypatch):
+    monkeypatch.setattr(
+        "octacam.serial_ports.list_serial_ports",
+        lambda: [_fake_serial_port("/dev/ttyACM0")],
+    )
+    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    titles = [s["title"] for s in payload["sections"]]
+    assert "Serial devices" in titles
+
+
+def test_doctor_probe_serial_reports_firmware(monkeypatch):
+    from octacam.serial_ports import SerialIdentity
+
+    monkeypatch.setattr(
+        "octacam.serial_ports.list_serial_ports",
+        lambda: [_fake_serial_port("/dev/ttyACM0")],
+    )
+    monkeypatch.setattr(
+        "octacam.serial_ports.probe_identity",
+        lambda device, **kw: SerialIdentity(device, "OMNIVIEW 1", False, None),
+    )
+    result = runner.invoke(app, ["doctor", "--probe-serial"])
+    assert result.exit_code == 0, result.output
+    assert "OMNIVIEW 1" in result.output
+
+
+def test_doctor_probe_serial_skips_busy_port(monkeypatch):
+    from octacam.serial_ports import SerialIdentity
+
+    monkeypatch.setattr(
+        "octacam.serial_ports.list_serial_ports",
+        lambda: [_fake_serial_port("/dev/ttyACM0")],
+    )
+    monkeypatch.setattr(
+        "octacam.serial_ports.probe_identity",
+        lambda device, **kw: SerialIdentity(device, None, True, "busy"),
+    )
+    result = runner.invoke(app, ["doctor", "--probe-serial"])
+    assert result.exit_code == 0, result.output
+    assert "port in use" in result.output
+
+
+def test_build_config_doc_includes_plugins():
+    # The config wizard threads a serial plugin selection into the written TOML.
+    from octacam.config import RecordConfig
+
+    doc = _build_config_doc(
+        "fake", RecordConfig(), [], [], None,
+        [{"name": "omniview", "options": {"device": "/dev/ttyACM0"}}],
+    )
+    assert doc["plugins"] == [
+        {"name": "omniview", "options": {"device": "/dev/ttyACM0"}}
+    ]
+
+
 # --- process: idempotent re-runs (skip existing outputs) --------------------
 
 
@@ -570,7 +672,7 @@ def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
         lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],
     )
     target = tmp_path / "mixed-rig"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--no-snapshot-params"], input=inputs
     )
@@ -606,6 +708,7 @@ def test_config_wizard_writes_roundtrippable_config(tmp_path):
                 "y",  # configure a transfer destination?
                 "/mnt/nas",  # transfer directory
                 "",  # checksum -> default (yes)
+                "n",  # enable a serial/trigger plugin? no
             ]
         )
         + "\n"
@@ -639,7 +742,7 @@ def test_config_wizard_no_snapshot_params_skips_parameter_files(tmp_path):
     # --no-snapshot-params keeps the wizard enumeration-only: it writes the
     # config but never opens a camera, so no per-camera parameter file appears.
     target = tmp_path / "rig-noparams"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app,
         ["config", str(target), "--backend", "fake", "--no-snapshot-params"],
@@ -660,7 +763,7 @@ def test_config_wizard_skips_params_when_cameras_busy(tmp_path, monkeypatch):
 
     monkeypatch.setattr("octacam.cameras.system.CameraSystem", busy)
     target = tmp_path / "rig-busy"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake"], input=inputs
     )
@@ -685,6 +788,7 @@ def test_config_wizard_prompts_for_directory_when_omitted(tmp_path):
                 "",  # relative directory
                 "",  # save method
                 "n",  # transfer? no
+                "n",  # enable a serial/trigger plugin? no
                 str(target),  # config directory to create
             ]
         )
@@ -714,6 +818,7 @@ def test_config_wizard_aborts_without_overwriting(tmp_path):
                 "",  # relative directory
                 "",  # save method
                 "n",  # transfer? no
+                "n",  # enable a serial/trigger plugin? no
                 "n",  # overwrite existing? no
             ]
         )
@@ -732,7 +837,7 @@ def test_config_wizard_force_overwrites(tmp_path):
     target = tmp_path / "existing"
     target.mkdir()
     (target / "octacam_config.toml").write_text("# stale\n")
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake", "--force"], input=inputs
     )

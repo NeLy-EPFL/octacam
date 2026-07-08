@@ -2,7 +2,9 @@
 //
 // Served from /plugins/omniview/, so it cannot import core "./util.js" (that would
 // 404). The shared fetch helper (api) and clampInput are passed in via the ctx the
-// host (app.js) constructs.
+// host (app.js) constructs. The serial helpers live at /js/ (absolute path, since
+// a relative import would resolve under /plugins/omniview/ and 404).
+import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
 
 const STATE_LABELS = {
   idle:    "Idle — waiting for arm command",
@@ -18,13 +20,16 @@ export default class OmniviewTab {
     this._getRecordSettings = getRecordSettings;
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
+    this.firmware = status?.firmware || null;
     this.arduinoState = status?.arduino_state || "idle";
     this.connected = false;
 
     this.statusBox    = document.getElementById("omniview-status");
     this.statusMsg    = document.getElementById("omniview-status-msg");
     this.reconnectBtn = document.getElementById("omniview-reconnect");
+    this.portSelect   = document.getElementById("omniview-port");
     this.stateValue   = document.getElementById("omniview-state-value");
+    this.firmwareEl   = document.getElementById("omniview-firmware");
     this.dutyInput    = document.getElementById("omniview-duty");
     this.armWithRec   = document.getElementById("omniview-arm-with-recording");
 
@@ -35,8 +40,16 @@ export default class OmniviewTab {
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
+    this._loadPorts();
     this._refresh();
     this._renderState();
+    this._renderFirmware();
+  }
+
+  // Populate the port dropdown with the currently detected serial ports,
+  // keeping the active device selected.
+  async _loadPorts() {
+    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
 
   // -------------------------------------------------- WS / connection state
@@ -50,6 +63,10 @@ export default class OmniviewTab {
   applyState(msg) {
     this.arduinoState = msg.state || "idle";
     if (msg.device) this.device = msg.device;
+    if ("firmware" in msg) {
+      this.firmware = msg.firmware || null;
+      this._renderFirmware();
+    }
     // The backend reports link readiness with every state push, so a serial port
     // that dies mid-session disables the arm gate (and shows the reconnect notice)
     // instead of leaving a stale "ready" that would arm a dead link.
@@ -103,13 +120,22 @@ export default class OmniviewTab {
     }
   }
 
+  _renderFirmware() {
+    if (!this.firmwareEl) return;
+    this.firmwareEl.textContent =
+      this.ready && this.firmware ? `Board firmware: ${this.firmware}` : "";
+  }
+
   // --------------------------------------------------------- reconnect
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
+    // Connect to the port picked in the dropdown (device override); with no
+    // selection the backend reopens the configured device.
+    const device = this.portSelect?.value || "";
     let r;
     try {
-      r = await this.api("POST", "/api/omniview/reconnect");
+      r = await this.api("POST", "/api/omniview/reconnect", device ? { device } : {});
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");
@@ -122,11 +148,14 @@ export default class OmniviewTab {
     }
     this.ready = Boolean(r.data?.ready);
     if (r.data?.device) this.device = r.data.device;
+    this.firmware = r.data?.firmware || null;
     if (r.data?.arduino_state) {
       this.arduinoState = r.data.arduino_state;
       this._renderState();
     }
+    this._renderFirmware();
     this._refresh();
+    this._loadPorts(); // refresh the list + selection after the attempt
     if (this.ready) {
       this.notify("info", `Serial port ${this.device} connected.`);
     } else {

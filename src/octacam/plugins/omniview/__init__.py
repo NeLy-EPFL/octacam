@@ -46,6 +46,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
 
@@ -87,6 +88,10 @@ _STATE_LABELS: dict[str, str] = {
     "D": "done",
     "C": "idle",
 }
+
+# Prefix of the firmware identity banner (kVersion = "OMNIVIEW <n>" in the .ino).
+# A connected board whose banner doesn't start with this is likely the wrong one.
+_EXPECTED_BANNER = "OMNIVIEW"
 
 
 @dataclass
@@ -172,6 +177,10 @@ class OmniviewLink:
         self._on_broken = on_broken
         self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
+        # Firmware identity banner ("OMNIVIEW <version>"), captured by the reader
+        # when it arrives in reply to an identify query. identify() waits on it.
+        self._identity: str | None = None
+        self._identity_event = threading.Event()
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
@@ -243,6 +252,22 @@ class OmniviewLink:
     def send_identify(self) -> None:
         self._write(bytes([_IDENTIFY_MAGIC]))
 
+    @property
+    def identity(self) -> str | None:
+        """The last firmware banner captured, or None if none seen yet."""
+        return self._identity
+
+    def identify(self, timeout: float = 0.5) -> str | None:
+        """Query the firmware banner and wait briefly for the reply.
+
+        Returns the banner (e.g. ``"OMNIVIEW 1"``) or None if the board did not
+        answer in time (an older firmware, a wrong board, or a slow link)."""
+        self._identity = None
+        self._identity_event.clear()
+        self.send_identify()
+        self._identity_event.wait(timeout)
+        return self._identity
+
     def _read_loop(self) -> None:
         buf = bytearray()
         while not self._reader_stop.is_set():
@@ -276,7 +301,11 @@ class OmniviewLink:
                 del buf[:]
                 buf.extend(rest)
                 token = line.decode("ascii", "replace").strip()
-                if token in _STATE_LABELS:
+                if token.upper().startswith("OMNIVIEW"):
+                    # Identity reply to an identify query; release identify().
+                    self._identity = token
+                    self._identity_event.set()
+                elif token in _STATE_LABELS:
                     try:
                         self._on_status(token)
                     except Exception:
@@ -341,8 +370,12 @@ class OmniviewPlugin(Plugin):
         default_duty_percent: float = DEFAULT_DUTY_PERCENT,
         default_cam_pulse_us: int = DEFAULT_CAM_PULSE_US,
     ):
+        # _configured_device is what the config asked for (a path, or "auto");
+        # self.device is the currently-active/display device, resolved on open.
+        self._configured_device = device
         self.device = device
         self.baud = baud
+        self._firmware: str | None = None
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
         self._default_duty_percent = default_duty_percent
@@ -385,7 +418,12 @@ class OmniviewPlugin(Plugin):
             # gate in sync without a separate poll.
             self._broadcast(
                 "omniview_state",
-                {"state": state, "device": self.device, "ready": self._link.is_open},
+                {
+                    "state": state,
+                    "device": self.device,
+                    "ready": self._link.is_open,
+                    "firmware": self._firmware,
+                },
             )
 
     # -------------------------------------------------- process lifecycle
@@ -394,14 +432,48 @@ class OmniviewPlugin(Plugin):
         self._open()
 
     def _open(self) -> str | None:
-        """(Re)open the serial link; returns an error message on failure, else None."""
+        """(Re)open the serial link; returns an error message on failure, else None.
+
+        Resolves ``device="auto"`` to a single detected board, enriches an open
+        failure with the detected candidate ports, and reads back the firmware
+        identity so a wrong board on the port is surfaced instead of failing
+        silently at record time."""
+        self._firmware = None
+        device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+        if device is None:
+            log.warning("omniview trigger: %s", reason)
+            return reason
+        if device != self.device:
+            log.info("omniview trigger: %s", reason)
+            self.device = device
         try:
-            self._link.open(self.device, self.baud)
+            self._link.open(device, self.baud)
         except Exception as e:
-            log.warning("omniview trigger: failed to open %s: %s", self.device, e)
-            return str(e)
-        log.info("omniview trigger: opened %s @ %d", self.device, self.baud)
+            msg = serial_ports.explain_open_failure(device, e)
+            log.warning("omniview trigger: %s", msg)
+            return msg
+        log.info("omniview trigger: opened %s @ %d", device, self.baud)
+        self._verify_identity()
         return None
+
+    def _verify_identity(self) -> None:
+        """Read the firmware banner and warn if it isn't omniview firmware."""
+        banner = self._link.identify()
+        self._firmware = banner
+        if banner is None:
+            log.info(
+                "omniview trigger: no firmware identity from %s (older firmware "
+                "or non-omniview board); proceeding",
+                self.device,
+            )
+        elif not banner.upper().startswith(_EXPECTED_BANNER):
+            log.warning(
+                "omniview trigger: %s reports firmware %r but an %r board was "
+                "expected — wrong device?",
+                self.device,
+                banner,
+                _EXPECTED_BANNER,
+            )
 
     def teardown(self) -> None:
         self._link.send_cancel()
@@ -417,6 +489,7 @@ class OmniviewPlugin(Plugin):
             "arduino_state": self._arduino_state,
             "duty_percent": self._default_duty_percent,
             "cam_pulse_us": self._default_cam_pulse_us,
+            "firmware": self._firmware,
         }
 
     # -------------------------------------------------- recording lifecycle
@@ -483,19 +556,27 @@ class OmniviewPlugin(Plugin):
         return Path(__file__).parent / "web"
 
     def api_router(self):
-        from fastapi import APIRouter
+        from fastapi import APIRouter, Body
 
         router = APIRouter()
 
         @router.post("/api/omniview/reconnect")
-        def reconnect():
-            """Re-attempt opening the serial port after an unplug/replug."""
+        def reconnect(payload: dict = Body(default={})):
+            """Re-attempt opening the serial port after an unplug/replug.
+
+            An optional ``{"device": "/dev/…"}`` body switches to a different
+            port (e.g. one picked from the GUI dropdown) before reopening; with
+            no body it reopens the configured device."""
+            device = payload.get("device") if isinstance(payload, dict) else None
+            if isinstance(device, str) and device.strip():
+                self._configured_device = device.strip()
             error = self._open()
             return {
                 "ready": self._link.is_open,
                 "device": self.device,
                 "error": error,
                 "arduino_state": self._arduino_state,
+                "firmware": self._firmware,
             }
 
         @router.get("/api/omniview/status")
@@ -507,6 +588,7 @@ class OmniviewPlugin(Plugin):
                 "arduino_state": self._arduino_state,
                 "duty_percent": self._default_duty_percent,
                 "cam_pulse_us": self._default_cam_pulse_us,
+                "firmware": self._firmware,
             }
 
         return router

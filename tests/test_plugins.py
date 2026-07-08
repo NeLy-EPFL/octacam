@@ -126,7 +126,9 @@ def test_flywheel_open_reports_success_and_failure():
     assert plugin.is_ready() is True
 
     link.fail = OSError("no such device")
-    assert plugin._open() == "no such device"
+    # The message is enriched with detected-port hints (env-dependent), but it
+    # always preserves the underlying open error.
+    assert plugin._open().startswith("failed to open /dev/test: no such device")
     assert plugin.is_ready() is False  # a failed open leaves the port closed
 
 
@@ -148,11 +150,11 @@ def test_flywheel_reconnect_endpoint_surfaces_ready_state():
     link.fail = OSError("no such device")
     r = client.post("/api/serial/reconnect")
     assert r.status_code == 200
-    assert r.json() == {
-        "ready": False,
-        "device": "/dev/test",
-        "error": "no such device",
-    }
+    body = r.json()
+    assert body["ready"] is False
+    assert body["device"] == "/dev/test"
+    # Error is enriched with detected-port hints but preserves the base message.
+    assert body["error"].startswith("failed to open /dev/test: no such device")
 
     # Board now present: reconnect succeeds.
     link.fail = None

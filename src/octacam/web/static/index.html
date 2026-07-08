@@ -188,8 +188,11 @@
     <section id="tab-flywheel" class="tab" data-plugin="flywheel">
       <div id="flywheel-status" class="plugin-status hidden">
         <span id="flywheel-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="flywheel-port" class="serial-port-select"></select>
+        </label>
         <button type="button" id="flywheel-reconnect" class="btn"
-          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+          title="Connect to the selected serial port">Reconnect</button>
       </div>
       <fieldset id="flywheel-fields" disabled>
         <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
@@ -248,8 +251,11 @@
     <section id="tab-twophoton" class="tab" data-plugin="twophoton">
       <div id="twophoton-status" class="plugin-status hidden">
         <span id="twophoton-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="twophoton-port" class="serial-port-select"></select>
+        </label>
         <button type="button" id="twophoton-reconnect" class="btn"
-          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+          title="Connect to the selected serial port">Reconnect</button>
       </div>
       <div class="col">
         <div class="row" title="Current state of the Arduino trigger board">
@@ -275,8 +281,11 @@
     <section id="tab-omniview" class="tab" data-plugin="omniview">
       <div id="omniview-status" class="plugin-status hidden">
         <span id="omniview-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="omniview-port" class="serial-port-select"></select>
+        </label>
         <button type="button" id="omniview-reconnect" class="btn"
-          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+          title="Connect to the selected serial port">Reconnect</button>
       </div>
       <div class="col">
         <div class="row" title="Current state of the Arduino trigger board">
@@ -285,6 +294,7 @@
             Idle — waiting for arm command
           </span>
         </div>
+        <div id="omniview-firmware" class="hint"></div>
         <label class="row"
           title="LED strobe duty cycle: how much of each frame the ring lights are on">
           <span>Strobe duty (%):</span>
@@ -406,8 +416,8 @@
       <label class="row" id="save-name-row" title="Name for the new config folder"><span>Name:</span>
         <input id="save-name" type="text" spellcheck="false" placeholder="my_rig">
       </label>
-      <label class="check" title="Save current sensor parameters as a Pylon .pfs file">
-        <input type="checkbox" id="save-sensor" checked> Sensor parameters (.pfs)</label>
+      <label class="check" title="Save current sensor parameters in each camera's native format (Basler .pfs / FLIR .txt)">
+        <input type="checkbox" id="save-sensor" checked> Sensor parameters</label>
       <label class="check" title="Save the window layout and rotation/flip as a .toml file">
         <input type="checkbox" id="save-display" checked> Display layout (.toml)</label>
       <div id="save-error" class="modal-error"></div>

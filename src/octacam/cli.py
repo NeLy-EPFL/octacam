@@ -1050,6 +1050,164 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             report.add("ok", f"config enables {name!r} (available)")
 
 
+def _plugin_default_device(name: str) -> str | None:
+    """The ``DEFAULT_DEVICE`` a serial plugin falls back to (None if unknown)."""
+    import importlib
+
+    try:
+        mod = importlib.import_module(f"octacam.plugins.{name}")
+        return getattr(mod, "DEFAULT_DEVICE", None)
+    except Exception:
+        return None
+
+
+def _configured_device(pc) -> tuple[str | None, bool]:
+    """``(device, is_auto)`` for a plugin config, mirroring the factory logic.
+
+    Returns the device string the plugin would use (explicit ``device`` option
+    or the plugin's ``DEFAULT_DEVICE``), and whether it is ``"auto"`` (dynamic)."""
+    from octacam import plugins as plugins_mod
+
+    name = plugins_mod._ALIASES.get(pc.name, pc.name)
+    raw = pc.options.get("device")
+    if isinstance(raw, str) and raw.strip().lower() == "auto":
+        return None, True
+    device = str(raw) if raw else _plugin_default_device(name)
+    return device, False
+
+
+def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
+    """List connected serial/Arduino devices and cross-check plugin ports.
+
+    Passive by default (never opens a port), so it is safe alongside a live
+    session. ``probe=True`` (``--probe-serial``) additionally reads each board's
+    firmware identity, skipping any port already held by a running session."""
+    from octacam import plugins as plugins_mod
+    from octacam import serial_ports as sp
+
+    report.section("Serial devices")
+    ports = sp.list_serial_ports()
+    if sp.comports is None:
+        report.add("warn", "pyserial not available; cannot enumerate serial ports")
+        return
+    if not ports:
+        report.add("info", "no serial ports detected")
+
+    # Microcontroller-class ports (Arduino/ESP/bridge chips) are the interesting
+    # ones; a host can have dozens of legacy /dev/ttyS* — collapse those to one
+    # line so the report stays readable.
+    mcus = [p for p in ports if p.likely_microcontroller]
+    generic = [p for p in ports if not p.likely_microcontroller]
+    for p in mcus:
+        sn = f"  sn={p.serial_number}" if p.serial_number else ""
+        line = f"{p.board_name}  {p.device}  [{p.vid_pid}]{sn}"
+        # Highlight boards that are (almost certainly) an Arduino with a marker.
+        report.add("info" if p.likely_arduino else "list", line)
+    if generic:
+        shown = ", ".join(p.device for p in generic[:4])
+        more = f", … (+{len(generic) - 4} more)" if len(generic) > 4 else ""
+        report.add("list", f"{len(generic)} other/generic serial port(s): {shown}{more}")
+
+    _doctor_serial_vs_config(report, cfg, ports)
+    if probe:
+        _doctor_serial_probe(report, cfg, mcus)
+
+
+def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
+    """Cross-check each enabled serial plugin's device against detected ports.
+
+    The serial analogue of :func:`_doctor_cameras_vs_config`: an "error" when a
+    configured device is absent (drives a nonzero exit), an "info" for a detected
+    board no plugin uses."""
+    from octacam import plugins as plugins_mod
+    from octacam import serial_ports as sp
+
+    if cfg is None:
+        return
+    detected_real = {os.path.realpath(p.device) for p in ports}
+    used_real: set[str] = set()
+    any_serial_plugin = False
+    for pc in getattr(cfg, "plugins", []):
+        name = plugins_mod._ALIASES.get(pc.name, pc.name)
+        if name not in sp.SERIAL_PLUGINS:
+            continue
+        any_serial_plugin = True
+        device, is_auto = _configured_device(pc)
+        if is_auto:
+            resolved, reason = sp.resolve_device("auto")
+            if resolved is None:
+                report.add("error", f"plugin {name!r}: {reason}")
+            else:
+                report.add("ok", f"plugin {name!r} device=auto → {reason}")
+                used_real.add(os.path.realpath(resolved))
+            continue
+        if not device:
+            continue
+        real = os.path.realpath(device)
+        if real in detected_real:
+            report.add("ok", f"plugin {name!r} device {device} is connected")
+            used_real.add(real)
+        else:
+            report.add(
+                "error",
+                f"plugin {name!r} device {device} not found among connected "
+                f"serial ports ({sp.format_candidates(ports)})",
+            )
+            arduino = next((p for p in ports if p.likely_arduino), None)
+            if arduino is not None:
+                report.add(
+                    "info",
+                    f"a stable udev rule for {arduino.device}: "
+                    f"{sp.udev_rule_for(arduino)}",
+                )
+    if any_serial_plugin:
+        for p in ports:
+            if p.likely_microcontroller and os.path.realpath(p.device) not in used_real:
+                report.add(
+                    "info",
+                    f"{p.board_name} {p.device} detected but not used by any plugin",
+                )
+
+
+def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
+    """Read each microcontroller port's firmware identity (opt-in, invasive)."""
+    from octacam import plugins as plugins_mod
+    from octacam import serial_ports as sp
+
+    expected: dict[str, tuple[str, str]] = {}
+    if cfg is not None:
+        for pc in getattr(cfg, "plugins", []):
+            name = plugins_mod._ALIASES.get(pc.name, pc.name)
+            banner = sp.EXPECTED_BANNER.get(name)
+            device, is_auto = _configured_device(pc)
+            if banner and device and not is_auto:
+                expected[os.path.realpath(device)] = (name, banner)
+    for p in mcus:
+        ident = sp.probe_identity(p.device)
+        if ident.busy:
+            report.add(
+                "info",
+                f"{p.device}: port in use (held by a running session); "
+                "skipped identity probe",
+            )
+            continue
+        if ident.banner:
+            report.add("info", f"{p.device}: firmware identity {ident.banner!r}")
+        else:
+            report.add(
+                "info",
+                f"{p.device}: no identity reply (not an octacam-firmware board, "
+                "or its firmware has no identify command)",
+            )
+        exp = expected.get(os.path.realpath(p.device))
+        if exp and ident.banner and not ident.banner.upper().startswith(exp[1]):
+            report.add(
+                "warn",
+                f"{p.device}: expected {exp[0]} firmware (banner {exp[1]!r}) but "
+                f"got {ident.banner!r} — wrong board?",
+            )
+
+
 def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     from octacam import session_cache
 
@@ -1189,6 +1347,15 @@ def doctor(
             help="Exit nonzero on warnings too (for CI), not only on errors.",
         ),
     ] = False,
+    probe_serial: Annotated[
+        bool,
+        typer.Option(
+            "--probe-serial",
+            help="Also open each detected serial port briefly to read its "
+            "firmware identity. Skips ports held by a running session; skip "
+            "this if a board may be armed.",
+        ),
+    ] = False,
 ) -> None:
     """Diagnose the octacam install and, optionally, a rig config.
 
@@ -1209,6 +1376,7 @@ def doctor(
         _doctor_cameras_vs_config(report, cfg, backend)
         _doctor_storage(report, cfg)
     _doctor_plugins(report, cfg)
+    _doctor_serial(report, cfg, probe=probe_serial)
     _doctor_runtime(report, config_dir)
 
     if json_output:
@@ -1446,12 +1614,79 @@ def _prompt_transfer(console) -> dict | None:
     return {"directory": directory, "checksum": checksum}
 
 
+def _detect_serial_ports(console):
+    """Print detected microcontroller-class serial ports; return that list.
+
+    Mirrors :func:`_detect_cameras` — the legacy ``/dev/ttyS*`` ports are omitted
+    so only the plausible Arduino candidates are shown."""
+    from octacam import serial_ports as sp
+
+    mcus = [p for p in sp.list_serial_ports() if p.likely_microcontroller]
+    if mcus:
+        console.print(f"Detected [bold]{len(mcus)}[/bold] serial device(s):")
+        for p in mcus:
+            sn = f"  sn={p.serial_number}" if p.serial_number else ""
+            console.print(f"  • {p.board_name}  {p.device}  [{p.vid_pid}]{sn}")
+    else:
+        console.print("[yellow]No Arduino-class serial ports detected.[/yellow]")
+    return mcus
+
+
+def _prompt_serial_plugin(console) -> list[dict]:
+    """Optionally enable one serial/trigger plugin and choose its device.
+
+    Returns a list of plugin entry dicts for the config (empty when declined)."""
+    from rich.prompt import Confirm, Prompt
+
+    from octacam import serial_ports as sp
+
+    console.print()
+    if not Confirm.ask(
+        "Enable a hardware trigger / serial plugin (Arduino)?",
+        default=False,
+        console=console,
+    ):
+        return []
+    name = Prompt.ask(
+        "  Plugin",
+        choices=["omniview", "twophoton", "flywheel"],
+        default="omniview",
+        console=console,
+    )
+    ports = _detect_serial_ports(console)
+    default_device = ports[0].device if ports else (_plugin_default_device(name) or "auto")
+    console.print(
+        "  Enter a device path, or [bold]auto[/bold] to pick the single board "
+        "connected at launch."
+    )
+    device = Prompt.ask("  Device", default=default_device, console=console).strip()
+    options = {"device": device} if device else {}
+    # Offer a stable udev rule for the chosen board (survives re-enumeration).
+    chosen = next((p for p in ports if p.device == device), None)
+    if (
+        chosen is not None
+        and chosen.serial_number
+        and Confirm.ask(
+            "  Print a udev rule for a stable /dev path for this board?",
+            default=False,
+            console=console,
+        )
+    ):
+        console.print(f"    {sp.udev_rule_for(chosen)}")
+        console.print(
+            "    Add it to /etc/udev/rules.d/99-octacam.rules, then reload with "
+            "`sudo udevadm control --reload && sudo udevadm trigger`."
+        )
+    return [{"name": name, "options": options}]
+
+
 def _build_config_doc(
     backend: str,
     record_cfg: "RecordConfig",
     cameras: list[dict],
     visualization: list[dict],
     transfer: dict | None,
+    plugins: list[dict] | None = None,
 ) -> dict:
     """Assemble the raw-TOML dict the config writer serializes.
 
@@ -1469,6 +1704,8 @@ def _build_config_doc(
         doc["cameras"] = cameras
     if visualization:
         doc["visualization"] = visualization
+    if plugins:
+        doc["plugins"] = plugins
     if transfer:
         doc["transfer"] = transfer
     return doc
@@ -1509,7 +1746,7 @@ def _snapshot_camera_params(
         pfs = system.save_all_params()
         if not pfs:
             return []
-        # Each camera persists in its own backend's format (.pfs / .json), so a
+        # Each camera persists in its own backend's format (.pfs / .txt), so a
         # mixed rig writes per-serial rather than one shared extension.
         ext_by_serial = system.extension_by_serial()
         config_writer.write_pfs_files(target, pfs, ext_by_serial)
@@ -1549,7 +1786,7 @@ def config(
         typer.Option(
             "--snapshot-params/--no-snapshot-params",
             help="Open each detected camera once to save its current sensor "
-            "parameters (.pfs/.json). Skipped when a camera is busy. On by default.",
+            "parameters (.pfs/.txt). Skipped when a camera is busy. On by default.",
         ),
     ] = True,
 ) -> None:
@@ -1581,6 +1818,7 @@ def config(
     record_cfg = _prompt_record(console)
     console.print()
     transfer = _prompt_transfer(console)
+    plugins_cfg = _prompt_serial_plugin(console)
 
     if config_dir is None:
         console.print()
@@ -1604,7 +1842,7 @@ def config(
         raise typer.Exit(1)
 
     doc = _build_config_doc(
-        chosen_backend, record_cfg, cameras, visualization, transfer
+        chosen_backend, record_cfg, cameras, visualization, transfer, plugins_cfg
     )
     try:
         target.mkdir(parents=True, exist_ok=True)

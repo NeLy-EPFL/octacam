@@ -303,6 +303,19 @@ def test_reconnect_endpoint_surfaces_failure(monkeypatch):
     assert data["error"] == "could not open /dev/arduinoCams"
 
 
+def test_reconnect_endpoint_accepts_device_override():
+    # A {"device": …} body switches the port before reopening (GUI dropdown).
+    plugin, link = _plugin_with_fake(is_open=False)
+    r = _test_client(plugin).post(
+        "/api/twophoton/reconnect", json={"device": "/dev/ttyUSB3"}
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ready"] is True
+    assert data["device"] == "/dev/ttyUSB3"
+    assert plugin._configured_device == "/dev/ttyUSB3"
+
+
 def test_from_payload_clamps_duration_to_uint32():
     # An out-of-range duration must clamp, not blow up to_bytes() with struct.error.
     p = ArmParams.from_payload({"duration_ms": 2**40}, 100, 10_000)

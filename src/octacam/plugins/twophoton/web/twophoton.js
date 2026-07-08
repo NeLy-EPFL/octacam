@@ -2,7 +2,9 @@
 //
 // Served from /plugins/twophoton/, so it cannot import core "./util.js" (that
 // would 404). The shared fetch helper (api) is passed in via the ctx the host
-// (app.js) constructs.
+// (app.js) constructs. The serial helpers live at /js/ (absolute path, since a
+// relative import would resolve under /plugins/twophoton/ and 404).
+import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -24,14 +26,22 @@ export default class TwoPhotonTab {
     this.statusBox     = document.getElementById("twophoton-status");
     this.statusMsg     = document.getElementById("twophoton-status-msg");
     this.reconnectBtn  = document.getElementById("twophoton-reconnect");
+    this.portSelect    = document.getElementById("twophoton-port");
     this.stateLabel    = document.getElementById("twophoton-state-label");
     this.stateValue    = document.getElementById("twophoton-state-value");
     this.armWithRec    = document.getElementById("twophoton-arm-with-recording");
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
+    this._loadPorts();
     this._refresh();
     this._renderState();
+  }
+
+  // Populate the port dropdown with the currently detected serial ports,
+  // keeping the active device selected.
+  async _loadPorts() {
+    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
 
   // -------------------------------------------------- WS / connection state
@@ -98,9 +108,12 @@ export default class TwoPhotonTab {
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
+    // Connect to the port picked in the dropdown (device override); with no
+    // selection the backend reopens the configured device.
+    const device = this.portSelect?.value || "";
     let r;
     try {
-      r = await this.api("POST", "/api/twophoton/reconnect");
+      r = await this.api("POST", "/api/twophoton/reconnect", device ? { device } : {});
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");
@@ -118,6 +131,7 @@ export default class TwoPhotonTab {
       this._renderState();
     }
     this._refresh();
+    this._loadPorts(); // refresh the list + selection after the attempt
     if (this.ready) {
       this.notify("info", `Serial port ${this.device} connected.`);
     } else {

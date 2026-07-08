@@ -59,6 +59,17 @@ class FakeLink:
             if self._open:
                 self.written.append(bytes([CANCEL_MAGIC]))
 
+    def send_identify(self) -> None:
+        pass
+
+    def identify(self, timeout: float = 0.5):
+        # Tests set `.banner` to control the reported firmware identity.
+        return getattr(self, "banner", None)
+
+    @property
+    def identity(self):
+        return getattr(self, "banner", None)
+
     def snapshot(self) -> list[bytes]:
         with self._lock:
             return list(self.written)
@@ -259,7 +270,10 @@ def test_broadcast_called_on_status_change():
     plugin.set_broadcast(lambda kind, payload: received.append((kind, payload)))
     plugin._on_arduino_status("R")
     assert received == [
-        ("omniview_state", {"state": "running", "device": DEVICE, "ready": True})
+        (
+            "omniview_state",
+            {"state": "running", "device": DEVICE, "ready": True, "firmware": None},
+        )
     ]
 
 
@@ -283,7 +297,7 @@ def test_link_broken_broadcasts_not_ready():
     plugin._on_link_broken()
     assert events[-1] == (
         "omniview_state",
-        {"state": "idle", "device": DEVICE, "ready": False},
+        {"state": "idle", "device": DEVICE, "ready": False, "firmware": None},
     )
 
 
@@ -349,6 +363,88 @@ def test_reconnect_endpoint_surfaces_failure(monkeypatch):
     data = r.json()
     assert data["ready"] is False
     assert data["error"] == "could not open /dev/ttyACM0"
+
+
+def test_reconnect_endpoint_accepts_device_override():
+    # A {"device": …} body switches the port before reopening (GUI dropdown).
+    plugin, link = _plugin_with_fake(is_open=False)
+    r = _test_client(plugin).post(
+        "/api/omniview/reconnect", json={"device": "/dev/ttyACM5"}
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ready"] is True
+    assert data["device"] == "/dev/ttyACM5"
+    assert plugin._configured_device == "/dev/ttyACM5"
+
+
+# ---------------------------------------------------------------------------
+# Plugin: firmware identity verification + auto device resolution
+# ---------------------------------------------------------------------------
+
+
+def test_open_reads_and_reports_firmware():
+    plugin, link = _plugin_with_fake(is_open=False)
+    link.banner = "OMNIVIEW 1"
+    assert plugin._open() is None
+    assert plugin._firmware == "OMNIVIEW 1"
+    assert plugin.status()["firmware"] == "OMNIVIEW 1"
+
+
+def test_open_warns_on_wrong_firmware_banner():
+    records, detach = _capture_octacam_logs()
+    try:
+        plugin, link = _plugin_with_fake(is_open=False)
+        link.banner = "SOMEOTHERBOARD"
+        # A wrong banner is a warning, not a hard failure: the port still opens.
+        assert plugin._open() is None
+        assert plugin.is_ready() is True
+        assert plugin._firmware == "SOMEOTHERBOARD"
+    finally:
+        detach()
+    assert any("wrong device" in r.getMessage() for r in records)
+
+
+def test_auto_device_resolves_single_port(monkeypatch):
+    from octacam import serial_ports as sp
+
+    only = sp.SerialPort(
+        device="/dev/ttyACM0",
+        description="",
+        manufacturer="Arduino",
+        product=None,
+        vid=0x2341,
+        pid=0x0070,
+        serial_number="SN",
+        hwid="",
+        board_name="Arduino Nano ESP32",
+        likely_microcontroller=True,
+        likely_arduino=True,
+    )
+    monkeypatch.setattr(sp, "list_serial_ports", lambda: [only])
+    plugin = OmniviewPlugin(device="auto")
+    plugin._link = FakeLink(is_open=False)
+    assert plugin._open() is None
+    assert plugin.device == "/dev/ttyACM0"
+
+
+def test_auto_device_ambiguous_errors(monkeypatch):
+    from octacam import serial_ports as sp
+
+    def two_ports():
+        return [
+            sp.SerialPort("/dev/ttyACM0", "", None, None, 0x2341, 0x0070, "A", "",
+                          "Arduino Nano ESP32", True, True),
+            sp.SerialPort("/dev/ttyACM1", "", None, None, 0x2341, 0x0070, "B", "",
+                          "Arduino Nano ESP32", True, True),
+        ]
+
+    monkeypatch.setattr(sp, "list_serial_ports", two_ports)
+    plugin = OmniviewPlugin(device="auto")
+    plugin._link = FakeLink(is_open=False)
+    err = plugin._open()
+    assert err is not None and "set [plugins.options].device" in err
+    assert plugin.is_ready() is False
 
 
 # ---------------------------------------------------------------------------

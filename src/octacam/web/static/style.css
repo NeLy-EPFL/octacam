@@ -303,6 +303,10 @@ body {
 }
 
 .plugin-status button { flex: none; }
+/* Let the message take the row and push the port picker + Reconnect right. */
+.plugin-status > span:first-child { flex: 1; }
+.serial-port-row { flex: none; display: flex; align-items: center; gap: 4px; }
+.serial-port-select { max-width: 220px; }
 
 .hint {
   margin: 6px 0;
