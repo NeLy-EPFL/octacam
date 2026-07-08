@@ -23,26 +23,23 @@ export class ViewTab {
       this.onSelect?.(this.selected);
     });
 
-    // "selected" applies to the grid's currently-selected tile (kept in lockstep
-    // with the picker via onSelect/selectCamera); "all" applies to every camera.
-    const scope = () =>
-      document.querySelector('input[name="apply-to"]:checked').value;
-
+    // Rotate/flip/reset always target the grid's currently-selected tile (kept
+    // in lockstep with the picker via onSelect/selectCamera).
     document
       .getElementById("rotate-ccw")
-      .addEventListener("click", () => grid.applyView({ rotateDelta: -90 }, scope()));
+      .addEventListener("click", () => grid.applyView({ rotateDelta: -90 }, "selected"));
     document
       .getElementById("rotate-cw")
-      .addEventListener("click", () => grid.applyView({ rotateDelta: 90 }, scope()));
+      .addEventListener("click", () => grid.applyView({ rotateDelta: 90 }, "selected"));
     document
       .getElementById("flip-h")
-      .addEventListener("click", () => grid.applyView({ flipH: true }, scope()));
+      .addEventListener("click", () => grid.applyView({ flipH: true }, "selected"));
     document
       .getElementById("flip-v")
-      .addEventListener("click", () => grid.applyView({ flipV: true }, scope()));
+      .addEventListener("click", () => grid.applyView({ flipV: true }, "selected"));
     document
       .getElementById("view-reset")
-      .addEventListener("click", () => grid.applyView({ reset: true }, scope()));
+      .addEventListener("click", () => grid.applyView({ reset: true }, "selected"));
     document
       .getElementById("display-cross")
       .addEventListener("change", (e) => grid.setCrossVisible(e.target.checked));

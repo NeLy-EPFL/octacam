@@ -290,15 +290,9 @@
 
     <section id="tab-view" class="tab">
       <fieldset id="view-fields" disabled>
-        <label class="row" title="Which camera the rotate/flip controls apply to when Apply to is set to Selected"><span>Camera:</span>
+        <label class="row" title="Which camera the rotate/flip controls apply to"><span>Camera:</span>
           <select id="view-target"></select>
         </label>
-        <div class="row" title="Apply rotate/flip to just the selected camera, or to every camera at once"><span>Apply to:</span>
-          <span class="radio-group">
-            <label title="Change only the selected camera"><input type="radio" name="apply-to" value="selected"> Selected</label>
-            <label title="Change all cameras at once"><input type="radio" name="apply-to" value="all" checked> All</label>
-          </span>
-        </div>
         <div class="row"
           title="Rotate the preview 90°. Does not change the sensor; baked into recordings saved in 'display' form."><span>Rotate:</span>
           <span class="btn-pair">
@@ -314,7 +308,7 @@
           </span>
         </div>
         <button type="button" id="view-reset" class="btn wide"
-          title="Clear all rotation and flips for the targeted camera(s)">Reset</button>
+          title="Clear all rotation and flips for the selected camera">Reset</button>
         <label class="center" title="Overlay centering crosshairs on every preview tile">
           <input type="checkbox" id="display-cross"> Display cross</label>
       </fieldset>
