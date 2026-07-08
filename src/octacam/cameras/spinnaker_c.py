@@ -45,7 +45,12 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
+from octacam.cameras._genicam_config import (
+    apply_config,
+    dump_config,
+    normalize_trigger_source,
+    parse_config,
+)
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
@@ -836,7 +841,9 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             if self._nodemap is not None
             else None
         )
-        return dump_config(self, model)
+        return normalize_trigger_source(
+            dump_config(self, model), self._original_trigger_source
+        )
 
     # ----------------------------------------------------------- triggering
 

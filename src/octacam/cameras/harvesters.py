@@ -50,7 +50,12 @@ from pathlib import Path
 from typing import Any
 
 from octacam.cameras import _genicam_features
-from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
+from octacam.cameras._genicam_config import (
+    apply_config,
+    dump_config,
+    normalize_trigger_source,
+    parse_config,
+)
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
@@ -448,7 +453,7 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         self._original_trigger_source = self._get_enum("TriggerSource")
 
     def save_params(self) -> str:
-        return dump_config(self)
+        return normalize_trigger_source(dump_config(self), self._original_trigger_source)
 
     # ----------------------------------------------------------- triggering
 

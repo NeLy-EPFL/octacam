@@ -243,7 +243,7 @@ def dump_config(backend, model: str | None = None) -> str:
     """
     serial = getattr(backend, "serial_number", None)
     device = " ".join(filter(None, (model, f"({serial})" if serial else "")))
-    lines = list(_HEADER)
+    lines: list[str] = list(_HEADER)
     if device:
         lines.append(f"# Device = {device}")
     last_cat: str | None = None
@@ -273,3 +273,31 @@ def dump_config(backend, model: str | None = None) -> str:
             last_cat = category
         lines.append(f"{name}\t{rendered}")
     return "\n".join(lines) + "\n"
+
+
+def normalize_trigger_source(text: str, original_source: str | None) -> str:
+    """Undo a live software-trigger preview's ``TriggerSource=Software`` override.
+
+    ``begin_software_trigger_preview`` forces ``TriggerSource=Software`` on the
+    live camera; a config saved (GUI "Save") while previewing would bake that in,
+    so a later external-trigger recording would wait for a software trigger that
+    never fires — the cameras just never start, silently (this is exactly how the
+    omniview FLIR ``.txt`` files ended up unrecordable). Rewrite a dumped
+    ``TriggerSource\\tSoftware`` line back to *original_source* — the hardware line
+    :meth:`load_params` captured when the config was loaded. Mirrors
+    :func:`octacam.cameras.basler._normalize_pfs_triggers`.
+
+    No-op when there is nothing to undo (the value is not ``Software``) or no
+    hardware source to restore to (``original_source`` is unknown or itself
+    ``Software``), so a genuinely software-triggered rig is left untouched.
+    """
+    if not original_source or original_source == "Software":
+        return text
+    out = []
+    for line in text.splitlines():
+        if not line.startswith("#") and "\t" in line:
+            name, _, value = line.partition("\t")
+            if name.strip() == "TriggerSource" and value.strip() == "Software":
+                line = f"{name}\t{original_source}"
+        out.append(line)
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")

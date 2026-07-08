@@ -689,3 +689,35 @@ def test_omniview_is_registered_builtin():
     from octacam.plugins import _BUILTINS
 
     assert "omniview" in _BUILTINS
+
+
+# ---------------------------------------------------------------------------
+# Headless-record arming: `octacam record` has no GUI checkbox, so the plugin
+# contributes its arm slice via default_start_params (regression: CLI records
+# used to never arm the board, leaving external-trigger cameras waiting forever).
+# ---------------------------------------------------------------------------
+
+
+def test_default_start_params_uses_recording_timing_and_configured_strobe():
+    plugin = OmniviewPlugin(default_duty_percent=33.0, default_cam_pulse_us=250)
+    assert plugin.default_start_params(fps=80.0, duration_s=2.5) == {
+        "fps": 80,
+        "duration_ms": 2500,
+        "duty_percent": 33.0,
+        "cam_pulse_us": 250,
+    }
+
+
+def test_plugin_manager_default_start_params_includes_only_opted_in_plugins():
+    from octacam.plugins.base import Plugin, PluginManager
+
+    class Quiet(Plugin):  # a plugin that does not act at record start
+        name = "quiet"
+
+    omni = OmniviewPlugin(default_duty_percent=20.0, default_cam_pulse_us=0)
+    params = PluginManager([Quiet(), omni]).default_start_params(
+        fps=80.0, duration_s=10.0
+    )
+    assert set(params) == {"omniview"}  # the no-op base plugin is omitted
+    assert params["omniview"]["fps"] == 80
+    assert params["omniview"]["duration_ms"] == 10000

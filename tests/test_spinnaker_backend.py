@@ -359,6 +359,32 @@ def test_params_round_trip():
     assert values["TriggerSource"] == "Line2"  # enum read straight back
 
 
+def test_save_params_undoes_preview_software_trigger_source():
+    # A config saved while the live software-trigger preview forced
+    # TriggerSource=Software must NOT bake that in: save_params rewrites it back to
+    # the hardware line load_params captured, so a later external-trigger recording
+    # still fires. Regression: the omniview FLIR .txt shipped with Software and the
+    # cameras silently never triggered.
+    nm = FakeNodeMap()  # TriggerSource ships as the hardware line Line0
+    backend, _cam = _open_backend(nm)
+    backend.load_params("TriggerSource\tLine0\n")  # captures _original = Line0
+    backend.begin_software_trigger_preview()  # forces the live source to Software
+    assert nm.TriggerSource.value == "Software"
+    values = dict(parse_config(backend.save_params()))
+    assert values["TriggerSource"] == "Line0"
+
+
+def test_save_params_keeps_software_when_that_is_the_configured_source():
+    # A genuinely software-triggered rig (no hardware source to restore) is left
+    # untouched, so the normalization never fights an intentional Software config.
+    nm = FakeNodeMap()
+    nm.TriggerSource = FakeEnum("Software")
+    backend, _cam = _open_backend(nm)
+    backend.load_params("TriggerSource\tSoftware\n")  # captures _original = Software
+    values = dict(parse_config(backend.save_params()))
+    assert values["TriggerSource"] == "Software"
+
+
 def test_load_params_skips_unavailable_nodes(caplog):
     nm = FakeNodeMap()
     nm.Gain = FakeNode(1.5, writable=False)  # present but not writable
