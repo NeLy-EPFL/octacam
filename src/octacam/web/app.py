@@ -75,9 +75,17 @@ PREVIEW_FOCUS_MAX_DIM_RECORDING = 1280
 # bound. In normal use (clients with similar layouts) there is one variant.
 MAX_PREVIEW_VARIANTS_PER_CAMERA = 4
 JPEG_QUALITY = 75
-# u8 version | u8 kind | u8 camera | u8 flags(bit0=recording) |
-# u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
-FRAME_HEADER = struct.Struct("<BBBBIQfI")
+# Preview frame header, version 2 (little-endian):
+#   u8  version (2) | u8 kind (1) | u8 camera | u8 flags(bit0=recording)
+#   u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
+#   u16 crop_x | u16 crop_y | u16 crop_w | u16 crop_h   (sensor px covered)
+#   u16 sensor_w | u16 sensor_h                          (full sensor size)
+# The crop rect lets the client place a server-side crop (a zoomed region) at
+# the right spot under its display transform; for an un-cropped frame it is the
+# whole sensor (0, 0, sensor_w, sensor_h). Bumping the version byte from 1 keeps
+# the client's version check meaningful (an old client fails closed).
+FRAME_HEADER = struct.Struct("<BBBBIQfIHHHHHH")
+FRAME_VERSION = 2
 
 
 @dataclasses.dataclass(frozen=True)
@@ -89,47 +97,90 @@ class _ViewSpec:
     client. ``need`` is the longest source edge (in device pixels) the client
     can actually display; ``full`` marks a focused tile (maximized/zoomed) that
     is allowed to exceed the ``PREVIEW_MAX_DIM`` baseline up to sensor
-    resolution. A default spec reproduces the pre-feature behavior exactly, so a
-    client that never sends a view message is byte-for-byte unchanged."""
+    resolution. ``crop`` (x, y, w, h in sensor px) asks the server to send only
+    that sub-rectangle — a zoomed-in region delivered at full detail for the
+    cost of a small frame, instead of the whole sensor. A default spec
+    reproduces the pre-feature behavior exactly, so a client that never sends a
+    view message is byte-for-byte unchanged."""
 
     want: bool = True
     need: int | None = None  # requested longest source edge in px; None = baseline
     full: bool = False  # focused tile may request finer than the baseline
+    crop: tuple[int, int, int, int] | None = None  # (x, y, w, h) in sensor px
 
 
 _DEFAULT_VIEW = _ViewSpec()
 
 
-def _preview_factor(width: int, height: int, spec: _ViewSpec, recording: bool) -> int:
-    """Integer decimation factor for one camera given a client's view spec.
+def _parse_crop(crop) -> tuple[int, int, int, int] | None:
+    """Parse a {"x","y","w","h"} crop dict into an int tuple, or None when
+    absent/malformed. Width/height must be positive and the origin non-negative;
+    the rect is clamped to the live sensor size later by _clamp_crop."""
+    if not isinstance(crop, dict):
+        return None
+    try:
+        x, y = int(crop["x"]), int(crop["y"])
+        w, h = int(crop["w"]), int(crop["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0 or x < 0 or y < 0:
+        return None
+    return (x, y, w, h)
+
+
+def _clamp_crop(
+    crop: tuple[int, int, int, int] | None, width: int, height: int
+) -> tuple[int, int, int, int]:
+    """Clamp a requested crop to the sensor, returning the whole sensor when
+    there is no crop. numpy would silently clip an out-of-range slice, so pin
+    the rect here and report the clamped geometry to the client (in the frame
+    header) — the client positions the crop from what was actually sent, never
+    from what it asked for."""
+    if crop is None:
+        return (0, 0, width, height)
+    x, y, w, h = crop
+    x = max(0, min(int(x), max(0, width - 1)))
+    y = max(0, min(int(y), max(0, height - 1)))
+    w = max(1, min(int(w), width - x))
+    h = max(1, min(int(h), height - y))
+    return (x, y, w, h)
+
+
+def _preview_factor(
+    sensor_long: int, region_long: int, spec: _ViewSpec, recording: bool
+) -> int:
+    """Integer decimation factor for the region being encoded (the whole sensor,
+    or a crop of it) given a client's view spec.
 
     A default/legacy spec (no ``need``) returns today's baseline factor,
-    ``ceil(long_edge / PREVIEW_MAX_DIM)``, so unspecified clients are unchanged.
-    A normal tile may only go *coarser* than the baseline (a small tile sends
-    less data); a focused tile may go *finer*, up to sensor resolution when idle
-    and up to ``PREVIEW_FOCUS_MAX_DIM_RECORDING`` while recording.
-    """
-    long_edge = max(width, height, 1)
-    baseline = max(1, math.ceil(long_edge / PREVIEW_MAX_DIM))
+    ``ceil(sensor_long / PREVIEW_MAX_DIM)``, so unspecified clients are
+    unchanged. A normal tile may only go *coarser* than the baseline (a small
+    tile sends less data); a focused tile may go *finer*, down to 1:1, bounded
+    to ``PREVIEW_FOCUS_MAX_DIM_RECORDING`` while recording. ``region_long`` is
+    the crop's long edge when cropping, else the sensor's."""
+    sensor_long = max(sensor_long, 1)
+    region_long = max(region_long, 1)
+    baseline = max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM))
     if spec.need is None:
         return baseline
     need = max(1, spec.need)
     if not spec.full:
-        # Unfocused tile: honor a smaller need (coarser preview), but never
-        # sharper than today's baseline — this is what keeps a single HiDPI
-        # (devicePixelRatio > 1) client from silently upgrading every camera.
-        return max(baseline, max(1, round(long_edge / need)))
-    # Focused tile: may exceed the baseline, up to the sensor itself. round()
-    # matches the requested resolution while biasing a maximized tile toward
-    # full detail (send a little extra rather than a little soft).
-    need = min(need, long_edge)  # never finer than the sensor
-    factor = max(1, round(long_edge / need))
+        # Unfocused tile (never cropped): honor a smaller need (coarser
+        # preview), but never sharper than today's baseline — this keeps a
+        # single HiDPI (devicePixelRatio > 1) client from silently upgrading
+        # every camera.
+        return max(baseline, max(1, round(region_long / need)))
+    # Focused tile: may exceed the baseline, down to 1:1 on the region. round()
+    # matches the requested resolution while biasing toward full detail (send a
+    # little extra rather than a little soft).
+    need = min(need, region_long)  # never finer than the pixels that exist
+    factor = max(1, round(region_long / need))
     if recording:
         # A *hard* resolution ceiling while recording, so a large preview encode
         # can't starve the writer's CPU — ceil (a true upper bound) rather than
         # the need-matching round above, which could leave the effective
-        # resolution up to ~1.5x over the cap for mid-band sensor sizes.
-        factor = max(factor, math.ceil(long_edge / PREVIEW_FOCUS_MAX_DIM_RECORDING))
+        # resolution up to ~1.5x over the cap for mid-band region sizes.
+        factor = max(factor, math.ceil(region_long / PREVIEW_FOCUS_MAX_DIM_RECORDING))
     return factor
 
 
@@ -358,6 +409,7 @@ class _Client:
                 want=bool(spec.get("want", True)),
                 need=need,
                 full=bool(spec.get("full", False)),
+                crop=_parse_crop(spec.get("crop")),
             )
 
     def queue_frame(self, camera_index: int, message: bytes) -> None:
@@ -487,30 +539,32 @@ class _AppState:
                 continue
             recording = self.controller.recording_active
             # Per camera, group the clients that are both drained (newest-only
-            # backpressure, is_ready_for) AND still want it by the decimation
-            # factor each one needs. Each distinct factor is encoded once and
-            # shared by every client that asked for it, so encode cost tracks
-            # the number of *distinct resolutions* on screen, not the number of
+            # backpressure, is_ready_for) AND still want it by the (crop region,
+            # decimation factor) each one needs. Each distinct variant is encoded
+            # once and shared by every client asking for it, so encode cost
+            # tracks the number of *distinct views* on screen, not the number of
             # clients. A camera no ready client wants (hidden behind someone's
-            # maximized tile) is skipped entirely — no grab, no encode. A slow
-            # or stalled ssh -L tunnel still can't make the rig burn CPU on
-            # previews nobody is keeping up with.
-            jobs = []  # (index, camera, frame, {factor: [clients]})
+            # maximized tile) is skipped entirely — no grab, no encode. A slow or
+            # stalled ssh -L tunnel still can't make the rig burn CPU on previews
+            # nobody is keeping up with.
+            jobs = []  # (index, camera, frame, {(region, factor): [clients]})
             for index, camera in enumerate(self.controller.camera_system):
-                groups: dict[int, list[_Client]] = {}
+                width, height = camera.width, camera.height
+                sensor_long = max(width, height)
+                groups: dict[tuple, list[_Client]] = {}
                 for client in clients:
                     if not client.is_ready_for(index):
                         continue
                     spec = client.view_for(index)
                     if not spec.want:
                         continue
-                    factor = _preview_factor(
-                        camera.width, camera.height, spec, recording
-                    )
-                    groups.setdefault(factor, []).append(client)
+                    region = _clamp_crop(spec.crop, width, height)
+                    region_long = max(region[2], region[3])
+                    factor = _preview_factor(sensor_long, region_long, spec, recording)
+                    groups.setdefault((region, factor), []).append(client)
                 if not groups:
                     continue
-                self._cap_variants(groups)
+                self._cap_variants(groups, width, height, sensor_long)
                 frame = camera.frame_for_display.pop()
                 if frame is None:
                     continue
@@ -525,20 +579,34 @@ class _AppState:
                     client.queue_frame(camera_index, message)
 
     @staticmethod
-    def _cap_variants(groups: dict[int, list["_Client"]]) -> None:
-        """Bound distinct resolution variants of one camera to the safety cap.
-
-        Drops the sharpest (most expensive) extra factors and folds their
-        clients onto the sharpest surviving factor, so those clients still get a
-        correct — if slightly softer — image while total encode cost stays
-        bounded regardless of how many clients diverge."""
+    def _cap_variants(
+        groups: dict[tuple, list["_Client"]],
+        width: int,
+        height: int,
+        sensor_long: int,
+    ) -> None:
+        """Bound distinct (region, factor) variants of one camera to the safety
+        cap. Keeps the cheapest few and demotes the rest to the shared
+        full-frame baseline variant — a correct whole-sensor image for those
+        clients (their client-side zoom still magnifies it), just without the
+        server-cropped detail. Two different crops are never merged into one
+        encode (that would show a client the wrong region); demotion only ever
+        widens a crop back to the full frame."""
         if len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA:
             return
-        factors = sorted(groups)  # ascending: sharpest (smallest factor) first
-        keep = factors[-MAX_PREVIEW_VARIANTS_PER_CAMERA:]  # the cheapest to encode
-        target = keep[0]  # sharpest survivor
-        for factor in factors[:-MAX_PREVIEW_VARIANTS_PER_CAMERA]:
-            groups[target].extend(groups.pop(factor))
+
+        def output_pixels(key):  # encode cost proxy
+            (_, _, w, h), factor = key
+            return (w // factor + 1) * (h // factor + 1)
+
+        cheapest = sorted(groups, key=output_pixels)
+        keep = set(cheapest[: MAX_PREVIEW_VARIANTS_PER_CAMERA - 1])
+        baseline = ((0, 0, width, height), max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM)))
+        bucket = groups.setdefault(baseline, [])
+        for key in cheapest[MAX_PREVIEW_VARIANTS_PER_CAMERA - 1 :]:
+            if key in keep or key == baseline:
+                continue
+            bucket.extend(groups.pop(key))
 
     def _encode_jobs(
         self, jobs, recording: bool
@@ -549,30 +617,32 @@ class _AppState:
         messages = []
         for index, camera, frame, groups in jobs:
             # One monotonic frame number and one telemetry snapshot per camera
-            # per tick, shared across that camera's resolution variants.
+            # per tick, shared across that camera's variants.
+            frame_h, frame_w = frame.shape
             count = self._frame_counters.get(index, 0) + 1
             self._frame_counters[index] = count
-            header = FRAME_HEADER.pack(
-                1,
-                1,
-                index,
-                flags,
-                count,
-                time.time_ns(),
-                camera.resulting_fps,
-                camera.dropped_count,
-            )
-            for factor, group in groups.items():
-                small = (
-                    np.ascontiguousarray(frame[::factor, ::factor])
-                    if factor > 1
-                    else np.ascontiguousarray(frame)
-                )
+            timestamp = time.time_ns()
+            fps = camera.resulting_fps
+            dropped = camera.dropped_count
+            for (region, factor), group in groups.items():
+                # Re-clamp against the frame actually popped (it may differ from
+                # camera.width/height for one frame across a live geometry
+                # change); numpy would silently clip otherwise.
+                x, y, w, h = _clamp_crop(region, frame_w, frame_h)
+                whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
+                if factor > 1 or not whole:
+                    sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
+                else:
+                    sub = np.ascontiguousarray(frame)
                 ok, jpeg = cv2.imencode(
-                    ".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+                    ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
                 )
                 if not ok:
                     continue
+                header = FRAME_HEADER.pack(
+                    FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
+                    x, y, w, h, frame_w, frame_h,
+                )
                 messages.append((index, header + jpeg.tobytes(), group))
         return messages
 

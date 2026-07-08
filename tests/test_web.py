@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import time
 from unittest.mock import Mock
@@ -249,11 +250,12 @@ def test_websocket_preview_and_telemetry(client):
 
     assert got_state and got_settings
     assert len(frames) >= 4
-    version, kind, camera_index, flags, number, ts, fps, dropped = FRAME_HEADER.unpack(
-        frames[0][: FRAME_HEADER.size]
-    )
-    assert (version, kind) == (1, 1)
+    (version, kind, camera_index, flags, number, ts, fps, dropped, cx, cy, cw, ch,
+     sw, sh) = FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
+    assert (version, kind) == (2, 1)
     assert camera_index in (0, 1)
+    # A default client is un-cropped: the crop rect is the whole sensor.
+    assert (cx, cy) == (0, 0) and (cw, ch) == (sw, sh)
     jpeg = np.frombuffer(frames[0][FRAME_HEADER.size :], np.uint8)
     image = cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE)
     assert image is not None and image.size > 0
@@ -956,24 +958,28 @@ def test_preview_factor_policy():
     finer, bounded to a mid resolution while recording."""
     from octacam.web.app import _preview_factor, _DEFAULT_VIEW, _ViewSpec
 
-    W, H = 2048, 1536  # long edge 2048, baseline ceil(2048/640) = 4
+    L = 2048  # sensor long edge; baseline ceil(2048/640) = 4
     # Default/legacy spec == today's baseline (backward compatible).
-    assert _preview_factor(W, H, _DEFAULT_VIEW, False) == 4
+    assert _preview_factor(L, L, _DEFAULT_VIEW, False) == 4
     # A small unfocused tile sends less data (coarser)...
-    assert _preview_factor(W, H, _ViewSpec(need=300), False) == 7
+    assert _preview_factor(L, L, _ViewSpec(need=300), False) == 7
     # ...but a large unfocused tile is still capped at the baseline, so a HiDPI
     # client can't silently upgrade every camera above today's cost.
-    assert _preview_factor(W, H, _ViewSpec(need=1500), False) == 4
-    # A focused (maximized/zoomed) tile may exceed the baseline, up to sensor.
-    assert _preview_factor(W, H, _ViewSpec(need=1500, full=True), False) == 1
-    assert _preview_factor(W, H, _ViewSpec(need=100000, full=True), False) == 1
+    assert _preview_factor(L, L, _ViewSpec(need=1500), False) == 4
+    # A focused (maximized) tile may exceed the baseline, up to the sensor.
+    assert _preview_factor(L, L, _ViewSpec(need=1500, full=True), False) == 1
+    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), False) == 1
     # While recording, a focused tile is bounded so the preview encode can't
-    # starve the writer (ceil(2048/1280) = 2 -> 1024 px <= 1280 cap).
-    assert _preview_factor(W, H, _ViewSpec(need=100000, full=True), True) == 2
-    # The recording cap is a true ceiling: a mid-band sensor whose long edge
-    # falls in (1280, 2*1280) must still be bounded, not encoded full-res
-    # (regression guard — round() here would leak factor 1 = full 1600 px).
-    assert _preview_factor(1600, 1200, _ViewSpec(need=100000, full=True), True) == 2
+    # starve the writer (ceil(2048/1280) = 2 -> 1024 px <= 1280 cap)...
+    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), True) == 2
+    # ...and the cap is a true ceiling for mid-band regions too (round() would
+    # leak factor 1 = full res).
+    assert _preview_factor(1600, 1600, _ViewSpec(need=100000, full=True), True) == 2
+    # A cropped focused tile picks the factor from the CROP's long edge (2nd
+    # arg), not the sensor's, so a small crop is delivered near 1:1 (full detail)
+    # while a bigger crop still decimates to about the requested size.
+    assert _preview_factor(L, 400, _ViewSpec(need=400, full=True), False) == 1
+    assert _preview_factor(L, 800, _ViewSpec(need=400, full=True), False) == 2
 
 
 def test_client_apply_view_is_tolerant():
@@ -985,17 +991,22 @@ def test_client_apply_view_is_tolerant():
         {
             "type": "view",
             "cameras": {
-                "0": {"want": True, "need": 512, "full": True},
+                "0": {"want": True, "need": 512, "full": True,
+                      "crop": {"x": 10, "y": 20, "w": 300, "h": 400}},
                 "1": {"want": False},
                 "2": {"need": -5},  # invalid need -> treated as baseline (None)
+                "4": {"crop": {"x": 0, "y": 0, "w": 0, "h": 5}},  # bad crop -> None
                 "bad": {"need": 100},  # non-int key -> skipped
                 "3": "notadict",  # non-dict entry -> skipped
             },
         }
     )
-    assert client.view_for(0) == _ViewSpec(want=True, need=512, full=True)
+    assert client.view_for(0) == _ViewSpec(
+        want=True, need=512, full=True, crop=(10, 20, 300, 400)
+    )
     assert client.view_for(1).want is False
     assert client.view_for(2).need is None
+    assert client.view_for(4).crop is None  # malformed crop dropped
     assert client.view_for(9) is _DEFAULT_VIEW  # never set -> default
     # Malformed top-level payloads are ignored, not raised.
     client.apply_view({"cameras": "nope"})
@@ -1003,18 +1014,35 @@ def test_client_apply_view_is_tolerant():
 
 
 def test_cap_variants_bounds_encode_count():
-    """Beyond the per-camera cap, the sharpest extra factors fold onto the
-    sharpest survivor so encode count stays bounded and no client is dropped."""
-    from octacam.web.app import _AppState, MAX_PREVIEW_VARIANTS_PER_CAMERA
+    """Beyond the per-camera cap, the priciest extra variants are demoted to the
+    shared full-frame baseline (never cross-merged), so encode count stays
+    bounded and no client is dropped."""
+    from octacam.web.app import (
+        _AppState,
+        MAX_PREVIEW_VARIANTS_PER_CAMERA,
+        PREVIEW_MAX_DIM,
+    )
 
-    groups = {f: [f"client{f}"] for f in (1, 2, 3, 5, 8, 12)}
-    total_clients = sum(len(v) for v in groups.values())
-    _AppState._cap_variants(groups)
-    assert len(groups) == MAX_PREVIEW_VARIANTS_PER_CAMERA
-    # Every client is still served (none dropped).
-    assert sum(len(v) for v in groups.values()) == total_clients
-    # The sharpest surviving factor absorbed the dropped sharper requests.
-    assert min(groups) == sorted((1, 2, 3, 5, 8, 12))[-MAX_PREVIEW_VARIANTS_PER_CAMERA]
+    W = H = 2048
+    baseline_f = math.ceil(W / PREVIEW_MAX_DIM)  # 4
+    baseline_key = ((0, 0, W, H), baseline_f)
+    # Six distinct (crop, factor) variants — more than the cap of 4.
+    groups = {
+        baseline_key: ["a"],
+        ((0, 0, 400, 400), 1): ["b"],
+        ((0, 0, 2048, 2048), 1): ["c"],  # full res — priciest, must demote
+        ((0, 0, 1600, 1600), 1): ["d"],
+        ((100, 100, 1200, 1200), 1): ["e"],
+        ((0, 0, 800, 800), 1): ["f"],
+    }
+    total = sum(len(v) for v in groups.values())
+    _AppState._cap_variants(groups, W, H, W)
+    assert len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA
+    assert sum(len(v) for v in groups.values()) == total  # nobody dropped
+    assert baseline_key in groups  # demotion target survives
+    # The priciest full-res crop was demoted onto the baseline (client folded in).
+    assert ((0, 0, 2048, 2048), 1) not in groups
+    assert "c" in groups[baseline_key]
 
 
 def test_view_message_selects_resolution_and_pauses(client):
@@ -1061,3 +1089,50 @@ def test_view_message_selects_resolution_and_pauses(client):
 
     assert full_seen, "camera 0 never reached full resolution after the view"
     assert cam1_after_full == 0, "paused camera 1 kept sending frames"
+
+
+def test_view_message_server_side_crop(client):
+    """A `view` message with a crop makes the server send only that sub-rectangle
+    (reported in the frame header) rather than the whole sensor."""
+    import cv2
+
+    cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
+    w, h = cams[0]["width"], cams[0]["height"]
+    # A centered quarter-area crop, requested at ~1:1 (need == crop long edge).
+    cx, cy, cw, ch = w // 4, h // 4, w // 2, h // 2
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "view",
+                    "cameras": {
+                        "0": {
+                            "want": True,
+                            "full": True,
+                            "need": max(cw, ch),
+                            "crop": {"x": cx, "y": cy, "w": cw, "h": ch},
+                        },
+                    },
+                }
+            )
+        )
+        seen = None
+        for _ in range(150):
+            message = ws.receive()
+            buf = message.get("bytes")
+            if not buf or buf[2] != 0:  # header byte 2 is the camera index
+                continue
+            (_v, _k, _i, _f, _n, _t, _fps, _d, hx, hy, hcw, hch, hsw, hsh) = (
+                FRAME_HEADER.unpack(buf[: FRAME_HEADER.size])
+            )
+            if (hx, hy, hcw, hch) == (cx, cy, cw, ch):
+                jpeg = np.frombuffer(buf[FRAME_HEADER.size :], np.uint8)
+                seen = (cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE), hsw, hsh)
+                break
+
+        assert seen is not None, "server never sent the requested crop"
+        image, hsw, hsh = seen
+        assert (hsw, hsh) == (w, h)  # header reports the full sensor size
+        # need == crop long edge -> factor 1 -> the crop is sent at 1:1.
+        assert image.shape == (ch, cw)

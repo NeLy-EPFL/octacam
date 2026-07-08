@@ -1,7 +1,8 @@
 // WebSocket wrapper: parses preview-frame binary messages and JSON text
 // messages, reconnects with capped exponential backoff.
 
-const HEADER_BYTES = 24;
+const HEADER_BYTES = 36;
+const FRAME_VERSION = 2;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 10000;
 
@@ -75,13 +76,15 @@ export class ReconnectingSocket {
   }
 }
 
-// 24-byte little-endian header followed by JPEG bytes.
+// 36-byte little-endian header (see FRAME_HEADER in app.py) followed by JPEG
+// bytes. The crop rect (sensor px) locates a server-cropped region within the
+// full sensor; for an un-cropped frame it is (0, 0, sensorW, sensorH).
 function parseFrame(buf) {
   if (buf.byteLength < HEADER_BYTES) return null;
   const dv = new DataView(buf);
   const version = dv.getUint8(0);
   const kind = dv.getUint8(1);
-  if (version !== 1 || kind !== 1) return null;
+  if (version !== FRAME_VERSION || kind !== 1) return null;
   return {
     cameraIndex: dv.getUint8(2),
     recording: (dv.getUint8(3) & 1) !== 0,
@@ -89,6 +92,12 @@ function parseFrame(buf) {
     hwTimestampNs: dv.getBigUint64(8, true),
     fps: dv.getFloat32(16, true),
     dropped: dv.getUint32(20, true),
+    cropX: dv.getUint16(24, true),
+    cropY: dv.getUint16(26, true),
+    cropW: dv.getUint16(28, true),
+    cropH: dv.getUint16(30, true),
+    sensorW: dv.getUint16(32, true),
+    sensorH: dv.getUint16(34, true),
     jpeg: new Uint8Array(buf, HEADER_BYTES),
   };
 }

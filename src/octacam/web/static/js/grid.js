@@ -97,17 +97,31 @@ export class CameraGrid {
       droppedEl: el.querySelector(".tile-dropped"),
       maxBtn: el.querySelector(".tile-max"),
       runtime: { rot: 0, fx: 1, fy: 1 },
+      // natW/natH are the decoded JPEG's pixel size (a crop, when zoomed);
+      // sensorW/sensorH are the full sensor size used for all layout math; and
+      // crop{X,Y,W,H} is the sensor sub-rectangle the current frame covers
+      // (the whole sensor when un-cropped). They diverge once the server sends
+      // a server-side crop for a zoomed tile.
       natW: 0,
       natH: 0,
-      // On-screen footprint (px) of the fitted, un-zoomed canvas, used to clamp
-      // the pan so a zoomed image can never be dragged off its own tile.
+      sensorW: cam.width || 0,
+      sensorH: cam.height || 0,
+      cropX: 0,
+      cropY: 0,
+      cropW: cam.width || 0,
+      cropH: cam.height || 0,
+      // On-screen footprint (px) of the fitted, un-zoomed full frame, and the
+      // sensor->screen fit scale k; used to clamp the pan and to invert the
+      // display transform when computing the visible crop.
       fitW: 0,
       fitH: 0,
+      k: 0,
       zoom: 1,
       panX: 0,
       panY: 0,
       busy: false,
       pendingBlob: null,
+      pendingMeta: null,
       suppressClick: false,
       maximized: false,
     };
@@ -282,6 +296,11 @@ export class CameraGrid {
       this._layoutCanvas(t);
       this._pushTransform(t);
     }
+    // A rotate/flip/reset changes which sensor region a zoomed tile shows, so
+    // re-request its server-side crop for the new orientation (otherwise the
+    // server keeps sending the crop for the old one and the tile shows a stale
+    // or blank region until the next zoom/resize).
+    if (targets.length) this._notifyView();
   }
 
   // Mirror the on-screen transform to the server so a "display"-form recording
@@ -304,8 +323,21 @@ export class CameraGrid {
     this._setDropped(t, frame.dropped);
     t.el.classList.toggle("rec", frame.recording);
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
-    if (t.busy) t.pendingBlob = blob; // keep only the latest pending frame
-    else this._draw(t, blob);
+    const meta = {
+      sensorW: frame.sensorW,
+      sensorH: frame.sensorH,
+      cropX: frame.cropX,
+      cropY: frame.cropY,
+      cropW: frame.cropW,
+      cropH: frame.cropH,
+    };
+    if (t.busy) {
+      // keep only the latest pending frame + its geometry
+      t.pendingBlob = blob;
+      t.pendingMeta = meta;
+    } else {
+      this._draw(t, blob, meta);
+    }
   }
 
   updateStats(index, { fps, dropped, writerFailed }) {
@@ -325,17 +357,27 @@ export class CameraGrid {
     t.droppedEl.textContent = dropped > 0 ? `${dropped} dropped` : "";
   }
 
-  async _draw(t, blob) {
+  async _draw(t, blob, meta) {
     t.busy = true;
     try {
       const bmp = await createImageBitmap(blob);
+      if (meta && meta.sensorW && meta.sensorH) {
+        t.sensorW = meta.sensorW;
+        t.sensorH = meta.sensorH;
+        t.cropX = meta.cropX;
+        t.cropY = meta.cropY;
+        t.cropW = meta.cropW;
+        t.cropH = meta.cropH;
+      }
       if (bmp.width !== t.natW || bmp.height !== t.natH) {
         t.natW = bmp.width;
         t.natH = bmp.height;
         t.canvas.width = bmp.width;
         t.canvas.height = bmp.height;
-        this._layoutCanvas(t);
       }
+      // The crop rect (hence placement) can change while the decoded size stays
+      // the same — e.g. re-aiming a zoom — so re-layout on every frame.
+      this._layoutCanvas(t);
       t.ctx.drawImage(bmp, 0, 0);
       bmp.close();
     } catch {
@@ -344,8 +386,10 @@ export class CameraGrid {
     t.busy = false;
     if (t.pendingBlob) {
       const next = t.pendingBlob;
+      const nextMeta = t.pendingMeta;
       t.pendingBlob = null;
-      this._draw(t, next);
+      t.pendingMeta = null;
+      this._draw(t, next, nextMeta);
     }
   }
 
@@ -354,37 +398,53 @@ export class CameraGrid {
     const sx = (b.scale_x || 1) * t.runtime.fx;
     const sy = (b.scale_y || 1) * t.runtime.fy;
     const deg = (b.rotation_deg || 0) + t.runtime.rot;
-    // Scroll-zoom/pan act in screen space, so they compose OUTSIDE the
-    // orientation transform (CSS applies the rightmost function first): the
-    // sensor image is rotated/flipped, then the result is scaled up and panned.
+    // The canvas holds the current crop region (the whole sensor when
+    // un-cropped). Shift it in pre-rotation sensor space (innermost) so the
+    // crop sits at its true position and the rotate/flip still pivots about the
+    // sensor centre; then zoom and pan in screen space (CSS applies the
+    // rightmost function first). Un-cropped, the offset is 0 and this reduces
+    // to the plain zoom/pan · flip · rotate transform.
+    const k = t.k || 0;
+    const sw = t.sensorW || t.natW || 0;
+    const sh = t.sensorH || t.natH || 0;
+    const offX = (t.cropX + t.cropW / 2 - sw / 2) * k;
+    const offY = (t.cropY + t.cropH / 2 - sh / 2) * k;
     t.canvas.style.transform =
       `translate(${t.panX}px, ${t.panY}px) scale(${t.zoom}) ` +
-      `scale(${sx}, ${sy}) rotate(${deg}deg)`;
+      `scale(${sx}, ${sy}) rotate(${deg}deg) translate(${offX}px, ${offY}px)`;
   }
 
-  // Size the canvas so the (possibly rotated/scaled) frame fits the tile
-  // body while keeping its aspect ratio.
+  // Fit the FULL sensor frame into the tile body (keeping aspect) to get the
+  // sensor->screen scale k, then size the canvas to the current crop at that
+  // same k (the whole sensor when un-cropped). k and the fitted footprint also
+  // drive pan clamping and the visible-region computation.
   _layoutCanvas(t) {
-    if (!t.natW || !t.natH) return;
+    const sw = t.sensorW || t.natW;
+    const sh = t.sensorH || t.natH;
+    if (!sw || !sh) return;
     const bw = t.body.clientWidth;
     const bh = t.body.clientHeight;
     if (!bw || !bh) return;
     const b = t.cam.transform;
     const theta =
       (((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180;
-    const effW = t.natW * Math.abs(b.scale_x || 1);
-    const effH = t.natH * Math.abs(b.scale_y || 1);
+    const effW = sw * Math.abs(b.scale_x || 1);
+    const effH = sh * Math.abs(b.scale_y || 1);
     const c = Math.abs(Math.cos(theta));
     const s = Math.abs(Math.sin(theta));
     const boundW = effW * c + effH * s;
     const boundH = effW * s + effH * c;
     const k = Math.min(bw / boundW, bh / boundH);
-    t.canvas.style.width = `${t.natW * k}px`;
-    t.canvas.style.height = `${t.natH * k}px`;
-    // The rotated content's on-screen footprint — the box the pan is clamped
+    t.k = k;
+    const cw = t.cropW || sw;
+    const ch = t.cropH || sh;
+    t.canvas.style.width = `${cw * k}px`;
+    t.canvas.style.height = `${ch * k}px`;
+    // On-screen footprint of the fitted FULL frame — the box the pan is clamped
     // against so a zoomed image can't be dragged past its own edges.
     t.fitW = boundW * k;
     t.fitH = boundH * k;
+    this._applyTransform(t);
     this._clampPan(t);
   }
 
@@ -426,11 +486,12 @@ export class CameraGrid {
     this.onViewChange?.();
   }
 
-  // Per-camera resolution / pause request for the server: the longest source
-  // edge each tile can actually display (its on-screen size × devicePixelRatio
-  // × zoom), whether it is focused (maximized/zoomed, so allowed to exceed the
-  // default preview resolution up to the sensor's), and want=false for a tile
-  // hidden behind another's maximized window (the server then stops sending it).
+  // Per-camera resolution / crop / pause request for the server. want=false for
+  // a tile hidden behind another's maximized window (the server stops sending
+  // it). For a zoomed tile, request a server-side crop of just the visible
+  // region at the tile's resolution — full detail for the cost of a small
+  // frame. Otherwise request the whole frame at the tile size × dpr × zoom, so
+  // a maximize is sharp and a not-yet-cropped zoom still has finer pixels.
   getViewSpec() {
     const anyMax = this.tiles.some((t) => t.maximized);
     const dpr = window.devicePixelRatio || 1;
@@ -441,13 +502,65 @@ export class CameraGrid {
         continue;
       }
       const longEdge = Math.max(t.body.clientWidth, t.body.clientHeight);
-      spec[t.index] = {
-        want: true,
-        need: Math.max(1, Math.ceil(longEdge * dpr * t.zoom)),
-        full: t.maximized || t.zoom > 1,
-      };
+      const crop = t.zoom > 1 ? this._visibleSensorRect(t) : null;
+      const entry = { want: true, full: t.maximized || t.zoom > 1 };
+      if (crop) {
+        entry.crop = crop;
+        entry.need = Math.max(1, Math.ceil(longEdge * dpr));
+      } else {
+        entry.need = Math.max(1, Math.ceil(longEdge * dpr * t.zoom));
+      }
+      spec[t.index] = entry;
     }
     return spec;
+  }
+
+  // The axis-aligned sensor rectangle currently visible in a tile, found by
+  // inverting the display transform (zoom/pan, then flip, then rotate) over the
+  // four viewport corners. This is what the server crops to. Returns null when
+  // geometry isn't known yet or the view still covers ~the whole sensor.
+  _visibleSensorRect(t) {
+    const k = t.k;
+    const sw = t.sensorW || t.natW;
+    const sh = t.sensorH || t.natH;
+    if (!k || !sw || !sh) return null;
+    const bw = t.body.clientWidth;
+    const bh = t.body.clientHeight;
+    const b = t.cam.transform;
+    const sx = (b.scale_x || 1) * t.runtime.fx;
+    const sy = (b.scale_y || 1) * t.runtime.fy;
+    const rad = -(((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180; // inverse
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [px, py] of [
+      [-bw / 2, -bh / 2],
+      [bw / 2, -bh / 2],
+      [-bw / 2, bh / 2],
+      [bw / 2, bh / 2],
+    ]) {
+      // Undo pan/zoom (screen space), then flip (S^-1), then rotate (R^-1).
+      const dx = (px - t.panX) / t.zoom / sx;
+      const dy = (py - t.panY) / t.zoom / sy;
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      const i = lx / k + sw / 2;
+      const j = ly / k + sh / 2;
+      minX = Math.min(minX, i);
+      maxX = Math.max(maxX, i);
+      minY = Math.min(minY, j);
+      maxY = Math.max(maxY, j);
+    }
+    // A small margin so small re-aims stay inside the already-sent crop.
+    const mx = (maxX - minX) * 0.15;
+    const my = (maxY - minY) * 0.15;
+    const x = Math.max(0, Math.floor(minX - mx));
+    const y = Math.max(0, Math.floor(minY - my));
+    const w = Math.min(sw, Math.ceil(maxX + mx)) - x;
+    const h = Math.min(sh, Math.ceil(maxY + my)) - y;
+    if (w <= 0 || h <= 0) return null;
+    if (x <= 0 && y <= 0 && w >= sw && h >= sh) return null; // ~whole frame
+    return { x, y, w, h };
   }
 
   _applyTileBox(t) {
