@@ -6,7 +6,7 @@
 #   hexaview: pre(250)+exposure(2000)+post(250)+lightOff(10000) = 12500 µs period
 #   omniview: fps = 80        -> 12500 µs frame period
 #             duty = 20 %      -> 2500 µs light-on window (covers the 2 ms exposure)
-#             exposure = 2000 µs (per-camera, in the .pfs / .json)
+#             exposure = 2000 µs (per-camera, in the .pfs / .txt)
 #
 # Cameras run in EXTERNAL hardware-trigger mode; the Arduino Nano ESP32 running
 # the omniview firmware drives the shared trigger line (D13 -> each camera's
@@ -43,33 +43,75 @@ checksum = true
 [[cameras]]
 serial_number = "40018619"
 name = "basler_1"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 [[cameras]]
 serial_number = "40018631"
 name = "basler_2"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 [[cameras]]
 serial_number = "40018632"
 name = "basler_3"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 [[cameras]]
 serial_number = "40022761"
 name = "basler_4"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 # 2× FLIR Grasshopper3 GS3-U3-41C6NIR (2048×2048) — the "2048" cameras.
 # Sensor params (2048² ROI, 2 ms exposure, hardware trigger line) persist as
-# <serial>.json, set from the GUI "Save…" dialog. Under backend = "auto" the
-# FLIRs open through the Spinnaker C-API tier (PySpin is unavailable on modern
-# Python); it records and tears down cleanly (verified 4 Basler + 2 FLIR headless
-# record, clean exit).
+# <serial>.txt (the camera's native GenApi feature-persistence TSV), set from
+# the GUI "Save…" dialog. Under backend = "auto" the FLIRs open through the
+# Spinnaker C-API tier (PySpin is unavailable on modern Python); it records and
+# tears down cleanly (verified 4 Basler + 2 FLIR headless record, clean exit).
 
 [[cameras]]
 serial_number = "17475185"
 name = "flir_1"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 [[cameras]]
 serial_number = "17475187"
 name = "flir_2"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = -1.0
+window_y = -1.0
+window_width = -1.0
+window_height = -1.0
 
 # --- omniview trigger + strobe plugin ----------------------------------------
 # fps and duration come from [record] above; the plugin adds the strobe duty

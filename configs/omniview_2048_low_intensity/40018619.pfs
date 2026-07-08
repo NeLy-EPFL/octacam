@@ -3,45 +3,13 @@
 # Device = Basler::UsbCameraParams -- Basler USB3Vision camera interface -- Device version = 1.0.0 -- Product GUID = 5a809e15-f447-480f-a21f-0fb7256b8400 -- Product version GUID = E93A8010-AA2E-4113-AFF3-8FB9038F267B
 ExposureAuto	Off
 GainAuto	Off
-Width	1920
-Height	1200
 CenterX	1
 CenterY	1
 BinningHorizontalMode	Average
-BinningHorizontal	1
 BinningVerticalMode	Average
-BinningVertical	1
 ReverseX	0
 ReverseY	0
-PixelFormat	Mono8
 TestImageSelector	Off
-ROIZoneMode	{ROIZoneSelector=Zone0}	Off
-ROIZoneMode	{ROIZoneSelector=Zone1}	Off
-ROIZoneMode	{ROIZoneSelector=Zone2}	Off
-ROIZoneMode	{ROIZoneSelector=Zone3}	Off
-ROIZoneMode	{ROIZoneSelector=Zone4}	Off
-ROIZoneMode	{ROIZoneSelector=Zone5}	Off
-ROIZoneMode	{ROIZoneSelector=Zone6}	Off
-ROIZoneMode	{ROIZoneSelector=Zone7}	Off
-ROIZoneSelector	Zone0
-ROIZoneSize	{ROIZoneSelector=Zone0}	4
-ROIZoneSize	{ROIZoneSelector=Zone1}	4
-ROIZoneSize	{ROIZoneSelector=Zone2}	4
-ROIZoneSize	{ROIZoneSelector=Zone3}	4
-ROIZoneSize	{ROIZoneSelector=Zone4}	4
-ROIZoneSize	{ROIZoneSelector=Zone5}	4
-ROIZoneSize	{ROIZoneSelector=Zone6}	4
-ROIZoneSize	{ROIZoneSelector=Zone7}	4
-ROIZoneSelector	Zone0
-ROIZoneOffset	{ROIZoneSelector=Zone0}	0
-ROIZoneOffset	{ROIZoneSelector=Zone1}	0
-ROIZoneOffset	{ROIZoneSelector=Zone2}	0
-ROIZoneOffset	{ROIZoneSelector=Zone3}	0
-ROIZoneOffset	{ROIZoneSelector=Zone4}	0
-ROIZoneOffset	{ROIZoneSelector=Zone5}	0
-ROIZoneOffset	{ROIZoneSelector=Zone6}	0
-ROIZoneOffset	{ROIZoneSelector=Zone7}	0
-ROIZoneSelector	Zone0
 Gain	{GainSelector=All}	0.00000
 GainSelector	All
 BlackLevel	{BlackLevelSelector=All}	0.00000
@@ -54,8 +22,6 @@ PgiMode	Off
 ShutterMode	Global
 ExposureMode	Timed
 ExposureTime	2000.0
-SensorReadoutMode	Normal
-AcquisitionBurstFrameCount	1
 TriggerMode	{TriggerSelector=FrameBurstStart}	Off
 TriggerMode	{TriggerSelector=FrameStart}	Off
 TriggerSelector	FrameStart
@@ -72,15 +38,6 @@ DeviceLinkThroughputLimitMode	{DeviceLinkSelector=0}	On
 DeviceLinkSelector	0
 DeviceLinkThroughputLimit	{DeviceLinkSelector=0}	300000000
 DeviceLinkSelector	0
-ChunkEnable	{ChunkSelector=Gain}	0
-ChunkEnable	{ChunkSelector=ExposureTime}	0
-ChunkEnable	{ChunkSelector=Timestamp}	0
-ChunkEnable	{ChunkSelector=LineStatusAll}	0
-ChunkEnable	{ChunkSelector=CounterValue}	0
-ChunkEnable	{ChunkSelector=SequencerSetActive}	0
-ChunkEnable	{ChunkSelector=PayloadCRC16}	0
-ChunkSelector	Timestamp
-ChunkModeActive	0
 AutoTargetBrightness	0.50196
 AutoFunctionProfile	MinimizeGain
 AutoGainLowerLimit	0.00000
@@ -113,18 +70,19 @@ LineMode	{LineSelector=Line1}	Input
 LineMode	{LineSelector=Line2}	Output
 LineMode	{LineSelector=Line3}	Input
 LineMode	{LineSelector=Line4}	Input
-LineSelector	Line1
+LineSelector	Line2
 LineSource	{LineSelector=Line2}	UserOutput1
+LineSelector	Line2
 LineInverter	{LineSelector=Line1}	0
 LineInverter	{LineSelector=Line2}	0
 LineInverter	{LineSelector=Line3}	0
 LineInverter	{LineSelector=Line4}	0
-LineSelector	Line1
+LineSelector	Line2
 LineDebouncerTime	{LineSelector=Line1}	0.00000
 LineDebouncerTime	{LineSelector=Line3}	0.00000
 LineDebouncerTime	{LineSelector=Line4}	0.00000
-LineSelector	Line1
 LineMinimumOutputPulseWidth	{LineSelector=Line2}	0.000
+LineSelector	Line2
 UserOutputValueAll	0x0
 TimerDuration	{TimerSelector=Timer1}	0.0
 TimerSelector	Timer1
