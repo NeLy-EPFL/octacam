@@ -1,0 +1,18 @@
+/* omniview plugin styles. Served from /plugins/omniview/ and injected by the
+   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+
+/* omniview Arduino state chip */
+.omniview-state {
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.omniview-state--running { color: var(--green); }
+.omniview-state--done    { color: var(--text-dim); }
+
+.omniview-duty {
+  width: 5em;
+}

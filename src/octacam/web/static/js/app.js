@@ -347,6 +347,9 @@ async function main() {
       case "twophoton_state":
         pluginTabs.get("twophoton")?.applyState(msg);
         break;
+      case "omniview_state":
+        pluginTabs.get("omniview")?.applyState(msg);
+        break;
     }
   }
 

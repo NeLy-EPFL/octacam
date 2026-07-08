@@ -193,6 +193,22 @@ class FakeBackend(SoftwareTriggerHandoff):
         array = _render(width, height, index) if wants_array() else None
         return (array, time.time_ns())
 
+    def retrieve_external(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """External-trigger record fetch.
+
+        The fake has no hardware buffer, so it models the *external* source with
+        the same trigger counter as software mode: a frame arrives only once
+        ``trigger_once`` has fired (the "external pulse"). This is exactly
+        :meth:`retrieve` minus the (absent) device software trigger, and — unlike
+        ``retrieve_freerun``, which fabricates a frame on every call — it lets an
+        external recording with no pulses correctly yield nothing, so the
+        controller's "wait for the first external frame" / "flag a zero-frame
+        capture" paths stay exercised.
+        """
+        return self.retrieve(timeout_ms, wants_array)
+
 
 def _render(width: int, height: int, index: int) -> np.ndarray:
     """A cheap, owned mono frame whose content advances with the frame index."""

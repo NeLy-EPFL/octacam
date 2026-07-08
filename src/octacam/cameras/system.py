@@ -280,12 +280,15 @@ class CameraSystem:
         video_format: VideoFormat,
         record_form: str = "display",
         save_frame_timestamps: bool = False,
+        use_software_trigger: bool = True,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
         A single camera failing (writer open, trigger-ready timeout, or a
         start "insufficient resources" error) no longer abandons the others
-        half-started: it is logged and skipped.
+        half-started: it is logged and skipped. ``use_software_trigger`` is
+        forwarded so an external-trigger recording fetches frames without the
+        software-trigger hand-off (see :meth:`Camera.start_record`).
         """
         self.stop()
 
@@ -297,6 +300,7 @@ class CameraSystem:
                 video_format,
                 record_form,
                 save_frame_timestamps,
+                software_trigger=use_software_trigger,
             )
 
         # Start every camera at once so they begin grabbing closer together

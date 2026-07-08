@@ -695,6 +695,7 @@ class RecordingController:
                 settings.video_format(),
                 settings.record_form,
                 settings.save_frame_timestamps,
+                use_software_trigger=use_software_trigger,
             )
             total = len(self.camera_system)
             if not started:

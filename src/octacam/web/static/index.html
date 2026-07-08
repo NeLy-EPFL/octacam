@@ -37,6 +37,8 @@
         title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
       <button type="button" data-tab="twophoton" data-plugin="twophoton"
         title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
+      <button type="button" data-tab="omniview" data-plugin="omniview"
+        title="omniview rig: arm the Arduino camera trigger + LED strobe">omniview</button>
     </nav>
 
     <section id="tab-record" class="tab active">
@@ -265,6 +267,41 @@
         <label class="center"
           title="Arm the Arduino automatically when a recording starts">
           <input type="checkbox" id="twophoton-arm-with-recording" checked>
+          Arm with recording
+        </label>
+      </div>
+    </section>
+
+    <section id="tab-omniview" class="tab" data-plugin="omniview">
+      <div id="omniview-status" class="plugin-status hidden">
+        <span id="omniview-status-msg"></span>
+        <button type="button" id="omniview-reconnect" class="btn"
+          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+      </div>
+      <div class="col">
+        <div class="row" title="Current state of the Arduino trigger board">
+          <span>Arduino state:</span>
+          <span id="omniview-state-value" class="omniview-state omniview-state--idle">
+            Idle — waiting for arm command
+          </span>
+        </div>
+        <label class="row"
+          title="LED strobe duty cycle: how much of each frame the ring lights are on">
+          <span>Strobe duty (%):</span>
+          <input type="number" id="omniview-duty" class="omniview-duty"
+            min="0" max="100" step="1" value="20">
+        </label>
+        <p class="hint">
+          FPS and duration are taken from the Record tab settings.
+          When "Arm with recording" is checked, the Arduino is armed
+          automatically each time a recording starts: it emits the camera
+          trigger pulses and strobes the two CCS LED ring lights at the duty
+          above, in sync, for the recording duration. Cameras must be set to
+          external hardware trigger.
+        </p>
+        <label class="center"
+          title="Arm the Arduino automatically when a recording starts">
+          <input type="checkbox" id="omniview-arm-with-recording" checked>
           Arm with recording
         </label>
       </div>

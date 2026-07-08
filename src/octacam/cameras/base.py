@@ -468,12 +468,18 @@ class Camera:
         video_format: VideoFormat,
         record_form: str = "display",
         save_frame_timestamps: bool = False,
+        software_trigger: bool = True,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
         ``record_form`` selects "display" (bake the camera's display transform
         into the video) or "sensor" (raw, untransformed). ``save_frame_timestamps``
-        re-enables the per-frame timestamp CSV (off by default).
+        re-enables the per-frame timestamp CSV (off by default). ``software_trigger``
+        picks the grab path: the software-trigger hand-off (this process drives each
+        frame) when True, or a plain fetch of externally-triggered frames when
+        False. An external trigger never bumps the hand-off counter, so gating the
+        record loop on it (``retrieve``) would capture nothing — external recording
+        must use the un-gated ``retrieve_freerun`` fetch instead.
         """
         self._stop_flag.clear()
         self._started = False
@@ -513,7 +519,7 @@ class Camera:
 
         self._thread = threading.Thread(
             target=self._record_loop,
-            args=(save_path, transform, save_frame_timestamps),
+            args=(save_path, transform, save_frame_timestamps, software_trigger),
             daemon=True,
         )
         self._thread.start()
@@ -570,11 +576,25 @@ class Camera:
         save_path: str,
         transform: DisplayTransform | None = None,
         save_frame_timestamps: bool = False,
+        software_trigger: bool = True,
     ) -> None:
         backend = self._backend
+        # With an external trigger the frames arrive on their own; the
+        # software-trigger hand-off (retrieve) would block forever waiting for a
+        # pending count that only the software trigger timer bumps. Fetch
+        # externally-triggered frames without firing a software trigger instead:
+        # real backends just grab the next produced frame (retrieve_freerun); a
+        # backend that models the external source itself (the fake, via its
+        # trigger counter) provides retrieve_external.
+        if software_trigger:
+            retrieve = backend.retrieve
+        else:
+            retrieve = getattr(backend, "retrieve_external", None) or (
+                backend.retrieve_freerun
+            )
         frame_count = 0
         while not self._stop_flag.is_set() and backend.is_grabbing():
-            frame = backend.retrieve(GRAB_TIMEOUT_MS, _ALWAYS)
+            frame = retrieve(GRAB_TIMEOUT_MS, _ALWAYS)
             if frame is None:
                 continue
             array, timestamp = frame

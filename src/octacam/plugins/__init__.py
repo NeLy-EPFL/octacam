@@ -39,7 +39,7 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 
 # Bundled plugins live at octacam.plugins.<name>; importing the module runs its
 # @register call. Listed here so build_plugins knows what it may import.
-_BUILTINS = ("flywheel", "twophoton")
+_BUILTINS = ("flywheel", "twophoton", "omniview")
 
 # Legacy plugin names → current name. The stepper plugin was renamed
 # arduino → flywheel; existing rig configs (name = "arduino") and
