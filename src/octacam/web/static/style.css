@@ -328,7 +328,10 @@ fieldset:disabled { opacity: 0.55; }
 
 .row {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  /* minmax(0, 1fr) (not plain 1fr) lets the value column shrink below its
+     content's min-content width, so a narrow sidebar clips/ellipsizes inside
+     the row rather than forcing the whole tab to scroll horizontally. */
+  grid-template-columns: 96px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
@@ -419,8 +422,17 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 .btn.wide { display: block; width: 100%; margin-top: 4px; }
 
-.btn-pair { display: flex; gap: 6px; }
-.btn-pair .btn { flex: 1; }
+.btn-pair { display: flex; gap: 6px; min-width: 0; }
+/* min-width:0 lets the paired buttons shrink with the sidebar (their default
+   min-width is their label's width); overflow/ellipsis keeps a long label
+   (e.g. "Horizontal") tidy inside the shrunk button instead of spilling. */
+.btn-pair .btn {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 #record-button {
   width: 100%;
