@@ -44,7 +44,8 @@ gaining node bounds and hardware timestamps.
 
 Each camera keeps its own backend's parameter-file format side by side in the
 config directory — a Basler persists as `<serial>.pfs`, everything else as
-`<serial>.json`. Everything else behaves identically across tiers: preview,
+`<serial>.txt` (the camera's native GenApi feature-persistence TSV). Everything
+else behaves identically across tiers: preview,
 recording (monochrome H.264 or raw), the software trigger, the per-camera
 exposure/gain/ROI controls, the recording summary (and opt-in timestamp CSVs),
 and the web GUI. Existing configs (which omit the key, or set
@@ -87,7 +88,8 @@ pip install spinnaker_python-*.whl
 pip install "octacam[flir]"
 ```
 
-Per-camera sensor parameters persist as `<serial>.json`. If a config pins
+Per-camera sensor parameters persist as `<serial>.txt` (the native GenApi
+feature-persistence TSV). If a config pins
 `backend = "flir"` and PySpin is missing, octacam exits with a clear message
 rather than a traceback; under `auto` it just uses a lower tier.
 

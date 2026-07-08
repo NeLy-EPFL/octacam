@@ -75,9 +75,9 @@ def test_select_fake_backend():
 
 def test_select_pycameleon_backend():
     # pycameleon is a core dependency, so selecting it always works and it
-    # persists parameters as JSON.
+    # persists parameters as native GenApi TSV (shared _genicam_config format).
     enumerate_fn, factory, extension = select_backend("pycameleon")
-    assert extension == "json"
+    assert extension == "txt"
     assert callable(enumerate_fn) and callable(factory)
 
 
@@ -85,7 +85,7 @@ def test_select_harvesters_backend():
     # harvesters + genicam are core deps, so selecting it always works (whether a
     # GenTL producer is installed only affects enumeration, not availability).
     enumerate_fn, factory, extension = select_backend("harvesters")
-    assert extension == "json"
+    assert extension == "txt"
     assert callable(enumerate_fn) and callable(factory)
 
 
@@ -112,7 +112,7 @@ def test_flir_module_imports_without_pyspin():
     # the registry, which converts the missing SDK to BackendUnavailable).
     import octacam.cameras.flir as flir
 
-    assert flir.FlirBackend.extension == "json"
+    assert flir.FlirBackend.extension == "txt"
 
 
 def test_spinnaker_module_imports_without_sdk():
@@ -121,7 +121,7 @@ def test_spinnaker_module_imports_without_sdk():
     # converts a missing libSpinnaker_C.so to BackendUnavailable at selection.
     import octacam.cameras.spinnaker_c as spinnaker_c
 
-    assert spinnaker_c.SpinnakerBackend.extension == "json"
+    assert spinnaker_c.SpinnakerBackend.extension == "txt"
 
 
 def test_select_spinnaker_without_sdk_raises(monkeypatch):

@@ -1,10 +1,10 @@
 """pycameleon backend node/param mapping, with a mocked camera (no hardware)."""
 
-import json
 import types
 
 import numpy as np
 
+from octacam.cameras._genicam_config import parse_config
 from octacam.cameras.pycameleon import PycameleonBackend, enumerate_pycameleon
 
 
@@ -116,13 +116,15 @@ def test_write_node_routes_to_int_or_float():
 
 def test_params_round_trip_and_trigger_normalization():
     backend, _cam = _open_backend()
-    backend.load_params(json.dumps({"params": {"exposure": 2222.0, "width": 640}}))
+    # Native GenApi persistence TSV: tab-separated feature lines, applied in order.
+    backend.load_params(
+        "# GenApi persistence file\nExposureTime\t2222.0\nWidth\t640\n"
+    )
     assert backend.read_node("exposure").value == 2222.0
     assert backend.read_node("width").value == 640
-    data = json.loads(backend.save_params())
-    assert data["trigger_mode"] == "Off"  # normalized like the other backends
-    assert data["trigger_source"] == "Line1"  # captured original, not the override
-    assert data["params"]["exposure"] == 2222.0
+    values = dict(parse_config(backend.save_params()))
+    assert values["ExposureTime"] == "2222"  # _fmt_float drops the trailing .0
+    assert values["TriggerSource"] == "Line1"  # captured original, not the override
 
 
 def test_triggering_sets_software_and_defers_execute():

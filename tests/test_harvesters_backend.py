@@ -5,7 +5,6 @@ node map so the SFNC → NodeInfo mapping, param round-trip, triggering, frame
 reshape, and the bounded close are exercised in pure Python.
 """
 
-import json
 import os
 import types
 
@@ -13,6 +12,7 @@ import genicam.genapi as genapi
 import numpy as np
 
 from octacam.cameras import harvesters as hv
+from octacam.cameras._genicam_config import parse_config
 from octacam.cameras.harvesters import HarvestersBackend, _find_cti_files
 
 
@@ -138,12 +138,15 @@ def test_write_node_routes_to_int_or_float():
 def test_params_round_trip():
     nm = FakeNodeMap()
     backend = _backend(nm)
-    backend.load_params(json.dumps({"params": {"exposure": 2222.0, "width": 640}}))
+    # Native GenApi persistence TSV: tab-separated feature lines, applied in order.
+    backend.load_params(
+        "# GenApi persistence file\nExposureTime\t2222.0\nWidth\t640\n"
+    )
     assert nm.ExposureTime.value == 2222.0 and nm.Width.value == 640
-    data = json.loads(backend.save_params())
-    assert data["trigger_mode"] == "Off"
-    assert data["trigger_source"] == "Line1"
-    assert data["params"]["exposure"] == 2222.0
+    values = dict(parse_config(backend.save_params()))
+    assert values["ExposureTime"] == "2222"  # _fmt_float drops the trailing .0
+    assert values["Width"] == "640"
+    assert values["TriggerSource"] == "Line1"  # captured original
 
 
 def test_trigger_once_is_a_pure_bump_not_a_device_call():

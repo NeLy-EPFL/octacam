@@ -13,7 +13,6 @@ PreciseTimer that drives the real cameras drives the fake.
 cameras.
 """
 
-import json
 import logging
 import os
 import time
@@ -21,13 +20,20 @@ from collections.abc import Callable
 
 import numpy as np
 
+from octacam.cameras._genicam_config import apply_config, dump_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
-from octacam.cameras.base import BackendError, Frame, NodeInfo
+from octacam.cameras.base import PARAM_NODES, BackendError, Frame, NodeInfo
 
 log = logging.getLogger("octacam")
 
 FAKE_CAMERAS_ENV = "OCTACAM_FAKE_CAMERAS"
 _DEFAULT_SERIALS = "FAKE-0,FAKE-1"
+
+# The fake speaks snake_case params internally; the native TSV config uses SFNC
+# node names, so map the six persisted nodes back (Width -> width, ...). Nodes
+# the fake does not model are simply skipped by the config applier/serialiser.
+_INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
+_SFNC_TO_PARAM = {sfnc: snake for snake, sfnc in PARAM_NODES.items()}
 
 
 def _default_nodes() -> dict[str, dict]:
@@ -109,32 +115,46 @@ class FakeBackend(SoftwareTriggerHandoff):
             raise BackendError(f"unknown node: {name}")
         self._nodes[name]["value"] = value
 
-    def load_params(self, config_str: str) -> None:
-        if not config_str:
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
+    # The fake models only the six PARAM_NODES (as floats/ints) plus a stored
+    # TriggerSource; every other node raises/returns-None so the applier and
+    # serialiser skip it, exactly as a real camera skips a node it lacks.
+    def _set_enum(self, name: str, value: str) -> None:
+        if name == "TriggerSource":
+            self._original_trigger_source = value
             return
-        try:
-            data = json.loads(config_str)
-        except (ValueError, TypeError) as e:
-            raise BackendError(f"invalid fake parameters: {e}") from e
-        if not isinstance(data, dict):
-            raise BackendError("invalid fake parameters: expected an object")
-        for name, value in (data.get("params") or {}).items():
-            if name in self._nodes:
-                self._nodes[name]["value"] = value
-        self._original_trigger_source = data.get(
-            "trigger_source", self._original_trigger_source
-        )
+        raise BackendError(f"fake has no enumeration {name}")
+
+    def _get_enum(self, name: str) -> str | None:
+        return self._original_trigger_source if name == "TriggerSource" else None
+
+    def _set_bool(self, name: str, value: bool) -> None:
+        raise BackendError(f"fake has no boolean {name}")
+
+    def _get_bool(self, name: str) -> bool | None:
+        return None
+
+    def _set_number(self, name: str, value: float, is_int: bool) -> None:
+        param = _SFNC_TO_PARAM.get(name)
+        if param is None or param not in self._nodes:
+            raise BackendError(f"fake has no node {name}")
+        self._nodes[param]["value"] = int(value) if is_int else float(value)
+
+    def _get_number(self, name: str, is_int: bool) -> float | int | None:
+        param = _SFNC_TO_PARAM.get(name)
+        if param is None or param not in self._nodes:
+            return None
+        value = self._nodes[param]["value"]
+        return int(value) if is_int else float(value)
+
+    def load_params(self, config_str: str) -> None:
+        if config_str:
+            apply_config(self, config_str)
 
     def save_params(self) -> str:
-        # Mirror the Basler normalization: a saved snapshot ships with the
-        # FrameStart trigger Off and the originally-loaded source, not the
-        # live-preview Software override.
-        data = {
-            "params": {name: node["value"] for name, node in self._nodes.items()},
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        # A saved snapshot ships with the originally-loaded trigger source (via
+        # _get_enum); dump_config emits only the nodes the fake models.
+        return dump_config(self, "FakeCamera")
 
     # ----------------------------------------------------------- triggering
 

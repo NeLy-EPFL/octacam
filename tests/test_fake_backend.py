@@ -6,7 +6,6 @@ round-tripping through load_config), and deterministic node behaviour — all in
 pure Python with no hardware.
 """
 
-import json
 import os
 
 os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
@@ -14,6 +13,7 @@ os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 import pytest
 
 from octacam.cameras import CameraSystem
+from octacam.cameras._genicam_config import parse_config
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
@@ -88,9 +88,10 @@ def test_save_params_round_trips(previewing_system):
     cam = previewing_system.camera_at(0)
     cam.set_live_param("exposure", 2222.0)
     text = cam.save_params()
-    data = json.loads(text)  # the fake persists JSON
-    assert data["trigger_mode"] == "Off"  # normalized, like the Basler .pfs
-    assert data["params"]["exposure"] == 2222.0
+    # The fake persists the native GenApi persistence TSV (shared with FLIR).
+    values = dict(parse_config(text))
+    assert values["ExposureTime"] == "2222"  # _fmt_float drops the trailing .0
+    assert "TriggerSource" in values  # the fake stores/round-trips the source
     cam.load_params(text)
     assert abs(cam.read_param("exposure")["value"] - 2222.0) < 1.0
 
@@ -110,8 +111,10 @@ def test_reset_params_restores_and_keeps_previewing(previewing_system):
 def test_reset_params_invalid_keeps_previewing(previewing_system):
     cam = previewing_system.camera_at(0)
     assert cam._backend.is_grabbing()
+    # Free text with no `name<TAB>value` line is a malformed config, rejected as
+    # a ValueError (the applier raises rather than silently applying nothing).
     with pytest.raises(ValueError):
-        cam.reset_params("this is not valid json {")
+        cam.reset_params("this is not a persistence file")
     assert cam._backend.is_grabbing()
     assert cam.frame_for_display.pop() is not None
 
@@ -123,10 +126,14 @@ def test_save_all_params_covers_every_camera(previewing_system):
 
 
 def test_load_config_reads_backend_extension(tmp_path):
-    # The persistence generalization: a non-".pfs" per-camera file, named by
-    # the backend's extension, round-trips through load_config.
+    # The persistence generalization: a non-".pfs" per-camera file, named by the
+    # backend's extension, round-trips through load_config. The fake persists the
+    # native GenApi persistence TSV, so the file uses SFNC feature names.
     (tmp_path / "FAKE-0.fake").write_text(
-        json.dumps({"params": {"exposure": 9999.0, "width": 800, "height": 600}})
+        "# GenApi persistence file\n"
+        "ExposureTime\t9999.0\n"
+        "Width\t800\n"
+        "Height\t600\n"
     )
     system = CameraSystem(FAKE_SERIALS, backend="fake")
     try:

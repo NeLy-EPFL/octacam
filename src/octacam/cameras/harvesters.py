@@ -34,13 +34,14 @@ Mapping notes vs. the other backends:
 * Node names are the standard SFNC ones, so :data:`PARAM_NODES` is reused;
   ``remote_device.node_map.<Name>`` yields a typed genicam node whose
   ``.value/.min/.max/.inc/.unit`` and access mode fill :class:`NodeInfo`.
-* Parameters persist as JSON (``extension = "json"``), shared with FLIR/pycameleon.
+* Parameters persist in the camera's native GenApi feature-persistence TSV
+  (``extension = "txt"``; see :mod:`octacam.cameras._genicam_config`), shared with
+  the FLIR/Spinnaker/pycameleon backends.
 * The GenTL ``System`` is owned by a module-level :class:`Harvester` singleton,
   reset once (after every camera is closed) by :func:`teardown`, which
   :class:`~octacam.cameras.system.CameraSystem` calls through the registry.
 """
 
-import json
 import logging
 import os
 import threading
@@ -48,13 +49,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from octacam.cameras._genicam_config import apply_config, dump_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
     Frame,
     NodeInfo,
-    snap_value,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -249,7 +250,7 @@ def _device_info_for(harvester, serial: str):
 class HarvestersBackend(SoftwareTriggerHandoff):
     """A single camera driven through Harvesters over a GenTL producer."""
 
-    extension = "json"
+    extension = "txt"
 
     def __init__(self, serial: str):
         self._serial = serial
@@ -360,6 +361,36 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         except Exception:
             return None
 
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
+    # genicam nodes are duck-typed: assigning/reading ``.value`` works for
+    # boolean, integer and float nodes alike.
+    def _set_bool(self, name: str, value: bool) -> None:
+        try:
+            getattr(self._nodemap(), name).value = bool(value)
+        except Exception as e:
+            raise BackendError(str(e)) from e
+
+    def _get_bool(self, name: str) -> bool | None:
+        try:
+            return bool(getattr(self._nodemap(), name).value)
+        except Exception:
+            return None
+
+    def _set_number(self, name: str, value: float, is_int: bool) -> None:
+        try:
+            getattr(self._nodemap(), name).value = (
+                int(value) if is_int else float(value)
+            )
+        except Exception as e:
+            raise BackendError(str(e)) from e
+
+    def _get_number(self, name: str, is_int: bool) -> float | int | None:
+        try:
+            value = getattr(self._nodemap(), name).value
+        except Exception:
+            return None
+        return int(value) if is_int else float(value)
+
     # ----------------------------------------------------- sensor parameters
 
     def read_node(self, name: str) -> NodeInfo:
@@ -389,39 +420,14 @@ class HarvestersBackend(SoftwareTriggerHandoff):
             raise BackendError(str(e)) from e
 
     def load_params(self, config_str: str) -> None:
+        # Native GenApi persistence TSV, applied best-effort in file order (see
+        # _genicam_config). Runs after open(), so open()'s Mono8 stays authoritative.
         if config_str:
-            try:
-                data = json.loads(config_str)
-            except (ValueError, TypeError) as e:
-                raise BackendError(f"invalid harvesters parameters: {e}") from e
-            if not isinstance(data, dict):
-                raise BackendError("invalid harvesters parameters: expected an object")
-            params = data.get("params") or {}
-            for name in ("width", "height", "offset_x", "offset_y", "exposure", "gain"):
-                if name not in params:
-                    continue
-                try:
-                    info = self.read_node(name)
-                    self.write_node(name, snap_value(float(params[name]), info))
-                except BackendError as e:
-                    log.warning(
-                        "Could not restore %s on camera %s: %s", name, self._serial, e
-                    )
+            apply_config(self, config_str)
         self._original_trigger_source = self._get_enum("TriggerSource")
 
     def save_params(self) -> str:
-        params: dict[str, float] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_node(name).value
-            except BackendError:
-                continue
-        data = {
-            "params": params,
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        return dump_config(self)
 
     # ----------------------------------------------------------- triggering
 

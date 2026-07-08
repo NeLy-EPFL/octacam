@@ -221,8 +221,9 @@ class Camera:
     def extension(self) -> str:
         """The parameter-file suffix this camera's backend persists (no dot).
 
-        Per-camera (``pfs`` for Basler, ``json`` for FLIR) so a rig mixing
-        vendors reads and writes each camera's sensor params in its own format.
+        Per-camera (``pfs`` for Basler, ``txt`` — the native GenApi persistence
+        TSV — for the FLIR/GenICam backends) so a rig mixing vendors reads and
+        writes each camera's sensor params in its own native format.
         """
         return type(self._backend).extension
 

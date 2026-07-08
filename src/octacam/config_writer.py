@@ -269,7 +269,7 @@ def write_pfs_files(
 
     ``extension`` is the single suffix for a one-vendor rig, or a
     ``serial -> suffix`` map for a mixed rig so each camera's params land in its
-    own backend's format (``pfs`` for Basler, ``json`` for FLIR, ...).
+    own backend's format (``pfs`` for Basler, ``txt`` for FLIR/GenICam, ...).
     """
     target_dir = Path(target_dir)
     for serial, text in pfs_by_serial.items():
@@ -284,8 +284,8 @@ def read_pfs_files(
 
     The inverse of :func:`write_pfs_files`, used to reset live cameras back to
     the parameters the active config shipped. ``extension`` is the backend's
-    parameter-file suffix (``pfs`` for Basler, ``json`` for FLIR, ...), or the
-    set of suffixes for a mixed-vendor rig. Keyed by file stem (the serial for a
+    parameter-file suffix (``pfs`` for Basler, ``txt`` for FLIR/GenICam, ...), or
+    the set of suffixes for a mixed-vendor rig. Keyed by file stem (the serial for a
     ``<serial>.<extension>``), so auxiliary files like
     ``fictrac_camera_config.pfs`` are read too but simply never match a live
     serial.

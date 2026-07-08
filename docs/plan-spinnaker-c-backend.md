@@ -281,6 +281,7 @@ scratchpad — `bench_queue.py`, `final_validate.py`):
 **and** use a short exposure (~100 µs). At the hexaview 4 ms exposure, software
 trigger is hardware-capped ~65 fps on this CCD — use `trigger_source=external` for
 90 fps at 4 ms. octacam configs set no exposure, so the operator sets it via the GUI
-slider (then `octacam config` snapshots it to a `{serial}.json`).
+slider (then `octacam config` snapshots it to a `{serial}.txt` — the native GenApi
+feature-persistence TSV; see `octacam/cameras/_genicam_config.py`).
 
 Still deferred (unchanged): the pycameleon GIL fork in the follow-up above.

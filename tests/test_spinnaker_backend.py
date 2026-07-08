@@ -9,12 +9,11 @@ mirrors ``test_harvesters_backend.py``'s fake-handle approach one seam lower: th
 real ctypes ABI is exercised only by the on-rig hardware verification.
 """
 
-import json
-
 import numpy as np
 import pytest
 
 import octacam.cameras.spinnaker_c as sc
+from octacam.cameras._genicam_config import parse_config
 from octacam.cameras.base import BackendError, NodeInfo
 from octacam.cameras.spinnaker_c import SpinnakerBackend
 
@@ -44,6 +43,15 @@ class FakeEnum:
         self.writable = writable
 
 
+class FakeBool:
+    """A boolean node (the native-TSV config persists these via _set/_get_bool)."""
+
+    def __init__(self, value, writable=True):
+        self.value = bool(value)
+        self.readable = True
+        self.writable = writable
+
+
 class FakeCommand:
     def __init__(self):
         self.executed = 0
@@ -59,6 +67,7 @@ class FakeNodeMap:
         self.OffsetY = FakeNode(0, mn=0, mx=1184, inc=2)
         self.ExposureTime = FakeNode(5000.0, mn=20.0, mx=1e6, unit="us")
         self.Gain = FakeNode(1.5, mn=0.0, mx=24.0, unit="dB")
+        self.GammaEnabled = FakeBool(False)  # a config-persisted boolean node
         self.PixelFormat = FakeEnum("Mono8")
         self.AcquisitionMode = FakeEnum("Continuous")
         self.TriggerSource = FakeEnum("Line0")
@@ -74,10 +83,11 @@ class FakeNodeMap:
 
 
 class FakeImage:
-    def __init__(self, array=None, timestamp=0, incomplete=False):
+    def __init__(self, array=None, timestamp=0, incomplete=False, bits=8):
         self.array = array
         self.timestamp = timestamp
         self.incomplete = incomplete
+        self.bits = bits  # bits per pixel; 8 == Mono8 (the only format we accept)
         self.released = False
 
 
@@ -198,6 +208,21 @@ class FakeSpin:
         node = getattr(nodemap, name, None)
         return node.value if node is not None else None
 
+    def set_bool(self, nodemap, name, value):
+        node = getattr(nodemap, name, None)
+        if node is None or not node.writable:
+            raise BackendError(f"boolean {name} is not writable")
+        node.value = bool(value)
+
+    def get_bool(self, nodemap, name):
+        node = getattr(nodemap, name, None)
+        return bool(node.value) if node is not None and node.readable else None
+
+    def read_string(self, nodemap, name):
+        # e.g. DeviceModelName in save_params(); absent on the fake node map -> None.
+        node = getattr(nodemap, name, None)
+        return getattr(node, "value", None) if node is not None else None
+
     def execute_command(self, nodemap, name):
         node = getattr(nodemap, name, None)
         if node is None:
@@ -213,6 +238,9 @@ class FakeSpin:
 
     def image_timestamp(self, image):
         return image.timestamp
+
+    def image_bits_per_pixel(self, image):
+        return image.bits
 
     def image_array(self, image):
         return np.array(image.array, copy=True)
@@ -313,20 +341,31 @@ def test_params_round_trip():
     nm = FakeNodeMap()
     nm.TriggerSource = FakeEnum("Line2")
     backend, _cam = _open_backend(nm)
-    backend.load_params(json.dumps({"params": {"exposure": 2222.0, "width": 640}}))
+    # Native GenApi persistence TSV: tab-separated <FeatureName>\t<Value> lines,
+    # applied best-effort in file order. Covers a float, an int, and a bool node.
+    backend.load_params(
+        "# GenApi persistence file\n"
+        "ExposureTime\t2222.0\n"
+        "Width\t640\n"
+        "GammaEnabled\ttrue\n"
+    )
     assert nm.ExposureTime.value == 2222.0 and nm.Width.value == 640
-    data = json.loads(backend.save_params())
-    assert data["trigger_mode"] == "Off"
-    assert data["trigger_source"] == "Line2"  # captured original at load time
-    assert data["params"]["exposure"] == 2222.0 and data["params"]["width"] == 640
+    assert nm.GammaEnabled.value is True
+    # save_params round-trips to the same TSV; parse it back to name -> value.
+    values = dict(parse_config(backend.save_params()))
+    assert values["ExposureTime"] == "2222"  # _fmt_float drops the trailing .0
+    assert values["Width"] == "640"
+    assert values["GammaEnabled"] == "true"
+    assert values["TriggerSource"] == "Line2"  # enum read straight back
 
 
 def test_load_params_skips_unavailable_nodes(caplog):
     nm = FakeNodeMap()
     nm.Gain = FakeNode(1.5, writable=False)  # present but not writable
     backend, _cam = _open_backend(nm)
-    # A rejected node is logged and skipped, never fatal.
-    backend.load_params(json.dumps({"params": {"gain": 9.0, "exposure": 3000.0}}))
+    # A rejected node is logged at debug and skipped, never fatal; the writable
+    # lines still apply (mirrors the FLIR C config tool's per-node guard).
+    backend.load_params("Gain\t9.0\nExposureTime\t3000.0\n")
     assert nm.ExposureTime.value == 3000.0 and nm.Gain.value == 1.5
 
 
@@ -398,6 +437,32 @@ def test_retrieve_skips_incomplete_image_but_releases_it():
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None
     assert image.released  # incomplete frames are still released
+
+
+def test_retrieve_skips_non_mono8_frame_but_releases_it():
+    # We force Mono8 at open, but if that best-effort set failed the camera could
+    # still deliver e.g. Mono16 — a 2-D frame with a wider stride that image_array
+    # would misread one byte per pixel. The bits-per-pixel guard drops it (PySpin's
+    # ndim!=2 check would let it through, since a Mono16 frame is still 2-D).
+    backend, cam = _grabbing_backend()
+    image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), timestamp=9, bits=16)
+    cam.next_image = image
+    backend.trigger_once()
+    assert backend.retrieve(100, lambda: True) is None  # non-Mono8: dropped
+    assert image.released  # but still released — never leak a buffer
+
+
+def test_retrieve_accepts_non_mono8_frame_when_array_not_wanted():
+    # The format guard lives on the array-materialization path (matching PySpin):
+    # when the display slot is full we never touch the pixels, so the frame's
+    # timestamp is still recorded and only the copy is skipped.
+    backend, cam = _grabbing_backend()
+    image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), timestamp=11, bits=16)
+    cam.next_image = image
+    backend.trigger_once()
+    array, timestamp = backend.retrieve(100, lambda: False)
+    assert array is None and timestamp == 11
+    assert image.released
 
 
 def test_close_deinits_releases_and_is_idempotent():

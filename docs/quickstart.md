@@ -41,7 +41,7 @@ run while a session is live. See [`doctor` in the CLI reference](reference/cli.m
 Most commands take a **config directory**: a folder holding one
 `octacam_config.toml` (camera names, display layout, recording/encoder/transfer
 settings, and the [camera backend](guide/backends.md)) plus one per-camera sensor
-file — `<serial>.pfs` for Basler, `<serial>.json` for FLIR.
+file — `<serial>.pfs` for Basler, `<serial>.txt` (native GenApi TSV) for FLIR.
 
 ```
 configs/my_rig/

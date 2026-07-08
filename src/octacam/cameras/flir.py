@@ -13,24 +13,24 @@ Mapping notes vs. the Basler backend:
 * Spinnaker has no pylon ``GrabStrategy`` enum; the equivalent is acquisition
   mode Continuous plus a stream buffer-handling mode — ``NewestOnly`` for
   preview (≈ LatestImageOnly) and ``OldestFirst`` for recording (≈ OneByOne).
-* There is no ``FeaturePersistence``/``.pfs``; parameters persist as JSON
-  (``extension = "json"``), the same scheme the fake backend uses.
+* There is no pylon ``FeaturePersistence``/``.pfs``; parameters persist in the
+  camera's native GenApi feature-persistence TSV (``extension = "txt"``; see
+  :mod:`octacam.cameras._genicam_config`), shared with the Spinnaker-C backend.
 * The ``System`` singleton must be released exactly once, after every camera is
   de-initialized; that teardown is centralized in :func:`teardown`, which
   :class:`~octacam.cameras.system.CameraSystem` calls via the registry.
 """
 
-import json
 import logging
 from typing import Any
 
+from octacam.cameras._genicam_config import apply_config, dump_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
     Frame,
     NodeInfo,
-    snap_value,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -79,7 +79,7 @@ def _safe(getter):
 class FlirBackend(SoftwareTriggerHandoff):
     """A single FLIR camera, driven through PySpin."""
 
-    extension = "json"
+    extension = "txt"
 
     def __init__(self, cam: Any):
         # PySpin's CameraPtr is untyped here (the SDK has no stubs); typing it
@@ -210,6 +210,40 @@ class FlirBackend(SoftwareTriggerHandoff):
         entry = node.GetCurrentEntry()
         return entry.GetSymbolic() if entry is not None else None
 
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
+    def _set_bool(self, name: str, value: bool) -> None:
+        spin = _spin()
+        node = spin.CBooleanPtr(self._nodemap().GetNode(name))
+        if not spin.IsAvailable(node) or not spin.IsWritable(node):
+            raise BackendError(f"boolean {name} is not writable")
+        node.SetValue(bool(value))
+
+    def _get_bool(self, name: str) -> bool | None:
+        spin = _spin()
+        node = spin.CBooleanPtr(self._nodemap().GetNode(name))
+        if not spin.IsAvailable(node) or not spin.IsReadable(node):
+            return None
+        return bool(node.GetValue())
+
+    def _set_number(self, name: str, value: float, is_int: bool) -> None:
+        spin = _spin()
+        raw = self._nodemap().GetNode(name)
+        node = spin.CIntegerPtr(raw) if is_int else spin.CFloatPtr(raw)
+        if not spin.IsAvailable(node) or not spin.IsWritable(node):
+            raise BackendError(f"node {name} is not writable")
+        node.SetValue(int(value) if is_int else float(value))
+
+    def _get_number(self, name: str, is_int: bool) -> float | int | None:
+        spin = _spin()
+        raw = self._nodemap().GetNode(name)
+        node = spin.CIntegerPtr(raw) if is_int else spin.CFloatPtr(raw)
+        if not spin.IsAvailable(node) or not spin.IsReadable(node):
+            return None
+        try:
+            return node.GetValue()
+        except spin.SpinnakerException:
+            return None
+
     # ----------------------------------------------------- sensor parameters
 
     def read_node(self, name: str) -> NodeInfo:
@@ -241,40 +275,15 @@ class FlirBackend(SoftwareTriggerHandoff):
             raise BackendError(str(e)) from e
 
     def load_params(self, config_str: str) -> None:
+        # Native GenApi persistence TSV, applied best-effort in file order (see
+        # _genicam_config). Runs after open(), so open()'s Mono8/throughput stay
+        # authoritative (both are in the applier's skip set).
         if config_str:
-            try:
-                data = json.loads(config_str)
-            except (ValueError, TypeError) as e:
-                raise BackendError(f"invalid FLIR parameters: {e}") from e
-            if not isinstance(data, dict):
-                raise BackendError("invalid FLIR parameters: expected an object")
-            params = data.get("params") or {}
-            # Geometry first (while not streaming), then the live params.
-            for name in ("width", "height", "offset_x", "offset_y", "exposure", "gain"):
-                if name not in params:
-                    continue
-                try:
-                    info = self.read_node(name)
-                    self.write_node(name, snap_value(float(params[name]), info))
-                except BackendError as e:
-                    log.warning(
-                        "Could not restore %s on camera %s: %s", name, self._serial, e
-                    )
+            apply_config(self, config_str)
         self._original_trigger_source = self._get_enum("TriggerSource")
 
     def save_params(self) -> str:
-        params: dict[str, float] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_node(name).value
-            except BackendError:
-                continue
-        data = {
-            "params": params,
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        return dump_config(self)
 
     # ----------------------------------------------------------- triggering
 

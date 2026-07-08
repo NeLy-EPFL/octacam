@@ -20,8 +20,9 @@ Mapping notes vs. the other backends:
   ``max`` from the readable SFNC ``WidthMax``/``HeightMax`` when present.
 * There is no per-frame hardware timestamp, so :meth:`retrieve` returns a ``0``
   timestamp and :class:`~octacam.cameras.base.Camera` falls back to host time.
-* Parameters persist as JSON (``extension = "json"``), the same scheme the FLIR
-  and fake backends use.
+* Parameters persist in the camera's native GenApi feature-persistence TSV
+  (``extension = "txt"``; see :mod:`octacam.cameras._genicam_config`), shared
+  with the FLIR/Spinnaker backends.
 * pycameleon takes an **exclusive borrow** of the camera object: calling
   ``execute()`` (the software trigger) from one thread while ``receive()`` runs on
   another raises "Already borrowed". octacam's shared trigger timer and grab loop
@@ -32,20 +33,19 @@ Mapping notes vs. the other backends:
   so the camera is only ever touched by one thread at a time.
 """
 
-import json
 import logging
 import threading
 from typing import Any
 
 import numpy as np
 
+from octacam.cameras._genicam_config import apply_config, dump_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
     Frame,
     NodeInfo,
-    snap_value,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -81,7 +81,7 @@ def ensure_available() -> None:
 class PycameleonBackend(SoftwareTriggerHandoff):
     """A single USB3-Vision camera driven through pycameleon/libusb."""
 
-    extension = "json"
+    extension = "txt"
 
     def __init__(self, cam):
         # The PyCameleonCamera handle from enumerate_cameras(); set to None by
@@ -181,6 +181,45 @@ class PycameleonBackend(SoftwareTriggerHandoff):
             except Exception as e:
                 raise BackendError(str(e)) from e
 
+    def _get_enum(self, node: str) -> str | None:
+        return self._read_enum_opt(node)
+
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
+    def _set_bool(self, node: str, value: bool) -> None:
+        with self._lock:
+            try:
+                self._cam.write_bool(node, bool(value))
+            except Exception as e:
+                raise BackendError(str(e)) from e
+
+    def _get_bool(self, node: str) -> bool | None:
+        with self._lock:
+            try:
+                return bool(self._cam.read_bool(node))
+            except Exception:
+                return None
+
+    def _set_number(self, node: str, value: float, is_int: bool) -> None:
+        with self._lock:
+            try:
+                if is_int:
+                    self._cam.write_integer(node, int(value))
+                else:
+                    self._cam.write_float(node, float(value))
+            except Exception as e:
+                raise BackendError(str(e)) from e
+
+    def _get_number(self, node: str, is_int: bool) -> float | int | None:
+        with self._lock:
+            try:
+                return (
+                    int(self._cam.read_integer(node))
+                    if is_int
+                    else float(self._cam.read_float(node))
+                )
+            except Exception:
+                return None
+
     # ----------------------------------------------------- sensor parameters
 
     def read_node(self, name: str) -> NodeInfo:
@@ -221,40 +260,14 @@ class PycameleonBackend(SoftwareTriggerHandoff):
                 raise BackendError(str(e)) from e
 
     def load_params(self, config_str: str) -> None:
+        # Native GenApi persistence TSV, applied best-effort in file order (see
+        # _genicam_config). Runs after open(), so open()'s Mono8 stays authoritative.
         if config_str:
-            try:
-                data = json.loads(config_str)
-            except (ValueError, TypeError) as e:
-                raise BackendError(f"invalid pycameleon parameters: {e}") from e
-            if not isinstance(data, dict):
-                raise BackendError("invalid pycameleon parameters: expected an object")
-            params = data.get("params") or {}
-            # Geometry first (while not streaming), then the live params.
-            for name in ("width", "height", "offset_x", "offset_y", "exposure", "gain"):
-                if name not in params:
-                    continue
-                try:
-                    info = self.read_node(name)
-                    self.write_node(name, snap_value(float(params[name]), info))
-                except BackendError as e:
-                    log.warning(
-                        "Could not restore %s on camera %s: %s", name, self._serial, e
-                    )
+            apply_config(self, config_str)
         self._original_trigger_source = self._read_enum_opt("TriggerSource")
 
     def save_params(self) -> str:
-        params: dict[str, float] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_node(name).value
-            except BackendError:
-                continue
-        data = {
-            "params": params,
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        return dump_config(self)
 
     # ----------------------------------------------------------- triggering
 

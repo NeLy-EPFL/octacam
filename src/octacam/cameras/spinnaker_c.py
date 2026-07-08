@@ -3,9 +3,11 @@
 This is the fast, watermark-free, modern-Python path for FLIR cameras. It drives
 ``libSpinnaker_C.so`` (the Spinnaker SDK's flat C ABI) directly through
 :mod:`ctypes`, mirroring the PySpin backend (:mod:`octacam.cameras.flir`)
-node-for-node — same SFNC names, same :data:`PARAM_NODES`, same
-``extension = "json"``, same session-wide ``spinSystem`` singleton released in
-:func:`teardown` — but calling the C functions instead of PySpin's C++ wrappers.
+node-for-node — same SFNC names, same :data:`PARAM_NODES`, same native GenApi
+persistence TSV config (``extension = "txt"``; see
+:mod:`octacam.cameras._genicam_config`), same session-wide ``spinSystem``
+singleton released in :func:`teardown` — but calling the C functions instead of
+PySpin's C++ wrappers.
 
 Why this backend exists (see ``docs/plan-spinnaker-c-backend.md``):
 
@@ -38,19 +40,18 @@ Structure:
 
 import atexit
 import ctypes
-import json
 import logging
 from typing import Any
 
 import numpy as np
 
+from octacam.cameras._genicam_config import apply_config, dump_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
     Frame,
     NodeInfo,
-    snap_value,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -88,8 +89,13 @@ _ERR_NAMES = {
 
 # Spinnaker node interface types differ per parameter; the rest are floats. Int
 # nodes expose min/max/inc but no unit; float nodes expose min/max/unit but no
-# inc (SpinnakerGenApiC.h has no spinIntegerGetUnit / spinFloatGetInc), so those
-# NodeInfo fields are None for the respective kind. snap_value tolerates both.
+# inc — the Spinnaker C ABI has no spinIntegerGetUnit / spinFloatGetInc (verified
+# absent from libSpinnaker_C.so.4.3), unlike PySpin's C++ node handles. This
+# costs nothing vs the PySpin backend here: octacam's int nodes (Width/Height/
+# Offset*) carry an empty unit the GUI hides either way (camera.js ``if (d.unit)``),
+# and its float nodes (ExposureTime/Gain) are continuous, so PySpin's GetInc
+# yields None on them too. The fields are left None for the respective kind;
+# snap_value and the GUI slider step both tolerate a missing inc.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
 # The System singleton and its camera list are held for the whole session and
@@ -159,6 +165,7 @@ def _configure(lib) -> None:
         "spinCameraGetTLDeviceNodeMap": [v, P(v)],
         "spinCameraGetTLStreamNodeMap": [v, P(v)],
         "spinCameraGetDeviceID": [v, ch, P(sz)],
+        "spinCameraGetUniqueID": [v, ch, P(sz)],
         "spinCameraBeginAcquisition": [v],
         "spinCameraEndAcquisition": [v],
         "spinCameraGetNextImageEx": [v, u64, P(v)],
@@ -169,6 +176,7 @@ def _configure(lib) -> None:
         "spinImageGetTimeStamp": [v, P(u64)],
         "spinImageGetData": [v, P(v)],
         "spinImageGetStride": [v, P(sz)],
+        "spinImageGetBitsPerPixel": [v, P(sz)],
         "spinImageRelease": [v],
         # GenApi nodes
         "spinNodeMapGetNode": [v, ch, P(v)],
@@ -191,6 +199,8 @@ def _configure(lib) -> None:
         "spinEnumerationSetIntValue": [v, i64],
         "spinEnumerationEntryGetSymbolic": [v, ch, P(sz)],
         "spinStringGetValue": [v, ch, P(sz)],
+        "spinBooleanGetValue": [v, P(u8)],
+        "spinBooleanSetValue": [v, u8],
         "spinCommandExecute": [v],
     }
     for name, argtypes in specs.items():
@@ -240,6 +250,14 @@ class _Spinnaker:
         buf = ctypes.create_string_buffer(_MAX_BUFF_LEN)
         n = ctypes.c_size_t(_MAX_BUFF_LEN)
         if fn(handle, buf, ctypes.byref(n)) != SPINNAKER_ERR_SUCCESS:
+            return None
+        return buf.value.decode("ascii", "replace") or None
+
+    def _cam_string(self, fn, hcam) -> str | None:
+        """A camera-level C string getter (GetDeviceID / GetUniqueID)."""
+        buf = ctypes.create_string_buffer(_MAX_BUFF_LEN)
+        n = ctypes.c_size_t(_MAX_BUFF_LEN)
+        if fn(hcam, buf, ctypes.byref(n)) != SPINNAKER_ERR_SUCCESS:
             return None
         return buf.value.decode("ascii", "replace") or None
 
@@ -306,8 +324,9 @@ class _Spinnaker:
     def read_serial(self, hcam) -> str:
         """DeviceSerialNumber from the TL device nodemap (readable pre-Init).
 
-        Falls back to the GenTL device id, then an empty string — mirrors the
-        PySpin backend's ``GetUniqueID`` fallback.
+        Falls back to the GenTL device id, then the camera's unique id — this
+        matches (and extends) the PySpin backend's ``GetUniqueID`` fallback, so
+        the serial is never empty on a device that omits DeviceSerialNumber.
         """
         try:
             hmap = self._out_handle(self._lib.spinCameraGetTLDeviceNodeMap, hcam)
@@ -316,13 +335,10 @@ class _Spinnaker:
                 return serial
         except BackendError:
             pass
-        buf = ctypes.create_string_buffer(_MAX_BUFF_LEN)
-        n = ctypes.c_size_t(_MAX_BUFF_LEN)
-        if (
-            self._lib.spinCameraGetDeviceID(hcam, buf, ctypes.byref(n))
-            == SPINNAKER_ERR_SUCCESS
-        ):
-            return buf.value.decode("ascii", "replace")
+        for fn in (self._lib.spinCameraGetDeviceID, self._lib.spinCameraGetUniqueID):
+            got = self._cam_string(fn, hcam)
+            if got:
+                return got
         return ""
 
     # ------------------------------------------------------- camera lifecycle
@@ -451,6 +467,30 @@ class _Spinnaker:
             return None
         return self._string_from(self._lib.spinEnumerationEntryGetSymbolic, entry)
 
+    def get_bool(self, nodemap, name: str) -> bool | None:
+        try:
+            node = self._node(nodemap, name)
+        except BackendError:
+            return None
+        if not self._readable(node):
+            return None
+        b = ctypes.c_uint8(0)
+        if (
+            self._lib.spinBooleanGetValue(node, ctypes.byref(b))
+            != SPINNAKER_ERR_SUCCESS
+        ):
+            return None
+        return bool(b.value)
+
+    def set_bool(self, nodemap, name: str, value: bool) -> None:
+        node = self._node(nodemap, name)
+        if not self._writable(node):
+            raise BackendError(f"boolean {name} is not writable")
+        _chk(
+            self._lib.spinBooleanSetValue(node, ctypes.c_uint8(1 if value else 0)),
+            f"set {name}",
+        )
+
     def execute_command(self, nodemap, name: str) -> None:
         node = self._node(nodemap, name)
         _chk(self._lib.spinCommandExecute(node), f"execute {name}")
@@ -493,6 +533,23 @@ class _Spinnaker:
             == SPINNAKER_ERR_SUCCESS
         ):
             return int(v.value)
+        return 0
+
+    def image_bits_per_pixel(self, himage) -> int:
+        """Bits per pixel of the delivered image (8 for Mono8).
+
+        Lets the caller reject a non-Mono8 frame before ``image_array`` reshapes
+        the buffer as one byte per pixel — a Mono16/packed frame has the same
+        2-D shape but a wider stride, so it would otherwise be misread as
+        garbage. Returns 0 if the SDK cannot report it (the caller treats that
+        as a bad frame and skips it).
+        """
+        n = ctypes.c_size_t()
+        if (
+            self._lib.spinImageGetBitsPerPixel(himage, ctypes.byref(n))
+            == SPINNAKER_ERR_SUCCESS
+        ):
+            return int(n.value)
         return 0
 
     def image_array(self, himage) -> np.ndarray:
@@ -554,7 +611,7 @@ def ensure_available() -> None:
 class SpinnakerBackend(SoftwareTriggerHandoff):
     """A single FLIR camera driven through the Spinnaker C API via ctypes."""
 
-    extension = "json"
+    extension = "txt"
 
     def __init__(self, cam: Any):
         # ``cam`` is an opaque spinCamera handle from enumerate_spinnaker(); it is
@@ -705,6 +762,26 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             return None
         return _spin().get_enum(self._nodemap, name)
 
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
+    def _set_bool(self, name: str, value: bool) -> None:
+        _spin().set_bool(self._nodemap, name, value)
+
+    def _get_bool(self, name: str) -> bool | None:
+        if self._nodemap is None:
+            return None
+        return _spin().get_bool(self._nodemap, name)
+
+    def _set_number(self, name: str, value: float, is_int: bool) -> None:
+        _spin().write_number(self._nodemap, name, value, is_int)
+
+    def _get_number(self, name: str, is_int: bool) -> float | int | None:
+        if self._nodemap is None:
+            return None
+        try:
+            return _spin().read_number(self._nodemap, name, is_int).value
+        except BackendError:
+            return None
+
     # ----------------------------------------------------- sensor parameters
 
     def read_node(self, name: str) -> NodeInfo:
@@ -722,40 +799,21 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         )
 
     def load_params(self, config_str: str) -> None:
+        # Native GenApi persistence TSV: apply every feature line best-effort, in
+        # file order (see _genicam_config). Runs after open(), so open()'s
+        # DeviceLinkThroughputLimit/Mono8 stay authoritative (both are skipped by
+        # the applier). Geometry is written here while not yet grabbing.
         if config_str:
-            try:
-                data = json.loads(config_str)
-            except (ValueError, TypeError) as e:
-                raise BackendError(f"invalid Spinnaker parameters: {e}") from e
-            if not isinstance(data, dict):
-                raise BackendError("invalid Spinnaker parameters: expected an object")
-            params = data.get("params") or {}
-            # Geometry first (while not streaming), then the live params.
-            for name in ("width", "height", "offset_x", "offset_y", "exposure", "gain"):
-                if name not in params:
-                    continue
-                try:
-                    info = self.read_node(name)
-                    self.write_node(name, snap_value(float(params[name]), info))
-                except BackendError as e:
-                    log.warning(
-                        "Could not restore %s on camera %s: %s", name, self._serial, e
-                    )
+            apply_config(self, config_str)
         self._original_trigger_source = self._get_enum("TriggerSource")
 
     def save_params(self) -> str:
-        params: dict[str, float] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_node(name).value
-            except BackendError:
-                continue
-        data = {
-            "params": params,
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        model = (
+            _spin().read_string(self._nodemap, "DeviceModelName")
+            if self._nodemap is not None
+            else None
+        )
+        return dump_config(self, model)
 
     # ----------------------------------------------------------- triggering
 
@@ -920,13 +978,21 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             timestamp = spin.image_timestamp(image)
             array = None
             if wants_array():
-                arr = spin.image_array(image)
-                if arr.ndim != 2:
+                # Reject a non-Mono8 frame before reshaping the buffer as one
+                # byte per pixel. A Mono16/packed frame is still 2-D but has a
+                # wider stride, so image_array would silently return garbage.
+                # (PySpin's ndim!=2 guard misses this — a Mono16 frame is 2-D —
+                # so this format check is stricter than the PySpin path. We force
+                # Mono8 at open, so this only fires if that best-effort set fails.)
+                bits = spin.image_bits_per_pixel(image)
+                if bits != 8:
                     log.warning(
-                        "Camera %s delivered a non-mono frame; skipping", self._serial
+                        "Camera %s delivered a %d-bpp (non-Mono8) frame; skipping",
+                        self._serial,
+                        bits,
                     )
                     return None
-                array = arr
+                array = spin.image_array(image)
             return (array, timestamp)
         except BackendError as e:
             log.warning("Camera %s: bad frame (%s); skipping", self._serial, e)

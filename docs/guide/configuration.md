@@ -5,7 +5,8 @@ A **config directory** describes one rig. It holds:
 - one `octacam_config.toml` — camera names, display layout, and the
   recording/encoding/transfer settings, plus the [camera backend](backends.md);
 - one per-camera **sensor parameter file** — `<serial>.pfs` for Basler,
-  `<serial>.json` for FLIR (written by the GUI's *Save…* dialog).
+  `<serial>.txt` (the native GenApi feature-persistence TSV) for FLIR/GenICam,
+  written by the GUI's *Save…* dialog.
 
 Everything below is optional and has a sensible default — an empty or missing
 `octacam_config.toml` uses all detected cameras with defaults. octacam parses the
@@ -28,7 +29,7 @@ octacam config <config_dir>    # or omit the dir to be prompted for a name
 ```
 
 By default the wizard opens each detected camera once to save its current sensor
-parameters into a `<serial>.pfs` (Basler) or `<serial>.json` (FLIR) file. A
+parameters into a `<serial>.pfs` (Basler) or `<serial>.txt` (FLIR/GenICam) file. A
 camera that is busy — held by a live session — is skipped with a warning; you
 can capture its parameters later from the GUI's *Save…* dialog. Pass
 `--no-snapshot-params` to skip that step entirely (enumeration only, no camera is

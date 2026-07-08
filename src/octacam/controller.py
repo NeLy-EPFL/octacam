@@ -541,9 +541,10 @@ class RecordingController:
     ) -> dict:
         """Restore one camera's (or all cameras') sensor parameters to the config.
 
-        ``pfs_by_serial`` maps a serial number to its ``<serial>.pfs`` text from
-        the active config dir. Cameras without a saved ``.pfs`` are left
-        unchanged; if none of the targeted cameras has one, ``FileNotFoundError``
+        ``pfs_by_serial`` maps a serial number to its per-camera parameter text
+        from the active config dir, in whatever format the backend persists
+        (Basler ``.pfs`` / FLIR-GenICam ``.txt``). Cameras without a saved file are
+        left unchanged; if none of the targeted cameras has one, ``FileNotFoundError``
         is raised so the caller can report that there is nothing to reset to. As
         in set_camera_param, the grab-cycling reload runs OFF the controller
         lock, guarded by ``_reconfiguring`` so a recording cannot start
@@ -589,7 +590,8 @@ class RecordingController:
         return {"updated": updated}
 
     def export_camera_params(self) -> dict[str, str]:
-        """Snapshot every camera's .pfs text; rejected while recording/benchmarking."""
+        """Snapshot every camera's parameter text (Basler .pfs / FLIR .txt);
+        rejected while recording/benchmarking."""
         with self._lock:
             if self._camera_locked:
                 raise RuntimeError(
