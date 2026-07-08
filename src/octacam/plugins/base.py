@@ -52,6 +52,13 @@ class OctacamPlugin(Protocol):
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
 
+    # Headless-record (CLI) start params. The GUI supplies each plugin's
+    # start-time slice from its tab; `octacam record` has no UI, so a plugin that
+    # must act at record start (e.g. arm a hardware trigger) contributes its slice
+    # here, built from the recording's fps/duration. None = nothing to contribute.
+    # See PluginManager.default_start_params.
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
+
     # ---- web contribution (optional) ----
     # client_id identifies the WebSocket connection a message/disconnect came
     # from, so a plugin can scope per-connection state (e.g. a hold-to-jog) to
@@ -96,6 +103,9 @@ class Plugin:
 
     def on_recording_stop(self, aborted: bool) -> None:
         pass
+
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        return None
 
     def api_router(self) -> APIRouter | None:
         return None
@@ -143,6 +153,28 @@ class PluginManager:
                 getattr(plugin, hook)(*args)
             except Exception:
                 log.exception("Plugin %s.%s failed", self._name(plugin), hook)
+
+    def default_start_params(self, fps: float, duration_s: float) -> dict:
+        """Collect each plugin's headless-record start slice, keyed by name.
+
+        ``octacam record`` has no GUI to POST ``plugin_params``, so a plugin that
+        must act at record start (e.g. omniview arming the trigger board)
+        contributes its slice via :meth:`Plugin.default_start_params`. Plugins
+        returning ``None`` are omitted. The result mirrors the ``{name: params}``
+        shape the GUI sends, so it can be passed straight to ``start_recording``.
+        """
+        params: dict = {}
+        for plugin in self.plugins:
+            try:
+                slice_ = plugin.default_start_params(fps, duration_s)
+            except Exception:
+                log.exception(
+                    "Plugin %s.default_start_params failed", self._name(plugin)
+                )
+                slice_ = None
+            if slice_ is not None:
+                params[self._name(plugin)] = slice_
+        return params
 
     def status(self) -> dict:
         result: dict = {}

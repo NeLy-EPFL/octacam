@@ -494,6 +494,22 @@ class OmniviewPlugin(Plugin):
 
     # -------------------------------------------------- recording lifecycle
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict:
+        """Headless (CLI) arm slice for ``octacam record``.
+
+        The CLI has no "Arm with recording" checkbox, so contribute the arm
+        params unconditionally — otherwise the external-trigger cameras would wait
+        forever for a trigger the board is never told to send. Mirrors the GUI's
+        ``getStartParams()``: the recording's fps/duration plus the configured
+        strobe duty and camera-pulse width.
+        """
+        return {
+            "fps": int(round(fps)),
+            "duration_ms": max(1, int(round(duration_s * 1000))),
+            "duty_percent": self._default_duty_percent,
+            "cam_pulse_us": self._default_cam_pulse_us,
+        }
+
     def on_recording_start(self, params: dict | None) -> None:
         """Arm the Arduino when the GUI's "Arm with recording" box is checked.
 

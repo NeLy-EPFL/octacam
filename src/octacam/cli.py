@@ -1976,7 +1976,14 @@ def record(
             settings.duration_s,
             settings.save_dir,
         )
-        result = controller.start_recording(confirm_overwrite=True)
+        # Headless record has no GUI to POST plugin_params, so build each enabled
+        # plugin's start slice from the recording's fps/duration (e.g. omniview
+        # arms its trigger board — without this the external-trigger cameras wait
+        # forever for a trigger that never fires). Empty -> None (no-op dispatch).
+        plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
+        result = controller.start_recording(
+            confirm_overwrite=True, plugin_params=plugin_params or None
+        )
         if not result.ok:
             sys.exit(f"Failed to start recording: {result.message}")
         controller.join()

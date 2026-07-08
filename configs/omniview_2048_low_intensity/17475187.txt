@@ -17,9 +17,9 @@ TestPendingAck	0
 # --- AcquisitionControl ---
 TriggerSelector	FrameStart
 TriggerMode	On
-TriggerSource	Software
-TriggerActivation	FallingEdge
-TriggerDelayEnabled	true
+TriggerSource	Line0
+TriggerActivation	RisingEdge
+TriggerDelayEnabled	false
 TriggerDelay	199.854
 ExposureMode	Timed
 ExposureAuto	Off
