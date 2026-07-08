@@ -362,6 +362,9 @@ async function main() {
       case "camera_params":
         cameraTab?.applyParams(msg);
         break;
+      case "camera_features_dirty":
+        cameraTab?.applyFeaturesDirty(msg);
+        break;
       case "camera_name":
         cameraTab?.applyName(msg);
         break;

@@ -45,13 +45,17 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras._genicam_config import apply_config, dump_config
+from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
+    FeatureInfo,
     Frame,
     NodeInfo,
+    curated_list_features,
+    curated_read_feature,
+    curated_write_feature,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -797,6 +801,25 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
         _spin().write_number(
             self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS
         )
+
+    # Full-node-map introspection over the Spinnaker C API is not implemented;
+    # the Camera tab falls back to the six curated PARAM_NODES quick controls.
+    def list_features(self) -> list[FeatureInfo]:
+        if self._nodemap is None:
+            return []
+        return curated_list_features(self)
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        return curated_read_feature(self, name)
+
+    def write_feature(self, name: str, value: object) -> None:
+        curated_write_feature(self, name, value)
+
+    def execute_command(self, name: str) -> None:
+        raise BackendError("command execution is not supported on this backend")
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        return dict(parse_config(config_str))
 
     def load_params(self, config_str: str) -> None:
         # Native GenApi persistence TSV: apply every feature line best-effort, in

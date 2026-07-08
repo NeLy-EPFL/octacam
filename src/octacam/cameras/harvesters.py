@@ -49,11 +49,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from octacam.cameras._genicam_config import apply_config, dump_config
+from octacam.cameras import _genicam_features
+from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
+    FeatureInfo,
     Frame,
     NodeInfo,
 )
@@ -418,6 +420,25 @@ class HarvestersBackend(SoftwareTriggerHandoff):
             node.value = int(value) if name in _INT_PARAMS else float(value)
         except Exception as e:
             raise BackendError(str(e)) from e
+
+    # ---------------------------------------------------- full device node map
+
+    def list_features(self) -> list[FeatureInfo]:
+        if self._ia is None:
+            return []
+        return _genicam_features.walk_features(genapi, self._nodemap())
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        return _genicam_features.read_feature(genapi, self._nodemap(), name)
+
+    def write_feature(self, name: str, value: object) -> None:
+        _genicam_features.write_feature(genapi, self._nodemap(), name, value)
+
+    def execute_command(self, name: str) -> None:
+        _genicam_features.execute_command(genapi, self._nodemap(), name)
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        return dict(parse_config(config_str))
 
     def load_params(self, config_str: str) -> None:
         # Native GenApi persistence TSV, applied best-effort in file order (see

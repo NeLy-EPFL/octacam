@@ -104,6 +104,17 @@ def test_unsafe_camera_name_dropped(tmp_path):
     assert config.cameras[1].name == "ok"
 
 
+def test_center_flags_parse(tmp_path):
+    # The ROI auto-centering flags default off and round-trip as booleans.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\ncenter_x = true\ncenter_y = true\n'
+        '[[cameras]]\nserial_number = "b"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert config.cameras[0].center_x is True and config.cameras[0].center_y is True
+    assert config.cameras[1].center_x is False and config.cameras[1].center_y is False
+
+
 def test_integer_serial_and_name_coerced_to_string(tmp_path):
     # TOML keeps types explicit, but an unquoted integer serial/name should
     # still be read as text rather than rejected.

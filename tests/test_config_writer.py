@@ -56,6 +56,24 @@ def test_merge_updates_existing_and_appends_new():
     assert by_serial["B"]["name"] == "camB" and by_serial["B"]["window_x"] == 0.5
 
 
+def test_merge_persists_center_flags(tmp_path):
+    # The ROI auto-centering flags travel with the display fields and survive a
+    # write -> reparse round-trip (including an explicit False).
+    raw = {"cameras": [{"serial_number": "A"}]}
+    doc = cw.merge_camera_display(
+        raw,
+        [
+            {"serial": "A", "center_x": True, "center_y": False},
+            {"serial": "B", "center_x": True, "center_y": True},
+        ],
+    )
+    cw.write_config(tmp_path, doc)
+    config = parse_config(tmp_path / "octacam_config.toml")
+    by_serial = {c.serial_number: c for c in config.cameras}
+    assert by_serial["A"].center_x is True and by_serial["A"].center_y is False
+    assert by_serial["B"].center_x is True and by_serial["B"].center_y is True
+
+
 def test_dumps_escapes_strings():
     doc = {"gui": {"save_directory_default": 'a"b\\c'}}
     assert tomllib.loads(cw._dumps(doc))["gui"]["save_directory_default"] == 'a"b\\c'

@@ -133,7 +133,7 @@
 
     <section id="tab-camera" class="tab">
       <fieldset id="camera-fields" disabled>
-        <label class="row" title="Which camera these sensor parameters are read from and applied to"><span>Camera:</span>
+        <label class="row" title="Which camera these parameters are read from and applied to"><span>Camera:</span>
           <select id="cam-target"></select>
         </label>
         <div class="row" title="Rename the selected camera. The name becomes its per-camera video filename, so it must be unique and contain no slashes or dots."><span>Name:</span>
@@ -149,38 +149,15 @@
             <label title="Change all cameras at once"><input type="radio" name="cam-apply-to" value="all"> All</label>
           </span>
         </div>
-        <label class="row" title="Active image width in pixels (sensor region of interest)"><span>Width:</span>
-          <input id="cam-width" type="number" step="1">
-        </label>
-        <span class="node-range" id="cam-width-range"></span>
-        <label class="row" title="Active image height in pixels (sensor region of interest)"><span>Height:</span>
-          <input id="cam-height" type="number" step="1">
-        </label>
-        <span class="node-range" id="cam-height-range"></span>
-        <label class="row" title="Exposure time per frame, in microseconds"><span>Exposure:</span>
-          <span class="suffixed">
-            <input id="cam-exposure" type="number" step="any">
-            <span class="suffix">&micro;s</span>
-          </span>
-        </label>
-        <span class="node-range" id="cam-exposure-range"></span>
-        <details id="cam-advanced" class="advanced">
-          <summary title="Show less-common sensor controls (gain and ROI offset)">Advanced</summary>
-          <label class="row" title="Brightness gain applied to the sensor signal (in the camera's gain units)"><span>Gain:</span>
-            <input id="cam-gain" type="number" step="any">
+        <div class="cam-tools">
+          <input id="cam-filter" type="search" placeholder="Filter parameters…"
+            spellcheck="false" title="Filter the parameter list by name">
+          <label class="check" title="Also show Expert-visibility parameters">
+            <input id="cam-expert" type="checkbox"> Expert
           </label>
-          <span class="node-range" id="cam-gain-range"></span>
-          <label class="row" title="Horizontal start of the sensor region of interest, in pixels"><span>Offset X:</span>
-            <input id="cam-offset_x" type="number" step="1">
-          </label>
-          <span class="node-range" id="cam-offset_x-range"></span>
-          <label class="row" title="Vertical start of the sensor region of interest, in pixels"><span>Offset Y:</span>
-            <input id="cam-offset_y" type="number" step="1">
-          </label>
-          <span class="node-range" id="cam-offset_y-range"></span>
-        </details>
-        <button id="cam-reset" type="button" class="btn wide"
-          title="Reset sensor parameters to the active config's saved values">Reset to config</button>
+        </div>
+        <!-- Grouped, model-dependent parameter browser rendered by camera.js -->
+        <div id="camera-params"></div>
       </fieldset>
       <div id="camera-status"></div>
     </section>

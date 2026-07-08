@@ -46,6 +46,31 @@ LIVE_PARAMS = {
 }
 PARAM_NODES = {**GEOMETRY_PARAMS, **LIVE_PARAMS}
 
+# --- Full-node-map (Camera tab) policy, in SFNC node names ---------------------
+# The two ROI-size nodes: the SDK refuses these writes while grabbing, so a write
+# is routed through set_geometry (which cycles the preview). Every other feature
+# is written live.
+GEOMETRY_FEATURES = frozenset({"Width", "Height"})
+# The ROI-origin nodes and the per-axis center flag that auto-computes each. When
+# a flag is on the node is derived from the sensor size and the ROI size, so the
+# UI locks the field and octacam owns the value.
+OFFSET_FEATURES = {"OffsetX": "center_x", "OffsetY": "center_y"}
+# Nodes octacam drives itself at runtime; surfaced in the Camera tab read-only so
+# an operator can see the value but cannot break preview/recording by editing it.
+# PixelFormat is forced to Mono8 (the GRAY8 writer); DeviceLinkThroughputLimit is
+# maximised at open(); the Trigger* chain and AcquisitionMode are reprogrammed by
+# the preview/record/benchmark grab paths; TLParamsLocked is transport state.
+RUNTIME_MANAGED_FEATURES = frozenset({
+    "PixelFormat",
+    "DeviceLinkThroughputLimit",
+    "TLParamsLocked",
+    "TriggerSelector",
+    "TriggerMode",
+    "TriggerSource",
+    "TriggerOverlap",
+    "AcquisitionMode",
+})
+
 
 class BackendError(Exception):
     """An SDK-level failure surfaced by a camera backend (vendor-neutral)."""
@@ -61,6 +86,118 @@ class NodeInfo:
     inc: float | None = None
     unit: str | None = None
     writable: bool = False
+
+
+@dataclass
+class FeatureInfo:
+    """One node from the full device node map, for the Camera tab's browser.
+
+    ``type`` is the widget kind — ``"int"``/``"float"`` (number box with
+    min/max/inc), ``"bool"`` (checkbox), ``"enum"`` (dropdown of ``entries``),
+    ``"string"`` (text), ``"command"`` (button), or ``"category"`` (a group
+    header). ``value`` is ``None`` for command/category nodes and for an enum
+    holds the current symbolic string. ``entries`` lists an enum's selectable
+    symbolics (each ``{"value", "display", "available"}``). ``category`` is the
+    enclosing GenApi category, used to group the browser. ``managed`` is set by
+    the Camera core for nodes octacam drives itself (see
+    :data:`RUNTIME_MANAGED_FEATURES`) so the UI locks them with a note.
+    """
+
+    name: str
+    display_name: str
+    type: str
+    category: str = ""
+    value: object | None = None
+    min: float | None = None
+    max: float | None = None
+    inc: float | None = None
+    unit: str | None = None
+    entries: list[dict] | None = None
+    readable: bool = True
+    writable: bool = False
+    visibility: str = "beginner"
+    tooltip: str | None = None
+    managed: bool = False
+
+    def as_dict(self) -> dict:
+        d = {
+            "name": self.name,
+            "display_name": self.display_name,
+            "type": self.type,
+            "category": self.category,
+            "value": self.value,
+            "readable": self.readable,
+            "writable": self.writable,
+            "visibility": self.visibility,
+            "managed": self.managed,
+        }
+        # Only include the type-specific keys that apply, keeping the payload
+        # small and the client's rendering unambiguous.
+        for key in ("min", "max", "inc", "unit", "tooltip", "entries"):
+            v = getattr(self, key)
+            if v is not None:
+                d[key] = v
+        return d
+
+
+# --- Curated feature fallback --------------------------------------------------
+# For a backend that cannot introspect its full node map (the pycameleon floor
+# and the Spinnaker C-API tier), the Camera tab degrades to the six PARAM_NODES,
+# built as FeatureInfo from the backend's existing read_node/write_node. GenICam
+# backends (harvesters/basler) and the fake override this with a full walk.
+_SFNC_TO_SNAKE = {sfnc: snake for snake, sfnc in PARAM_NODES.items()}
+_CURATED_CATEGORY = {
+    "Width": "ImageFormatControl",
+    "Height": "ImageFormatControl",
+    "OffsetX": "ImageFormatControl",
+    "OffsetY": "ImageFormatControl",
+    "ExposureTime": "AcquisitionControl",
+    "Gain": "AnalogControl",
+}
+
+
+def curated_list_features(backend) -> list["FeatureInfo"]:
+    """The six PARAM_NODES as FeatureInfo (fallback for non-introspectable SDKs)."""
+    out: list[FeatureInfo] = []
+    for snake, sfnc in PARAM_NODES.items():
+        try:
+            info = backend.read_node(snake)
+        except BackendError:
+            continue
+        out.append(_curated_feature(sfnc, info))
+    return out
+
+
+def _curated_feature(sfnc: str, info: "NodeInfo") -> "FeatureInfo":
+    kind = "int" if _SFNC_TO_SNAKE.get(sfnc) in ("width", "height", "offset_x", "offset_y") else "float"
+    return FeatureInfo(
+        name=sfnc,
+        display_name=sfnc,
+        type=kind,
+        category=_CURATED_CATEGORY.get(sfnc, "Other"),
+        value=info.value,
+        min=info.min,
+        max=info.max,
+        inc=info.inc,
+        unit=info.unit,
+        readable=True,
+        writable=info.writable,
+    )
+
+
+def curated_read_feature(backend, name: str) -> "FeatureInfo":
+    snake = _SFNC_TO_SNAKE.get(name)
+    if snake is None:
+        raise BackendError(f"{name} is not available on this backend")
+    return _curated_feature(name, backend.read_node(snake))
+
+
+def curated_write_feature(backend, name: str, value: object) -> None:
+    snake = _SFNC_TO_SNAKE.get(name)
+    if snake is None:
+        raise BackendError(f"{name} is not editable on this backend")
+    is_int = snake in ("width", "height", "offset_x", "offset_y")
+    backend.write_node(snake, int(float(value)) if is_int else float(value))
 
 
 # A retrieved frame: the (owned) image array — or None when the caller did not
@@ -90,8 +227,23 @@ class CameraBackend(Protocol):
     def read_node(self, name: str) -> NodeInfo: ...
     def write_node(self, name: str, value: float) -> None: ...
 
+    # Full device node map (Camera tab). A backend that cannot introspect its
+    # node map returns an empty list from ``list_features`` and the Camera tab
+    # falls back to the curated PARAM_NODES quick controls. ``name`` is a GenApi
+    # (SFNC or vendor) node name; ``value`` is coerced to the node's type by the
+    # backend. All four raise :class:`BackendError` on SDK failure.
+    def list_features(self) -> list[FeatureInfo]: ...
+    def read_feature(self, name: str) -> FeatureInfo: ...
+    def write_feature(self, name: str, value: object) -> None: ...
+    def execute_command(self, name: str) -> None: ...
+
     def load_params(self, config_str: str) -> None: ...
     def save_params(self) -> str: ...
+
+    # Parse a saved per-camera config text (this backend's native format) into a
+    # ``{node_name: value_string}`` map, used by the per-field "reset to config"
+    # button. An unparseable/empty text yields ``{}``.
+    def config_values(self, config_str: str) -> dict[str, str]: ...
 
     def enable_frame_trigger(self) -> None: ...
     def set_trigger_source(self, use_software: bool) -> None: ...
@@ -181,6 +333,17 @@ class Camera:
         # video when recording in "display" form. Set from config at load time;
         # identity until then.
         self.display_transform = DisplayTransform()
+        # Auto-center the ROI: when set, OffsetX/OffsetY are derived from the
+        # sensor size and the ROI size and recomputed on every geometry change,
+        # so the ROI stays centered. Set from config at load time (see
+        # CameraSystem.apply_display_config).
+        self.center_x = False
+        self.center_y = False
+        # First-seen value of each node, captured lazily in list_features(). A
+        # node outside the saved config file is never written by octacam, so its
+        # first-read value is the camera's factory/power-on default — the
+        # fallback for a per-field reset when the config has no saved value.
+        self._default_cache: dict[str, object] = {}
         self.frame_for_display = LatestFrame()
         self._video_writer: AsyncFrameWriter | None = None
         self._recorded_frame_size: tuple[int, int] | None = None
@@ -371,6 +534,12 @@ class Camera:
                 error = ValueError(str(e))
             self.width = self._backend.width()
             self.height = self._backend.height()
+            # A ROI resize changes each offset's valid range, so re-center any
+            # auto-centered axis while still stopped — AFTER refreshing the
+            # cached size, since centering derives the offset from it. Best-effort:
+            # a device that rejects it keeps its offset.
+            if error is None:
+                self._recenter_offsets_locked()
             self.frame_for_display.pop()
             self.frame_for_display.push(
                 np.zeros((self.height, self.width), dtype=np.uint8)
@@ -431,6 +600,148 @@ class Camera:
             return ""
         with self._param_lock:
             return self._backend.save_params()
+
+    # ------------------------------------------------- full device node map
+
+    def _annotate(self, feature: FeatureInfo) -> FeatureInfo:
+        """Apply octacam's cross-backend policy to one raw backend feature.
+
+        Marks runtime-managed nodes read-only (so the operator sees them but
+        cannot break preview/recording), keeps the two ROI-size nodes editable
+        while the camera is open even though the SDK reports them non-writable
+        mid-grab (set_geometry cycles the grab), and locks an offset node whose
+        axis is auto-centered."""
+        if feature.name in RUNTIME_MANAGED_FEATURES:
+            feature.managed = True
+            feature.writable = False
+        elif feature.name in GEOMETRY_FEATURES:
+            feature.writable = self._backend.is_open()
+        elif feature.name in OFFSET_FEATURES:
+            if getattr(self, OFFSET_FEATURES[feature.name]):
+                feature.writable = False  # octacam derives it; UI shows locked
+        if feature.value is not None:
+            # Cache the first-seen value as the factory-default fallback (see
+            # _default_cache); managed nodes are never reset so are irrelevant.
+            self._default_cache.setdefault(feature.name, feature.value)
+        return feature
+
+    def list_features(self) -> list[dict]:
+        """Every node the backend exposes, annotated with octacam's policy.
+
+        Returns ``[]`` for a backend that cannot introspect its node map; the
+        Camera tab then falls back to the curated PARAM_NODES quick controls."""
+        with self._param_lock:
+            features = self._backend.list_features()
+        return [self._annotate(f).as_dict() for f in features]
+
+    def read_feature(self, name: str) -> dict:
+        """One node's current descriptor, annotated with octacam's policy."""
+        with self._param_lock:
+            feature = self._backend.read_feature(name)
+        return self._annotate(feature).as_dict()
+
+    def _centered_offset(self, node_name: str) -> int | None:
+        """The offset value that centers the ROI on ``node_name``'s axis.
+
+        Sensor size comes from ``WidthMax``/``HeightMax`` when the model exposes
+        it, else from the offset node's own max (which the SDK reports as
+        ``sensor - size``). Returns None if the offset node is unavailable."""
+        try:
+            info = self._backend.read_node(
+                "offset_x" if node_name == "OffsetX" else "offset_y"
+            )
+        except BackendError:
+            return None
+        size = self.width if node_name == "OffsetX" else self.height
+        sensor_max = "WidthMax" if node_name == "OffsetX" else "HeightMax"
+        full: float | None = None
+        try:
+            full = self._backend.read_feature(sensor_max).value  # type: ignore[assignment]
+        except BackendError:
+            full = None
+        if full is None and info.max is not None:
+            full = info.max + size  # offset max is (sensor - size) per SFNC
+        if full is None:
+            return None
+        lo = info.min or 0
+        centered = lo + (float(full) - lo - size) / 2
+        return int(snap_value(max(lo, centered), info))
+
+    def _recenter_offsets_locked(self) -> None:
+        """Recompute and write each auto-centered offset. Caller holds the lock."""
+        for node_name, flag in OFFSET_FEATURES.items():
+            if not getattr(self, flag):
+                continue
+            target = self._centered_offset(node_name)
+            if target is None:
+                continue
+            snake = "offset_x" if node_name == "OffsetX" else "offset_y"
+            try:
+                self._backend.write_node(snake, target)
+            except BackendError as e:
+                log.debug("Could not center %s on %s: %s", node_name, self.serial_number, e)
+
+    def set_center(self, axis: str, enabled: bool) -> dict:
+        """Toggle ROI auto-centering on an axis and re-center it immediately.
+
+        ``axis`` is ``"x"`` or ``"y"``. Enabling derives the offset now (and on
+        every later geometry change); disabling frees the field. Offsets are
+        live-writable, so no grab cycle is needed."""
+        if axis not in ("x", "y"):
+            raise ValueError(f"Unknown center axis: {axis}")
+        with self._param_lock:
+            setattr(self, f"center_{axis}", bool(enabled))
+            if enabled:
+                self._recenter_offsets_locked()
+        return {"center_x": self.center_x, "center_y": self.center_y}
+
+    def set_feature(self, name: str, value: object) -> None:
+        """Write one arbitrary node, routing ROI size through the grab cycle.
+
+        Rejects nodes octacam manages and offset nodes on an auto-centered axis.
+        A geometry write recomputes any auto-centered offset."""
+        if name in RUNTIME_MANAGED_FEATURES:
+            raise ValueError(f"{name} is managed by octacam and cannot be edited")
+        if name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[name]):
+            raise ValueError(f"{name} is auto-centered; disable centering to set it")
+        if name == "Width":
+            self.set_geometry(width=int(float(value)))  # type: ignore[arg-type]
+            return
+        if name == "Height":
+            self.set_geometry(height=int(float(value)))  # type: ignore[arg-type]
+            return
+        with self._param_lock:
+            try:
+                self._backend.write_feature(name, value)
+            except BackendError as e:
+                raise ValueError(str(e)) from None
+
+    def reset_feature(self, name: str, config_str: str) -> None:
+        """Reset one node to its saved-config value, else its factory default.
+
+        The config's value for ``name`` wins; a node absent from the config
+        falls back to the value first read this session (its factory/power-on
+        state, since octacam never wrote it). A node with neither is left as-is.
+        """
+        if name in RUNTIME_MANAGED_FEATURES:
+            raise ValueError(f"{name} is managed by octacam and cannot be reset")
+        value: object | None = None
+        if config_str:
+            with self._param_lock:
+                value = self._backend.config_values(config_str).get(name)
+        if value is None:
+            value = self._default_cache.get(name)
+        if value is None:
+            return  # nothing to reset to
+        self.set_feature(name, value)
+
+    def execute_command(self, name: str) -> None:
+        """Execute a command node (e.g. TimestampLatch)."""
+        with self._param_lock:
+            try:
+                self._backend.execute_command(name)
+            except BackendError as e:
+                raise ValueError(str(e)) from None
 
     # ----------------------------------------------------------- triggering
 

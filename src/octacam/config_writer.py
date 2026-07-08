@@ -36,6 +36,8 @@ DISPLAY_FIELDS = (
     "window_y",
     "window_width",
     "window_height",
+    "center_x",
+    "center_y",
 )
 
 

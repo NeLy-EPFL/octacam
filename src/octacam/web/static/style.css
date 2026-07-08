@@ -575,18 +575,104 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 /* ------------------------------------------------ camera params tab */
 
-.node-range {
-  display: block;
-  margin: -3px 0 7px 104px; /* align under the input (96px label + 8px gap) */
+.name-edit { display: flex; gap: 6px; }
+.name-edit input { flex: 1; min-width: 0; }
+.name-edit .btn { flex: none; }
+
+/* Filter + Expert toggle above the parameter browser. */
+.cam-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+#cam-filter {
+  flex: 1;
+  min-width: 0;
+}
+.cam-tools .check { flex: none; white-space: nowrap; }
+
+/* Grouped, model-dependent parameter browser. */
+#camera-params { margin-top: 4px; }
+
+.cam-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px 4px;
+}
+
+.cam-group {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin-bottom: 6px;
+  background: var(--panel);
+}
+.cam-group > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cam-group[open] > summary { border-bottom: 1px solid var(--border); }
+
+.cam-feat {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.cam-feat:last-child { border-bottom: none; }
+.cam-feat-label {
+  font-size: 12px;
+  color: var(--text);
+}
+.cam-feat.managed .cam-feat-label { color: var(--text-dim); }
+
+.cam-feat-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cam-feat-control > input[type="number"],
+.cam-feat-control > input[type="text"],
+.cam-feat-control > select {
+  flex: 1;
+  min-width: 0;
+}
+.cam-feat-control > input[type="checkbox"] { flex: none; margin-right: auto; }
+.cam-cmd { flex: none; }
+
+.cam-reset-field {
+  flex: none;
+  width: 26px;
+  padding: 4px 0;
+  cursor: pointer;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cam-reset-field:hover:not(:disabled) { color: var(--text); }
+.cam-reset-field:disabled { opacity: 0.4; cursor: default; }
+
+.cam-center {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cam-center input { flex: none; }
+
+.cam-feat-hint {
   font-size: 11px;
   color: var(--text-dim);
 }
-
-.name-edit { display: flex; gap: 6px; }
-.name-edit input { flex: 1; }
-.name-edit .btn { flex: none; }
-
-#cam-reset { margin-top: 12px; }
 
 .advanced { margin-top: 6px; }
 .advanced summary {

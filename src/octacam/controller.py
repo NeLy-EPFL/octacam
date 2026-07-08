@@ -589,6 +589,89 @@ class RecordingController:
                 self._reconfiguring = False
         return {"updated": updated}
 
+    # -------------------------------------------------- full device node map
+
+    @staticmethod
+    def _features_payload(index: int, camera) -> dict:
+        return {
+            "index": index,
+            "serial": camera.serial_number,
+            "width": camera.width,
+            "height": camera.height,
+            "center_x": camera.center_x,
+            "center_y": camera.center_y,
+            "features": camera.list_features(),
+        }
+
+    def read_camera_features(self, index: int) -> dict:
+        """Full node-map descriptors for one camera (lazily fetched by the tab)."""
+        with self._lock:
+            camera = self.camera_system.camera_at(index)
+        return self._features_payload(index, camera)
+
+    def _reconfigure(self, index: int, scope: str, apply) -> dict:
+        """Run ``apply(camera)`` on one camera or all, off the controller lock.
+
+        Shared by the feature write/reset/command/center paths: it takes the
+        same recording/reconfigure guards as set_camera_param, resolves the
+        scope, then runs the (possibly grab-cycling) work under
+        ``_reconfiguring`` so a recording cannot start mid-change. Returns the
+        refreshed feature payload for every camera it touched."""
+        with self._lock:
+            if self._camera_locked:
+                raise RuntimeError(
+                    "Camera parameters are locked while recording or benchmarking"
+                )
+            if self._reconfiguring:
+                raise RuntimeError("A camera reconfiguration is already in progress")
+            if scope == "all":
+                targets = list(enumerate(self.camera_system))
+            else:
+                targets = [(index, self.camera_system.camera_at(index))]
+            self._reconfiguring = True
+        try:
+            if scope == "all":
+                self.camera_system.apply_to_all(apply)
+            else:
+                apply(targets[0][1])
+            updated = [self._features_payload(i, camera) for i, camera in targets]
+        finally:
+            with self._lock:
+                self._reconfiguring = False
+        return {"updated": updated}
+
+    def set_camera_feature(
+        self, index: int, name: str, value, scope: str = "selected"
+    ) -> dict:
+        """Write one node-map feature on one camera or all; refreshes the list.
+
+        A write can change other nodes (an Auto mode locking its value, a ROI
+        resize shifting the offsets), so every touched camera's full feature
+        list is re-read and returned. Rejected while recording/benchmarking."""
+        return self._reconfigure(index, scope, lambda camera: camera.set_feature(name, value))
+
+    def reset_camera_feature(
+        self, index: int, name: str, pfs_by_serial: dict[str, str], scope: str = "selected"
+    ) -> dict:
+        """Reset one feature to its saved-config value (else its factory default)."""
+        return self._reconfigure(
+            index,
+            scope,
+            lambda camera: camera.reset_feature(
+                name, pfs_by_serial.get(camera.serial_number, "")
+            ),
+        )
+
+    def execute_camera_command(self, index: int, name: str) -> dict:
+        """Execute a command node on one camera; refreshes its feature list."""
+        return self._reconfigure(index, "selected", lambda camera: camera.execute_command(name))
+
+    def set_camera_center(
+        self, index: int, axis: str, enabled: bool, scope: str = "selected"
+    ) -> dict:
+        """Toggle ROI auto-centering on an axis for one camera or all."""
+        return self._reconfigure(index, scope, lambda camera: camera.set_center(axis, enabled))
+
     def export_camera_params(self) -> dict[str, str]:
         """Snapshot every camera's parameter text (Basler .pfs / FLIR .txt);
         rejected while recording/benchmarking."""

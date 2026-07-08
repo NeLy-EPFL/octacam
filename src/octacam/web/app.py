@@ -27,7 +27,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 from fastapi import (
@@ -283,6 +283,47 @@ class CameraParamReset(BaseModel):
     scope: Literal["selected", "all"] = "selected"
 
 
+class CameraFeaturePatch(BaseModel):
+    """Set one full-node-map feature by GenApi node name on one camera or all.
+
+    ``value`` is untyped (JSON number/bool/string): the backend coerces it to
+    the node's GenApi type, so an enum sends its symbolic string, a bool sends
+    ``true``/``false``, and int/float send a number."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    value: Any
+    scope: Literal["selected", "all"] = "selected"
+
+
+class CameraFeatureReset(BaseModel):
+    """Reset one node-map feature to its config value (else factory default)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    scope: Literal["selected", "all"] = "selected"
+
+
+class CameraCommandRequest(BaseModel):
+    """Execute one command node (e.g. TimestampLatch) on the selected camera."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class CameraCenterPatch(BaseModel):
+    """Toggle ROI auto-centering on an axis for one camera or all."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    axis: Literal["x", "y"]
+    enabled: bool
+    scope: Literal["selected", "all"] = "selected"
+
+
 class CameraNamePatch(BaseModel):
     """Rename one camera (validated and applied by the controller)."""
 
@@ -321,6 +362,8 @@ class CameraDisplayParams(BaseModel):
     window_y: float = -1.0
     window_width: float = -1.0
     window_height: float = -1.0
+    center_x: bool = False
+    center_y: bool = False
 
     @field_validator("name")
     @classmethod
@@ -759,6 +802,10 @@ def create_app(
                             ("rotation_deg", 0.0),
                         )
                     },
+                    # Live ROI-centering state, so the save dialog can persist it
+                    # for a camera whose Camera tab was never opened this session.
+                    "center_x": camera.center_x,
+                    "center_y": camera.center_y,
                 }
             )
         # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
@@ -908,6 +955,92 @@ def create_app(
             state.broadcast_threadsafe(
                 f"camera_params:{entry['index']}", {"type": "camera_params", **entry}
             )
+        return result
+
+    # ---------------------------------------------- full device node map (tab)
+
+    def _broadcast_features_dirty(result: dict) -> None:
+        """Ping every client that a camera's feature list changed so it refetches.
+
+        The list is large and a change can touch many nodes, so instead of
+        broadcasting the whole list the server nudges clients to re-GET
+        ``/features`` for that camera (only if they are showing it)."""
+        for entry in result["updated"]:
+            index = entry["index"]
+            state.broadcast_threadsafe(
+                f"camera_features_dirty:{index}",
+                {"type": "camera_features_dirty", "index": index,
+                 "center_x": entry["center_x"], "center_y": entry["center_y"]},
+            )
+
+    @app.get("/api/cameras/{index}/features")
+    def get_camera_features(index: int):
+        try:
+            return controller.read_camera_features(index)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+
+    @app.put("/api/cameras/{index}/features")
+    def put_camera_feature(index: int, patch: CameraFeaturePatch):
+        try:
+            result = controller.set_camera_feature(
+                index, patch.name, patch.value, patch.scope
+            )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        _broadcast_features_dirty(result)
+        return result
+
+    @app.post("/api/cameras/{index}/features/reset")
+    def reset_camera_feature(index: int, payload: CameraFeatureReset):
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        pfs_by_serial = config_writer.read_pfs_files(
+            config_dir, controller.camera_system.extensions
+        )
+        try:
+            result = controller.reset_camera_feature(
+                index, payload.name, pfs_by_serial, payload.scope
+            )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        _broadcast_features_dirty(result)
+        return result
+
+    @app.post("/api/cameras/{index}/commands")
+    def run_camera_command(index: int, payload: CameraCommandRequest):
+        try:
+            result = controller.execute_camera_command(index, payload.name)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        _broadcast_features_dirty(result)
+        return result
+
+    @app.put("/api/cameras/{index}/center")
+    def put_camera_center(index: int, patch: CameraCenterPatch):
+        try:
+            result = controller.set_camera_center(
+                index, patch.axis, patch.enabled, patch.scope
+            )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
+        _broadcast_features_dirty(result)
         return result
 
     @app.get("/api/config/configs")

@@ -145,3 +145,54 @@ def test_load_config_reads_backend_extension(tmp_path):
         assert system.camera_at(1).read_param("exposure")["value"] != 9999.0
     finally:
         system.close()
+
+
+# ------------------------------------------------ full device node map (Camera tab)
+
+
+def test_features_span_every_widget_kind(previewing_system):
+    cam = previewing_system.camera_at(0)
+    by = {f["name"]: f for f in cam.list_features()}
+    kinds = {f["type"] for f in by.values()}
+    assert {"int", "float", "enum", "bool", "string", "command"} <= kinds
+    # Bounds/entries/units are surfaced per kind.
+    assert by["Gain"]["min"] == 0.0 and by["Gain"]["unit"] == "dB"
+    assert [e["value"] for e in by["ExposureAuto"]["entries"]] == ["Off", "Once", "Continuous"]
+    assert by["ReverseX"]["type"] == "bool"
+    assert by["DeviceModelName"]["type"] == "string" and by["DeviceModelName"]["writable"] is False
+
+
+def test_expert_and_guru_visibility(previewing_system):
+    cam = previewing_system.camera_at(0)
+    by = {f["name"]: f for f in cam.list_features()}
+    assert by["AcquisitionFrameRate"]["visibility"] == "expert"
+    # DeviceReset is Guru-visibility -> excluded from the browser entirely.
+    assert "DeviceReset" not in by
+
+
+def test_write_feature_validates(previewing_system):
+    cam = previewing_system.camera_at(0)
+    cam.set_feature("ReverseX", True)
+    assert cam.read_feature("ReverseX")["value"] is True
+    cam.set_feature("ExposureAuto", "Continuous")
+    assert cam.read_feature("ExposureAuto")["value"] == "Continuous"
+    with pytest.raises(ValueError):  # not a valid enum entry
+        cam.set_feature("ExposureAuto", "Bogus")
+    cam.set_feature("DeviceUserID", "rig-cam")
+    assert cam.read_feature("DeviceUserID")["value"] == "rig-cam"
+
+
+def test_command_execution_counter(previewing_system):
+    cam = previewing_system.camera_at(0)
+    cam.execute_command("TimestampLatch")
+    assert cam.backend._commands_run.get("TimestampLatch") == 1
+    with pytest.raises(ValueError):
+        cam.execute_command("NotACommand")
+
+
+def test_reset_feature_prefers_config(previewing_system):
+    cam = previewing_system.camera_at(0)
+    config_text = "# GenApi persistence file\nGain\t7.0\n"
+    cam.set_feature("Gain", 3.0)
+    cam.reset_feature("Gain", config_text)  # config value wins over factory
+    assert abs(cam.read_feature("Gain")["value"] - 7.0) < 0.2

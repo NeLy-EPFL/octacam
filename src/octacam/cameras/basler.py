@@ -16,6 +16,7 @@ from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
+    FeatureInfo,
     Frame,
     NodeInfo,
 )
@@ -25,6 +26,103 @@ log = logging.getLogger("octacam")
 TRIGGER_READY_TIMEOUT_MS = 1000
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
+
+# pypylon.genicam interface-type int -> FeatureInfo widget kind. GetNode() nodes
+# come back already downcast to the typed interface (IInteger/IEnumeration/...),
+# so no CxxxPtr cast is needed; only INode-level metadata goes through .GetNode().
+_IFACE_KIND = {
+    genicam.intfIInteger: "int",
+    genicam.intfIFloat: "float",
+    genicam.intfIBoolean: "bool",
+    genicam.intfIEnumeration: "enum",
+    genicam.intfIString: "string",
+    genicam.intfICommand: "command",
+    genicam.intfICategory: "category",
+}
+# GetVisibility() int -> name; only Beginner/Expert are shown in the browser.
+_VIS_NAME = {
+    genicam.Beginner: "beginner",
+    genicam.Expert: "expert",
+    genicam.Guru: "guru",
+    genicam.Invisible: "invisible",
+}
+
+
+def _typed_value_attr(node, getter: str):
+    """Best-effort ``node.<getter>()`` (e.g. GetInc on a float without one)."""
+    try:
+        return getattr(node, getter)()
+    except (AttributeError, genicam.GenericException):
+        return None
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _basler_feature(typed) -> FeatureInfo | None:
+    """Build a FeatureInfo from a pypylon typed node (None = skip)."""
+    inode = typed.GetNode()
+    kind = _IFACE_KIND.get(inode.GetPrincipalInterfaceType())
+    if kind is None or kind == "category":
+        return None
+    name = inode.GetName()
+    readable = genicam.IsReadable(inode)
+    writable = genicam.IsWritable(inode)
+    feature = FeatureInfo(
+        name=name,
+        display_name=inode.GetDisplayName() or name,
+        type=kind,
+        readable=readable,
+        writable=writable,
+        visibility=_VIS_NAME.get(inode.GetVisibility(), "beginner"),
+        tooltip=(inode.GetToolTip() or inode.GetDescription() or None),
+    )
+    if kind in ("int", "float"):
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+        feature.min = _typed_value_attr(typed, "GetMin")
+        feature.max = _typed_value_attr(typed, "GetMax")
+        feature.inc = _typed_value_attr(typed, "GetInc")
+        feature.unit = _typed_value_attr(typed, "GetUnit") or None
+    elif kind == "bool":
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+    elif kind == "enum":
+        if readable:
+            try:
+                feature.value = typed.ToString()
+            except genicam.GenericException:
+                feature.value = None
+        feature.entries = _basler_enum_entries(typed)
+    elif kind == "string":
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+    return feature
+
+
+def _basler_enum_entries(node) -> list[dict] | None:
+    try:
+        out = []
+        for entry in node.GetEntries():
+            try:
+                symbolic = entry.GetSymbolic()
+            except genicam.GenericException:
+                continue
+            if not symbolic:
+                continue
+            try:
+                available = genicam.IsAvailable(entry.GetNode())
+            except genicam.GenericException:
+                available = True
+            out.append({"value": symbolic, "display": symbolic, "available": available})
+        return out or None
+    except genicam.GenericException:
+        return None
 
 
 def _node_attr(node, attr: str):
@@ -183,6 +281,115 @@ class BaslerBackend(SoftwareTriggerHandoff):
             node.Value = value
         except genicam.GenericException as e:
             raise BackendError(str(e)) from e
+
+    # ---------------------------------------------------- full device node map
+
+    def _walk(self, category, path: str, out: list, seen: set) -> None:
+        """Depth-first walk of the GenApi category tree, collecting features."""
+        try:
+            features = category.GetFeatures()
+        except genicam.GenericException:
+            return
+        for typed in features:
+            try:
+                inode = typed.GetNode()
+                if not inode.IsFeature() or not genicam.IsAvailable(inode):
+                    continue
+                vis = _VIS_NAME.get(inode.GetVisibility(), "beginner")
+                if vis not in ("beginner", "expert"):
+                    continue
+                iface = inode.GetPrincipalInterfaceType()
+                if iface == genicam.intfICategory:
+                    self._walk(typed, inode.GetName(), out, seen)
+                    continue
+                name = inode.GetName()
+                if name in seen:
+                    continue
+                seen.add(name)
+                feature = _basler_feature(typed)
+                if feature is not None:
+                    feature.category = path or "Other"
+                    out.append(feature)
+            except genicam.GenericException as e:
+                log.debug("Skipping node during feature walk: %s", e)
+
+    def list_features(self) -> list[FeatureInfo]:
+        if self.raw is None or not self.raw.IsOpen():
+            return []
+        nodemap = self.raw.GetNodeMap()
+        try:
+            root = nodemap.GetNode("Root")
+        except genicam.GenericException:
+            return []
+        out: list[FeatureInfo] = []
+        self._walk(root, "", out, set())
+        return out
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+        except genicam.GenericException as e:
+            raise BackendError(f"no such node: {name}") from e
+        if typed is None:
+            raise BackendError(f"no such node: {name}")
+        feature = _basler_feature(typed)
+        if feature is None:
+            raise BackendError(f"node {name} is not an editable feature")
+        # Category is only known from the tree walk; leave it blank on a
+        # single-node re-read (the client keeps the grouping it already has).
+        return feature
+
+    def write_feature(self, name: str, value: object) -> None:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+            kind = _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType())
+        except genicam.GenericException as e:
+            raise BackendError(f"no such node: {name}") from e
+        try:
+            if kind == "int":
+                node_min = _typed_value_attr(typed, "GetMin")
+                node_inc = _typed_value_attr(typed, "GetInc")
+                snapped = int(round(float(value)))
+                if node_inc:
+                    base = node_min if node_min is not None else 0
+                    snapped = int(base + round((snapped - base) / node_inc) * node_inc)
+                typed.SetValue(snapped)
+            elif kind == "float":
+                typed.SetValue(float(value))
+            elif kind == "bool":
+                typed.SetValue(_coerce_bool(value))
+            elif kind in ("enum", "string"):
+                typed.FromString(str(value))
+            else:
+                raise BackendError(f"node {name} is not writable ({kind})")
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+    def execute_command(self, name: str) -> None:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+            if _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType()) != "command":
+                raise BackendError(f"node {name} is not a command")
+            typed.Execute()
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        """Parse a Basler ``.pfs`` (``Name<TAB>...<TAB>value``) into name->value.
+
+        The value is the last tab-separated field; context-qualified selector
+        lines (``TriggerMode\\t{TriggerSelector=...}\\tOff``) collapse to the base
+        node, which is good enough for the per-field reset fallback."""
+        out: dict[str, str] = {}
+        for line in config_str.splitlines():
+            if line.startswith("#") or "\t" not in line:
+                continue
+            fields = line.split("\t")
+            name = fields[0].strip()
+            value = fields[-1].strip()
+            if name and value:
+                out.setdefault(name, value)
+        return out
 
     def load_params(self, config_str: str) -> None:
         if config_str:

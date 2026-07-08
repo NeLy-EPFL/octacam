@@ -773,6 +773,10 @@ export class CameraGrid {
         window_y: l.window_y,
         window_width: l.window_width,
         window_height: l.window_height,
+        // Live ROI-centering flags (updated by the Camera tab on the shared cam
+        // object) so a save persists them alongside the display transform.
+        center_x: !!t.cam.center_x,
+        center_y: !!t.cam.center_y,
       };
     });
   }

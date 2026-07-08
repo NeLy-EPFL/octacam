@@ -24,13 +24,17 @@ Mapping notes vs. the Basler backend:
 import logging
 from typing import Any
 
-from octacam.cameras._genicam_config import apply_config, dump_config
+from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     PARAM_NODES,
     BackendError,
+    FeatureInfo,
     Frame,
     NodeInfo,
+    curated_list_features,
+    curated_read_feature,
+    curated_write_feature,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -273,6 +277,27 @@ class FlirBackend(SoftwareTriggerHandoff):
             node.SetValue(int(value) if name in _INT_PARAMS else float(value))
         except spin.SpinnakerException as e:
             raise BackendError(str(e)) from e
+
+    # A full PySpin node-map walk is not implemented here; on the harvesters
+    # branch a FLIR is normally claimed by the harvesters tier (mvIMPACT
+    # producer), which serves the full node map. This legacy PySpin tier falls
+    # back to the six curated PARAM_NODES for the Camera tab.
+    def list_features(self) -> list[FeatureInfo]:
+        if self._cam is None or not self._cam.IsInitialized():
+            return []
+        return curated_list_features(self)
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        return curated_read_feature(self, name)
+
+    def write_feature(self, name: str, value: object) -> None:
+        curated_write_feature(self, name, value)
+
+    def execute_command(self, name: str) -> None:
+        raise BackendError("command execution is not supported on this backend")
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        return dict(parse_config(config_str))
 
     def load_params(self, config_str: str) -> None:
         # Native GenApi persistence TSV, applied best-effort in file order (see

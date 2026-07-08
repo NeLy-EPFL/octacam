@@ -253,10 +253,12 @@ class CameraSystem:
                 raise exc
 
     def apply_display_config(self, cameras: "list[CameraConfig]") -> None:
-        """Set each camera's display transform from its persisted config entry.
+        """Set each camera's display transform and ROI centering from config.
 
         The transform (rotation/flips) is baked into the video when recording
         in "display" form; a camera absent from the config keeps the identity.
+        The center_x/center_y flags auto-derive the ROI offsets, applied via
+        set_center so an enabled axis is re-centered immediately.
         """
         by_serial = {c.serial_number: c for c in cameras}
         for camera in self.cameras:
@@ -264,6 +266,17 @@ class CameraSystem:
             camera.display_transform = (
                 from_camera_config(cfg) if cfg is not None else DisplayTransform()
             )
+            for axis, enabled in (
+                ("x", bool(cfg.center_x) if cfg else False),
+                ("y", bool(cfg.center_y) if cfg else False),
+            ):
+                try:
+                    camera.set_center(axis, enabled)
+                except (BackendError, ValueError) as e:
+                    log.debug(
+                        "Could not apply center_%s on %s: %s",
+                        axis, camera.serial_number, e,
+                    )
 
     def start_preview(self) -> None:
         self.stop()

@@ -54,6 +54,11 @@ class CameraConfig(BaseModel):
     window_y: float = -1.0
     window_width: float = -1.0
     window_height: float = -1.0
+    # Auto-center the sensor ROI on each axis: when true, OffsetX/OffsetY are
+    # derived from the full sensor size and the ROI size and recomputed whenever
+    # the ROI changes, instead of being set by hand.
+    center_x: bool = False
+    center_y: bool = False
 
     @field_validator("serial_number", "name", mode="before")
     @classmethod

@@ -775,6 +775,114 @@ def test_camera_params_locked_while_recording(client):
         client.controller.stop_recording(abort=True)
 
 
+# --------------------------------------------- full device node map (Camera tab)
+
+
+def test_camera_features_endpoint(client):
+    system = client.get("/api/system").json()
+    # /api/system exposes the live centering flags per camera.
+    assert system["cameras"][0]["center_x"] is False
+    assert system["cameras"][0]["center_y"] is False
+
+    payload = client.get("/api/cameras/0/features").json()
+    assert {"index", "serial", "center_x", "center_y", "features"} <= set(payload)
+    by = {f["name"]: f for f in payload["features"]}
+    assert len(by) > 10  # full node map, not the six curated params
+    assert by["PixelFormat"]["managed"] is True
+
+    assert client.get("/api/cameras/99/features").status_code == 404
+
+
+def test_camera_feature_write_and_managed_reject(client):
+    r = client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 2500.0})
+    assert r.status_code == 200, r.text
+    by = {f["name"]: f for f in r.json()["updated"][0]["features"]}
+    assert abs(by["ExposureTime"]["value"] - 2500.0) < 2.0
+
+    # Managed node -> 422; unknown node -> 422; extra field -> 422.
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "PixelFormat", "value": "Mono12"}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "Bogus", "value": 1}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "Gain", "value": 1, "x": 2}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/99/features", json={"name": "Gain", "value": 1}
+    ).status_code == 404
+
+
+def test_camera_feature_scope_all(client):
+    r = client.put(
+        "/api/cameras/0/features", json={"name": "ExposureTime", "value": 2000.0, "scope": "all"}
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["updated"]) == 2  # both emulated cameras updated
+
+
+def test_camera_center_endpoint(client):
+    client.put("/api/cameras/0/features", json={"name": "Width", "value": 512})
+    r = client.put("/api/cameras/0/center", json={"axis": "x", "enabled": True})
+    assert r.status_code == 200, r.text
+    entry = r.json()["updated"][0]
+    assert entry["center_x"] is True
+    by = {f["name"]: f for f in entry["features"]}
+    assert by["OffsetX"]["writable"] is False  # octacam owns it while centered
+
+    # Bad axis -> 422.
+    assert client.put(
+        "/api/cameras/0/center", json={"axis": "z", "enabled": True}
+    ).status_code == 422
+    # Turning it back off frees the offset.
+    off = client.put("/api/cameras/0/center", json={"axis": "x", "enabled": False})
+    off_by = {f["name"]: f for f in off.json()["updated"][0]["features"]}
+    assert off_by["OffsetX"]["writable"] is True
+
+
+def test_camera_command_endpoint(client):
+    features = client.get("/api/cameras/0/features").json()["features"]
+    commands = [f["name"] for f in features if f["type"] == "command"]
+    assert commands, "emulator exposes command nodes"
+    r = client.post("/api/cameras/0/commands", json={"name": commands[0]})
+    assert r.status_code == 200, r.text
+    # A non-existent command is a clean 422, not a 500.
+    assert client.post(
+        "/api/cameras/0/commands", json={"name": "NotACommand"}
+    ).status_code == 422
+
+
+def test_camera_feature_reset_prefers_config(client, tmp_path):
+    # Save the current params so a per-serial config file exists to reset to.
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    baseline = None
+    for f in client.get("/api/cameras/0/features").json()["features"]:
+        if f["name"] == "ExposureTime":
+            baseline = f["value"]
+    assert baseline is not None
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
+    r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+    assert r.status_code == 200, r.text
+    restored = {f["name"]: f for f in r.json()["updated"][0]["features"]}["ExposureTime"]["value"]
+    assert abs(restored - baseline) < 2.0
+
+
+def test_camera_features_locked_while_recording(client):
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        for call in (
+            client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 3000.0}),
+            client.put("/api/cameras/0/center", json={"axis": "x", "enabled": True}),
+            client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"}),
+        ):
+            assert call.status_code == 409, call.text
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
 def _save_client(tmp_path, config_dir):
     from octacam.config import parse_config
 
@@ -852,6 +960,32 @@ def test_config_save_active_and_new(tmp_path):
                 json={"target": "new", "name": "../evil", "cameras": cams},
             )
             assert bad.status_code == 422
+    finally:
+        controller.close()
+
+
+def test_config_save_persists_center_flags(tmp_path):
+    active = tmp_path / "rigs" / "active"
+    active.mkdir(parents=True)
+    (active / "octacam_config.toml").write_text("[gui]\n")
+    controller, app = _save_client(tmp_path, active)
+    cams = [
+        {"serial": EMULATED_SERIALS[0], "center_x": True, "center_y": True},
+        {"serial": EMULATED_SERIALS[1], "center_x": False, "center_y": False},
+    ]
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/config/save",
+                json={"target": "active", "save_sensor": False, "cameras": cams},
+            )
+            assert r.status_code == 200, r.text
+            toml = (active / "octacam_config.toml").read_text()
+            assert "center_x = true" in toml
+            # The saved config is adopted live, re-applying centering.
+            sysinfo = client.get("/api/system").json()
+            assert sysinfo["cameras"][0]["center_x"] is True
+            assert sysinfo["cameras"][1]["center_x"] is False
     finally:
         controller.close()
 
