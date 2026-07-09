@@ -20,7 +20,7 @@ from octacam.transfer import (
     transfer_destination,
     transfer_folder,
 )
-from octacam.transform import RECORDING_SUMMARY_FILENAME
+from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
 
 TEMP_GLOB = f".*{transfer_mod._TEMP_INFIX}*"
 
@@ -79,6 +79,27 @@ def test_copy_happy_path_no_temp_left(tmp_path):
     assert (dest / "camera_RF.mp4").read_bytes() == b"xyz" * 2000
     assert (dest / RECORDING_SUMMARY_FILENAME).exists()
     assert _no_temps(dest)  # mirror test_config_writer's no-temp assertion
+
+
+def test_copy_includes_timestamps_when_present(tmp_path):
+    # timestamps.npz is opt-in; when it exists it rides along like the summary.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
+    (src / TIMESTAMPS_FILENAME).write_bytes(b"\x00npz-bytes")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    result = transfer_folder(src, dest=dest)
+
+    assert TIMESTAMPS_FILENAME in set(result.copied)
+    assert (dest / TIMESTAMPS_FILENAME).read_bytes() == b"\x00npz-bytes"
+
+
+def test_copy_without_timestamps_is_fine(tmp_path):
+    # No timestamps.npz (the default) → nothing extra, no error.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    result = transfer_folder(src, dest=dest)
+
+    assert TIMESTAMPS_FILENAME not in set(result.copied)
+    assert not (dest / TIMESTAMPS_FILENAME).exists()
 
 
 def test_copy_bare_name_without_base(tmp_path):

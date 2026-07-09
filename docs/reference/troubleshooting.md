@@ -68,7 +68,8 @@ octacam doctor --backend flir
   `gui`/`record` warn about it at startup).
 - Frames the **camera or transport** never delivered (e.g. USB bandwidth gaps)
   are *not* counted as dropped. Enable `record.save_timestamps = true` and
-  inspect the per-frame CSV's inter-frame gaps to find those.
+  inspect the inter-frame gaps in `timestamps.npz` to find those — e.g.
+  `np.diff(np.load("timestamps.npz")["cam0/timestamp_ns"])`.
 
 ## Transfer destination not present / not writable
 

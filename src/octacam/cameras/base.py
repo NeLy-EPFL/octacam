@@ -18,7 +18,6 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import ClassVar, Protocol
 
 import numpy as np
@@ -365,6 +364,11 @@ class Camera:
         self._timestamps: list[int] = []
         self._dropped: list[bool] = []
         self._dropped_count = 0
+        # Frames whose backend timestamp was 0 and fell back to host time_ns.
+        # A per-recording provenance signal (see timestamp_source in the summary):
+        # normally 0 (all hardware) or == frames (host-only backend like
+        # pycameleon/fake); anything in between flags a stray-zero anomaly.
+        self._host_fallback_count = 0
         self._resulting_fps = 0.0
         self._started = False
 
@@ -424,6 +428,25 @@ class Camera:
     def dropped_indices(self) -> list[int]:
         """Frame indices that were dropped (encoder/queue could not accept)."""
         return [i for i, dropped in enumerate(self._dropped) if dropped]
+
+    @property
+    def frame_timestamps(self) -> list[int]:
+        """Per-frame timestamps (ns) of the last recording — hardware when the
+        backend supplied one, else host ``time.time_ns()`` (see
+        :attr:`host_fallback_count`). A copy, so the caller can't mutate state."""
+        return list(self._timestamps)
+
+    @property
+    def frame_dropped(self) -> list[bool]:
+        """Per-frame dropped flags of the last recording (parallel to
+        :attr:`frame_timestamps`). A copy."""
+        return list(self._dropped)
+
+    @property
+    def host_fallback_count(self) -> int:
+        """How many of the recorded frames fell back to host time because the
+        backend reported no hardware timestamp."""
+        return self._host_fallback_count
 
     @property
     def start_timestamp_ns(self) -> int | None:
@@ -870,14 +893,14 @@ class Camera:
         fps: float,
         video_format: VideoFormat,
         record_form: str = "display",
-        save_frame_timestamps: bool = False,
         software_trigger: bool = True,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
         ``record_form`` selects "display" (bake the camera's display transform
-        into the video) or "sensor" (raw, untransformed). ``save_frame_timestamps``
-        re-enables the per-frame timestamp CSV (off by default). ``software_trigger``
+        into the video) or "sensor" (raw, untransformed). The per-frame timestamp
+        series is always accumulated (it feeds recording_summary.json); the
+        controller decides whether to persist it. ``software_trigger``
         picks the grab path: the software-trigger hand-off (this process drives each
         frame) when True, or a plain fetch of externally-triggered frames when
         False. An external trigger never bumps the hand-off counter, so gating the
@@ -891,6 +914,7 @@ class Camera:
         self._timestamps.clear()
         self._dropped.clear()
         self._dropped_count = 0
+        self._host_fallback_count = 0
 
         bake = record_form == "display" and not self.display_transform.is_identity
         transform = self.display_transform if bake else None
@@ -922,7 +946,7 @@ class Camera:
 
         self._thread = threading.Thread(
             target=self._record_loop,
-            args=(save_path, transform, save_frame_timestamps, software_trigger),
+            args=(transform, software_trigger),
             daemon=True,
         )
         self._thread.start()
@@ -944,7 +968,8 @@ class Camera:
     # ------------------------------------------------------- grab loop bodies
 
     def _store_timestamp(self, timestamp: int) -> None:
-        if not timestamp:
+        if not timestamp:  # backend supplied no hardware timestamp for this frame
+            self._host_fallback_count += 1
             timestamp = time.time_ns()
         self._timestamps.append(timestamp)
 
@@ -985,9 +1010,7 @@ class Camera:
 
     def _record_loop(
         self,
-        save_path: str,
         transform: DisplayTransform | None = None,
-        save_frame_timestamps: bool = False,
         software_trigger: bool = True,
     ) -> None:
         backend = self._backend
@@ -1044,13 +1067,12 @@ class Camera:
             frame_count,
             dropped_count,
         )
-        if save_frame_timestamps:
-            self._write_timestamps_csv(save_path)
 
     def _reconcile_unwritten_frames(self) -> None:
         """If the sink died, frames accepted into the queue after the failure
         were discarded rather than written. Mark that trailing run of
-        accepted frames as dropped so the CSV reflects what reached the file.
+        accepted frames as dropped so the timestamp series reflects what reached
+        the file.
         """
         if self._video_writer is None or not self._video_writer.failed:
             return
@@ -1059,15 +1081,6 @@ class Camera:
         for index in accepted[written:]:
             self._dropped[index] = True
             self._dropped_count += 1
-
-    def _write_timestamps_csv(self, save_path: str) -> None:
-        csv_path = Path(save_path).with_suffix(".csv")
-        with open(csv_path, "w") as csv_file:
-            csv_file.write("frame_index,timestamp,dropped\n")
-            for i, (timestamp, dropped) in enumerate(
-                zip(self._timestamps, self._dropped, strict=False)
-            ):
-                csv_file.write(f"{i},{timestamp},{int(dropped)}\n")
 
 
 def _ALWAYS() -> bool:

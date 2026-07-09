@@ -38,7 +38,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from octacam.transform import RECORDING_SUMMARY_FILENAME
+from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
 
 log = logging.getLogger("octacam")
 
@@ -322,7 +322,8 @@ def transfer_folder(
     checksum: bool = False,
     on_progress: TransferCallback | None = None,
 ) -> TransferResult:
-    """Copy mp4s (and recording_summary.json) from *folder* to *dest*.
+    """Copy mp4s (plus recording_summary.json and, when present, timestamps.npz)
+    from *folder* to *dest*.
 
     Parameters
     ----------
@@ -333,7 +334,8 @@ def transfer_folder(
         e.g. ``transfer.directory / relative_directory``).
     files_only:
         Explicit list of files to copy; overrides the default (all *.mp4 in
-        *folder*).  ``recording_summary.json`` is always appended if present.
+        *folder*).  ``recording_summary.json`` and ``timestamps.npz`` are always
+        appended if present.
     dry_run:
         Log intended operations without touching the filesystem.
     verify:
@@ -358,6 +360,10 @@ def transfer_folder(
     summary = folder / RECORDING_SUMMARY_FILENAME
     if summary.exists() and summary not in candidates:
         candidates.append(summary)
+
+    timestamps = folder / TIMESTAMPS_FILENAME
+    if timestamps.exists() and timestamps not in candidates:
+        candidates.append(timestamps)
 
     result = TransferResult(dest=dest)
 

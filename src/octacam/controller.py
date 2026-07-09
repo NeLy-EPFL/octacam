@@ -10,7 +10,7 @@ A monitor thread replaces the Qt timers: it polls for the first frame on
 every camera (dispatching plugin hooks at that moment — e.g. a flywheel
 stepper command), enforces the recording deadline, and runs the teardown
 sequence in the same order as the original code (stop trigger -> grab loops
-exit -> writers drain -> CSVs).
+exit -> writers drain -> summary + timestamps).
 """
 
 import contextlib
@@ -28,10 +28,16 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from octacam import config_writer
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
-from octacam.transform import RECORDING_SUMMARY_FILENAME, DisplayTransform
+from octacam.transform import (
+    RECORDING_SUMMARY_FILENAME,
+    TIMESTAMPS_FILENAME,
+    DisplayTransform,
+)
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
@@ -126,8 +132,8 @@ class RecordingSettings:
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
     remux_mp4: bool = False
     # "display" bakes each camera's display transform into the video; "sensor"
-    # saves the raw, untransformed image. save_frame_timestamps re-enables the
-    # per-frame timestamp CSV (debugging; off by default).
+    # saves the raw, untransformed image. save_frame_timestamps writes the
+    # per-frame timestamp file (timestamps.npz; debugging; off by default).
     record_form: str = "display"
     save_frame_timestamps: bool = False
     # Post-recording (`octacam process`) params. Not used during capture; they
@@ -174,6 +180,30 @@ _DROPPED_FRAMES_NOTE = (
     "investigate those."
 )
 
+_TIMESTAMP_NOTE = (
+    "Per-camera `timestamp_source` records where each camera's per-frame "
+    "timestamps came from. `hardware` = the camera/SDK timestamp (a free-running "
+    "counter with a per-camera epoch — precise for relative timing, but NOT "
+    "wall-clock and NOT aligned across cameras). `host` = host `time.time_ns()` "
+    "(UTC wall clock; used when the backend supplies none). The full per-frame "
+    f"series is written to {TIMESTAMPS_FILENAME} when save_timestamps is on."
+)
+
+
+def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
+    """Where a camera's per-frame timestamps came from, from the fallback count.
+
+    ``None`` when no frames were recorded; ``"hardware"`` when none fell back;
+    ``"host"`` when all did (a host-only backend like pycameleon/fake);
+    ``"mixed"`` when only some did (a stray-zero anomaly, surfaced honestly)."""
+    if frames <= 0:
+        return None
+    if host_fallback_count <= 0:
+        return "hardware"
+    if host_fallback_count >= frames:
+        return "host"
+    return "mixed"
+
 
 def build_recording_summary(
     settings: RecordingSettings,
@@ -213,13 +243,17 @@ def build_recording_summary(
                 "dropped": camera.dropped_count,
                 "dropped_indices": camera.dropped_indices,
                 "start_timestamp_ns": camera.start_timestamp_ns,
+                "timestamp_source": _timestamp_source(
+                    camera.frames_recorded, camera.host_fallback_count
+                ),
+                "host_fallback_count": camera.host_fallback_count,
                 "writer_failed": camera.writer_failed,
                 "transform": transform.to_dict(),
                 "transform_applied": applied,
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
@@ -234,8 +268,31 @@ def build_recording_summary(
         # re-templates the date on a different day.
         "relative_directory": _relative_directory(settings),
         "dropped_frames_note": _DROPPED_FRAMES_NOTE,
+        "timestamp_note": _TIMESTAMP_NOTE,
         "cameras": cams,
     }
+
+
+def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
+    """Assemble the {key: array} payload for ``timestamps.npz`` from finalized
+    camera stats.
+
+    Pure (no I/O) so it can be unit-tested without a recording. Per camera, two
+    parallel arrays keyed ``"<name>/timestamp_ns"`` (int64) and
+    ``"<name>/dropped"`` (bool); ``frame_index`` is implicit (array position).
+    Lengths are truncated to the shared minimum (mirrors the defensive
+    non-strict zip the old CSV used) so a rare skew truncates rather than raises;
+    a zero-frame camera contributes empty arrays."""
+    arrays: dict[str, np.ndarray] = {}
+    for camera in cameras:
+        timestamps = camera.frame_timestamps
+        dropped = camera.frame_dropped
+        n = min(len(timestamps), len(dropped))
+        arrays[f"{camera.name}/timestamp_ns"] = np.asarray(
+            timestamps[:n], dtype=np.int64
+        )
+        arrays[f"{camera.name}/dropped"] = np.asarray(dropped[:n], dtype=bool)
+    return arrays
 
 
 def _relative_directory(settings: RecordingSettings) -> str:
@@ -895,7 +952,6 @@ class RecordingController:
                 settings.fps,
                 settings.video_format(),
                 settings.record_form,
-                settings.save_frame_timestamps,
                 use_software_trigger=use_software_trigger,
             )
             total = len(self.camera_system)
@@ -1211,11 +1267,13 @@ class RecordingController:
                 ),
             )
 
-        # All camera threads are joined now (stats/CSVs final) and save_dir is
-        # still the recording's own directory (it is incremented below). Write
+        # All camera threads are joined now (stats/timestamps final) and save_dir
+        # is still the recording's own directory (it is incremented below). Write
         # the session summary here so both the duration-elapsed and manual-stop
         # paths produce exactly one; never let a summary error abort teardown.
         self._write_recording_summary(self._aborted)
+        if self._settings.save_frame_timestamps:
+            self._write_timestamps()
         self._note_in_session_cache()
 
         with self._lock:
@@ -1305,6 +1363,21 @@ class RecordingController:
             log.info("Wrote recording summary: %s", path)
         except Exception:
             log.exception("Failed to write recording summary to %s", path)
+
+    def _write_timestamps(self) -> None:
+        """Write the per-frame timestamp series for every camera into one
+        compressed ``timestamps.npz`` in the recording's save directory.
+
+        Called only when save_timestamps is on, after every grab thread is
+        joined (so the series are final). Best-effort like the summary: a
+        failure is logged, never allowed to abort teardown."""
+        path = Path(self._settings.save_dir) / TIMESTAMPS_FILENAME
+        try:
+            arrays = build_timestamps_arrays(list(self.camera_system))
+            np.savez_compressed(path, **arrays)
+            log.info("Wrote frame timestamps: %s", path)
+        except Exception:
+            log.exception("Failed to write frame timestamps to %s", path)
 
     def _note_in_session_cache(self) -> None:
         """Record this recording's folder in the session cache for `transcode`.

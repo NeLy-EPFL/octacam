@@ -47,7 +47,7 @@ config directory — a Basler persists as `<serial>.pfs`, everything else as
 `<serial>.txt` (the camera's native GenApi feature-persistence TSV). Everything
 else behaves identically across tiers: preview,
 recording (monochrome H.264 or raw), the software trigger, the per-camera
-exposure/gain/ROI controls, the recording summary (and opt-in timestamp CSVs),
+exposure/gain/ROI controls, the recording summary (and the opt-in timestamp file),
 and the web GUI. Existing configs (which omit the key, or set
 `backend = "basler"`) keep working unchanged.
 

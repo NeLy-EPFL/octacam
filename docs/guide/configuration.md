@@ -85,7 +85,7 @@ save_timestamps = false
 | `save_method` | `"ffmpeg"` | `ffmpeg` (encoded video) or `raw` (a `.raw` byte dump per camera). |
 | `ffmpeg_params` | ultrafast x264, see above | Encoder args used at record time. |
 | `save_transformed` | `true` | Bake each camera's rotation/flips into the file (see [Recording](recording.md#transformed-vs-raw-frames)). |
-| `save_timestamps` | `false` | Also write a per-frame timestamp CSV. |
+| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`) covering all cameras. |
 
 ## `[transcode]`
 

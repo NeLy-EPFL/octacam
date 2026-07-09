@@ -32,7 +32,8 @@ Each recording writes, into its own save directory:
 
 - one video file per camera,
 - one `recording_summary.json`,
-- a copy of the rig's `octacam_config.toml`.
+- a copy of the rig's `octacam_config.toml`,
+- one `timestamps.npz` (only when `record.save_timestamps` is on).
 
 ### The recording summary
 
@@ -43,9 +44,30 @@ plus the session start wall-clock time and the recording settings.
 !!! note "What *dropped* does and doesn't count"
     Only frames the encoder/writer queue could not accept are counted as
     dropped — **not** frames the camera or transport never delivered (e.g. USB
-    bandwidth gaps). To catch the latter, turn on the per-frame timestamp CSV
+    bandwidth gaps). To catch the latter, turn on the per-frame timestamps
     (`record.save_timestamps = true`, off by default) and inspect the
     inter-frame gaps.
+
+### Per-frame timestamps
+
+With `record.save_timestamps = true`, each recording also writes a single
+compressed `timestamps.npz` holding every camera's per-frame series (replacing
+the old per-camera CSVs). Per camera it stores two arrays keyed by camera name —
+`"<name>/timestamp_ns"` (int64, `frame_index` is the array position) and
+`"<name>/dropped"` (bool):
+
+```python
+import numpy as np
+d = np.load("timestamps.npz")
+ts = d["cam0/timestamp_ns"]          # nanoseconds
+gaps_ms = np.diff(ts) / 1e6          # inter-frame gaps
+```
+
+Where each camera's timestamps came from — hardware (the camera/SDK clock) or
+host wall-clock fallback — is recorded per camera as `timestamp_source` in
+`recording_summary.json` (see its `timestamp_note`). Hardware timestamps are
+free-running per-camera counters: precise for one camera's relative timing, but
+not wall-clock and not aligned across cameras.
 
 ### The embedded config snapshot
 

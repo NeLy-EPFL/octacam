@@ -39,6 +39,7 @@ def test_build_recording_summary():
         dropped_count=2,
         dropped_indices=[137, 411],
         start_timestamp_ns=123,
+        host_fallback_count=0,
         writer_failed=False,
         display_transform=DisplayTransform(rotation_deg=90),
     )
@@ -48,7 +49,7 @@ def test_build_recording_summary():
     summary = build_recording_summary(
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert summary["fps_target"] == 100.0
     assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
@@ -58,6 +59,9 @@ def test_build_recording_summary():
     assert entry["file"] == "cam0.mkv"
     assert entry["pixel_format"] == "Mono8"
     assert entry["dropped_indices"] == [137, 411]
+    # No fallbacks -> the series is entirely the camera's hardware timestamp.
+    assert entry["timestamp_source"] == "hardware"
+    assert entry["host_fallback_count"] == 0
     assert (entry["width"], entry["height"]) == (240, 320)
     assert entry["transform"] == {"rotation_deg": 90, "flip_h": False, "flip_v": False}
     assert entry["transform_applied"] is True
@@ -68,6 +72,54 @@ def test_build_recording_summary():
     )
     assert sensor_summary["cameras"][0]["transform_applied"] is False
     assert sensor_summary["start_time"] is None
+
+
+def test_timestamp_source_derivation():
+    from octacam.controller import _timestamp_source
+
+    assert _timestamp_source(0, 0) is None  # no frames
+    assert _timestamp_source(500, 0) == "hardware"  # never fell back
+    assert _timestamp_source(500, 500) == "host"  # host-only backend
+    assert _timestamp_source(500, 3) == "mixed"  # stray zeros
+
+
+def test_build_timestamps_arrays():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from octacam.controller import build_timestamps_arrays
+
+    cams = [
+        SimpleNamespace(
+            name="cam0",
+            frame_timestamps=[10, 20, 30],
+            frame_dropped=[False, True, False],
+        ),
+        # Different length (ragged) — long format handles it naturally.
+        SimpleNamespace(
+            name="cam1",
+            frame_timestamps=[100, 200],
+            frame_dropped=[False, False],
+        ),
+        # Zero-frame camera contributes empty arrays.
+        SimpleNamespace(name="cam2", frame_timestamps=[], frame_dropped=[]),
+        # Defensive: a length skew truncates to the shared minimum, never raises.
+        SimpleNamespace(
+            name="cam3", frame_timestamps=[1, 2, 3], frame_dropped=[True]
+        ),
+    ]
+    arrays = build_timestamps_arrays(cams)
+
+    assert arrays["cam0/timestamp_ns"].dtype == np.int64
+    assert arrays["cam0/dropped"].dtype == np.bool_
+    assert list(arrays["cam0/timestamp_ns"]) == [10, 20, 30]
+    assert list(arrays["cam0/dropped"]) == [False, True, False]
+    assert list(arrays["cam1/timestamp_ns"]) == [100, 200]
+    assert len(arrays["cam2/timestamp_ns"]) == 0
+    assert len(arrays["cam2/dropped"]) == 0
+    assert list(arrays["cam3/timestamp_ns"]) == [1]  # truncated to len(dropped)
+    assert list(arrays["cam3/dropped"]) == [True]
 
 
 def dataclasses_replace(obj, **kw):
@@ -214,7 +266,7 @@ def test_full_recording_cycle(camera_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-        assert not video.with_suffix(".csv").exists()  # CSV is opt-in now
+    assert not (save_dir / "timestamps.npz").exists()  # timestamps are opt-in
 
     summary = json.loads((save_dir / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"

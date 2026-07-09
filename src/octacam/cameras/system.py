@@ -295,7 +295,6 @@ class CameraSystem:
         fps: float,
         video_format: VideoFormat,
         record_form: str = "display",
-        save_frame_timestamps: bool = False,
         use_software_trigger: bool = True,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
@@ -315,7 +314,6 @@ class CameraSystem:
                 fps,
                 video_format,
                 record_form,
-                save_frame_timestamps,
                 software_trigger=use_software_trigger,
             )
 

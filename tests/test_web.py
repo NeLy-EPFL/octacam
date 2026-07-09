@@ -430,8 +430,8 @@ def test_recording_cycle_over_rest(client, tmp_path):
 
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
-    # Per-frame CSVs are opt-in now; by default only the compact summary lands.
-    assert not any(v.with_suffix(".csv").exists() for v in videos)
+    # Per-frame timestamps are opt-in now; by default only the compact summary lands.
+    assert not (save_dir / "timestamps.npz").exists()
     summary = json.loads((save_dir / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
@@ -483,7 +483,9 @@ def test_recording_with_split_directory(client, tmp_path):
     assert settings["save_dir"] == f"{base}/day/002"
 
 
-def test_recording_writes_csv_when_enabled(client, tmp_path):
+def test_recording_writes_timestamps_when_enabled(client, tmp_path):
+    import numpy as np
+
     save_dir = tmp_path / "rec" / "001"
     assert (
         client.put("/api/settings", json={"save_frame_timestamps": True}).status_code
@@ -503,10 +505,14 @@ def test_recording_writes_csv_when_enabled(client, tmp_path):
 
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
-    assert all(v.with_suffix(".csv").exists() for v in videos)
-    for video in videos:
-        lines = video.with_suffix(".csv").read_text().splitlines()
-        assert lines[0] == "frame_index,timestamp,dropped"
+    # A single compressed file for all cameras (no per-camera CSVs).
+    assert not any(save_dir.glob("*.csv"))
+    with np.load(save_dir / "timestamps.npz") as data:
+        for video in videos:
+            name = video.stem
+            timestamps = data[f"{name}/timestamp_ns"]
+            assert timestamps.dtype == np.int64
+            assert len(timestamps) == len(data[f"{name}/dropped"]) > 0
 
 
 def test_live_transform_is_baked_into_display_recording(client, tmp_path):
