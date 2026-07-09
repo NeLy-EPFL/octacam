@@ -2,7 +2,7 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0e1116;
+  --bg: #000; /* complete black page background */
   --panel: #151a21;
   --panel-2: #1d2530;
   --border: #2a323e;
@@ -14,7 +14,8 @@
   --amber: #d4a72c;
   --lime: #00ff00;
   --selected-bg: #20354e; /* tinted title bar of the selected tile */
-  --video-bg: #000; /* letterbox behind each tile's video */
+  --video-bg: #0a1626; /* faint blue letterbox so an all-black frame's window
+                          shape stays visible against the black page */
   --sidebar-width: 280px;
   --resizer-width: 6px;
 }
