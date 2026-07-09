@@ -16,3 +16,69 @@
 .omniview-duty {
   width: 5em;
 }
+.omniview-duty-mode {
+  max-width: 16em;
+}
+
+/* Small square icon button (timing refresh). */
+.btn-icon {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+/* ---- Frame-timing visualization -------------------------------------- */
+.omniview-timing {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.omniview-timing-head {
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.omniview-timing-viz {
+  width: 100%;
+}
+.ov-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+#omniview-timing-summary {
+  margin-top: 4px;
+}
+
+/* SVG marks — all theme-aware via the core :root variables. */
+.ov-frame {
+  fill: var(--panel-2);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.ov-trigger { fill: var(--accent); }
+.ov-led     { fill: var(--amber); }
+.ov-guard   { fill: var(--amber); opacity: 0.4; }
+.ov-exposure { fill: var(--green); opacity: 0.75; }
+.ov-exposure--gov {
+  opacity: 1;
+  stroke: var(--text);
+  stroke-width: 1;
+}
+.ov-guide {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.ov-guide--led { stroke: var(--amber); }
+.ov-axis { stroke: var(--border); stroke-width: 1; }
+.ov-label {
+  fill: var(--text-dim);
+  font-size: 12px;
+}
+.ov-axis-label,
+.ov-tag {
+  fill: var(--text-dim);
+  font-size: 11px;
+}

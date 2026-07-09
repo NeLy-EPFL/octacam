@@ -1968,6 +1968,12 @@ def record(
         record_kind="record",
         config_dir=config_dir,
     )
+    # Hand a controller reference to plugins that read live device state (e.g.
+    # omniview's auto strobe duty reads each camera's ExposureTime). Duck-typed
+    # so core stays decoupled from concrete plugin classes; mirrors create_app.
+    for plugin in plugins.plugins:
+        if hasattr(plugin, "set_controller"):
+            plugin.set_controller(controller)
     try:
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",

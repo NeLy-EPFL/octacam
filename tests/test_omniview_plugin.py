@@ -15,6 +15,7 @@ from octacam.plugins.omniview import (
     DEFAULT_DURATION_MS,
     DEFAULT_DUTY_PERCENT,
     DEFAULT_FPS,
+    DEFAULT_STROBE_GUARD_US,
     ArmParams,
     OmniviewPlugin,
     _build,
@@ -73,6 +74,35 @@ class FakeLink:
     def snapshot(self) -> list[bytes]:
         with self._lock:
             return list(self.written)
+
+
+# ---------------------------------------------------------------------------
+# FakeCamera / FakeController — stand in for the recording controller so the
+# server-side auto strobe duty can read exposures without any real hardware.
+# ---------------------------------------------------------------------------
+
+
+class FakeCamera:
+    def __init__(self, name, exposure_us, trigger_delay_us=0.0, has_delay=True):
+        self.name = name
+        self._exposure = exposure_us
+        self._delay = trigger_delay_us
+        self._has_delay = has_delay
+
+    def read_param(self, name):
+        assert name == "exposure"
+        return {"value": self._exposure}
+
+    def read_feature(self, name):
+        assert name == "TriggerDelay"
+        if not self._has_delay:
+            raise RuntimeError("node unavailable on this model")
+        return {"value": self._delay}
+
+
+class FakeController:
+    def __init__(self, cameras):
+        self.camera_system = list(cameras)
 
 
 def _plugin_with_fake(is_open: bool = True) -> tuple[OmniviewPlugin, FakeLink]:
@@ -249,6 +279,133 @@ def test_on_recording_start_warns_and_skips_when_link_closed():
 
 
 # ---------------------------------------------------------------------------
+# Plugin: server-side auto strobe duty (sizes the LED on-time to bracket the
+# longest camera exposure + its trigger delay + the guard band)
+# ---------------------------------------------------------------------------
+
+
+def test_auto_duty_covers_longest_exposure_window():
+    plugin, link = _plugin_with_fake()  # guard defaults to 100 µs
+    plugin.set_controller(
+        FakeController(
+            [
+                FakeCamera("basler", exposure_us=2000, trigger_delay_us=50),
+                FakeCamera("flir", exposure_us=1000, trigger_delay_us=0),
+            ]
+        )
+    )
+    plugin.on_recording_start(
+        {"omniview": {"fps": 80, "duration_ms": 5000, "duty_auto": True}}
+    )
+    _, fps, dur, duty, _ = _unpack(link.snapshot()[0])
+    # led_on = max(2000+50, 1000+0) + 100 = 2150 µs; period = 12500 µs
+    # duty = round(2150 / 12500 * 1000) = 172 ‰
+    assert (fps, dur, duty) == (80, 5000, 172)
+
+
+def test_auto_duty_treats_missing_trigger_delay_as_zero():
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(
+        FakeController([FakeCamera("c", exposure_us=3000, has_delay=False)])
+    )
+    plugin.on_recording_start({"omniview": {"fps": 100, "duty_auto": True}})
+    _, fps, _, duty, _ = _unpack(link.snapshot()[0])
+    # period = 10000 µs; led_on = 3000 + 0 + 100 = 3100 µs; duty = 310 ‰
+    assert (fps, duty) == (100, 310)
+
+
+def test_auto_duty_skips_cameras_without_readable_exposure():
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(
+        FakeController(
+            [
+                FakeCamera("bad", exposure_us=None),  # read_param -> value None
+                FakeCamera("good", exposure_us=2000, trigger_delay_us=0),
+            ]
+        )
+    )
+    plugin.on_recording_start({"omniview": {"fps": 80, "duty_auto": True}})
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    # only "good": led_on = 2000 + 100 = 2100 µs; period 12500; duty = 168 ‰
+    assert duty == 168
+
+
+def test_auto_duty_clamps_to_continuous_when_exposure_exceeds_period():
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(
+        FakeController([FakeCamera("c", exposure_us=20000, trigger_delay_us=0)])
+    )
+    # period = 10000 µs < led_on (20100) -> clamp to 100 % (continuous)
+    plugin.on_recording_start({"omniview": {"fps": 100, "duty_auto": True}})
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    assert duty == 1000
+
+
+def test_auto_duty_uses_configured_default_when_spec_omits_flag():
+    plugin, link = _plugin_with_fake()
+    plugin._default_duty_auto = True  # config default, spec doesn't say
+    plugin.set_controller(
+        FakeController([FakeCamera("c", exposure_us=1000, trigger_delay_us=0)])
+    )
+    plugin.on_recording_start({"omniview": {"fps": 100}})
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    # period 10000; led_on = 1000 + 100 = 1100; duty = 110 ‰
+    assert duty == 110
+
+
+def test_auto_duty_rounds_up_so_led_never_undershoots_exposure():
+    # Regression: the firmware on-time is quantised to permille (a period/1000
+    # step). At very low fps that step exceeds the guard, so round-to-nearest
+    # could turn the LED off before the exposure ends. Auto duty must round UP.
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(
+        FakeController([FakeCamera("c", exposure_us=249010, trigger_delay_us=0)])
+    )
+    plugin.on_recording_start({"omniview": {"fps": 4, "duty_auto": True}})
+    _, fps, _, duty, _ = _unpack(link.snapshot()[0])
+    period_us = 1_000_000 / fps
+    led_on_us = 249010 + 100  # exposure + 100 µs guard
+    # 249110 / 250000 * 1000 = 996.44 -> ceil 997 (round-to-nearest would give 996)
+    assert duty == 997
+    # The quantised firmware on-time must still bracket the full exposure window.
+    assert duty / 1000 * period_us >= led_on_us
+
+
+def test_manual_mode_ignores_camera_exposures():
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(FakeController([FakeCamera("c", exposure_us=9000)]))
+    plugin.on_recording_start(
+        {"omniview": {"fps": 80, "duty_percent": 25, "duty_auto": False}}
+    )
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    assert duty == 250  # manual 25 %, camera exposures untouched
+
+
+def test_auto_duty_falls_back_to_manual_without_controller():
+    records, detach = _capture_octacam_logs()
+    try:
+        plugin, link = _plugin_with_fake()  # no controller wired
+        plugin.on_recording_start(
+            {"omniview": {"fps": 80, "duty_percent": 20, "duty_auto": True}}
+        )
+    finally:
+        detach()
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    assert duty == 200  # manual 20 % fallback
+    assert any("no camera exposure" in r.getMessage() for r in records)
+
+
+def test_auto_duty_falls_back_to_manual_with_empty_camera_list():
+    plugin, link = _plugin_with_fake()
+    plugin.set_controller(FakeController([]))
+    plugin.on_recording_start(
+        {"omniview": {"fps": 80, "duty_percent": 15, "duty_auto": True}}
+    )
+    _, _, _, duty, _ = _unpack(link.snapshot()[0])
+    assert duty == 150  # manual 15 %
+
+
+# ---------------------------------------------------------------------------
 # Plugin: status callback and broadcast
 # ---------------------------------------------------------------------------
 
@@ -342,6 +499,34 @@ def test_get_status_endpoint():
     assert data["device"] == DEVICE
     assert data["arduino_state"] == "idle"
     assert data["duty_percent"] == DEFAULT_DUTY_PERCENT
+    assert data["duty_auto"] is False
+    assert data["guard_us"] == DEFAULT_STROBE_GUARD_US
+
+
+def test_exposures_endpoint_returns_camera_timings():
+    plugin, _ = _plugin_with_fake()
+    plugin.set_controller(
+        FakeController(
+            [
+                FakeCamera("basler", exposure_us=2000, trigger_delay_us=50),
+                FakeCamera("flir", exposure_us=1000, trigger_delay_us=0),
+            ]
+        )
+    )
+    r = _test_client(plugin).get("/api/omniview/exposures")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["guard_us"] == DEFAULT_STROBE_GUARD_US
+    assert [c["name"] for c in data["cameras"]] == ["basler", "flir"]
+    assert data["cameras"][0]["exposure_us"] == 2000
+    assert data["cameras"][0]["trigger_delay_us"] == 50
+
+
+def test_exposures_endpoint_empty_without_controller():
+    plugin, _ = _plugin_with_fake()  # no controller wired
+    r = _test_client(plugin).get("/api/omniview/exposures")
+    assert r.status_code == 200
+    assert r.json()["cameras"] == []
 
 
 def test_reconnect_endpoint_reopens_link(monkeypatch):
@@ -525,6 +710,8 @@ def test_build_uses_provided_options():
             "default_fps": 50,
             "default_duration_ms": 3000,
             "default_duty_percent": 30,
+            "default_duty_auto": True,
+            "strobe_guard_us": 250,
             "default_cam_pulse_us": 400,
         }
     )
@@ -533,7 +720,18 @@ def test_build_uses_provided_options():
     assert plugin._default_fps == 50
     assert plugin._default_duration_ms == 3000
     assert plugin._default_duty_percent == 30
+    assert plugin._default_duty_auto is True
+    assert plugin._strobe_guard_us == 250
     assert plugin._default_cam_pulse_us == 400
+
+
+def test_build_parses_string_and_default_auto_flag():
+    # TOML may deliver a bool; a stray string should still parse sanely.
+    assert _build({"default_duty_auto": "true"})._default_duty_auto is True
+    assert _build({"default_duty_auto": "no"})._default_duty_auto is False
+    # Unset -> default (auto off).
+    assert _build({})._default_duty_auto is False
+    assert _build({})._strobe_guard_us == DEFAULT_STROBE_GUARD_US
 
 
 # ---------------------------------------------------------------------------
@@ -704,8 +902,14 @@ def test_default_start_params_uses_recording_timing_and_configured_strobe():
         "fps": 80,
         "duration_ms": 2500,
         "duty_percent": 33.0,
+        "duty_auto": False,
         "cam_pulse_us": 250,
     }
+
+
+def test_default_start_params_carries_configured_auto_flag():
+    plugin = OmniviewPlugin(default_duty_auto=True)
+    assert plugin.default_start_params(fps=100.0, duration_s=1.0)["duty_auto"] is True
 
 
 def test_plugin_manager_default_start_params_includes_only_opted_in_plugins():

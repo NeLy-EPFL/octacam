@@ -47,6 +47,11 @@ function setupTabs() {
     for (const panel of document.querySelectorAll(".tab")) {
       panel.classList.toggle("active", panel.id === `tab-${btn.dataset.tab}`);
     }
+    // Let tabs (incl. plugin tabs) react when they become visible — e.g. the
+    // omniview tab re-reads the Record-tab fps to redraw its timing diagram.
+    document.dispatchEvent(
+      new CustomEvent("tab-shown", { detail: { tab: btn.dataset.tab } })
+    );
   });
 }
 

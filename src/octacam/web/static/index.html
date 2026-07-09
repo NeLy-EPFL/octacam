@@ -272,17 +272,37 @@
         </div>
         <div id="omniview-firmware" class="hint"></div>
         <label class="row"
+          title="How the LED strobe on-time is chosen each frame">
+          <span>Strobe:</span>
+          <select id="omniview-duty-mode" class="omniview-duty-mode">
+            <option value="auto">Auto — cover longest exposure</option>
+            <option value="manual">Manual duty (%)</option>
+          </select>
+        </label>
+        <label class="row" id="omniview-duty-row"
           title="LED strobe duty cycle: how much of each frame the ring lights are on">
-          <span>Strobe duty (%):</span>
+          <span>Duty (%):</span>
           <input type="number" id="omniview-duty" class="omniview-duty"
             min="0" max="100" step="1" value="20">
         </label>
+        <div class="omniview-timing">
+          <div class="row omniview-timing-head">
+            <span>Frame timing</span>
+            <button type="button" id="omniview-timing-refresh" class="btn btn-icon"
+              title="Re-read camera exposures">↻</button>
+          </div>
+          <div id="omniview-timing-viz" class="omniview-timing-viz"></div>
+          <div id="omniview-timing-summary" class="hint"></div>
+        </div>
         <p class="hint">
           FPS and duration are taken from the Record tab settings.
-          When "Arm with recording" is checked, the Arduino is armed
-          automatically each time a recording starts: it emits the camera
-          trigger pulses and strobes the two CCS LED ring lights at the duty
-          above, in sync, for the recording duration. Cameras must be set to
+          In <strong>Auto</strong>, the strobe on-time is sized to cover the
+          longest camera exposure (plus its trigger delay and a small guard),
+          so the LED reliably brackets every sensor's integration; in
+          <strong>Manual</strong> it is the duty above. When "Arm with
+          recording" is checked, the Arduino is armed each time a recording
+          starts: it emits the shared camera trigger and strobes the two CCS LED
+          ring lights in sync for the recording duration. Cameras must be set to
           external hardware trigger.
         </p>
         <label class="center"
