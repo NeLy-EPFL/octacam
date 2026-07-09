@@ -36,23 +36,108 @@ function addEvent(evt) {
   list.scrollTop = list.scrollHeight;
 }
 
+// Wire the tab bar and its "priority+" overflow menu. Returns a reflow() the
+// caller runs once the set of tabs is final (plugin tabs are removed after this
+// is called), so the overflow packing is computed against the real tab list.
 function setupTabs() {
   const nav = document.getElementById("tabs");
+
+  // Tabs that don't fit the sidebar width collapse into a "⋯" dropdown, so the
+  // bar stays a single row no matter how many plugins contribute tabs. The
+  // active tab is always kept out of the menu.
+  const moreBtn = document.createElement("button");
+  moreBtn.type = "button";
+  moreBtn.id = "tabs-more";
+  moreBtn.className = "tabs-more";
+  moreBtn.setAttribute("aria-haspopup", "true");
+  moreBtn.setAttribute("aria-expanded", "false");
+  moreBtn.title = "More tabs";
+  moreBtn.textContent = "⋯";
+  moreBtn.hidden = true;
+  const menu = document.createElement("div");
+  menu.id = "tabs-menu";
+  menu.className = "tabs-menu";
+  nav.append(moreBtn, menu);
+
+  let order = null; // stable tab-button list, captured after plugin tabs settle
+  const closeMenu = () => {
+    menu.classList.remove("open");
+    moreBtn.setAttribute("aria-expanded", "false");
+  };
+
+  function reflow() {
+    if (!order) order = [...nav.querySelectorAll("button[data-tab]")];
+    // Put every tab back in the row (before the menu button) and measure.
+    for (const b of order) nav.insertBefore(b, moreBtn);
+    menu.replaceChildren();
+    moreBtn.hidden = true;
+    closeMenu();
+
+    const avail = nav.clientWidth;
+    const widths = order.map((b) => b.offsetWidth);
+    if (widths.reduce((a, w) => a + w, 0) <= avail) return; // all fit
+
+    moreBtn.hidden = false;
+    // Keep a contiguous prefix of tabs visible and overflow the rest, so tabs
+    // never reorder or leave a gap (stop at the first one that doesn't fit).
+    let used = moreBtn.offsetWidth;
+    let cut = order.length;
+    for (let i = 0; i < order.length; i++) {
+      if (used + widths[i] <= avail) used += widths[i];
+      else { cut = i; break; }
+    }
+    const visible = order.slice(0, cut);
+    // Keep the active tab visible: if it overflowed, evict trailing visible tabs
+    // until it fits, then show it at the end of the row.
+    const active = order.find((b) => b.classList.contains("active"));
+    if (active && !visible.includes(active)) {
+      while (visible.length && used + active.offsetWidth > avail) {
+        used -= visible.pop().offsetWidth;
+      }
+      visible.push(active);
+    }
+    for (const b of order) if (!visible.includes(b)) menu.appendChild(b);
+  }
+
   nav.addEventListener("click", (e) => {
+    if (e.target.closest("#tabs-more")) {
+      const open = menu.classList.toggle("open");
+      moreBtn.setAttribute("aria-expanded", String(open));
+      return;
+    }
     const btn = e.target.closest("button[data-tab]");
     if (!btn) return;
-    for (const b of nav.querySelectorAll("button")) {
+    for (const b of nav.querySelectorAll("button[data-tab]")) {
       b.classList.toggle("active", b === btn);
     }
     for (const panel of document.querySelectorAll(".tab")) {
       panel.classList.toggle("active", panel.id === `tab-${btn.dataset.tab}`);
     }
+    closeMenu();
+    reflow(); // pull the newly-active tab out of the overflow menu if it was in it
     // Let tabs (incl. plugin tabs) react when they become visible — e.g. the
     // triggerbox tab re-reads the Record-tab fps to redraw its timing diagram.
     document.dispatchEvent(
       new CustomEvent("tab-shown", { detail: { tab: btn.dataset.tab } })
     );
   });
+
+  // Close the dropdown when clicking outside the tab bar.
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#tabs")) closeMenu();
+  });
+
+  // Re-pack when the sidebar is resized. reflow() never changes nav's own width
+  // (the menu is absolutely positioned), so this can't loop.
+  if (typeof ResizeObserver !== "undefined") {
+    let lastW = 0;
+    new ResizeObserver(() => {
+      const w = Math.round(nav.clientWidth);
+      if (w && w !== lastW) { lastW = w; reflow(); }
+    }).observe(nav);
+  }
+
+  return reflow;
 }
 
 function wsUrl() {
@@ -105,7 +190,7 @@ async function main() {
   versionEl.textContent = `octacam ${system.version}`;
   versionEl.title = system.config_dir;
 
-  setupTabs();
+  const reflowTabs = setupTabs();
   // Show optional plugin tabs only when the plugin is loaded. A not-ready
   // plugin still shows its tab (with a "serial unavailable" notice and a
   // Reconnect button) so a missing/unplugged board is diagnosable. Plugin tab
@@ -114,6 +199,7 @@ async function main() {
   for (const el of document.querySelectorAll("[data-plugin]")) {
     if (!system.plugins?.[el.dataset.plugin]) el.remove();
   }
+  reflowTabs(); // pack the (now-final) tab set into the bar + overflow menu
 
   let cameraTab = null;
   let viewTab = null;

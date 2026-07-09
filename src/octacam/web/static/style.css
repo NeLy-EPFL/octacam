@@ -248,26 +248,81 @@ body {
 #tabs {
   flex: none;
   display: flex;
+  align-items: stretch;
   border-bottom: 1px solid var(--border);
+  position: relative; /* anchors the overflow dropdown */
 }
 
-#tabs button {
-  flex: 1;
-  padding: 8px 4px;
+/* Tabs size to their label (not flex:1) so the overflow menu can measure them
+   and only the ones that fit stay in the row. */
+#tabs > button[data-tab] {
+  flex: 0 0 auto;
+  padding: 8px 10px;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-dim);
   font: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-#tabs button:hover { color: var(--text); }
+#tabs > button[data-tab]:hover { color: var(--text); }
 
-#tabs button.active {
+#tabs > button[data-tab].active {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
+
+/* "⋯" overflow button, pinned to the right end of the bar. */
+.tabs-more {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.tabs-more:hover { color: var(--text); }
+.tabs-more[aria-expanded="true"] { color: var(--text); }
+
+/* Dropdown holding the tabs that didn't fit. */
+.tabs-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 150px;
+  margin-top: 1px;
+  padding: 4px;
+  display: none;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.tabs-menu.open { display: flex; }
+.tabs-menu button[data-tab] {
+  flex: none;
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tabs-menu button[data-tab]:hover { color: var(--text); background: var(--border); }
+.tabs-menu button[data-tab].active { color: var(--text); }
 
 .tab {
   display: none;
