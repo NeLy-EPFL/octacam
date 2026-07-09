@@ -208,6 +208,9 @@ async function main() {
     },
     notify,
   });
+  // Enable the "managed" trigger-source option only when a driving plugin is
+  // loaded (e.g. the triggerbox); the server computes this from plugin capability.
+  record.setManagedAvailable(!!system.managed_trigger_available);
 
   // Each plugin that ships a UI advertises its entry module + optional CSS in
   // /api/system; import it from the plugin's own /plugins/<name>/ folder and

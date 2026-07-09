@@ -92,7 +92,11 @@ class RecordConfig(BaseModel):
     fps: float = 100.0
     duration: float = 5.0
     duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
-    trigger_source: Literal["software", "external"] = "software"
+    trigger_source: Literal["software", "managed", "external"] = "software"
+    # How preview is triggered so it approximates the recording. "auto" mirrors
+    # trigger_source; "software"/"free_running" force that preview mode. See
+    # RecordingController._effective_preview_mode.
+    preview_trigger_source: Literal["auto", "software", "free_running"] = "auto"
     directory: str = "./"
     relative_directory: str = ""
     save_method: Literal["ffmpeg", "raw"] = "ffmpeg"

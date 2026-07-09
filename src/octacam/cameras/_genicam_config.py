@@ -178,6 +178,53 @@ def _fmt_float(value: float) -> str:
     return format(float(value), ".6g")
 
 
+# The AcquisitionFrameRate control differs across firmware: SFNC spells the gate
+# ``AcquisitionFrameRateEnable``, while the Point Grey / Grasshopper3 feature set
+# uses ``AcquisitionFrameRateEnabled`` plus an ``AcquisitionFrameRateAuto`` enum.
+# Both spellings are written best-effort so one call covers every GenICam vendor.
+_FRAMERATE_ENABLE_NODES = ("AcquisitionFrameRateEnable", "AcquisitionFrameRateEnabled")
+
+
+def apply_freerun_rate_cap(backend, fps: float) -> None:
+    """Best-effort: cap a free-running camera's rate at ``fps``.
+
+    Used by ``begin_freerun(fps)`` so a free-run *preview* draws the same bus
+    bandwidth as an fps-matched recording (and reports the true target rate)
+    instead of the uncapped sensor ceiling. Every write is independent and
+    swallowed: a model missing a node (or a node not writable in free-run) simply
+    keeps running uncapped. Requires the caller to have already set
+    ``TriggerMode=Off`` (the manual-rate nodes are inert/hidden while triggered).
+    """
+    for name in _FRAMERATE_ENABLE_NODES:
+        try:
+            backend._set_bool(name, True)
+        except BackendError:
+            pass
+    try:
+        backend._set_enum("AcquisitionFrameRateAuto", "Off")
+    except BackendError:
+        pass
+    try:
+        backend._set_number("AcquisitionFrameRate", float(fps), False)
+    except BackendError as e:
+        log.debug("Could not cap free-run rate at %s fps: %s", fps, e)
+
+
+def clear_freerun_rate_cap(backend) -> None:
+    """Best-effort: disable the manual frame-rate cap set by :func:`apply_freerun_rate_cap`.
+
+    Called when arming a triggered mode (software or hardware) so a cap left over
+    from a free-run preview cannot clip a subsequent externally-triggered
+    recording (notably on Basler, where the enable node applies even while
+    triggered). No-op on a model that never had the node.
+    """
+    for name in _FRAMERATE_ENABLE_NODES:
+        try:
+            backend._set_bool(name, False)
+        except BackendError:
+            pass
+
+
 def parse_config(text: str) -> list[tuple[str, str]]:
     """Parse a native persistence TSV into ordered ``(name, value)`` pairs.
 

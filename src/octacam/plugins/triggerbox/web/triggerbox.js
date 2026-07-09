@@ -42,9 +42,10 @@ function clamp(v, lo, hi) {
 }
 
 export default class TriggerboxTab {
-  constructor({ notify, status, getRecordSettings, api, clampInput }) {
+  constructor({ notify, status, getRecordSettings, api, clampInput, send }) {
     this.notify = notify;
     this.api = api;
+    this.send = send; // pushes a JSON message over the WS (live spec edits)
     this.clampInput = clampInput;
     this._getRecordSettings = getRecordSettings;
     this.ready = Boolean(status?.ready);
@@ -561,7 +562,26 @@ export default class TriggerboxTab {
     return { fps, periodUs, rows, maxCoverage, guardUs: this.guardUs, exps };
   }
 
+  // Push the current camera/light spec to the server (debounced) so the plugin's
+  // own spec — the source the managed preview arm reads — tracks live tab edits,
+  // and a running managed preview re-strobes to match. Independent of the
+  // arm-with-recording checkbox (that gates only the recording arm).
+  _pushSpec() {
+    if (!this.send) return;
+    clearTimeout(this._pushTimer);
+    this._pushTimer = setTimeout(() => {
+      const s = this._getRecordSettings?.();
+      const fps = Math.max(1, Math.round(s?.fps || 80));
+      const lights = [1, 2, 3].map((ch) => ({ ...this.lights[ch] }));
+      this.send({
+        type: "triggerbox_spec",
+        spec: { fps, cameras: this.cameras.map((c) => ({ ...c })), lights },
+      });
+    }, 250);
+  }
+
   _renderTiming() {
+    this._pushSpec(); // every camera/light edit funnels through here
     if (!this.timingViz) return;
     const m = this._timingModel();
     this.timingViz.innerHTML = this._buildSvg(m);

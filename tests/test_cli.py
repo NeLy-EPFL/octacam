@@ -677,7 +677,7 @@ def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
         lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],
     )
     target = tmp_path / "mixed-rig"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--no-snapshot-params"], input=inputs
     )
@@ -707,6 +707,7 @@ def test_config_wizard_writes_roundtrippable_config(tmp_path):
                 "",  # duration -> default
                 "",  # duration unit -> default
                 "",  # trigger source -> default
+                "",  # preview trigger source -> default
                 "/data/rig1",  # save directory
                 "%y%m%d/001",  # relative directory template
                 "",  # save method -> default
@@ -747,7 +748,7 @@ def test_config_wizard_no_snapshot_params_skips_parameter_files(tmp_path):
     # --no-snapshot-params keeps the wizard enumeration-only: it writes the
     # config but never opens a camera, so no per-camera parameter file appears.
     target = tmp_path / "rig-noparams"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app,
         ["config", str(target), "--backend", "fake", "--no-snapshot-params"],
@@ -768,7 +769,7 @@ def test_config_wizard_skips_params_when_cameras_busy(tmp_path, monkeypatch):
 
     monkeypatch.setattr("octacam.cameras.system.CameraSystem", busy)
     target = tmp_path / "rig-busy"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake"], input=inputs
     )
@@ -789,6 +790,7 @@ def test_config_wizard_prompts_for_directory_when_omitted(tmp_path):
                 "",  # duration
                 "",  # unit
                 "",  # trigger
+                "",  # preview trigger
                 "",  # directory
                 "",  # relative directory
                 "",  # save method
@@ -819,6 +821,7 @@ def test_config_wizard_aborts_without_overwriting(tmp_path):
                 "",  # duration
                 "",  # unit
                 "",  # trigger
+                "",  # preview trigger
                 "",  # directory
                 "",  # relative directory
                 "",  # save method
@@ -842,7 +845,7 @@ def test_config_wizard_force_overwrites(tmp_path):
     target = tmp_path / "existing"
     target.mkdir()
     (target / "octacam_config.toml").write_text("# stale\n")
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake", "--force"], input=inputs
     )

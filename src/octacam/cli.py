@@ -247,6 +247,7 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
         record_directory=resolve_record_directory(record, when),
         relative_directory=resolve_relative_directory(record, when),
         trigger_source=record.trigger_source,
+        preview_trigger_source=record.preview_trigger_source,
         save_method=record.save_method,
         ffmpeg_params=record.ffmpeg_params,
         record_form="display" if record.save_transformed else "sensor",
@@ -1607,8 +1608,14 @@ def _prompt_record(console) -> "RecordConfig":
     )
     trigger_source = Prompt.ask(
         "Trigger source",
-        choices=["software", "external"],
+        choices=["software", "managed", "external"],
         default=d.trigger_source,
+        console=console,
+    )
+    preview_trigger_source = Prompt.ask(
+        "Preview trigger source (auto = mirror the recording trigger)",
+        choices=["auto", "software", "free_running"],
+        default=d.preview_trigger_source,
         console=console,
     )
     directory = Prompt.ask(
@@ -1633,6 +1640,7 @@ def _prompt_record(console) -> "RecordConfig":
             "duration": duration,
             "duration_unit": duration_unit,
             "trigger_source": trigger_source,
+            "preview_trigger_source": preview_trigger_source,
             "directory": directory,
             "relative_directory": relative_directory,
             "save_method": save_method,

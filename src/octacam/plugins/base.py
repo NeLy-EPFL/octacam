@@ -59,6 +59,19 @@ class OctacamPlugin(Protocol):
     # See PluginManager.default_start_params.
     def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
 
+    # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
+    # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
+    # idle preview too, so the preview approximates the recording. It advertises
+    # this with drives_preview_trigger() -> True; the controller then arms the
+    # cameras in hardware-trigger mode and dispatches on_preview_start (arm the
+    # board indefinitely, strobing as the recording will) and on_preview_stop
+    # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
+    # plugin arm can block on a serial write + ack. params is the same
+    # {name: slice} shape as default_start_params / the recording hooks.
+    def drives_preview_trigger(self) -> bool: ...
+    def on_preview_start(self, params: dict | None) -> None: ...
+    def on_preview_stop(self) -> None: ...
+
     # ---- web contribution (optional) ----
     # client_id identifies the WebSocket connection a message/disconnect came
     # from, so a plugin can scope per-connection state (e.g. a hold-to-jog) to
@@ -106,6 +119,15 @@ class Plugin:
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
         return None
+
+    def drives_preview_trigger(self) -> bool:
+        return False
+
+    def on_preview_start(self, params: dict | None) -> None:
+        pass
+
+    def on_preview_stop(self) -> None:
+        pass
 
     def api_router(self) -> APIRouter | None:
         return None

@@ -144,6 +144,7 @@ class FakeBackend(SoftwareTriggerHandoff):
         self._nodes = _default_nodes()
         self._commands_run: dict[str, int] = {}
         self._frame_index = 0
+        self._freerun_fps: float | None = None
         self._init_trigger_handoff()
         self._original_trigger_source = "Line1"
 
@@ -354,17 +355,28 @@ class FakeBackend(SoftwareTriggerHandoff):
     def trigger_once(self) -> None:
         self._bump_trigger()
 
-    def begin_freerun(self) -> bool:
+    def begin_freerun(self, fps: float | None = None) -> bool:
         # The fake has no exposure pipeline, so free-run is simply "produce a
-        # frame per fetch with no trigger" — always supported.
+        # frame per fetch with no trigger" — always supported. ``fps`` is the
+        # free-run preview rate cap; the fake honours it only to pace
+        # retrieve_freerun (see there), since it has no real sensor timing.
+        self._freerun_fps = fps
         return True
 
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        if not self._grabbing:
-            return None
         with self._cond:
+            if not self._grabbing:
+                return None
+            # Pace a *capped* free-run (a preview) to its target rate so it does
+            # not busy-loop — real backends block on the SDK fetch here. Uncapped
+            # (fps=None, the benchmark's ceiling probe) returns immediately.
+            # cond.wait releases the lock and is woken by stop_grab's notify.
+            if self._freerun_fps:
+                self._cond.wait(min(1.0 / self._freerun_fps, timeout_ms / 1000.0))
+                if not self._grabbing:
+                    return None
             self._frame_index += 1
             index = self._frame_index
             width = int(self._nodes["Width"]["value"])

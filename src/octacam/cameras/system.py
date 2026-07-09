@@ -278,10 +278,13 @@ class CameraSystem:
                         axis, camera.serial_number, e,
                     )
 
-    def start_preview(self) -> None:
+    def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
+        """Start preview on every camera in the given trigger mode (see
+        :meth:`Camera.start_preview`): ``"software"``, ``"free_running"`` (rate
+        capped at ``fps``), or ``"managed"`` (octacam-driven hardware trigger)."""
         self.stop()
         for _camera, _result, exc in self._run_parallel(
-            lambda camera: camera.start_preview()
+            lambda camera: camera.start_preview(mode, fps)
         ):
             if exc is not None:
                 raise exc

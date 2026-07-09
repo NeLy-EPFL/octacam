@@ -258,11 +258,13 @@ class CameraBackend(Protocol):
     def begin_software_trigger_preview(self) -> None: ...
     def trigger_once(self) -> None: ...
 
-    # Free-run (continuous, no per-frame trigger). Used only by the benchmark to
-    # measure the external-trigger-equivalent acquisition ceiling; ``begin_freerun``
-    # returns False when the backend cannot arm free-run so the caller skips it,
-    # and ``retrieve_freerun`` fetches the next continuously-produced frame.
-    def begin_freerun(self) -> bool: ...
+    # Free-run (continuous, no per-frame trigger). Used by the benchmark to
+    # measure the external-trigger-equivalent acquisition ceiling (``fps=None``,
+    # uncapped) and by free-run *preview* (``fps`` set, capping the rate at the
+    # target so the preview matches an fps-equal recording's bandwidth).
+    # ``begin_freerun`` returns False when the backend cannot arm free-run so the
+    # caller skips it, and ``retrieve_freerun`` fetches the next produced frame.
+    def begin_freerun(self, fps: float | None = None) -> bool: ...
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
@@ -820,16 +822,46 @@ class Camera:
 
     # ------------------------------------------------------------- grabbing
 
-    def start_preview(self) -> None:
+    def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
+        """Start live preview in one of three trigger modes.
+
+        ``mode`` selects how the cameras are clocked during preview so it can
+        approximate how the recording will be triggered:
+
+        * ``"software"`` — octacam's FrameStart software trigger (driven by the
+          shared software-trigger timer the controller starts), synchronized across
+          cameras; frames fetched via the software-trigger hand-off.
+        * ``"free_running"`` — the camera free-runs with its rate capped at ``fps``
+          (so preview draws the same bandwidth, and reports the same rate, as an
+          fps-matched recording). Approximates a truly external / unmanaged trigger
+          octacam cannot drive.
+        * ``"managed"`` — the cameras run in *hardware*-trigger mode waiting for an
+          octacam-driven external source (a trigger plugin the controller arms);
+          frames fetched un-gated like an external recording.
+
+        ``free_running`` and ``managed`` fetch without firing a software trigger
+        (mirroring :meth:`start_record`'s external path); neither uses the shared
+        software-trigger timer.
+        """
         self._stop_flag.clear()
         if not self._backend.is_open():
             return
-        self._backend.begin_software_trigger_preview()
+        if mode == "free_running":
+            self._backend.begin_freerun(fps)
+        elif mode == "managed":
+            self._backend.enable_frame_trigger()
+            self._backend.set_trigger_source(False)  # restore the hardware line
+        else:
+            mode = "software"
+            self._backend.begin_software_trigger_preview()
         self._timestamps.clear()
         self._dropped.clear()
         self._dropped_count = 0  # so preview never shows a stale recording count
+        self._host_fallback_count = 0
         self._backend.start_grab_preview()
-        self._thread = threading.Thread(target=self._preview_loop, daemon=True)
+        self._thread = threading.Thread(
+            target=self._preview_loop, args=(mode,), daemon=True
+        )
         self._thread.start()
 
     def start_record(
@@ -926,13 +958,22 @@ class Camera:
         delta_ns = timestamps[last] - timestamps[start]
         self._resulting_fps = (last - start) * 1e9 / delta_ns if delta_ns else 0.0
 
-    def _preview_loop(self) -> None:
+    def _preview_loop(self, mode: str = "software") -> None:
         backend = self._backend
+        # Match the fetch to the arm chosen in start_preview: the software-trigger
+        # hand-off for "software", else the un-gated free-run fetch. Both
+        # free_running and managed use retrieve_freerun — a free-running or
+        # plugin/hardware-triggered camera produces frames on its own, so preview
+        # just grabs the next one. (Unlike _record_loop's external path, preview
+        # does NOT use retrieve_external: that gates on a software-trigger pulse to
+        # model an unpulsed external *recording*, which would wrongly freeze a
+        # managed preview that is clocked by the plugin, not the software timer.)
+        retrieve = backend.retrieve if mode == "software" else backend.retrieve_freerun
         while not self._stop_flag.is_set() and backend.is_grabbing():
             # Materialize the (copying) array only when the display slot is
             # free, keeping the per-frame copy off the steady state. The
             # timestamp is recorded for every successful grab regardless.
-            frame = backend.retrieve(
+            frame = retrieve(
                 GRAB_TIMEOUT_MS, lambda: self.frame_for_display.wants_frame
             )
             if frame is not None:

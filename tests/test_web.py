@@ -122,12 +122,16 @@ def test_system_and_settings_endpoints(client):
     assert system["plugins"] == {}
     # the rig's default GUI theme is surfaced for the client (defaults to dark)
     assert system["theme"] == "dark"
+    # No driving plugin loaded -> the "managed" trigger source is unavailable.
+    assert system["managed_trigger_available"] is False
 
     settings = client.get("/api/settings").json()
     assert settings["fps"] == 50.0
     # New recording-output toggles default to display form, CSV off.
     assert settings["record_form"] == "display"
     assert settings["save_frame_timestamps"] is False
+    # Preview trigger source defaults to mirroring the recording trigger.
+    assert settings["preview_trigger_source"] == "auto"
 
     response = client.put("/api/settings", json={"fps": 60.0, "save_method": "raw"})
     assert response.status_code == 200
@@ -143,6 +147,16 @@ def test_system_and_settings_endpoints(client):
     assert patched.json()["record_form"] == "sensor"
     assert patched.json()["save_frame_timestamps"] is True
     assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
+    # Preview trigger source + the managed recording source round-trip; bad values 422.
+    pv = client.put("/api/settings", json={"preview_trigger_source": "free_running"})
+    assert pv.status_code == 200 and pv.json()["preview_trigger_source"] == "free_running"
+    mg = client.put("/api/settings", json={"trigger_source": "managed"})
+    assert mg.status_code == 200 and mg.json()["trigger_source"] == "managed"
+    assert (
+        client.put("/api/settings", json={"preview_trigger_source": "x"}).status_code
+        == 422
+    )
+    assert client.put("/api/settings", json={"trigger_source": "x"}).status_code == 422
     # ffmpeg_params is a live setting (the GUI's Advanced box edits it); a bad
     # save_method is still rejected, and other encoder knobs stay unknown (422).
     ffmpeg = client.put("/api/settings", json={"ffmpeg_params": "-c:v ffv1"})

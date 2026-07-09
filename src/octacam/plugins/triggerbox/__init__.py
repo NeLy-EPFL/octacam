@@ -685,6 +685,10 @@ class TriggerboxPlugin(Plugin):
         self._default_cam_pulse_us = default_cam_pulse_us
         self._cameras: list[CameraLine] = cameras or [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
         self._lights: list[LightChannel] = lights or []
+        # True while an indefinite *preview* arm is live (vs a finite recording
+        # arm). A live GUI spec edit re-arms the board only in this state, so the
+        # managed preview strobes exactly as the edited recording will.
+        self._preview_armed = False
         self._controller: RecordingController | None = None
         self._link = TriggerboxLink(
             self._on_arduino_status,
@@ -1090,31 +1094,58 @@ class TriggerboxPlugin(Plugin):
             "lights": [lt.to_dict() for lt in self._lights],
         }
 
-    def on_recording_start(self, params: dict | None) -> None:
-        """Arm the Arduino when a triggerbox arm slice is present in params."""
+    @staticmethod
+    def _spec_from_params(params: dict | None) -> dict | None:
+        """This plugin's arm slice from a {name: slice} params dict, or None."""
         params = params or {}
         spec = params.get("triggerbox")
         if spec is None:
             spec = params.get("omniview")  # legacy plugin name, one-release shim
-        if not isinstance(spec, dict):
-            return
+        return spec if isinstance(spec, dict) else None
+
+    def on_recording_start(self, params: dict | None) -> None:
+        """Arm the Arduino when a triggerbox arm slice is present in params."""
+        self._preview_armed = False  # a recording arm supersedes any preview arm
+        spec = self._spec_from_params(params)
+        if spec is not None:
+            self._arm_from_spec(spec, duration_ms=None, context="recording")
+
+    def _arm_from_spec(
+        self, spec: dict, *, duration_ms: int | None, context: str
+    ) -> None:
+        """Arm the board from an arm slice; shared by recording and preview.
+
+        ``duration_ms=None`` derives the run length from the slice (a finite
+        recording); ``duration_ms=0`` runs until cancel (an indefinite preview
+        arm). ``context`` ("recording" | "preview") only tailors the operator
+        messaging — the packet is identical, so a managed preview strobes exactly
+        as the recording will."""
+        subject = (
+            "external-triggered cameras" if context == "recording" else "preview"
+        )
         if not self._link.is_open:
-            log.warning(
-                "triggerbox: link to %s is not open; recording will NOT be "
-                "hardware-armed (cameras may wait for a trigger that never fires)",
-                self.device,
+            # Surface it (not just a log): the cameras are already parked in
+            # hardware-trigger mode, so with no board a managed preview / external
+            # recording just freezes — the operator needs to know why.
+            self._report_error(
+                f"the board on {self.device} is not connected; {subject} will not "
+                "be triggered (cameras wait for a trigger that never fires). "
+                "Check the cable / reconnect the board."
             )
             return
         if not self._firmware_ok:
-            log.error(
-                "triggerbox: firmware on %s (%r) is incompatible; refusing to arm — "
-                "reflash arduino/triggerbox to TRIGGERBOX %d",
-                self.device, self._firmware, _PROTOCOL_VERSION,
+            self._report_error(
+                f"the firmware on {self.device} ({self._firmware!r}) is incompatible; "
+                f"{subject} will not be triggered. Reflash arduino/triggerbox to "
+                f"TRIGGERBOX {_PROTOCOL_VERSION}."
             )
             return
 
         fps = max(1, min(_MAX_FPS, _coerce_int(spec.get("fps"), self._default_fps)))
-        duration_ms = max(1, min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms)))
+        if duration_ms is None:
+            duration_ms = max(
+                1, min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms))
+            )
         cams = self._cameras_from_spec(spec)
         lights = self._lights_from_spec(spec)
         try:
@@ -1125,22 +1156,24 @@ class TriggerboxPlugin(Plugin):
             return
 
         log.info(
-            "triggerbox: arming %d fps for %d ms — %d camera line(s), %d light channel(s)",
-            fps, duration_ms, len(arm.cameras), len(arm.lights),
+            "triggerbox: arming %d fps for %s — %d camera line(s), %d light channel(s)",
+            fps,
+            "preview (until cancel)" if duration_ms == 0 else f"{duration_ms} ms",
+            len(arm.cameras), len(arm.lights),
         )
         result = self._arm_and_wait(arm)
         # A write failure or missing ACK (but not an explicit reject) is the
         # signature of a wedged USB link — try one host bus reset + re-arm before
         # giving up, and make any remaining failure loud (GUI + log) so the
-        # operator knows the recording will get no triggers.
+        # operator knows the cameras will get no triggers.
         if result in ("write_failed", "timeout"):
             what = (
                 "the serial write failed" if result == "write_failed"
                 else f"no acknowledgement within {self._ack_timeout_s:.1f}s"
             )
             self._report_error(
-                f"the board on {self.device} did not arm ({what}); external-"
-                "triggered cameras will not be triggered. Attempting a USB reset…"
+                f"the board on {self.device} did not arm ({what}); {subject} "
+                "will not be triggered. Attempting a USB reset…"
             )
             if self._recover_usb("the board stopped responding during arm"):
                 log.info("triggerbox: re-arming %s after USB reset", self.device)
@@ -1155,8 +1188,8 @@ class TriggerboxPlugin(Plugin):
         elif result != "ok":
             self._report_error(
                 f"the board on {self.device} still did not arm after a USB-reset "
-                "attempt — external-triggered cameras will wait for a trigger that "
-                "never fires. Power-cycle or replug the board and check the cable."
+                f"attempt — {subject} will wait for a trigger that never fires. "
+                "Power-cycle or replug the board and check the cable."
             )
 
     def _arm_and_wait(self, arm: ArmSpec) -> str:
@@ -1180,6 +1213,63 @@ class TriggerboxPlugin(Plugin):
         # already-idle board is a harmless no-op.
         self._link.send_cancel()
         self._set_arduino_state("idle")
+
+    # ----------------------------------------------------------- preview arm
+    # octacam is the trigger master for this board, so it can drive the trigger
+    # during idle preview too — giving a hardware-triggered, cross-camera
+    # synchronized, strobe-lit preview that mirrors the recording.
+
+    def drives_preview_trigger(self) -> bool:
+        return True
+
+    def on_preview_start(self, params: dict | None) -> None:
+        """Arm the board indefinitely for a managed preview.
+
+        Same fps + light spec the recording would use (so preview strobes exactly
+        as the recording will), but with an indefinite duration (``duration_ms=0``
+        = run until cancel) since preview has no fixed length. Falls back to the
+        plugin's configured spec when the controller sends no slice."""
+        spec = self._spec_from_params(params)
+        if spec is None:
+            spec = self.default_start_params(self._default_fps, 0.0)
+        self._preview_armed = True
+        self._arm_from_spec(spec, duration_ms=0, context="preview")
+
+    def on_preview_stop(self) -> None:
+        # Cancel the indefinite preview arm; harmless no-op if already idle.
+        self._preview_armed = False
+        self._link.send_cancel()
+        self._set_arduino_state("idle")
+
+    def on_ws_message(self, message: dict, client_id: int) -> bool:
+        """Apply a live camera/light spec edit from the triggerbox tab.
+
+        The tab edits its spec client-side and only sends it as recording
+        ``plugin_params`` at record start; this pushes each edit to the server so
+        the plugin's own ``self._cameras``/``self._lights`` — the source both the
+        managed preview arm (``default_start_params``) and the timing use — track
+        the tab. When a managed preview is currently running, the board is re-armed
+        in place so the live preview strobes exactly as the edited recording will.
+        """
+        if not isinstance(message, dict) or message.get("type") != "triggerbox_spec":
+            return False
+        spec = message.get("spec")
+        if not isinstance(spec, dict):
+            return True  # ours, but malformed — swallow it
+        new_cams = self._cameras_from_spec(spec)
+        new_lights = self._lights_from_spec(spec)
+        changed = [c.to_dict() for c in new_cams] != [
+            c.to_dict() for c in self._cameras
+        ] or [lt.to_dict() for lt in new_lights] != [
+            lt.to_dict() for lt in self._lights
+        ]
+        self._cameras = new_cams
+        self._lights = new_lights
+        # Re-arm a live preview only on a real change (the tab pushes on redraws
+        # too), so switching tabs / resizing never re-strobes the board.
+        if changed and self._preview_armed and self._link.is_open:
+            self._arm_from_spec(spec, duration_ms=0, context="preview")
+        return True
 
     # -------------------------------------------------- web contributions
 

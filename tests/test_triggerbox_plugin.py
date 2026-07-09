@@ -341,6 +341,111 @@ def test_auto_duty_without_controller_falls_back_to_manual():
 
 
 # ===========================================================================
+# Preview arm (octacam-driven "managed" preview)
+# ===========================================================================
+
+
+def test_drives_preview_trigger_is_true():
+    plugin, _link = _plugin_with_fake()
+    assert plugin.drives_preview_trigger() is True
+
+
+def test_preview_arm_matches_recording_except_indefinite_duration():
+    plugin, link = _plugin_with_fake(
+        cameras=[{"pin": "D13", "pulse_us": 500}],
+        lights=[
+            {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}
+        ],
+    )
+    slice_ = plugin.default_start_params(80.0, 10.0)
+    plugin.on_recording_start({"triggerbox": slice_})
+    rec = _last_arm(link)
+    plugin.on_preview_start({"triggerbox": slice_})
+    prev = _last_arm(link)
+    # Recording runs its finite duration; preview runs until cancel (0)...
+    assert rec["duration_ms"] == 10000
+    assert prev["duration_ms"] == 0
+    # ...but is otherwise the same trigger + strobe as the recording (user chose
+    # "strobe as in recording"), so preview is WYSIWYG.
+    assert prev["fps"] == rec["fps"]
+    assert prev["cams"] == rec["cams"]
+    assert prev["lights"] == rec["lights"]
+
+
+def test_on_preview_start_without_slice_uses_configured_spec():
+    plugin, link = _plugin_with_fake(cameras=[{"pin": "D13", "pulse_us": 500}])
+    plugin.on_preview_start(None)  # controller sent no slice
+    arm = _last_arm(link)
+    assert arm["duration_ms"] == 0
+    assert arm["fps"] == plugin._default_fps
+
+
+def test_on_preview_stop_cancels():
+    plugin, link = _plugin_with_fake()
+    plugin.on_preview_start({"triggerbox": plugin.default_start_params(80.0, 10.0)})
+    plugin.on_preview_stop()
+    assert link.snapshot()[-1] == bytes([CANCEL_MAGIC])
+
+
+def _spec_msg(duty):
+    return {
+        "type": "triggerbox_spec",
+        "spec": {
+            "fps": 80,
+            "cameras": [{"pin": "D13", "pulse_us": 500}],
+            "lights": [
+                {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": duty}
+            ],
+        },
+    }
+
+
+def test_on_ws_message_ignores_unrelated():
+    plugin, _link = _plugin_with_fake()
+    assert plugin.on_ws_message({"type": "jog"}, 1) is False
+
+
+def test_ws_spec_edit_updates_the_plugin_spec():
+    # A live tab edit becomes the source the managed preview arm reads.
+    plugin, _link = _plugin_with_fake(lights=[{"channel": 1, "mode": "off"}])
+    assert plugin.on_ws_message(_spec_msg(20.0), 1) is True
+    dsp = plugin.default_start_params(80.0, 10.0)
+    assert dsp["lights"][0]["mode"] == "strobe"
+    assert dsp["cameras"][0]["pin"] == "D13"
+
+
+def test_ws_spec_edit_does_not_arm_when_not_previewing():
+    plugin, link = _plugin_with_fake(lights=[{"channel": 1, "mode": "off"}])
+    plugin.on_ws_message(_spec_msg(20.0), 1)
+    assert [f for f in link.snapshot() if f and f[0] == ARM_MAGIC] == []
+
+
+def test_ws_spec_edit_rearms_a_running_managed_preview():
+    plugin, link = _plugin_with_fake(
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
+    )
+    plugin.on_preview_start(None)  # managed preview armed from the config spec
+    before = len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC])
+    plugin.on_ws_message(_spec_msg(50.0), 1)  # operator drags duty to 50%
+    arms = [f for f in link.snapshot() if f and f[0] == ARM_MAGIC]
+    assert len(arms) == before + 1  # re-armed in place
+    dec = _decode_frame(arms[-1])
+    assert dec["duration_ms"] == 0  # still indefinite (preview)
+    assert dec["lights"][0][3] == round(0.50 * (1_000_000 / 80))  # new 50% on-time
+
+
+def test_ws_spec_edit_no_rearm_when_unchanged():
+    plugin, link = _plugin_with_fake(
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
+    )
+    plugin.on_preview_start(None)
+    plugin.on_ws_message(_spec_msg(20.0), 1)  # first push adopts the spec (may re-arm)
+    n = len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC])
+    plugin.on_ws_message(_spec_msg(20.0), 1)  # identical spec (a redraw push) -> no-op
+    assert len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC]) == n
+
+
+# ===========================================================================
 # Factory: _build (config parsing)
 # ===========================================================================
 
@@ -454,28 +559,22 @@ def test_on_recording_start_ignored_without_spec():
     assert not link.snapshot()
 
 
-def test_on_recording_start_warns_and_skips_when_link_closed():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake(is_open=False)
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    finally:
-        detach()
-    assert not link.snapshot()
-    assert any("is not open" in r.getMessage() for r in records)
+def test_on_recording_start_reports_and_skips_when_link_closed():
+    plugin, link = _plugin_with_fake(is_open=False)
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    assert not link.snapshot()  # nothing armed
+    # Surfaced to the operator (not just logged), so a frozen preview/recording
+    # has a visible cause.
+    assert plugin._last_error and "not connected" in plugin._last_error
 
 
-def test_on_recording_start_refuses_on_incompatible_firmware():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin._firmware_ok = False
-        plugin._firmware = "OMNIVIEW 1"
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    finally:
-        detach()
+def test_on_recording_start_reports_and_skips_on_incompatible_firmware():
+    plugin, link = _plugin_with_fake()
+    plugin._firmware_ok = False
+    plugin._firmware = "OMNIVIEW 1"
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert not link.snapshot()
-    assert any("refusing to arm" in r.getMessage() for r in records)
+    assert plugin._last_error and "incompatible" in plugin._last_error
 
 
 def test_on_recording_stop_sends_cancel():

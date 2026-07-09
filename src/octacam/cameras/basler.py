@@ -423,6 +423,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
     def enable_frame_trigger(self) -> None:
         if not self.raw.IsOpen():
             return
+        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
 
@@ -440,6 +441,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             )
 
     def begin_software_trigger_preview(self) -> None:
+        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
         self.raw.TriggerSource.Value = "Software"
@@ -449,13 +451,39 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # the grab thread. Keeps the shared trigger timer off this device.
         self._bump_trigger()
 
-    def begin_freerun(self) -> bool:
-        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+    def _apply_freerun_cap(self, fps: float) -> None:
+        """Best-effort: cap the free-run rate at ``fps`` (SFNC nodes on the ace)."""
+        try:
+            self.raw.AcquisitionFrameRateEnable.Value = True
+            self.raw.AcquisitionFrameRate.Value = float(fps)
+        except genicam.GenericException as e:
+            log.debug(
+                "Could not cap free-run rate at %s fps on camera %s: %s",
+                fps, self._serial, e,
+            )
 
-        Best-effort: any failure returns False so the benchmark skips the free-run
-        ceiling for this camera rather than aborting. A subsequent
-        ``begin_software_trigger_preview`` re-arms the FrameStart trigger, so no
-        explicit restore is needed.
+    def _clear_freerun_cap(self) -> None:
+        """Best-effort: disable the manual frame-rate cap so it can't clip a
+        subsequent triggered recording (the enable node applies even while
+        triggered on Basler). No-op on a model without the node."""
+        raw = self.raw
+        if raw is None:
+            return
+        try:
+            raw.AcquisitionFrameRateEnable.Value = False
+        except genicam.GenericException:
+            pass
+
+    def begin_freerun(self, fps: float | None = None) -> bool:
+        """Switch to continuous free-run (TriggerMode Off).
+
+        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
+        by free-run *preview* (``fps`` set, so the rate is capped at the target and
+        the preview draws the same bandwidth as an fps-matched recording).
+        Best-effort: any failure returns False so the caller skips free-run for this
+        camera rather than aborting. A subsequent ``begin_software_trigger_preview``
+        re-arms the FrameStart trigger (and clears the cap), so no explicit restore
+        is needed.
         """
         raw = self.raw
         if raw is None:
@@ -466,6 +494,8 @@ class BaslerBackend(SoftwareTriggerHandoff):
                 raw.AcquisitionMode.Value = "Continuous"
             except genicam.GenericException:
                 pass  # Continuous is the grabbing default; a rejected write is fine
+            if fps is not None:
+                self._apply_freerun_cap(fps)
             return True
         except genicam.GenericException as e:
             log.debug("free-run unsupported on camera %s: %s", self._serial, e)

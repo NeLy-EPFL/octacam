@@ -75,10 +75,19 @@
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
         </div>
         <label class="row"
-          title="software: the server starts each frame on a timer. external: every frame is driven by a hardware trigger signal."><span>Trigger source:</span>
+          title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
           <select id="trigger-source">
             <option value="software">software</option>
+            <option value="managed" disabled>managed</option>
             <option value="external">external</option>
+          </select>
+        </label>
+        <label class="row"
+          title="How live preview is triggered when not recording. auto: mirror the recording trigger source (software→synchronized, managed→drive the plugin/strobe as recording, external→free-run at the target fps). software: always software-synchronized. free_running: cameras free-run capped at the target fps."><span>Preview trigger:</span>
+          <select id="preview-trigger-source">
+            <option value="auto">auto (match recording)</option>
+            <option value="software">software</option>
+            <option value="free_running">free running</option>
           </select>
         </label>
         <details id="record-advanced" class="advanced">

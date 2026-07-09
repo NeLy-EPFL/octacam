@@ -116,7 +116,11 @@ class RecordingSettings:
     # onto the destination; empty falls back to the save_dir's own basename.
     record_directory: str = ""
     relative_directory: str = ""
-    trigger_source: str = "software"  # "software" | "external"
+    trigger_source: str = "software"  # "software" | "managed" | "external"
+    # How preview is triggered. "auto" mirrors trigger_source (software->software,
+    # managed->drive the plugin, external->free-run approximation); "software" and
+    # "free_running" force that mode regardless of the recording trigger source.
+    preview_trigger_source: str = "auto"  # "auto" | "software" | "free_running"
     save_method: str = "ffmpeg"  # "ffmpeg" | "raw"
     # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg".
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
@@ -276,6 +280,21 @@ class RecordingController:
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
+        # Back-compat: a rig that predates the "managed" trigger source declares
+        # trigger_source="external" plus a trigger-driving plugin (the shipped
+        # triggerbox configs). octacam already drives that trigger, so promote it
+        # to "managed" — the recording behaves identically, but `auto` preview now
+        # resolves to the plugin-driven (synchronized, strobe-lit) preview instead
+        # of the free-run approximation reserved for a truly external source.
+        if (
+            self._settings.trigger_source == "external"
+            and self._preview_trigger_plugin() is not None
+        ):
+            self._settings = dataclasses.replace(self._settings, trigger_source="managed")
+            log.info(
+                "trigger_source 'external' with a trigger-driving plugin loaded; "
+                "treating it as 'managed' (octacam drives the trigger)."
+            )
         # The rig config dir whose octacam_config.toml is copied into each
         # recording folder (so `octacam process` needs no --config later). None
         # skips the snapshot (e.g. unit tests constructing a controller directly).
@@ -385,9 +404,16 @@ class RecordingController:
                 raise ValueError("duration_s must be > 0")
             if "trigger_source" in changes and changes["trigger_source"] not in (
                 "software",
+                "managed",
                 "external",
             ):
-                raise ValueError("trigger_source must be software or external")
+                raise ValueError("trigger_source must be software, managed or external")
+            if "preview_trigger_source" in changes and changes[
+                "preview_trigger_source"
+            ] not in ("auto", "software", "free_running"):
+                raise ValueError(
+                    "preview_trigger_source must be auto, software or free_running"
+                )
             if "record_form" in changes and changes["record_form"] not in (
                 "display",
                 "sensor",
@@ -419,9 +445,27 @@ class RecordingController:
                     ),
                 )
             self._settings = merged
-            if "fps" in changes:  # live-updates the preview trigger rate
+            if "fps" in changes:  # live-updates the software-trigger rate
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
-            return dataclasses.replace(self._settings)
+            # Re-arm live preview when a change alters how it should be triggered:
+            # the trigger source, the preview override, or (for a non-software
+            # preview, whose rate is baked into the arm) the fps. A software
+            # preview absorbs an fps change through set_software_trigger_frequency
+            # above, so it needs no restart (keeps the fps slider smooth).
+            rearm = (
+                "trigger_source" in changes or "preview_trigger_source" in changes
+            ) or ("fps" in changes and self._effective_preview_mode() != "software")
+            arm_mode = (
+                self._arm_preview_locked()
+                if rearm and self._state == "preview"
+                else None
+            )
+            new_settings = dataclasses.replace(self._settings)
+        # Arm the driving plugin (managed preview only) off the lock — a plugin
+        # arm can block on a serial write + ack; no-op for software/free-run.
+        if arm_mode is not None:
+            self._dispatch_preview_arm(arm_mode)
+        return new_settings
 
     def validate_save_dir(self, path_str: str) -> dict:
         resolved = Path(normalize_save_dir(path_str))
@@ -725,17 +769,89 @@ class RecordingController:
 
     # -------------------------------------------------------------- preview
 
+    def _preview_trigger_plugin(self):
+        """First loaded plugin that can drive the trigger during preview, else None.
+
+        Duck-typed (like ``set_controller``/``set_broadcast`` probing in the web
+        app): a trigger-generating plugin (triggerbox) exposes
+        ``drives_preview_trigger() -> True``; relay/other plugins (twophoton,
+        flywheel) do not, so a ``managed`` preview falls back to free-run."""
+        for plugin in self.plugins.plugins:
+            drives = getattr(plugin, "drives_preview_trigger", None)
+            try:
+                if callable(drives) and drives():
+                    return plugin
+            except Exception:
+                log.exception("plugin drives_preview_trigger check failed")
+        return None
+
+    @property
+    def managed_trigger_available(self) -> bool:
+        """True when a loaded plugin can drive the trigger during preview, so the
+        ``managed`` trigger source is usable (surfaced to the GUI to enable it)."""
+        return self._preview_trigger_plugin() is not None
+
+    def _effective_preview_mode(self) -> str:
+        """Resolve the preview trigger mode: software | free_running | managed.
+
+        ``preview_trigger_source`` forces ``software``/``free_running``; ``auto``
+        mirrors the recording ``trigger_source`` — software→software,
+        managed→managed (drive the plugin) when a driving plugin is present, and
+        external (or managed with no driving plugin) → free-run approximation."""
+        pref = self._settings.preview_trigger_source
+        if pref == "software":
+            return "software"
+        if pref == "free_running":
+            return "free_running"
+        src = self._settings.trigger_source  # auto
+        if src == "software":
+            return "software"
+        if src == "managed" and self._preview_trigger_plugin() is not None:
+            return "managed"
+        return "free_running"
+
+    def _arm_preview_locked(self) -> str:
+        """Arm the cameras for live preview in the resolved mode; caller holds the
+        lock. Returns the mode. For ``managed`` the driving plugin is armed
+        separately, OFF the lock, via :meth:`_dispatch_preview_arm`."""
+        mode = self._effective_preview_mode()
+        fps = self._settings.fps
+        self.camera_system.stop_software_trigger()
+        self.camera_system.set_software_trigger_frequency(fps)
+        self.camera_system.start_preview(mode, fps)
+        if mode == "software":
+            self.camera_system.start_software_trigger()
+        self._set_state("preview")
+        return mode
+
+    def _dispatch_preview_arm(self, mode: str | None) -> None:
+        """Arm/disarm the driving plugin for a preview mode, OFF the controller
+        lock. Managed preview arms the plugin (indefinite, strobe-as-recording);
+        any other mode (or None/idle) cancels a preview arm that may be running."""
+        if mode == "managed":
+            self.plugins.dispatch("on_preview_start", self._preview_arm_params())
+        else:
+            self.plugins.dispatch("on_preview_stop")
+
+    def _preview_arm_params(self) -> dict:
+        """The recording-start plugin slice reused for an indefinite preview arm.
+
+        Same fps + light spec the recording would use (so preview strobes exactly
+        as the recording will); the plugin substitutes an indefinite duration for
+        preview."""
+        return self.plugins.default_start_params(
+            self._settings.fps, self._settings.duration_s
+        )
+
     def start_preview(self) -> None:
-        """(Re)start live preview with the free-running software trigger."""
+        """(Re)start live preview in the resolved preview trigger mode."""
         with self._lock:
             if self._camera_locked:
                 raise RuntimeError(
                     "Cannot start preview while recording or benchmarking"
                 )
-            self.camera_system.set_software_trigger_frequency(self._settings.fps)
-            self.camera_system.start_preview()
-            self.camera_system.start_software_trigger()
-            self._set_state("preview")
+            mode = self._arm_preview_locked()
+        self._dispatch_preview_arm(mode)
 
     # ------------------------------------------------------------ recording
 
@@ -785,46 +901,53 @@ class RecordingController:
             total = len(self.camera_system)
             if not started:
                 self._event("error", "No camera could start recording")
-                self._resume_preview()
-                return StartResult(StartResult.ERROR, "No camera could start recording")
-            if len(started) < total:
-                missing = [
-                    camera.name
-                    for camera in self.camera_system
-                    if camera.name not in started
-                ]
-                self._event(
-                    "warning",
-                    f"Only {len(started)}/{total} cameras started "
-                    f"recording (missing: {', '.join(missing)})",
+                # Re-arm the preview cameras under the lock; the (possibly
+                # blocking) driving-plugin arm is dispatched off the lock below.
+                failed_resume_mode = self._resume_preview()
+            else:
+                if len(started) < total:
+                    missing = [
+                        camera.name
+                        for camera in self.camera_system
+                        if camera.name not in started
+                    ]
+                    self._event(
+                        "warning",
+                        f"Only {len(started)}/{total} cameras started "
+                        f"recording (missing: {', '.join(missing)})",
+                    )
+                if use_software_trigger:
+                    self.camera_system.start_software_trigger(settings.duration_s)
+
+                # Snapshot the config and write an initial summary (pessimistically
+                # marked aborted, frames=0) as soon as the cameras start, so a raw
+                # recording keeps its geometry — and stays transcodable — even if
+                # the process is hard-killed before the final summary is written at
+                # teardown. Both are overwritten with final data when recording ends.
+                self._snapshot_config()
+                self._write_recording_summary(aborted=True)
+
+                self._aborted = False
+                self._stop_event.clear()
+                self._start_hooks_done.clear()
+                self._deadline = None
+                self._set_state("waiting")
+                self._monitor = threading.Thread(
+                    target=self._monitor_loop,
+                    args=(
+                        settings.duration_s,
+                        plugin_params,
+                        len(started),
+                        not use_software_trigger,
+                    ),
+                    daemon=True,
                 )
-            if use_software_trigger:
-                self.camera_system.start_software_trigger(settings.duration_s)
-
-            # Snapshot the config and write an initial summary (pessimistically
-            # marked aborted, frames=0) as soon as the cameras start, so a raw
-            # recording keeps its geometry — and stays transcodable — even if the
-            # process is hard-killed before the final summary is written at
-            # teardown. Both are overwritten with final data when recording ends.
-            self._snapshot_config()
-            self._write_recording_summary(aborted=True)
-
-            self._aborted = False
-            self._stop_event.clear()
-            self._start_hooks_done.clear()
-            self._deadline = None
-            self._set_state("waiting")
-            self._monitor = threading.Thread(
-                target=self._monitor_loop,
-                args=(
-                    settings.duration_s,
-                    plugin_params,
-                    len(started),
-                    not use_software_trigger,
-                ),
-                daemon=True,
-            )
-            self._monitor.start()
+                self._monitor.start()
+        if not started:
+            # No camera recorded: dispatch the preview re-arm OFF the lock (a
+            # driving-plugin arm can block on a serial write + ack), then bail.
+            self._dispatch_preview_arm(failed_resume_mode)
+            return StartResult(StartResult.ERROR, "No camera could start recording")
         # Arm plugins off the controller lock — like on_first_frame below — so a
         # plugin's blocking serial write (e.g. the twophoton arm, write_timeout=1
         # s) can't stall snapshot()/telemetry while self._lock is held. The
@@ -847,15 +970,17 @@ class RecordingController:
             self._start_hooks_done.set()
         return StartResult(StartResult.OK)
 
-    def _resume_preview(self) -> None:
-        """Return to preview (or idle) after a recording ends or fails."""
+    def _resume_preview(self) -> str | None:
+        """Arm preview (or go idle) after a recording/benchmark ends; caller holds
+        the lock.
+
+        Returns the resolved preview mode so the caller can arm the driving plugin
+        OFF the lock via :meth:`_dispatch_preview_arm` (None = went idle, which
+        still disarms any preview arm)."""
         if self._auto_preview:
-            self.camera_system.set_software_trigger_frequency(self._settings.fps)
-            self.camera_system.start_preview()
-            self.camera_system.start_software_trigger()
-            self._set_state("preview")
-        else:
-            self._set_state("idle")
+            return self._arm_preview_locked()
+        self._set_state("idle")
+        return None
 
     def stop_recording(self, abort: bool = False) -> None:
         """Finish (or abort) the current recording early."""
@@ -934,7 +1059,11 @@ class RecordingController:
         try:
             # Stop live preview (and its trigger) off the lock — the diagnostic
             # owns the cameras for its duration via its own grab loops + timer.
+            # Also disarm any managed preview arm: the benchmark drives cameras via
+            # begin_freerun (TriggerMode Off), which would ignore — and be fought by
+            # — a plugin still pulsing the external trigger line.
             self.camera_system.stop_software_trigger()
+            self.plugins.dispatch("on_preview_stop")
             self.camera_system.stop()
 
             def progress(p) -> None:
@@ -973,7 +1102,8 @@ class RecordingController:
         finally:
             # Always return to preview/idle, even on failure or cancel.
             with self._lock:
-                self._resume_preview()
+                resume_mode = self._resume_preview()
+            self._dispatch_preview_arm(resume_mode)  # re-arm managed preview off-lock
 
     def cancel_diagnostic(self) -> None:
         """Ask a running benchmark to stop early (no-op if none is running)."""
@@ -1112,12 +1242,15 @@ class RecordingController:
                         self._settings,
                         save_dir=increment_trailing_number(self._settings.save_dir),
                     )
-            self._resume_preview()
+            resume_mode = self._resume_preview()
         # Wait out the on_recording_start hooks so a stop/abort cancel can never
         # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when
         # the recording is stopped in the window right after it starts.
         self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
         self.plugins.dispatch("on_recording_stop", aborted)
+        # Re-arm the driving plugin for preview (managed only) AFTER the recording
+        # cancel, off the lock, so the record arm is fully torn down first.
+        self._dispatch_preview_arm(resume_mode)
         self._event("info", "Recording aborted" if aborted else "Recording finished")
 
     def _snapshot_config(self) -> None:

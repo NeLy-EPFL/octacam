@@ -223,6 +223,7 @@ class SettingsPatch(BaseModel):
     record_directory: str | None = None
     relative_directory: str | None = None
     trigger_source: str | None = None
+    preview_trigger_source: str | None = None
     save_method: str | None = None
     ffmpeg_params: str | None = None
     record_form: str | None = None
@@ -849,6 +850,9 @@ def create_app(
             "version": octacam.__version__,
             "config_dir": config_dir,
             "plugins": plugins_status,
+            # Enables the "managed" trigger-source option in the GUI: true when a
+            # loaded plugin can drive the trigger (e.g. the triggerbox).
+            "managed_trigger_available": state.controller.managed_trigger_available,
             "display_refresh_interval_ms": (
                 state.config.gui.display_refresh_interval_ms
             ),

@@ -42,6 +42,7 @@ export class RecordTab {
     this.relativeDir = document.getElementById("relative-dir");
     this.diskFree = document.getElementById("disk-free");
     this.trigger = document.getElementById("trigger-source");
+    this.previewTrigger = document.getElementById("preview-trigger-source");
     this.format = document.getElementById("format");
     this.ffmpegParams = document.getElementById("ffmpeg-params");
     this.recordForm = document.getElementById("record-form");
@@ -87,6 +88,12 @@ export class RecordTab {
     this.relativeDir.addEventListener("change", () => this._commitRelativeDir());
     this.trigger.addEventListener("change", () =>
       this._put({ trigger_source: this.trigger.value }, [this.trigger])
+    );
+    this.previewTrigger.addEventListener("change", () =>
+      this._put(
+        { preview_trigger_source: this.previewTrigger.value },
+        [this.previewTrigger]
+      )
     );
     this.format.addEventListener("change", () => {
       this._put({ save_method: this.format.value }, [this.format]);
@@ -137,6 +144,18 @@ export class RecordTab {
 
   // ------------------------------------------------------ server -> UI
 
+  // The "managed" trigger source needs an octacam-driven trigger plugin; enable
+  // its dropdown option only when the server reports one is loaded.
+  setManagedAvailable(available) {
+    this._managedAvailable = available;
+    if (available) this._enableManagedOption();
+  }
+
+  _enableManagedOption() {
+    const opt = this.trigger?.querySelector('option[value="managed"]');
+    if (opt) opt.disabled = false;
+  }
+
   // Never overwrite an input the user is editing, unless it is listed in
   // `force` (the input that originated the change).
   applySettings(s, force = []) {
@@ -160,7 +179,13 @@ export class RecordTab {
       this.relativeDir.value = s.relative_directory;
     }
     if (s.trigger_source && canSet(this.trigger)) {
+      // The server promotes external+driving-plugin to "managed", so the option
+      // may need enabling before it can be selected as the current value.
+      if (s.trigger_source === "managed") this._enableManagedOption();
       this.trigger.value = s.trigger_source;
+    }
+    if (s.preview_trigger_source && canSet(this.previewTrigger)) {
+      this.previewTrigger.value = s.preview_trigger_source;
     }
     if (s.save_method && canSet(this.format)) {
       this.format.value = s.save_method;

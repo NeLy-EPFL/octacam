@@ -19,7 +19,13 @@ backend = "auto"   # cascade: Basler->pypylon, FLIR Grasshopper3->Spinnaker C
 fps = 80.0
 duration = 10.0
 duration_unit = "seconds"     # frames | seconds | minutes | hours
-trigger_source = "external"   # cameras wait for the Arduino's Line1 trigger
+trigger_source = "managed"    # octacam drives the Arduino triggerbox (plugin below)
+# preview_trigger_source (default "auto") mirrors the recording trigger: for a
+# "managed" rig, preview drives the triggerbox live, so the live preview is
+# hardware-triggered, cross-camera synchronized and strobe-lit exactly like the
+# recording. Override with "software" or "free_running" to preview without the
+# LEDs (e.g. "free_running" free-runs the cameras capped at fps).
+preview_trigger_source = "auto"
 
 directory = "~/octacam/data/omniview"
 relative_directory = "%y%m%d/Fly1/001"

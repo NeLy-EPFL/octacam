@@ -39,7 +39,13 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
+from octacam.cameras._genicam_config import (
+    apply_config,
+    apply_freerun_rate_cap,
+    clear_freerun_rate_cap,
+    dump_config,
+    parse_config,
+)
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     GEOMETRY_FEATURES,
@@ -322,6 +328,7 @@ class PycameleonBackend(SoftwareTriggerHandoff):
     def enable_frame_trigger(self) -> None:
         if not self._open:
             return
+        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._enable_trigger_overlap()
@@ -340,6 +347,7 @@ class PycameleonBackend(SoftwareTriggerHandoff):
             )
 
     def begin_software_trigger_preview(self) -> None:
+        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._set_enum("TriggerSource", "Software")
@@ -351,12 +359,15 @@ class PycameleonBackend(SoftwareTriggerHandoff):
         # while the grab loop's receive() holds the borrow.
         self._bump_trigger()
 
-    def begin_freerun(self) -> bool:
-        """Switch to continuous free-run (TriggerMode Off) for the benchmark.
+    def begin_freerun(self, fps: float | None = None) -> bool:
+        """Switch to continuous free-run (TriggerMode Off).
 
-        Best-effort: a failure returns False so the benchmark skips the free-run
-        ceiling for this camera. A later ``begin_software_trigger_preview`` re-arms
-        the FrameStart trigger, so no explicit restore is needed.
+        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
+        by free-run *preview* (``fps`` set, so the rate is capped at the target and
+        the preview draws the same bandwidth as an fps-matched recording).
+        Best-effort: a failure returns False so the caller skips free-run for this
+        camera. A later ``begin_software_trigger_preview`` re-arms the FrameStart
+        trigger (and clears the cap), so no explicit restore is needed.
         """
         try:
             self._set_enum("TriggerMode", "Off")
@@ -364,6 +375,8 @@ class PycameleonBackend(SoftwareTriggerHandoff):
                 self._set_enum("AcquisitionMode", "Continuous")
             except BackendError:
                 pass
+            if fps is not None:
+                apply_freerun_rate_cap(self, fps)
             return True
         except BackendError as e:
             log.debug("free-run unsupported on camera %s: %s", self._serial, e)
