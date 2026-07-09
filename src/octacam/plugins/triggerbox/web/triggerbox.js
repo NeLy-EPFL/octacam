@@ -32,6 +32,20 @@ function fmtDur(us) {
   if (!Number.isFinite(us)) return "–";
   return us >= 1000 ? `${(us / 1000).toFixed(2)} ms` : `${Math.round(us)} µs`;
 }
+// Compact axis-tick label: trims trailing zeros so 12500 → "12.5 ms", 5000 → "5 ms".
+function fmtTick(us) {
+  if (us === 0) return "0";
+  if (us >= 1000) return `${(us / 1000).toFixed(1).replace(/\.0$/, "")} ms`;
+  return `${Math.round(us)} µs`;
+}
+// Round up to a "nice" 1/2/5×10ⁿ step for readable axis ticks.
+function niceNum(x) {
+  if (x <= 0) return 1;
+  const exp = Math.floor(Math.log10(x));
+  const f = x / Math.pow(10, exp);
+  const nf = f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10;
+  return nf * Math.pow(10, exp);
+}
 function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -81,16 +95,33 @@ export default class TriggerboxTab {
     this.addCameraBtn = document.getElementById("triggerbox-add-camera");
     this.timingViz = document.getElementById("triggerbox-timing-viz");
     this.timingSummary = document.getElementById("triggerbox-timing-summary");
-    this.timingRefresh = document.getElementById("triggerbox-timing-refresh");
     this.armWithRec = document.getElementById("triggerbox-arm-with-recording");
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
     this.fwFlashBtn?.addEventListener("click", () => this._flash());
     this.addCameraBtn?.addEventListener("click", () => this._addCamera());
-    this.timingRefresh?.addEventListener("click", () => this._loadExposures());
     document.addEventListener("tab-shown", (e) => {
       if (e.detail?.tab === "triggerbox") this._renderTiming();
     });
+    // Auto-refresh the timing diagram whenever a camera feature changes anywhere
+    // (this or another client): exposure time, trigger delay, frame rate, ROI,
+    // auto-exposure mode … any of these can move the exposure/delay it draws.
+    // Debounced so a burst of edits coalesces into one re-read — this replaces
+    // the old manual refresh button.
+    document.addEventListener("camera-features-changed", () =>
+      this._scheduleExposureReload()
+    );
+    // The timing diagram is drawn 1 SVG user-unit = 1 CSS px (not scaled down to
+    // fit), so its text stays legible. That means it must be re-rendered at the
+    // sidebar's live width — e.g. when the sidebar-resizer is dragged.
+    this._lastVizW = 0;
+    this._exposureReloadTimer = null;
+    if (this.timingViz && typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => {
+        const w = Math.round(this.timingViz.clientWidth);
+        if (w && w !== this._lastVizW) this._renderTiming();
+      }).observe(this.timingViz);
+    }
 
     this._loadPorts();
     this._renderCameras();
@@ -351,7 +382,6 @@ export default class TriggerboxTab {
       this.statusBox.classList.remove("hidden");
     }
     this._applyDisabled();
-    if (this.timingRefresh) this.timingRefresh.disabled = !this.connected;
     this._renderFlashBanner();
   }
 
@@ -480,6 +510,15 @@ export default class TriggerboxTab {
 
   // --------------------------------------------------- exposures + timing
 
+  // Debounced re-read of the live camera exposures, driven by
+  // camera-features-changed events so the diagram tracks parameter edits without
+  // a manual refresh. Coalesces a burst of edits (or multi-camera dirty pings)
+  // into a single fetch.
+  _scheduleExposureReload() {
+    clearTimeout(this._exposureReloadTimer);
+    this._exposureReloadTimer = setTimeout(() => this._loadExposures(), 250);
+  }
+
   async _loadExposures() {
     let r;
     try {
@@ -584,7 +623,11 @@ export default class TriggerboxTab {
     this._pushSpec(); // every camera/light edit funnels through here
     if (!this.timingViz) return;
     const m = this._timingModel();
-    this.timingViz.innerHTML = this._buildSvg(m);
+    // Measure the container so the SVG is drawn at real pixel size; fall back to
+    // the last known width while the tab is hidden (clientWidth is 0 then).
+    const cw = Math.round(this.timingViz.clientWidth) || this._lastVizW || 240;
+    this._lastVizW = cw;
+    this.timingViz.innerHTML = this._buildSvg(m, cw);
     this._renderSummary(m);
   }
 
@@ -609,96 +652,143 @@ export default class TriggerboxTab {
     this.timingSummary.textContent = parts.join(" · ") + note;
   }
 
-  _buildSvg(m) {
-    const W = 1000, L = 150, R = 18, TOP = 10;
-    const rowH = 22, barH = 12, axisH = 26;
-    const plotW = W - L - R;
-    const rows = Math.max(1, m.rows.length);
-    const plotH = rows * rowH;
-    const H = TOP + plotH + axisH;
+  _buildSvg(m, cw) {
+    // Drawn at real pixel size (1 user-unit = 1 CSS px, `cw` = live container
+    // width) so the labels stay legible in the narrow sidebar, rather than being
+    // scaled down with a fixed 1000-wide viewBox. Row labels sit *above* each
+    // bar so the bars get the full panel width.
+    const width = Math.max(200, Math.round(cw) || 240);
+    const PAD_L = 1, PAD_R = 7, TOP = 6;
+    const labelH = 15, barH = 13, rowGap = 9;
+    const stride = labelH + barH + rowGap, axisH = 24;
+    const plotW = width - PAD_L - PAD_R;
+    const n = Math.max(1, m.rows.length);
+    const H = TOP + n * stride + axisH;
 
-    const X = (t) => L + (clamp(t, 0, m.periodUs) / m.periodUs) * plotW;
+    // X-axis limit: cap to the active window unless something spans the whole
+    // frame (a continuous light or an independent pulse train), so short
+    // exposures aren't squished into a sliver at the far left.
+    let activity = 0, spansFrame = false;
+    for (const r of m.rows) {
+      if (r.kind === "trigger") activity = Math.max(activity, r.delayUs + r.pulseUs);
+      else if (r.kind === "led") {
+        if (r.continuous) spansFrame = true;
+        else activity = Math.max(activity, r.delayUs + r.onUs);
+      } else if (r.kind === "pulse") spansFrame = true;
+      else if (r.kind === "exposure" && r.exposureUs != null)
+        activity = Math.max(activity, r.delayUs + r.exposureUs);
+    }
+    if (m.maxCoverage != null) activity = Math.max(activity, m.maxCoverage + (m.guardUs || 0));
+    activity = Math.min(activity || m.periodUs, m.periodUs);
+    let axisMax;
+    if (spansFrame || activity >= m.periodUs * 0.85) {
+      axisMax = m.periodUs;
+    } else {
+      const s = niceNum((activity * 1.12) / 3.5);
+      axisMax = Math.min(m.periodUs, Math.ceil((activity * 1.1) / s) * s);
+    }
+    const truncated = axisMax < m.periodUs * 0.999;
+
+    const X = (t) => PAD_L + (clamp(t, 0, axisMax) / axisMax) * plotW;
     const barW = (a, b) => Math.max(2, X(b) - X(a));
-    const rowY = (i) => TOP + i * rowH + (rowH - barH) / 2;
-    const midY = (i) => TOP + i * rowH + rowH / 2;
-    const label = (i, text, cls = "") =>
-      `<text x="${L - 8}" y="${midY(i)}" class="tb-label ${cls}" text-anchor="end" ` +
-      `dominant-baseline="middle">${esc(text)}</text>`;
-    const tag = (x, i, text, anchor = "start") =>
-      `<text x="${x}" y="${midY(i)}" class="tb-tag" text-anchor="${anchor}" ` +
-      `dominant-baseline="middle">${esc(text)}</text>`;
+    const barY = (i) => TOP + i * stride + labelH;
+    const labelBaseY = (i) => TOP + i * stride + 11;
+    const plotBottom = TOP + n * stride - rowGap + 2;
+    // In-bar annotation, baseline near the bar's bottom (y = barY(i)).
+    const tag = (x, y, text, anchor = "start") =>
+      `<text x="${x}" y="${y + barH - 3}" class="tb-tag" text-anchor="${anchor}">${esc(text)}</text>`;
 
-    const g = [`<rect x="${L}" y="${TOP}" width="${plotW}" height="${plotH}" class="tb-frame"/>`];
+    const g = [];        // background: gridlines, guide, lanes, bars
+    const labels = [];   // drawn last, so each label's halo knocks out any line behind it
+
+    // Vertical time gridlines, dropped near the right end so they can't collide
+    // with the end (period) tick label.
+    const step = niceNum(axisMax / 4);
+    const ticks = [];
+    for (let t = step; t < axisMax * 0.75; t += step) ticks.push(t);
+    for (const t of ticks)
+      g.push(`<line x1="${X(t)}" y1="${barY(0) - 2}" x2="${X(t)}" y2="${plotBottom}" class="tb-grid"/>`);
+
+    // Guide at the longest-exposure end (before the bars, so labels can mask it).
+    if (m.maxCoverage != null && m.maxCoverage < axisMax)
+      g.push(
+        `<line x1="${X(m.maxCoverage)}" y1="${barY(0) - 2}" x2="${X(m.maxCoverage)}" ` +
+        `y2="${plotBottom}" class="tb-guide"/>`
+      );
 
     m.rows.forEach((r, i) => {
-      g.push(label(i, r.label));
+      const y = barY(i);
+      g.push(`<rect x="${PAD_L}" y="${y}" width="${plotW}" height="${barH}" class="tb-lane" rx="2"/>`);
       if (r.kind === "trigger") {
         g.push(
-          `<rect x="${X(r.delayUs)}" y="${rowY(i)}" width="${barW(r.delayUs, r.delayUs + r.pulseUs)}" ` +
-          `height="${barH}" class="tb-trigger"><title>pulse ${fmtDur(r.pulseUs)}` +
+          `<rect x="${X(r.delayUs)}" y="${y}" width="${barW(r.delayUs, r.delayUs + r.pulseUs)}" ` +
+          `height="${barH}" class="tb-trigger" rx="1"><title>pulse ${fmtDur(r.pulseUs)}` +
           `${r.delayUs ? `, delay ${fmtDur(r.delayUs)}` : ""}</title></rect>`
         );
       } else if (r.kind === "led") {
-        if (r.onUs > 0) {
+        if (r.continuous) {
+          g.push(`<rect x="${PAD_L}" y="${y}" width="${plotW}" height="${barH}" class="tb-led" rx="1"/>`);
+          labels.push(tag(X(axisMax) - 4, y, "continuous", "end"));
+        } else if (r.onUs > 0) {
           g.push(
-            `<rect x="${X(r.delayUs)}" y="${rowY(i)}" width="${barW(r.delayUs, r.delayUs + r.onUs)}" ` +
-            `height="${barH}" class="tb-led"><title>on ${fmtDur(r.rawOnUs)}</title></rect>`
+            `<rect x="${X(r.delayUs)}" y="${y}" width="${barW(r.delayUs, r.delayUs + r.onUs)}" ` +
+            `height="${barH}" class="tb-led" rx="1"><title>on ${fmtDur(r.rawOnUs)}</title></rect>`
           );
+          if (r.guardFrom != null && r.delayUs + r.onUs > r.guardFrom)
+            g.push(
+              `<rect x="${X(r.guardFrom)}" y="${y}" width="${barW(r.guardFrom, r.delayUs + r.onUs)}" ` +
+              `height="${barH}" class="tb-guard" rx="1"><title>guard</title></rect>`
+            );
         } else {
-          g.push(tag(X(0), i, "off"));
+          labels.push(tag(PAD_L + 3, y, "off"));
         }
-        if (r.guardFrom != null && r.delayUs + r.onUs > r.guardFrom && !r.continuous) {
-          g.push(
-            `<rect x="${X(r.guardFrom)}" y="${rowY(i)}" width="${barW(r.guardFrom, r.delayUs + r.onUs)}" ` +
-            `height="${barH}" class="tb-guard"><title>guard</title></rect>`
-          );
-        }
-        if (r.continuous) g.push(tag(X(m.periodUs) - 4, i, "continuous", "end"));
       } else if (r.kind === "pulse") {
         if (r.intervalUs > 0) {
           const pw = Math.min(r.pulseUs, r.intervalUs - 1);
           let drawn = 0;
-          for (let t = r.startDelayUs; t < m.periodUs && drawn < 200; t += r.intervalUs, drawn++) {
-            g.push(
-              `<rect x="${X(t)}" y="${rowY(i)}" width="${barW(t, t + pw)}" height="${barH}" class="tb-pulse"/>`
-            );
-          }
-          g.push(tag(X(m.periodUs) - 4, i, `${r.freqHz} Hz · independent`, "end"));
+          for (let t = r.startDelayUs; t < axisMax && drawn < 400; t += r.intervalUs, drawn++)
+            g.push(`<rect x="${X(t)}" y="${y}" width="${barW(t, t + pw)}" height="${barH}" class="tb-pulse"/>`);
+          labels.push(tag(X(axisMax) - 4, y, `${r.freqHz} Hz`, "end"));
         } else {
-          g.push(tag(X(0), i, "invalid frequency"));
+          labels.push(tag(PAD_L + 3, y, "invalid frequency"));
         }
       } else if (r.kind === "exposure") {
         if (r.exposureUs == null) {
-          g.push(tag(X(0), i, "exposure n/a"));
+          labels.push(tag(PAD_L + 3, y, "exposure n/a"));
         } else {
           const gov = r.coverageUs === m.maxCoverage;
           g.push(
-            `<rect x="${X(r.delayUs)}" y="${rowY(i)}" width="${barW(r.delayUs, r.delayUs + r.exposureUs)}" ` +
-            `height="${barH}" class="tb-exposure${gov ? " tb-exposure--gov" : ""}">` +
+            `<rect x="${X(r.delayUs)}" y="${y}" width="${barW(r.delayUs, r.delayUs + r.exposureUs)}" ` +
+            `height="${barH}" class="tb-exposure${gov ? " tb-exposure--gov" : ""}" rx="1">` +
             `<title>${esc(r.label)}: expose ${fmtDur(r.exposureUs)}` +
             `${r.delayUs ? `, trigger delay ${fmtDur(r.delayUs)}` : ""}</title></rect>`
           );
         }
       }
+      labels.push(
+        `<text x="${PAD_L + 1}" y="${labelBaseY(i)}" class="tb-rowlabel">${esc(r.label)}</text>`
+      );
     });
 
-    // Vertical guide at the longest-exposure end.
-    if (m.maxCoverage != null && m.maxCoverage < m.periodUs) {
-      g.push(
-        `<line x1="${X(m.maxCoverage)}" y1="${TOP}" x2="${X(m.maxCoverage)}" y2="${TOP + plotH}" class="tb-guide"/>`
+    // Note that the axis is zoomed in on a longer frame period.
+    if (truncated)
+      labels.push(
+        `<text x="${PAD_L + plotW}" y="${labelBaseY(0)}" class="tb-trunc" ` +
+        `text-anchor="end">${fmtDur(m.periodUs)} frame ⇥</text>`
       );
-    }
 
-    const ay = TOP + plotH + 4;
-    g.push(`<line x1="${L}" y1="${ay}" x2="${W - R}" y2="${ay}" class="tb-axis"/>`);
-    g.push(`<text x="${L}" y="${ay + 14}" class="tb-axis-label" text-anchor="start">0</text>`);
+    const ay = plotBottom + 4;
+    g.push(`<line x1="${PAD_L}" y1="${ay}" x2="${PAD_L + plotW}" y2="${ay}" class="tb-axis"/>`);
+    g.push(`<text x="${PAD_L}" y="${ay + 13}" class="tb-axis-label" text-anchor="start">0</text>`);
+    for (const t of ticks)
+      g.push(`<text x="${X(t)}" y="${ay + 13}" class="tb-axis-label" text-anchor="middle">${fmtTick(t)}</text>`);
     g.push(
-      `<text x="${W - R}" y="${ay + 14}" class="tb-axis-label" text-anchor="end">${fmtDur(m.periodUs)}</text>`
+      `<text x="${PAD_L + plotW}" y="${ay + 13}" class="tb-axis-label" text-anchor="end">${fmtTick(axisMax)}</text>`
     );
 
     return (
-      `<svg viewBox="0 0 ${W} ${H}" class="tb-svg" preserveAspectRatio="xMidYMid meet" ` +
-      `role="img" aria-label="triggerbox frame timing diagram">${g.join("")}</svg>`
+      `<svg viewBox="0 0 ${width} ${H}" width="${width}" height="${H}" class="tb-svg" ` +
+      `role="img" aria-label="triggerbox frame timing diagram">${g.join("")}${labels.join("")}</svg>`
     );
   }
 

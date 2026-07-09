@@ -376,6 +376,12 @@ async function main() {
         break;
       case "camera_features_dirty":
         cameraTab?.applyFeaturesDirty(msg);
+        // Let plugin tabs (e.g. triggerbox's timing diagram) react to a camera
+        // feature change without coupling core to each plugin — the exposure or
+        // trigger delay they read may have just moved.
+        document.dispatchEvent(
+          new CustomEvent("camera-features-changed", { detail: { index: msg.index } })
+        );
         break;
       case "camera_name":
         cameraTab?.applyName(msg);
