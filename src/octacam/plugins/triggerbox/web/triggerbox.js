@@ -51,6 +51,11 @@ export default class TriggerboxTab {
     this.device = status?.device || "";
     this.firmware = status?.firmware || null;
     this.firmwareOk = status?.firmware_ok !== false;
+    this.firmwareState = status?.firmware_state || null;
+    this.needsFlash = Boolean(status?.needs_flash);
+    this.canFlash = false; // learned from /api/triggerbox/firmware
+    this.neededBuild = null;
+    this._flashing = false;
     this.armError = status?.error || null;
     this.arduinoState = status?.arduino_state || "idle";
     this.connected = false;
@@ -66,6 +71,10 @@ export default class TriggerboxTab {
     this.portSelect = document.getElementById("triggerbox-port");
     this.stateValue = document.getElementById("triggerbox-state-value");
     this.firmwareEl = document.getElementById("triggerbox-firmware");
+    this.fwFlash = document.getElementById("triggerbox-fw-flash");
+    this.fwFlashMsg = document.getElementById("triggerbox-fw-flash-msg");
+    this.fwFlashBtn = document.getElementById("triggerbox-fw-flash-btn");
+    this.fwFlashLog = document.getElementById("triggerbox-fw-flash-log");
     this.camerasEl = document.getElementById("triggerbox-cameras");
     this.lightsEl = document.getElementById("triggerbox-lights");
     this.addCameraBtn = document.getElementById("triggerbox-add-camera");
@@ -75,6 +84,7 @@ export default class TriggerboxTab {
     this.armWithRec = document.getElementById("triggerbox-arm-with-recording");
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
+    this.fwFlashBtn?.addEventListener("click", () => this._flash());
     this.addCameraBtn?.addEventListener("click", () => this._addCamera());
     this.timingRefresh?.addEventListener("click", () => this._loadExposures());
     document.addEventListener("tab-shown", (e) => {
@@ -88,6 +98,7 @@ export default class TriggerboxTab {
     this._renderState();
     this._renderFirmware();
     this._loadExposures();
+    this._loadFirmware();
   }
 
   // --------------------------------------------------------- seeding
@@ -153,6 +164,8 @@ export default class TriggerboxTab {
     if (msg.device) this.device = msg.device;
     if ("firmware" in msg) this.firmware = msg.firmware || null;
     if (typeof msg.firmware_ok === "boolean") this.firmwareOk = msg.firmware_ok;
+    if ("firmware_state" in msg) this.firmwareState = msg.firmware_state || null;
+    if ("needs_flash" in msg) this.needsFlash = Boolean(msg.needs_flash);
     if (typeof msg.ready === "boolean") this.ready = msg.ready;
     if ("error" in msg) {
       const next = msg.error || null;
@@ -338,6 +351,7 @@ export default class TriggerboxTab {
     }
     this._applyDisabled();
     if (this.timingRefresh) this.timingRefresh.disabled = !this.connected;
+    this._renderFlashBanner();
   }
 
   _applyDisabled() {
@@ -360,9 +374,107 @@ export default class TriggerboxTab {
   }
 
   _renderFirmware() {
-    if (!this.firmwareEl) return;
-    this.firmwareEl.textContent =
-      this.ready && this.firmware ? `Board firmware: ${this.firmware}` : "";
+    if (this.firmwareEl) {
+      let txt = "";
+      if (this.ready && this.firmware) {
+        txt = `Board firmware: ${this.firmware}`;
+        if (this.firmwareState === "current") txt += " ✓ up to date";
+      }
+      this.firmwareEl.textContent = txt;
+    }
+    this._renderFlashBanner();
+  }
+
+  // A prompt to (re)flash appears whenever the board's firmware doesn't match the
+  // sketch source: out of date, incompatible, or no identity (possibly blank).
+  _renderFlashBanner() {
+    if (!this.fwFlash) return;
+    const show = this.ready && this.needsFlash && this.arduinoState !== "running";
+    this.fwFlash.classList.toggle("hidden", !show);
+    if (!show) return;
+    let msg;
+    if (this.firmwareState === "wrong_version" || this.firmwareState === "wrong_board") {
+      msg = `Board firmware${this.firmware ? ` (${this.firmware})` : ""} is incompatible — ` +
+        `flash the current triggerbox firmware to enable arming.`;
+    } else if (this.firmwareState === "unidentified") {
+      msg = "The board sent no firmware identity — it may be blank. " +
+        "Flash the triggerbox firmware?";
+    } else {
+      msg = `Board firmware is out of date${this.neededBuild ? ` (current build ${this.neededBuild})` : ""}` +
+        ` — flash the current firmware?`;
+    }
+    if (this.fwFlashMsg) this.fwFlashMsg.textContent = msg;
+    if (this.fwFlashBtn) {
+      this.fwFlashBtn.disabled = !this.canFlash || this._flashing;
+      this.fwFlashBtn.textContent = this._flashing ? "Flashing…" : "Flash firmware";
+      this.fwFlashBtn.title = this.canFlash
+        ? "Compile and upload the current triggerbox firmware to the board"
+        : "arduino-cli or the sketch source is unavailable on the server — flash manually";
+    }
+  }
+
+  async _loadFirmware() {
+    let r;
+    try {
+      r = await this.api("GET", "/api/triggerbox/firmware");
+    } catch {
+      return;
+    }
+    if (!r?.ok || !r.data) return;
+    const d = r.data;
+    if ("state" in d) this.firmwareState = d.state || null;
+    this.needsFlash = Boolean(d.needs_flash);
+    this.canFlash = Boolean(d.can_flash);
+    this.neededBuild = d.needed_build ?? null;
+    if ("firmware" in d) this.firmware = d.firmware || null;
+    this._renderFirmware();
+  }
+
+  async _flash() {
+    if (this._flashing || !this.canFlash) return;
+    const ok = window.confirm(
+      "Compile and upload the current triggerbox firmware to the board?\n\n" +
+        "This takes about a minute; the board will reboot. Don't do this during a recording."
+    );
+    if (!ok) return;
+    this._flashing = true;
+    this._renderFlashBanner();
+    if (this.fwFlashMsg)
+      this.fwFlashMsg.textContent = "Flashing… compiling + uploading (~1 min). The board will reboot.";
+    if (this.fwFlashLog) {
+      this.fwFlashLog.classList.remove("hidden");
+      this.fwFlashLog.textContent = "";
+    }
+    let r;
+    try {
+      r = await this.api("POST", "/api/triggerbox/flash", {});
+    } catch {
+      this._flashing = false;
+      this.notify("error", "Flash failed: server unreachable");
+      this._renderFlashBanner();
+      return;
+    }
+    this._flashing = false;
+    if (!r.ok) {
+      this.notify("error", r.data?.detail || `Flash failed (HTTP ${r.status})`);
+      this._renderFlashBanner();
+      return;
+    }
+    const d = r.data || {};
+    if (this.fwFlashLog && d.log) this.fwFlashLog.textContent = d.log;
+    if ("firmware" in d) this.firmware = d.firmware || null;
+    if (typeof d.firmware_ok === "boolean") this.firmwareOk = d.firmware_ok;
+    if (typeof d.ready === "boolean") this.ready = d.ready;
+    const prov = d.provisioning || {};
+    if ("state" in prov) this.firmwareState = prov.state || null;
+    this.needsFlash = Boolean(prov.needs_flash);
+    if ("can_flash" in prov) this.canFlash = Boolean(prov.can_flash);
+    if ("needed_build" in prov) this.neededBuild = prov.needed_build ?? this.neededBuild;
+    this.notify(d.ok ? "info" : "error", d.message || (d.ok ? "Firmware flashed." : "Flash failed."));
+    this._renderFirmware();
+    this._refresh();
+    this._renderState();
+    this._loadPorts();
   }
 
   // --------------------------------------------------- exposures + timing
@@ -593,6 +705,8 @@ export default class TriggerboxTab {
     this.firmware = r.data?.firmware || null;
     this.armError = null; // a fresh (re)connect clears any stale arm failure
     if (typeof r.data?.firmware_ok === "boolean") this.firmwareOk = r.data.firmware_ok;
+    if ("firmware_state" in (r.data || {})) this.firmwareState = r.data.firmware_state || null;
+    if ("needs_flash" in (r.data || {})) this.needsFlash = Boolean(r.data.needs_flash);
     if (r.data?.arduino_state) {
       this.arduinoState = r.data.arduino_state;
       this._renderState();
@@ -600,6 +714,7 @@ export default class TriggerboxTab {
     this._renderFirmware();
     this._refresh();
     this._loadPorts();
+    this._loadFirmware();
     if (this.ready && this.firmwareOk) {
       this.notify("info", `Serial port ${this.device} connected.`);
     } else if (this.ready && !this.firmwareOk) {

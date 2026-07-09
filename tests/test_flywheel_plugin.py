@@ -41,6 +41,10 @@ class FakeLink:
     def close(self) -> None:
         self._open = False
 
+    def identify(self, banner_prefix, timeout=0.5):
+        # Tests set `link.banner` to control the classified firmware state.
+        return getattr(self, "banner", None)
+
     def snapshot(self) -> list[bytes]:
         with self._lock:
             return list(self.written)
@@ -353,3 +357,104 @@ def test_serial_command_endpoint_422_on_bad_payload():
     plugin._link = FakeLink(is_open=True)
     response = _client(plugin).post("/api/serial/command", json={"n_steps": 1})
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Firmware provisioning: identity (sentinel), classification, flash, endpoints
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+import octacam.firmware as fw_mod  # noqa: E402
+from octacam.plugins.flywheel import _IDENTIFY_MARKER, _build  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_flash(monkeypatch):
+    """Never shell out to arduino-cli or poll a real /dev node; deterministic can_flash."""
+    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
+    monkeypatch.setattr("octacam.serial_ports.wait_for_device", lambda device, timeout=3.0: True)
+
+    def _fake_flash(spec, port, needed_build, **kwargs):
+        return fw_mod.FlashResult(
+            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
+            build=needed_build,
+        )
+
+    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
+
+
+def _plugin_with_fake(is_open=True):
+    plugin = FlywheelPlugin()
+    link = FakeLink(is_open=is_open)
+    plugin._link = link
+    return plugin, link
+
+
+def _verify_with_banner(plugin, link, banner):
+    link.banner = banner
+    plugin._verify_identity()
+
+
+def test_identify_sentinel_is_a_harmless_release_command():
+    # The identify query is n_steps=0 (release) + the marker in step_interval_us,
+    # so old firmware just releases the coils. It must NOT decode as motion.
+    sentinel = Command(n_steps=0, step_interval_us=_IDENTIFY_MARKER)
+    assert sentinel.n_steps == 0  # old firmware -> release_motor(), no move
+    assert len(sentinel.to_bytes()) == 8  # unchanged 8-byte wire format
+
+
+def test_identify_current_and_outdated():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, f"FLYWHEEL 1 {plugin._fw.needed_build}")
+    assert plugin._firmware_ok
+    assert plugin.firmware_provisioning()["state"] == "current"
+
+    _verify_with_banner(plugin, link, "FLYWHEEL 1")
+    assert plugin._firmware_ok  # command protocol unchanged -> still drivable
+    assert plugin.firmware_provisioning()["state"] == "outdated"
+
+
+def test_identify_unidentified_still_drives():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, None)  # old firmware: no reply
+    assert plugin._firmware_ok
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "unidentified"
+    assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
+
+
+def test_flash_firmware_success():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, None)  # out of date / unidentified
+    link.banner = f"FLYWHEEL 1 {plugin._fw.needed_build}"
+    result = plugin.flash_firmware()
+    assert result.ok
+    assert plugin.firmware_provisioning()["needs_flash"] is False
+
+
+def test_flash_refused_while_jogging():
+    plugin, link = _plugin_with_fake()
+    plugin._jog_owner = 123  # a jog is active
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert "jogging" in result.message
+
+
+def test_firmware_and_flash_endpoints():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "FLYWHEEL 1")
+    client = _client(plugin)
+    body = client.get("/api/flywheel/firmware").json()
+    assert body["state"] == "outdated" and body["needs_flash"] is True
+
+    link.banner = f"FLYWHEEL 1 {plugin._fw.needed_build}"
+    flashed = client.post("/api/flywheel/flash", json={}).json()
+    assert flashed["ok"] is True
+    assert flashed["provisioning"]["needs_flash"] is False
+
+
+def test_build_reads_fqbn_and_auto_flash():
+    p = _build({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
+    assert p._auto_flash is True
+    assert p._fw.spec.fqbn == "arduino:avr:nano"

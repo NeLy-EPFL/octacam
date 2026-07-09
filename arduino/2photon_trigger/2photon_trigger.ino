@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "fw_build_info.h"  // TWOPHOTON_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
 //  Camera trigger generator — 2-photon rig variant
@@ -17,6 +18,12 @@
 //    'A' (0x41) — armed, waiting for ThorSync rising edge
 //    'T' (0x54) — triggered, capture running
 //    'D' (0x44) — done, capture complete, back to IDLE
+//
+//  Identify (1 byte): [0x3F] '?'  -> replies "2PHOTON 1 <build>\n"
+//    The banner starts with '2' (never a status byte), so the host can tell it
+//    apart from the bare 'A'/'T'/'D' status bytes. <build> is a short hash of the
+//    sketch source (fw_build_info.h) so octacam knows whether this exact firmware
+//    is running and can offer to (re)flash it.
 //
 //  State machine:
 //    IDLE  ---(arm packet)---> ARMED
@@ -38,8 +45,10 @@ constexpr uint8_t kStatusLed    = LED_BUILTIN;
 // ---- Serial protocol constants ---------------------------------------------
 constexpr uint8_t  kArmMagic       = 0xA5;
 constexpr uint8_t  kCancelMagic    = 0xCA;
+constexpr uint8_t  kIdentifyMagic  = 0x3F;  // '?'  -> identity banner
 constexpr uint8_t  kArmPayloadSize = 6;   // uint16 fps + uint32 duration_ms
 constexpr uint32_t kPayloadWaitMs  = 10;  // max wait for payload bytes after magic
+constexpr char     kVersion[]      = "2PHOTON 1";
 
 // ---- State machine ---------------------------------------------------------
 enum class State : uint8_t { IDLE, ARMED, RUNNING };
@@ -190,6 +199,12 @@ void loop() {
       if (g_state != State::IDLE) {
         enter_idle();
       }
+    } else if (b == kIdentifyMagic) {
+      Serial.read();  // consume '?'
+      Serial.print(kVersion);
+      Serial.write(' ');
+      Serial.print(TWOPHOTON_FW_BUILD);
+      Serial.write('\n');
     } else if (b == kArmMagic) {
       Serial.read();  // consume magic
       uint16_t fps;

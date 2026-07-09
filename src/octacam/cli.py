@@ -1169,8 +1169,36 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
                 )
 
 
+def _firmware_spec_for(name: str):
+    """``(spec, needed_build)`` for a serial plugin whose board carries a firmware
+    fingerprint, or ``(None, None)`` for an unknown/source-less plugin."""
+    from octacam import firmware as fw
+
+    if name == "triggerbox":
+        from octacam.plugins.triggerbox import _firmware_spec
+
+        spec = _firmware_spec()
+    elif name == "twophoton":
+        from octacam.plugins.twophoton import _firmware_spec
+
+        spec = _firmware_spec()
+    elif name == "flywheel":
+        from octacam.plugins.flywheel import _DEFAULT_FQBN, _firmware_spec
+
+        spec = _firmware_spec(_DEFAULT_FQBN)  # fqbn is irrelevant to classification
+    else:
+        return None, None
+    if spec is None:
+        return None, None
+    try:
+        return spec, fw.sketch_fingerprint(spec.sketch_dir)
+    except Exception:
+        return spec, None
+
+
 def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
     """Read each microcontroller port's firmware identity (opt-in, invasive)."""
+    from octacam import firmware as fw
     from octacam import plugins as plugins_mod
     from octacam import serial_ports as sp
 
@@ -1200,10 +1228,25 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
                 "or its firmware has no identify command)",
             )
         exp = expected.get(os.path.realpath(p.device))
-        if exp and ident.banner and not ident.banner.upper().startswith(exp[1]):
+        if not exp:
+            continue
+        name = exp[0]
+        spec, needed = _firmware_spec_for(name)
+        if spec is not None and needed is not None:
+            check = fw.classify(spec, ident.banner, needed)
+            if check.state is fw.FirmwareState.CURRENT:
+                report.add("ok", f"{p.device}: {name} firmware up to date (build {needed})")
+            elif check.needs_flash and check.state is not fw.FirmwareState.UNIDENTIFIED:
+                # UNIDENTIFIED is already covered by the "no identity reply" line above.
+                report.add(
+                    "warn",
+                    f"{p.device}: {name} firmware needs flashing — {check.detail}; "
+                    "run `octacam flash`",
+                )
+        elif ident.banner and not ident.banner.upper().startswith(exp[1]):
             report.add(
                 "warn",
-                f"{p.device}: expected {exp[0]} firmware (banner {exp[1]!r}) but "
+                f"{p.device}: expected {name} firmware (banner {exp[1]!r}) but "
                 f"got {ident.banner!r} — wrong board?",
             )
 
@@ -1892,6 +1935,15 @@ def record(
             "relative_directory from config.",
         ),
     ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Don't prompt: if a serial plugin's board firmware is out of "
+            "date, reflash it before recording (also lets a headless run flash).",
+        ),
+    ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
 ) -> None:
@@ -1957,6 +2009,13 @@ def record(
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
     plugins.setup_all()
 
+    # If a serial plugin's board is running stale/wrong firmware, offer to reflash
+    # it before we start (interactive prompt) — or, headless, warn unless opted in
+    # via --yes / auto_flash. Without this an external-triggered rig would silently
+    # record against the wrong firmware (or, for a wrong protocol version, get no
+    # triggers at all).
+    _preflight_firmware(plugins, assume_yes=yes)
+
     # Tag this headless run in the session cache so `octacam process --last`
     # and `--last session` pick it up too (a one-off, single-folder "session").
     controller = RecordingController(
@@ -2000,6 +2059,267 @@ def record(
     extension = settings.video_format().extension
     for camera in system:
         typer.echo(f"{Path(settings.save_dir) / camera.name}.{extension}")
+
+
+# ---------------------------------------------------------------------------
+# `octacam flash` — check & upload a serial plugin's Arduino firmware
+#
+# Serial plugins whose board needs a specific sketch (today: triggerbox) expose
+# firmware_provisioning()/flash_firmware(). This command opens the board, compares
+# its build fingerprint to the sketch source, and (unless --check) offers to
+# compile + upload the current firmware with arduino-cli. `octacam record` runs the
+# same check at start; `octacam doctor --probe-serial` reports it read-only.
+# ---------------------------------------------------------------------------
+
+
+def _load_config_or_empty(config_dir: Path | None):
+    """Load a rig config if present, else an empty stand-in (``.plugins == []``)."""
+    from types import SimpleNamespace
+
+    if config_dir is None:
+        return SimpleNamespace(plugins=[])
+    try:
+        from octacam.config import load_config_dir
+
+        return load_config_dir(config_dir)
+    except Exception as e:
+        log.debug("flash: could not load config at %s: %s", config_dir, e)
+        return SimpleNamespace(plugins=[])
+
+
+def _flashable_plugins(plugins, only: str | None):
+    """The plugins that support firmware provisioning, optionally filtered to one."""
+    from octacam import plugins as plugins_mod
+
+    out = [
+        p
+        for p in getattr(plugins, "plugins", [])
+        if hasattr(p, "flash_firmware") and hasattr(p, "firmware_provisioning")
+    ]
+    if only:
+        # build_plugins resolves legacy aliases (e.g. omniview->triggerbox), so
+        # match on the canonical name the requested name resolves to.
+        canonical = plugins_mod._ALIASES.get(only, only)
+        out = [p for p in out if p.name == canonical]
+    return out
+
+
+def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: bool) -> int:
+    """Report one board's firmware and, unless --check, offer to flash it.
+
+    Returns 0 when up to date or freshly flashed, 1 otherwise (out of date and
+    not flashed)."""
+    from rich.prompt import Confirm
+
+    device = prov.get("device")
+    console.print()
+    console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
+    # An un-openable board (unplugged, wrong path, or port held by a running
+    # session) can't be probed — never report that as "up to date".
+    if not getattr(plugin, "is_ready", lambda: True)():
+        console.print(
+            "  [red]could not open the board[/red] — it may be unplugged, the "
+            "device path may be wrong, or the port may be held by a running octacam "
+            "session. Its firmware can't be read or flashed here."
+        )
+        return 1
+    console.print(f"  board firmware: {prov.get('firmware') or '(no identity reply)'}")
+    console.print(f"  source build:   {prov.get('needed_build') or '(source not found)'}")
+    if not prov.get("needs_flash"):
+        console.print("  [green]✓ up to date[/green]")
+        return 0
+    console.print(f"  [yellow]needs flashing[/yellow] — {prov.get('detail', '')}")
+    if check_only:
+        return 1
+    if not prov.get("can_flash"):
+        if not prov.get("sketch_found"):
+            console.print(
+                "  [red]Can't auto-flash:[/red] the sketch source wasn't found (a "
+                "wheel install without a checkout). Flash manually with arduino-cli, "
+                "or set OCTACAM_ARDUINO_DIR."
+            )
+        elif not prov.get("cli_available"):
+            console.print(
+                "  [red]Can't auto-flash:[/red] arduino-cli was not found. Install it "
+                "(https://arduino.github.io/arduino-cli/) or set OCTACAM_ARDUINO_CLI."
+            )
+        else:
+            console.print("  [red]Can't auto-flash on this host.[/red]")
+        return 1
+    if prov.get("state") == "unidentified":
+        console.print(
+            "  [yellow]⚠ the board sent no identity[/yellow] — flashing overwrites "
+            "whatever is on it; only proceed if this is the right board."
+        )
+    if not assume_yes and not Confirm.ask(
+        f"  Upload the current firmware to {device}?", default=False, console=console
+    ):
+        console.print("  skipped — the board keeps its current firmware.")
+        return 1
+    console.print("  Flashing (compile + upload, ~1 min; the board reboots at the end)…")
+    result = plugin.flash_firmware(on_line=lambda ln: console.print(f"    [dim]{ln}[/dim]"))
+    if result.ok:
+        console.print(f"  [green]✓ {result.message}[/green]")
+        return 0
+    console.print(f"  [red]✗ {result.message}[/red]")
+    return 1
+
+
+def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
+    """At record start, offer to reflash a serial plugin's stale board.
+
+    Interactive (a TTY): prompt per out-of-date board. Headless: warn only —
+    unless ``--yes`` or the plugin's ``auto_flash`` is set AND the board is
+    unambiguously *this* board running an old build (a blank/foreign board is
+    never auto-flashed; the operator must confirm with ``octacam flash``)."""
+    interactive = sys.stdin.isatty()
+    console = None
+    for p in getattr(plugins, "plugins", []):
+        if not (hasattr(p, "firmware_provisioning") and hasattr(p, "flash_firmware")):
+            continue
+        try:
+            prov = p.firmware_provisioning()
+        except Exception:
+            log.debug("firmware preflight: %s provisioning failed", getattr(p, "name", "?"),
+                      exc_info=True)
+            continue
+        if not prov.get("needs_flash"):
+            continue
+        device = prov.get("device")
+        can = bool(prov.get("can_flash"))
+        safe = bool(prov.get("safe_to_auto_flash"))
+        auto = bool(getattr(p, "_auto_flash", False))
+        msg = f"{p.name}: board firmware on {device} is out of date — {prov.get('detail', '')}"
+        do_flash = False
+        if interactive and can:
+            from rich.console import Console
+            from rich.prompt import Confirm
+
+            console = console or Console(stderr=True)
+            console.print(f"[yellow]{msg}[/yellow]")
+            if prov.get("state") == "unidentified":
+                console.print(
+                    "[yellow]  no identity — flashing overwrites whatever is on the "
+                    "board[/yellow]"
+                )
+            do_flash = Confirm.ask(
+                f"Upload the current firmware to {device} now?", default=False, console=console
+            )
+        elif (assume_yes or auto) and can and safe:
+            do_flash = True
+        else:
+            hint = (
+                "run `octacam flash`"
+                if not can or not safe
+                else "pass --yes or set auto_flash=true"
+            )
+            log.warning("%s; %s to reflash. Continuing WITHOUT reflashing.", msg, hint)
+        if do_flash:
+            log.info("%s: flashing current firmware…", p.name)
+            result = p.flash_firmware(on_line=lambda ln: log.info("  arduino-cli: %s", ln))
+            log.log(logging.INFO if result.ok else logging.ERROR, "%s: %s", p.name, result.message)
+
+
+@app.command()
+def flash(
+    config_dir: Annotated[
+        Path | None,
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Rig config dir whose serial plugins to check. Optional if --plugin "
+            "is given.",
+        ),
+    ] = None,
+    plugin: Annotated[
+        str | None,
+        typer.Option(
+            "--plugin",
+            help="Serial plugin whose firmware to manage (e.g. triggerbox); enables "
+            "it even if not in the config.",
+        ),
+    ] = None,
+    device: Annotated[
+        str | None,
+        typer.Option("--device", help="Serial device override (e.g. /dev/ttyACM0 or auto)."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Flash without prompting when out of date."),
+    ] = False,
+    check_only: Annotated[
+        bool,
+        typer.Option(
+            "--check",
+            help="Report only; exit nonzero if any board is out of date. Never flashes.",
+        ),
+    ] = False,
+) -> None:
+    """Check a serial plugin's board firmware and upload the current sketch if needed.
+
+    Reads the board's identify banner, compares its build fingerprint to the sketch
+    source in ``arduino/<name>``, and (unless ``--check``) compiles + uploads the
+    current firmware with arduino-cli. Exits 0 when every board is up to date (or
+    was flashed), nonzero if any remains out of date.
+    """
+    from rich.console import Console
+
+    from octacam.plugins import build_plugins
+
+    console = Console()
+    config = _load_config_or_empty(config_dir)
+    if config_dir is None and not plugin and not getattr(config, "plugins", []):
+        raise typer.BadParameter(
+            "give a rig CONFIG_DIR or --plugin <name>", param_hint="--plugin"
+        )
+
+    # Flashing resets the board, so refuse to flash a rig another octacam owns
+    # (its board may be armed mid-recording). Same per-config lock the GUI takes.
+    instance_lock = None
+    if config_dir is not None:
+        instance_lock = _acquire_instance_lock(config_dir)
+        if instance_lock is None:
+            holder = _instance_lock_holder(config_dir.resolve())
+            who = f" (pid {holder})" if holder else ""
+            console.print(
+                f"[red]Another octacam instance owns this rig{who}[/red] — its board "
+                "may be armed. Stop it before flashing."
+            )
+            raise typer.Exit(2)
+
+    try:
+        plugins = build_plugins(config, [plugin] if plugin else None)
+        flashable = _flashable_plugins(plugins, plugin)
+        if not flashable:
+            which = f" {plugin!r}" if plugin else ""
+            console.print(
+                f"[yellow]No firmware-flashable serial plugin{which} is enabled.[/yellow] "
+                "triggerbox, twophoton, and flywheel support firmware flashing."
+            )
+            raise typer.Exit(1 if plugin else 0)
+
+        exit_code = 0
+        for p in flashable:
+            if device and hasattr(p, "_configured_device"):
+                p._configured_device = device
+            try:
+                p.setup()  # open the link + read the identity banner
+            except Exception as e:
+                console.print(f"[yellow]{p.name}: could not open the board: {e}[/yellow]")
+            try:
+                prov = p.firmware_provisioning()
+                if _flash_one(console, p, prov, assume_yes=yes, check_only=check_only) != 0:
+                    exit_code = 1
+            finally:
+                try:
+                    p.teardown()
+                except Exception:
+                    pass
+        raise typer.Exit(exit_code)
+    finally:
+        if instance_lock is not None and instance_lock is not _LOCK_UNAVAILABLE:
+            instance_lock.close()
 
 
 # ---------------------------------------------------------------------------

@@ -307,6 +307,37 @@ body {
 /* Let the message take the row and push the port picker + Reconnect right. */
 .plugin-status > span:first-child { flex: 1; }
 .serial-port-row { flex: none; display: flex; align-items: center; gap: 4px; }
+
+/* Firmware "out of date — Flash firmware" banner, shared by serial-plugin tabs
+   (js/firmware-flash.js). Amber = attention, distinct from the red link-error
+   .plugin-status above. */
+.fw-flash {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  font-size: 12.5px;
+}
+.fw-flash > span { flex: 1; color: var(--text); }
+.fw-flash .btn { white-space: nowrap; }
+.fw-log {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .serial-port-select { max-width: 220px; }
 
 .hint {

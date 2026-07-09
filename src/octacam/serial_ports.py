@@ -47,11 +47,15 @@ _NO_PYSERIAL_MSG = (
 )
 
 # The bundled plugins that talk to a serial/Arduino device, and the firmware
-# banner each expects from an identify probe (used to flag a wrong board). Only
-# triggerbox firmware answers an identify today; twophoton/flywheel have no such
-# command, so they are absent from EXPECTED_BANNER.
+# banner each expects from an identify probe (used to flag a wrong board and, in
+# `octacam doctor`, an out-of-date firmware). triggerbox and twophoton answer the
+# `?` identify byte with a "<NAME> <ver> <build>" banner. flywheel's firmware also
+# reports a banner, but only to an 8-byte sentinel command (its protocol is
+# frameless), so the passive `?` probe won't elicit it — `octacam flash` reads it
+# through the plugin instead; flywheel is kept here only for the wrong-board
+# cross-check.
 SERIAL_PLUGINS = frozenset({"triggerbox", "twophoton", "flywheel"})
-EXPECTED_BANNER = {"triggerbox": "TRIGGERBOX"}
+EXPECTED_BANNER = {"triggerbox": "TRIGGERBOX", "twophoton": "2PHOTON", "flywheel": "FLYWHEEL"}
 
 # --- USB VID/PID classification --------------------------------------------
 # Names are driven primarily by VID, refined by PID. PIDs for the same board

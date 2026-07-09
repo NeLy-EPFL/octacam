@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "esp_timer.h"
+#include "fw_build_info.h"  // TRIGGERBOX_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
 //  triggerbox — configurable camera-trigger + light controller (protocol v2)
@@ -45,7 +46,7 @@
 //              --- end payload ---
 //              [checksum : u8]                            XOR over version+len+payload
 //    Cancel:   [0xCA]
-//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 2\n"
+//    Identify: [0x3F] '?'   -> replies "TRIGGERBOX 2 <build>\n" (build = source hash)
 //
 //    light mode fields:
 //      0 off        : hold LOW
@@ -62,7 +63,7 @@
 //                          v version   c checksum   o oversize/count
 //                          l length    f fps        p bad pin id
 //                          r reserved pin            d duplicate pin   m bad mode
-//    "TRIGGERBOX 2\n"    reply to an identify request
+//    "TRIGGERBOX 2 <build>\n" reply to identify (build = short source hash)
 // =============================================================================
 
 // ---- Canonical pin-label table (SINGLE SOURCE OF TRUTH) --------------------
@@ -398,7 +399,12 @@ void loop() {
     } else if (b == kCancelMagic) {
       enter_idle('C');
     } else if (b == kIdentifyMagic) {
+      // "TRIGGERBOX <ver> <build>\n" — the build tag is a short hash of the
+      // sketch source, so the host can tell whether this exact firmware is
+      // running (see fw_build_info.h).
       Serial.print(kVersion);
+      Serial.write(' ');
+      Serial.print(TRIGGERBOX_FW_BUILD);
       Serial.write('\n');
     } else if (b == kArmMagic) {
       g_rx = Rx::COLLECT;

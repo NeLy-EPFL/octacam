@@ -106,7 +106,8 @@ Light **mode** fields:
 | 2    | continuous  | —             | —            | —                | — (on for whole run)   |
 | 3    | pulse_train | pulse_us      | interval_us  | start_delay_us   | train_us (0 = forever) |
 
-**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 2\n`.
+**Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 2 <build>\n`,
+where `<build>` is a short hash of the sketch source (see *Firmware fingerprint* below).
 
 A valid new arm re-arms from any state (restarts a run in progress). `duration_ms`
 is the master gate — a pulse-train longer than the run is truncated at the end.
@@ -119,11 +120,28 @@ is the master gate — a pulse-train longer than the run is truncated at the end
 | `D`              | done — requested duration elapsed, back to idle                |
 | `C`              | cancelled — cancel received (or a valid re-arm superseded)     |
 | `E<c>`           | rejected — arm refused; `<c>`: `v`ersion `c`hecksum `o`versize `l`ength `f`ps `p`in `r`eserved `d`uplicate `m`ode |
-| `TRIGGERBOX 2`   | reply to an identify request                                   |
+| `TRIGGERBOX 2 <build>` | reply to an identify request (`<build>` = source hash) |
 
 ## Flashing the firmware
 
-Requires the **Arduino ESP32** core (board: *Arduino Nano ESP32*).
+**Let octacam do it (recommended).** octacam knows the fingerprint of the sketch
+in this folder and, whenever the board is out of date (or blank, or running a
+predecessor like `omniview`), offers to compile + upload it for you — from the
+GUI's **Flash firmware** button, the CLI, or a prompt when `octacam record`
+starts:
+
+```bash
+octacam flash --plugin triggerbox --device /dev/ttyACM0   # prompts, then flashes
+octacam flash rig_config/ --check                         # report only (CI-friendly)
+octacam flash rig_config/ --yes                           # flash without prompting
+```
+
+Headless `octacam record` only warns unless you pass `--yes` or set
+`auto_flash = true` under `[plugins.options]`. octacam uses `arduino-cli` under
+the hood (found on `PATH` or via `OCTACAM_ARDUINO_CLI`); the sketch is located
+relative to the repo, or via `OCTACAM_ARDUINO_DIR`.
+
+**By hand.** Requires the **Arduino ESP32** core (board: *Arduino Nano ESP32*).
 
 ```bash
 arduino-cli core install arduino:esp32
@@ -133,6 +151,17 @@ arduino-cli upload  -b arduino:esp32:nano_nora -p /dev/ttyACM0 arduino/triggerbo
 
 DFU upload may need a udev rule granting write access to the Nano ESP32 (VID
 `2341`, PID `303a`), e.g. `MODE=0666` in `/etc/udev/rules.d/`.
+
+### Firmware fingerprint
+
+The identify banner ends with a short hash of the sketch source
+(`fw_build_info.h` → `TRIGGERBOX_FW_BUILD`), so octacam can tell whether the
+*exact* current firmware is running. The committed value is a placeholder
+(`UNBAKED`); octacam bakes the real hash into a throwaway copy of the sketch at
+flash time (the repo tree is never modified). A board flashed **by hand** reports
+`UNBAKED`, which octacam treats as "not the managed build" and offers to reflash —
+harmless, but let octacam flash it once to sync the fingerprint. Editing the
+sketch changes the hash, so octacam will notice the drift and offer to reflash.
 
 ## Bench-testing without octacam
 

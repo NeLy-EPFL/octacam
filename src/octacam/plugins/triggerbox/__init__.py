@@ -19,6 +19,7 @@ inline-table arrays::
     [plugins.options]
     device = "auto"            # udev symlink, /dev/ttyACM0, COM3, or "auto"
     baud = 115200
+    auto_flash = false         # headless: reflash a stale board without prompting
     strobe_guard_us = 100      # guard band added to the longest exposure (auto duty)
     cameras = [ { pin = "D13", pulse_us = 500 } ]
     lights = [
@@ -40,6 +41,14 @@ start delay, train duration) decoupled from the frame rate.
 
 Enable at launch with ``--plugin triggerbox``. pyserial ships with octacam. The
 cameras must be in external hardware trigger (``trigger_source = "external"``).
+
+**Firmware provisioning.** The board's identify banner carries a short hash of the
+sketch source (``TRIGGERBOX 2 <build>``); octacam recomputes it from
+``arduino/triggerbox`` and, when the board is out of date (or blank, or running a
+predecessor), offers to compile + upload the current firmware with ``arduino-cli``
+— from the GUI's *Flash firmware* button, the ``octacam flash`` command, or a
+prompt at ``octacam record`` start. Headless runs only warn unless ``--yes`` /
+``auto_flash = true``. See :mod:`octacam.firmware`.
 
 Wire protocol v2 (host → Arduino, little-endian):
   [0xA5][version u8=2][payload_len u16][payload][checksum u8]  — arm
@@ -70,6 +79,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from octacam.controller import RecordingController
 
+from octacam import firmware as fw
 from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
@@ -149,7 +159,32 @@ _REJECT_REASONS = {
 }
 
 # Firmware identity banner prefix (kVersion = "TRIGGERBOX <n>" in the .ino).
+# The full banner is "TRIGGERBOX <version> <build>" where <build> is a short hash
+# of the sketch source — see octacam.firmware and arduino/triggerbox/fw_build_info.h.
 _EXPECTED_BANNER = "TRIGGERBOX"
+# arduino-cli fully-qualified board name for the Nano ESP32 (used to (re)flash).
+_FQBN = "arduino:esp32:nano_nora"
+# Known predecessor firmware names that are safe to auto-upgrade to triggerbox.
+_LEGACY_BANNERS = ("OMNIVIEW",)
+
+
+def _firmware_spec() -> fw.FirmwareSpec | None:
+    """Describe the triggerbox firmware for :mod:`octacam.firmware`, or None when
+    the sketch source can't be located (a wheel install without a checkout) — in
+    which case firmware detection still works from the banner, but auto-flash is
+    unavailable."""
+    sketch = fw.resolve_sketch_dir("triggerbox")
+    if sketch is None:
+        return None
+    return fw.FirmwareSpec(
+        name="triggerbox",
+        sketch_dir=sketch,
+        fqbn=_FQBN,
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="TRIGGERBOX_FW_BUILD",
+        legacy_prefixes=_LEGACY_BANNERS,
+    )
 
 
 def _u16(v) -> int:
@@ -177,19 +212,6 @@ def _coerce_float(value, default: float) -> float:
 def pin_id(label: str) -> int:
     """Index of a pin label in PIN_LABELS. Raises ValueError if unknown."""
     return PIN_LABELS.index(str(label).upper())
-
-
-def _parse_banner_version(banner: str | None) -> int | None:
-    """Protocol version from a ``"TRIGGERBOX <n>"`` banner, or None."""
-    if not banner:
-        return None
-    parts = banner.split()
-    if len(parts) < 2:
-        return None
-    try:
-        return int(parts[-1])
-    except ValueError:
-        return None
 
 
 # ============================================================================
@@ -612,6 +634,7 @@ def _build(options: dict) -> TriggerboxPlugin:
     return TriggerboxPlugin(
         device=str(options.get("device") or DEFAULT_DEVICE),
         baud=_opt_int("baud", DEFAULT_BAUD),
+        auto_flash=_opt_bool("auto_flash", default=False),
         default_fps=_opt_int("default_fps", DEFAULT_FPS),
         default_duration_ms=_opt_int("default_duration_ms", DEFAULT_DURATION_MS),
         default_duty_percent=default_duty_percent,
@@ -637,6 +660,7 @@ class TriggerboxPlugin(Plugin):
         self,
         device: str = DEFAULT_DEVICE,
         baud: int = DEFAULT_BAUD,
+        auto_flash: bool = False,
         default_fps: int = DEFAULT_FPS,
         default_duration_ms: int = DEFAULT_DURATION_MS,
         default_duty_percent: float = DEFAULT_DUTY_PERCENT,
@@ -651,6 +675,8 @@ class TriggerboxPlugin(Plugin):
         self.baud = baud
         self._firmware: str | None = None
         self._firmware_ok = True
+        # Opt-in: let a headless `octacam record` auto-flash a stale board.
+        self._auto_flash = bool(auto_flash)
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
         self._default_duty_percent = default_duty_percent
@@ -664,6 +690,17 @@ class TriggerboxPlugin(Plugin):
             self._on_arduino_status,
             on_broken=self._on_link_broken,
             on_reject=self._on_arduino_reject,
+        )
+        # Firmware detection + flash lifecycle (shared with the other serial
+        # plugins). Owns the port lock; _open/reconnect take it too so a flash and
+        # a (re)open can never fight over the port. See octacam.firmware.
+        self._fw = fw.FirmwareProvisioner(
+            _firmware_spec(),
+            resolve_device=lambda: serial_ports.resolve_device(self._configured_device, self.baud),
+            reopen=lambda: self._open(allow_recovery=False),
+            close_link=lambda: self._link.close(),  # late-bound: link may be replaced
+            wait_for_device=serial_ports.wait_for_device,
+            is_busy=self._fw_is_busy,
         )
         self._arduino_state = "idle"
         self._armed_event = threading.Event()
@@ -680,6 +717,47 @@ class TriggerboxPlugin(Plugin):
     def set_controller(self, controller: RecordingController) -> None:
         """Inject the recording controller so auto-duty can read live exposures."""
         self._controller = controller
+
+    # -------------------------------------------------- firmware provisioning glue
+
+    # Thin forwarders so callers/tests can read the provisioner's state on the
+    # plugin (the provisioner is the single source of truth).
+    @property
+    def _fw_spec(self):
+        return self._fw.spec
+
+    @_fw_spec.setter
+    def _fw_spec(self, value):
+        self._fw.spec = value
+
+    @property
+    def _fw_needed_build(self):
+        return self._fw.needed_build
+
+    @_fw_needed_build.setter
+    def _fw_needed_build(self, value):
+        self._fw.needed_build = value
+
+    @property
+    def _fw_check(self):
+        return self._fw.check
+
+    @_fw_check.setter
+    def _fw_check(self, value):
+        self._fw.check = value
+
+    def _fw_is_busy(self) -> tuple[bool, str]:
+        """Refuse to flash while a recording is live or the board is armed.
+
+        Prefers the controller's authoritative recording state (which flips before
+        the board's 'R' ack, closing the arm/flash race); falls back to the last-
+        seen board state."""
+        controller = self._controller
+        if controller is not None and getattr(controller, "recording_active", False):
+            return True, "refusing to flash while a recording is active — stop it first"
+        if self._arduino_state == "running":
+            return True, "refusing to flash while the board is armed/running — stop the recording first"
+        return False, ""
 
     # -------------------------------------------------- camera exposure timings
 
@@ -816,6 +894,7 @@ class TriggerboxPlugin(Plugin):
 
     def _broadcast_state(self) -> None:
         if self._broadcast is not None:
+            check = self._fw_check
             self._broadcast(
                 "triggerbox_state",
                 {
@@ -824,6 +903,8 @@ class TriggerboxPlugin(Plugin):
                     "ready": self._link.is_open,
                     "firmware": self._firmware,
                     "firmware_ok": self._firmware_ok,
+                    "firmware_state": check.state.value if check else None,
+                    "needs_flash": bool(check and check.needs_flash),
                     "error": self._last_error,
                 },
             )
@@ -834,31 +915,35 @@ class TriggerboxPlugin(Plugin):
         self._open()
 
     def _open(self, *, allow_recovery: bool = True) -> str | None:
-        self._firmware = None
-        self._firmware_ok = True
-        self._last_error = None  # a fresh connection attempt clears stale failures
-        device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
-        if device is None:
-            log.warning("triggerbox: %s", reason)
-            return reason
-        if device != self.device:
-            log.info("triggerbox: %s", reason)
-            self.device = device
-        try:
-            self._link.open(device, self.baud)
-        except Exception as e:
-            msg = serial_ports.explain_open_failure(device, e)
-            log.warning("triggerbox: %s", msg)
-            return msg
-        log.info("triggerbox: opened %s @ %d", device, self.baud)
-        self._verify_identity()
-        # A board that opens but never answers identify may have a wedged USB-CDC
-        # link (every transfer stalls with EPIPE while it stays enumerated); a
-        # healthy triggerbox always replies fast. Try one host bus reset.
-        if self._firmware is None and allow_recovery:
-            if self._recover_usb("the board did not answer an identity query"):
-                self._verify_identity()
-        return None
+        # Held across the whole open+verify so a concurrent flash (which also holds
+        # this lock across close→upload→reopen) can't fight over the port. Re-
+        # entrant: flash's own reopen() calls this on the same thread.
+        with self._fw.port_lock:
+            self._firmware = None
+            self._firmware_ok = True
+            self._last_error = None  # a fresh connection attempt clears stale failures
+            device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+            if device is None:
+                log.warning("triggerbox: %s", reason)
+                return reason
+            if device != self.device:
+                log.info("triggerbox: %s", reason)
+                self.device = device
+            try:
+                self._link.open(device, self.baud)
+            except Exception as e:
+                msg = serial_ports.explain_open_failure(device, e)
+                log.warning("triggerbox: %s", msg)
+                return msg
+            log.info("triggerbox: opened %s @ %d", device, self.baud)
+            self._verify_identity()
+            # A board that opens but never answers identify may have a wedged USB-CDC
+            # link (every transfer stalls with EPIPE while it stays enumerated); a
+            # healthy triggerbox always replies fast. Try one host bus reset.
+            if self._firmware is None and allow_recovery:
+                if self._recover_usb("the board did not answer an identity query"):
+                    self._verify_identity()
+            return None
 
     def _recover_usb(self, why: str) -> bool:
         """Best-effort clear of a wedged USB link: close, host bus-reset, reopen.
@@ -888,31 +973,60 @@ class TriggerboxPlugin(Plugin):
             log.info("triggerbox: reopened %s after USB reset", device)
         return self._link.is_open
 
+    def _banner_arm_compatible(self, banner: str | None) -> bool:
+        """Fallback arm-compatibility check when the sketch source is unavailable
+        (no fingerprint to classify against): compatible unless the banner is a
+        foreign name or a different protocol version."""
+        if not banner:
+            return True
+        name, version, _ = fw.parse_banner(banner)
+        if name != _EXPECTED_BANNER.upper():
+            return False
+        return version is None or version == _PROTOCOL_VERSION
+
     def _verify_identity(self) -> None:
-        """Read the firmware banner; refuse to arm on a recognized-stale board."""
+        """Read the firmware banner and classify it against the sketch source.
+
+        Sets ``firmware_ok`` (whether the board understands our v2 arm packet) and
+        ``_fw_check`` (the flash verdict, when the source is available). An
+        OUTDATED board — same protocol, drifted source — stays arm-compatible; we
+        only *offer* a reflash. A wrong protocol version or a foreign banner
+        disables arming."""
         banner = self._link.identify()
         self._firmware = banner
-        self._firmware_ok = True
-        if banner is None:
-            log.info(
-                "triggerbox: no firmware identity from %s (older firmware, a "
-                "non-triggerbox board, or a slow link); proceeding",
-                self.device,
-            )
-        elif banner.upper().startswith(_EXPECTED_BANNER):
-            version = _parse_banner_version(banner)
-            if version is not None and version != _PROTOCOL_VERSION:
+        check = self._fw.classify(banner)
+        if check is None:
+            # No source checkout: can't fingerprint, so fall back to a plain
+            # name/version compatibility check (no flash offer).
+            self._firmware_ok = self._banner_arm_compatible(banner)
+            if banner is None:
+                log.info("triggerbox: no firmware identity from %s; proceeding", self.device)
+            elif not self._firmware_ok:
                 log.warning(
-                    "triggerbox: %s runs firmware %r (protocol v%s) but the plugin "
-                    "speaks v%d; reflash arduino/triggerbox is recommended",
-                    self.device, banner, version, _PROTOCOL_VERSION,
+                    "triggerbox: %s reports firmware %r incompatible with protocol "
+                    "v%d; arming is disabled", self.device, banner, _PROTOCOL_VERSION,
                 )
-        else:
-            self._firmware_ok = False
+            return
+        self._firmware_ok = fw.arm_compatible(check)
+        S = fw.FirmwareState
+        if check.state is S.CURRENT:
+            log.info("triggerbox: %s firmware %s", self.device, check.detail)
+        elif check.state is S.OUTDATED:
             log.warning(
-                "triggerbox: %s reports firmware %r — reflash to TRIGGERBOX %d; the "
-                "v%d arm packet would not be understood, so arming is disabled",
-                self.device, banner, _PROTOCOL_VERSION, _PROTOCOL_VERSION,
+                "triggerbox: %s is out of date — %s; run `octacam flash` (or the "
+                "Flash firmware button) to upload the current build. Arming still works.",
+                self.device, check.detail,
+            )
+        elif check.state is S.UNIDENTIFIED:
+            log.info(
+                "triggerbox: %s sent no firmware identity (%s); proceeding",
+                self.device, check.detail,
+            )
+        else:  # WRONG_VERSION / WRONG_BOARD — not armable
+            log.warning(
+                "triggerbox: %s — %s; reflash to TRIGGERBOX %d (arming is disabled). "
+                "Run `octacam flash` or use the Flash firmware button.",
+                self.device, check.detail, _PROTOCOL_VERSION,
             )
 
     def teardown(self) -> None:
@@ -924,16 +1038,46 @@ class TriggerboxPlugin(Plugin):
         return self._link.is_open
 
     def status(self) -> dict:
+        check = self._fw_check
         return {
             "device": self.device,
             "arduino_state": self._arduino_state,
             "firmware": self._firmware,
             "firmware_ok": self._firmware_ok,
+            "firmware_state": check.state.value if check else None,
+            "needs_flash": bool(check and check.needs_flash),
             "error": self._last_error,
             "guard_us": self._strobe_guard_us,
             "cameras": [c.to_dict() for c in self._cameras],
             "lights": [lt.to_dict() for lt in self._lights],
         }
+
+    # -------------------------------------------------- firmware provisioning
+
+    def firmware_provisioning(self) -> dict:
+        """Full firmware picture for the CLI (`octacam flash`) and the GUI."""
+        return self._fw.provisioning(
+            plugin_name=self.name,
+            device=self.device,
+            firmware=self._firmware,
+            firmware_ok=self._firmware_ok,
+            extra={"auto_flash": self._auto_flash},
+        )
+
+    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> fw.FlashResult:
+        """Compile + upload the current triggerbox firmware to the board.
+
+        Delegates the close→upload→reopen→re-verify lifecycle to the shared
+        FirmwareProvisioner (which holds the port lock so a concurrent reconnect
+        can't seize the port, and refuses while a recording is live). Never raises."""
+        result = self._fw.flash(on_line=on_line)
+        if result.ok:
+            self._arduino_state = "idle"  # the board rebooted after the upload
+        else:
+            # reopen() cleared _last_error; restore the failure so the GUI shows it.
+            self._last_error = result.message
+        self._broadcast_state()
+        return result
 
     # -------------------------------------------------- recording lifecycle
 
@@ -1053,6 +1197,7 @@ class TriggerboxPlugin(Plugin):
             if isinstance(device, str) and device.strip():
                 self._configured_device = device.strip()
             error = self._open()
+            check = self._fw_check
             return {
                 "ready": self._link.is_open,
                 "device": self.device,
@@ -1060,11 +1205,34 @@ class TriggerboxPlugin(Plugin):
                 "arduino_state": self._arduino_state,
                 "firmware": self._firmware,
                 "firmware_ok": self._firmware_ok,
+                "firmware_state": check.state.value if check else None,
+                "needs_flash": bool(check and check.needs_flash),
             }
 
         @router.get("/api/triggerbox/status")
         def get_status():
             return {"ready": self._link.is_open, **self.status()}
+
+        @router.get("/api/triggerbox/firmware")
+        def get_firmware():
+            """Firmware state vs. the sketch source + whether octacam can flash it."""
+            return self.firmware_provisioning()
+
+        @router.post("/api/triggerbox/flash")
+        def flash(payload: dict = Body(default={})):
+            """Compile + upload the current firmware, then report the new state.
+
+            Runs synchronously (FastAPI dispatches this sync handler to a thread,
+            so the event loop keeps serving); the whole compile+upload takes tens
+            of seconds and the board reboots at the end."""
+            result = self.flash_firmware()
+            return {
+                **result.to_dict(),
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "ready": self._link.is_open,
+                "provisioning": self.firmware_provisioning(),
+            }
 
         @router.get("/api/triggerbox/exposures")
         def get_exposures():

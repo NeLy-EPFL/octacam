@@ -885,7 +885,10 @@ def test_verify_identity_warns_on_version_mismatch():
         plugin._verify_identity()
     finally:
         detach()
-    assert plugin._firmware_ok is True  # still a triggerbox board
+    # A v1 board can't parse a v2 arm packet, so arming is disabled and a reflash
+    # is offered (better than arming and getting a guaranteed protocol reject).
+    assert plugin._firmware_ok is False
+    assert plugin.firmware_provisioning()["state"] == "wrong_version"
     assert any("reflash" in r.getMessage() for r in records)
 
 
@@ -940,3 +943,164 @@ def test_default_start_params_via_manager():
     params = manager.default_start_params(80.0, 5.0)
     assert "triggerbox" in params
     assert params["triggerbox"]["fps"] == 80
+
+
+# ===========================================================================
+# Firmware provisioning: identity classification, flash, endpoints
+# ===========================================================================
+
+import octacam.firmware as fw_mod  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_flash(monkeypatch):
+    """Never shell out to arduino-cli from the suite, and make can_flash
+    deterministic regardless of whether the dev box has arduino-cli installed."""
+    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
+
+    def _fake_flash(spec, port, needed_build, **kwargs):
+        return fw_mod.FlashResult(
+            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
+            build=needed_build,
+        )
+
+    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
+
+
+def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
+    """Set the board's identity banner and run the plugin's classification."""
+    link.banner = banner
+    plugin._verify_identity()
+
+
+def test_identify_current_build_is_up_to_date():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin._fw_needed_build}")
+    assert plugin._firmware_ok
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "current"
+    assert prov["needs_flash"] is False
+
+
+def test_identify_outdated_build_still_arms():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # no build tag = pre-fingerprint flash
+    assert plugin._firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "outdated"
+    assert prov["needs_flash"] is True
+
+
+def test_identify_wrong_version_disables_arming():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 1 abc1234")
+    assert plugin._firmware_ok is False
+    assert plugin.firmware_provisioning()["state"] == "wrong_version"
+
+
+def test_identify_legacy_omniview_disables_arming_but_is_flashable():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "OMNIVIEW 1")
+    assert plugin._firmware_ok is False
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "wrong_board"
+    assert prov["needs_flash"] and prov["safe_to_auto_flash"]
+
+
+def test_identify_unidentified_proceeds_but_flags_flash():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, None)
+    assert plugin._firmware_ok  # unknown -> proceed (may be a slow link)
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "unidentified"
+    assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
+
+
+def test_no_source_falls_back_to_banner_compatibility():
+    plugin, link = _plugin_with_fake()
+    plugin._fw_spec = None
+    plugin._fw_needed_build = None
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    assert plugin._firmware_ok  # name+version compatible; no flash offer
+    assert plugin._fw_check is None
+    _verify_with_banner(plugin, link, "TRIGGERBOX 1")
+    assert plugin._firmware_ok is False
+
+
+def test_broadcast_includes_firmware_state():
+    plugin, link = _plugin_with_fake()
+    bc = _Broadcasts()
+    plugin.set_broadcast(bc)
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    plugin._broadcast_state()
+    last = bc.msgs[-1]
+    assert last["firmware_state"] == "outdated"
+    assert last["needs_flash"] is True
+
+
+def test_flash_firmware_success_updates_state():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # start out of date
+    # After the (faked) upload the board reports the current build on re-identify.
+    link.banner = f"TRIGGERBOX 2 {plugin._fw_needed_build}"
+    result = plugin.flash_firmware()
+    assert result.ok
+    assert plugin._firmware_ok
+    assert plugin.firmware_provisioning()["needs_flash"] is False
+    assert link.closes >= 1 and link.opens >= 1  # link cycled for the upload
+
+
+def test_flash_firmware_refused_while_running():
+    plugin, link = _plugin_with_fake()
+    plugin._arduino_state = "running"
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert "running" in result.message
+
+
+def test_flash_firmware_without_source():
+    plugin, link = _plugin_with_fake()
+    plugin._fw_spec = None
+    plugin._fw_needed_build = None
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert "source" in result.message.lower()
+
+
+def test_flash_firmware_failure_is_reported(monkeypatch):
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    monkeypatch.setattr(
+        fw_mod, "flash",
+        lambda spec, port, build, **k: fw_mod.FlashResult(False, "arduino-cli exited 1", "boom"),
+    )
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert plugin._last_error == result.message  # surfaced to the GUI
+
+
+def test_firmware_endpoint():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    body = _test_client(plugin).get("/api/triggerbox/firmware").json()
+    assert body["state"] == "outdated"
+    assert body["needs_flash"] is True
+    assert body["can_flash"] is True
+    assert body["needed_build"] == plugin._fw_needed_build
+
+
+def test_flash_endpoint():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2")
+    link.banner = f"TRIGGERBOX 2 {plugin._fw_needed_build}"
+    body = _test_client(plugin).post("/api/triggerbox/flash", json={}).json()
+    assert body["ok"] is True
+    assert body["provisioning"]["needs_flash"] is False
+    assert "log" in body
+
+
+def test_build_reads_auto_flash_option():
+    assert _build({"device": DEVICE}).firmware_provisioning()["auto_flash"] is False
+    plugin = _build({"device": DEVICE, "auto_flash": True})
+    assert plugin._auto_flash is True
+    assert plugin.firmware_provisioning()["auto_flash"] is True

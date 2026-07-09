@@ -14,10 +14,18 @@ the configured frame rate for the configured duration. Enable it with a
     baud = 115200                # optional; default 115200
     default_fps = 100            # fallback when GUI params are not sent
     default_duration_ms = 10000  # fallback duration in milliseconds
+    auto_flash = false           # headless: reflash a stale board without prompting
 
 The plugin can also be enabled at launch time with ``--plugin twophoton``.
 Its serial dependency (pyserial) ships with octacam by default, so no extra
 install is needed.
+
+**Firmware provisioning.** The firmware answers an identify query with a banner
+``"2PHOTON <ver> <build>"`` (``<build>`` = a hash of ``arduino/2photon_trigger``);
+octacam compares it to the source and offers to compile + upload the current
+sketch (arduino-cli, board ``arduino:avr:mega``) when the board is out of date,
+blank, or foreign — from the GUI's *Flash firmware* button, ``octacam flash``, or
+a prompt at ``octacam record`` start. See :mod:`octacam.firmware`.
 
 Wire protocol (host → Arduino, 7 bytes little-endian):
   [0xA5][fps:uint16][duration_ms:uint32]  — arm
@@ -49,6 +57,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import firmware as fw
 from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
@@ -79,10 +88,34 @@ _NO_PYSERIAL_MSG = (
 # Wire-format constants
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
+_IDENTIFY_MAGIC = 0x3F  # '?' -> firmware identity banner
 # magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) = 7 bytes
 _ARM_FORMAT = "<BHI"
 
 _STATUS_BYTES = frozenset(b"ATD")
+
+# Firmware identity + provisioning (see octacam.firmware). The banner is
+# "2PHOTON <version> <build>"; it deliberately starts with '2' (never a status
+# byte) so the reader can tell it apart from the bare 'A'/'T'/'D' status bytes.
+_EXPECTED_BANNER = "2PHOTON"
+_FQBN = "arduino:avr:mega"  # Arduino Mega 2560
+_PROTOCOL_VERSION = 1
+
+
+def _firmware_spec() -> fw.FirmwareSpec | None:
+    """The 2-photon trigger firmware spec for :mod:`octacam.firmware`, or None
+    when the sketch source can't be located (a wheel install without a checkout)."""
+    sketch = fw.resolve_sketch_dir("2photon_trigger")
+    if sketch is None:
+        return None
+    return fw.FirmwareSpec(
+        name="twophoton",
+        sketch_dir=sketch,
+        fqbn=_FQBN,
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="TWOPHOTON_FW_BUILD",
+    )
 
 
 @dataclass
@@ -139,6 +172,8 @@ class TwoPhotonLink:
         self._on_broken = on_broken
         self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
+        self._identity: str | None = None
+        self._identity_event = threading.Event()
 
     def open(self, device: str, baud: int) -> None:
         if serial is None:
@@ -212,7 +247,28 @@ class TwoPhotonLink:
     def send_cancel(self) -> None:
         self._write(bytes([_CANCEL_MAGIC]))
 
+    def send_identify(self) -> None:
+        self._write(bytes([_IDENTIFY_MAGIC]))
+
+    @property
+    def identity(self) -> str | None:
+        return self._identity
+
+    def identify(self, timeout: float = 0.5) -> str | None:
+        """Query the firmware banner and wait briefly for the reply (None if the
+        board has no identify command — e.g. older firmware)."""
+        self._identity = None
+        self._identity_event.clear()
+        self.send_identify()
+        self._identity_event.wait(timeout)
+        return self._identity
+
     def _read_loop(self) -> None:
+        # The firmware emits bare single-byte statuses ('A'/'T'/'D') AND, in reply
+        # to an identify query, a newline-terminated banner "2PHOTON <v> <build>".
+        # The banner never starts with a status byte, so a byte seen with an empty
+        # buffer is a status; anything else accumulates into the banner line.
+        buf = bytearray()
         while not self._reader_stop.is_set():
             s = self._serial
             if s is None or not s.is_open:
@@ -236,11 +292,28 @@ class TwoPhotonLink:
                     )
                     self._mark_broken()
                 break
-            if b and b[0] in _STATUS_BYTES:
+            if not b:
+                continue
+            byte = b[0]
+            if byte == 0x0A:  # '\n' — end of a banner line
+                line = buf.decode("ascii", "replace").strip()
+                buf.clear()
+                if line.upper().startswith(_EXPECTED_BANNER):
+                    self._identity = line
+                    self._identity_event.set()
+                continue
+            if buf:
+                buf.append(byte)
+                if len(buf) > 64:  # runaway/garbled line guard
+                    buf.clear()
+                continue
+            if byte in _STATUS_BYTES:
                 try:
-                    self._on_status(chr(b[0]))
+                    self._on_status(chr(byte))
                 except Exception:
                     log.exception("2-photon trigger: status callback error")
+            else:
+                buf.append(byte)  # start of a banner line
 
 
 _STATE_LABELS: dict[str, str] = {
@@ -274,11 +347,15 @@ def _build(options: dict) -> TwoPhotonPlugin:
         )
     except (TypeError, ValueError):
         default_duration_ms = DEFAULT_DURATION_MS
+    auto_flash = options.get("auto_flash", False)
+    if isinstance(auto_flash, str):
+        auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
     return TwoPhotonPlugin(
         device=str(device),
         baud=baud,
         default_fps=default_fps,
         default_duration_ms=default_duration_ms,
+        auto_flash=bool(auto_flash),
     )
 
 
@@ -298,6 +375,7 @@ class TwoPhotonPlugin(Plugin):
         baud: int = DEFAULT_BAUD,
         default_fps: int = DEFAULT_FPS,
         default_duration_ms: int = DEFAULT_DURATION_MS,
+        auto_flash: bool = False,
     ):
         # _configured_device is what the config asked for (a path, or "auto");
         # self.device is the currently-active/display device, resolved on open.
@@ -306,8 +384,23 @@ class TwoPhotonPlugin(Plugin):
         self.baud = baud
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
+        self._auto_flash = bool(auto_flash)
+        self._firmware: str | None = None
+        self._firmware_ok = True
+        self._last_error: str | None = None
         self._link = TwoPhotonLink(
             self._on_arduino_status, on_broken=self._on_link_broken
+        )
+        # Firmware detection + flash lifecycle (shared with the other serial
+        # plugins). Owns the port lock; _open/reconnect take it too. See
+        # octacam.firmware.
+        self._fw = fw.FirmwareProvisioner(
+            _firmware_spec(),
+            resolve_device=lambda: serial_ports.resolve_device(self._configured_device, self.baud),
+            reopen=self._open,
+            close_link=lambda: self._link.close(),
+            wait_for_device=serial_ports.wait_for_device,
+            is_busy=self._fw_is_busy,
         )
         self._arduino_state = "idle"
         # Set by the status reader when the firmware acknowledges an arm ('A').
@@ -317,6 +410,12 @@ class TwoPhotonPlugin(Plugin):
         self._ack_timeout_s = ACK_TIMEOUT_S
         # Injected by app.py via set_broadcast() once the web app is created.
         self._broadcast: Callable[[str, dict], None] | None = None
+
+    def _fw_is_busy(self) -> tuple[bool, str]:
+        """Refuse to flash while the trigger is armed or a capture is running."""
+        if self._arduino_state in ("armed", "triggered"):
+            return True, "refusing to flash while the trigger is armed/running — stop the recording first"
+        return False, ""
 
     # -------------------------------------------------- broadcast injection
 
@@ -339,14 +438,28 @@ class TwoPhotonPlugin(Plugin):
 
     def _set_arduino_state(self, state: str) -> None:
         self._arduino_state = state
-        if self._broadcast is not None:
-            # Carry link readiness with every state push so a client that
-            # connected before the port opened (or after it died) keeps its arm
-            # gate in sync without a separate poll.
-            self._broadcast(
-                "twophoton_state",
-                {"state": state, "device": self.device, "ready": self._link.is_open},
-            )
+        self._broadcast_state()
+
+    def _broadcast_state(self) -> None:
+        if self._broadcast is None:
+            return
+        # Carry link readiness + firmware state with every push so a client that
+        # connected before the port opened (or after it died) keeps its arm gate
+        # and flash prompt in sync without a separate poll.
+        check = self._fw.check
+        self._broadcast(
+            "twophoton_state",
+            {
+                "state": self._arduino_state,
+                "device": self.device,
+                "ready": self._link.is_open,
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "firmware_state": check.state.value if check else None,
+                "needs_flash": bool(check and check.needs_flash),
+                "error": self._last_error,
+            },
+        )
 
     # -------------------------------------------------- process lifecycle
 
@@ -356,23 +469,57 @@ class TwoPhotonPlugin(Plugin):
     def _open(self) -> str | None:
         """(Re)open the serial link; returns an error message on failure, else None.
 
-        Resolves ``device="auto"`` to a single detected board and enriches an
-        open failure with the detected candidate ports."""
-        device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
-        if device is None:
-            log.warning("2-photon trigger: %s", reason)
-            return reason
-        if device != self.device:
-            log.info("2-photon trigger: %s", reason)
-            self.device = device
-        try:
-            self._link.open(device, self.baud)
-        except Exception as e:
-            msg = serial_ports.explain_open_failure(device, e)
-            log.warning("2-photon trigger: %s", msg)
-            return msg
-        log.info("2-photon trigger: opened %s @ %d", device, self.baud)
-        return None
+        Resolves ``device="auto"`` to a single detected board, reads the firmware
+        identity, and enriches an open failure with the detected candidate ports.
+        Held under the provisioner's port lock so a concurrent flash can't fight
+        over the port (re-entrant: flash's reopen calls this on the same thread)."""
+        with self._fw.port_lock:
+            self._firmware = None
+            self._firmware_ok = True
+            self._last_error = None
+            device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+            if device is None:
+                log.warning("2-photon trigger: %s", reason)
+                return reason
+            if device != self.device:
+                log.info("2-photon trigger: %s", reason)
+                self.device = device
+            try:
+                self._link.open(device, self.baud)
+            except Exception as e:
+                msg = serial_ports.explain_open_failure(device, e)
+                log.warning("2-photon trigger: %s", msg)
+                return msg
+            log.info("2-photon trigger: opened %s @ %d", device, self.baud)
+            self._verify_identity()
+            return None
+
+    def _banner_arm_compatible(self, banner: str | None) -> bool:
+        """Fallback when the sketch source is unavailable (no fingerprint):
+        compatible unless the banner is a foreign name or a different version."""
+        if not banner:
+            return True
+        name, version, _ = fw.parse_banner(banner)
+        if name != _EXPECTED_BANNER.upper():
+            return False
+        return version is None or version == _PROTOCOL_VERSION
+
+    def _verify_identity(self) -> None:
+        """Read the firmware banner and classify it against the sketch source.
+
+        An OUTDATED or UNIDENTIFIED board still arms fine (the arm protocol is
+        unchanged); a foreign banner or wrong version disables arming and offers a
+        reflash."""
+        banner = self._link.identify()
+        self._firmware = banner
+        check = self._fw.classify(banner)
+        if check is None:
+            self._firmware_ok = self._banner_arm_compatible(banner)
+            return
+        self._firmware_ok = fw.arm_compatible(check)
+        if check.needs_flash and check.state is not fw.FirmwareState.OUTDATED:
+            log.warning("2-photon trigger: %s — %s; run `octacam flash` to update.",
+                        self.device, check.detail)
 
     def teardown(self) -> None:
         self._link.send_cancel()
@@ -383,7 +530,41 @@ class TwoPhotonPlugin(Plugin):
         return self._link.is_open
 
     def status(self) -> dict:
-        return {"device": self.device, "arduino_state": self._arduino_state}
+        check = self._fw.check
+        return {
+            "device": self.device,
+            "arduino_state": self._arduino_state,
+            "firmware": self._firmware,
+            "firmware_ok": self._firmware_ok,
+            "firmware_state": check.state.value if check else None,
+            "needs_flash": bool(check and check.needs_flash),
+            "error": self._last_error,
+        }
+
+    # -------------------------------------------------- firmware provisioning
+
+    def firmware_provisioning(self) -> dict:
+        """Firmware picture for `octacam flash` and the GUI."""
+        return self._fw.provisioning(
+            plugin_name=self.name,
+            device=self.device,
+            firmware=self._firmware,
+            firmware_ok=self._firmware_ok,
+            extra={"auto_flash": self._auto_flash},
+        )
+
+    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> fw.FlashResult:
+        """Compile + upload the current 2-photon trigger firmware (arduino:avr:mega).
+
+        Delegates the close→upload→reopen→re-verify lifecycle to the shared
+        FirmwareProvisioner. Never raises."""
+        result = self._fw.flash(on_line=on_line)
+        if result.ok:
+            self._arduino_state = "idle"
+        else:
+            self._last_error = result.message
+        self._broadcast_state()
+        return result
 
     # -------------------------------------------------- recording lifecycle
 
@@ -405,6 +586,13 @@ class TwoPhotonPlugin(Plugin):
                 "2-photon trigger: link to %s is not open; recording will NOT be "
                 "hardware-armed (cameras may wait for a trigger that never fires)",
                 self.device,
+            )
+            return
+        if not self._firmware_ok:
+            log.error(
+                "2-photon trigger: firmware on %s (%r) is incompatible; refusing to "
+                "arm — reflash with `octacam flash` or the Flash firmware button",
+                self.device, self._firmware,
             )
             return
         log.info(
@@ -459,20 +647,38 @@ class TwoPhotonPlugin(Plugin):
             if isinstance(device, str) and device.strip():
                 self._configured_device = device.strip()
             error = self._open()
+            check = self._fw.check
             return {
                 "ready": self._link.is_open,
                 "device": self.device,
                 "error": error,
                 "arduino_state": self._arduino_state,
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "firmware_state": check.state.value if check else None,
+                "needs_flash": bool(check and check.needs_flash),
             }
 
         @router.get("/api/twophoton/status")
         def get_status():
             """Current connection and Arduino state (for initial page load)."""
+            return {"ready": self._link.is_open, **self.status()}
+
+        @router.get("/api/twophoton/firmware")
+        def get_firmware():
+            """Firmware state vs. the sketch source + whether octacam can flash it."""
+            return self.firmware_provisioning()
+
+        @router.post("/api/twophoton/flash")
+        def flash(payload: dict = Body(default={})):
+            """Compile + upload the current firmware, then report the new state."""
+            result = self.flash_firmware()
             return {
+                **result.to_dict(),
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
                 "ready": self._link.is_open,
-                "device": self.device,
-                "arduino_state": self._arduino_state,
+                "provisioning": self.firmware_provisioning(),
             }
 
         return router

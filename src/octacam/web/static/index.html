@@ -170,6 +170,12 @@
         <button type="button" id="flywheel-reconnect" class="btn"
           title="Connect to the selected serial port">Reconnect</button>
       </div>
+      <div id="flywheel-fw-flash" class="fw-flash hidden">
+        <span id="flywheel-fw-flash-msg"></span>
+        <button type="button" id="flywheel-fw-flash-btn" class="btn"
+          title="Compile and upload the current stepper firmware">Flash firmware</button>
+      </div>
+      <pre id="flywheel-fw-flash-log" class="fw-log hidden"></pre>
       <fieldset id="flywheel-fields" disabled>
         <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
         <div class="row" title="Rotation direction of the first sweep"><span>Initial direction:</span>
@@ -240,6 +246,13 @@
             Idle — waiting for arm command
           </span>
         </div>
+        <div id="twophoton-fw-flash" class="fw-flash hidden">
+          <span id="twophoton-fw-flash-msg"></span>
+          <button type="button" id="twophoton-fw-flash-btn" class="btn"
+            title="Compile and upload the current 2-photon trigger firmware">
+            Flash firmware</button>
+        </div>
+        <pre id="twophoton-fw-flash-log" class="fw-log hidden"></pre>
         <p class="hint">
           FPS and duration are taken from the Record tab settings.
           When "Arm with recording" is checked, the Arduino is armed
@@ -271,6 +284,14 @@
           </span>
         </div>
         <div id="triggerbox-firmware" class="hint"></div>
+
+        <div id="triggerbox-fw-flash" class="triggerbox-fw-flash hidden">
+          <span id="triggerbox-fw-flash-msg"></span>
+          <button type="button" id="triggerbox-fw-flash-btn" class="btn"
+            title="Compile and upload the current triggerbox firmware to the board">
+            Flash firmware</button>
+        </div>
+        <pre id="triggerbox-fw-flash-log" class="triggerbox-fw-log hidden"></pre>
 
         <div class="triggerbox-section">
           <div class="row triggerbox-section-head">

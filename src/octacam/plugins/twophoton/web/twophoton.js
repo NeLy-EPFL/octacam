@@ -5,6 +5,7 @@
 // (app.js) constructs. The serial helpers live at /js/ (absolute path, since a
 // relative import would resolve under /plugins/twophoton/ and 404).
 import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
+import { FirmwareFlash } from "/js/firmware-flash.js";
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -33,9 +34,27 @@ export default class TwoPhotonTab {
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
+    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
+    // while the trigger is armed/running so a flash can't interrupt a capture.
+    this.fw = new FirmwareFlash({
+      api: this.api,
+      notify: this.notify,
+      prefix: "twophoton",
+      ids: {
+        banner: "twophoton-fw-flash",
+        msg: "twophoton-fw-flash-msg",
+        btn: "twophoton-fw-flash-btn",
+        log: "twophoton-fw-flash-log",
+      },
+      isActive: () => this.arduinoState === "armed" || this.arduinoState === "triggered",
+    });
+    this.fw.setReady(this.ready);
+    this.fw.applyState(status);
+
     this._loadPorts();
     this._refresh();
     this._renderState();
+    this.fw.load();
   }
 
   // Populate the port dropdown with the currently detected serial ports,
@@ -62,6 +81,7 @@ export default class TwoPhotonTab {
       this.ready = msg.ready;
       this._refresh();
     }
+    this.fw.applyState(msg);
     this._renderState();
   }
 
@@ -130,6 +150,8 @@ export default class TwoPhotonTab {
       this.arduinoState = r.data.arduino_state;
       this._renderState();
     }
+    this.fw.applyResponse(r.data);
+    this.fw.load();
     this._refresh();
     this._loadPorts(); // refresh the list + selection after the attempt
     if (this.ready) {

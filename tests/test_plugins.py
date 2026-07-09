@@ -113,6 +113,9 @@ class _FakeLink:
     def is_open(self):
         return self._open
 
+    def identify(self, banner_prefix, timeout=0.5):
+        return None  # no board / no banner in these open-path tests
+
 
 def test_flywheel_open_reports_success_and_failure():
     """_open never raises; it returns None on success, the message on failure."""
@@ -156,13 +159,12 @@ def test_flywheel_reconnect_endpoint_surfaces_ready_state():
     # Error is enriched with detected-port hints but preserves the base message.
     assert body["error"].startswith("failed to open /dev/test: no such device")
 
-    # Board now present: reconnect succeeds.
+    # Board now present: reconnect succeeds (response also carries firmware fields).
     link.fail = None
-    assert client.post("/api/serial/reconnect").json() == {
-        "ready": True,
-        "device": "/dev/test",
-        "error": None,
-    }
+    body = client.post("/api/serial/reconnect").json()
+    assert body["ready"] is True
+    assert body["device"] == "/dev/test"
+    assert body["error"] is None
 
 
 def test_setup_teardown_order():
