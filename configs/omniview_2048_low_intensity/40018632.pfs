@@ -22,6 +22,7 @@ PgiMode	Off
 ShutterMode	Global
 ExposureMode	Timed
 ExposureTime	2000.0
+SensorReadoutMode	Fast
 TriggerMode	{TriggerSelector=FrameBurstStart}	Off
 TriggerMode	{TriggerSelector=FrameStart}	Off
 TriggerSelector	FrameStart
