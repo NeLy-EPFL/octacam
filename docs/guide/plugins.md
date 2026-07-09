@@ -50,7 +50,51 @@ ThorSync edge.
 The firmware and wiring notes are in
 [arduino/2photon_trigger/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger).
 
-Both plugins talk to their Arduino over serial via pyserial, which ships with
+### `triggerbox` — configurable camera trigger + lights
+
+Drives the EPFL `common-trigger-circuit` board (Arduino Nano ESP32) as a full
+camera-trigger + light controller. Adds the web GUI's **triggerbox** tab and,
+when "arm with recording" is on, arms the board at recording start so external
+hardware-triggered cameras are driven for the recording's fps + duration.
+
+Every output is chosen at run time from the config — no reflashing to rewire:
+
+- **Camera lines** — one or more `{ pin, pulse_us, delay_us }`. `pin` is any
+  broken-out line (`D5`–`D13`, `A0`–`A7`); `D2`/`D3`/`D4` are the status LED.
+- **Light channels** — the three CCS channels (1→D5, 2→D6, 3→D7), each
+  independently `off`, `strobe` (frame-locked; `duty_mode = "auto"` sizes the
+  on-time to bracket the longest live camera exposure + `strobe_guard_us`, or a
+  `manual` `duty_percent`), `continuous`, or an optogenetic `pulse_train`
+  (`freq_hz`, `pulse_us`, `start_delay_ms`, `train_ms`). All three channels are
+  electrically identical, so any channel can play any role.
+
+```toml
+[[plugins]]
+name = "triggerbox"
+
+[plugins.options]
+device = "auto"
+strobe_guard_us = 100
+cameras = [ { pin = "D13", pulse_us = 500 } ]
+lights = [
+  { channel = 1, mode = "strobe", duty_mode = "auto" },
+  { channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20 },
+  { channel = 3, mode = "pulse_train", freq_hz = 10, pulse_us = 5000 },
+]
+```
+
+Omitting `cameras`/`lights` defaults to the classic rig: one `D13` line plus
+channels 1 and 2 strobing. The firmware and wiring notes are in
+[arduino/triggerbox/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox).
+(The plugin was previously named `omniview`; that name still works as an alias.)
+
+If the board fails to arm — the ESP32-S3 USB link can occasionally *wedge*
+(every transfer stalls while the port stays enumerated), which would otherwise
+leave external-triggered cameras waiting forever — the plugin says so loudly in
+the GUI and log and, on Linux, automatically attempts a USB bus reset to clear
+the stall and re-arm. If recovery still fails, power-cycle or replug the board.
+
+These plugins talk to their Arduino over serial via pyserial, which ships with
 octacam.
 
 ## Finding the serial device
@@ -75,7 +119,7 @@ wins over `"auto"`.
 
 ```toml
 [[plugins]]
-name = "omniview"
+name = "triggerbox"
 options = { device = "auto" }   # or "/dev/ttyACM0", or a udev symlink
 ```
 

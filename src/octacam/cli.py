@@ -1649,8 +1649,8 @@ def _prompt_serial_plugin(console) -> list[dict]:
         return []
     name = Prompt.ask(
         "  Plugin",
-        choices=["omniview", "twophoton", "flywheel"],
-        default="omniview",
+        choices=["triggerbox", "twophoton", "flywheel"],
+        default="triggerbox",
         console=console,
     )
     ports = _detect_serial_ports(console)
@@ -1969,7 +1969,7 @@ def record(
         config_dir=config_dir,
     )
     # Hand a controller reference to plugins that read live device state (e.g.
-    # omniview's auto strobe duty reads each camera's ExposureTime). Duck-typed
+    # triggerbox's auto strobe duty reads each camera's ExposureTime). Duck-typed
     # so core stays decoupled from concrete plugin classes; mirrors create_app.
     for plugin in plugins.plugins:
         if hasattr(plugin, "set_controller"):
@@ -1983,7 +1983,7 @@ def record(
             settings.save_dir,
         )
         # Headless record has no GUI to POST plugin_params, so build each enabled
-        # plugin's start slice from the recording's fps/duration (e.g. omniview
+        # plugin's start slice from the recording's fps/duration (e.g. triggerbox
         # arms its trigger board — without this the external-trigger cameras wait
         # forever for a trigger that never fires). Empty -> None (no-op dispatch).
         plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)

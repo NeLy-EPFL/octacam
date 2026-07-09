@@ -37,8 +37,8 @@
         title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
       <button type="button" data-tab="twophoton" data-plugin="twophoton"
         title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
-      <button type="button" data-tab="omniview" data-plugin="omniview"
-        title="omniview rig: arm the Arduino camera trigger + LED strobe">omniview</button>
+      <button type="button" data-tab="triggerbox" data-plugin="triggerbox"
+        title="triggerbox rig: arm the Arduino camera trigger + LED strobe">triggerbox</button>
     </nav>
 
     <section id="tab-record" class="tab active">
@@ -254,60 +254,61 @@
       </div>
     </section>
 
-    <section id="tab-omniview" class="tab" data-plugin="omniview">
-      <div id="omniview-status" class="plugin-status hidden">
-        <span id="omniview-status-msg"></span>
+    <section id="tab-triggerbox" class="tab" data-plugin="triggerbox">
+      <div id="triggerbox-status" class="plugin-status hidden">
+        <span id="triggerbox-status-msg"></span>
         <label class="serial-port-row" title="Choose which serial port to connect to">Port:
-          <select id="omniview-port" class="serial-port-select"></select>
+          <select id="triggerbox-port" class="serial-port-select"></select>
         </label>
-        <button type="button" id="omniview-reconnect" class="btn"
+        <button type="button" id="triggerbox-reconnect" class="btn"
           title="Connect to the selected serial port">Reconnect</button>
       </div>
       <div class="col">
         <div class="row" title="Current state of the Arduino trigger board">
           <span>Arduino state:</span>
-          <span id="omniview-state-value" class="omniview-state omniview-state--idle">
+          <span id="triggerbox-state-value" class="triggerbox-state triggerbox-state--idle">
             Idle — waiting for arm command
           </span>
         </div>
-        <div id="omniview-firmware" class="hint"></div>
-        <label class="row"
-          title="How the LED strobe on-time is chosen each frame">
-          <span>Strobe:</span>
-          <select id="omniview-duty-mode" class="omniview-duty-mode">
-            <option value="auto">Auto — cover longest exposure</option>
-            <option value="manual">Manual duty (%)</option>
-          </select>
-        </label>
-        <label class="row" id="omniview-duty-row"
-          title="LED strobe duty cycle: how much of each frame the ring lights are on">
-          <span>Duty (%):</span>
-          <input type="number" id="omniview-duty" class="omniview-duty"
-            min="0" max="100" step="1" value="20">
-        </label>
-        <div class="omniview-timing">
-          <div class="row omniview-timing-head">
+        <div id="triggerbox-firmware" class="hint"></div>
+
+        <div class="triggerbox-section">
+          <div class="row triggerbox-section-head">
+            <span>Camera trigger lines</span>
+            <button type="button" id="triggerbox-add-camera" class="btn btn-icon"
+              title="Add a camera trigger line">＋</button>
+          </div>
+          <div id="triggerbox-cameras"></div>
+        </div>
+
+        <div class="triggerbox-section">
+          <div class="row triggerbox-section-head"><span>Light channels</span></div>
+          <div id="triggerbox-lights"></div>
+        </div>
+
+        <div class="triggerbox-timing">
+          <div class="row triggerbox-timing-head">
             <span>Frame timing</span>
-            <button type="button" id="omniview-timing-refresh" class="btn btn-icon"
+            <button type="button" id="triggerbox-timing-refresh" class="btn btn-icon"
               title="Re-read camera exposures">↻</button>
           </div>
-          <div id="omniview-timing-viz" class="omniview-timing-viz"></div>
-          <div id="omniview-timing-summary" class="hint"></div>
+          <div id="triggerbox-timing-viz" class="triggerbox-timing-viz"></div>
+          <div id="triggerbox-timing-summary" class="hint"></div>
         </div>
+
         <p class="hint">
-          FPS and duration are taken from the Record tab settings.
-          In <strong>Auto</strong>, the strobe on-time is sized to cover the
-          longest camera exposure (plus its trigger delay and a small guard),
-          so the LED reliably brackets every sensor's integration; in
-          <strong>Manual</strong> it is the duty above. When "Arm with
-          recording" is checked, the Arduino is armed each time a recording
-          starts: it emits the shared camera trigger and strobes the two CCS LED
-          ring lights in sync for the recording duration. Cameras must be set to
+          FPS and duration come from the Record tab. Each camera line pulses on
+          its pin every frame; each of the three CCS light channels is
+          independent — <strong>off</strong>, a frame-locked <strong>strobe</strong>
+          (Auto sizes the on-time to bracket the longest camera exposure, or set a
+          Manual duty), <strong>continuous</strong>, or an independent optogenetic
+          <strong>pulse train</strong>. When "Arm with recording" is checked the
+          board is armed each time a recording starts. Cameras must be set to
           external hardware trigger.
         </p>
         <label class="center"
           title="Arm the Arduino automatically when a recording starts">
-          <input type="checkbox" id="omniview-arm-with-recording" checked>
+          <input type="checkbox" id="triggerbox-arm-with-recording" checked>
           Arm with recording
         </label>
       </div>

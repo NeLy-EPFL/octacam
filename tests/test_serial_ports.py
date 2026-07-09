@@ -139,7 +139,7 @@ def test_resolve_device_auto_ambiguous(monkeypatch):
 
 
 class _FakeSerial:
-    def __init__(self, *a, reply=b"OMNIVIEW 1\n", **kw):
+    def __init__(self, *a, reply=b"TRIGGERBOX 1\n", **kw):
         self._reply = reply
 
     def reset_input_buffer(self):
@@ -161,7 +161,7 @@ class _FakeSerial:
 def test_probe_identity_reads_banner(monkeypatch):
     monkeypatch.setattr(sp.serial, "Serial", lambda *a, **k: _FakeSerial())
     ident = sp.probe_identity("/dev/ttyACM0")
-    assert ident.banner == "OMNIVIEW 1"
+    assert ident.banner == "TRIGGERBOX 1"
     assert ident.busy is False
     assert ident.error is None
 
@@ -206,11 +206,11 @@ def test_format_candidates_no_microcontroller_ports():
 
 
 def test_udev_rule_for():
-    rule = sp.udev_rule_for(_sp("/dev/ttyACM0"), symlink="omniview")
+    rule = sp.udev_rule_for(_sp("/dev/ttyACM0"), symlink="triggerbox")
     assert 'ATTRS{idVendor}=="2341"' in rule
     assert 'ATTRS{idProduct}=="0070"' in rule
     assert 'ATTRS{serial}=="SN"' in rule
-    assert 'SYMLINK+="omniview"' in rule
+    assert 'SYMLINK+="triggerbox"' in rule
 
 
 def test_explain_open_failure_device_absent(monkeypatch):
@@ -226,3 +226,29 @@ def test_explain_open_failure_device_present(monkeypatch):
     # The device exists, so the failure is permissions/busy — no candidate list.
     msg = sp.explain_open_failure("/dev/ttyACM0", OSError("permission denied"))
     assert msg == "failed to open /dev/ttyACM0: permission denied"
+
+
+# --- USB bus reset recovery (reset_usb_device / wait_for_device) ------------
+# These never touch real hardware: reset_usb_device on a non-existent tty finds
+# no sysfs entry and returns (False, ...) before opening any usbfs node.
+
+
+def test_reset_usb_device_non_linux_is_noop(monkeypatch):
+    monkeypatch.setattr(sp.sys, "platform", "darwin")
+    ok, msg = sp.reset_usb_device("/dev/ttyACM0")
+    assert ok is False and "only implemented on Linux" in msg
+
+
+def test_reset_usb_device_unknown_tty_returns_false(monkeypatch):
+    monkeypatch.setattr(sp.sys, "platform", "linux")
+    ok, msg = sp.reset_usb_device("/dev/octacam-does-not-exist")
+    assert ok is False
+    assert "could not locate the backing USB device" in msg
+
+
+def test_wait_for_device_true_when_present():
+    assert sp.wait_for_device("/dev/null", timeout=0.2) is True
+
+
+def test_wait_for_device_false_when_absent():
+    assert sp.wait_for_device("/dev/octacam-does-not-exist", timeout=0.1) is False

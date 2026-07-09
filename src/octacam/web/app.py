@@ -741,7 +741,7 @@ def create_app(
 
     # Give plugins that support real-time WS push a broadcast callback, and hand
     # a controller reference to any plugin that needs to read live device state
-    # (e.g. omniview's auto strobe duty reads each camera's ExposureTime).
+    # (e.g. triggerbox's auto strobe duty reads each camera's ExposureTime).
     # Checked by duck-typing so core stays decoupled from concrete plugin classes.
     for plugin in plugins.plugins:
         if hasattr(plugin, "set_broadcast"):

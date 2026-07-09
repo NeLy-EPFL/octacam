@@ -75,6 +75,13 @@ def _toml_value(value: object) -> str:
         return _toml_escape(value)
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    if isinstance(value, dict):
+        # Inline table: ``{ key = value, ... }``. Used for arrays of tables that
+        # live inside a subtable (e.g. the triggerbox plugin's ``cameras`` /
+        # ``lights`` under ``[plugins.options]``), which _emit_table writes as a
+        # single ``key = [...]`` line rather than as [[header]] arrays.
+        inner = ", ".join(f"{k} = {_toml_value(v)}" for k, v in value.items())
+        return "{" + inner + "}"
     raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")
 
 

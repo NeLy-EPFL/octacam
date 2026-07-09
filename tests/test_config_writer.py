@@ -88,6 +88,29 @@ def test_plugin_options_roundtrip():
     assert tomllib.loads(cw._dumps(doc)) == doc
 
 
+def test_plugin_options_inline_table_arrays_roundtrip():
+    # The triggerbox plugin nests arrays-of-inline-tables (cameras/lights) under
+    # [plugins.options]; a GUI camera-display save re-dumps the whole config, so
+    # these must survive _dumps (previously _toml_value raised on a dict).
+    doc = {
+        "plugins": [
+            {
+                "name": "triggerbox",
+                "options": {
+                    "device": "auto",
+                    "strobe_guard_us": 100,
+                    "cameras": [{"pin": "D13", "pulse_us": 500}],
+                    "lights": [
+                        {"channel": 1, "mode": "strobe", "duty_mode": "auto"},
+                        {"channel": 3, "mode": "pulse_train", "freq_hz": 10.0},
+                    ],
+                },
+            }
+        ]
+    }
+    assert tomllib.loads(cw._dumps(doc)) == doc
+
+
 def test_visualization_and_transfer_sections_roundtrip():
     # A GUI save round-trips through _dumps; it must not wipe the
     # [[visualization]] (array-of-tables, incl. the nested layout list-of-lists)

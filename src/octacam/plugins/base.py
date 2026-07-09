@@ -158,7 +158,7 @@ class PluginManager:
         """Collect each plugin's headless-record start slice, keyed by name.
 
         ``octacam record`` has no GUI to POST ``plugin_params``, so a plugin that
-        must act at record start (e.g. omniview arming the trigger board)
+        must act at record start (e.g. triggerbox arming the trigger board)
         contributes its slice via :meth:`Plugin.default_start_params`. Plugins
         returning ``None`` are omitted. The result mirrors the ``{name: params}``
         shape the GUI sends, so it can be passed straight to ``start_recording``.

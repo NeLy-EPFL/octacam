@@ -39,13 +39,15 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 
 # Bundled plugins live at octacam.plugins.<name>; importing the module runs its
 # @register call. Listed here so build_plugins knows what it may import.
-_BUILTINS = ("flywheel", "twophoton", "omniview")
+_BUILTINS = ("flywheel", "twophoton", "triggerbox")
 
 # Legacy plugin names → current name. The stepper plugin was renamed
-# arduino → flywheel; existing rig configs (name = "arduino") and
-# `--plugin arduino` still resolve, with a deprecation warning, so upgrading
-# does not silently drop a configured plugin.
-_ALIASES = {"arduino": "flywheel"}
+# arduino → flywheel, and the trigger/strobe plugin omniview → triggerbox
+# (generalized to the full common-trigger-circuit capability); existing rig
+# configs (name = "arduino" / "omniview") and `--plugin <old>` still resolve,
+# with a deprecation warning, so upgrading does not silently drop a configured
+# plugin.
+_ALIASES = {"arduino": "flywheel", "omniview": "triggerbox"}
 
 
 def _discover_entry_points() -> None:

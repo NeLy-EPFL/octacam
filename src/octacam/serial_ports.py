@@ -2,7 +2,7 @@
 
 Arduino boards (Nano ESP32, Mega 2560, stepper controllers) are commonly used
 with octacam as hardware triggers and LED-strobe controllers, driven through the
-opt-in plugins (``omniview``, ``twophoton``, ``flywheel``). This module is the
+opt-in plugins (``triggerbox``, ``twophoton``, ``flywheel``). This module is the
 serial analogue of :mod:`octacam.cameras.registry`: it enumerates the connected
 serial ports, gives each a best-effort friendly board name from its USB VID/PID,
 and provides the small helpers the CLI (``octacam doctor``/``octacam config``),
@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import time
 from dataclasses import dataclass
 
 try:
@@ -35,8 +37,8 @@ except ImportError:  # pyserial ships by default; guard against a broken env
 log = logging.getLogger("octacam")
 
 DEFAULT_BAUD = 115200
-# The omniview firmware's identify query byte ('?'); the board replies
-# "OMNIVIEW <version>\n". Shared so probe_identity and the plugin agree.
+# The triggerbox firmware's identify query byte ('?'); the board replies
+# "TRIGGERBOX <version>\n". Shared so probe_identity and the plugin agree.
 IDENTIFY_MAGIC = b"?"
 
 _NO_PYSERIAL_MSG = (
@@ -46,10 +48,10 @@ _NO_PYSERIAL_MSG = (
 
 # The bundled plugins that talk to a serial/Arduino device, and the firmware
 # banner each expects from an identify probe (used to flag a wrong board). Only
-# omniview firmware answers an identify today; twophoton/flywheel have no such
+# triggerbox firmware answers an identify today; twophoton/flywheel have no such
 # command, so they are absent from EXPECTED_BANNER.
-SERIAL_PLUGINS = frozenset({"omniview", "twophoton", "flywheel"})
-EXPECTED_BANNER = {"omniview": "OMNIVIEW"}
+SERIAL_PLUGINS = frozenset({"triggerbox", "twophoton", "flywheel"})
+EXPECTED_BANNER = {"triggerbox": "TRIGGERBOX"}
 
 # --- USB VID/PID classification --------------------------------------------
 # Names are driven primarily by VID, refined by PID. PIDs for the same board
@@ -250,6 +252,96 @@ def probe_identity(
             port.close()
         except Exception:
             pass
+
+
+# USBDEVFS_RESET ioctl = _IO('U', 20): re-initialise a USB device's link from
+# the host without a physical unplug (the tty path is preserved).
+_USBDEVFS_RESET = (ord("U") << 8) | 20
+
+
+def _usb_device_dir(tty_device: str) -> str | None:
+    """The sysfs USB *device* dir backing a tty (has busnum/devnum), or None.
+
+    Walks up from ``/sys/class/tty/<name>/device`` (the USB *interface*) to the
+    parent USB device node. Linux-only; returns None for a non-USB tty."""
+    name = os.path.basename(os.path.realpath(tty_device))
+    start = f"/sys/class/tty/{name}/device"
+    if not os.path.exists(start):
+        return None
+    path = os.path.realpath(start)
+    for _ in range(8):  # interface -> device is one hop; bound the walk anyway
+        if os.path.exists(os.path.join(path, "busnum")) and os.path.exists(
+            os.path.join(path, "devnum")
+        ):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path or not parent.startswith("/sys"):
+            break
+        path = parent
+    return None
+
+
+def reset_usb_device(device: str) -> tuple[bool, str]:
+    """Issue a host-side USB bus reset to the USB device backing *device*.
+
+    Some USB-CDC microcontrollers — notably the ESP32-S3 on the Arduino Nano
+    ESP32 — can *wedge*: the port stays enumerated but every write/control
+    transfer stalls with ``EPIPE``, so the board is unreachable (arm packets
+    never land; cameras then hang waiting for a trigger that never fires). A
+    ``USBDEVFS_RESET`` ioctl re-initialises the link and clears the stall without
+    a physical unplug; the tty path is preserved.
+
+    Returns ``(ok, message)``. It is a best-effort recovery: returns
+    ``(False, reason)`` — never raises — on non-Linux, when the backing USB node
+    can't be located, or when the usbfs node can't be opened (needs write access,
+    e.g. root or the ``plugdev`` group). **The caller must not hold the tty open.**
+    """
+    if not sys.platform.startswith("linux"):
+        return False, "USB bus reset is only implemented on Linux"
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - fcntl ships on posix
+        return False, "fcntl is unavailable; cannot issue a USB reset"
+    usbdir = _usb_device_dir(device)
+    if usbdir is None:
+        return False, (
+            f"{device}: could not locate the backing USB device in sysfs "
+            "(not a USB serial port?)"
+        )
+    try:
+        with open(os.path.join(usbdir, "busnum")) as f:
+            bus = int(f.read().strip())
+        with open(os.path.join(usbdir, "devnum")) as f:
+            dev = int(f.read().strip())
+    except (OSError, ValueError) as e:
+        return False, f"{device}: could not read USB bus/dev numbers: {e}"
+    node = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+    try:
+        fd = os.open(node, os.O_WRONLY)
+    except OSError as e:
+        return False, (
+            f"cannot open {node} to reset it ({e}); a USB reset needs write "
+            "access to the usbfs node (root, or the plugdev group)"
+        )
+    try:
+        fcntl.ioctl(fd, _USBDEVFS_RESET, 0)
+    except OSError as e:
+        return False, f"USB reset ioctl on {node} failed: {e}"
+    finally:
+        os.close(fd)
+    return True, f"issued a USB bus reset to {node} (backing {device})"
+
+
+def wait_for_device(device: str, timeout: float = 3.0) -> bool:
+    """Poll until *device* exists again (a bus reset briefly drops the node)."""
+    real = os.path.realpath(device)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if os.path.exists(real) or os.path.exists(device):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def resolve_device(

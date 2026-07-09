@@ -429,7 +429,7 @@ def test_save_params_undoes_preview_software_trigger_source():
     # A config saved while the live software-trigger preview forced
     # TriggerSource=Software must NOT bake that in: save_params rewrites it back to
     # the hardware line load_params captured, so a later external-trigger recording
-    # still fires. Regression: the omniview FLIR .txt shipped with Software and the
+    # still fires. Regression: the triggerbox FLIR .txt shipped with Software and the
     # cameras silently never triggered.
     nm = FakeNodeMap()  # TriggerSource ships as the hardware line Line0
     backend, _cam = _open_backend(nm)

@@ -1,17 +1,17 @@
-# omniview rig — "2048 low intensity" preset (80 fps, 20% strobe duty).
+# triggerbox rig — "2048 low intensity" preset (80 fps, 20% strobe duty).
 #
 # octacam equivalent of hexaview-control/config/2048_low_intensity.yaml, but
 # parameterized by TIMING (fps) + STROBE DUTY CYCLE instead of raw µs windows:
 #
-#   hexaview: pre(250)+exposure(2000)+post(250)+lightOff(10000) = 12500 µs period
-#   omniview: fps = 80        -> 12500 µs frame period
-#             duty = 20 %      -> 2500 µs light-on window (covers the 2 ms exposure)
-#             exposure = 2000 µs (per-camera, in the .pfs / .txt)
+#   hexaview:   pre(250)+exposure(2000)+post(250)+lightOff(10000) = 12500 µs period
+#   triggerbox: fps = 80        -> 12500 µs frame period
+#               duty = 20 %      -> 2500 µs light-on window (covers the 2 ms exposure)
+#               exposure = 2000 µs (per-camera, in the .pfs / .txt)
 #
 # Cameras run in EXTERNAL hardware-trigger mode; the Arduino Nano ESP32 running
-# the omniview firmware drives the shared trigger line (D13 -> each camera's
+# the triggerbox firmware drives the shared trigger line (D13 -> each camera's
 # Line1) and strobes the two CCS LED ring lights (CCS ch1/ch2) in sync. The
-# omniview plugin arms the board with the fps/duration below + the strobe duty.
+# triggerbox plugin arms the board with the fps/duration below + the light spec.
 
 backend = "auto"   # cascade: Basler->pypylon, FLIR Grasshopper3->Spinnaker C
 
@@ -113,14 +113,22 @@ window_y = -1.0
 window_width = -1.0
 window_height = -1.0
 
-# --- omniview trigger + strobe plugin ----------------------------------------
-# fps and duration come from [record] above; the plugin adds the strobe duty
-# cycle (and optional camera-pulse width) and arms the Arduino on record start.
+# --- triggerbox trigger + light plugin ---------------------------------------
+# fps and duration come from [record] above. The plugin arms the Arduino on
+# record start with the camera line(s) and light channel(s) below. One camera
+# line (D13 -> all 6 cameras); CCS ch1 (D5) + ch2 (D6) strobe in sync at 20%
+# duty; ch3 (D7) is off. A "strobe" channel with duty_mode = "auto" would size
+# its on-time to bracket the longest live camera exposure instead.
 
 [[plugins]]
-name = "omniview"
+name = "triggerbox"
 
 [plugins.options]
-device = "/dev/ttyACM0"   # Arduino Nano ESP32 (omniview firmware); a udev symlink is nicer
-duty_percent = 20.0       # LED strobe duty (% of the frame period) -> 2.5 ms on @ 80 fps
-# cam_pulse_us = 500      # camera trigger pulse width (0/omit = firmware default)
+device = "/dev/ttyACM0"   # Arduino Nano ESP32 (triggerbox firmware); a udev symlink is nicer
+cameras = [ { pin = "D13", pulse_us = 500 } ]
+lights = [
+  { channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 20.0 },
+  { channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20.0 },
+  { channel = 3, mode = "off" },
+]
+strobe_guard_us = 100

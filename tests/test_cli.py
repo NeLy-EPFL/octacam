@@ -423,13 +423,16 @@ def test_doctor_serial_flags_missing_configured_device(monkeypatch, tmp_path):
         lambda: [_fake_serial_port("/dev/ttyACM0")],
     )
     (tmp_path / "octacam_config.toml").write_text(
-        '[[plugins]]\nname = "omniview"\n[plugins.options]\ndevice = "/dev/ttyACM9"\n'
+        '[[plugins]]\nname = "triggerbox"\n[plugins.options]\ndevice = "/dev/ttyACM9"\n'
     )
     result = runner.invoke(app, ["--log-level", "error", "doctor", str(tmp_path)])
     assert result.exit_code == 1, result.output
-    assert "not found among connected serial ports" in result.output
+    # Collapse whitespace: Rich wraps the console at 80 cols, so the phrase can
+    # span a line break depending on the (variable-length) plugin name.
+    flat = " ".join(result.output.split())
+    assert "not found among connected serial ports" in flat
     # A detected board not used by any plugin is reported as info, not an error.
-    assert "detected but not used by any plugin" in result.output
+    assert "detected but not used by any plugin" in flat
 
 
 def test_doctor_serial_section_in_json(monkeypatch):
@@ -453,11 +456,11 @@ def test_doctor_probe_serial_reports_firmware(monkeypatch):
     )
     monkeypatch.setattr(
         "octacam.serial_ports.probe_identity",
-        lambda device, **kw: SerialIdentity(device, "OMNIVIEW 1", False, None),
+        lambda device, **kw: SerialIdentity(device, "TRIGGERBOX 1", False, None),
     )
     result = runner.invoke(app, ["doctor", "--probe-serial"])
     assert result.exit_code == 0, result.output
-    assert "OMNIVIEW 1" in result.output
+    assert "TRIGGERBOX 1" in result.output
 
 
 def test_doctor_probe_serial_skips_busy_port(monkeypatch):
@@ -482,10 +485,10 @@ def test_build_config_doc_includes_plugins():
 
     doc = _build_config_doc(
         "fake", RecordConfig(), [], [], None,
-        [{"name": "omniview", "options": {"device": "/dev/ttyACM0"}}],
+        [{"name": "triggerbox", "options": {"device": "/dev/ttyACM0"}}],
     )
     assert doc["plugins"] == [
-        {"name": "omniview", "options": {"device": "/dev/ttyACM0"}}
+        {"name": "triggerbox", "options": {"device": "/dev/ttyACM0"}}
     ]
 
 

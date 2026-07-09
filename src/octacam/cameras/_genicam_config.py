@@ -282,7 +282,7 @@ def normalize_trigger_source(text: str, original_source: str | None) -> str:
     live camera; a config saved (GUI "Save") while previewing would bake that in,
     so a later external-trigger recording would wait for a software trigger that
     never fires — the cameras just never start, silently (this is exactly how the
-    omniview FLIR ``.txt`` files ended up unrecordable). Rewrite a dumped
+    triggerbox FLIR ``.txt`` files ended up unrecordable). Rewrite a dumped
     ``TriggerSource\\tSoftware`` line back to *original_source* — the hardware line
     :meth:`load_params` captured when the config was loaded. Mirrors
     :func:`octacam.cameras.basler._normalize_pfs_triggers`.

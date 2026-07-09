@@ -1,0 +1,136 @@
+/* triggerbox plugin styles. Served from /plugins/triggerbox/ and injected by the
+   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+
+/* Arduino state chip */
+.triggerbox-state {
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.triggerbox-state--running { color: var(--green); }
+.triggerbox-state--done    { color: var(--text-dim); }
+
+/* Small square icon button (add camera / timing refresh). */
+.btn-icon {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+/* ---- Camera lines + light channels ----------------------------------- */
+.triggerbox-section {
+  margin: 8px 0;
+}
+.triggerbox-section-head {
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.tb-cam-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.tb-field {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--text-dim);
+  gap: 2px;
+}
+.tb-field input {
+  width: 6em;
+}
+.tb-cam-pin {
+  align-self: center;
+}
+.tb-cam-remove {
+  align-self: center;
+}
+
+.tb-light-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.tb-light-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.tb-light-mode {
+  max-width: 12em;
+}
+.tb-light-fields {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---- Frame-timing visualization -------------------------------------- */
+.triggerbox-timing {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.triggerbox-timing-head {
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.triggerbox-timing-viz {
+  width: 100%;
+}
+.tb-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+#triggerbox-timing-summary {
+  margin-top: 4px;
+}
+
+/* SVG marks — all theme-aware via the core :root variables. */
+.tb-frame {
+  fill: var(--panel-2);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.tb-trigger { fill: var(--accent); }
+.tb-led     { fill: var(--amber); }
+.tb-guard   { fill: var(--amber); opacity: 0.4; }
+.tb-pulse   { fill: var(--purple, #a970ff); }
+.tb-exposure { fill: var(--green); opacity: 0.75; }
+.tb-exposure--gov {
+  opacity: 1;
+  stroke: var(--text);
+  stroke-width: 1;
+}
+.tb-guide {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.tb-axis { stroke: var(--border); stroke-width: 1; }
+.tb-label {
+  fill: var(--text-dim);
+  font-size: 12px;
+}
+.tb-axis-label,
+.tb-tag {
+  fill: var(--text-dim);
+  font-size: 11px;
+}
