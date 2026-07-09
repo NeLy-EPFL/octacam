@@ -77,5 +77,5 @@ sort themselves into a `.../date/subject/trial` tree automatically. See
 
 octacam notes every finished recording in a small cache (`~/.cache/octacam`), so
 you never have to retype paths when processing — `octacam process --last`,
-`--session`, and `--all` read it. See
+`--last session`, and `--all` read it. See
 [Processing → Selecting recordings](processing.md#selecting-recordings-from-the-cache).

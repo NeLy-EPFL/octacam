@@ -84,7 +84,7 @@ octacam process --all
 ```
 
 octacam remembers where it recorded, so `--all` processes every recent recording.
-You can also pass explicit folders, or use `--last` / `--session`. See
+You can also pass explicit folders, or use `--last` / `--last session`. See
 [Processing recordings](guide/processing.md).
 
 ## Working remotely

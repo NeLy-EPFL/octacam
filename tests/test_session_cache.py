@@ -1,4 +1,4 @@
-"""The recording-session cache that backs `octacam transcode --last/--session/--all`."""
+"""The recording-session cache backing `octacam process --last/--last session/--all`."""
 
 import datetime
 import os

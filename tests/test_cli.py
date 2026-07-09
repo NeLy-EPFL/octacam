@@ -259,7 +259,7 @@ def test_process_help_lists_options():
         "--no-transcode",
         "--no-grid",
         "--no-transfer",
-        "--remove-source",
+        "--delete-source",
         "--force",
     ):
         assert opt in result.output
@@ -271,8 +271,10 @@ def test_process_help_lists_options():
 def test_process_help_lists_cache_selectors():
     result = runner.invoke(app, ["process", "--help"])
     assert result.exit_code == 0
-    for opt in ("--last", "--session", "--session-id", "--all"):
+    for opt in ("--last", "--session-id", "--all"):
         assert opt in result.output
+    # --last carries an optional recording|session value.
+    assert "recording|session" in result.output
 
 
 class _MsgHandler(logging.Handler):
@@ -322,7 +324,7 @@ def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):
         logger.removeHandler(handler)
     blob = "\n".join(handler.messages)
     # Two ready-to-run selectors: the last session and every cached session.
-    assert "--session" in blob and "--all" in blob
+    assert "--last session" in blob and "--all" in blob
 
     # A session that recorded nothing prints no hint.
     logger, handler = _capture_octacam_logs(logging.INFO)

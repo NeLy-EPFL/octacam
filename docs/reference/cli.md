@@ -107,15 +107,16 @@ octacam process [PATHS…]
 Transcode recordings to mp4, build composite grid videos, and transfer to
 storage — all driven by each recording's embedded config snapshot. Pass
 recording folders (or parent directories with `-r`), or select from the cache
-with `--last` / `--session` / `--all`. See [Processing](../guide/processing.md).
+with `--last` / `--last session` / `--all`. See
+[Processing](../guide/processing.md).
 
 **Selecting what to process** (mutually exclusive; can't combine with explicit
 `PATHS`):
 
 | Option | Purpose |
 | --- | --- |
-| `--last` | The most recent recording folder. |
-| `--session` | Every folder from the last GUI session. |
+| `--last` (or `--last recording`) | The most recent recording folder. |
+| `--last session` | Every folder from the last GUI session. |
 | `--session-id <id>` | Every folder from one exact session id. |
 | `--all` | Every recording folder still in the cache. |
 
@@ -128,8 +129,8 @@ with `--last` / `--session` / `--all`. See [Processing](../guide/processing.md).
 | `--no-grid` | Skip building the grid video(s). |
 | `--no-transfer` | Skip transferring to the `[transfer]` destination. |
 | `--force` | Re-transcode / rebuild grids even if outputs already exist. |
-| `--remove-source` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
-| `--config`, `-C` | Fallback config dir for recordings with no embedded snapshot. |
+| `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
+| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 

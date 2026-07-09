@@ -366,7 +366,7 @@ def _print_transcode_hints(session_id: str) -> None:
         return
     log.info(
         "Recorded %d folder(s) this session. Transcode, grid, and transfer them with:\n"
-        "  last session:  octacam process --session\n"
+        "  last session:  octacam process --last session\n"
         "  all sessions:  octacam process --all",
         len(folders),
     )
@@ -526,8 +526,8 @@ def gui(
 
     settings = _settings_from_record(config.record, config.transcode, config.transfer)
     # One session id for this GUI run; every recording made before shutdown is
-    # tagged with it in the session cache so `octacam process --session` can
-    # find the whole batch later (and we print the commands on the way out).
+    # tagged with it in the session cache so `octacam process --last session`
+    # can find the whole batch later (and we print the commands on the way out).
     session_id = session_cache.new_session_id()
     controller = RecordingController(
         system, settings, plugins, session_id=session_id, config_dir=config_dir
@@ -1958,7 +1958,7 @@ def record(
     plugins.setup_all()
 
     # Tag this headless run in the session cache so `octacam process --last`
-    # and `--session` pick it up too (a one-off, single-folder "session").
+    # and `--last session` pick it up too (a one-off, single-folder "session").
     controller = RecordingController(
         system,
         settings,
@@ -2589,29 +2589,35 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
 
 def _resolve_transcode_paths(
     paths: list[Path],
-    last: bool,
-    session: bool,
+    last: str | None,
     session_id: str | None,
     all_: bool,
 ) -> list[Path]:
     """Resolve explicit PATHS or one cache selector to a list of folders.
 
-    The selectors --last/--session/--session-id/--all are mutually
-    exclusive and cannot be combined with explicit PATHS. They read the recording
-    cache (octacam.session_cache) and skip folders that have since been deleted,
-    so a removed recording is simply ignored. ``--session`` means the most recent
-    session; ``--session-id`` names an exact one (what the GUI prints on exit, so
-    the command stays correct even if another recording happens afterwards);
-    ``--all`` is every folder the cache still holds (last RETENTION_DAYS).
-    Exits with a clear message on a bad combination or when nothing is found.
+    The selectors --last/--session-id/--all are mutually exclusive and cannot be
+    combined with explicit PATHS. They read the recording cache
+    (octacam.session_cache) and skip folders that have since been deleted, so a
+    removed recording is simply ignored. ``--last`` (or ``--last recording``) is
+    the single most recent recording folder; ``--last session`` is every folder
+    from the most recent session; ``--session-id`` names an exact session (what
+    the GUI prints on exit, so the command stays correct even if another
+    recording happens afterwards); ``--all`` is every folder the cache still
+    holds (last RETENTION_DAYS). Exits with a clear message on a bad value, a bad
+    combination, or when nothing is found.
     """
     from octacam import session_cache
+
+    if last is not None and last not in ("recording", "session"):
+        sys.exit(
+            f"--last takes 'recording' or 'session' (or nothing, for the most "
+            f"recent recording), not {last!r}."
+        )
 
     chosen = [
         name
         for name, on in (
-            ("--last", last),
-            ("--session", session),
+            ("--last", last is not None),
             ("--session-id", session_id is not None),
             ("--all", all_),
         )
@@ -2625,20 +2631,20 @@ def _resolve_transcode_paths(
         if not paths:
             sys.exit(
                 "Provide one or more PATHS, or one of "
-                "--last/--session/--session-id/--all."
+                "--last/--session-id/--all."
             )
         return paths
 
-    if last:
+    if last == "session":
+        selector = "--last session"
+        folders = session_cache.session_folders()
+    elif last == "recording":
         selector = "--last"
         folder = session_cache.last_folder()
         folders = [folder] if folder else []
     elif all_:
         selector = "--all"
         folders = session_cache.all_folders()
-    elif session:
-        selector = "--session"
-        folders = session_cache.session_folders()
     else:
         selector = f"--session-id {shlex.quote(session_id or '')}"
         folders = session_cache.session_folders(session_id)
@@ -3117,32 +3123,60 @@ def _grid_and_transfer(
     return transfer_failed
 
 
-@app.command()
+def _inject_default_last(args: list[str]) -> list[str]:
+    """Give a value-less ``--last`` its default (``recording``) before parsing.
+
+    ``--last`` takes an optional value (``recording`` | ``session``), but typer
+    doesn't forward click's optional-value (flag_value) support, and doing it
+    via click internals would be brittle across the ``typer>=0.15`` range. So we
+    normalize the raw args here instead: a ``--last`` that ends the list or is
+    followed by another option gets an explicit ``recording`` inserted after it.
+    Tokens after a ``--`` separator are left untouched.
+    """
+    out: list[str] = []
+    seen_ddash = False
+    for i, tok in enumerate(args):
+        out.append(tok)
+        if seen_ddash:
+            continue
+        if tok == "--":
+            seen_ddash = True
+        elif tok == "--last":
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if nxt is None or nxt.startswith("-"):
+                out.append("recording")
+    return out
+
+
+class _ProcessCommand(typer.core.TyperCommand):
+    """`process` command whose ``--last`` accepts an optional value.
+
+    Bare ``--last`` means ``--last recording``; see :func:`_inject_default_last`.
+    """
+
+    def parse_args(self, ctx, args):  # type: ignore[override]
+        return super().parse_args(ctx, _inject_default_last(args))
+
+
+@app.command(cls=_ProcessCommand)
 def process(
     paths: Annotated[
         list[Path] | None,
         typer.Argument(
             exists=True,
             help="Recording folders (or parent directories with -r). Omit when "
-            "using --last/--session/--all.",
+            "using --last/--session-id/--all.",
         ),
     ] = None,
     last: Annotated[
-        bool,
+        str | None,
         typer.Option(
             "--last",
-            "--last-recording",
-            help="Process the most recent recording folder (from the cache).",
+            metavar="[recording|session]",
+            help="Process the most recent recording (--last or --last recording) "
+            "or every folder from the last GUI session (--last session).",
         ),
-    ] = False,
-    session: Annotated[
-        bool,
-        typer.Option(
-            "--session",
-            "--last-session",
-            help="Process every folder from the last GUI session.",
-        ),
-    ] = False,
+    ] = None,
     session_id: Annotated[
         str | None,
         typer.Option(
@@ -3191,7 +3225,7 @@ def process(
         Path | None,
         typer.Option(
             "--config",
-            "-C",
+            "-c",
             exists=True,
             file_okay=False,
             dir_okay=True,
@@ -3199,10 +3233,11 @@ def process(
             "octacam_config.toml (older recordings). Normally not needed.",
         ),
     ] = None,
-    remove_source: Annotated[
+    delete_source: Annotated[
         bool,
         typer.Option(
-            "--remove-source",
+            "--delete-source",
+            "-d",
             help="Delete each source .mkv/.raw once it transcodes successfully. "
             "The recording_summary.json is kept.",
         ),
@@ -3237,9 +3272,10 @@ def process(
     --force to rebuild existing transcodes and grids anyway (e.g. after changing
     the encoder params or grid layout).
 
-    Instead of PATHS, pass --last (the most recent recording), --session (the
-    last GUI session), --session-id (an exact session), or --all (every cached
-    folder). Deleted folders are silently skipped.
+    Instead of PATHS, pass --last (the most recent recording; same as --last
+    recording), --last session (the last GUI session), --session-id (an exact
+    session), or --all (every cached folder). Deleted folders are silently
+    skipped.
     """
     from octacam import session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -3251,7 +3287,7 @@ def process(
         sys.exit("Nothing to do: --no-transcode, --no-grid and --no-transfer all set.")
 
     folders = _resolve_transcode_paths(
-        list(paths or []), last, session, session_id, all_
+        list(paths or []), last, session_id, all_
     )
 
     raw_output = progress_style is ProgressStyle.ffmpeg
@@ -3328,8 +3364,8 @@ def process(
                             continue
                         completed += 1
                         folder_outputs.setdefault(folder, []).append(output)
-                        if remove_source:
-                            _remove_source_files(input_path)
+                        if delete_source:
+                            _delete_source_files(input_path)
                 except KeyboardInterrupt:
                     interrupted = True
             if not interrupted:
@@ -3375,7 +3411,7 @@ def process(
         sys.exit("; ".join(problems))
 
 
-def _remove_source_files(input_path: Path) -> None:
+def _delete_source_files(input_path: Path) -> None:
     """Delete a transcoded source (.mkv/.raw) once it has been transcoded.
 
     Never removes the recording_summary.json. Deletion failures are logged but

@@ -32,8 +32,8 @@ Other options:
 | --- | --- |
 | `-r`, `--recursive` | Recurse into the given folders. |
 | `--force` | Re-transcode / rebuild grids even when the output already exists. |
-| `--remove-source` | Delete each `.mkv`/`.raw` once it transcodes successfully (the summary is always kept). |
-| `--config`, `-C` | Fallback config dir for recordings that lack an embedded snapshot. |
+| `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully (the summary is always kept). |
+| `--config`, `-c` | Fallback config dir for recordings that lack an embedded snapshot. |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (stream ffmpeg's native output). |
 
@@ -46,8 +46,8 @@ was already baked in at record time (see
 [transformed vs raw](recording.md#transformed-vs-raw-frames)).
 
 `process` accepts any mix of recording folders. Already-transcoded outputs are
-skipped unless you pass `--force`. Pass `--remove-source` to delete each source
-`.mkv`/`.raw` once it transcodes successfully.
+skipped unless you pass `--force`. Pass `--delete-source`/`-d` to delete each
+source `.mkv`/`.raw` once it transcodes successfully.
 
 Progress is shown as an octacam-style bar (`[i/N] name`, percent, fps, speed,
 elapsed) reformatted live from ffmpeg's output. Use `--progress-style ffmpeg` to
@@ -123,14 +123,16 @@ recording (from the GUI or `octacam record`) is noted in a small cache under
 
 ```bash
 octacam process --last          # the most recent recording folder
-octacam process --session       # every folder from the last GUI session
+octacam process --last session  # every folder from the last GUI session
 octacam process --all           # every folder still in the cache
 ```
 
-- `--session` means the *most recent* session; `--session-id <id>` names an
-  exact one (useful when a later recording would otherwise steal "most recent").
-- When a GUI session ends, octacam prints ready-to-run `--session` and `--all`
-  commands.
+- `--last` takes an optional value: bare `--last` (or `--last recording`) is the
+  single most recent recording folder; `--last session` is the *most recent*
+  session. `--session-id <id>` names an exact session (useful when a later
+  recording would otherwise steal "most recent").
+- When a GUI session ends, octacam prints ready-to-run `--last session` and
+  `--all` commands.
 - Folders deleted between recording and processing are silently skipped.
 - The cache prunes itself (entries older than 30 days are dropped on each
   write), so it never grows without bound.

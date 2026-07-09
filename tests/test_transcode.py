@@ -450,15 +450,32 @@ def test_transcode_last_uses_cache(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_session_uses_cache(tmp_path, cache_env):
+def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_env):
+    # `--last recording` is the explicit spelling of a bare `--last`.
+    f1 = _recording_folder(tmp_path, "rec1")
+    f2 = _recording_folder(tmp_path, "rec2")
+    result = _run("--last", "recording", "--no-grid", "--no-transfer")
+    assert result.exit_code == 0, result.output
+    assert (f2 / "cam0.mp4").exists()  # only the most recent folder
+    assert not (f1 / "cam0.mp4").exists()
+
+
+def test_transcode_last_session_uses_cache(tmp_path, cache_env):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s2")
-    result = _run("--session", "--no-grid", "--no-transfer")
+    result = _run("--last", "session", "--no-grid", "--no-transfer")
     assert result.exit_code == 0, result.output
     assert (f1 / "cam0.mp4").exists()
     assert (f2 / "cam0.mp4").exists()
     assert not (f_old / "cam0.mp4").exists()  # an earlier session is excluded
+
+
+def test_transcode_last_rejects_bad_value(tmp_path, cache_env):
+    _recording_folder(tmp_path, "rec1")
+    result = _run("--last", "bogus", "--no-grid", "--no-transfer")
+    assert result.exit_code != 0
+    assert "recording" in result.output and "session" in result.output
 
 
 def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
@@ -467,14 +484,14 @@ def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
     f1 = _recording_folder(tmp_path, "rec1", session="s1")
     f2 = _recording_folder(tmp_path, "rec2", session="s1")
     shutil.rmtree(f1)  # removed between recording and transcoding -> ignored
-    result = _run("--session", "--no-grid", "--no-transfer")
+    result = _run("--last", "session", "--no-grid", "--no-transfer")
     assert result.exit_code == 0, result.output
     assert (f2 / "cam0.mp4").exists()
 
 
 def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     # --session-id names one exact session, unaffected by a later recording that
-    # would steal the "latest session" out from under bare --session.
+    # would steal the "latest session" out from under bare --last session.
     f1 = _recording_folder(tmp_path, "rec1", session="guiA")
     f2 = _recording_folder(tmp_path, "rec2", session="guiA")
     later = _recording_folder(tmp_path, "rec3", session="recB")  # a later session
@@ -483,10 +500,10 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     assert (f1 / "cam0.mp4").exists()
     assert (f2 / "cam0.mp4").exists()
     assert not (later / "cam0.mp4").exists()
-    # Bare --session would instead pick the later session (regression guard).
+    # `--last session` would instead pick the later session (regression guard).
     for folder in (f1, f2, later):
         (folder / "cam0.mp4").unlink(missing_ok=True)
-    assert _run("--session", "--no-grid", "--no-transfer").exit_code == 0
+    assert _run("--last", "session", "--no-grid", "--no-transfer").exit_code == 0
     assert (later / "cam0.mp4").exists()
     assert not (f1 / "cam0.mp4").exists()
 
@@ -511,11 +528,11 @@ def test_transcode_all_empty_cache_errors(tmp_path, cache_env):
 
 def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
     _recording_folder(tmp_path, "rec1")
-    result = _run("--last", "--session")
+    result = _run("--last", "--all")
     assert result.exit_code != 0
     assert "at most one" in result.output
-    # --all is part of the mutual-exclusion set too.
-    result = _run("--all", "--last")
+    # --session-id is part of the mutual-exclusion set too.
+    result = _run("--all", "--session-id", "s1")
     assert result.exit_code != 0
     assert "at most one" in result.output
 
@@ -693,32 +710,32 @@ def test_recursive_and_mixed_args_dedup(tmp_path):
     assert result.output.count(str(sub_b / "cam.mp4")) == 1
 
 
-def test_remove_source_deletes_raw_and_sidecar_keeps_summary(tmp_path):
+def test_delete_source_deletes_raw_and_sidecar_keeps_summary(tmp_path):
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam0.raw", frame)
     _summary(
         tmp_path,
         [_camera_entry("cam0.raw", frame, transform_applied=True)],
     )
-    result = _run(str(tmp_path), "--remove-source", "--no-grid", "--no-transfer")
+    result = _run(str(tmp_path), "--delete-source", "--no-grid", "--no-transfer")
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam0.mp4").exists()
     assert not (tmp_path / "cam0.raw").exists()  # source raw removed
     assert (tmp_path / "recording_summary.json").exists()  # summary kept
 
 
-def test_remove_source_deletes_mkv(tmp_path):
+def test_delete_source_deletes_mkv(tmp_path):
     _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
-    result = _run(str(tmp_path), "--remove-source", "--no-grid", "--no-transfer")
+    result = _run(str(tmp_path), "-d", "--no-grid", "--no-transfer")
     assert result.exit_code == 0, result.output
     assert (tmp_path / "cam.mp4").exists()
     assert not (tmp_path / "cam.mkv").exists()
 
 
-def test_remove_source_keeps_file_when_transcode_fails(tmp_path):
+def test_delete_source_keeps_file_when_transcode_fails(tmp_path):
     # A .raw with no summary geometry fails to transcode; the source must survive.
     (tmp_path / "orphan.raw").write_bytes(_frame(16, 12).tobytes())
-    result = _run(str(tmp_path), "--remove-source", "--no-grid", "--no-transfer")
+    result = _run(str(tmp_path), "--delete-source", "--no-grid", "--no-transfer")
     assert result.exit_code != 0
     assert (tmp_path / "orphan.raw").exists()
 

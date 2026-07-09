@@ -152,7 +152,7 @@ def test_fake_recording_notes_folder_in_session_cache(
     fake_system, tmp_path, monkeypatch
 ):
     # With a session id, each finished recording's folder is noted in the cache
-    # so `octacam transcode --session` can rediscover the batch.
+    # so `octacam process --last session` can rediscover the batch.
     from octacam import session_cache
 
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
