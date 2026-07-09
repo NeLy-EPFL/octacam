@@ -59,9 +59,6 @@ from octacam.cameras.base import (
     FeatureInfo,
     Frame,
     NodeInfo,
-    curated_list_features,
-    curated_read_feature,
-    curated_write_feature,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -108,6 +105,22 @@ _ERR_NAMES = {
 # snap_value and the GUI slider step both tolerate a missing inc.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
+# spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
+# node-map walk (Camera tab). The unmapped types (ValueNode/BaseNode/Register/
+# EnumEntry/Port and UnknownNode=-1) are containers or leaves the browser skips.
+_KIND_BY_NODE_TYPE = {
+    2: "int",  # IntegerNode
+    3: "bool",  # BooleanNode
+    4: "float",  # FloatNode
+    5: "command",  # CommandNode
+    6: "string",  # StringNode
+    8: "enum",  # EnumerationNode
+    10: "category",  # CategoryNode
+}
+# spinVisibility (SpinnakerGenApiDefsC.h). Beginner/Expert/Guru are shown in the
+# browser; Invisible (and any unknown) is hidden.
+_VIS_NAME = {0: "beginner", 1: "expert", 2: "guru", 3: "invisible"}
+
 # The System singleton and its camera list are held for the whole session and
 # released exactly once in teardown(), after every camera has been de-inited.
 _system: Any = None
@@ -128,6 +141,28 @@ _outstanding: dict[int, Any] = {}
 # The loaded binding, created lazily by _spin(). Tests replace it with a fake so
 # the backend orchestration is exercised without the SDK or hardware.
 _facade: "_Spinnaker | None" = None
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _snap_int(value: float, node_min: int | None, node_inc: int | None) -> int:
+    """Round ``value`` to the node's increment grid (offset from its min).
+
+    The firmware rejects an off-grid integer write; snap it here as the Basler
+    backend and base.snap_value do. A node without an increment just rounds to
+    the nearest int.
+    """
+    snapped = int(round(float(value)))
+    if node_inc:
+        base = node_min if node_min is not None else 0
+        snapped = int(base + round((snapped - base) / node_inc) * node_inc)
+    return snapped
 
 
 def _err_name(err: int) -> str:
@@ -155,6 +190,7 @@ def _configure(lib) -> None:
     dbl = ctypes.c_double
     u8 = ctypes.c_uint8
     ch = ctypes.c_char_p
+    i32 = ctypes.c_int  # spinNodeType / spinVisibility enums are plain C ints
     specs = {
         # System / camera list
         "spinSystemGetInstance": [P(v)],
@@ -193,6 +229,17 @@ def _configure(lib) -> None:
         "spinNodeIsAvailable": [v, P(u8)],
         "spinNodeIsReadable": [v, P(u8)],
         "spinNodeIsWritable": [v, P(u8)],
+        # Full node-map walk (Camera tab): node metadata + category traversal.
+        "spinNodeGetType": [v, P(i32)],
+        "spinNodeGetVisibility": [v, P(i32)],
+        "spinNodeGetName": [v, ch, P(sz)],
+        "spinNodeGetDisplayName": [v, ch, P(sz)],
+        "spinNodeGetToolTip": [v, ch, P(sz)],
+        "spinNodeGetDescription": [v, ch, P(sz)],
+        "spinCategoryGetNumFeatures": [v, P(sz)],
+        "spinCategoryGetFeatureByIndex": [v, sz, P(v)],
+        "spinEnumerationGetNumEntries": [v, P(sz)],
+        "spinEnumerationGetEntryByIndex": [v, sz, P(v)],
         "spinIntegerGetValue": [v, P(i64)],
         "spinIntegerSetValue": [v, i64],
         "spinIntegerGetMin": [v, P(i64)],
@@ -209,6 +256,7 @@ def _configure(lib) -> None:
         "spinEnumerationSetIntValue": [v, i64],
         "spinEnumerationEntryGetSymbolic": [v, ch, P(sz)],
         "spinStringGetValue": [v, ch, P(sz)],
+        "spinStringSetValue": [v, ch],
         "spinBooleanGetValue": [v, P(u8)],
         "spinBooleanSetValue": [v, u8],
         "spinCommandExecute": [v],
@@ -504,6 +552,232 @@ class _Spinnaker:
     def execute_command(self, nodemap, name: str) -> None:
         node = self._node(nodemap, name)
         _chk(self._lib.spinCommandExecute(node), f"execute {name}")
+
+    # ------------------------------------------------------- full node-map walk
+    # A GenApi node handle obtained here is owned by the node map and freed when
+    # the camera handle is released (see the SpinnakerGenApiC.h note on
+    # spinCategoryReleaseNode / spinNodeMapReleaseNode); like the by-name path
+    # above (spinNodeMapGetNode, called every frame for TriggerSoftware) these are
+    # left unreleased — list_features runs only on Camera-tab open / after a write.
+    def _node_type(self, handle) -> int:
+        t = ctypes.c_int(-1)
+        if self._lib.spinNodeGetType(handle, ctypes.byref(t)) != SPINNAKER_ERR_SUCCESS:
+            return -1
+        return int(t.value)
+
+    def _visibility(self, handle) -> str:
+        vis = ctypes.c_int(0)
+        if (
+            self._lib.spinNodeGetVisibility(handle, ctypes.byref(vis))
+            != SPINNAKER_ERR_SUCCESS
+        ):
+            return "beginner"
+        return _VIS_NAME.get(int(vis.value), "beginner")
+
+    def _available(self, handle) -> bool:
+        return self._flag(self._lib.spinNodeIsAvailable, handle)
+
+    def _tooltip(self, handle) -> str | None:
+        return self._string_from(
+            self._lib.spinNodeGetToolTip, handle
+        ) or self._string_from(self._lib.spinNodeGetDescription, handle)
+
+    def _current_enum_symbolic(self, handle) -> str | None:
+        entry = ctypes.c_void_p()
+        if (
+            self._lib.spinEnumerationGetCurrentEntry(handle, ctypes.byref(entry))
+            != SPINNAKER_ERR_SUCCESS
+            or not entry.value
+        ):
+            return None
+        return self._string_from(self._lib.spinEnumerationEntryGetSymbolic, entry)
+
+    def _enum_entries(self, handle) -> list[dict] | None:
+        n = ctypes.c_size_t()
+        if (
+            self._lib.spinEnumerationGetNumEntries(handle, ctypes.byref(n))
+            != SPINNAKER_ERR_SUCCESS
+        ):
+            return None
+        out: list[dict] = []
+        for i in range(int(n.value)):
+            entry = ctypes.c_void_p()
+            if (
+                self._lib.spinEnumerationGetEntryByIndex(
+                    handle, ctypes.c_size_t(i), ctypes.byref(entry)
+                )
+                != SPINNAKER_ERR_SUCCESS
+                or not entry.value
+            ):
+                continue
+            symbolic = self._string_from(
+                self._lib.spinEnumerationEntryGetSymbolic, entry
+            )
+            if not symbolic:
+                continue
+            out.append(
+                {
+                    "value": symbolic,
+                    "display": symbolic,
+                    "available": self._available(entry),
+                }
+            )
+        return out or None
+
+    def _build_feature(self, handle, kind: str, name: str) -> FeatureInfo:
+        """Assemble one FeatureInfo from a node handle already typed as ``kind``."""
+        readable = self._readable(handle)
+        feature = FeatureInfo(
+            name=name,
+            display_name=self._string_from(self._lib.spinNodeGetDisplayName, handle)
+            or name,
+            type=kind,
+            readable=readable,
+            writable=self._writable(handle),
+            visibility=self._visibility(handle),
+            tooltip=self._tooltip(handle),
+        )
+        if kind == "int":
+            if readable:
+                feature.value = self._opt_i64(self._lib.spinIntegerGetValue, handle)
+            feature.min = self._opt_i64(self._lib.spinIntegerGetMin, handle)
+            feature.max = self._opt_i64(self._lib.spinIntegerGetMax, handle)
+            feature.inc = self._opt_i64(self._lib.spinIntegerGetInc, handle)
+        elif kind == "float":
+            if readable:
+                feature.value = self._opt_f64(self._lib.spinFloatGetValue, handle)
+            feature.min = self._opt_f64(self._lib.spinFloatGetMin, handle)
+            feature.max = self._opt_f64(self._lib.spinFloatGetMax, handle)
+            feature.unit = self._string_from(self._lib.spinFloatGetUnit, handle)
+        elif kind == "bool":
+            if readable:
+                b = ctypes.c_uint8(0)
+                if (
+                    self._lib.spinBooleanGetValue(handle, ctypes.byref(b))
+                    == SPINNAKER_ERR_SUCCESS
+                ):
+                    feature.value = bool(b.value)
+        elif kind == "enum":
+            if readable:
+                feature.value = self._current_enum_symbolic(handle)
+            feature.entries = self._enum_entries(handle)
+        elif kind == "string" and readable:
+            feature.value = self._string_from(self._lib.spinStringGetValue, handle)
+        # command: no value
+        return feature
+
+    def _walk(self, category, path: str, out: list[FeatureInfo], seen: set) -> None:
+        """Depth-first walk of the GenApi category tree, collecting features.
+
+        Mirrors the Basler backend's ``_walk``: recurse into category nodes
+        (grouping label = the category's display name), classify every other
+        available, non-Invisible feature by its node type, and dedup by name. One
+        bad node is skipped, never aborting the whole walk.
+        """
+        n = ctypes.c_size_t()
+        if (
+            self._lib.spinCategoryGetNumFeatures(category, ctypes.byref(n))
+            != SPINNAKER_ERR_SUCCESS
+        ):
+            return
+        for i in range(int(n.value)):
+            child = ctypes.c_void_p()
+            if (
+                self._lib.spinCategoryGetFeatureByIndex(
+                    category, ctypes.c_size_t(i), ctypes.byref(child)
+                )
+                != SPINNAKER_ERR_SUCCESS
+                or not child.value
+            ):
+                continue
+            try:
+                if not self._available(child):
+                    continue
+                if self._visibility(child) not in ("beginner", "expert", "guru"):
+                    continue
+                kind = _KIND_BY_NODE_TYPE.get(self._node_type(child))
+                if kind == "category":
+                    label = (
+                        self._string_from(self._lib.spinNodeGetDisplayName, child)
+                        or self._string_from(self._lib.spinNodeGetName, child)
+                        or path
+                    )
+                    self._walk(child, label, out, seen)
+                    continue
+                if kind is None:
+                    continue
+                name = self._string_from(self._lib.spinNodeGetName, child)
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                feature = self._build_feature(child, kind, name)
+                feature.category = path or "Other"
+                out.append(feature)
+            except Exception as e:  # one bad node must not abort the walk
+                log.debug("Skipping node during feature walk: %s", e)
+
+    def list_features(self, nodemap) -> list[FeatureInfo]:
+        """Every browsable feature in ``nodemap``, grouped by GenApi category."""
+        out: list[FeatureInfo] = []
+        try:
+            root = self._node(nodemap, "Root")
+        except BackendError:
+            return out
+        self._walk(root, "", out, set())
+        return out
+
+    def read_feature(self, nodemap, name: str) -> FeatureInfo:
+        """Re-read one node into a FeatureInfo (raises BackendError if absent)."""
+        node = self._node(nodemap, name)
+        kind = _KIND_BY_NODE_TYPE.get(self._node_type(node))
+        if kind is None or kind == "category":
+            raise BackendError(f"node {name} is not an editable feature")
+        # Category is only known from the tree walk; leave it blank on a single
+        # re-read (the client keeps the grouping it already has).
+        return self._build_feature(node, kind, name)
+
+    def write_feature(self, nodemap, name: str, value: object) -> None:
+        """Write one node, coercing ``value`` to the node's GenApi type."""
+        node = self._node(nodemap, name)
+        kind = _KIND_BY_NODE_TYPE.get(self._node_type(node))
+        if not self._writable(node):
+            raise BackendError(f"node {name} is not writable")
+        if kind == "int":
+            snapped = _snap_int(
+                float(value),  # type: ignore[arg-type]
+                self._opt_i64(self._lib.spinIntegerGetMin, node),
+                self._opt_i64(self._lib.spinIntegerGetInc, node),
+            )
+            _chk(
+                self._lib.spinIntegerSetValue(node, ctypes.c_int64(snapped)),
+                f"set {name}",
+            )
+        elif kind == "float":
+            _chk(
+                self._lib.spinFloatSetValue(node, ctypes.c_double(float(value))),  # type: ignore[arg-type]
+                f"set {name}",
+            )
+        elif kind == "bool":
+            _chk(
+                self._lib.spinBooleanSetValue(
+                    node, ctypes.c_uint8(1 if _coerce_bool(value) else 0)
+                ),
+                f"set {name}",
+            )
+        elif kind == "enum":
+            # Reuse the tested by-name enum setter (GetEntryByName -> SetIntValue).
+            self.set_enum(nodemap, name, str(value))
+        elif kind == "string":
+            # GenICam strings are ASCII; a non-ASCII value is invalid input, so
+            # surface it as a clean BackendError rather than a raw
+            # UnicodeEncodeError (which base.set_feature would not wrap).
+            try:
+                encoded = str(value).encode("ascii")
+            except UnicodeEncodeError as e:
+                raise BackendError(f"{name}: value must be ASCII") from e
+            _chk(self._lib.spinStringSetValue(node, encoded), f"set {name}")
+        else:
+            raise BackendError(f"node {name} is not writable ({kind})")
 
     # --------------------------------------------------------------- imaging
     def get_next_image(self, hcam, timeout_ms: int):
@@ -813,21 +1087,27 @@ class SpinnakerBackend(SoftwareTriggerHandoff):
             self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS
         )
 
-    # Full-node-map introspection over the Spinnaker C API is not implemented;
-    # the Camera tab falls back to the six curated PARAM_NODES quick controls.
+    # Full device node-map browser (Camera tab): walk the GenApi node map over
+    # the C API, exactly like the Basler backend does over pypylon.genicam.
     def list_features(self) -> list[FeatureInfo]:
         if self._nodemap is None:
             return []
-        return curated_list_features(self)
+        return _spin().list_features(self._nodemap)
 
     def read_feature(self, name: str) -> FeatureInfo:
-        return curated_read_feature(self, name)
+        if self._nodemap is None:
+            raise BackendError("camera is not open")
+        return _spin().read_feature(self._nodemap, name)
 
     def write_feature(self, name: str, value: object) -> None:
-        curated_write_feature(self, name, value)
+        if self._nodemap is None:
+            raise BackendError("camera is not open")
+        _spin().write_feature(self._nodemap, name, value)
 
     def execute_command(self, name: str) -> None:
-        raise BackendError("command execution is not supported on this backend")
+        if self._nodemap is None:
+            raise BackendError("camera is not open")
+        _spin().execute_command(self._nodemap, name)
 
     def config_values(self, config_str: str) -> dict[str, str]:
         return dict(parse_config(config_str))

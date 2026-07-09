@@ -146,8 +146,13 @@
         <div class="cam-tools">
           <input id="cam-filter" type="search" placeholder="Filter parameters…"
             spellcheck="false" title="Filter the parameter list by name">
-          <label class="check" title="Also show Expert-visibility parameters">
-            <input id="cam-expert" type="checkbox"> Expert
+          <label class="cam-vis" title="Show parameters up to this GenICam visibility level. Higher levels expose more advanced, rarely-changed features (e.g. Sensor Readout Mode is Guru).">
+            <span>Level:</span>
+            <select id="cam-visibility">
+              <option value="beginner">Beginner</option>
+              <option value="expert">Expert</option>
+              <option value="guru">Guru</option>
+            </select>
           </label>
         </div>
         <!-- Grouped, model-dependent parameter browser rendered by camera.js -->

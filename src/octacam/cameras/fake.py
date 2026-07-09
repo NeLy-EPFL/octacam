@@ -286,11 +286,10 @@ class FakeBackend(SoftwareTriggerHandoff):
         if not self._open:
             return []
         features = [self._feature(sfnc) for sfnc in self._nodes]
-        features += [
-            self._command_feature(name)
-            for name, (_d, _c, vis) in _COMMANDS.items()
-            if vis != "guru"  # match the genicam walker: skip Guru-visibility
-        ]
+        # The genicam walker surfaces Beginner/Expert/Guru (only Invisible is
+        # dropped); the browser's level selector filters client-side. All fake
+        # command nodes are at or below Guru, so none are skipped here.
+        features += [self._command_feature(name) for name in _COMMANDS]
         return features
 
     def read_feature(self, name: str) -> FeatureInfo:

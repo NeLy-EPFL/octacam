@@ -40,7 +40,7 @@ _IFACE_KIND = {
     genicam.intfICommand: "command",
     genicam.intfICategory: "category",
 }
-# GetVisibility() int -> name; only Beginner/Expert are shown in the browser.
+# GetVisibility() int -> name; Beginner/Expert/Guru are shown in the browser.
 _VIS_NAME = {
     genicam.Beginner: "beginner",
     genicam.Expert: "expert",
@@ -304,7 +304,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
                 if not inode.IsFeature() or not genicam.IsAvailable(inode):
                     continue
                 vis = _VIS_NAME.get(inode.GetVisibility(), "beginner")
-                if vis not in ("beginner", "expert"):
+                if vis not in ("beginner", "expert", "guru"):
                     continue
                 iface = inode.GetPrincipalInterfaceType()
                 if iface == genicam.intfICategory:

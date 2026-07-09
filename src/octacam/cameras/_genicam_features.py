@@ -56,14 +56,14 @@ def _visibility_name(genapi, node) -> str:
 
 
 def _is_included(genapi, node) -> bool:
-    """Whether a node should appear in the browser (available, not Guru/hidden)."""
+    """Whether a node should appear in the browser (available, not Invisible)."""
     try:
         if not genapi.is_available(node):
             return False
     except Exception:
         return False
     vis = _visibility_name(genapi, node)
-    return vis in ("beginner", "expert")
+    return vis in ("beginner", "expert", "guru")
 
 
 def _category_of(genapi, node) -> str:

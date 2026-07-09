@@ -19,6 +19,11 @@ const trimNum = (v) => {
   return String(Math.round(v * 1000) / 1000);
 };
 
+// GenICam visibility levels, least to most advanced. The level selector shows
+// every feature at or below the chosen level (Guru includes all). The server
+// walk never sends Invisible nodes, so only these three reach the browser.
+const VIS_RANK = { beginner: 0, expert: 1, guru: 2 };
+
 // A short "min–max, inc X, unit" hint for a numeric node.
 function rangeHint(f) {
   const parts = [];
@@ -52,7 +57,7 @@ export class CameraTab {
     this.featuresByIndex = {};
     this.collapsed = new Set();
     this.filter = "";
-    this.showExpert = false;
+    this.visLevel = "beginner"; // max GenICam visibility shown (see VIS_RANK)
     // A write broadcasts camera_features_dirty to every client, including this
     // one. We already applied the authoritative response locally, so ignore the
     // echo (per camera index) for a short window instead of refetching. The
@@ -68,7 +73,7 @@ export class CameraTab {
     this.nameInput = document.getElementById("cam-name");
     this.renameBtn = document.getElementById("cam-rename");
     this.filterInput = document.getElementById("cam-filter");
-    this.expertInput = document.getElementById("cam-expert");
+    this.visInput = document.getElementById("cam-visibility");
 
     for (const cam of cameras) {
       const opt = document.createElement("option");
@@ -87,8 +92,8 @@ export class CameraTab {
       this.filter = this.filterInput.value.trim().toLowerCase();
       this._renderParams();
     });
-    this.expertInput.addEventListener("change", () => {
-      this.showExpert = this.expertInput.checked;
+    this.visInput.addEventListener("change", () => {
+      this.visLevel = this.visInput.value;
       this._renderParams();
     });
     // Track the focused feature so a re-render (commit / soft refresh) can put
@@ -183,7 +188,7 @@ export class CameraTab {
     }
     if (document.activeElement !== this.nameInput) this.nameInput.value = cam.name;
     this.filterInput.value = this.filter;
-    this.expertInput.checked = this.showExpert;
+    this.visInput.value = this.visLevel;
     if (this.connected && !this.featuresByIndex[this.selected]) {
       this._loadFeatures();
     } else {
@@ -293,9 +298,10 @@ export class CameraTab {
     if (widget && !widget.disabled) widget.focus();
   }
 
-  // Whether a feature passes the current filter + Expert-visibility toggle.
+  // Whether a feature passes the current filter + visibility-level selector.
+  // Features above the chosen level (Beginner < Expert < Guru) are hidden.
   _visible(f) {
-    if (!this.showExpert && f.visibility === "expert") return false;
+    if ((VIS_RANK[f.visibility] ?? 0) > (VIS_RANK[this.visLevel] ?? 0)) return false;
     if (this.filter) {
       const hay = `${f.name} ${f.display_name}`.toLowerCase();
       if (!hay.includes(this.filter)) return false;

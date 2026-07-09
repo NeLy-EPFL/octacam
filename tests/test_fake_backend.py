@@ -166,8 +166,9 @@ def test_expert_and_guru_visibility(previewing_system):
     cam = previewing_system.camera_at(0)
     by = {f["name"]: f for f in cam.list_features()}
     assert by["AcquisitionFrameRate"]["visibility"] == "expert"
-    # DeviceReset is Guru-visibility -> excluded from the browser entirely.
-    assert "DeviceReset" not in by
+    # Guru nodes (e.g. DeviceReset) are surfaced too; the browser's level
+    # selector hides them client-side until the user opts into Guru.
+    assert by["DeviceReset"]["visibility"] == "guru"
 
 
 def test_write_feature_validates(previewing_system):

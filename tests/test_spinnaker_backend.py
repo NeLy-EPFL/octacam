@@ -14,7 +14,7 @@ import pytest
 
 import octacam.cameras.spinnaker_c as sc
 from octacam.cameras._genicam_config import parse_config
-from octacam.cameras.base import BackendError, NodeInfo
+from octacam.cameras.base import BackendError, FeatureInfo, NodeInfo
 from octacam.cameras.spinnaker_c import SpinnakerBackend
 
 
@@ -37,10 +37,13 @@ class FakeNode:
 class FakeEnum:
     """An enumeration node holding its current symbolic value."""
 
-    def __init__(self, value, writable=True):
+    def __init__(self, value, writable=True, entries=None):
         self.value = value
         self.readable = True
         self.writable = writable
+        # Selectable symbolics for the Camera-tab dropdown; defaults to the
+        # current value so a walk always yields at least one entry.
+        self.entries = entries if entries is not None else [value]
 
 
 class FakeBool:
@@ -229,6 +232,69 @@ class FakeSpin:
             raise BackendError(f"command {name} not found")
         node.executed += 1
 
+    # full node-map walk (Camera tab). The real facade traverses the GenApi
+    # category tree over ctypes; here we synthesize a FeatureInfo per fake node so
+    # the backend delegation + widget-kind mapping are exercised in pure Python.
+    def _feature_from(self, name, node):
+        if isinstance(node, FakeCommand):
+            return FeatureInfo(name, name, "command", category="Other")
+        if isinstance(node, FakeBool):
+            return FeatureInfo(
+                name, name, "bool", category="Other",
+                value=node.value, readable=node.readable, writable=node.writable,
+            )
+        if isinstance(node, FakeEnum):
+            entries = [{"value": e, "display": e, "available": True} for e in node.entries]
+            return FeatureInfo(
+                name, name, "enum", category="Other", value=node.value,
+                entries=entries, readable=node.readable, writable=node.writable,
+            )
+        if isinstance(node, FakeNode):
+            kind = "int" if isinstance(node.value, int) else "float"
+            # The real facade gives int nodes an increment but no unit, and float
+            # nodes a unit but no increment (the C API has no spinFloatGetInc /
+            # spinIntegerGetUnit) — mirror that so the fake is not more permissive.
+            return FeatureInfo(
+                name, name, kind, category="Other", value=node.value,
+                min=node.min, max=node.max,
+                inc=(node.inc if kind == "int" else None),
+                unit=(None if kind == "int" else node.unit),
+                readable=node.readable, writable=node.writable,
+            )
+        return None
+
+    def list_features(self, nodemap):
+        out = []
+        for name, node in vars(nodemap).items():
+            feature = self._feature_from(name, node)
+            if feature is not None:
+                out.append(feature)
+        return out
+
+    def read_feature(self, nodemap, name):
+        node = getattr(nodemap, name, None)
+        if node is None:
+            raise BackendError(f"node {name} is not an editable feature")
+        feature = self._feature_from(name, node)
+        if feature is None:
+            raise BackendError(f"node {name} is not an editable feature")
+        return feature
+
+    def write_feature(self, nodemap, name, value):
+        node = getattr(nodemap, name, None)
+        if node is None:
+            raise BackendError(f"no such node: {name}")
+        if not getattr(node, "writable", False):
+            raise BackendError(f"node {name} is not writable")
+        if isinstance(node, FakeBool):
+            node.value = str(value).strip().lower() in ("1", "true", "yes", "on") if isinstance(value, str) else bool(value)
+        elif isinstance(node, FakeEnum):
+            node.value = str(value)
+        elif isinstance(node, FakeNode):
+            node.value = int(round(float(value))) if isinstance(node.value, int) else float(value)
+        else:
+            raise BackendError(f"node {name} is not writable")
+
     # imaging
     def get_next_image(self, cam, timeout_ms):
         return cam.next_image
@@ -393,6 +459,107 @@ def test_load_params_skips_unavailable_nodes(caplog):
     # lines still apply (mirrors the FLIR C config tool's per-node guard).
     backend.load_params("Gain\t9.0\nExposureTime\t3000.0\n")
     assert nm.ExposureTime.value == 3000.0 and nm.Gain.value == 1.5
+
+
+# ------------------------------------------------ full node-map walk (Camera tab)
+def test_list_features_walks_the_full_node_map():
+    # The Camera tab now browses the whole GenApi node map (like Basler), not just
+    # the six curated PARAM_NODES. Every node kind is classified correctly.
+    backend, _cam = _open_backend()
+    features = {f.name: f for f in backend.list_features()}
+    # Far more than the six curated params.
+    assert len(features) > 6
+    width = features["Width"]
+    assert width.type == "int" and width.value == 1920
+    assert width.min == 16 and width.max == 1920 and width.inc == 16
+    exposure = features["ExposureTime"]
+    assert exposure.type == "float" and exposure.value == 5000.0 and exposure.unit == "us"
+    assert features["Gain"].type == "float"
+    gamma = features["GammaEnabled"]
+    assert gamma.type == "bool" and gamma.value is False
+    pixel_format = features["PixelFormat"]
+    assert pixel_format.type == "enum" and pixel_format.value == "Mono8"
+    assert pixel_format.entries and pixel_format.entries[0]["value"] == "Mono8"
+    trigger_sw = features["TriggerSoftware"]
+    assert trigger_sw.type == "command" and trigger_sw.value is None
+
+
+def test_list_features_empty_when_not_open():
+    cam = FakeCam("17475185")
+    backend = SpinnakerBackend(cam)  # not opened: no nodemap
+    assert backend.list_features() == []
+
+
+def test_read_feature_returns_one_node():
+    backend, _cam = _open_backend()
+    feature = backend.read_feature("ExposureTime")
+    assert feature.name == "ExposureTime" and feature.type == "float"
+    assert feature.value == 5000.0
+
+
+def test_read_feature_unknown_node_raises():
+    backend, _cam = _open_backend()
+    with pytest.raises(BackendError):
+        backend.read_feature("NoSuchNode")
+
+
+def test_read_feature_raises_when_not_open():
+    backend = SpinnakerBackend(FakeCam("17475185"))
+    with pytest.raises(BackendError):
+        backend.read_feature("Width")
+
+
+def test_write_feature_dispatches_by_node_type():
+    nm = FakeNodeMap()
+    backend, _cam = _open_backend(nm)
+    backend.write_feature("Width", 640)  # int
+    assert nm.Width.value == 640 and isinstance(nm.Width.value, int)
+    backend.write_feature("Gain", 3.5)  # float
+    assert nm.Gain.value == 3.5 and isinstance(nm.Gain.value, float)
+    backend.write_feature("GammaEnabled", True)  # bool
+    assert nm.GammaEnabled.value is True
+    backend.write_feature("AcquisitionMode", "SingleFrame")  # enum
+    assert nm.AcquisitionMode.value == "SingleFrame"
+
+
+def test_write_feature_not_writable_raises():
+    nm = FakeNodeMap()
+    nm.Gain = FakeNode(1.5, writable=False)
+    backend, _cam = _open_backend(nm)
+    with pytest.raises(BackendError):
+        backend.write_feature("Gain", 2.0)
+
+
+def test_write_feature_raises_when_not_open():
+    backend = SpinnakerBackend(FakeCam("17475185"))
+    with pytest.raises(BackendError):
+        backend.write_feature("Width", 640)
+
+
+def test_execute_command_fires_the_node():
+    nm = FakeNodeMap()
+    backend, _cam = _open_backend(nm)
+    backend.execute_command("TriggerSoftware")
+    assert nm.TriggerSoftware.executed == 1
+
+
+def test_execute_command_raises_when_not_open():
+    backend = SpinnakerBackend(FakeCam("17475185"))
+    with pytest.raises(BackendError):
+        backend.execute_command("TriggerSoftware")
+
+
+def test_snap_int_rounds_to_the_increment_grid():
+    # The real write_feature snaps an off-grid integer to the node's inc grid
+    # (offset from min) before the SDK write, which would otherwise reject it.
+    # This is the one non-trivial bit of arithmetic in the ctypes walk, so it is
+    # covered directly (the ctypes .so itself is verified on hardware).
+    assert sc._snap_int(643, node_min=0, node_inc=16) == 640  # nearest multiple
+    assert sc._snap_int(650, node_min=0, node_inc=16) == 656  # rounds up
+    assert sc._snap_int(101, node_min=5, node_inc=16) == 101  # grid offset by min
+    assert sc._snap_int(100, node_min=5, node_inc=16) == 101  # -> 5 + 6*16
+    assert sc._snap_int(123.9, node_min=None, node_inc=None) == 124  # no inc: round
+    assert sc._snap_int(200, node_min=0, node_inc=None) == 200
 
 
 def test_trigger_once_is_a_pure_bump_not_a_device_call():

@@ -38,9 +38,6 @@ from octacam.cameras.base import (
     FeatureInfo,
     Frame,
     NodeInfo,
-    curated_list_features,
-    curated_read_feature,
-    curated_write_feature,
 )
 from octacam.cameras.registry import BackendUnavailable
 
@@ -84,6 +81,104 @@ def _safe(getter):
         return getter()
     except Exception:
         return None
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- Full node-map walk (Camera tab) ------------------------------------------
+# The PySpin interface-type / visibility constants live on the module, which may
+# be absent (cp310-only), so the maps are built lazily from the passed-in module
+# rather than at import time (unlike the Basler backend, whose pypylon is always
+# present). This mirrors the standalone genicam walk in _genicam_features.py, but
+# over PySpin's C++ node wrappers (CIntegerPtr/CEnumerationPtr/... casts) instead.
+def _iface_kind(spin, itype) -> str | None:
+    """Map a PySpin interface type to a FeatureInfo widget kind (None = skip)."""
+    return {
+        spin.intfIInteger: "int",
+        spin.intfIFloat: "float",
+        spin.intfIBoolean: "bool",
+        spin.intfIEnumeration: "enum",
+        spin.intfIString: "string",
+        spin.intfICommand: "command",
+        spin.intfICategory: "category",
+    }.get(itype)
+
+
+def _visibility_name(spin, node) -> str:
+    try:
+        return {
+            spin.Beginner: "beginner",
+            spin.Expert: "expert",
+            spin.Guru: "guru",
+            spin.Invisible: "invisible",
+        }.get(node.GetVisibility(), "beginner")
+    except Exception:
+        return "beginner"
+
+
+def _flir_enum_entries(spin, enum) -> list[dict] | None:
+    try:
+        out = []
+        for entry in enum.GetEntries():
+            try:
+                symbolic = spin.CEnumEntryPtr(entry).GetSymbolic()
+            except Exception:
+                continue
+            if not symbolic:
+                continue
+            try:
+                available = spin.IsAvailable(entry)
+            except Exception:
+                available = True
+            out.append({"value": symbolic, "display": symbolic, "available": available})
+        return out or None
+    except Exception:
+        return None
+
+
+def _flir_feature(spin, node) -> FeatureInfo | None:
+    """Build a FeatureInfo from a PySpin INode (None = skip category/non-feature)."""
+    kind = _iface_kind(spin, node.GetPrincipalInterfaceType())
+    if kind is None or kind == "category":
+        return None
+    name = node.GetName()
+    readable = spin.IsReadable(node)
+    feature = FeatureInfo(
+        name=name,
+        display_name=_safe(node.GetDisplayName) or name,
+        type=kind,
+        readable=readable,
+        writable=spin.IsWritable(node),
+        visibility=_visibility_name(spin, node),
+        tooltip=(_safe(node.GetToolTip) or _safe(node.GetDescription) or None),
+    )
+    if kind in ("int", "float"):
+        typed = spin.CIntegerPtr(node) if kind == "int" else spin.CFloatPtr(node)
+        if readable:
+            feature.value = _safe(typed.GetValue)
+        feature.min = _safe(typed.GetMin)
+        feature.max = _safe(typed.GetMax)
+        feature.inc = _safe(typed.GetInc)
+        feature.unit = _safe(typed.GetUnit) or None
+    elif kind == "bool":
+        if readable:
+            feature.value = _safe(spin.CBooleanPtr(node).GetValue)
+    elif kind == "enum":
+        enum = spin.CEnumerationPtr(node)
+        if readable:
+            entry = _safe(enum.GetCurrentEntry)
+            feature.value = _safe(entry.GetSymbolic) if entry is not None else None
+        feature.entries = _flir_enum_entries(spin, enum)
+    elif kind == "string" and readable:
+        feature.value = _safe(spin.CStringPtr(node).GetValue)
+    # command: no value
+    return feature
 
 
 class FlirBackend(SoftwareTriggerHandoff):
@@ -290,23 +385,110 @@ class FlirBackend(SoftwareTriggerHandoff):
         except spin.SpinnakerException as e:
             raise BackendError(str(e)) from e
 
-    # A full PySpin node-map walk is not implemented here; on the harvesters
-    # branch a FLIR is normally claimed by the harvesters tier (mvIMPACT
-    # producer), which serves the full node map. This legacy PySpin tier falls
-    # back to the six curated PARAM_NODES for the Camera tab.
+    # Full device node-map browser (Camera tab): depth-first walk of the GenApi
+    # category tree, exactly like the Basler backend does over pypylon.genicam
+    # (and the Spinnaker C-API backend over ctypes) — same widget kinds, same
+    # per-node bounds/enum-entries, grouped by category.
     def list_features(self) -> list[FeatureInfo]:
         if self._cam is None or not self._cam.IsInitialized():
             return []
-        return curated_list_features(self)
+        spin = _spin()
+        try:
+            root = spin.CCategoryPtr(self._nodemap().GetNode("Root"))
+        except spin.SpinnakerException:
+            return []
+        out: list[FeatureInfo] = []
+        self._walk(spin, root, "", out, set())
+        return out
+
+    def _walk(self, spin, category, path: str, out: list, seen: set) -> None:
+        """Depth-first walk of the GenApi category tree, collecting features."""
+        try:
+            features = category.GetFeatures()
+        except spin.SpinnakerException:
+            return
+        for node in features:
+            try:
+                if not spin.IsAvailable(node) or not node.IsFeature():
+                    continue
+                if _visibility_name(spin, node) not in ("beginner", "expert", "guru"):
+                    continue
+                if node.GetPrincipalInterfaceType() == spin.intfICategory:
+                    label = _safe(node.GetDisplayName) or _safe(node.GetName) or path
+                    self._walk(spin, spin.CCategoryPtr(node), label, out, seen)
+                    continue
+                name = node.GetName()
+                if name in seen:
+                    continue
+                seen.add(name)
+                feature = _flir_feature(spin, node)
+                if feature is not None:
+                    feature.category = path or "Other"
+                    out.append(feature)
+            except spin.SpinnakerException as e:
+                log.debug("Skipping node during feature walk: %s", e)
 
     def read_feature(self, name: str) -> FeatureInfo:
-        return curated_read_feature(self, name)
+        spin = _spin()
+        try:
+            node = self._nodemap().GetNode(name)
+        except spin.SpinnakerException as e:
+            raise BackendError(f"no such node: {name}") from e
+        if node is None or not spin.IsAvailable(node):
+            raise BackendError(f"no such node: {name}")
+        feature = _flir_feature(spin, node)
+        if feature is None:
+            raise BackendError(f"node {name} is not an editable feature")
+        # Category is only known from the tree walk; leave it blank on a single
+        # re-read (the client keeps the grouping it already has).
+        return feature
 
     def write_feature(self, name: str, value: object) -> None:
-        curated_write_feature(self, name, value)
+        spin = _spin()
+        try:
+            node = self._nodemap().GetNode(name)
+        except spin.SpinnakerException as e:
+            raise BackendError(f"no such node: {name}") from e
+        if node is None:  # GetNode returns None (not a raise) for an absent name
+            raise BackendError(f"no such node: {name}")
+        kind = _iface_kind(spin, node.GetPrincipalInterfaceType())
+        try:
+            if kind == "int":
+                typed = spin.CIntegerPtr(node)
+                node_min = _safe(typed.GetMin)
+                node_inc = _safe(typed.GetInc)
+                snapped = int(round(float(value)))  # type: ignore[arg-type]
+                if node_inc:
+                    base = node_min if node_min is not None else 0
+                    snapped = int(base + round((snapped - base) / node_inc) * node_inc)
+                typed.SetValue(snapped)
+            elif kind == "float":
+                spin.CFloatPtr(node).SetValue(float(value))  # type: ignore[arg-type]
+            elif kind == "bool":
+                spin.CBooleanPtr(node).SetValue(_coerce_bool(value))
+            elif kind == "enum":
+                spin.CEnumerationPtr(node).FromString(str(value))
+            elif kind == "string":
+                spin.CStringPtr(node).SetValue(str(value))
+            else:
+                raise BackendError(f"node {name} is not writable ({kind})")
+        except spin.SpinnakerException as e:
+            raise BackendError(str(e)) from e
 
     def execute_command(self, name: str) -> None:
-        raise BackendError("command execution is not supported on this backend")
+        spin = _spin()
+        try:
+            node = self._nodemap().GetNode(name)
+        except spin.SpinnakerException as e:
+            raise BackendError(f"no such node: {name}") from e
+        if node is None:  # GetNode returns None (not a raise) for an absent name
+            raise BackendError(f"no such node: {name}")
+        if node.GetPrincipalInterfaceType() != spin.intfICommand:
+            raise BackendError(f"node {name} is not a command")
+        try:
+            spin.CCommandPtr(node).Execute()
+        except spin.SpinnakerException as e:
+            raise BackendError(str(e)) from e
 
     def config_values(self, config_str: str) -> dict[str, str]:
         return dict(parse_config(config_str))
