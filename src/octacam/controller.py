@@ -130,6 +130,10 @@ class RecordingSettings:
     save_method: str = "ffmpeg"  # "ffmpeg" | "raw"
     # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg".
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
+    # Depth of each camera's writer queue (frames buffered to the encoder). A
+    # deeper queue absorbs transient encoder stalls without dropping frames, at
+    # the cost of peak RAM. See config.RecordConfig.writer_queue_size.
+    writer_queue_size: int = 64
     remux_mp4: bool = False
     # "display" bakes each camera's display transform into the video; "sensor"
     # saves the raw, untransformed image. save_frame_timestamps writes the
@@ -484,6 +488,12 @@ class RecordingController:
                 "sensor",
             ):
                 raise ValueError("record_form must be display or sensor")
+            if "writer_queue_size" in changes and (
+                not isinstance(changes["writer_queue_size"], int)
+                or isinstance(changes["writer_queue_size"], bool)
+                or changes["writer_queue_size"] < 1
+            ):
+                raise ValueError("writer_queue_size must be an integer >= 1")
             if "transcode_ffmpeg_params" in changes:
                 # Reject args ffmpeg could never parse (bad quoting) up front:
                 # the config loader would otherwise silently drop them back to
@@ -985,6 +995,7 @@ class RecordingController:
                     settings.video_format(),
                     settings.record_form,
                     use_software_trigger=use_software_trigger,
+                    writer_queue_size=settings.writer_queue_size,
                 )
             except Exception as e:
                 # A non-BackendError escaping the trigger-config or start_record

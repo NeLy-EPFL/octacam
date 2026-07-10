@@ -74,7 +74,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("octacam")
 
 GRAB_TIMEOUT_MS = 100  # matches Camera.GRAB_TIMEOUT_MS
-WRITER_QUEUE_SIZE = 20  # matches Camera.WRITER_QUEUE_SIZE
+WRITER_QUEUE_SIZE = 64  # matches Camera.WRITER_QUEUE_SIZE (record.writer_queue_size default)
 WARMUP_S = 0.5  # discarded settle time before every measurement window
 # A trial "passes" (target achievable) when it delivers at least this fraction of
 # the requested fps with no more than this drop rate. The drop bar matches the

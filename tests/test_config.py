@@ -55,6 +55,15 @@ def test_record_defaults():
     assert record.trigger_source == "software"
 
 
+def test_writer_queue_size_default_and_floor():
+    assert RecordConfig().writer_queue_size == 64
+    assert RecordConfig(writer_queue_size=128).writer_queue_size == 128
+    # queue.Queue(maxsize=0) is *unbounded*; the validator floors at 1 so the
+    # bound is always meaningful (a slow encoder can never OOM the host).
+    assert RecordConfig(writer_queue_size=0).writer_queue_size == 1
+    assert RecordConfig(writer_queue_size=-10).writer_queue_size == 1
+
+
 def test_parses_emulate_basler_config():
     config = load_config_dir(REPO_ROOT / "configs" / "emulate_basler")
     assert config.record.fps == 30.0

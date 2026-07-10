@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from octacam.cameras.base import BackendError, Camera
+from octacam.cameras.base import WRITER_QUEUE_SIZE, BackendError, Camera
 from octacam.cameras.registry import (
     BackendUnavailable,
     resolve_backend_names,
@@ -296,6 +296,7 @@ class CameraSystem:
         video_format: VideoFormat,
         record_form: str = "display",
         use_software_trigger: bool = True,
+        writer_queue_size: int = WRITER_QUEUE_SIZE,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
@@ -304,6 +305,7 @@ class CameraSystem:
         half-started: it is logged and skipped. ``use_software_trigger`` is
         forwarded so an external-trigger recording fetches frames without the
         software-trigger hand-off (see :meth:`Camera.start_record`).
+        ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
         """
         self.stop()
 
@@ -315,6 +317,7 @@ class CameraSystem:
                 video_format,
                 record_form,
                 software_trigger=use_software_trigger,
+                queue_size=writer_queue_size,
             )
 
         # Start every camera at once so they begin grabbing closer together

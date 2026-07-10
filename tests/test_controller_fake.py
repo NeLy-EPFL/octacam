@@ -58,6 +58,23 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert all(c["frames"] > 0 for c in snapshot["cameras"])
 
 
+def test_writer_queue_size_reaches_each_writer(fake_system, tmp_path):
+    # The config knob must flow settings -> CameraSystem -> Camera -> writer so a
+    # deeper queue actually absorbs transient encoder stalls at record time.
+    save_dir = tmp_path / "rec" / "001-trial"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(save_dir), writer_queue_size=7
+    )
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+    assert controller.start_recording().ok
+    # Writers are open the moment start_recording() returns ok (created under the
+    # controller lock), before the countdown ends — inspect them now.
+    for camera in fake_system:
+        assert camera._video_writer is not None
+        assert camera._video_writer._max_queue_size == 7
+    controller.join(timeout=20)
+
+
 def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path):
     from octacam._compat import tomllib
     from octacam.config_writer import write_config

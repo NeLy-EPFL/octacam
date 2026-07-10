@@ -101,6 +101,12 @@ class RecordConfig(BaseModel):
     relative_directory: str = ""
     save_method: Literal["ffmpeg", "raw"] = "ffmpeg"
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
+    # Frames buffered per camera between the grab loop and the encoder. The grab
+    # loop never blocks, so a frame arriving while this queue is full is dropped;
+    # a deeper queue absorbs a transient encoder stall (bursty ffmpeg/GPU) at the
+    # cost of peak RAM (queue x frame bytes x cameras). Raise it if a fast rig
+    # shows brief drop bursts; lower it on memory-tight / high-resolution rigs.
+    writer_queue_size: int = 64
     # true bakes each camera's display transform (rotation/flips) into the video
     # (old record_form "display"); false saves the raw sensor image ("sensor").
     save_transformed: bool = True
@@ -120,6 +126,13 @@ class RecordConfig(BaseModel):
     @classmethod
     def _check_ffmpeg_params(cls, value: str) -> str:
         return _valid_ffmpeg_params(value)
+
+    @field_validator("writer_queue_size")
+    @classmethod
+    def _floor_writer_queue_size(cls, value: int) -> int:
+        # A queue.Queue(maxsize=0) is *unbounded* (would grow to OOM on a slow
+        # encoder); floor at 1 so the bound is always meaningful.
+        return max(1, value)
 
 
 class TranscodeConfig(BaseModel):

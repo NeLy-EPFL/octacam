@@ -161,6 +161,14 @@ def test_update_settings_validation():
         controller.update_settings(trigger_source="quantum")
     with pytest.raises(ValueError):
         controller.update_settings(no_such_field=1)
+    # writer_queue_size must be a real int >= 1 (bool/float/sub-1 rejected).
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=0)
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=True)
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=3.5)
+    assert controller.update_settings(writer_queue_size=100).writer_queue_size == 100
     controller.update_settings(fps=42.0)
     assert controller.camera_system.hz == 42.0
 

@@ -231,6 +231,7 @@ class SettingsPatch(BaseModel):
     preview_trigger_source: str | None = None
     save_method: str | None = None
     ffmpeg_params: str | None = None
+    writer_queue_size: int | None = None
     record_form: str | None = None
     save_frame_timestamps: bool | None = None
     transcode_ffmpeg_params: str | None = None

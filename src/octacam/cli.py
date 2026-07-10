@@ -252,6 +252,7 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
         preview_trigger_source=record.preview_trigger_source,
         save_method=record.save_method,
         ffmpeg_params=record.ffmpeg_params,
+        writer_queue_size=record.writer_queue_size,
         record_form="display" if record.save_transformed else "sensor",
         save_frame_timestamps=record.save_timestamps,
         transcode_ffmpeg_params=transcode.ffmpeg_params,

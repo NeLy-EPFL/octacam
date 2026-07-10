@@ -28,7 +28,14 @@ from octacam.writer import AsyncFrameWriter, VideoFormat
 log = logging.getLogger("octacam")
 
 GRAB_TIMEOUT_MS = 100
-WRITER_QUEUE_SIZE = 20
+# Default depth of each camera's writer queue (frames buffered between the grab
+# loop and the encoder). The grab loop never blocks: a frame that arrives while
+# the queue is full is dropped. The bound must absorb a *transient* encoder
+# stall (e.g. several GPU NVENC sessions warming up together) without dropping,
+# while capping worst-case memory (depth x frame bytes x cameras). 64 frames is
+# ~0.8 s of headroom at 80 fps; rigs can override it via record.writer_queue_size
+# (raise it for high camera counts / bursty encoders, lower it to save memory).
+WRITER_QUEUE_SIZE = 64
 # Upper bound on the per-frame timestamp series kept during *preview* (the GUI's
 # idle steady state, never periodically restarted): preview only needs the last
 # few for the rolling fps readout, so the series is trimmed to this many instead
@@ -935,6 +942,7 @@ class Camera:
         video_format: VideoFormat,
         record_form: str = "display",
         software_trigger: bool = True,
+        queue_size: int = WRITER_QUEUE_SIZE,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
@@ -946,7 +954,9 @@ class Camera:
         frame) when True, or a plain fetch of externally-triggered frames when
         False. An external trigger never bumps the hand-off counter, so gating the
         record loop on it (``retrieve``) would capture nothing — external recording
-        must use the un-gated ``retrieve_freerun`` fetch instead.
+        must use the un-gated ``retrieve_freerun`` fetch instead. ``queue_size``
+        bounds the writer queue that buffers frames between the grab loop and the
+        encoder (see :data:`WRITER_QUEUE_SIZE`).
         """
         self._stop_flag.clear()
         self._started = False
@@ -965,7 +975,7 @@ class Camera:
             self.display_transform.output_size(*sensor_size) if bake else sensor_size
         )
         self._recorded_frame_size = frame_size
-        self._video_writer = video_format.create_writer(WRITER_QUEUE_SIZE)
+        self._video_writer = video_format.create_writer(max(1, queue_size))
         if not self._video_writer.open(save_path, fps, frame_size):
             log.error("Failed to open video writer for: %s", save_path)
             return False
