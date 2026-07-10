@@ -9,7 +9,10 @@ isolated Python without touching your system environment.
     USB3-Vision camera through the [backend cascade](guide/backends.md). The one
     exception is the *FLIR vendor SDK* (Spinnaker/PySpin), whose wheel is
     cp310-only — so if you specifically want that tier, use Python 3.10. On newer
-    Python octacam still drives FLIR cameras through harvesters or pycameleon.
+    Python octacam still drives FLIR cameras through the Spinnaker C-API backend
+    (`spinnaker`) — the SDK's `libSpinnaker_C.so` via ctypes, which has no cp310
+    wheel limit — falling back to the always-present pycameleon floor if the SDK
+    is absent.
 
 ## Install with uv
 
@@ -60,14 +63,15 @@ core, so **a rig works out of the box**; only the two non-pip pieces are manual.
 | **pycameleon** (floor) | libusb (USB3 Vision) | ✅ Yes — always available |
 | **Basler** | pypylon | ✅ Yes — works out of the box |
 | **harvesters** (GenTL consumer) | harvesters + genicam | ✅ Yes, but needs a **producer** (below) |
-| **FLIR / Teledyne** | Spinnaker SDK + PySpin | ❌ Install separately, Python ≤3.10 (below) |
+| **FLIR C-API** (`spinnaker`) | Spinnaker SDK (`libSpinnaker_C.so`) | ❌ Install the SDK separately; works on any Python — no PySpin/producer |
+| **FLIR / Teledyne vendor** (PySpin) | Spinnaker SDK + PySpin | ❌ Install separately, Python 3.10 only — the PySpin vendor tier (below) |
 
 The only system requirement for the always-on floor is `libusb-1.0`. See
 [Camera backends](guide/backends.md) for how the cascade picks a backend per
 camera. Run `octacam doctor` to see which tiers are available and which one each
 camera would use.
 
-### A GenTL producer (tier 2)
+### A GenTL producer (opt-in harvesters tier)
 
 harvesters drives any GenICam camera through an installed GenTL *producer* (a
 `.cti` transport layer). Install a producer's SDK and point octacam at it via
@@ -84,7 +88,9 @@ installed, `OCTACAM_GENTL_PRODUCER` pins/prioritises them (see
 
 PySpin is **not on PyPI** — it ships with Teledyne's Spinnaker SDK — and only has
 a **cp310** wheel, so this tier requires **Python 3.10**. On newer Python the
-cascade drives FLIR cameras through harvesters or pycameleon instead.
+cascade drives FLIR cameras through the `spinnaker` C-API backend
+(`libSpinnaker_C.so` via ctypes — needs the Spinnaker SDK but no PySpin/cp310
+wheel), falling back to the pycameleon floor. harvesters is never auto-selected.
 
 ```bash
 # 1. Install the Spinnaker SDK for your platform (from Teledyne), on Python 3.10.

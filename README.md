@@ -78,6 +78,6 @@ Run `octacam --help` (or `<command> --help`) for the full option list.
 | [Recording](https://nely-epfl.github.io/octacam/guide/recording/) | Outputs, the recording summary, transformed vs raw |
 | [Processing](https://nely-epfl.github.io/octacam/guide/processing/) | Transcode, grid videos, and transfer to storage |
 | [Configuration](https://nely-epfl.github.io/octacam/guide/configuration/) | The `octacam_config.toml` reference |
-| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade: Basler, FLIR, GenTL producers, pycameleon |
-| [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable and 2-photon trigger |
+| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon), plus the opt-in GenTL-producer (harvesters) tier |
+| [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
 | [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |

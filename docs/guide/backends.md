@@ -13,22 +13,26 @@ The optional top-level `backend` key only *pins* a rig to one backend:
 # backend = "auto"       # default (and what an absent key means): the cascade
 # backend = "basler"     # pin to Basler (pypylon)
 # backend = "flir"       # pin to FLIR / Teledyne (Spinnaker / PySpin)
+# backend = "spinnaker"  # pin FLIRs to the Spinnaker C-API tier (no cp310 wheel limit)
 # backend = "harvesters" # pin to a GenTL producer (any GenICam camera)
 # backend = "pycameleon" # pin to the libusb USB3-Vision floor
 ```
 
 ## The cascade
 
-Under `auto`, octacam tries these tiers in order and claims each camera for the
-first one that enumerates its serial (lower tiers skip serials already claimed,
-so a camera is never opened twice):
+Under `auto`, octacam tries the cascade tiers in order and claims each camera for
+the first one that enumerates its serial (lower tiers skip serials already
+claimed, so a camera is never opened twice). The `harvesters` GenTL tier and
+`fake` are **not** swept by `auto` — they are opt-in only, reached by pinning the
+`backend` key:
 
 | Priority | `backend` | Driver | Install | Bounds / HW timestamp |
 | --- | --- | --- | --- | --- |
 | 1 (vendor) | `basler` | pypylon | pip (core) | full |
-| 1 (vendor) | `flir` | Spinnaker + PySpin | **manual**, Python ≤3.10 only | full |
-| 2 (producer) | `harvesters` | any GenTL `.cti` producer | pip (core) + a **producer** | full |
+| 1 (vendor) | `flir` | Spinnaker + PySpin | **manual**, cp310 wheel only | full |
+| 2 (FLIR C-API) | `spinnaker` | Spinnaker C API (`libSpinnaker_C.so`, ctypes) | **manual** SDK, any Python | full |
 | 3 (floor) | `pycameleon` | libusb (USB3 Vision) | pip (core) | none¹ |
+| — (opt-in) | `harvesters` | any GenTL `.cti` producer | pip (core) + a **producer** | full |
 | — | `fake` | in-memory synthetic | pip (core) | — |
 
 ¹ pycameleon 0.2.x exposes node *values* only — no min/max/increment or
@@ -76,13 +80,16 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
 
 FLIR / Teledyne cameras use the Spinnaker SDK's **PySpin** wheel, which is **not
 on PyPI** (it ships with the SDK installer) and only has a **cp310** wheel — so
-the FLIR *vendor* tier is reachable **only on Python ≤3.10**. On newer Python this
-tier is simply absent and the cascade falls through to harvesters or pycameleon,
-which drive FLIR cameras too (just without the vendor SDK).
+the FLIR *vendor* tier is reachable **only on Python 3.10** (the PySpin wheel is
+cp310-only). On newer Python this vendor tier is simply absent and the cascade
+claims the FLIR through the `spinnaker` tier (the Spinnaker SDK C API via ctypes)
+if the SDK is installed, otherwise through the always-present `pycameleon` floor —
+both drive FLIR cameras (just without the PySpin vendor SDK). harvesters is never
+selected automatically.
 
 ```bash
 # 1. Install the Spinnaker SDK for your platform (from Teledyne).
-# 2. Install the matching PySpin wheel into octacam's environment (Python ≤3.10):
+# 2. Install the matching PySpin wheel into octacam's environment (Python 3.10):
 pip install spinnaker_python-*.whl
 # 3. (optional) record the intent — installs nothing on its own:
 pip install "octacam[flir]"
@@ -93,9 +100,26 @@ feature-persistence TSV). If a config pins
 `backend = "flir"` and PySpin is missing, octacam exits with a clear message
 rather than a traceback; under `auto` it just uses a lower tier.
 
-## Tier 2 — harvesters + a GenTL producer
+## Tier 2 — spinnaker (Spinnaker C-API)
 
-[Harvesters](https://github.com/genicam/harvesters) is a vendor-neutral GenICam
+The `spinnaker` tier drives FLIR / Teledyne cameras through the Spinnaker SDK's
+**C API** (`libSpinnaker_C.so`) via `ctypes` — no PySpin wheel, so it has **no
+cp310 limit and runs on any modern Python**. It needs the Spinnaker SDK installed
+(the same system SDK the `flir` vendor tier uses), but not the PySpin Python
+wheel; when `libSpinnaker_C.so` can't be loaded the tier self-disables, exactly
+like `flir`.
+
+Because `ctypes` releases the GIL around the blocking grab call, a slow FLIR
+exposure does not starve co-recorded cameras. The tier reports full node bounds
+and hardware timestamps, and persists per-camera parameters as `<serial>.txt` (the
+native GenApi feature-persistence TSV). In the `auto` cascade it sits **below the
+`flir` vendor tier and above the `pycameleon` floor**, so on any Python where
+PySpin is unavailable the FLIRs are claimed here before falling to pycameleon.
+
+## harvesters + a GenTL producer (opt-in, not in the auto cascade)
+
+This tier is used **only when a rig pins `backend = "harvesters"`** — `auto` never
+selects it. [Harvesters](https://github.com/genicam/harvesters) is a vendor-neutral GenICam
 GenTL *consumer*: it drives any camera reachable through an installed GenTL
 *producer* — a `.cti` transport layer discovered on `GENICAM_GENTL64_PATH` (or
 via octacam's `OCTACAM_GENTL_CTI` override). `harvesters` and `genicam` ship in

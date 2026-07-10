@@ -1379,8 +1379,8 @@ def doctor(
         str | None,
         typer.Option(
             "--backend",
-            help="Only enumerate this backend (basler/flir/harvesters/pycameleon/"
-            "fake). Default: the whole available cascade.",
+            help="Only enumerate this backend (basler/flir/spinnaker/harvesters/"
+            "pycameleon/fake). Default: the whole available cascade.",
         ),
     ] = None,
     json_output: Annotated[
@@ -1825,9 +1825,9 @@ def config(
         str | None,
         typer.Option(
             "--backend",
-            help="Pin the rig to one camera backend (basler/flir/harvesters/"
-            "pycameleon/fake). Default: auto-detect through the cascade and use "
-            "whatever is connected.",
+            help="Pin the rig to one camera backend (basler/flir/spinnaker/"
+            "harvesters/pycameleon/fake). Default: auto-detect through the cascade "
+            "and use whatever is connected.",
         ),
     ] = None,
     force: Annotated[

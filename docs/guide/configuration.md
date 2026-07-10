@@ -33,9 +33,9 @@ parameters into a `<serial>.pfs` (Basler) or `<serial>.txt` (FLIR/GenICam) file.
 camera that is busy — held by a live session — is skipped with a warning; you
 can capture its parameters later from the GUI's *Save…* dialog. Pass
 `--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
-opened). Pass `--backend basler|flir|harvesters|pycameleon|fake` to pin the rig
-to one backend instead of auto-detecting, or `--force` to overwrite an existing
-file. The wizard
+opened). Pass `--backend basler|flir|spinnaker|harvesters|pycameleon|fake` to pin
+the rig to one backend instead of auto-detecting, or `--force` to overwrite an
+existing file. The wizard
 deliberately leaves the **visual**
 settings — per-camera window placement, rotation, and the grid — to `octacam
 gui`, which tunes them against a live preview; run it next on the new directory.
@@ -44,15 +44,17 @@ Everything the wizard writes stays hand-editable afterward.
 ## Top level
 
 ```toml
-# backend = "auto"   # "auto" (default) | "basler" | "flir" | "harvesters" | "pycameleon" | "fake"
+# backend = "auto"   # "auto" (default) | "basler" | "flir" | "spinnaker" | "harvesters" | "pycameleon" | "fake"
 ```
 
 `backend` is optional. Omit it (or set `"auto"`) and the rig runs the preference
 cascade: each camera is claimed by the best available driver that sees it (vendor
-SDK → a GenTL producer via harvesters → the always-present pycameleon floor), so
-Basler, FLIR, and other GenICam cameras can run together in one config, each
-keeping its own parameter-file format. Set a concrete value to pin the rig to a
-single backend. See [Camera backends](backends.md).
+SDK for Basler/FLIR → the Spinnaker C-API tier → the always-present pycameleon
+floor), so Basler, FLIR, and other GenICam cameras can run together in one config,
+each keeping its own parameter-file format. The harvesters GenTL tier is opt-in
+only and is never chosen by `auto`; enable it by pinning `backend = "harvesters"`.
+Set a concrete value to pin the rig to a single backend. See
+[Camera backends](backends.md).
 
 ## `[record]`
 
@@ -63,7 +65,7 @@ Controls capture and how frames are written.
 fps = 100.0
 duration = 5.0
 duration_unit = "seconds"      # frames | seconds | minutes | hours
-trigger_source = "software"    # software | external
+trigger_source = "software"    # software | managed | external
 
 directory = "/data/octacam"
 relative_directory = "%y%m%d-genotype/Fly1/001-bhv"   # strftime template
@@ -79,7 +81,8 @@ save_timestamps = false
 | `fps` | `100.0` | Frame rate. |
 | `duration` | `5.0` | Recording length, in `duration_unit`. |
 | `duration_unit` | `"seconds"` | `frames` \| `seconds` \| `minutes` \| `hours`. |
-| `trigger_source` | `"software"` | `software` or an `external` hardware trigger. |
+| `trigger_source` | `"software"` | `software`, `managed` (octacam drives the hardware trigger), or an `external` hardware trigger. |
+| `preview_trigger_source` | `"auto"` | How preview is triggered so it approximates the recording: `auto` (mirror `trigger_source`), `software`, or `free_running`. |
 | `directory` | `"./"` | Base save directory. |
 | `relative_directory` | `""` | Sub-path appended to `directory`; a `strftime` template (e.g. `%y%m%d/…`), so trials sort into a date/subject/trial tree. |
 | `save_method` | `"ffmpeg"` | `ffmpeg` (encoded video) or `raw` (a `.raw` byte dump per camera). |
@@ -141,6 +144,7 @@ window_height = 0.25
 | `scale_x`, `scale_y` | `1.0` | Preview scale. |
 | `rotation_deg` | `0.0` | Display rotation (baked into recordings when `save_transformed`). |
 | `window_x`, `window_y`, `window_width`, `window_height` | `-1.0` | Preview tile placement as fractions of the canvas; `-1` means auto-place. |
+| `center_x`, `center_y` | `false` | Auto-center the sensor ROI on that axis: OffsetX/OffsetY are derived from the sensor and ROI size and recomputed when the ROI changes. |
 
 !!! tip
     You normally set these from the GUI's **View** and **Camera** tabs and save
@@ -183,6 +187,7 @@ options = { device = "/dev/ttyACM0", baud = 115200 }
 ```toml
 [gui]
 display_refresh_interval_ms = 33     # preview refresh cadence (~30 Hz)
+theme = "dark"                       # "dark" | "light" rig default; the per-browser toggle overrides it
 ```
 
 ## Validate a config

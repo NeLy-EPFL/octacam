@@ -31,7 +31,9 @@ If the config directory is omitted it defaults to the current directory (`.`).
 - **View** — arrange the preview layout and set each camera's rotation/flips.
   These display transforms are baked into recordings by default (see
   [transformed vs raw](recording.md#transformed-vs-raw-frames)).
-- **Flywheel** / **2-Photon** — appear only when the matching
+- **Benchmark** — test whether a target frame rate is achievable on this rig and
+  find the limiting step (the same check as `octacam benchmark`).
+- **Flywheel** / **2-Photon** / **Triggerbox** — appear only when the matching
   [plugin](plugins.md) is enabled.
 
 ## One instance per rig

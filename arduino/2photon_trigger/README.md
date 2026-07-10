@@ -26,21 +26,23 @@ Baud rate: **115 200**.
 
 ### Host → Arduino
 
-| Packet  | Bytes | Layout                                                              |
-|---------|-------|---------------------------------------------------------------------|
-| Arm     | 7     | `0xA5` · fps `uint16_t` LE · duration_ms `uint32_t` LE             |
-| Cancel  | 1     | `0xCA`                                                              |
+| Packet   | Bytes | Layout                                                            |
+|----------|-------|-------------------------------------------------------------------|
+| Arm      | 7     | `0xA5` · fps `uint16_t` LE · duration_ms `uint32_t` LE            |
+| Cancel   | 1     | `0xCA`                                                            |
+| Identify | 1     | `0x3F` (`?`) — request the identity banner                       |
 
 A new arm packet re-arms the Arduino from any state (including mid-capture).
 A cancel packet returns it to IDLE.
 
 ### Arduino → Host
 
-| Byte | Meaning                                   |
-|------|-------------------------------------------|
-| `A`  | Armed — waiting for ThorSync rising edge  |
-| `T`  | Triggered — capture running               |
-| `D`  | Done — capture complete, back to IDLE     |
+| Token               | Meaning                                                          |
+|---------------------|------------------------------------------------------------------|
+| `A`                 | Armed — waiting for ThorSync rising edge                         |
+| `T`                 | Triggered — capture running                                      |
+| `D`                 | Done — capture complete, back to IDLE                            |
+| `2PHOTON 1 <build>` | Reply to an identify request (newline-terminated; `<build>` = source hash) |
 
 ## State machine
 
@@ -54,9 +56,36 @@ IDLE ──(arm packet)──▶ ARMED ──(ThorSync ↑)──▶ RUNNING ─
 
 ## Flashing the firmware
 
+**Let octacam do it (recommended).** octacam knows the fingerprint of the sketch
+in this folder and, whenever the board is out of date (or blank, or running a
+predecessor), offers to compile + upload it for you — from the GUI's **Flash
+firmware** button, the CLI, or a prompt when `octacam record` starts:
+
+```bash
+octacam flash --plugin twophoton --device /dev/arduinoCams   # prompts, then flashes
+octacam flash rig_config/ --check                            # report only (CI-friendly)
+octacam flash rig_config/ --yes                              # flash without prompting
+```
+
+Headless `octacam record` only warns unless you pass `--yes` or set
+`auto_flash = true` under `[plugins.options]`. octacam uses `arduino-cli` under the
+hood (found on `PATH` or via `OCTACAM_ARDUINO_CLI`).
+
+**By hand.**
+
 1. Open `2photon_trigger.ino` in the Arduino IDE (or use `arduino-cli`).
 2. Select **Board: Arduino Mega or Mega 2560** and the correct port.
 3. Upload.
+
+### Firmware fingerprint
+
+The identify banner ends with a short hash of the sketch source
+(`fw_build_info.h` → `TWOPHOTON_FW_BUILD`), so octacam can tell whether the
+*exact* current firmware is running. The committed value is a placeholder
+(`UNBAKED`); octacam bakes the real hash into a throwaway copy of the sketch at
+flash time (the repo tree is never modified). A board flashed **by hand** reports
+`UNBAKED`, which octacam treats as "not the managed build" and offers to reflash —
+harmless, but let octacam flash it once to sync the fingerprint.
 
 ## octacam plugin configuration
 

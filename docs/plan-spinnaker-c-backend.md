@@ -1,5 +1,12 @@
 # Plan: Spinnaker C-API FLIR backend (`spinnaker` tier)
 
+> **Historical planning document.** The `spinnaker` backend described here has
+> **shipped** (commit `e8357af` on `feat/harvesters-backend`); this page is kept
+> for design context, not as an open to-do. Where the plan and the shipped code
+> differ, the code wins — e.g. the persisted parameter-file extension landed as
+> `"txt"` (the GenApi feature-persistence TSV), not the `"json"` sketched below.
+> See "## Outcome" at the bottom for what actually landed.
+
 **Status:** IMPLEMENTED and hardware-verified (2026-07-04). Branch
 `feat/harvesters-backend`. See "## Outcome" at the bottom.
 **Why:** give FLIR cameras a fast, watermark-free, Python-3.14 path that does not
@@ -64,7 +71,7 @@ deadlock — see [[harvesters-migration]]).
 New module `src/octacam/cameras/spinnaker_c.py` implementing the `CameraBackend`
 protocol (`cameras/base.py`) over `libSpinnaker_C.so` via `ctypes`. Mirror the
 structure of `flir.py` (PySpin) — same SFNC node names, same `PARAM_NODES`, same
-`extension = "json"`, same `teardown()` for the session-wide `spinSystem`
+`extension = "txt"`, same `teardown()` for the session-wide `spinSystem`
 singleton — but call the flat C ABI instead of PySpin.
 
 Reuse `SoftwareTriggerHandoff`: `trigger_once()` → `_bump_trigger()`; the device
@@ -82,7 +89,7 @@ vs pycameleon; must be verified, see below.)
   have it; on py3.14 `flir` drops out and `spinnaker` (C API) claims the FLIRs
   before the `pycameleon` floor.
 - `select_backend("spinnaker")` imports `cameras.spinnaker_c` defensively and
-  returns `(enumerate_spinnaker, SpinnakerBackend, "json")`; raises
+  returns `(enumerate_spinnaker, SpinnakerBackend, "txt")`; raises
   `BackendUnavailable("spinnaker", "the Spinnaker SDK (libSpinnaker_C.so) is not
   installed")` when `ctypes.CDLL("libSpinnaker_C.so")` fails — so it self-disables
   on boxes without the SDK, exactly like `flir`.

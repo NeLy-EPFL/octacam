@@ -46,11 +46,29 @@ opens a camera, so it is safe to run while a session is live.
 
 | Option | Purpose |
 | --- | --- |
-| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`harvesters`/`pycameleon`/`fake`). Default: the whole available cascade. |
+| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`harvesters`/`pycameleon`/`fake`). Default: the whole available cascade. |
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
+| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
 
 Exits `0` when no errors are found, so it works as a pre-flight check in scripts.
+
+## `config`
+
+```bash
+octacam config [CONFIG_DIR]
+```
+
+Interactively scaffold a new rig's `octacam_config.toml`: auto-detects the
+connected cameras, prompts for the record/transfer settings and an optional serial
+plugin, then writes the file (visual per-camera placement is left to `octacam
+gui`). If `CONFIG_DIR` is omitted you are prompted for one.
+
+| Option | Purpose |
+| --- | --- |
+| `--backend <name>` | Pin the rig to one backend (`basler`/`flir`/`spinnaker`/`harvesters`/`pycameleon`/`fake`). Default: auto-detect through the cascade. |
+| `--force` | Overwrite an existing `octacam_config.toml` without asking. |
+| `--snapshot-params` / `--no-snapshot-params` | Open each detected camera once to save its current sensor parameters (`.pfs`/`.txt`); busy cameras are skipped. On by default. |
 
 ## `record`
 
@@ -67,8 +85,26 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config). |
 | `--output`, `-o` | Save directory, overriding the templated location. |
+| `--yes`, `-y` | Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash). |
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
+
+## `flash`
+
+```bash
+octacam flash [CONFIG_DIR]
+```
+
+Check a serial plugin's board firmware against the bundled Arduino sketch and,
+unless `--check`, compile + upload the current sketch with arduino-cli. Pass
+`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both.
+
+| Option | Purpose |
+| --- | --- |
+| `--plugin <name>` | Serial plugin whose firmware to manage (e.g. `triggerbox`); enables it even if not in the config. |
+| `--device <path>` | Serial device override (e.g. `/dev/ttyACM0` or `auto`). |
+| `--yes`, `-y` | Flash without prompting when out of date. |
+| `--check` | Report only; exit nonzero if any board is out of date. Never flashes. |
 
 ## `benchmark`
 
@@ -93,6 +129,7 @@ available from the GUI's **Benchmark** tab.
 | `--fps`, `-f` | from config | Target fps to test. |
 | `--duration`, `-d` | `5` | Seconds spent measuring each scenario. |
 | `--find-max` / `--no-find-max` | on | Search for the maximum achievable fps (software trigger only). |
+| `--freerun` / `--no-freerun` | on | Also measure the free-run (external-trigger-equivalent) ceiling. |
 | `--sink` | `config` | `config` (encode through the rig's real save method — measures the encode cost) or `null` (discard frames to isolate acquisition). |
 | `--record-form` | from config | `display` (bake the transform) or `sensor`. |
 | `--backend` | from config | Override the camera backend. |

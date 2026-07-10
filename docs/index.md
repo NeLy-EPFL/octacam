@@ -22,7 +22,8 @@ SeptaCam.
 - **One-command post-processing** — `octacam process` transcodes, tiles cameras
   into composite grid videos, and copies everything to shared storage, all from
   a config snapshot each recording carries with it.
-- **Opt-in plugins** for rig hardware (turntable, 2-photon trigger).
+- **Opt-in plugins** for rig hardware (turntable, 2-photon trigger, configurable
+  camera-trigger + lights box).
 
 ## Get started
 
@@ -61,7 +62,7 @@ or remote runs.
 | [Recording](guide/recording.md) | Outputs, the recording summary, transformed vs raw |
 | [Processing](guide/processing.md) | Transcode, grid videos, and transfer to storage |
 | [Configuration](guide/configuration.md) | The `octacam_config.toml` reference |
-| [Camera backends](guide/backends.md) | The auto-detect cascade: Basler, FLIR, GenTL producers, pycameleon |
-| [Plugins](guide/plugins.md) | Flywheel turntable and 2-photon trigger |
+| [Camera backends](guide/backends.md) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon), plus the opt-in GenTL-producer (harvesters) tier |
+| [Plugins](guide/plugins.md) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
 | [CLI reference](reference/cli.md) | Every command and option |
 | [Troubleshooting](reference/troubleshooting.md) | Common errors and fixes |

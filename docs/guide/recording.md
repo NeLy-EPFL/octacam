@@ -19,6 +19,7 @@ options override only the day-to-day values:
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config's `duration`/`duration_unit`). |
 | `--output`, `-o` | Save directory, overriding the templated location. |
+| `--yes`, `-y` | If a serial plugin's board firmware is out of date, reflash it before recording (also lets a headless run flash instead of only warning). |
 | `--plugin <name>` | Enable a [plugin](plugins.md) (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 
