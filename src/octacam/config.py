@@ -221,7 +221,6 @@ _BACKENDS = (
     "basler",
     "flir",
     "spinnaker",
-    "harvesters",
     "pycameleon",
     "fake",
 )
@@ -234,8 +233,7 @@ class OctacamConfig(BaseModel):
     # Spinnaker C-API tier (spinnaker) that claims the FLIRs on modern Python where
     # PySpin drops out, then the always-present pycameleon floor — so a rig just
     # uses whatever is plugged in with whatever is installed. A concrete name pins
-    # the rig to one backend (including "spinnaker" for the FLIR C-API tier and
-    # "harvesters", which is opt-in only — it is never chosen by "auto"). Every
+    # the rig to one backend (including "spinnaker" for the FLIR C-API tier). Every
     # existing config keeps working.
     backend: str = "auto"
     record: RecordConfig = Field(default_factory=RecordConfig)

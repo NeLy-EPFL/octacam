@@ -6,6 +6,14 @@
 > differ, the code wins — e.g. the persisted parameter-file extension landed as
 > `"txt"` (the GenApi feature-persistence TSV), not the `"json"` sketched below.
 > See "## Outcome" at the bottom for what actually landed.
+>
+> **Superseded (later on this branch):** the `harvesters` GenTL tier referenced
+> below as the "opt-in" backend was **removed entirely** — module, deps, and docs
+> — because every GenTL producer is a user-installed, vendor-EULA'd `.cti` with
+> its own quirks and the always-present `pycameleon` floor covers the general
+> GenICam-USB3 camera better. The mentions below are preserved as accurate
+> history; the current backend set is basler / flir / spinnaker / pycameleon
+> (+ fake). See [Camera backends](guide/backends.md).
 
 **Status:** IMPLEMENTED and hardware-verified (2026-07-04). Branch
 `feat/harvesters-backend`. See "## Outcome" at the bottom.

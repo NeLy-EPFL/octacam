@@ -354,8 +354,8 @@ def normalize_trigger_source(text: str, original_source: str | None) -> str:
 class GenICamTriggerConfig:
     """Shared software-trigger + config lifecycle for the GenICam backends.
 
-    The FLIR/PySpin, Spinnaker-C, Harvesters and pycameleon backends drive the
-    same SFNC trigger chain and persist the same native GenApi persistence TSV, so
+    The FLIR/PySpin, Spinnaker-C and pycameleon backends drive the same SFNC
+    trigger chain and persist the same native GenApi persistence TSV, so
     the nine trigger/config methods below are byte-for-byte identical across them
     and live here once. A backend mixes this in alongside
     :class:`~octacam.cameras._trigger_handoff.SoftwareTriggerHandoff` and supplies

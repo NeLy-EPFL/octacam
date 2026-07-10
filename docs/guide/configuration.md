@@ -33,7 +33,7 @@ parameters into a `<serial>.pfs` (Basler) or `<serial>.txt` (FLIR/GenICam) file.
 camera that is busy — held by a live session — is skipped with a warning; you
 can capture its parameters later from the GUI's *Save…* dialog. Pass
 `--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
-opened). Pass `--backend basler|flir|spinnaker|harvesters|pycameleon|fake` to pin
+opened). Pass `--backend basler|flir|spinnaker|pycameleon|fake` to pin
 the rig to one backend instead of auto-detecting, or `--force` to overwrite an
 existing file. The wizard
 deliberately leaves the **visual**
@@ -44,17 +44,15 @@ Everything the wizard writes stays hand-editable afterward.
 ## Top level
 
 ```toml
-# backend = "auto"   # "auto" (default) | "basler" | "flir" | "spinnaker" | "harvesters" | "pycameleon" | "fake"
+# backend = "auto"   # "auto" (default) | "basler" | "flir" | "spinnaker" | "pycameleon" | "fake"
 ```
 
 `backend` is optional. Omit it (or set `"auto"`) and the rig runs the preference
 cascade: each camera is claimed by the best available driver that sees it (vendor
 SDK for Basler/FLIR → the Spinnaker C-API tier → the always-present pycameleon
 floor), so Basler, FLIR, and other GenICam cameras can run together in one config,
-each keeping its own parameter-file format. The harvesters GenTL tier is opt-in
-only and is never chosen by `auto`; enable it by pinning `backend = "harvesters"`.
-Set a concrete value to pin the rig to a single backend. See
-[Camera backends](backends.md).
+each keeping its own parameter-file format. Set a concrete value to pin the rig
+to a single backend. See [Camera backends](backends.md).
 
 ## `[record]`
 

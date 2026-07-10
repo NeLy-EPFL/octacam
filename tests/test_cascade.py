@@ -2,7 +2,7 @@
 
 Mocks several backends enumerating overlapping serials and asserts that each
 camera is claimed by the highest-priority tier that sees it, and never twice — so
-a camera served by a vendor SDK is not also opened by harvesters/pycameleon.
+a camera served by a vendor SDK is not also opened by the pycameleon floor.
 """
 
 import octacam.cameras.system as system_mod

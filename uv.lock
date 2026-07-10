@@ -355,7 +355,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -379,33 +379,6 @@ wheels = [
 ]
 
 [[package]]
-name = "genicam"
-version = "1.5.1"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/1a/c0b1739c54c685f40b07eb1edef136493233feca038b0e3ec6774b432d8f/genicam-1.5.1-cp310-cp310-manylinux2014_aarch64.whl", hash = "sha256:41e08f79eeb2cf9bd414e2ada5ce8f9147b1a8a5a4b4d7243aa82deac962a9d8", size = 2337431, upload-time = "2025-11-11T16:43:57.633Z" },
-    { url = "https://files.pythonhosted.org/packages/f7/bc/003de74ea812452796bbda83748341bdac766cfdd17f1811ffa3aba6622d/genicam-1.5.1-cp310-cp310-manylinux2014_armv7l.whl", hash = "sha256:88bd74dd58dbadfae5d53d066f7297e84d8bb550caa66b41a2da4d4040e1ed86", size = 1941047, upload-time = "2025-11-11T16:43:59.472Z" },
-    { url = "https://files.pythonhosted.org/packages/f4/5e/4f7949e9d407bf7371506530624a7ee9a14503826b18d4b70492ae843e93/genicam-1.5.1-cp310-cp310-manylinux2014_x86_64.whl", hash = "sha256:a7ec8518631b19fbc23e09ffd8454699ae1f856851ddac882df7e115665f3662", size = 2588283, upload-time = "2025-11-11T16:44:03.399Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/e3/7a2075f3cab6b2f73bdb21c448c37dbe645ba52d97c1840da8f8ba1325e3/genicam-1.5.1-cp310-cp310-win_amd64.whl", hash = "sha256:1de3365f46c69ee9a4ff3d5c9adfdcd5fbc8c1a0c83edb07f0ca8ddbccdf7544", size = 1525110, upload-time = "2025-11-11T16:44:04.659Z" },
-    { url = "https://files.pythonhosted.org/packages/b4/24/3bbbda0dd2ced91e3a3906db79037b72e4a73688996690ce5089c3fe20c7/genicam-1.5.1-cp311-cp311-manylinux2014_aarch64.whl", hash = "sha256:240262f41c6b4f3b0618083e4e74468e06e8cb006ccee9a147caa1a8b19be291", size = 2336557, upload-time = "2025-11-11T16:44:06.155Z" },
-    { url = "https://files.pythonhosted.org/packages/07/0c/0471b31f8d15ca2d4bfc8b550e2dfb78d3bd3a3f0853629188c5eaef2f0f/genicam-1.5.1-cp311-cp311-manylinux2014_armv7l.whl", hash = "sha256:80a72acfb2490a70a1b819928c047c7b50cd9ac120b703eda589caad35089d2a", size = 1941385, upload-time = "2025-11-11T16:44:08.243Z" },
-    { url = "https://files.pythonhosted.org/packages/11/b3/41687bb1a4bc3aaa6619bfc601b1367880ca7f7999a44d0f2dcfa91ebba9/genicam-1.5.1-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:2bde76bba7d9aa84074fecc1e91dc1a3575d9c3ef034b6589c060f3046683c91", size = 2588999, upload-time = "2025-11-11T16:44:10.246Z" },
-    { url = "https://files.pythonhosted.org/packages/c8/fd/ccff98740ee96ef02c2ff8826070753bd42217d389874abd6f211194483d/genicam-1.5.1-cp311-cp311-win_amd64.whl", hash = "sha256:ff286bc2a84d1f3df0d9eecf907d3771922aa7b57cf500e57d4fbe8de44b8297", size = 1525121, upload-time = "2025-11-11T16:44:11.913Z" },
-    { url = "https://files.pythonhosted.org/packages/37/e6/52b7687ba0d1dcf4db0665b16eb3c0b43dc7401a56be92c53ae3e488e605/genicam-1.5.1-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:72d5c31872b76ef7e6f2678154478a4fb8eed0346e853bce854a5195a55fad83", size = 2339312, upload-time = "2025-11-11T16:44:13.216Z" },
-    { url = "https://files.pythonhosted.org/packages/ad/dd/434608bf2c12056897e59bd399f7281df04f21514d59061a5d4b32f4ba99/genicam-1.5.1-cp312-cp312-manylinux2014_armv7l.whl", hash = "sha256:009aa246cfea080c7fd50add38512f5697205e9b16742827c90dad69c279ee32", size = 1941267, upload-time = "2025-11-11T16:44:14.358Z" },
-    { url = "https://files.pythonhosted.org/packages/9a/8a/0f88baaca625b17f4e2e5da8ce79f511566a07364696a7af0f5e126109a0/genicam-1.5.1-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:741beb6e14ab82ed05806481954f91e5d4d3d8f85c2367368272aecf02654041", size = 2586693, upload-time = "2025-11-11T16:44:15.584Z" },
-    { url = "https://files.pythonhosted.org/packages/58/10/ce6b37fef57865bf463d2d7c984b9368220d0bfd333498b1d7e58b451227/genicam-1.5.1-cp312-cp312-win_amd64.whl", hash = "sha256:246675ae7914c6e9d7c4e5d5fa7308eaac294db6b8b51f1ed7d921fb427f1af8", size = 1525382, upload-time = "2025-11-11T16:44:17.178Z" },
-    { url = "https://files.pythonhosted.org/packages/47/2b/afadd8935d46db6aa05ce5afd5f7d38e4efc08d88c25f67592987c188858/genicam-1.5.1-cp313-cp313-manylinux2014_aarch64.whl", hash = "sha256:a2973a5589ba214da7413804e04d1f12d6531c1543674d049644e4629c0cf346", size = 2339578, upload-time = "2025-11-11T16:44:18.398Z" },
-    { url = "https://files.pythonhosted.org/packages/e6/f8/8d8e39a5f422b4163478712fac287e5cb52389a2312281c487eb5187001e/genicam-1.5.1-cp313-cp313-manylinux2014_armv7l.whl", hash = "sha256:4569de0bc5f58c5c714b8f85661a939ec9290c135f2be3c802edee6baba33855", size = 1941273, upload-time = "2025-11-11T16:44:20.133Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/03/d539b1748f5e0b4d61bb29b9ae72c4fbd6db037d89b7dbf91fe071b95474/genicam-1.5.1-cp313-cp313-manylinux2014_x86_64.whl", hash = "sha256:1c0f4866d3e4305262ebc93c4a628ec1cfa436dafd5a602591cccb2d28ddec6c", size = 2586227, upload-time = "2025-11-11T16:44:21.403Z" },
-    { url = "https://files.pythonhosted.org/packages/01/d1/3c729ab7730eeee89e9e9a151702f1488424c0e254bf680648f529368e10/genicam-1.5.1-cp313-cp313-win_amd64.whl", hash = "sha256:f1af464366c504fb7282379e66fda96d1a31736fc46a8e7be652a58b6c94bbb3", size = 1525425, upload-time = "2025-11-11T16:44:22.76Z" },
-    { url = "https://files.pythonhosted.org/packages/42/a2/942d673c22a1842afac3b8c9fe23966948e6571a6403a27ca9471f67fcd5/genicam-1.5.1-cp314-cp314-manylinux2014_aarch64.whl", hash = "sha256:47fef24f8c54ebc91284948bd3f68203044c4ef85a1e14412657512006fd54ab", size = 2340687, upload-time = "2025-11-11T16:44:24.228Z" },
-    { url = "https://files.pythonhosted.org/packages/cb/2e/264dd4ab16859d5c6c723dbccfb4ff75c900190e0d63320467ad2fd28ca4/genicam-1.5.1-cp314-cp314-manylinux2014_armv7l.whl", hash = "sha256:8d93a1e1394f61bc2b0fb0b0630b80f4e0ca9def9580874675ba66257750fbc6", size = 1941265, upload-time = "2025-11-11T16:44:25.405Z" },
-    { url = "https://files.pythonhosted.org/packages/b6/fa/cb06e62412dc8129ad9801c9f02014cce5aecd718f1fcc196d02ed9e5ff3/genicam-1.5.1-cp314-cp314-manylinux2014_x86_64.whl", hash = "sha256:2cff00b8075ed8d65810bc6d4f2a20234ef0a9bad6d6868a5feecef148b59b4c", size = 2586586, upload-time = "2025-11-11T16:44:26.599Z" },
-    { url = "https://files.pythonhosted.org/packages/be/37/000f65e7ae995f2d0b7320b4eaea42f1c36ad1ee684cc705bcd972f84614/genicam-1.5.1-cp314-cp314-win_amd64.whl", hash = "sha256:5c6eac77e5c329281aec3bf8fe56a3eca63b187719bbce265d3f692a06feac27", size = 1562965, upload-time = "2025-11-11T16:44:27.759Z" },
-]
-
-[[package]]
 name = "ghp-import"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -424,20 +397,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6fb3c75474d40b3052059d95df7e73351460c8588d963/h11-0.16.0.tar.gz", hash = "sha256:4e35b956cf45792e4caa5885e69fba00bdbc6ffafbfa020300e549b208ee5ff1", size = 101250, upload-time = "2025-04-24T03:35:25.427Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl", hash = "sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86", size = 37515, upload-time = "2025-04-24T03:35:24.344Z" },
-]
-
-[[package]]
-name = "harvesters"
-version = "1.4.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "genicam" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d3/18/ee45d896fee51dee2e35df9d371e2d213ed4488ddea4dd4bd1df6f92a5fb/harvesters-1.4.3.tar.gz", hash = "sha256:c237dd402735a66ebd570865113a3e80ae19161a21706aed80691627a8cb7da2", size = 104391, upload-time = "2024-05-16T17:09:41.805Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9a/ab/295e5ec52cc2859ad8fa0d56f953cefa26f3e1eb28cc937162d7df7df872/harvesters-1.4.3-py3-none-any.whl", hash = "sha256:74994cedc941051b9ce9527c5b336e611589a1bc209bc03186c49102a55f1f1f", size = 100253, upload-time = "2024-05-16T17:09:27.933Z" },
 ]
 
 [[package]]
@@ -867,8 +826,6 @@ version = "0.3.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
-    { name = "genicam" },
-    { name = "harvesters" },
     { name = "imageio-ffmpeg" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -901,8 +858,6 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.136.3" },
-    { name = "genicam", specifier = ">=1.2" },
-    { name = "harvesters", specifier = ">=1.4.3" },
     { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python-headless", specifier = ">=4.9" },

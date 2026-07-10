@@ -4,8 +4,7 @@ No Spinnaker SDK or hardware: the module-level ``_Spinnaker`` binding (which is
 the only thing that touches ``libSpinnaker_C.so`` via ctypes) is replaced by a
 fake that operates on in-memory node maps, so the SFNC → NodeInfo mapping, the
 param round-trip, the software-trigger hand-off, the frame retrieve, the clean
-close, and the enumerate handle-release are all exercised in pure Python. This
-mirrors ``test_harvesters_backend.py``'s fake-handle approach one seam lower: the
+close, and the enumerate handle-release are all exercised in pure Python: the
 real ctypes ABI is exercised only by the on-rig hardware verification.
 """
 

@@ -62,7 +62,7 @@ or remote runs.
 | [Recording](guide/recording.md) | Outputs, the recording summary, transformed vs raw |
 | [Processing](guide/processing.md) | Transcode, grid videos, and transfer to storage |
 | [Configuration](guide/configuration.md) | The `octacam_config.toml` reference |
-| [Camera backends](guide/backends.md) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon), plus the opt-in GenTL-producer (harvesters) tier |
+| [Camera backends](guide/backends.md) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon) |
 | [Plugins](guide/plugins.md) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
 | [CLI reference](reference/cli.md) | Every command and option |
 | [Troubleshooting](reference/troubleshooting.md) | Common errors and fixes |

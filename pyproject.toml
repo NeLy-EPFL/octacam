@@ -5,17 +5,14 @@ description = "Preview, record, and save video streams from multiple scientific 
 readme = "README.md"
 # 3.10 is the floor because the FLIR vendor tier's PySpin wheel is cp310-only; a
 # rig that wants that tier is pinned to 3.10. The rest of the backend cascade
-# (harvesters + a GenTL producer, pycameleon) runs on any modern Python.
+# (the Spinnaker C-API tier, pycameleon) runs on any modern Python.
 requires-python = ">=3.10"
 dependencies = [
     # Basler vendor tier (uv-installable, so it lives in core).
     "pypylon>=4.0",
-    # Tier-2 GenTL consumer: harvesters drives any camera through an installed
-    # GenTL producer; genicam is its node-map runtime.
-    "harvesters>=1.4.3",
-    "genicam>=1.2",
-    # Tier-3 floor: libusb-only USB3-Vision, always present so the cascade has a
-    # guaranteed backend on any Python where no vendor SDK / producer is set up.
+    # Floor tier: libusb-only USB3-Vision, always present so the cascade has a
+    # guaranteed backend on any Python where no vendor SDK is set up. It is the
+    # general-purpose path for any GenICam USB3-Vision camera without a vendor SDK.
     "pycameleon>=0.2.11",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",

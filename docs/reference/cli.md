@@ -46,7 +46,7 @@ opens a camera, so it is safe to run while a session is live.
 
 | Option | Purpose |
 | --- | --- |
-| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`harvesters`/`pycameleon`/`fake`). Default: the whole available cascade. |
+| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: the whole available cascade. |
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
 | `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
@@ -66,7 +66,7 @@ gui`). If `CONFIG_DIR` is omitted you are prompted for one.
 
 | Option | Purpose |
 | --- | --- |
-| `--backend <name>` | Pin the rig to one backend (`basler`/`flir`/`spinnaker`/`harvesters`/`pycameleon`/`fake`). Default: auto-detect through the cascade. |
+| `--backend <name>` | Pin the rig to one backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: auto-detect through the cascade. |
 | `--force` | Overwrite an existing `octacam_config.toml` without asking. |
 | `--snapshot-params` / `--no-snapshot-params` | Open each detected camera once to save its current sensor parameters (`.pfs`/`.txt`); busy cameras are skipped. On by default. |
 

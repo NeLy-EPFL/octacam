@@ -29,13 +29,10 @@ def test_backends_and_cascade_membership():
     # just below flir, so it claims the FLIRs on modern Python where PySpin drops.
     assert CASCADE.index("spinnaker") == CASCADE.index("flir") + 1
     assert "spinnaker" in BACKENDS
-    # harvesters is DELIBERATELY excluded from the auto cascade: every GenTL
-    # producer is a user-installed, vendor-EULA'd .cti with its own quirks, so it
-    # must never be auto-selected — only opted into by name. It stays a known
-    # backend and remains selectable explicitly.
-    assert "harvesters" not in CASCADE
-    assert "harvesters" in BACKENDS
-    assert resolve_backend_names("harvesters") == ["harvesters"]
+    # The GenTL "harvesters" tier was removed: every GenTL producer is a
+    # user-installed, vendor-EULA'd .cti with its own quirks, and the always-present
+    # pycameleon floor covers the general GenICam-USB3 camera without one.
+    assert "harvesters" not in BACKENDS and "harvesters" not in CASCADE
 
 
 def test_select_unknown_backend_raises():
@@ -62,7 +59,6 @@ def test_resolve_backend_names_concrete_is_single():
     assert resolve_backend_names("basler") == ["basler"]
     assert resolve_backend_names("FLIR") == ["flir"]
     assert resolve_backend_names("spinnaker") == ["spinnaker"]
-    assert resolve_backend_names("harvesters") == ["harvesters"]
     assert resolve_backend_names("pycameleon") == ["pycameleon"]
     assert resolve_backend_names("fake") == ["fake"]
 
@@ -81,12 +77,11 @@ def test_select_pycameleon_backend():
     assert callable(enumerate_fn) and callable(factory)
 
 
-def test_select_harvesters_backend():
-    # harvesters + genicam are core deps, so selecting it always works (whether a
-    # GenTL producer is installed only affects enumeration, not availability).
-    enumerate_fn, factory, extension = select_backend("harvesters")
-    assert extension == "txt"
-    assert callable(enumerate_fn) and callable(factory)
+def test_select_harvesters_backend_raises():
+    # The harvesters tier was removed: it is no longer a known backend, so an
+    # explicit selection must surface a clean BackendUnavailable.
+    with pytest.raises(BackendUnavailable):
+        select_backend("harvesters")
 
 
 def test_select_pycameleon_without_package_raises(monkeypatch):
@@ -97,14 +92,6 @@ def test_select_pycameleon_without_package_raises(monkeypatch):
     monkeypatch.setattr(pcmod, "pycameleon", None)
     with pytest.raises(BackendUnavailable):
         select_backend("pycameleon")
-
-
-def test_select_harvesters_without_genicam_raises(monkeypatch):
-    import octacam.cameras.harvesters as hmod
-
-    monkeypatch.setattr(hmod, "Harvester", None)
-    with pytest.raises(BackendUnavailable):
-        select_backend("harvesters")
 
 
 def test_flir_module_imports_without_pyspin():

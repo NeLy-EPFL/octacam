@@ -386,9 +386,8 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         concurrent node access. Instead await the non-blocking ``receive_async``
         under a ``timeout_ms`` deadline (:func:`asyncio.wait_for`) and return None
         on timeout, so the grab loop re-checks :meth:`is_grabbing` / the stop flag
-        and can exit. Mirrors the bounded-fetch design of the harvesters backend
-        (see ``harvesters._fetch_frame``). Called only under ``_lock`` from the
-        grab thread, so the reused event loop is single-threaded.
+        and can exit. Called only under ``_lock`` from the grab thread, so the
+        reused event loop is single-threaded.
         """
         loop = self._recv_loop
         if loop is None:

@@ -62,8 +62,7 @@ core, so **a rig works out of the box**; only the two non-pip pieces are manual.
 | --- | --- | --- |
 | **pycameleon** (floor) | libusb (USB3 Vision) | ✅ Yes — always available |
 | **Basler** | pypylon | ✅ Yes — works out of the box |
-| **harvesters** (GenTL consumer) | harvesters + genicam | ✅ Yes, but needs a **producer** (below) |
-| **FLIR C-API** (`spinnaker`) | Spinnaker SDK (`libSpinnaker_C.so`) | ❌ Install the SDK separately; works on any Python — no PySpin/producer |
+| **FLIR C-API** (`spinnaker`) | Spinnaker SDK (`libSpinnaker_C.so`) | ❌ Install the SDK separately; works on any Python — no PySpin wheel |
 | **FLIR / Teledyne vendor** (PySpin) | Spinnaker SDK + PySpin | ❌ Install separately, Python 3.10 only — the PySpin vendor tier (below) |
 
 The only system requirement for the always-on floor is `libusb-1.0`. See
@@ -71,29 +70,13 @@ The only system requirement for the always-on floor is `libusb-1.0`. See
 camera. Run `octacam doctor` to see which tiers are available and which one each
 camera would use.
 
-### A GenTL producer (opt-in harvesters tier)
-
-harvesters drives any GenICam camera through an installed GenTL *producer* (a
-`.cti` transport layer). Install a producer's SDK and point octacam at it via
-`GENICAM_GENTL64_PATH` or `OCTACAM_GENTL_CTI`. The recommended producer is the
-**Basler pylon `ProducerU3V`** (installed with the pylon SDK) — it opens and
-closes cleanly with no watermark, but enumerates **Basler** U3V cameras only
-(drive FLIR through the `spinnaker`/`flir` backends). **Allied Vision Vimba X**
-only covers Allied Vision cameras and third-party *GigE Vision* — its USB
-transport layer will not see FLIR/Basler USB3 cameras. Teledyne's Spinnaker
-producer is denied by default (its device close deadlocks while holding the GIL,
-wedging the process); **Balluff mvIMPACT** is denylisted (watermarks third-party
-frames and crashes the device scan). When several producers are installed,
-`OCTACAM_GENTL_PRODUCER` pins/prioritises them (see
-[Camera backends](guide/backends.md)).
-
 ### FLIR / Teledyne vendor SDK (tier 1)
 
 PySpin is **not on PyPI** — it ships with Teledyne's Spinnaker SDK — and only has
 a **cp310** wheel, so this tier requires **Python 3.10**. On newer Python the
 cascade drives FLIR cameras through the `spinnaker` C-API backend
 (`libSpinnaker_C.so` via ctypes — needs the Spinnaker SDK but no PySpin/cp310
-wheel), falling back to the pycameleon floor. harvesters is never auto-selected.
+wheel), falling back to the pycameleon floor.
 
 ```bash
 # 1. Install the Spinnaker SDK for your platform (from Teledyne), on Python 3.10.

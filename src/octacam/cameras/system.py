@@ -81,7 +81,7 @@ class CameraSystem:
         in full, in priority order, and a camera is claimed by the *first*
         backend that reports its serial — a lower tier that also sees an
         already-claimed serial is skipped, so a camera served by a vendor SDK is
-        never double-opened by the harvesters or pycameleon tiers.
+        never double-opened by the pycameleon floor.
         """
         active = []  # (name, enumerate_fn, factory), in cascade priority order
         unavailable: list[BackendUnavailable] = []
@@ -100,7 +100,7 @@ class CameraSystem:
                 raise unavailable[0]
             raise BackendUnavailable(backend, "no camera backend is available")
 
-        # Release order matters for FLIR/harvesters; record every backend we
+        # Release order matters for FLIR/spinnaker; record every backend we
         # enumerate (as a set — teardown order is not significant among them).
         self._backends_used = {name for name, _fn, _mk in active}
 
@@ -149,7 +149,7 @@ class CameraSystem:
 
         Rolls the per-tier enumeration (each tier logs only at debug) into a
         single summary that also says which backend won each camera, e.g.
-        ``Detected 3 camera(s): 2 via harvesters, 1 via basler`` — instead of
+        ``Detected 3 camera(s): 2 via spinnaker, 1 via basler`` — instead of
         the several overlapping per-tier counts that confused operators.
         """
         if not entries:

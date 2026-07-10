@@ -641,72 +641,16 @@ class _Report:
         return errors, warns
 
 
-def _enumerate_harvesters_serials() -> list[str]:
-    """Enumerate the harvesters (GenTL) tier's serials in a child process.
-
-    A GenTL producer runs third-party native code that can hard-crash the process
-    two ways, neither catchable by a Python ``try/except``: a broken producer can
-    SIGSEGV *inside the device scan* (``IFUpdateDeviceList`` — observed with Balluff
-    mvIMPACT), and some producers SIGSEGV during *interpreter finalization* after a
-    clean scan (observed with Basler's pylon ``ProducerU3V``). An in-process scan
-    would take all of ``octacam doctor`` down with it. Running the scan in a
-    subprocess contains the blast radius, and the child ``os._exit(0)``s right after
-    printing so the finalization crash never turns a good scan into a bad exit code:
-    on a clean scan we read the serials it printed; on a scan that truly crashes we
-    raise so the caller reports the tier as broken and the rest of the diagnostic
-    still runs."""
-    import subprocess
-
-    # os._exit(0) skips interpreter finalization (atexit + native destructors),
-    # which is where a producer like pylon's SIGSEGVs; flush first so the parent
-    # still receives the serials printed above. It only runs on a clean scan — an
-    # exception propagates past it to a non-zero exit, which the caller reports.
-    code = (
-        "import os, sys\n"
-        "from octacam.cameras.harvesters import enumerate_harvesters, teardown\n"
-        "try:\n"
-        "    for serial, _h in enumerate_harvesters(None):\n"
-        "        print(serial)\n"
-        "finally:\n"
-        "    teardown()\n"
-        "sys.stdout.flush()\n"
-        "os._exit(0)\n"
-    )
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError(
-            "the GenTL producer hung during the device scan (>30s); this is a bug "
-            "in the third-party .cti, not octacam"
-        ) from e
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"the GenTL producer crashed during the device scan "
-            f"(exit {proc.returncode}); this is a bug in the third-party .cti, "
-            f"not octacam"
-        )
-    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-
-
 def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     """``[(serial, model|None), ...]`` for a backend without opening any camera.
 
     ``"auto"`` (or an empty selector) sweeps the available backend cascade and
     returns each camera once, claimed by the highest-priority tier that sees it
-    (so a Basler served by the vendor tier is not also listed under harvesters/
-    pycameleon) — mirroring how :class:`CameraSystem` opens them. Basler goes
-    through the pylon TL factory directly so model names come along; other
-    backends expose only serials via their enumeration function. Enumeration
-    never opens/grabs a device, so this is safe to run alongside a live session.
-
-    The ``harvesters`` (GenTL) tier scans in a subprocess — its producer can hard
-    crash the process, which must not take down the caller (see
-    :func:`_enumerate_harvesters_serials`)."""
+    (so a Basler served by the vendor tier is not also listed under the pycameleon
+    floor) — mirroring how :class:`CameraSystem` opens them. Basler goes through
+    the pylon TL factory directly so model names come along; other backends expose
+    only serials via their enumeration function. Enumeration never opens/grabs a
+    device, so this is safe to run alongside a live session."""
     from octacam.cameras import select_backend
 
     key = (name or "auto").strip().lower()
@@ -717,8 +661,6 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
 
         devices = pylon.TlFactory.GetInstance().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
-    if key == "harvesters":
-        return [(serial, None) for serial in _enumerate_harvesters_serials()]
     enumerate_fn, _factory, _extension = select_backend(name)
     return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
 
@@ -763,8 +705,8 @@ class _CameraScan:
     imported first on the *calling* thread (the ``select_backend`` gate in
     ``__init__``), so no two cold vendor-SDK imports race the Python import lock;
     the worker threads only run the device scan itself. The slowest single backend
-    is the wall-clock floor — a hung/crashing GenTL producer (harvesters, a ~2.4 s
-    subprocess) now overlaps the in-process tiers instead of adding to them.
+    is the wall-clock floor — e.g. ``enumerate_spinnaker``'s ~2.4 s ``System``
+    re-init — but the tiers now overlap instead of running back-to-back.
 
     Enumeration never opens a camera, so this is safe alongside a live session.
     """
@@ -789,7 +731,7 @@ class _CameraScan:
                 continue
             self.targets.append(name)
         # Cascade selection order (priority) is CASCADE restricted to the tiers we
-        # scanned; harvesters is never a cascade tier, so it never claims a camera.
+        # scanned.
         self._cascade_order = [b for b in CASCADE if b in self.targets]
         self._cams: dict[str, list[tuple[str, str | None]]] = {}
         self._errs: dict[str, Exception] = {}
@@ -1000,34 +942,6 @@ def _doctor_system(report: _Report) -> None:
         report.add("ok", f"open-file limit {soft}")
 
 
-def _report_harvesters_producers(report: _Report) -> None:
-    """Report the GenTL producers: which will load, and which are detected but not.
-
-    A producer that is installed but denylisted (e.g. Spinnaker's, which deadlocks
-    on close) is surfaced with its reason rather than silently dropped, so an
-    operator can see it was detected and why octacam won't use it."""
-    try:
-        from octacam.cameras.harvesters import report_producers
-
-        will_load, disabled = report_producers()
-    except Exception:  # pragma: no cover - defensive; harvesters is a core dep
-        return
-    if will_load:
-        report.add("list", "GenTL producer(s) in use: " + ", ".join(will_load))
-    else:
-        report.add(
-            "list",
-            "no usable GenTL producer found — install one (e.g. Basler pylon's "
-            "ProducerU3V) and set GENICAM_GENTL64_PATH (or OCTACAM_GENTL_CTI) to "
-            "enable this opt-in tier",
-        )
-    for cti, reason in disabled:
-        report.add(
-            "info",
-            f"GenTL producer detected but not used: {os.path.basename(cti)} — {reason}",
-        )
-
-
 def _doctor_backends(
     report: _Report, only_backend: str | None, scan: _CameraScan
 ) -> None:
@@ -1052,10 +966,6 @@ def _doctor_backends(
         except Exception as e:
             report.add("warn", f"{name}: could not select backend ({e})")
             continue
-        # harvesters is importable regardless of hardware; whether it can drive a
-        # camera depends on an installed GenTL producer, so surface which one(s).
-        if name == "harvesters":
-            _report_harvesters_producers(report)
         try:
             # Served from the single parallel scan; a select_backend success above
             # guarantees this name was a scan target (see _CameraScan).
@@ -1559,7 +1469,7 @@ def doctor(
         str | None,
         typer.Option(
             "--backend",
-            help="Only enumerate this backend (basler/flir/spinnaker/harvesters/"
+            help="Only enumerate this backend (basler/flir/spinnaker/"
             "pycameleon/fake). Default: the whole available cascade.",
         ),
     ] = None,
@@ -1639,9 +1549,9 @@ def _available_backends() -> list[str]:
     """The cascade tiers installed here, in priority order.
 
     Lets the wizard tell the user which backends it will auto-detect through
-    (vendor SDKs, harvesters, the always-present pycameleon floor). ``fake`` is a
-    synthetic test backend, never auto-detected. Selection imports the SDK but
-    never opens a device, so this is side-effect free."""
+    (vendor SDKs, the always-present pycameleon floor). ``fake`` is a synthetic
+    test backend, never auto-detected. Selection imports the SDK but never opens a
+    device, so this is side-effect free."""
     from octacam.cameras.registry import available_backends
 
     return available_backends()
@@ -2011,7 +1921,7 @@ def config(
         typer.Option(
             "--backend",
             help="Pin the rig to one camera backend (basler/flir/spinnaker/"
-            "harvesters/pycameleon/fake). Default: auto-detect through the cascade "
+            "pycameleon/fake). Default: auto-detect through the cascade "
             "and use whatever is connected.",
         ),
     ] = None,

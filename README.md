@@ -26,11 +26,10 @@ successor to SeptaCam.
 uv tool install git+https://github.com/NeLy-EPFL/octacam.git
 ```
 
-The Python-installable backends (pypylon, harvesters, and the always-on
-pycameleon floor) all ship in core, so **a rig works out of the box** on Python
-3.10+. Two tiers are optional manual installs: a GenTL producer for the
-harvesters tier, and the FLIR vendor SDK (Spinnaker/PySpin, Python ≤3.10). See
-the [installation guide](https://nely-epfl.github.io/octacam/installation/) and
+The Python-installable backends (pypylon and the always-on pycameleon floor)
+all ship in core, so **a rig works out of the box** on Python 3.10+. One tier is
+an optional manual install: the FLIR vendor SDK (Spinnaker/PySpin, Python ≤3.10).
+See the [installation guide](https://nely-epfl.github.io/octacam/installation/) and
 [camera backends](https://nely-epfl.github.io/octacam/guide/backends/).
 
 ## Quickstart
@@ -78,6 +77,6 @@ Run `octacam --help` (or `<command> --help`) for the full option list.
 | [Recording](https://nely-epfl.github.io/octacam/guide/recording/) | Outputs, the recording summary, transformed vs raw |
 | [Processing](https://nely-epfl.github.io/octacam/guide/processing/) | Transcode, grid videos, and transfer to storage |
 | [Configuration](https://nely-epfl.github.io/octacam/guide/configuration/) | The `octacam_config.toml` reference |
-| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon), plus the opt-in GenTL-producer (harvesters) tier |
+| [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon) |
 | [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
 | [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |

@@ -85,8 +85,8 @@ def _safe(getter):
 # The PySpin interface-type / visibility constants live on the module, which may
 # be absent (cp310-only), so the maps are built lazily from the passed-in module
 # rather than at import time (unlike the Basler backend, whose pypylon is always
-# present). This mirrors the standalone genicam walk in _genicam_features.py, but
-# over PySpin's C++ node wrappers (CIntegerPtr/CEnumerationPtr/... casts) instead.
+# present). This mirrors the Basler backend's genicam node-map walk, but over
+# PySpin's C++ node wrappers (CIntegerPtr/CEnumerationPtr/... casts) instead.
 def _iface_kind(spin, itype) -> str | None:
     """Map a PySpin interface type to a FeatureInfo widget kind (None = skip)."""
     return {

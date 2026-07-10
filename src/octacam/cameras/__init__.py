@@ -2,7 +2,7 @@
 
 The concrete, SDK-neutral :class:`Camera` / :class:`CameraSystem` live here; each
 vendor implements the thin :class:`CameraBackend` seam in its own module
-(``basler``, ``flir``, ``harvesters``, ``pycameleon``, ``fake``), imported lazily
+(``basler``, ``flir``, ``spinnaker_c``, ``pycameleon``, ``fake``), imported lazily
 through ``registry``.
 """
 

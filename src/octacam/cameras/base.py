@@ -149,8 +149,8 @@ class FeatureInfo:
 # --- Curated feature fallback --------------------------------------------------
 # For a backend that cannot introspect its full node map (the pycameleon floor
 # and the Spinnaker C-API tier), the Camera tab degrades to the six PARAM_NODES,
-# built as FeatureInfo from the backend's existing read_node/write_node. GenICam
-# backends (harvesters/basler) and the fake override this with a full walk.
+# built as FeatureInfo from the backend's existing read_node/write_node. The
+# basler backend and the fake override this with a full GenApi node-map walk.
 _SFNC_TO_SNAKE = {sfnc: snake for snake, sfnc in PARAM_NODES.items()}
 _CURATED_CATEGORY = {
     "Width": "ImageFormatControl",

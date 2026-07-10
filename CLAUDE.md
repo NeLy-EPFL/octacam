@@ -109,41 +109,29 @@ CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 | 1 | `basler` | pypylon | Basler vendor SDK; core dep |
 | 1 | `flir` | Spinnaker SDK + **PySpin** | FLIR vendor SDK; **PySpin wheel is cp310-only** → this tier drops out on Python ≥3.11 |
 | 2 | `spinnaker` | `libSpinnaker_C.so` via **ctypes** | Same FLIR cameras as `flir`, no cp310 limit → claims FLIRs on modern Python; ctypes releases the GIL on the blocking grab |
-| 3 | `pycameleon` | libusb (Rust `cameleon`) | Always-present floor; no vendor SDK/producer/EULA |
-| — | `harvesters` | GenTL producer | **Opt-in only, never auto** (see below) |
+| 3 | `pycameleon` | libusb (Rust `cameleon`) | Always-present floor; general GenICam-USB3 path; no vendor SDK/producer/EULA |
 | — | `fake` | synthetic | CI vehicle; only used when named |
 
-**Why `harvesters` is not in the cascade:** every GenTL producer is a
+**No GenTL tier (the removed `harvesters` backend).** octacam once carried an
+opt-in `harvesters` GenTL-consumer backend; it was **removed entirely** (module,
+the `harvesters`/`genicam` deps, and docs). Every GenTL producer is a
 user-installed, vendor-EULA'd `.cti` with its own quirks (watermarks, close
-deadlocks, vendor-only enumeration), so a camera lacking a vendor SDK must never
-be auto-routed through one. `harvesters` is used only when a rig explicitly sets
-`backend = "harvesters"`. The validated producer is now Basler's pylon
-`ProducerU3V`.
-
-### GenTL producer facts (empirical, on the test rig)
-- **pylon `ProducerU3V`** (`/opt/pylon/lib/gentlproducer/gtl`): **the recommended
-  producer.** Opens/**closes cleanly**, no watermark. Enumerates **Basler U3V
-  only** (does *not* see FLIR — use `spinnaker`/`flir` for those). Two quirks
-  handled in code: no `Buffer.timestamp_ns` (fall back to raw `timestamp` —
-  `harvesters._buffer_timestamp_ns`), and it SIGSEGVs during *interpreter
-  finalization* after a clean scan (the `octacam doctor` enum subprocess dodges it
-  with `os._exit`).
-- **Spinnaker GenTL** (`Spinnaker_GenTL.cti`): **`DevClose` deadlocks AND holds
-  the GIL** → wedges the whole process; only an external SIGKILL ends it.
-  Denylisted; `octacam doctor` shows it as *detected but not used*.
-- **mvIMPACT** (`mvGenTLProducer.cti`): **removed and denylisted.** SIGSEGVs inside
-  `IFUpdateDeviceList` during the device scan and watermarks third-party frames
-  after an ~8 s eval window. Do not reinstall as the octacam producer.
-- **Vimba X USB TL**: AVT-vendor-only → sees 0 third-party cameras. Useless here.
+deadlocks, vendor-only enumeration), and the always-present `pycameleon` floor —
+libusb-only, no producer needed — covers the general GenICam-USB3 camera better.
+Do **not** reintroduce a GenTL/`.cti` path. One producer fact still matters for a
+live backend: Teledyne's **Spinnaker GenTL producer** (`Spinnaker_GenTL.cti`) has
+a `DevClose` that **deadlocks while holding the GIL** (wedges the whole process) —
+which is exactly why the `spinnaker` tier drives the Spinnaker **SDK C API** over
+`ctypes` instead of that producer.
 
 ### Backend contract (`cameras/base.py :: CameraBackend`)
 All backends implement: enumerate/open/close; `load_params`/`save_params`;
 frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
 `retrieve_freerun` (used by the benchmark and free-run preview); and a full
 GenApi node-map walk (`list_features`/`read_feature`/`write_feature`/
-`execute_command`) for the Camera-tab node browser. `basler`/`harvesters` walk
-via genicam; `flir`/`spinnaker` walk the C/PySpin node map; `pycameleon` (no
-introspection) and the base fallback use a curated node set.
+`execute_command`) for the Camera-tab node browser. `basler` walks via genicam;
+`flir`/`spinnaker` walk the C/PySpin node map; `pycameleon` (no introspection)
+and the base fallback use a curated node set.
 
 ## Trigger model
 
@@ -185,8 +173,8 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
 Per-rig **`octacam_config.toml`** (parsed tolerantly in `config.py` —
 warn-and-default, never raise) plus **one per-camera sensor file**:
 - **Basler** → native `.pfs`.
-- **Every other GenICam backend** (flir, spinnaker, harvesters, pycameleon,
-  fake) → the native **GenApi persistence TSV** (`.txt`) via
+- **Every other GenICam backend** (flir, spinnaker, pycameleon, fake) → the
+  native **GenApi persistence TSV** (`.txt`) via
   `cameras/_genicam_config.py` (`apply_config`/`dump_config`/`parse_config`). The
   unified `.txt` format lets a rig switch flir↔spinnaker (PySpin 3.10 ↔ ctypes
   3.14) sharing the same param files.
@@ -288,8 +276,7 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
 - **Test rig:** 2× FLIR GS3-U3-41C6NIR (SN 17475185/17475187, 2048², CMV4000
   CMOS) + up to 4× Basler acA1920-150um (SN 40018619/40018631/40018632/40022761,
   and 40023151; 1920×1200); external trigger via the common-trigger-circuit Nano
-  ESP32. SDKs at `/opt/spinnaker` (Spinnaker) and `/opt/pylon` (Basler pylon,
-  incl. its `ProducerU3V` GenTL producer). mvIMPACT was removed.
+  ESP32. SDKs at `/opt/spinnaker` (Spinnaker) and `/opt/pylon` (Basler pylon).
 
 ## Where the deep detail lives
 
