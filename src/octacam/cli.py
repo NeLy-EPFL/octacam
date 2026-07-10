@@ -252,6 +252,7 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
         preview_trigger_source=record.preview_trigger_source,
         save_method=record.save_method,
         ffmpeg_params=record.ffmpeg_params,
+        max_nvenc_sessions=record.max_nvenc_sessions,
         writer_queue_size=record.writer_queue_size,
         record_form="display" if record.save_transformed else "sensor",
         save_frame_timestamps=record.save_timestamps,
@@ -881,6 +882,40 @@ def _ffmpeg_source(exe: str) -> str:
     return "system PATH"
 
 
+def _nvidia_gpus() -> list[str]:
+    """Detected NVIDIA GPUs as "<name> (driver <ver>)", via nvidia-smi.
+
+    Empty when no NVIDIA driver/GPU is present (nvidia-smi missing or failing) —
+    the signal that GPU (NVENC) encoding is unavailable on this host."""
+    if not shutil.which("nvidia-smi"):
+        return []
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    gpus: list[str] = []
+    for line in out.stdout.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if not parts or not parts[0]:
+            continue
+        if len(parts) >= 2:
+            gpus.append(f"{parts[0]} (driver {parts[1]})")
+        else:
+            gpus.append(parts[0])
+    return gpus
+
+
 def _instance_lock_holder(config_dir: Path) -> str | None:
     """The PID holding this rig's instance lock, or None if it is free.
 
@@ -1028,6 +1063,53 @@ def _doctor_encoding(report: _Report) -> None:
         )
     report.add("info", f"default record params:    {DEFAULT_FFMPEG_PARAMS}")
     report.add("info", f"default transcode params: {DEFAULT_TRANSCODE_FFMPEG_PARAMS}")
+    _doctor_gpu_encoding(report)
+
+
+def _doctor_gpu_encoding(report: _Report) -> None:
+    """Report GPU (NVIDIA NVENC) encode availability — the opt-in save_method="nvenc"."""
+    from octacam.writer import (
+        NVENC_H264_PARAMS,
+        find_ffmpeg,
+        probe_nvenc_max_sessions,
+    )
+
+    gpus = _nvidia_gpus()
+    if not gpus:
+        report.add(
+            "info",
+            'no NVIDIA GPU detected (nvidia-smi) — GPU encoding unavailable; '
+            'save_method="nvenc" would fall back to CPU (libx264)',
+        )
+        return
+    for gpu in gpus:
+        report.add("ok", f"NVIDIA GPU: {gpu}")
+    try:
+        nvexe = find_ffmpeg(require_encoder="h264_nvenc")
+    except RuntimeError:
+        report.add(
+            "warn",
+            'no ffmpeg with a working h264_nvenc encoder found — GPU encoding '
+            "unavailable (the bundled imageio-ffmpeg has no NVENC, and a system "
+            "ffmpeg's NVENC needs an API version the driver supports). Install a "
+            'system ffmpeg built with NVENC; until then save_method="nvenc" '
+            "falls back to CPU (libx264).",
+        )
+        return
+    report.add(
+        "ok",
+        f"h264_nvenc works via {_ffmpeg_version(nvexe) or 'ffmpeg'} at {nvexe}",
+    )
+    sessions = probe_nvenc_max_sessions()
+    if sessions is not None:
+        suffix = "+ (probe ceiling)" if sessions >= 12 else ""
+        report.add(
+            "info",
+            f"concurrent NVENC sessions detected: {sessions}{suffix} "
+            "(cameras beyond record.max_nvenc_sessions encode on CPU)",
+        )
+    report.add("info", f"NVENC record params: {NVENC_H264_PARAMS}")
+    report.add("info", 'enable per rig with  record.save_method = "nvenc"')
 
 
 def _doctor_config(report: _Report, config_dir: Path):
@@ -1728,8 +1810,8 @@ def _prompt_record(console) -> "RecordConfig":
         console=console,
     )
     save_method = Prompt.ask(
-        "Save method",
-        choices=["ffmpeg", "raw"],
+        "Save method (ffmpeg=CPU x264, nvenc=NVIDIA GPU, raw=Mono8 dump)",
+        choices=["ffmpeg", "nvenc", "raw"],
         default=d.save_method,
         console=console,
     )

@@ -235,11 +235,12 @@ export class RecordTab {
     this._syncFfmpegEnabled();
   }
 
-  // The ffmpeg parameters box only applies to the ffmpeg save method; grey it
-  // out for raw so it reads as inert (the fieldset's recording-lock disable is
-  // independent and layers on top).
+  // The ffmpeg parameters box applies to the encoding save methods (ffmpeg/CPU
+  // and nvenc/GPU); grey it out for raw so it reads as inert (the fieldset's
+  // recording-lock disable is independent and layers on top).
   _syncFfmpegEnabled() {
-    this.ffmpegParams.disabled = this.format.value !== "ffmpeg";
+    const method = this.format.value;
+    this.ffmpegParams.disabled = method !== "ffmpeg" && method !== "nvenc";
   }
 
   applyState(snap) {

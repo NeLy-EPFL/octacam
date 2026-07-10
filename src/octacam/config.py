@@ -99,8 +99,16 @@ class RecordConfig(BaseModel):
     preview_trigger_source: Literal["auto", "software", "free_running"] = "auto"
     directory: str = "./"
     relative_directory: str = ""
-    save_method: Literal["ffmpeg", "raw"] = "ffmpeg"
+    # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU (H.264 NVENC, falling back to
+    # libx264 for cameras beyond max_nvenc_sessions); "raw" = Mono8 dump for
+    # offline transcoding.
+    save_method: Literal["ffmpeg", "raw", "nvenc"] = "ffmpeg"
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
+    # Max concurrent NVENC (GPU) encode sessions to use when save_method="nvenc".
+    # One consumer GeForce allows only a handful (8 on driver 570; a Quadro/patched
+    # driver allows more) — cameras beyond this encode on CPU instead of failing.
+    # `octacam doctor` reports the empirically-detected limit for this GPU.
+    max_nvenc_sessions: int = 8
     # Frames buffered per camera between the grab loop and the encoder. The grab
     # loop never blocks, so a frame arriving while this queue is full is dropped;
     # a deeper queue absorbs a transient encoder stall (bursty ffmpeg/GPU) at the
@@ -126,6 +134,11 @@ class RecordConfig(BaseModel):
     @classmethod
     def _check_ffmpeg_params(cls, value: str) -> str:
         return _valid_ffmpeg_params(value)
+
+    @field_validator("max_nvenc_sessions")
+    @classmethod
+    def _floor_nvenc_sessions(cls, value: int) -> int:
+        return max(0, value)
 
     @field_validator("writer_queue_size")
     @classmethod

@@ -116,6 +116,7 @@ def test_system_and_settings_endpoints(client):
     assert system["cameras"][0]["width"] > 0
     assert {f["save_method"] for f in system["formats"]} == {
         "ffmpeg",
+        "nvenc",
         "raw",
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
@@ -163,6 +164,17 @@ def test_system_and_settings_endpoints(client):
     assert ffmpeg.status_code == 200
     assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
     assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
+
+    # The GPU save method + its session-limit knob round-trip; a negative limit 422s.
+    gpu = client.put(
+        "/api/settings", json={"save_method": "nvenc", "max_nvenc_sessions": 4}
+    )
+    assert gpu.status_code == 200
+    assert gpu.json()["save_method"] == "nvenc"
+    assert gpu.json()["max_nvenc_sessions"] == 4
+    assert (
+        client.put("/api/settings", json={"max_nvenc_sessions": -1}).status_code == 422
+    )
 
     assert client.put("/api/settings", json={"fps": -1}).status_code == 422
     assert client.put("/api/settings", json={"bogus": 1}).status_code == 422

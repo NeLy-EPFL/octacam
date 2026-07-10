@@ -43,6 +43,8 @@ from octacam.writer import (
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     FORMATS,
     VideoFormat,
+    is_nvenc_params,
+    resolve_capture_formats,
 )
 
 log = logging.getLogger("octacam")
@@ -127,9 +129,13 @@ class RecordingSettings:
     # managed->drive the plugin, external->free-run approximation); "software" and
     # "free_running" force that mode regardless of the recording trigger source.
     preview_trigger_source: str = "auto"  # "auto" | "software" | "free_running"
-    save_method: str = "ffmpeg"  # "ffmpeg" | "raw"
-    # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg".
+    save_method: str = "ffmpeg"  # "ffmpeg" (CPU) | "nvenc" (GPU) | "raw"
+    # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg" (and,
+    # when it names an *_nvenc encoder, when save_method == "nvenc").
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
+    # Max concurrent GPU NVENC sessions when save_method == "nvenc"; cameras
+    # beyond this encode on CPU (see writer.resolve_capture_formats).
+    max_nvenc_sessions: int = 8
     # Depth of each camera's writer queue (frames buffered to the encoder). A
     # deeper queue absorbs transient encoder stalls without dropping frames, at
     # the cost of peak RAM. See config.RecordConfig.writer_queue_size.
@@ -152,10 +158,17 @@ class RecordingSettings:
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
-        if self.save_method == "ffmpeg":
+        if self.save_method in ("ffmpeg", "nvenc"):
+            params = self.ffmpeg_params
+            # save_method="nvenc" means "encode on the GPU": honour a custom
+            # ffmpeg_params only when the operator actually put an *_nvenc encoder
+            # there; otherwise (e.g. the libx264 default is still in the field)
+            # use the curated NVENC params so the choice isn't silently ignored.
+            if self.save_method == "nvenc" and not is_nvenc_params(params):
+                params = video_format.ffmpeg_params
             video_format = dataclasses.replace(
                 video_format,
-                ffmpeg_params=self.ffmpeg_params,
+                ffmpeg_params=params,
                 remux_mp4=self.remux_mp4,
             )
         return video_format
@@ -276,7 +289,7 @@ def build_recording_summary(
                 "transform_applied": applied,
             }
         )
-    return {
+    summary = {
         "schema_version": 3,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
@@ -285,7 +298,10 @@ def build_recording_summary(
         "duration_s": settings.duration_s,
         "trigger_source": settings.trigger_source,
         "save_method": settings.save_method,
-        "ffmpeg_params": settings.ffmpeg_params,
+        # The encoder args actually used, not the raw config string: for
+        # save_method="nvenc" with default params this is the curated NVENC
+        # params (h264_nvenc), so the summary never mislabels the codec.
+        "ffmpeg_params": settings.video_format().ffmpeg_params,
         "record_form": settings.record_form,
         # The sub-path (under record.directory) the transfer step mirrors onto
         # the destination; resolved once here so a later transfer never
@@ -295,6 +311,11 @@ def build_recording_summary(
         "timestamp_note": _TIMESTAMP_NOTE,
         "cameras": cams,
     }
+    if settings.save_method == "nvenc":
+        # Cameras beyond this many used the CPU (libx264) fallback — see the
+        # per-recording warning; recorded here so the split is auditable.
+        summary["max_nvenc_sessions"] = settings.max_nvenc_sessions
+    return summary
 
 
 def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
@@ -487,6 +508,12 @@ class RecordingController:
                 raise ValueError(f"Unknown settings: {sorted(unknown)}")
             if "save_method" in changes and changes["save_method"] not in FORMATS:
                 raise ValueError(f"Unknown save_method: {changes['save_method']}")
+            if "max_nvenc_sessions" in changes and (
+                not isinstance(changes["max_nvenc_sessions"], int)
+                or isinstance(changes["max_nvenc_sessions"], bool)
+                or changes["max_nvenc_sessions"] < 0
+            ):
+                raise ValueError("max_nvenc_sessions must be an integer >= 0")
             if "fps" in changes and not changes["fps"] > 0:
                 raise ValueError("fps must be > 0")
             if "duration_s" in changes and not changes["duration_s"] > 0:
@@ -970,6 +997,20 @@ class RecordingController:
         # connect the two `if not started` blocks / the early return).
         failed_resume_mode: str | None = None
         hooks_done: threading.Event | None = None
+        # Warm the NVENC capability probe OFF the lock. resolve_capture_formats
+        # (called under the lock below) runs an ffmpeg probe subprocess on the
+        # first GPU recording of the process; doing it here first means the
+        # cached result is reused under the lock, so a slow/hung probe can never
+        # stall status/stop/preview (all of which take the same lock). Best-effort
+        # and side-effect-free: the authoritative resolve still runs under the lock.
+        pre = self._settings
+        if pre.save_method == "nvenc":
+            with contextlib.suppress(Exception):
+                resolve_capture_formats(
+                    pre.video_format(),
+                    len(self.camera_system),
+                    pre.max_nvenc_sessions,
+                )
         with self._lock:
             if self.recording_active:
                 return StartResult(StartResult.BUSY, "Recording in progress")
@@ -1009,10 +1050,23 @@ class RecordingController:
                 self.camera_system.set_trigger_source(use_software_trigger)
                 self.camera_system.set_software_trigger_frequency(settings.fps)
                 self._recording_start_wall_ns = time.time_ns()
+                # Resolve one encode format per camera, honouring the GPU NVENC
+                # session limit: for save_method="nvenc" the first
+                # max_nvenc_sessions cameras encode on the GPU and any overflow
+                # (or the whole set, if NVENC is unavailable) falls back to CPU.
+                # Non-NVENC methods pass through unchanged. Warnings surface to the
+                # operator so a silent CPU fallback never looks like GPU success.
+                formats, fmt_warnings = resolve_capture_formats(
+                    settings.video_format(),
+                    len(self.camera_system),
+                    settings.max_nvenc_sessions,
+                )
+                for message in fmt_warnings:
+                    self._event("warning", message)
                 started = self.camera_system.start_record(
                     save_dir,
                     settings.fps,
-                    settings.video_format(),
+                    formats,
                     settings.record_form,
                     use_software_trigger=use_software_trigger,
                     writer_queue_size=settings.writer_queue_size,

@@ -54,6 +54,18 @@ DEFAULT_X264_PARAMS = ""
 DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
 DEFAULT_TRANSCODE_FFMPEG_PARAMS = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
 
+# GPU capture params, opt-in via ``record.save_method = "nvenc"`` (or by naming
+# any ``*_nvenc`` encoder in ``ffmpeg_params``). NVENC rejects gray/4:0:0, so we
+# pack Mono8 into yuv420p — the full-range helpers below (_full_range_vf /
+# _color_range_args fire for yuv420p) keep 0-255 luma. NVENC ignores ``-crf``
+# (libx264-only); quality is set with ``-cq`` (constant-quality VBR). ``-cq 16``
+# targets the same near-visually-lossless level as the libx264 ``-crf 18``
+# default (NVENC is a touch less bit-efficient, so the number runs a little
+# lower). ``-bf 0`` keeps the encoder from buffering B-frames. The encoder is
+# resolved per camera at record time; a rig with more cameras than the GPU's
+# NVENC session limit falls the overflow back to libx264 (resolve_capture_formats).
+NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
+
 # Recorded pixel format -> ffmpeg rawvideo input pixel format / bytes-per-pixel.
 # Mono8 is the invariant every backend records today; the maps give a single
 # seam to extend if a backend ever records Mono10/RGB.
@@ -131,23 +143,202 @@ class TranscodeProgress:
 ProgressCallback = Callable[[TranscodeProgress], None]
 
 
-def find_ffmpeg() -> str:
-    """Locate an ffmpeg executable: $OCTACAM_FFMPEG, imageio-ffmpeg, $PATH."""
-    exe = os.environ.get("OCTACAM_FFMPEG")
-    if exe:
-        return exe
+# Which ffmpeg option names carry the video encoder choice. `-c:v`/`-vcodec`
+# are the common ones; the stream-qualified forms appear in hand-written params.
+_VIDEO_CODEC_FLAGS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
+
+
+def encoder_of(ffmpeg_params: str) -> str | None:
+    """The video encoder named by an ffmpeg_params string (after -c:v), or None."""
+    try:
+        tokens = shlex.split(ffmpeg_params)
+    except ValueError:
+        return None
+    return _extract_opt(tokens, _VIDEO_CODEC_FLAGS)
+
+
+def is_nvenc_params(ffmpeg_params: str) -> bool:
+    """True when ffmpeg_params selects an NVIDIA NVENC encoder (``*_nvenc``)."""
+    enc = encoder_of(ffmpeg_params)
+    return bool(enc) and enc.endswith("_nvenc")
+
+
+def _required_encoder(ffmpeg_params: str) -> str | None:
+    """The encoder :func:`find_ffmpeg` must guarantee for these params.
+
+    Only GPU encoders (which the bundled imageio ffmpeg lacks, and which a stale
+    driver can fail to run) need a capability search; libx264/CPU work runs on
+    any ffmpeg, so return None there to keep the historical fast-path binary."""
+    enc = encoder_of(ffmpeg_params)
+    return enc if enc and enc.endswith("_nvenc") else None
+
+
+def _which_all(name: str) -> list[str]:
+    """Every executable ``name`` on $PATH, in PATH order (shutil.which is first-only)."""
+    found: list[str] = []
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory:
+            continue
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            found.append(candidate)
+    return found
+
+
+def _ffmpeg_candidates() -> list[str]:
+    """Ordered, realpath-deduped ffmpeg executables to probe, most-preferred first.
+
+    $OCTACAM_FFMPEG, then the bundled imageio binary, then every ffmpeg on $PATH
+    — a system build is where a working NVENC almost always lives (the bundled
+    imageio binary ships without it)."""
+    cands: list[str] = []
+    env = os.environ.get("OCTACAM_FFMPEG")
+    if env:
+        cands.append(env)
     try:
         import imageio_ffmpeg
 
-        return imageio_ffmpeg.get_ffmpeg_exe()
+        cands.append(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as e:  # pragma: no cover - depends on environment
         log.debug("imageio-ffmpeg unavailable: %s", e)
-    exe = shutil.which("ffmpeg")
-    if exe:
-        return exe
+    cands.extend(_which_all("ffmpeg"))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for exe in cands:
+        try:
+            key = os.path.realpath(exe)
+        except OSError:
+            key = exe
+        if key not in seen:
+            seen.add(key)
+            ordered.append(exe)
+    return ordered
+
+
+# Capability-probe caches. A probe runs a real one-frame encode (below), so this
+# is not just a version check: it is the ground truth for "can this binary run
+# this encoder on THIS machine right now". Cleared only by process restart.
+_ENCODER_OK: dict[tuple[str, str], bool] = {}
+_FFMPEG_FOR_ENCODER: dict[str, str] = {}
+
+
+def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
+    """Whether *exe* can actually initialise *encoder* on this machine (cached).
+
+    Runs a real one-frame encode to the null muxer. This is stronger than parsing
+    ``-encoders``: a too-new ffmpeg lists ``h264_nvenc`` yet fails at runtime when
+    its NVENC API is newer than the installed NVIDIA driver supports, and a broken
+    GPU/driver fails here too. The result is cached per (realpath, encoder)."""
+    real = os.path.realpath(exe) if os.path.exists(exe) else exe
+    key = (real, encoder)
+    cached = _ENCODER_OK.get(key)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        proc = subprocess.run(
+            [
+                exe, "-hide_banner", "-loglevel", "error",
+                # 256x256: comfortably above NVENC's minimum frame dimensions
+                # (a smaller probe frame fails init on its own).
+                "-f", "lavfi", "-i", "color=c=black:s=256x256:r=5",
+                "-frames:v", "1", "-c:v", encoder, "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=30,
+        )  # fmt: skip
+        ok = proc.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        log.debug("encoder probe failed for %s / %s: %s", exe, encoder, e)
+    _ENCODER_OK[key] = ok
+    return ok
+
+
+def probe_nvenc_max_sessions(
+    encoder: str = "h264_nvenc", ceiling: int = 12
+) -> int | None:
+    """Empirically detect how many concurrent NVENC sessions this GPU allows.
+
+    Launches up to *ceiling* short, overlapping NVENC encodes and counts how many
+    initialise successfully — the excess fail their encoder init with the driver's
+    session-limit error. Returns the count (≤ *ceiling*), or None when no
+    NVENC-capable ffmpeg exists. Consumer GeForce cards cap this at a handful (8 on
+    driver 570; 12 on late-2025 drivers); a return equal to *ceiling* means "at
+    least this many". Used by ``octacam doctor``; it briefly loads the GPU, so it
+    is not on any record path.
+
+    Note: run during a live NVENC recording it under-counts (that recording holds
+    its sessions), but it cannot disturb those held sessions."""
+    try:
+        exe = find_ffmpeg(require_encoder=encoder)
+    except RuntimeError:
+        return None
+    procs: list[subprocess.Popen] = []
+    for _ in range(max(1, ceiling)):
+        try:
+            proc = subprocess.Popen(
+                [
+                    exe, "-hide_banner", "-loglevel", "error", "-re",
+                    "-f", "lavfi", "-i", "testsrc=size=256x256:rate=10",
+                    "-t", "2", "-c:v", encoder, "-f", "null", "-",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )  # fmt: skip
+        except OSError:
+            break
+        procs.append(proc)
+    ok = 0
+    for proc in procs:
+        try:
+            if proc.wait(timeout=30) == 0:
+                ok += 1
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    return ok
+
+
+def find_ffmpeg(require_encoder: str | None = None) -> str:
+    """Locate an ffmpeg executable.
+
+    Without ``require_encoder``: $OCTACAM_FFMPEG, then imageio-ffmpeg, then $PATH
+    (the historical order — the bundled binary is fine for libx264/CPU work).
+
+    With ``require_encoder`` (e.g. ``"h264_nvenc"``): return the first candidate
+    ffmpeg that can actually *run* that encoder — a real probe, not just listing
+    it (see :func:`ffmpeg_encoder_works`) — searching $OCTACAM_FFMPEG, the bundled
+    binary, then every ffmpeg on $PATH. The bundled imageio build has no NVENC, so
+    this is how a GPU recording reaches a system ffmpeg. Raises RuntimeError if
+    none qualifies (the caller can then fall back to CPU)."""
+    if require_encoder is None:
+        exe = os.environ.get("OCTACAM_FFMPEG")
+        if exe:
+            return exe
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:  # pragma: no cover - depends on environment
+            log.debug("imageio-ffmpeg unavailable: %s", e)
+        exe = shutil.which("ffmpeg")
+        if exe:
+            return exe
+        raise RuntimeError(
+            "No ffmpeg executable found: install the imageio-ffmpeg package or "
+            "a system ffmpeg, or set OCTACAM_FFMPEG."
+        )
+    cached = _FFMPEG_FOR_ENCODER.get(require_encoder)
+    if cached is not None:
+        return cached
+    for exe in _ffmpeg_candidates():
+        if ffmpeg_encoder_works(exe, require_encoder):
+            _FFMPEG_FOR_ENCODER[require_encoder] = exe
+            return exe
     raise RuntimeError(
-        "No ffmpeg executable found: install the imageio-ffmpeg package or "
-        "a system ffmpeg, or set OCTACAM_FFMPEG."
+        f"no ffmpeg with a working {require_encoder} encoder was found "
+        f"(install a system ffmpeg built with {require_encoder} and a matching "
+        "NVIDIA driver, or set OCTACAM_FFMPEG to one)."
     )
 
 
@@ -450,7 +641,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
     def _open_sink(self, filename, fps, frame_size):
         width, height = frame_size
         args = build_encode_args(
-            find_ffmpeg(),
+            find_ffmpeg(require_encoder=_required_encoder(self.ffmpeg_params)),
             filename,
             fps,
             width,
@@ -624,12 +815,90 @@ class VideoFormat:
         raise ValueError(f"Unknown save method: {self.save_method}")
 
 
-# Keyed by config `record.save_method`. "ffmpeg" encodes during capture;
-# "raw" dumps Mono8 for offline transcoding.
+# Keyed by config `record.save_method`. "ffmpeg" encodes during capture on the
+# CPU (libx264); "nvenc" encodes on an NVIDIA GPU (falling back to libx264 for
+# cameras beyond the GPU's session limit — see resolve_capture_formats); "raw"
+# dumps Mono8 for offline transcoding. "nvenc"'s writer class is still "ffmpeg"
+# (an FfmpegVideoWriter); only its params/encoder differ.
 FORMATS: dict[str, VideoFormat] = {
     "ffmpeg": VideoFormat("ffmpeg", "mkv", "x264 mkv (ffmpeg)"),
+    "nvenc": VideoFormat(
+        "ffmpeg", "mkv", "H.264 NVENC GPU (ffmpeg)", ffmpeg_params=NVENC_H264_PARAMS
+    ),
     "raw": VideoFormat("raw", "raw", "raw Mono8 (transcode later)"),
 }
+
+
+def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
+    """A libx264/CPU VideoFormat mirroring *base*'s container/remux/pixel format.
+
+    Used for cameras that can't get a GPU NVENC session (see
+    :func:`resolve_capture_formats`). It keeps *base*'s ``-pix_fmt`` (NVENC uses
+    yuv420p) so a mixed GPU+CPU recording is uniform — e.g. every file stays
+    yuv420p (browser-playable after an mp4 remux) instead of the fallback cameras
+    emitting monochrome 4:0:0. The full-range filter/flag still applies to
+    yuv420p via :func:`build_encode_args`, so 0-255 luma survives on both paths."""
+    try:
+        tokens = shlex.split(base.ffmpeg_params)
+    except ValueError:
+        tokens = []
+    pix_fmt = _extract_opt(tokens, ("-pix_fmt", "-pixel_format")) or DEFAULT_PIX_FMT
+    return VideoFormat(
+        save_method="ffmpeg",
+        extension=base.extension,
+        label="x264 mkv (CPU fallback)",
+        ffmpeg_params=(
+            f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} "
+            f"-pix_fmt {pix_fmt}"
+        ),
+        remux_mp4=base.remux_mp4,
+    )
+
+
+def resolve_capture_formats(
+    base: VideoFormat, num_cameras: int, max_nvenc_sessions: int
+) -> tuple[list[VideoFormat], list[str]]:
+    """Per-camera capture formats, honouring the GPU's NVENC session limit.
+
+    For a non-NVENC ``base`` every camera uses it unchanged. For an NVENC
+    ``base``:
+
+    - if no ffmpeg can actually run NVENC on this machine, *all* cameras fall
+      back to libx264 (so a misconfigured GPU never kills the whole recording);
+    - otherwise the first ``max_nvenc_sessions`` cameras use NVENC and any beyond
+      that fall back to libx264 — one consumer GeForce allows only a handful of
+      concurrent NVENC sessions, and the (N+1)-th would otherwise fail its
+      encoder init and silently record nothing.
+
+    Returns ``(formats, warnings)``; the caller surfaces each warning to the
+    operator (GUI event / CLI log). The NVENC-capability probe result is cached,
+    so calling this per recording is cheap after the first."""
+    if num_cameras <= 0:
+        return [], []
+    if not is_nvenc_params(base.ffmpeg_params):
+        return [base] * num_cameras, []
+    encoder = encoder_of(base.ffmpeg_params) or "h264_nvenc"
+    warnings: list[str] = []
+    try:
+        find_ffmpeg(require_encoder=encoder)
+    except RuntimeError as e:
+        warnings.append(
+            f"GPU encoding ({encoder}) unavailable — {e} "
+            f"Recording all {num_cameras} camera(s) on CPU (libx264) instead."
+        )
+        return [cpu_fallback_format(base)] * num_cameras, warnings
+    cap = max(0, max_nvenc_sessions)
+    n_gpu = min(cap, num_cameras)
+    formats = [base] * n_gpu + [cpu_fallback_format(base)] * (num_cameras - n_gpu)
+    if n_gpu < num_cameras:
+        warnings.append(
+            f"{num_cameras} cameras exceed the NVENC session limit "
+            f"(max_nvenc_sessions={cap}): the first {n_gpu} encode on GPU "
+            f"({encoder}); the remaining {num_cameras - n_gpu} fall back to CPU "
+            "(libx264). Raise record.max_nvenc_sessions if your GPU/driver "
+            "allows more (see `octacam doctor`)."
+        )
+    return formats, warnings
 
 
 def default_save_method(record_config) -> str:
