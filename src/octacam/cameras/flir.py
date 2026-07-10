@@ -83,7 +83,7 @@ def _safe(getter):
 
 # --- Full node-map walk (Camera tab) ------------------------------------------
 # The PySpin interface-type / visibility constants live on the module, which may
-# be absent (cp310-only), so the maps are built lazily from the passed-in module
+# be absent (PySpin not installed), so the maps are built lazily from the passed-in module
 # rather than at import time (unlike the Basler backend, whose pypylon is always
 # present). This mirrors the Basler backend's genicam node-map walk, but over
 # PySpin's C++ node wrappers (CIntegerPtr/CEnumerationPtr/... casts) instead.

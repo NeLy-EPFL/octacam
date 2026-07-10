@@ -1,9 +1,8 @@
 """Small standard-library shims so octacam runs on Python 3.10.
 
-octacam targets Python ≥3.10 (the FLIR vendor tier's PySpin wheel is cp310-only,
-so a rig that wants the FLIR SDK is pinned to 3.10). Two stdlib features octacam
-uses only arrived in 3.11, so they are polyfilled here and imported from this one
-module instead of the stdlib:
+octacam targets Python ≥3.10 (its lowest supported interpreter). Two stdlib
+features octacam uses only arrived in 3.11, so they are polyfilled here and
+imported from this one module instead of the stdlib:
 
 * ``tomllib`` — the TOML *reader* (3.11+). On 3.10 the pip-installable ``tomli``
   package is a drop-in (same ``loads`` / ``TOMLDecodeError``), pulled in via the

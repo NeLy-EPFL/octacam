@@ -107,8 +107,8 @@ CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 | Tier | Backend | Driver | Notes |
 | --- | --- | --- | --- |
 | 1 | `basler` | pypylon | Basler vendor SDK; core dep |
-| 1 | `flir` | Spinnaker SDK + **PySpin** | FLIR vendor SDK; **PySpin wheel is cp310-only** → this tier drops out on Python ≥3.11 |
-| 2 | `spinnaker` | `libSpinnaker_C.so` via **ctypes** | Same FLIR cameras as `flir`, no cp310 limit → claims FLIRs on modern Python; ctypes releases the GIL on the blocking grab |
+| 1 | `flir` | Spinnaker SDK + **PySpin** | FLIR vendor SDK; the default FLIR path. PySpin ships wheels for cp310–cp314 (Spinnaker 4.4), so this tier is available whenever `import PySpin` succeeds |
+| 2 | `spinnaker` | `libSpinnaker_C.so` via **ctypes** | Same FLIR cameras as `flir`; the FLIR path when PySpin is *not* installed (needs only the SDK's `libSpinnaker_C.so`, no PySpin wheel); ctypes releases the GIL on the blocking grab |
 | 3 | `pycameleon` | libusb (Rust `cameleon`) | Always-present floor; general GenICam-USB3 path; no vendor SDK/producer/EULA |
 | — | `fake` | synthetic | CI vehicle; only used when named |
 
@@ -176,8 +176,8 @@ warn-and-default, never raise) plus **one per-camera sensor file**:
 - **Every other GenICam backend** (flir, spinnaker, pycameleon, fake) → the
   native **GenApi persistence TSV** (`.txt`) via
   `cameras/_genicam_config.py` (`apply_config`/`dump_config`/`parse_config`). The
-  unified `.txt` format lets a rig switch flir↔spinnaker (PySpin 3.10 ↔ ctypes
-  3.14) sharing the same param files.
+  unified `.txt` format lets a rig switch flir↔spinnaker (PySpin ↔ ctypes)
+  sharing the same param files.
 
 **Trigger normalization on save:** a GUI "Save" taken while previewing with a
 software trigger must not bake `TriggerSource=Software` into the file (it would

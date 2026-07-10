@@ -1,6 +1,6 @@
 """FLIR / Teledyne Spinnaker backend over the C API via ``ctypes``.
 
-This is the fast, watermark-free, modern-Python path for FLIR cameras. It drives
+This is the fast, watermark-free, PySpin-free path for FLIR cameras. It drives
 ``libSpinnaker_C.so`` (the Spinnaker SDK's flat C ABI) directly through
 :mod:`ctypes`, mirroring the PySpin backend (:mod:`octacam.cameras.flir`)
 node-for-node — same SFNC names, same :data:`PARAM_NODES`, same native GenApi
@@ -11,9 +11,10 @@ PySpin's C++ wrappers.
 
 Why this backend exists (see ``docs/plan-spinnaker-c-backend.md``):
 
-* **Modern Python.** PySpin ships only as a cp310 wheel, so on the project's
-  Python 3.14 the :mod:`~octacam.cameras.flir` tier drops out. The C library has
-  no such limit — ``ctypes.CDLL`` loads it on any Python.
+* **No PySpin wheel required.** The :mod:`~octacam.cameras.flir` tier needs
+  PySpin (Teledyne ships cp310-cp314 wheels with the SDK). This tier needs only
+  the SDK's ``libSpinnaker_C.so`` — ``ctypes.CDLL`` loads it with no Python wheel
+  at all, so it drives the FLIRs even when PySpin is not installed.
 * **No GIL starvation.** The pycameleon floor's ``receive()`` holds the Python
   GIL for the whole exposure wait, so two FLIRs starve a co-recorded Basler.
   ``ctypes`` (a ``CDLL``, not a ``PyDLL``) **releases the GIL around every foreign

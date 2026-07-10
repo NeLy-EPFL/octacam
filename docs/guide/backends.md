@@ -13,7 +13,7 @@ The optional top-level `backend` key only *pins* a rig to one backend:
 # backend = "auto"       # default (and what an absent key means): the cascade
 # backend = "basler"     # pin to Basler (pypylon)
 # backend = "flir"       # pin to FLIR / Teledyne (Spinnaker / PySpin)
-# backend = "spinnaker"  # pin FLIRs to the Spinnaker C-API tier (no cp310 wheel limit)
+# backend = "spinnaker"  # pin FLIRs to the Spinnaker C-API tier (no PySpin wheel needed)
 # backend = "pycameleon" # pin to the libusb USB3-Vision floor
 ```
 
@@ -27,7 +27,7 @@ by `auto` — it is named-only, reached by pinning the `backend` key:
 | Priority | `backend` | Driver | Install | Bounds / HW timestamp |
 | --- | --- | --- | --- | --- |
 | 1 (vendor) | `basler` | pypylon | pip (core) | full |
-| 1 (vendor) | `flir` | Spinnaker + PySpin | **manual**, cp310 wheel only | full |
+| 1 (vendor) | `flir` | Spinnaker + PySpin | **manual**; PySpin wheels cp310–cp314 | full |
 | 2 (FLIR C-API) | `spinnaker` | Spinnaker C API (`libSpinnaker_C.so`, ctypes) | **manual** SDK, any Python | full |
 | 3 (floor) | `pycameleon` | libusb (USB3 Vision) | pip (core) | none¹ |
 | — | `fake` | in-memory synthetic | pip (core) | — |
@@ -76,16 +76,17 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler
 ## Tier 1 — FLIR / Teledyne (Spinnaker + PySpin)
 
 FLIR / Teledyne cameras use the Spinnaker SDK's **PySpin** wheel, which is **not
-on PyPI** (it ships with the SDK installer) and only has a **cp310** wheel — so
-the FLIR *vendor* tier is reachable **only on Python 3.10** (the PySpin wheel is
-cp310-only). On newer Python this vendor tier is simply absent and the cascade
-claims the FLIR through the `spinnaker` tier (the Spinnaker SDK C API via ctypes)
-if the SDK is installed, otherwise through the always-present `pycameleon` floor —
-both drive FLIR cameras (just without the PySpin vendor SDK).
+on PyPI** (it ships with the SDK installer) but is provided for **cp310–cp314**
+(as of Spinnaker 4.4) — so the FLIR *vendor* tier is available on any supported
+Python whenever the wheel matching your interpreter is installed. If PySpin is
+not installed, the cascade claims the FLIR through the `spinnaker` tier (the
+Spinnaker SDK C API via ctypes) if the SDK is installed, otherwise through the
+always-present `pycameleon` floor — both drive FLIR cameras (just without the
+PySpin vendor SDK).
 
 ```bash
 # 1. Install the Spinnaker SDK for your platform (from Teledyne).
-# 2. Install the matching PySpin wheel into octacam's environment (Python 3.10):
+# 2. Install the PySpin wheel matching your interpreter into octacam's environment:
 pip install spinnaker_python-*.whl
 # 3. (optional) record the intent — installs nothing on its own:
 pip install "octacam[flir]"
@@ -99,18 +100,17 @@ rather than a traceback; under `auto` it just uses a lower tier.
 ## Tier 2 — spinnaker (Spinnaker C-API)
 
 The `spinnaker` tier drives FLIR / Teledyne cameras through the Spinnaker SDK's
-**C API** (`libSpinnaker_C.so`) via `ctypes` — no PySpin wheel, so it has **no
-cp310 limit and runs on any modern Python**. It needs the Spinnaker SDK installed
-(the same system SDK the `flir` vendor tier uses), but not the PySpin Python
-wheel; when `libSpinnaker_C.so` can't be loaded the tier self-disables, exactly
-like `flir`.
+**C API** (`libSpinnaker_C.so`) via `ctypes` — **no PySpin wheel needed at all**.
+It needs the Spinnaker SDK installed (the same system SDK the `flir` vendor tier
+uses), but not the PySpin Python wheel; when `libSpinnaker_C.so` can't be loaded
+the tier self-disables, exactly like `flir`.
 
 Because `ctypes` releases the GIL around the blocking grab call, a slow FLIR
 exposure does not starve co-recorded cameras. The tier reports full node bounds
 and hardware timestamps, and persists per-camera parameters as `<serial>.txt` (the
 native GenApi feature-persistence TSV). In the `auto` cascade it sits **below the
-`flir` vendor tier and above the `pycameleon` floor**, so on any Python where
-PySpin is unavailable the FLIRs are claimed here before falling to pycameleon.
+`flir` vendor tier and above the `pycameleon` floor**, so whenever PySpin is not
+installed the FLIRs are claimed here before falling to pycameleon.
 
 ## Tier 3 — pycameleon (the always-available floor)
 

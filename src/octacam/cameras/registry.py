@@ -13,14 +13,14 @@ each camera is claimed by the highest-priority tier that enumerates its serial.
 The tiers, best-to-floor:
 
 1. **Vendor SDK** — ``basler`` (pypylon) / ``flir`` (Spinnaker + PySpin). Best
-   features/perf; the SDK is user-installed and not always available on modern
-   Python (PySpin is cp310-only), so the tier simply drops out of the cascade
-   when its import fails.
+   features/perf; the SDK is user-installed, so the tier simply drops out of the
+   cascade when its import fails. PySpin ships wheels for cp310-cp314 (Spinnaker
+   4.4), so ``flir`` is the default FLIR path whenever ``import PySpin`` succeeds.
 2. **spinnaker** — the Spinnaker SDK's C API (``libSpinnaker_C.so``) driven via
-   ``ctypes``. Same FLIR cameras as ``flir`` but with no cp310 wheel limit, so it
-   claims the FLIRs on modern Python where ``flir`` (PySpin) drops out. Faster
-   and watermark-free vs the pycameleon floor because ctypes releases the GIL on
-   the blocking grab. Self-disables when the SDK is not installed.
+   ``ctypes``. Same FLIR cameras as ``flir`` but needs only the SDK's ``.so``, no
+   PySpin wheel — so it claims the FLIRs when ``flir`` (PySpin) is not installed.
+   Faster and watermark-free vs the pycameleon floor because ctypes releases the
+   GIL on the blocking grab. Self-disables when the SDK is not installed.
 3. **pycameleon** — libusb-only, a core dependency, so it is always present and
    the guaranteed final fallback. It is the general-purpose USB3-Vision path for
    any GenICam camera without a vendor SDK, needing no user-installed producer.
@@ -35,8 +35,8 @@ BACKENDS = ("basler", "flir", "spinnaker", "pycameleon", "fake")
 # tier here that enumerates its serial (see CameraSystem._enumerate). Vendor SDKs
 # (basler/flir) rank above the always-available pycameleon floor; ``spinnaker``
 # (the Spinnaker C API via ctypes) sits at the FLIR-vendor position just below
-# ``flir`` so it claims the FLIRs on modern Python where PySpin is unavailable,
-# before they fall through to the pycameleon floor.
+# ``flir`` so it claims the FLIRs when PySpin is not installed, before they fall
+# through to the pycameleon floor.
 CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 
 # The real (non-``fake``) backends an auto-detecting rig sweeps, in cascade

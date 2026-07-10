@@ -6,13 +6,14 @@ isolated Python without touching your system environment.
 
 !!! note "Python version and the FLIR vendor tier"
     Any Python ≥3.10 runs octacam and drives Basler, FLIR, and any GenICam
-    USB3-Vision camera through the [backend cascade](guide/backends.md). The one
-    exception is the *FLIR vendor SDK* (Spinnaker/PySpin), whose wheel is
-    cp310-only — so if you specifically want that tier, use Python 3.10. On newer
-    Python octacam still drives FLIR cameras through the Spinnaker C-API backend
-    (`spinnaker`) — the SDK's `libSpinnaker_C.so` via ctypes, which has no cp310
-    wheel limit — falling back to the always-present pycameleon floor if the SDK
-    is absent.
+    USB3-Vision camera through the [backend cascade](guide/backends.md) — every
+    tier works on any supported Python. The *FLIR vendor SDK* (Spinnaker/PySpin)
+    ships its PySpin wheel for multiple Python versions (cp310–cp314 as of
+    Spinnaker 4.4); install the one matching your interpreter. If PySpin is not
+    installed, octacam still drives FLIR cameras through the Spinnaker C-API
+    backend (`spinnaker`) — the SDK's `libSpinnaker_C.so` via ctypes, which needs
+    no PySpin wheel — falling back to the always-present pycameleon floor if the
+    SDK is absent too.
 
 ## Install with uv
 
@@ -62,8 +63,8 @@ core, so **a rig works out of the box**; only the two non-pip pieces are manual.
 | --- | --- | --- |
 | **pycameleon** (floor) | libusb (USB3 Vision) | ✅ Yes — always available |
 | **Basler** | pypylon | ✅ Yes — works out of the box |
-| **FLIR C-API** (`spinnaker`) | Spinnaker SDK (`libSpinnaker_C.so`) | ❌ Install the SDK separately; works on any Python — no PySpin wheel |
-| **FLIR / Teledyne vendor** (PySpin) | Spinnaker SDK + PySpin | ❌ Install separately, Python 3.10 only — the PySpin vendor tier (below) |
+| **FLIR C-API** (`spinnaker`) | Spinnaker SDK (`libSpinnaker_C.so`) | ❌ Install the SDK separately; works on any Python — no PySpin wheel needed |
+| **FLIR / Teledyne vendor** (PySpin) | Spinnaker SDK + PySpin | ❌ Install separately — the PySpin vendor tier (below); wheels for cp310–cp314 |
 
 The only system requirement for the always-on floor is `libusb-1.0`. See
 [Camera backends](guide/backends.md) for how the cascade picks a backend per
@@ -72,15 +73,15 @@ camera would use.
 
 ### FLIR / Teledyne vendor SDK (tier 1)
 
-PySpin is **not on PyPI** — it ships with Teledyne's Spinnaker SDK — and only has
-a **cp310** wheel, so this tier requires **Python 3.10**. On newer Python the
-cascade drives FLIR cameras through the `spinnaker` C-API backend
-(`libSpinnaker_C.so` via ctypes — needs the Spinnaker SDK but no PySpin/cp310
-wheel), falling back to the pycameleon floor.
+PySpin is **not on PyPI** — it ships with Teledyne's Spinnaker SDK — but Spinnaker
+4.4 provides wheels for **cp310–cp314**, so install the one matching your
+interpreter. If PySpin is not installed, the cascade drives FLIR cameras through
+the `spinnaker` C-API backend (`libSpinnaker_C.so` via ctypes — needs the
+Spinnaker SDK but no PySpin wheel), falling back to the pycameleon floor.
 
 ```bash
-# 1. Install the Spinnaker SDK for your platform (from Teledyne), on Python 3.10.
-# 2. Install the matching PySpin wheel into octacam's environment:
+# 1. Install the Spinnaker SDK for your platform (from Teledyne).
+# 2. Install the PySpin wheel matching your interpreter into octacam's environment:
 pip install spinnaker_python-*.whl
 # 3. (optional) record the intent — installs nothing on its own:
 pip install "octacam[flir]"

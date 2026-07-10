@@ -3,9 +3,10 @@ name = "octacam"
 version = "0.3.0.dev0"
 description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR, and any GenICam USB3-Vision camera)"
 readme = "README.md"
-# 3.10 is the floor because the FLIR vendor tier's PySpin wheel is cp310-only; a
-# rig that wants that tier is pinned to 3.10. The rest of the backend cascade
-# (the Spinnaker C-API tier, pycameleon) runs on any modern Python.
+# 3.10 is the floor: it is the lowest Python octacam supports (and the lowest
+# PySpin wheel Teledyne ships). Every backend tier runs on any Python from 3.10
+# up — PySpin now ships cp310-cp314 wheels (Spinnaker 4.4), so the FLIR vendor
+# tier is no longer pinned to 3.10.
 requires-python = ">=3.10"
 dependencies = [
     # Basler vendor tier (uv-installable, so it lives in core).
@@ -40,9 +41,10 @@ dependencies = [
 flywheel = []
 twophoton = []
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
-# PyPI (it ships with the SDK installer). This extra is therefore a documented,
-# greppable install marker rather than a dependency list: install the Spinnaker
-# SDK and `pip install spinnaker_python-*.whl` manually (see the README).
+# PyPI (it ships with the SDK installer; Spinnaker 4.4 provides cp310-cp314
+# wheels — install the one matching your interpreter). This extra is therefore a
+# documented, greppable install marker rather than a dependency list: install the
+# Spinnaker SDK and `pip install spinnaker_python-*.whl` manually (see the README).
 flir = []
 
 [project.scripts]
