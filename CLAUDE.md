@@ -24,6 +24,7 @@ uv run pytest -q -o addopts=""            # ~726 tests (the -o skips slow covera
 uv run ruff check src/                    # lint (see the known baseline below)
 uv run pyright src/                       # types (documented baseline; net-new must be 0)
 uv run --group docs mkdocs build --strict # docs build + link/nav validation
+uv run --group frontend pytest tests/test_frontend.py  # browser-driven GUI tests
 
 PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, no hardware
 ```
@@ -35,6 +36,14 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   couple of intentional `E501`/`F401`-style items already in `[tool.ruff]`
   ignore or documented; pyright reports ~45 errors, mostly `self.raw`/`self._cam`
   Optional-access in the vendor backends and cli. **New work must add zero.**
+- **Frontend has a browser test harness** (`tests/test_frontend.py`): it loads
+  the real `web/static/js/*.js` ES modules in a headless Chromium against the
+  real `index.html` and asserts GUI wiring (fields exist, enable/disable,
+  applySettings round-trips). Opt-in via the `frontend` dependency group
+  (`playwright`), so the default suite skips it (importorskip) and it self-skips
+  if no Chromium is installed. This is the automated form of the manual
+  headless-render recipe below — add a case here whenever a backend setting gains
+  a GUI control, so "shipped a knob with no widget" gets caught.
 - **Full-suite runtime is ~8 min.** Run the relevant `tests/test_*.py` file(s)
   during development; run the whole suite before committing.
 - **Known crash:** on some setups `pytest` can SIGSEGV *at process teardown* when

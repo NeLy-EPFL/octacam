@@ -68,6 +68,14 @@ docs = [
     # usable locally: `uv run --group docs mike serve`.
     "mike>=2.1",
 ]
+# Browser-driven tests for the vanilla-JS frontend (tests/test_frontend.py):
+# loads the real ES modules in a headless Chromium against the real index.html.
+# Opt-in so the default `uv run pytest` never needs a browser. Run with
+# `uv run --group frontend pytest tests/test_frontend.py` (first time also needs
+# `uv run --group frontend playwright install chromium`).
+frontend = [
+    "playwright>=1.49",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
