@@ -297,6 +297,7 @@ class CameraSystem:
         record_form: str = "display",
         use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
+        max_frames: int | None = None,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
@@ -306,6 +307,8 @@ class CameraSystem:
         forwarded so an external-trigger recording fetches frames without the
         software-trigger hand-off (see :meth:`Camera.start_record`).
         ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
+        ``max_frames`` caps every camera at the same frame count so a teardown
+        race can't leave cameras one frame apart (None = uncapped).
         """
         self.stop()
 
@@ -318,6 +321,7 @@ class CameraSystem:
                 record_form,
                 software_trigger=use_software_trigger,
                 queue_size=writer_queue_size,
+                max_frames=max_frames,
             )
 
         # Start every camera at once so they begin grabbing closer together

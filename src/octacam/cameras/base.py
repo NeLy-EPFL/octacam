@@ -943,6 +943,7 @@ class Camera:
         record_form: str = "display",
         software_trigger: bool = True,
         queue_size: int = WRITER_QUEUE_SIZE,
+        max_frames: int | None = None,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
@@ -956,7 +957,9 @@ class Camera:
         record loop on it (``retrieve``) would capture nothing — external recording
         must use the un-gated ``retrieve_freerun`` fetch instead. ``queue_size``
         bounds the writer queue that buffers frames between the grab loop and the
-        encoder (see :data:`WRITER_QUEUE_SIZE`).
+        encoder (see :data:`WRITER_QUEUE_SIZE`). ``max_frames`` caps the grab loop
+        at a fixed number of frames so every camera captures the same count (None
+        = uncapped; see :meth:`_record_loop`).
         """
         self._stop_flag.clear()
         self._started = False
@@ -997,7 +1000,7 @@ class Camera:
 
         self._thread = threading.Thread(
             target=self._record_loop,
-            args=(transform, software_trigger),
+            args=(transform, software_trigger, max_frames),
             daemon=True,
         )
         self._thread.start()
@@ -1067,6 +1070,7 @@ class Camera:
         self,
         transform: DisplayTransform | None = None,
         software_trigger: bool = True,
+        max_frames: int | None = None,
     ) -> None:
         backend = self._backend
         # With an external trigger the frames arrive on their own; the
@@ -1084,6 +1088,16 @@ class Camera:
             )
         frame_count = 0
         while not self._stop_flag.is_set() and backend.is_grabbing():
+            # Stop at the intended frame count so every camera captures the same
+            # number: octacam clocks software/managed triggers for a fixed number
+            # of pulses (max_frames = round(fps x duration)), but each camera's
+            # grab loop is independent, so without this the teardown race lets one
+            # camera retrieve a trailing pulse the others don't (e.g. 801 vs 800).
+            # A camera that can't keep up never reaches max_frames and is bounded
+            # instead by the monitor's deadline (the existing short-capture path).
+            # max_frames is None for a truly external trigger (unknown pulse count).
+            if max_frames is not None and frame_count >= max_frames:
+                break
             frame = retrieve(GRAB_TIMEOUT_MS, _ALWAYS)
             if frame is None:
                 continue

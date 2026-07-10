@@ -94,6 +94,17 @@ Each `Camera` runs its own grab thread; `retrieve()` must **never raise** (it
 returns `None` on a device/stop-race error) or a dead grab thread would orphan
 its ffmpeg writer.
 
+Each grab thread is **capped at `round(fps × duration)` frames**
+(`controller.capture_frame_count` → `Camera.start_record(max_frames=…)`) for the
+`software`/`managed` trigger sources octacam clocks, so the independent grab
+loops all stop at the same count instead of ending a frame apart when the
+teardown race lets one retrieve a trailing pulse (e.g. 801 vs 800). `external`
+(a source octacam doesn't drive) has an unknown pulse count and stays uncapped —
+bounded only by the deadline. A camera that can't keep up never reaches the cap
+and is bounded by the deadline too (the existing short-capture path). The writer
+queue depth is `record.writer_queue_size` (default 64), tunable per rig to absorb
+transient encoder stalls (a full queue is the only source of a "dropped" frame).
+
 ## Camera backends & the auto cascade
 
 `cameras/registry.py` is the seam. `backend = "auto"` (the default) resolves to a

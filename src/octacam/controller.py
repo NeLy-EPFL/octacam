@@ -161,6 +161,26 @@ class RecordingSettings:
         return video_format
 
 
+def capture_frame_count(settings: RecordingSettings) -> int | None:
+    """The fixed number of frames each camera should capture, or None to leave it
+    uncapped.
+
+    octacam clocks the ``software`` and ``managed`` (triggerbox) trigger sources
+    for a known number of pulses over the recording — ``round(fps * duration)`` —
+    so every camera should capture exactly that many frames. Capping each
+    independent grab loop at this count keeps the cameras from ending a frame
+    apart when the teardown race lets one retrieve a trailing pulse the others
+    don't. A truly ``external`` trigger (a source octacam does not drive) has an
+    unknown pulse count, so it stays uncapped — bounded only by the recording
+    deadline. Non-positive fps/duration also returns None (defensive: never cap a
+    recording to zero frames)."""
+    if settings.trigger_source == "external":
+        return None
+    if settings.fps <= 0 or settings.duration_s <= 0:
+        return None
+    return max(1, round(settings.fps * settings.duration_s))
+
+
 class StartResult:
     OK = "ok"
     BUSY = "busy"
@@ -996,6 +1016,7 @@ class RecordingController:
                     settings.record_form,
                     use_software_trigger=use_software_trigger,
                     writer_queue_size=settings.writer_queue_size,
+                    max_frames=capture_frame_count(settings),
                 )
             except Exception as e:
                 # A non-BackendError escaping the trigger-config or start_record

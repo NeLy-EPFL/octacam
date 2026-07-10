@@ -58,6 +58,26 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert all(c["frames"] > 0 for c in snapshot["cameras"])
 
 
+def test_all_cameras_capture_the_same_frame_count(fake_system, tmp_path):
+    # A software-clocked recording caps each grab loop at round(fps*duration), so
+    # the independent per-camera grab loops can't end a frame apart (the teardown
+    # race that produced e.g. 801 vs 800 on the real rig).
+    save_dir = tmp_path / "rec" / "001-trial"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(save_dir), trigger_source="software"
+    )
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    counts = [c["frames"] for c in summary["cameras"]]
+    assert len(counts) == 2
+    # Every camera captured the same number, and none exceeded the intended cap.
+    assert len(set(counts)) == 1, counts
+    assert counts[0] == 50, counts  # round(50 fps * 1.0 s)
+
+
 def test_writer_queue_size_reaches_each_writer(fake_system, tmp_path):
     # The config knob must flow settings -> CameraSystem -> Camera -> writer so a
     # deeper queue actually absorbs transient encoder stalls at record time.

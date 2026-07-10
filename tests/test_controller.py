@@ -12,6 +12,7 @@ from octacam.controller import (
     RecordingController,
     RecordingSettings,
     StartResult,
+    capture_frame_count,
     increment_trailing_number,
     normalize_save_dir,
     sanitize_camera_name,
@@ -140,6 +141,36 @@ def test_normalize_save_dir():
     home = os.path.expanduser("~")
     assert normalize_save_dir(" ~/data ") == f"{home}/data"
     assert normalize_save_dir("/a/b").startswith("/a/b")
+
+
+def test_capture_frame_count():
+    # octacam-clocked triggers cap at the intended pulse count round(fps*dur)...
+    assert capture_frame_count(
+        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="software")
+    ) == 800
+    assert capture_frame_count(
+        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="managed")
+    ) == 800
+    assert capture_frame_count(
+        RecordingSettings(fps=30.0, duration_s=2.5, trigger_source="software")
+    ) == 75
+    # ...an external trigger's pulse count is unknown, so it stays uncapped.
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="external")
+        )
+        is None
+    )
+    # Defensive: never cap a recording to zero frames.
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=0.0, duration_s=10.0, trigger_source="software")
+        )
+        is None
+    )
+    assert capture_frame_count(
+        RecordingSettings(fps=1.0, duration_s=0.1, trigger_source="software")
+    ) == 1
 
 
 def test_update_settings_validation():
