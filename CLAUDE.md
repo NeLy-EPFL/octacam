@@ -50,6 +50,28 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   pypylon + genicam are both loaded in one process (a multi-lib native-teardown
   interaction, not octacam code — the tests themselves pass). Don't chase it.
 
+## Versioning & releases
+
+octacam follows **SemVer** and is released **from git tags** — there is no PyPI
+package; every install pulls `git+https://github.com/NeLy-EPFL/octacam.git`. The
+version has **one source of truth**, `pyproject.toml [project].version`;
+`octacam.__version__` reads it back from the installed metadata
+(`importlib.metadata.version`), so never hard-code a second copy. Between
+releases the dev branch carries a `.devN` suffix (e.g. `0.3.1.dev0`).
+
+To cut release `X.Y.Z`:
+
+1. Roll `CHANGELOG.md`'s `[Unreleased]` items under a new `## [X.Y.Z] - <date>` heading.
+2. Set `pyproject.toml` version to `X.Y.Z` (drop `.devN`); commit `release: vX.Y.Z`.
+3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"` (publish with `git push --tags`).
+4. Bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
+
+The version string alone can't tell a rolling-`main` install whether it is
+behind, so an "is an update available?" check compares the installed commit
+against `git ls-remote origin main` (tags are the coarse release signal; commits
+are the fine one). Branch model: `main` is stable (docs published as `stable`);
+`dev-*` are the development line (docs `dev`), published by mike on `gh-pages`.
+
 ## Repo layout
 
 ```

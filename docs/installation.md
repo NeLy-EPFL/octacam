@@ -43,14 +43,46 @@ pip install .          # into an existing environment
 
 ## Update
 
+octacam is released from git (there is no PyPI package), so **how you update
+depends on how you installed it**. Check what you are running first:
+
 ```bash
-uv tool upgrade octacam
+octacam --version
 ```
 
-Or reinstall from the latest `main`:
+**uv tool install** (the recommended install — tracks the latest `main`):
 
 ```bash
-uv tool install --force git+https://github.com/NeLy-EPFL/octacam.git
+uv tool upgrade --reinstall octacam
+```
+
+`--reinstall` forces uv to re-fetch the git source and rebuild; plain
+`uv tool upgrade octacam` may reuse a cached checkout of the branch.
+
+**pip install:**
+
+```bash
+pip install --upgrade --force-reinstall git+https://github.com/NeLy-EPFL/octacam.git
+```
+
+`--force-reinstall` is required: pip deduplicates by version, and a rolling
+`main` install keeps the same version between releases.
+
+**Development checkout** (`git clone` + `uv sync`):
+
+```bash
+git pull && uv sync
+```
+
+### Pin to a release
+
+Releases are tagged `vX.Y.Z` (see the
+[releases page](https://github.com/NeLy-EPFL/octacam/releases) and the
+`CHANGELOG.md` in the repository root). To install or hold a rig at a specific
+release instead of the moving `main`:
+
+```bash
+uv tool install --force git+https://github.com/NeLy-EPFL/octacam.git@v0.3.0
 ```
 
 ## Cameras: what you need per tier
