@@ -86,7 +86,6 @@ lights = [
 Omitting `cameras`/`lights` defaults to the classic rig: one `D13` line plus
 channels 1 and 2 strobing. The firmware and wiring notes are in
 [arduino/triggerbox/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox).
-(The plugin was previously named `omniview`; that name still works as an alias.)
 
 If the board fails to arm — the ESP32-S3 USB link can occasionally *wedge*
 (every transfer stalls while the port stays enumerated), which would otherwise

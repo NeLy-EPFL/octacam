@@ -293,7 +293,7 @@ class CameraSystem:
         self,
         save_dir: str | Path,
         fps: float,
-        video_format: VideoFormat,
+        video_format: VideoFormat | list[VideoFormat],
         record_form: str = "display",
         use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
@@ -309,15 +309,33 @@ class CameraSystem:
         ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
         ``max_frames`` caps every camera at the same frame count so a teardown
         race can't leave cameras one frame apart (None = uncapped).
+
+        ``video_format`` may be a single format used for every camera, or a list
+        with one format per camera (positionally, matching ``self.cameras``) so a
+        GPU recording can encode some cameras on NVENC and the overflow on CPU
+        (see :func:`octacam.writer.resolve_capture_formats`).
         """
         self.stop()
 
+        if isinstance(video_format, list):
+            if len(video_format) != len(self.cameras):
+                raise ValueError(
+                    f"start_record got {len(video_format)} formats for "
+                    f"{len(self.cameras)} cameras"
+                )
+            format_for = {
+                id(c): fmt for c, fmt in zip(self.cameras, video_format, strict=True)
+            }
+        else:
+            format_for = {id(c): video_format for c in self.cameras}
+
         def record_one(camera: Camera) -> bool:
-            save_path = Path(save_dir) / f"{camera.name}.{video_format.extension}"
+            fmt = format_for[id(camera)]
+            save_path = Path(save_dir) / f"{camera.name}.{fmt.extension}"
             return camera.start_record(
                 str(save_path),
                 fps,
-                video_format,
+                fmt,
                 record_form,
                 software_trigger=use_software_trigger,
                 queue_size=writer_queue_size,

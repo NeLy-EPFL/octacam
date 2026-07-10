@@ -43,6 +43,8 @@
 
     <section id="tab-record" class="tab active">
       <fieldset id="record-fields" disabled>
+        <!-- Essentials: always visible. Everything else lives under the
+             Advanced-options switch below (see record.js). -->
         <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
@@ -74,69 +76,106 @@
           <textarea id="relative-dir" rows="2" spellcheck="false"
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
         </div>
-        <label class="row"
-          title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
-          <select id="trigger-source">
-            <option value="software">software</option>
-            <option value="managed" disabled>managed</option>
-            <option value="external">external</option>
-          </select>
+        <div class="col">
+          <label class="col-label" for="transfer-dir"
+            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
+          <textarea id="transfer-dir" rows="2" spellcheck="false"
+            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
+        </div>
+
+        <!-- Binary on/off switch that reveals the less-common recording,
+             encoding, and post-processing knobs (wired in record.js). -->
+        <label class="adv-toggle" title="Show the less-common recording, encoding, and post-processing options">
+          <span>Advanced options</span>
+          <span class="switch">
+            <input id="record-advanced-toggle" type="checkbox"
+              title="Show the less-common recording, encoding, and post-processing options">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </span>
         </label>
-        <label class="row"
-          title="How live preview is triggered when not recording. auto: mirror the recording trigger source (software→synchronized, managed→drive the plugin/strobe as recording, external→free-run at the target fps). software: always software-synchronized. free_running: cameras free-run capped at the target fps."><span>Preview trigger:</span>
-          <select id="preview-trigger-source">
-            <option value="auto">auto (match recording)</option>
-            <option value="software">software</option>
-            <option value="free_running">free running</option>
-          </select>
-        </label>
-        <details id="record-advanced" class="advanced">
-          <summary title="Less-common recording options">Advanced</summary>
-          <label class="row"
-            title="How the saved video files are written. ffmpeg: encode now. raw: store Mono8 to transcode later."><span>Save method:</span>
-            <select id="format"></select>
-          </label>
-          <div class="col">
-            <label class="col-label" for="ffmpeg-params"
-              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg">ffmpeg parameters:</label>
-            <textarea id="ffmpeg-params" rows="2" spellcheck="false"
-              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg"></textarea>
+
+        <div id="record-advanced" hidden>
+          <div class="adv-group">
+            <div class="adv-group-head">Triggering</div>
+            <label class="row"
+              title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
+              <select id="trigger-source">
+                <option value="software">software</option>
+                <option value="managed" disabled>managed</option>
+                <option value="external">external</option>
+              </select>
+            </label>
+            <label class="row"
+              title="How live preview is triggered when not recording. auto: mirror the recording trigger source (software→synchronized, managed→drive the plugin/strobe as recording, external→free-run at the target fps). software: always software-synchronized. free_running: cameras free-run capped at the target fps."><span>Preview trigger:</span>
+              <select id="preview-trigger-source">
+                <option value="auto">auto (match recording)</option>
+                <option value="software">software</option>
+                <option value="free_running">free running</option>
+              </select>
+            </label>
           </div>
-          <label class="row"
-            title="displayed: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Save frames as:</span>
-            <select id="record-form">
-              <option value="display">displayed</option>
-              <option value="sensor">sensor</option>
-            </select>
-          </label>
-          <label class="row"
-            title="Also write timestamps.npz: the capture timestamp of every frame for all cameras, in one compressed file"><span>Save timestamps:</span>
-            <input id="save-frame-timestamps" type="checkbox">
-          </label>
-          <label class="row"
-            title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
-            <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
-          </label>
-        </details>
-        <details id="record-process" class="advanced" open>
-          <summary title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Process</summary>
-          <div class="col">
-            <label class="col-label" for="transcode-ffmpeg-params"
-              title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
-            <textarea id="transcode-ffmpeg-params" rows="2" spellcheck="false"
-              title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings"></textarea>
+
+          <div class="adv-group">
+            <div class="adv-group-head">Encoding &amp; output</div>
+            <label class="row"
+              title="How the saved video files are written. ffmpeg: encode now on the CPU (libx264). nvenc: encode now on an NVIDIA GPU (H.264 NVENC). raw: store Mono8 to transcode later."><span>Save method:</span>
+              <select id="format"></select>
+            </label>
+            <div class="col" id="ffmpeg-params-row">
+              <label class="col-label" for="ffmpeg-params"
+                title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg).">ffmpeg parameters (CPU):</label>
+              <textarea id="ffmpeg-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg)."></textarea>
+            </div>
+            <div class="col" id="nvenc-params-row" hidden>
+              <label class="col-label" for="nvenc-params"
+                title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc.">NVENC parameters (GPU):</label>
+              <textarea id="nvenc-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc."></textarea>
+            </div>
+            <div class="col" id="nvenc-sessions-row" hidden>
+              <label class="row"
+                title="Auto-detect how many concurrent NVENC sessions this GPU/driver allows and use that. Uncheck to cap it manually (e.g. to reserve GPU headroom)."><span>Auto-detect GPU sessions:</span>
+                <input id="nvenc-auto" type="checkbox">
+              </label>
+              <label class="row"
+                title="Max cameras that encode on the GPU at once; any beyond this fall back to CPU (libx264). Editable only when auto-detect is off."><span>Max NVENC sessions:</span>
+                <input id="max-nvenc-sessions" type="number" min="0" max="64" step="1">
+              </label>
+              <span id="nvenc-detected" class="hint"></span>
+            </div>
+            <label class="row"
+              title="displayed: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Save frames as:</span>
+              <select id="record-form">
+                <option value="display">displayed</option>
+                <option value="sensor">sensor</option>
+              </select>
+            </label>
+            <label class="row"
+              title="Also write timestamps.npz: the capture timestamp of every frame for all cameras, in one compressed file"><span>Save timestamps:</span>
+              <input id="save-frame-timestamps" type="checkbox">
+            </label>
+            <label class="row"
+              title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
+              <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
+            </label>
           </div>
-          <div class="col">
-            <label class="col-label" for="transfer-dir"
-              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
-            <textarea id="transfer-dir" rows="2" spellcheck="false"
-              title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
+
+          <div class="adv-group">
+            <div class="adv-group-head"
+              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</div>
+            <div class="col">
+              <label class="col-label" for="transcode-ffmpeg-params"
+                title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
+              <textarea id="transcode-ffmpeg-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings"></textarea>
+            </div>
+            <label class="row"
+              title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
+              <input id="transfer-checksum" type="checkbox">
+            </label>
           </div>
-          <label class="row"
-            title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
-            <input id="transfer-checksum" type="checkbox">
-          </label>
-        </details>
+        </div>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
         title="Start or stop recording on all cameras at once">Start recording</button>
@@ -418,6 +457,8 @@
         <span id="peers" class="hidden" title="Browsers connected to this server"></span>
       </div>
       <div id="footer-actions">
+        <button id="shortcuts-help-btn" type="button"
+          title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts">&#9000;</button>
         <button id="theme-toggle" type="button" aria-pressed="false"
           title="Switch to light theme">&#9728;</button>
         <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save config…</button>

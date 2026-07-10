@@ -44,8 +44,8 @@ cameras must be in external hardware trigger (``trigger_source = "external"``).
 
 **Firmware provisioning.** The board's identify banner carries a short hash of the
 sketch source (``TRIGGERBOX 2 <build>``); octacam recomputes it from
-``arduino/triggerbox`` and, when the board is out of date (or blank, or running a
-predecessor), offers to compile + upload the current firmware with ``arduino-cli``
+``arduino/triggerbox`` and, when the board is out of date (or blank), offers to
+compile + upload the current firmware with ``arduino-cli``
 — from the GUI's *Flash firmware* button, the ``octacam flash`` command, or a
 prompt at ``octacam record`` start. Headless runs only warn unless ``--yes`` /
 ``auto_flash = true``. See :mod:`octacam.firmware`.
@@ -164,8 +164,6 @@ _REJECT_REASONS = {
 _EXPECTED_BANNER = "TRIGGERBOX"
 # arduino-cli fully-qualified board name for the Nano ESP32 (used to (re)flash).
 _FQBN = "arduino:esp32:nano_nora"
-# Known predecessor firmware names that are safe to auto-upgrade to triggerbox.
-_LEGACY_BANNERS = ("OMNIVIEW",)
 
 
 def _firmware_spec() -> fw.FirmwareSpec | None:
@@ -183,7 +181,6 @@ def _firmware_spec() -> fw.FirmwareSpec | None:
         banner_prefix=_EXPECTED_BANNER,
         protocol_version=_PROTOCOL_VERSION,
         build_define="TRIGGERBOX_FW_BUILD",
-        legacy_prefixes=_LEGACY_BANNERS,
     )
 
 
@@ -1006,8 +1003,6 @@ class TriggerboxPlugin(Plugin):
         """This plugin's arm slice from a {name: slice} params dict, or None."""
         params = params or {}
         spec = params.get("triggerbox")
-        if spec is None:
-            spec = params.get("omniview")  # legacy plugin name, one-release shim
         return spec if isinstance(spec, dict) else None
 
     def on_recording_start(self, params: dict | None) -> None:

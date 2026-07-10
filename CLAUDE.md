@@ -208,13 +208,17 @@ source via `normalize_trigger_source` — keep this parity when adding a backend
 `config_writer._toml_value` must serialize every scalar the loader can produce —
 including inline tables (triggerbox's nested `cameras`/`lights` arrays) and
 date/datetime scalars (a bare serial number or date-like save dir parses as one).
+A `None`-valued field is **omitted** (TOML has no null); the loader restores its
+default on read, so an "auto" field like `record.max_nvenc_sessions = None` must
+never be written as a literal — the `octacam config` scaffold `model_dump()`s the
+whole `RecordConfig`, so any None-defaulting field would otherwise crash the dump.
 
 ## Plugin system
 
 Serial-hardware plugins under `plugins/<name>/`, registered in
 `_BUILTINS = ("flywheel", "twophoton", "triggerbox")` with legacy
-`_ALIASES = {"arduino": "flywheel", "omniview": "triggerbox"}` (old configs keep
-working). The default launch loads none; enable via `[[plugins]]` or `--plugin`.
+`_ALIASES = {"arduino": "flywheel"}` (old configs keep working). The default
+launch loads none; enable via `[[plugins]]` or `--plugin`.
 
 Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
 `on_first_frame`, `default_start_params` (so **headless `octacam record` arms the
@@ -252,6 +256,19 @@ of a zoomed region (frame header v2). The **Camera tab** is a full GenApi
 node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writable
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.
+
+**Keyboard shortcuts** live in one place: `web/static/js/shortcuts.js`
+(`initShortcuts({grid})`, wired once in `app.js main()`). It installs a single
+document-level `keydown` listener driven by one binding table, from which the `?`
+help overlay and the button `title=` hints are also generated (so they can't
+drift). Invariants worth preserving: every binding routes through the same
+`suppressed()` guard (no bare key fires while a text/`select`/contenteditable is
+focused or a modal is open), no binding uses bare `Enter`/`Escape`/`Tab` (owned by
+field/modal handlers), and actions **click the real control / call the real grid
+method** so gating (`disabled`), state-aware labels, and confirms are reused, not
+duplicated. Recording start/stop is `Ctrl/Cmd+Enter` on purpose (a stray key must
+never abort a live trial). Add a `tests/test_frontend.py` case for any new
+binding.
 
 To **see** GUI changes without the rig: render the real frontend in the cached
 Playwright Chromium and read the screenshot (serve `web/static` over

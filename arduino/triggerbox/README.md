@@ -125,8 +125,8 @@ is the master gate — a pulse-train longer than the run is truncated at the end
 ## Flashing the firmware
 
 **Let octacam do it (recommended).** octacam knows the fingerprint of the sketch
-in this folder and, whenever the board is out of date (or blank, or running a
-predecessor like `omniview`), offers to compile + upload it for you — from the
+in this folder and, whenever the board is out of date (or blank), offers to
+compile + upload it for you — from the
 GUI's **Flash firmware** button, the CLI, or a prompt when `octacam record`
 starts:
 

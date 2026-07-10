@@ -707,6 +707,72 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
 
+/* Compact glyph button (⌨) that opens the keyboard-shortcut overlay. */
+#shortcuts-help-btn {
+  flex: none;
+  padding: 2px 7px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* ---------------------------------------------- keyboard shortcuts overlay */
+
+/* Reuses .modal / .modal-card, but wider and scrollable for the binding list. */
+.shortcuts-card {
+  width: 460px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.shortcuts-head h3 { margin: 0; text-align: left; }
+.shortcuts-close { flex: none; padding: 2px 8px; }
+
+.shortcuts-group { margin-top: 12px; }
+
+.shortcuts-group-head {
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcuts-row {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.shortcuts-keys { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.shortcuts-sep { color: var(--text-dim); }
+.shortcuts-desc { color: var(--text); }
+
+/* Keycap styling, shared by anything rendering a <kbd>. */
+kbd {
+  display: inline-block;
+  min-width: 12px;
+  padding: 1px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text);
+}
+
 /* ------------------------------------------------ camera params tab */
 
 .name-edit { display: flex; gap: 6px; }
@@ -814,12 +880,82 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   color: var(--text-dim);
 }
 
-.advanced { margin-top: 6px; }
-.advanced summary {
-  cursor: pointer;
-  margin-bottom: 8px;
+/* Record tab — the Advanced-options switch and the grouped panels it reveals.
+   Replaces the old collapsible <details> "Advanced"/"Process" sections with a
+   single binary toggle (wired in record.js). */
+.adv-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 0 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
   color: var(--text-dim);
+  cursor: pointer;
   user-select: none;
+}
+
+#record-advanced { margin-top: 4px; }
+
+/* Logical groups within the advanced area; a hairline rule separates each. */
+.adv-group { margin: 10px 0; }
+.adv-group + .adv-group {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.adv-group-head {
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+/* Compact on/off switch (the Advanced-options toggle). The real checkbox is
+   invisible but covers the track so clicks/keyboard toggles work natively. */
+.switch {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch-track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 #camera-status {

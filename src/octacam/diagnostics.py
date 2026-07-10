@@ -64,7 +64,7 @@ import numpy as np
 
 from octacam.transform import apply_display_transform
 from octacam.trigger import PreciseTimer
-from octacam.writer import AsyncFrameWriter, VideoFormat
+from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_formats
 
 if TYPE_CHECKING:
     from octacam.cameras.base import Camera
@@ -839,6 +839,7 @@ def measure_encode_ceiling(
     duration_s: float,
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
+    formats_by_serial: dict[str, VideoFormat] | None = None,
 ) -> dict[str, float]:
     """Max encode fps per camera, one real writer per camera running concurrently.
 
@@ -848,6 +849,11 @@ def measure_encode_ceiling(
     counts only frames the sink actually encoded, so ``frames_written / window`` is
     the true drain rate regardless of how hard the producer pushes. Returns
     ``{serial: fps}``. Output files go to a temp dir that is removed afterwards.
+
+    ``formats_by_serial`` overrides ``video_format`` per camera (the GPU NVENC
+    session-cap split — see :func:`octacam.writer.resolve_capture_formats`), so
+    the benchmark measures exactly what the record path would run instead of
+    handing every camera an NVENC session and failing the ones past the cap.
     """
     results: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
@@ -858,8 +864,9 @@ def measure_encode_ceiling(
             # One constant frame, reused across writes: the writer never mutates
             # it, and the content is irrelevant to encoder throughput.
             frame = np.zeros((height, width), dtype=np.uint8)
-            writer = video_format.create_writer(WRITER_QUEUE_SIZE, profile=True)
-            path = tmpdir / f"{serial}.{video_format.extension}"
+            fmt = (formats_by_serial or {}).get(serial, video_format)
+            writer = fmt.create_writer(WRITER_QUEUE_SIZE, profile=True)
+            path = tmpdir / f"{serial}.{fmt.extension}"
             if not writer.open(str(path), fps, size):
                 results[serial] = 0.0
                 return
@@ -968,6 +975,7 @@ def run_target_trial(
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
     free_run: bool = False,
+    formats_by_serial: dict[str, VideoFormat] | None = None,
 ) -> TrialOutcome:
     """Run the full instrumented pipeline at ``target_fps`` for ``duration_s``.
 
@@ -989,7 +997,16 @@ def run_target_trial(
     backends = [c.backend for c in cameras]
     sizes = [_frame_size(c, record_form) for c in cameras]
     accums = [_CamAccum() for _ in cameras]
-    writers = [_make_writer(video_format, profile=True) for _ in cameras]
+    # Per-camera format override honours the NVENC session cap (GPU on the first
+    # N, CPU fallback on the rest), matching the record path; falls back to the
+    # single video_format (incl. the None null sink) when not provided.
+    writers = [
+        _make_writer(
+            (formats_by_serial or {}).get(c.serial_number, video_format),
+            profile=True,
+        )
+        for c in cameras
+    ]
 
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
         tmpdir = Path(tmp)
@@ -1376,6 +1393,20 @@ def diagnose(
     external = settings.trigger_source == "external"
 
     video_format = None if sink == "null" else settings.video_format()
+    # Per-camera formats honouring the GPU NVENC session cap, so the benchmark
+    # measures the real record path (NVENC on the first max_nvenc_sessions
+    # cameras, libx264 CPU fallback on the rest) instead of over-subscribing the
+    # GPU and failing the overflow encoders. None for the null sink / non-NVENC.
+    formats_by_serial: dict[str, VideoFormat] | None = None
+    if video_format is not None:
+        per_cam, cap_warnings = resolve_capture_formats(
+            video_format, len(cameras), settings.max_nvenc_sessions
+        )
+        formats_by_serial = {
+            c.serial_number: fmt for c, fmt in zip(cameras, per_cam, strict=True)
+        }
+        for message in cap_warnings:
+            log.warning(message)
     sizes = {c.serial_number: _frame_size(c, record_form) for c in cameras}
 
     run_freerun = measure_freerun
@@ -1503,7 +1534,12 @@ def diagnose(
     if run_encode and not _cancelled(cancel):
         emit(PHASE_ENCODE, f"({duration_s:g}s)")
         encode_fps = measure_encode_ceiling(
-            video_format, sizes, target_fps, duration_s, cancel=cancel
+            video_format,
+            sizes,
+            target_fps,
+            duration_s,
+            cancel=cancel,
+            formats_by_serial=formats_by_serial,
         )
     ceilings = Ceilings(
         grab_fps=grab_fps,
@@ -1523,7 +1559,13 @@ def diagnose(
     # --- end-to-end at the target fps ---
     emit(PHASE_TRIAL, f"@ {target_fps:g} fps ({duration_s:g}s)")
     outcome = run_target_trial(
-        cameras, video_format, target_fps, duration_s, record_form, cancel=cancel
+        cameras,
+        video_format,
+        target_fps,
+        duration_s,
+        record_form,
+        cancel=cancel,
+        formats_by_serial=formats_by_serial,
     )
     report.trials = outcome.trials
     report.achieved_fps = outcome.achieved_fps
@@ -1580,6 +1622,7 @@ def diagnose(
             record_form,
             cancel=cancel,
             free_run=True,
+            formats_by_serial=formats_by_serial,
         )
         report.freerun_trials = fr.trials
         if fr.trials:
@@ -1607,7 +1650,13 @@ def diagnose(
                 return False
             emit(PHASE_MAX, f"probing {fps:.0f} fps", advance=True, eta=WARMUP_S + probe_dur)
             result = run_target_trial(
-                cameras, video_format, fps, probe_dur, record_form, cancel=cancel
+                cameras,
+                video_format,
+                fps,
+                probe_dur,
+                record_form,
+                cancel=cancel,
+                formats_by_serial=formats_by_serial,
             )
             return result.stable_passed
 
@@ -1620,7 +1669,13 @@ def diagnose(
         else:
             emit(PHASE_MAX, f"confirming {candidate:.0f} fps", advance=True, eta=window)
             confirm = run_target_trial(
-                cameras, video_format, candidate, duration_s, record_form, cancel=cancel
+                cameras,
+                video_format,
+                candidate,
+                duration_s,
+                record_form,
+                cancel=cancel,
+                formats_by_serial=formats_by_serial,
             )
             report.measured_max_fps, report.max_confirmed = _reconcile_stable_max(
                 candidate, confirm, lo, ceiling_cap
