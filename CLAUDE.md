@@ -208,6 +208,10 @@ source via `normalize_trigger_source` — keep this parity when adding a backend
 `config_writer._toml_value` must serialize every scalar the loader can produce —
 including inline tables (triggerbox's nested `cameras`/`lights` arrays) and
 date/datetime scalars (a bare serial number or date-like save dir parses as one).
+A `None`-valued field is **omitted** (TOML has no null); the loader restores its
+default on read, so an "auto" field like `record.max_nvenc_sessions = None` must
+never be written as a literal — the `octacam config` scaffold `model_dump()`s the
+whole `RecordConfig`, so any None-defaulting field would otherwise crash the dump.
 
 ## Plugin system
 

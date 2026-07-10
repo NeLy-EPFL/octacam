@@ -93,14 +93,31 @@
         <details id="record-advanced" class="advanced">
           <summary title="Less-common recording options">Advanced</summary>
           <label class="row"
-            title="How the saved video files are written. ffmpeg: encode now. raw: store Mono8 to transcode later."><span>Save method:</span>
+            title="How the saved video files are written. ffmpeg: encode now on the CPU (libx264). nvenc: encode now on an NVIDIA GPU (H.264 NVENC). raw: store Mono8 to transcode later."><span>Save method:</span>
             <select id="format"></select>
           </label>
-          <div class="col">
+          <div class="col" id="ffmpeg-params-row">
             <label class="col-label" for="ffmpeg-params"
-              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg">ffmpeg parameters:</label>
+              title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg).">ffmpeg parameters (CPU):</label>
             <textarea id="ffmpeg-params" rows="2" spellcheck="false"
-              title="Verbatim ffmpeg output/encoder arguments; used only when Save method is ffmpeg"></textarea>
+              title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg)."></textarea>
+          </div>
+          <div class="col" id="nvenc-params-row" hidden>
+            <label class="col-label" for="nvenc-params"
+              title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc.">NVENC parameters (GPU):</label>
+            <textarea id="nvenc-params" rows="2" spellcheck="false"
+              title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc."></textarea>
+          </div>
+          <div class="col" id="nvenc-sessions-row" hidden>
+            <label class="row"
+              title="Auto-detect how many concurrent NVENC sessions this GPU/driver allows and use that. Uncheck to cap it manually (e.g. to reserve GPU headroom)."><span>Auto-detect GPU sessions:</span>
+              <input id="nvenc-auto" type="checkbox">
+            </label>
+            <label class="row"
+              title="Max cameras that encode on the GPU at once; any beyond this fall back to CPU (libx264). Editable only when auto-detect is off."><span>Max NVENC sessions:</span>
+              <input id="max-nvenc-sessions" type="number" min="0" max="64" step="1">
+            </label>
+            <span id="nvenc-detected" class="hint"></span>
           </div>
           <label class="row"
             title="displayed: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Save frames as:</span>

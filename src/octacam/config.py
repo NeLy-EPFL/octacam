@@ -20,6 +20,7 @@ from octacam._compat import tomllib
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+    NVENC_H264_PARAMS,
 )
 
 log = logging.getLogger("octacam")
@@ -103,12 +104,18 @@ class RecordConfig(BaseModel):
     # libx264 for cameras beyond max_nvenc_sessions); "raw" = Mono8 dump for
     # offline transcoding.
     save_method: Literal["ffmpeg", "raw", "nvenc"] = "ffmpeg"
+    # CPU encoder args (save_method="ffmpeg").
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    # Max concurrent NVENC (GPU) encode sessions to use when save_method="nvenc".
-    # One consumer GeForce allows only a handful (8 on driver 570; a Quadro/patched
-    # driver allows more) — cameras beyond this encode on CPU instead of failing.
-    # `octacam doctor` reports the empirically-detected limit for this GPU.
-    max_nvenc_sessions: int = 8
+    # GPU encoder args (save_method="nvenc"). A separate field so the CPU and GPU
+    # presets persist independently; defaults to the curated NVENC H.264 preset.
+    nvenc_params: str = NVENC_H264_PARAMS
+    # Max concurrent NVENC (GPU) encode sessions to use when save_method="nvenc";
+    # cameras beyond this encode on CPU instead of failing. Omit (None) to
+    # auto-detect the GPU/driver cap (one consumer GeForce allows only a handful —
+    # 8 on driver 570; a Quadro/patched driver allows more); set an int to cap it
+    # lower (e.g. to reserve GPU headroom). `octacam doctor` reports the detected
+    # limit for this GPU.
+    max_nvenc_sessions: int | None = None
     # Frames buffered per camera between the grab loop and the encoder. The grab
     # loop never blocks, so a frame arriving while this queue is full is dropped;
     # a deeper queue absorbs a transient encoder stall (bursty ffmpeg/GPU) at the
@@ -124,21 +131,23 @@ class RecordConfig(BaseModel):
         "directory",
         "relative_directory",
         "ffmpeg_params",
+        "nvenc_params",
         mode="before",
     )
     @classmethod
     def _as_scalar_str(cls, value: object) -> str:
         return _scalar_str(value)
 
-    @field_validator("ffmpeg_params")
+    @field_validator("ffmpeg_params", "nvenc_params")
     @classmethod
     def _check_ffmpeg_params(cls, value: str) -> str:
         return _valid_ffmpeg_params(value)
 
     @field_validator("max_nvenc_sessions")
     @classmethod
-    def _floor_nvenc_sessions(cls, value: int) -> int:
-        return max(0, value)
+    def _floor_nvenc_sessions(cls, value: int | None) -> int | None:
+        # None = auto-detect the GPU session cap; an int is floored at 0.
+        return None if value is None else max(0, value)
 
     @field_validator("writer_queue_size")
     @classmethod

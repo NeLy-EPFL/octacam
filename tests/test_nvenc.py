@@ -152,6 +152,49 @@ def test_resolve_cap_zero_forces_cpu(monkeypatch):
     assert len(warns) == 1
 
 
+def test_resolve_auto_uses_detected_cap(monkeypatch):
+    # max_nvenc_sessions=None => auto => the detected GPU cap (3 here): 5 cameras
+    # split 3 GPU + 2 CPU.
+    monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
+    monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": 3)
+    formats, warns = resolve_capture_formats(FORMATS["nvenc"], 5, None)
+    assert sum(is_nvenc_params(f.ffmpeg_params) for f in formats) == 3
+    assert sum("libx264" in f.ffmpeg_params for f in formats) == 2
+    assert len(warns) == 1
+
+
+def test_resolve_auto_is_the_default_arg(monkeypatch):
+    # Omitting the cap is the same as passing None (auto).
+    monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
+    monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": 4)
+    formats, warns = resolve_capture_formats(FORMATS["nvenc"], 4)
+    assert all(is_nvenc_params(f.ffmpeg_params) for f in formats)
+    assert warns == []
+
+
+def test_resolve_auto_inconclusive_probe_does_not_force_cpu(monkeypatch):
+    # nvenc ffmpeg exists but the session probe is inconclusive (None): let every
+    # camera try the GPU rather than forcing all-CPU.
+    monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
+    monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
+    formats, warns = resolve_capture_formats(FORMATS["nvenc"], 3, None)
+    assert all(is_nvenc_params(f.ffmpeg_params) for f in formats)
+    assert warns == []
+
+
+def test_nvenc_max_sessions_is_cached(monkeypatch):
+    calls = []
+    monkeypatch.setattr(w, "_NVENC_MAX_SESSIONS", {})  # fresh per-process cache
+    monkeypatch.setattr(
+        w,
+        "probe_nvenc_max_sessions",
+        lambda encoder="h264_nvenc": (calls.append(encoder), 5)[1],
+    )
+    assert w.nvenc_max_sessions("h264_nvenc") == 5
+    assert w.nvenc_max_sessions("h264_nvenc") == 5  # served from cache
+    assert calls == ["h264_nvenc"]  # probed exactly once
+
+
 def test_cpu_fallback_mirrors_container():
     base = w.VideoFormat(
         "ffmpeg", "mp4", "x", ffmpeg_params=NVENC_H264_PARAMS, remux_mp4=True
@@ -172,8 +215,8 @@ def test_cpu_fallback_defaults_pix_fmt_when_base_has_none():
 # --- RecordingSettings.video_format -----------------------------------------
 
 
-def test_video_format_nvenc_uses_curated_params_by_default():
-    # ffmpeg_params left at the libx264 default => the GPU choice wins.
+def test_video_format_nvenc_uses_nvenc_params_default():
+    # nvenc_params defaults to the curated NVENC preset.
     fmt = RecordingSettings(save_method="nvenc").video_format()
     assert fmt.ffmpeg_params == NVENC_H264_PARAMS
     assert fmt.save_method == "ffmpeg"  # still an FfmpegVideoWriter under the hood
@@ -181,7 +224,7 @@ def test_video_format_nvenc_uses_curated_params_by_default():
 
 def test_video_format_nvenc_honours_custom_nvenc_params():
     custom = "-c:v hevc_nvenc -cq 20 -pix_fmt yuv420p"
-    fmt = RecordingSettings(save_method="nvenc", ffmpeg_params=custom).video_format()
+    fmt = RecordingSettings(save_method="nvenc", nvenc_params=custom).video_format()
     assert fmt.ffmpeg_params == custom
 
 
@@ -189,6 +232,25 @@ def test_video_format_ffmpeg_unchanged():
     custom = "-c:v libx264 -crf 20 -pix_fmt gray"
     fmt = RecordingSettings(save_method="ffmpeg", ffmpeg_params=custom).video_format()
     assert fmt.ffmpeg_params == custom
+
+
+def test_video_format_cpu_and_gpu_presets_are_independent():
+    # Each method draws from its own field, so both presets can coexist and
+    # switching the method never clobbers the other.
+    s = RecordingSettings(
+        ffmpeg_params="-c:v libx264 -crf 20 -pix_fmt gray",
+        nvenc_params="-c:v h264_nvenc -cq 22 -pix_fmt yuv420p",
+    )
+    from dataclasses import replace
+
+    assert replace(s, save_method="ffmpeg").video_format().ffmpeg_params == (
+        "-c:v libx264 -crf 20 -pix_fmt gray"
+    )
+    assert replace(s, save_method="nvenc").video_format().ffmpeg_params == (
+        "-c:v h264_nvenc -cq 22 -pix_fmt yuv420p"
+    )
+    # raw takes neither params field.
+    assert replace(s, save_method="raw").video_format().save_method == "raw"
 
 
 # --- config -----------------------------------------------------------------
@@ -201,6 +263,72 @@ def test_config_accepts_nvenc_and_sessions():
 
 def test_config_floors_negative_sessions():
     assert RecordConfig.model_validate({"max_nvenc_sessions": -5}).max_nvenc_sessions == 0
+
+
+def test_config_max_nvenc_sessions_defaults_to_auto():
+    # Omitted => None => auto-detect the GPU cap.
+    assert RecordConfig().max_nvenc_sessions is None
+    assert RecordConfig.model_validate({"max_nvenc_sessions": None}).max_nvenc_sessions is None
+
+
+def test_config_nvenc_params_default_and_custom():
+    assert RecordConfig().nvenc_params == NVENC_H264_PARAMS
+    custom = "-c:v hevc_nvenc -cq 21 -pix_fmt yuv420p"
+    assert RecordConfig.model_validate({"nvenc_params": custom}).nvenc_params == custom
+
+
+def test_config_nvenc_params_rejects_bad_quoting():
+    with pytest.raises(ValueError, match="ffmpeg_params"):
+        RecordConfig.model_validate({"nvenc_params": '-c:v h264_nvenc "unterminated'})
+
+
+# --- recording_summary max_nvenc_sessions resolution (CI-safe, no GPU) -------
+
+
+def test_summary_resolves_auto_sessions_to_detected(monkeypatch):
+    from octacam.controller import build_recording_summary
+
+    monkeypatch.setattr("octacam.controller.nvenc_max_sessions", lambda encoder="h264_nvenc": 7)
+    s = RecordingSettings(save_method="nvenc", max_nvenc_sessions=None)
+    summary = build_recording_summary(s, [], 0, aborted=False)
+    assert summary["max_nvenc_sessions"] == 7  # None (auto) -> detected
+
+
+def test_summary_auto_uses_the_configured_encoder(monkeypatch):
+    # The detector is keyed by the encoder nvenc_params names, not the h264
+    # default, so a custom hevc_nvenc config resolves (and cache-hits) correctly.
+    from octacam.controller import build_recording_summary
+
+    seen = []
+    monkeypatch.setattr(
+        "octacam.controller.nvenc_max_sessions",
+        lambda encoder="h264_nvenc": (seen.append(encoder), 4)[1],
+    )
+    s = RecordingSettings(
+        save_method="nvenc", nvenc_params="-c:v hevc_nvenc -cq 20", max_nvenc_sessions=None
+    )
+    summary = build_recording_summary(s, [], 0, aborted=False)
+    assert seen == ["hevc_nvenc"]
+    assert summary["max_nvenc_sessions"] == 4
+
+
+def test_summary_uses_explicit_session_cap(monkeypatch):
+    # An explicit int is recorded verbatim; the detector is never consulted.
+    from octacam.controller import build_recording_summary
+
+    def _boom(encoder="h264_nvenc"):
+        raise AssertionError("must not probe when the cap is explicit")
+
+    monkeypatch.setattr("octacam.controller.nvenc_max_sessions", _boom)
+    s = RecordingSettings(save_method="nvenc", max_nvenc_sessions=3)
+    assert build_recording_summary(s, [], 0, aborted=False)["max_nvenc_sessions"] == 3
+
+
+def test_summary_omits_sessions_for_non_nvenc():
+    from octacam.controller import build_recording_summary
+
+    s = RecordingSettings(save_method="ffmpeg")
+    assert "max_nvenc_sessions" not in build_recording_summary(s, [], 0, aborted=False)
 
 
 # --- CameraSystem.start_record per-camera format list -----------------------
@@ -254,6 +382,42 @@ def _fake_nvenc_system(tmp_path):
     return system
 
 
+def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(tmp_path, monkeypatch):
+    # No GPU (all of CI): save_method="nvenc" must still record — every camera on
+    # libx264 — and warn. Exercises the controller's nvenc path (resolve fallback
+    # + summary None-branch) with no real GPU, by mocking NVENC as unavailable
+    # while keeping a real ffmpeg for the CPU encode.
+    real_find = w.find_ffmpeg
+
+    def _no_nvenc(require_encoder=None):
+        if require_encoder:  # any *_nvenc probe fails
+            raise RuntimeError("no nvenc in this test")
+        return real_find(None)  # real ffmpeg for the libx264 path
+
+    monkeypatch.setattr(w, "_NVENC_MAX_SESSIONS", {})  # ignore any cached real probe
+    monkeypatch.setattr(w, "find_ffmpeg", _no_nvenc)
+    system = _fake_nvenc_system(tmp_path)
+    save_dir = tmp_path / "rec"
+    settings = RecordingSettings(
+        fps=30.0, duration_s=1.0, save_dir=str(save_dir), save_method="nvenc"
+    )
+    controller = RecordingController(system, settings, auto_preview=False)
+    try:
+        assert controller.start_recording().ok
+        controller.join(timeout=30)
+        assert any(
+            e["level"] == "warning" and "unavailable" in e["message"]
+            for e in controller.events
+        )
+        summary = json.loads((save_dir / "recording_summary.json").read_text())
+        assert summary["save_method"] == "nvenc"
+        assert summary["max_nvenc_sessions"] is None  # probe raised -> None
+        assert all(c["frames"] > 0 for c in summary["cameras"])  # recorded on CPU
+        assert len(sorted(save_dir.glob("*.mkv"))) == 2
+    finally:
+        system.close()
+
+
 @requires_nvenc
 def test_fake_recording_with_nvenc(tmp_path):
     system = _fake_nvenc_system(tmp_path)
@@ -267,10 +431,11 @@ def test_fake_recording_with_nvenc(tmp_path):
         controller.join(timeout=30)
         summary = json.loads((save_dir / "recording_summary.json").read_text())
         assert summary["save_method"] == "nvenc"
-        # The summary records the encoder actually used (resolved NVENC params),
-        # not the raw libx264 default that was left in ffmpeg_params.
+        # The summary records the encoder actually used (the nvenc_params preset).
         assert "h264_nvenc" in summary["ffmpeg_params"]
-        assert summary["max_nvenc_sessions"] == 8
+        # max_nvenc_sessions defaulted to auto (None); the summary resolves it to
+        # the detected cap actually used.
+        assert summary["max_nvenc_sessions"] == w.nvenc_max_sessions()
         assert all(c["frames"] > 0 for c in summary["cameras"])
         videos = sorted(save_dir.glob("*.mkv"))
         assert len(videos) == 2 and all(v.stat().st_size > 0 for v in videos)

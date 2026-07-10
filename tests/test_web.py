@@ -165,13 +165,22 @@ def test_system_and_settings_endpoints(client):
     assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
     assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
-    # The GPU save method + its session-limit knob round-trip; a negative limit 422s.
+    # The GPU save method + its params/session-limit knobs round-trip; a negative
+    # limit 422s. max_nvenc_sessions=null selects auto-detect.
     gpu = client.put(
-        "/api/settings", json={"save_method": "nvenc", "max_nvenc_sessions": 4}
+        "/api/settings",
+        json={
+            "save_method": "nvenc",
+            "nvenc_params": "-c:v h264_nvenc -cq 20 -pix_fmt yuv420p",
+            "max_nvenc_sessions": 4,
+        },
     )
     assert gpu.status_code == 200
     assert gpu.json()["save_method"] == "nvenc"
+    assert gpu.json()["nvenc_params"] == "-c:v h264_nvenc -cq 20 -pix_fmt yuv420p"
     assert gpu.json()["max_nvenc_sessions"] == 4
+    auto = client.put("/api/settings", json={"max_nvenc_sessions": None})
+    assert auto.status_code == 200 and auto.json()["max_nvenc_sessions"] is None
     assert (
         client.put("/api/settings", json={"max_nvenc_sessions": -1}).status_code == 422
     )
@@ -208,6 +217,27 @@ def test_system_and_settings_endpoints(client):
         1,
     )
     assert client.post("/api/serial/command", json=command).status_code in (404, 405)
+
+
+def test_nvenc_capabilities_endpoint(client, monkeypatch):
+    # The GUI fetches this lazily to show/default the GPU session cap. Mock the
+    # detector so the test never loads the GPU.
+    import octacam.web.app as appmod
+
+    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": 6)
+    data = client.get("/api/nvenc/capabilities").json()
+    assert data["available"] is True
+    assert data["max_sessions"] == 6
+    assert data["encoder"] == "h264_nvenc"
+    assert data["default_params"] == appmod.NVENC_H264_PARAMS
+
+
+def test_nvenc_capabilities_unavailable(client, monkeypatch):
+    import octacam.web.app as appmod
+
+    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
+    data = client.get("/api/nvenc/capabilities").json()
+    assert data["available"] is False and data["max_sessions"] is None
 
 
 def test_directory_split_recomposes_save_dir(client, tmp_path):

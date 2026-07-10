@@ -51,7 +51,7 @@ from octacam.controller import (
     sanitize_camera_name,
 )
 from octacam.plugins.base import PluginManager
-from octacam.writer import FORMATS
+from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
 
 log = logging.getLogger("octacam")
 
@@ -231,6 +231,7 @@ class SettingsPatch(BaseModel):
     preview_trigger_source: str | None = None
     save_method: str | None = None
     ffmpeg_params: str | None = None
+    nvenc_params: str | None = None
     max_nvenc_sessions: int | None = None
     writer_queue_size: int | None = None
     record_form: str | None = None
@@ -913,6 +914,23 @@ def create_app(
         settings = dataclasses.asdict(updated)
         state.broadcast_threadsafe("settings", settings)
         return settings
+
+    @app.get("/api/nvenc/capabilities")
+    def get_nvenc_capabilities():
+        """GPU NVENC encode capability, for the Record tab's nvenc controls.
+
+        Reports the empirically-detected concurrent-session cap (what
+        `max_nvenc_sessions=auto` resolves to) so the GUI can show it and default
+        its override to it. The first call runs the probe (cached for the process;
+        it briefly loads the GPU), so the client fetches it lazily — only when the
+        operator selects the nvenc save method."""
+        detected = nvenc_max_sessions()
+        return {
+            "available": detected is not None and detected > 0,
+            "max_sessions": detected,
+            "encoder": "h264_nvenc",
+            "default_params": NVENC_H264_PARAMS,
+        }
 
     @app.get("/api/cameras/{index}/params")
     def get_camera_params(index: int):

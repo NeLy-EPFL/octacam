@@ -220,6 +220,10 @@ def _ffmpeg_candidates() -> list[str]:
 # this encoder on THIS machine right now". Cleared only by process restart.
 _ENCODER_OK: dict[tuple[str, str], bool] = {}
 _FFMPEG_FOR_ENCODER: dict[str, str] = {}
+# Detected NVENC session cap per encoder, memoized for the process. The probe
+# loads the GPU briefly, so we run it at most once and reuse the count; keyed by
+# encoder so h264 and hevc could differ. A missing key means "not yet probed".
+_NVENC_MAX_SESSIONS: dict[str, int | None] = {}
 
 
 def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
@@ -297,6 +301,20 @@ def probe_nvenc_max_sessions(
             proc.kill()
             proc.wait()
     return ok
+
+
+def nvenc_max_sessions(encoder: str = "h264_nvenc") -> int | None:
+    """Detected NVENC session cap for *encoder*, memoized for the process.
+
+    Wraps :func:`probe_nvenc_max_sessions` with a one-shot cache so the GPU probe
+    runs at most once per process. Returns the count, or None when no
+    NVENC-capable ffmpeg exists. Call it *before* opening record sessions (the
+    probe under-counts while sessions are held) — :meth:`resolve_capture_formats`
+    does exactly that via the controller's off-lock warm-up.
+    """
+    if encoder not in _NVENC_MAX_SESSIONS:
+        _NVENC_MAX_SESSIONS[encoder] = probe_nvenc_max_sessions(encoder)
+    return _NVENC_MAX_SESSIONS[encoder]
 
 
 def find_ffmpeg(require_encoder: str | None = None) -> str:
@@ -856,7 +874,7 @@ def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
 
 
 def resolve_capture_formats(
-    base: VideoFormat, num_cameras: int, max_nvenc_sessions: int
+    base: VideoFormat, num_cameras: int, max_nvenc_sessions: int | None = None
 ) -> tuple[list[VideoFormat], list[str]]:
     """Per-camera capture formats, honouring the GPU's NVENC session limit.
 
@@ -865,14 +883,17 @@ def resolve_capture_formats(
 
     - if no ffmpeg can actually run NVENC on this machine, *all* cameras fall
       back to libx264 (so a misconfigured GPU never kills the whole recording);
-    - otherwise the first ``max_nvenc_sessions`` cameras use NVENC and any beyond
-      that fall back to libx264 — one consumer GeForce allows only a handful of
-      concurrent NVENC sessions, and the (N+1)-th would otherwise fail its
-      encoder init and silently record nothing.
+    - otherwise the first ``cap`` cameras use NVENC and any beyond that fall back
+      to libx264 — one consumer GeForce allows only a handful of concurrent NVENC
+      sessions, and the (N+1)-th would otherwise fail its encoder init and
+      silently record nothing.
 
-    Returns ``(formats, warnings)``; the caller surfaces each warning to the
-    operator (GUI event / CLI log). The NVENC-capability probe result is cached,
-    so calling this per recording is cheap after the first."""
+    ``max_nvenc_sessions`` is the cap: ``None`` (the default) auto-detects the
+    GPU/driver limit via :func:`nvenc_max_sessions`; an int caps it explicitly
+    (e.g. to reserve GPU headroom). Returns ``(formats, warnings)``; the caller
+    surfaces each warning to the operator (GUI event / CLI log). Both the NVENC
+    capability probe and the session-count probe are cached, so calling this per
+    recording is cheap after the first."""
     if num_cameras <= 0:
         return [], []
     if not is_nvenc_params(base.ffmpeg_params):
@@ -887,7 +908,14 @@ def resolve_capture_formats(
             f"Recording all {num_cameras} camera(s) on CPU (libx264) instead."
         )
         return [cpu_fallback_format(base)] * num_cameras, warnings
-    cap = max(0, max_nvenc_sessions)
+    if max_nvenc_sessions is None:
+        # Auto: use the empirically detected GPU cap. The probe found NVENC-capable
+        # ffmpeg above, so a None here would be surprising — treat it as "don't
+        # cap" (let every camera try) rather than forcing all-CPU.
+        detected = nvenc_max_sessions(encoder)
+        cap = num_cameras if detected is None else detected
+    else:
+        cap = max(0, max_nvenc_sessions)
     n_gpu = min(cap, num_cameras)
     formats = [base] * n_gpu + [cpu_fallback_format(base)] * (num_cameras - n_gpu)
     if n_gpu < num_cameras:

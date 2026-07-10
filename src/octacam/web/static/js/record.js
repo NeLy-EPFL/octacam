@@ -45,6 +45,20 @@ export class RecordTab {
     this.previewTrigger = document.getElementById("preview-trigger-source");
     this.format = document.getElementById("format");
     this.ffmpegParams = document.getElementById("ffmpeg-params");
+    // Encoder-params boxes swap by save method (ffmpeg=CPU / nvenc=GPU), each
+    // bound to its own field; the nvenc block also carries the GPU session cap.
+    this.ffmpegParamsRow = document.getElementById("ffmpeg-params-row");
+    this.nvencParams = document.getElementById("nvenc-params");
+    this.nvencParamsRow = document.getElementById("nvenc-params-row");
+    this.nvencSessionsRow = document.getElementById("nvenc-sessions-row");
+    this.nvencAuto = document.getElementById("nvenc-auto");
+    this.maxNvencSessions = document.getElementById("max-nvenc-sessions");
+    this.nvencDetected = document.getElementById("nvenc-detected");
+    // One-shot cache: the detected GPU session cap, fetched lazily the first time
+    // nvenc is selected (the server probe briefly loads the GPU). _pending guards
+    // against a second fetch while one is in flight.
+    this._nvencCaps = null;
+    this._nvencCapsPending = false;
     this.recordForm = document.getElementById("record-form");
     this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
     this.writerQueueSize = document.getElementById("writer-queue-size");
@@ -99,11 +113,41 @@ export class RecordTab {
     );
     this.format.addEventListener("change", () => {
       this._put({ save_method: this.format.value }, [this.format]);
-      this._syncFfmpegEnabled();
+      this._syncSaveMethodFields();
     });
     this.ffmpegParams.addEventListener("change", () =>
       this._put({ ffmpeg_params: this.ffmpegParams.value }, [this.ffmpegParams])
     );
+    this.nvencParams.addEventListener("change", () =>
+      this._put({ nvenc_params: this.nvencParams.value }, [this.nvencParams])
+    );
+    // Auto-detect on: send null so the server probes the GPU cap and disable the
+    // manual box. Off: commit the shown number as an explicit cap.
+    this.nvencAuto.addEventListener("change", () => {
+      const auto = this.nvencAuto.checked;
+      this.maxNvencSessions.disabled = auto;
+      if (auto) {
+        this._put({ max_nvenc_sessions: null }, [this.nvencAuto]);
+        return;
+      }
+      // Turning auto OFF: seed the cap from the box, or from the detected cap
+      // when the box is blank, so it never silently commits 0 (which forces
+      // every camera onto the CPU).
+      const v =
+        this.maxNvencSessions.value.trim() === ""
+          ? (this._nvencCaps?.max_sessions ?? 1)
+          : Math.round(clampInput(this.maxNvencSessions));
+      this.maxNvencSessions.value = String(v);
+      this._put(
+        { max_nvenc_sessions: v },
+        [this.nvencAuto, this.maxNvencSessions]
+      );
+    });
+    this.maxNvencSessions.addEventListener("change", () => {
+      const v = Math.round(clampInput(this.maxNvencSessions));
+      this.maxNvencSessions.value = String(v);
+      this._put({ max_nvenc_sessions: v }, [this.maxNvencSessions]);
+    });
     this.recordForm.addEventListener("change", () =>
       this._put({ record_form: this.recordForm.value }, [this.recordForm])
     );
@@ -202,6 +246,20 @@ export class RecordTab {
     if (typeof s.ffmpeg_params === "string" && canSet(this.ffmpegParams)) {
       this.ffmpegParams.value = s.ffmpeg_params;
     }
+    if (typeof s.nvenc_params === "string" && canSet(this.nvencParams)) {
+      this.nvencParams.value = s.nvenc_params;
+    }
+    // max_nvenc_sessions is null when auto-detecting the GPU cap, else an int cap.
+    if (
+      "max_nvenc_sessions" in s &&
+      canSet(this.nvencAuto) &&
+      canSet(this.maxNvencSessions)
+    ) {
+      const auto = s.max_nvenc_sessions == null;
+      this.nvencAuto.checked = auto;
+      this.maxNvencSessions.disabled = auto;
+      if (!auto) this.maxNvencSessions.value = trimNum(s.max_nvenc_sessions);
+    }
     if (s.record_form && canSet(this.recordForm)) {
       this.recordForm.value = s.record_form;
     }
@@ -232,15 +290,62 @@ export class RecordTab {
     ) {
       this.transferChecksum.checked = s.transfer_checksum;
     }
-    this._syncFfmpegEnabled();
+    this._syncSaveMethodFields();
   }
 
-  // The ffmpeg parameters box applies to the encoding save methods (ffmpeg/CPU
-  // and nvenc/GPU); grey it out for raw so it reads as inert (the fieldset's
-  // recording-lock disable is independent and layers on top).
-  _syncFfmpegEnabled() {
+  // Show only the encoder-params block for the selected save method: the CPU
+  // (ffmpeg) box for "ffmpeg", the GPU box + session cap for "nvenc", neither for
+  // "raw". Each method keeps its own params field, so switching never clobbers
+  // the other preset.
+  _syncSaveMethodFields() {
     const method = this.format.value;
-    this.ffmpegParams.disabled = method !== "ffmpeg" && method !== "nvenc";
+    this.ffmpegParamsRow.hidden = method !== "ffmpeg";
+    this.nvencParamsRow.hidden = method !== "nvenc";
+    this.nvencSessionsRow.hidden = method !== "nvenc";
+    if (method === "nvenc") this._ensureNvencCaps();
+  }
+
+  // Fetch the detected GPU NVENC session cap once (lazily, since the server probe
+  // briefly loads the GPU), then reflect it in the UI. Best-effort: on failure
+  // the manual controls still work, just without the detected-count hint.
+  async _ensureNvencCaps() {
+    if (this._nvencCaps) {
+      this._applyNvencCaps();
+      return;
+    }
+    // applySettings runs on every telemetry tick, so a plain fetch here would
+    // fire a fresh /api/nvenc/capabilities (and a server-side GPU probe) each
+    // tick until one returns. Guard so at most one request is ever in flight.
+    if (this._nvencCapsPending) return;
+    this._nvencCapsPending = true;
+    let r;
+    try {
+      r = await api("GET", "/api/nvenc/capabilities");
+    } catch {
+      return;
+    } finally {
+      this._nvencCapsPending = false;
+    }
+    if (r && r.ok && r.data) {
+      this._nvencCaps = r.data;
+      this._applyNvencCaps();
+    }
+  }
+
+  _applyNvencCaps() {
+    const caps = this._nvencCaps;
+    if (!caps) return;
+    if (!caps.available) {
+      this.nvencDetected.textContent =
+        "GPU NVENC unavailable — every camera will encode on the CPU (libx264).";
+      return;
+    }
+    this.nvencDetected.textContent = `GPU: ${caps.max_sessions} concurrent NVENC session(s) detected.`;
+    // When auto-detecting, mirror the detected cap into the (disabled) box so the
+    // operator sees the number that will be used; leave a manual override alone.
+    if (this.nvencAuto.checked && document.activeElement !== this.maxNvencSessions) {
+      this.maxNvencSessions.value = String(caps.max_sessions);
+    }
   }
 
   applyState(snap) {

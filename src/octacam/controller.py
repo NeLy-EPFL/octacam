@@ -42,8 +42,10 @@ from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     FORMATS,
+    NVENC_H264_PARAMS,
     VideoFormat,
-    is_nvenc_params,
+    encoder_of,
+    nvenc_max_sessions,
     resolve_capture_formats,
 )
 
@@ -130,12 +132,16 @@ class RecordingSettings:
     # "free_running" force that mode regardless of the recording trigger source.
     preview_trigger_source: str = "auto"  # "auto" | "software" | "free_running"
     save_method: str = "ffmpeg"  # "ffmpeg" (CPU) | "nvenc" (GPU) | "raw"
-    # Verbatim ffmpeg output/encoder args used when save_method == "ffmpeg" (and,
-    # when it names an *_nvenc encoder, when save_method == "nvenc").
+    # Verbatim ffmpeg output/encoder args for the CPU encoder (save_method="ffmpeg").
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    # Max concurrent GPU NVENC sessions when save_method == "nvenc"; cameras
-    # beyond this encode on CPU (see writer.resolve_capture_formats).
-    max_nvenc_sessions: int = 8
+    # Verbatim ffmpeg args for the GPU encoder (save_method="nvenc"); a dedicated
+    # field so the CPU and GPU presets persist independently and switching methods
+    # never clobbers the other. Defaults to the curated NVENC H.264 preset.
+    nvenc_params: str = NVENC_H264_PARAMS
+    # Max concurrent GPU NVENC sessions when save_method == "nvenc"; cameras beyond
+    # this encode on CPU (see writer.resolve_capture_formats). None = auto-detect
+    # the GPU/driver session cap (writer.nvenc_max_sessions); an int caps it lower.
+    max_nvenc_sessions: int | None = None
     # Depth of each camera's writer queue (frames buffered to the encoder). A
     # deeper queue absorbs transient encoder stalls without dropping frames, at
     # the cost of peak RAM. See config.RecordConfig.writer_queue_size.
@@ -158,20 +164,19 @@ class RecordingSettings:
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
-        if self.save_method in ("ffmpeg", "nvenc"):
+        # Each encoder method draws from its own params field, so the CPU and GPU
+        # presets are independent (raw takes neither).
+        if self.save_method == "ffmpeg":
             params = self.ffmpeg_params
-            # save_method="nvenc" means "encode on the GPU": honour a custom
-            # ffmpeg_params only when the operator actually put an *_nvenc encoder
-            # there; otherwise (e.g. the libx264 default is still in the field)
-            # use the curated NVENC params so the choice isn't silently ignored.
-            if self.save_method == "nvenc" and not is_nvenc_params(params):
-                params = video_format.ffmpeg_params
-            video_format = dataclasses.replace(
-                video_format,
-                ffmpeg_params=params,
-                remux_mp4=self.remux_mp4,
-            )
-        return video_format
+        elif self.save_method == "nvenc":
+            params = self.nvenc_params
+        else:
+            return video_format
+        return dataclasses.replace(
+            video_format,
+            ffmpeg_params=params,
+            remux_mp4=self.remux_mp4,
+        )
 
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:
@@ -313,8 +318,15 @@ def build_recording_summary(
     }
     if settings.save_method == "nvenc":
         # Cameras beyond this many used the CPU (libx264) fallback — see the
-        # per-recording warning; recorded here so the split is auditable.
-        summary["max_nvenc_sessions"] = settings.max_nvenc_sessions
+        # per-recording warning; recorded here so the split is auditable. Resolve
+        # None (auto) to the detected cap actually used, keyed by the encoder the
+        # nvenc_params names (the same key the off-lock warm-up cached), so this is
+        # a cache lookup — never a fresh GPU probe under the caller's lock.
+        cap = settings.max_nvenc_sessions
+        if cap is None:
+            encoder = encoder_of(settings.video_format().ffmpeg_params) or "h264_nvenc"
+            cap = nvenc_max_sessions(encoder)
+        summary["max_nvenc_sessions"] = cap
     return summary
 
 
@@ -508,12 +520,26 @@ class RecordingController:
                 raise ValueError(f"Unknown settings: {sorted(unknown)}")
             if "save_method" in changes and changes["save_method"] not in FORMATS:
                 raise ValueError(f"Unknown save_method: {changes['save_method']}")
-            if "max_nvenc_sessions" in changes and (
-                not isinstance(changes["max_nvenc_sessions"], int)
-                or isinstance(changes["max_nvenc_sessions"], bool)
-                or changes["max_nvenc_sessions"] < 0
+            # None = auto-detect the GPU session cap; an int caps it explicitly.
+            if (
+                "max_nvenc_sessions" in changes
+                and changes["max_nvenc_sessions"] is not None
+                and (
+                    not isinstance(changes["max_nvenc_sessions"], int)
+                    or isinstance(changes["max_nvenc_sessions"], bool)
+                    or changes["max_nvenc_sessions"] < 0
+                )
             ):
-                raise ValueError("max_nvenc_sessions must be an integer >= 0")
+                raise ValueError(
+                    "max_nvenc_sessions must be a non-negative integer or None"
+                )
+            if "nvenc_params" in changes:
+                # Reject args ffmpeg could never parse (bad quoting) up front, as
+                # for transcode_ffmpeg_params below.
+                try:
+                    shlex.split(changes["nvenc_params"])
+                except ValueError as e:
+                    raise ValueError(f"invalid nvenc_params: {e}") from e
             if "fps" in changes and not changes["fps"] > 0:
                 raise ValueError("fps must be > 0")
             if "duration_s" in changes and not changes["duration_s"] > 0:

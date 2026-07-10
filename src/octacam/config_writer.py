@@ -103,6 +103,11 @@ def _emit_table(
     lines.append(f"[[{header}]]" if array else f"[{header}]")
     subtables = [(k, v) for k, v in table.items() if isinstance(v, dict)]
     for key, value in table.items():
+        # TOML has no null; a None-valued field (e.g. record.max_nvenc_sessions
+        # left at auto) is written by *omitting* the key — the loader restores
+        # its default on read.
+        if value is None:
+            continue
         if not isinstance(value, dict):
             lines.append(f"{key} = {_toml_value(value)}")
     for key, value in subtables:

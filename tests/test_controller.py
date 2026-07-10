@@ -200,6 +200,21 @@ def test_update_settings_validation():
     with pytest.raises(ValueError):
         controller.update_settings(writer_queue_size=3.5)
     assert controller.update_settings(writer_queue_size=100).writer_queue_size == 100
+    # max_nvenc_sessions: None = auto-detect (accepted); a non-negative int caps it;
+    # bool/negative are rejected.
+    assert controller.update_settings(max_nvenc_sessions=None).max_nvenc_sessions is None
+    assert controller.update_settings(max_nvenc_sessions=4).max_nvenc_sessions == 4
+    with pytest.raises(ValueError):
+        controller.update_settings(max_nvenc_sessions=-1)
+    with pytest.raises(ValueError):
+        controller.update_settings(max_nvenc_sessions=True)
+    # nvenc_params must be shlex-parseable (bad quoting rejected up front).
+    with pytest.raises(ValueError):
+        controller.update_settings(nvenc_params='-c:v h264_nvenc "oops')
+    assert (
+        controller.update_settings(nvenc_params="-c:v hevc_nvenc -cq 20").nvenc_params
+        == "-c:v hevc_nvenc -cq 20"
+    )
     controller.update_settings(fps=42.0)
     assert controller.camera_system.hz == 42.0
 
