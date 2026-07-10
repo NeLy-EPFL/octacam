@@ -1,6 +1,6 @@
 [project]
 name = "octacam"
-version = "0.3.0.dev0"
+version = "0.3.0"
 description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR, and any GenICam USB3-Vision camera)"
 readme = "README.md"
 # 3.10 is the floor: it is the lowest Python octacam supports (and the lowest
