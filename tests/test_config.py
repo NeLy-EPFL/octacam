@@ -55,8 +55,8 @@ def test_record_defaults():
     assert record.trigger_source == "software"
 
 
-def test_parses_emulate_8_cameras_config():
-    config = load_config_dir(REPO_ROOT / "configs" / "emulate_8_cameras")
+def test_parses_emulate_basler_config():
+    config = load_config_dir(REPO_ROOT / "configs" / "emulate_basler")
     assert config.record.fps == 30.0
     assert config.record.duration == 1.0
     assert len(config.cameras) == 8

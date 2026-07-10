@@ -25,7 +25,7 @@ uv run ruff check src/                    # lint (see the known baseline below)
 uv run pyright src/                       # types (documented baseline; net-new must be 0)
 uv run --group docs mkdocs build --strict # docs build + link/nav validation
 
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras   # run with 8 fake cameras, no hardware
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, no hardware
 ```
 
 - **`fake` backend** is the CI vehicle — a rich SFNC-keyed synthetic camera that

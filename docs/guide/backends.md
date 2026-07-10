@@ -70,7 +70,7 @@ files (pylon's native format).
 To run without hardware, use Basler's built-in emulator:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler
 ```
 
 ## Tier 1 — FLIR / Teledyne (Spinnaker + PySpin)

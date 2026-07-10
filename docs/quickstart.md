@@ -9,7 +9,7 @@ Basler's runtime includes a camera emulator. Set `PYLON_CAMEMU` to the number of
 fake cameras and launch the GUI with the bundled emulator config:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler
 ```
 
 Your browser opens to `http://127.0.0.1:8765` with eight synthetic cameras. You

@@ -37,7 +37,7 @@ See the [installation guide](https://nely-epfl.github.io/octacam/installation/) 
 No cameras attached? Try the built-in Basler emulator first:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras   # 8 fake cameras, live GUI
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # 8 fake cameras, live GUI
 ```
 
 On a real rig, point octacam at a config directory (camera names, layout, and

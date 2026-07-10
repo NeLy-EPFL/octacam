@@ -1,12 +1,10 @@
-# triggerbox rig — "2048 low intensity" preset (80 fps, 20% strobe duty).
+# triggerbox rig — 2048² FLIR + Basler, 80 fps, 20% strobe duty.
 #
-# octacam equivalent of hexaview-control/config/2048_low_intensity.yaml, but
-# parameterized by TIMING (fps) + STROBE DUTY CYCLE instead of raw µs windows:
+# Parameterized by TIMING (fps) + STROBE DUTY CYCLE instead of raw µs windows:
 #
-#   hexaview:   pre(250)+exposure(2000)+post(250)+lightOff(10000) = 12500 µs period
-#   triggerbox: fps = 80        -> 12500 µs frame period
-#               duty = 20 %      -> 2500 µs light-on window (covers the 2 ms exposure)
-#               exposure = 2000 µs (per-camera, in the .pfs / .txt)
+#   fps = 80        -> 12500 µs frame period
+#   duty = 20 %     -> 2500 µs light-on window (covers the 2 ms exposure)
+#   exposure = 2000 µs (per-camera, in the .pfs / .txt)
 #
 # Cameras run in EXTERNAL hardware-trigger mode; the Arduino Nano ESP32 running
 # the triggerbox firmware drives the shared trigger line (D13 -> each camera's

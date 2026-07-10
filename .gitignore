@@ -28,9 +28,6 @@ dist/
 htmlcov/
 .pytest_cache/
 
-# Benchmark outputs
-benchmarks/results/
-
 # Recorded camera data
 data/
 # Local transfer destination used for testing `octacam process`

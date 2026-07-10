@@ -182,7 +182,7 @@ binding exists — we write the first):
    **clean close** (no hang). No BALLUFF watermark in the saved mkv.
 3. GIL test: 1 ms ticker sees < ~10 ms stalls during `GetNextImageEx` (proves
    ctypes releases the GIL — the pycameleon failure mode is gone).
-4. `test_basler_and_flir` config: Basler holds ~69 fps (its ceiling) with 2 FLIR
+4. A Basler + 2 FLIR config: Basler holds ~69 fps (its ceiling) with 2 FLIR
    co-recording via `spinnaker`; FLIR ≥ ~16 fps each. i.e. no cross-starvation.
 5. `read_node` returns real min/max/inc/unit for exposure/gain/width/height.
 6. Full suite + ruff + pyright green; add `tests/test_spinnaker_backend.py` with a
