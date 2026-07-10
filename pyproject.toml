@@ -48,6 +48,13 @@ dev = [
     "ruff>=0.8",
     "pyright>=1.1.390",
 ]
+# Documentation site (Material for MkDocs). Preview locally with
+# `uv run --group docs mkdocs serve`; CI publishes the versioned site
+# (main -> "stable", dev-* -> "dev") to GitHub Pages via mike.
+docs = [
+    "mkdocs-material>=9.5",
+    "mike>=2.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]
