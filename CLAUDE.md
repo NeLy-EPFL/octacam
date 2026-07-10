@@ -217,8 +217,8 @@ whole `RecordConfig`, so any None-defaulting field would otherwise crash the dum
 
 Serial-hardware plugins under `plugins/<name>/`, registered in
 `_BUILTINS = ("flywheel", "twophoton", "triggerbox")` with legacy
-`_ALIASES = {"arduino": "flywheel", "omniview": "triggerbox"}` (old configs keep
-working). The default launch loads none; enable via `[[plugins]]` or `--plugin`.
+`_ALIASES = {"arduino": "flywheel"}` (old configs keep working). The default
+launch loads none; enable via `[[plugins]]` or `--plugin`.
 
 Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
 `on_first_frame`, `default_start_params` (so **headless `octacam record` arms the

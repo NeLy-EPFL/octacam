@@ -67,9 +67,7 @@ class FirmwareSpec:
 
     ``sketch_dir`` must contain ``<sketch_dir.name>.ino`` (arduino-cli requires
     the main sketch file to match the folder name). ``banner_prefix`` /
-    ``protocol_version`` are matched against the board's identify banner;
-    ``legacy_prefixes`` are known predecessor names (e.g. ``omniview`` → the same
-    board, just old firmware) that are safe to auto-upgrade.
+    ``protocol_version`` are matched against the board's identify banner.
     """
 
     name: str
@@ -79,7 +77,6 @@ class FirmwareSpec:
     protocol_version: int
     build_header: str = "fw_build_info.h"
     build_define: str = "TRIGGERBOX_FW_BUILD"
-    legacy_prefixes: tuple[str, ...] = ()
 
     @property
     def main_ino(self) -> Path:
@@ -107,7 +104,6 @@ class FirmwareCheck:
     board_build: str | None
     needed_build: str
     needed_version: int
-    is_legacy: bool = False
 
     @property
     def needs_flash(self) -> bool:
@@ -118,13 +114,11 @@ class FirmwareCheck:
         """Whether a headless/opt-in path may reflash WITHOUT a human confirming.
 
         True only when the board is unambiguously *this* board running stale
-        firmware (right name, or a known predecessor). A blank/unidentified board
-        or an unknown foreign banner is never auto-flashed — the operator must
+        firmware (right name, wrong build/version). A blank/unidentified board or
+        an unknown/foreign banner is never auto-flashed — the operator must
         confirm it really is the plugin's board first, since flashing overwrites
         whatever is there."""
-        if self.state in (FirmwareState.OUTDATED, FirmwareState.WRONG_VERSION):
-            return True
-        return self.state is FirmwareState.WRONG_BOARD and self.is_legacy
+        return self.state in (FirmwareState.OUTDATED, FirmwareState.WRONG_VERSION)
 
     def to_dict(self) -> dict:
         return {
@@ -135,7 +129,6 @@ class FirmwareCheck:
             "board_build": self.board_build,
             "needed_build": self.needed_build,
             "needed_version": self.needed_version,
-            "is_legacy": self.is_legacy,
             "needs_flash": self.needs_flash,
             "safe_to_auto_flash": self.safe_to_auto_flash,
         }
@@ -215,8 +208,8 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
     nv = spec.protocol_version
     prefix = spec.banner_prefix.upper()
 
-    def check(state: FirmwareState, detail: str, is_legacy: bool = False) -> FirmwareCheck:
-        return FirmwareCheck(state, detail, name, version, build, needed_build, nv, is_legacy)
+    def check(state: FirmwareState, detail: str) -> FirmwareCheck:
+        return FirmwareCheck(state, detail, name, version, build, needed_build, nv)
 
     if name is None:
         return check(
@@ -237,12 +230,9 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
                 f"the board runs {shown}; the current source is {needed_build}",
             )
         return check(FirmwareState.CURRENT, f"up to date (build {needed_build})")
-    is_legacy = name in {p.upper() for p in spec.legacy_prefixes}
-    tail = " (a known predecessor)" if is_legacy else ""
     return check(
         FirmwareState.WRONG_BOARD,
-        f"the board reports {banner!r}, not {spec.banner_prefix} firmware{tail}",
-        is_legacy=is_legacy,
+        f"the board reports {banner!r}, not {spec.banner_prefix} firmware",
     )
 
 

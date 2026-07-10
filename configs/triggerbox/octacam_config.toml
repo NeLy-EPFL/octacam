@@ -25,7 +25,7 @@ trigger_source = "managed"    # octacam drives the Arduino triggerbox (plugin be
 # LEDs (e.g. "free_running" free-runs the cameras capped at fps).
 preview_trigger_source = "auto"
 
-directory = "~/octacam/data/omniview"
+directory = "~/octacam/data/triggerbox"
 relative_directory = "%y%m%d/Fly1/001"
 
 save_method = "ffmpeg"        # ffmpeg | raw
@@ -37,7 +37,7 @@ save_timestamps = true        # per-frame timestamp CSV (handy to verify 80 fps)
 ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
 
 [transfer]
-directory = "~/octacam/server/omniview"
+directory = "~/octacam/server/triggerbox"
 checksum = true
 
 # --- Cameras -----------------------------------------------------------------

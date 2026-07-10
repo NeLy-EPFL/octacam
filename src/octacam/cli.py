@@ -2389,7 +2389,7 @@ def _flashable_plugins(plugins, only: str | None):
         if hasattr(p, "flash_firmware") and hasattr(p, "firmware_provisioning")
     ]
     if only:
-        # build_plugins resolves legacy aliases (e.g. omniview->triggerbox), so
+        # build_plugins resolves legacy aliases (e.g. arduino->flywheel), so
         # match on the canonical name the requested name resolves to.
         canonical = plugins_mod._ALIASES.get(only, only)
         out = [p for p in out if p.name == canonical]

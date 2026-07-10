@@ -84,7 +84,6 @@ def test_fingerprint_tracks_file_add(tmp_path):
         ("TRIGGERBOX 2 a1b2c3d4", ("TRIGGERBOX", 2, "a1b2c3d4")),
         ("TRIGGERBOX 2", ("TRIGGERBOX", 2, None)),
         ("triggerbox 2 abcd", ("TRIGGERBOX", 2, "abcd")),  # name upper-cased
-        ("OMNIVIEW 1", ("OMNIVIEW", 1, None)),
         ("WEIRD", ("WEIRD", None, None)),
         ("TRIGGERBOX x deadbeef", ("TRIGGERBOX", None, "deadbeef")),  # bad version
         (None, (None, None, None)),
@@ -109,7 +108,6 @@ def spec():
         fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX",
         protocol_version=2,
-        legacy_prefixes=("OMNIVIEW",),
     )
 
 
@@ -139,17 +137,9 @@ def test_classify_wrong_version(spec):
     assert c.needs_flash and c.safe_to_auto_flash
 
 
-def test_classify_legacy_is_wrong_board_but_safe(spec):
-    c = fw.classify(spec, "OMNIVIEW 1", "abc12345")
-    assert c.state is fw.FirmwareState.WRONG_BOARD
-    assert c.is_legacy
-    assert c.needs_flash and c.safe_to_auto_flash
-
-
 def test_classify_foreign_board_is_not_auto_flashable(spec):
     c = fw.classify(spec, "SOMETHINGELSE 5", "abc12345")
     assert c.state is fw.FirmwareState.WRONG_BOARD
-    assert not c.is_legacy
     assert c.needs_flash and not c.safe_to_auto_flash
 
 
@@ -304,7 +294,7 @@ def real_spec():
     return fw.FirmwareSpec(
         name="triggerbox", sketch_dir=d, fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX", protocol_version=2,
-        build_define="TRIGGERBOX_FW_BUILD", legacy_prefixes=("OMNIVIEW",),
+        build_define="TRIGGERBOX_FW_BUILD",
     )
 
 

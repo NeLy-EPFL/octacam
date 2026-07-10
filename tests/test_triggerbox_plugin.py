@@ -13,7 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from octacam.plugins import _ALIASES, _BUILTINS, build_plugins
+from octacam.plugins import _BUILTINS, build_plugins
 from octacam.plugins.triggerbox import (
     _PROTOCOL_VERSION,
     PIN_LABELS,
@@ -537,12 +537,6 @@ def test_on_recording_start_uses_configured_spec_when_only_fps_given():
     assert len(dec["lights"]) == 2  # ch1 + ch2
 
 
-def test_on_recording_start_accepts_legacy_omniview_key():
-    plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"omniview": {"fps": 80, "duration_ms": 1000}})
-    assert _last_arm(link)["fps"] == 80
-
-
 def test_on_recording_start_legacy_duty_overrides_strobe_channels():
     plugin, link = _plugin_with_fake()
     plugin.on_recording_start(
@@ -571,7 +565,7 @@ def test_on_recording_start_reports_and_skips_when_link_closed():
 def test_on_recording_start_reports_and_skips_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
     plugin._firmware_ok = False
-    plugin._firmware = "OMNIVIEW 1"
+    plugin._firmware = "OTHERBOARD 1"
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert not link.snapshot()
     assert plugin._last_error and "incompatible" in plugin._last_error
@@ -1026,11 +1020,11 @@ def test_verify_identity_accepts_triggerbox_v2():
     assert plugin._firmware == "TRIGGERBOX 2" and plugin._firmware_ok is True
 
 
-def test_verify_identity_refuses_legacy_omniview():
+def test_verify_identity_refuses_foreign_board():
     records, detach = _capture_octacam_logs()
     try:
         plugin, link = _plugin_with_fake()
-        link.banner = "OMNIVIEW 1"
+        link.banner = "OTHERBOARD 1"
         plugin._verify_identity()
     finally:
         detach()
@@ -1089,13 +1083,6 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
 
 def test_triggerbox_is_registered_builtin():
     assert "triggerbox" in _BUILTINS
-
-
-def test_omniview_alias_resolves_to_triggerbox():
-    assert _ALIASES.get("omniview") == "triggerbox"
-    cfg = SimpleNamespace(plugins=[SimpleNamespace(name="omniview", options={"device": DEVICE})])
-    manager = build_plugins(cfg, enabled=None)
-    assert [p.name for p in manager.plugins] == ["triggerbox"]
 
 
 def test_default_start_params_via_manager():
@@ -1159,13 +1146,14 @@ def test_identify_wrong_version_disables_arming():
     assert plugin.firmware_provisioning()["state"] == "wrong_version"
 
 
-def test_identify_legacy_omniview_disables_arming_but_is_flashable():
+def test_identify_foreign_board_disables_arming_and_needs_confirm():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "OMNIVIEW 1")
+    _verify_with_banner(plugin, link, "OTHERBOARD 1")
     assert plugin._firmware_ok is False
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "wrong_board"
-    assert prov["needs_flash"] and prov["safe_to_auto_flash"]
+    # A foreign board is flashable but never auto-flashed without confirmation.
+    assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
 
 
 def test_identify_unidentified_proceeds_but_flags_flash():
