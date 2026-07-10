@@ -41,3 +41,7 @@ site/
 
 # Vendor SDK packages (user-installed, not vendored in-repo)
 spinnaker-*-pkg.tar.gz
+
+# EPFL common-trigger-circuit board repo — cloned alongside for reference
+# (its own git repo; the firmware octacam flashes lives in arduino/triggerbox/).
+common-trigger-circuit/
