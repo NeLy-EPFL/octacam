@@ -30,3 +30,6 @@ htmlcov/
 
 # Benchmark outputs
 benchmarks/results/
+
+# MkDocs build output (`mkdocs build`); the published site is deployed by CI
+site/

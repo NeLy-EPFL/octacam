@@ -1,0 +1,85 @@
+name: Deploy docs
+
+# Publishes VERSIONED Material for MkDocs docs to the gh-pages branch via `mike`.
+#
+#   push to main          -> deploy the "stable" version and point the site root
+#                            at it (branch-based model: main == the stable trunk).
+#   push to a dev-* branch -> deploy the rolling "dev" version. Because it neither
+#                            names "stable" nor moves the default, the stable
+#                            version and the root redirect are left untouched.
+#
+# When octacam starts cutting tagged releases, switch the main path to numbered
+# versions + a "latest" alias (see mike docs); the dev path stays as-is.
+#
+# All versions live in their own subdirectory of gh-pages; the header version
+# selector (mkdocs.yml `extra.version.provider: mike`) reads versions.json at the
+# gh-pages root, so every version shares one dropdown.
+#
+# ONE-TIME SETUP (not done here): after the first run creates gh-pages, set
+# Settings -> Pages -> "Deploy from a branch" -> gh-pages -> / (root). Via API:
+#   gh api --method POST /repos/NeLy-EPFL/octacam/pages \
+#     -f build_type=legacy -f 'source[branch]=gh-pages' -f 'source[path]=/'
+# (POST to create; PUT to update. Needs a repo-admin token, not GITHUB_TOKEN.)
+
+on:
+  push:
+    branches:
+      - main
+      - "dev-*"          # dev-0.3.0 and future dev branches
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # mike commits the built site and pushes gh-pages via GITHUB_TOKEN
+
+# Every deploy commits to the single gh-pages branch. A CONSTANT group (NOT keyed
+# by branch/ref) serializes a main deploy against a dev deploy so they can never
+# race on versions.json or fail a non-fast-forward push. Never cancel a deploy
+# mid-push.
+concurrency:
+  group: docs-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history + the origin/gh-pages ref; a shallow
+                                # clone makes mike drop previously deployed versions
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Configure git identity for the mike commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # mike commits on top of the existing gh-pages tree but never runs git fetch
+      # itself. Fetch it explicitly so other versions survive (no-op on first run,
+      # when the branch does not exist yet -> mike creates it).
+      - name: Fetch existing gh-pages
+        run: git fetch origin gh-pages --depth=1 || true
+
+      # --no-project: don't build octacam + its camera deps just to render Markdown.
+      - name: Deploy with mike
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          run_mike() { uv run --no-project --with mkdocs-material --with mike mike "$@"; }
+          if [ "$REF" = "main" ]; then
+            echo "Deploying stable docs (branch: main)"
+            run_mike deploy --push stable
+            run_mike set-default --push stable
+          else
+            echo "Deploying development docs as version 'dev' (branch: $REF)"
+            run_mike deploy --push dev
+          fi
