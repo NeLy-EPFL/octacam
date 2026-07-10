@@ -83,6 +83,14 @@ nav:
       - Troubleshooting: reference/troubleshooting.md
 
 extra:
+  # Versioned docs: the header shows a version dropdown driven by mike's
+  # versions.json at the gh-pages root (see .github/workflows/docs.yml).
+  # `provider: mike` is the only supported value; the selector JS is gated on it.
+  # Cross-version jumps do a full page reload (works because site_url is set,
+  # which is what lets navigation.instant detect the version boundary).
+  version:
+    provider: mike
+    default: stable
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/NeLy-EPFL/octacam
