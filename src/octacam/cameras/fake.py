@@ -29,6 +29,7 @@ from octacam.cameras.base import (
     FeatureInfo,
     Frame,
     NodeInfo,
+    coerce_bool,
 )
 
 log = logging.getLogger("octacam")
@@ -150,7 +151,6 @@ class FakeBackend(SoftwareTriggerHandoff):
         # managed preview without pacing the benchmark's uncapped record-grab probe.
         self._preview_grab = False
         self._init_trigger_handoff()
-        self._original_trigger_source = "Line1"
 
     @property
     def serial_number(self) -> str:
@@ -316,8 +316,7 @@ class FakeBackend(SoftwareTriggerHandoff):
         elif kind == "float":
             node["value"] = float(value)
         elif kind == "bool":
-            node["value"] = str(value).strip().lower() in ("1", "true", "yes", "on") \
-                if isinstance(value, str) else bool(value)
+            node["value"] = coerce_bool(value)
         elif kind == "enum":
             valid = {e["value"] for e in node.get("entries", [])}
             if valid and str(value) not in valid:

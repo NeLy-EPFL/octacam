@@ -35,8 +35,9 @@ on a given model is simply skipped.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
-from octacam.cameras.base import BackendError
+from octacam.cameras.base import BackendError, coerce_bool
 
 log = logging.getLogger("octacam")
 
@@ -169,7 +170,7 @@ _HEADER = (
 
 
 def _to_bool(value: str) -> bool:
-    return value.strip().lower() in ("1", "true", "yes", "on")
+    return coerce_bool(value)
 
 
 def _fmt_float(value: float) -> str:
@@ -348,3 +349,134 @@ def normalize_trigger_source(text: str, original_source: str | None) -> str:
                 line = f"{name}\t{original_source}"
         out.append(line)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+class GenICamTriggerConfig:
+    """Shared software-trigger + config lifecycle for the GenICam backends.
+
+    The FLIR/PySpin, Spinnaker-C, Harvesters and pycameleon backends drive the
+    same SFNC trigger chain and persist the same native GenApi persistence TSV, so
+    the nine trigger/config methods below are byte-for-byte identical across them
+    and live here once. A backend mixes this in alongside
+    :class:`~octacam.cameras._trigger_handoff.SoftwareTriggerHandoff` and supplies
+    only its genuine per-SDK seam: the typed
+    ``_set_enum``/``_get_enum``/``_set_bool``/``_set_number`` setters, ``is_open``,
+    and the fetch/grab bodies. The Spinnaker-C backend overrides
+    :meth:`save_params` to stamp the device model name into the dump.
+    """
+
+    # Seam supplied by the concrete backend (``_serial``, ``is_open`` and the typed
+    # setters) and by :class:`SoftwareTriggerHandoff` (``_bump_trigger``). Declared
+    # for the type checker only — ``_serial``/``_original_trigger_source`` are bare
+    # annotations and the method stubs are ``TYPE_CHECKING``-guarded, so nothing is
+    # created at runtime and the MRO resolves each name to its real implementation.
+    _serial: str
+    _original_trigger_source: str | None
+
+    if TYPE_CHECKING:
+        # Positional-only (``/``) so a backend that names the node parameter
+        # differently (pycameleon uses ``node``) is not flagged as an incompatible
+        # override — only the type of the seam matters here, not the parameter name.
+        def _set_enum(self, name: str, value: str, /) -> None: ...
+        def _get_enum(self, name: str, /) -> str | None: ...
+        def is_open(self) -> bool: ...
+        def _bump_trigger(self) -> None: ...
+
+    # ----------------------------------------------------------- triggering
+
+    def _enable_trigger_overlap(self) -> None:
+        """Let a trigger be accepted during the previous frame's readout.
+
+        Without this (``TriggerOverlap=Off``, the FLIR default) a FrameStart
+        software trigger fired while the sensor is still reading out the previous
+        frame is silently ignored, so the camera accepts only ~every other trigger
+        — roughly halving the software-triggered frame rate and adding a full
+        grab-timeout stall on each dropped one. ``ReadOut`` pipelines back-to-back
+        triggers and restores the sensor's real rate (measured on the Spinnaker
+        backends: ~4.7 -> ~64 fps at 4 ms exposure; see
+        ``docs/plan-spinnaker-c-backend.md``). Best-effort: a model without the
+        node keeps its default.
+        """
+        try:
+            self._set_enum("TriggerOverlap", "ReadOut")
+        except BackendError as e:
+            log.debug("Could not set TriggerOverlap on camera %s: %s", self._serial, e)
+
+    def enable_frame_trigger(self) -> None:
+        if not self.is_open():
+            return
+        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
+        self._set_enum("TriggerSelector", "FrameStart")
+        self._set_enum("TriggerMode", "On")
+        self._enable_trigger_overlap()
+
+    def set_trigger_source(self, use_software: bool) -> None:
+        if not self.is_open():
+            return
+        try:
+            if use_software:
+                self._set_enum("TriggerSource", "Software")
+            elif self._original_trigger_source is not None:
+                self._set_enum("TriggerSource", self._original_trigger_source)
+        except BackendError as e:
+            log.warning(
+                "Failed to set trigger source on camera %s: %s", self._serial, e
+            )
+
+    def begin_software_trigger_preview(self) -> None:
+        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
+        self._set_enum("TriggerSelector", "FrameStart")
+        self._set_enum("TriggerMode", "On")
+        self._set_enum("TriggerSource", "Software")
+        self._enable_trigger_overlap()
+
+    def trigger_once(self) -> None:
+        # Only bump the pending counter; retrieve() fires the device trigger on
+        # the grab thread so the shared trigger timer never blocks on this camera.
+        self._bump_trigger()
+
+    def begin_freerun(self, fps: float | None = None) -> bool:
+        """Switch to continuous free-run (TriggerMode Off).
+
+        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
+        by free-run *preview* (``fps`` set, so the rate is capped at the target and
+        the preview draws the same bandwidth as an fps-matched recording).
+        Best-effort: a failure returns False so the caller skips free-run for this
+        camera. A later ``begin_software_trigger_preview`` re-arms the FrameStart
+        trigger (and clears the cap), so no explicit restore is needed.
+        """
+        if not self.is_open():
+            return False
+        try:
+            self._set_enum("TriggerMode", "Off")
+            try:
+                self._set_enum("AcquisitionMode", "Continuous")
+            except BackendError:
+                pass
+            if fps is not None:
+                apply_freerun_rate_cap(self, fps)
+            return True
+        except BackendError as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    # ----------------------------------------------------- config persistence
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        return dict(parse_config(config_str))
+
+    def load_params(self, config_str: str) -> None:
+        # Native GenApi persistence TSV, applied best-effort in file order (see
+        # apply_config). Runs after open(), so open()'s Mono8/throughput setup
+        # stays authoritative (both are in the applier's skip set).
+        if config_str:
+            apply_config(self, config_str)
+        self._original_trigger_source = self._get_enum("TriggerSource")
+
+    def save_params(self) -> str:
+        # Undo any live TriggerSource=Software override (from a software-trigger
+        # preview) so a config saved mid-preview does not bake an unrecordable
+        # Software trigger (see normalize_trigger_source).
+        return normalize_trigger_source(
+            dump_config(self), self._original_trigger_source
+        )

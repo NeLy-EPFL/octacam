@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 from octacam import firmware as fw
 from octacam import serial_ports
 from octacam.plugins import register
+from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
 
 try:
@@ -113,9 +114,8 @@ _NO_PYSERIAL_MSG = (
 )
 
 # ---- Wire protocol v2 (must match triggerbox.ino) --------------------------
+# The cancel (0xCA) / identify (0x3F) magics live in _serial_link (shared).
 _ARM_MAGIC = 0xA5
-_CANCEL_MAGIC = 0xCA
-_IDENTIFY_MAGIC = 0x3F
 _PROTOCOL_VERSION = 2
 _MAX_FPS = 5000
 _MAX_CAM = 12
@@ -398,114 +398,22 @@ class CameraTiming:
 # ============================================================================
 
 
-class TriggerboxLink:
+class TriggerboxLink(SerialReaderLink):
     """Serial link to the triggerbox Arduino.
 
-    Writes arm/cancel packets and reads back newline-terminated status tokens on
-    a dedicated background thread. The status/reject callbacks run on that thread;
+    Inherits the shared open/close/write/identify lifecycle from
+    :class:`~octacam.plugins._serial_link.SerialReaderLink`; only the reader-thread
+    token grammar (:meth:`_read_loop`) and the arm packet (:meth:`send_arm`) are
+    triggerbox-specific. The status/reject callbacks run on the reader thread;
     callers must be thread-safe.
     """
 
-    def __init__(
-        self,
-        on_status: Callable[[str], None],
-        on_broken: Callable[[], None] | None = None,
-        on_reject: Callable[[str], None] | None = None,
-    ):
-        self._serial = None
-        self._write_lock = threading.Lock()
-        self._lifecycle_lock = threading.Lock()
-        self._on_status = on_status
-        self._on_broken = on_broken
-        self._on_reject = on_reject
-        self._reader: threading.Thread | None = None
-        self._reader_stop = threading.Event()
-        self._identity: str | None = None
-        self._identity_event = threading.Event()
-
-    def open(self, device: str, baud: int) -> None:
-        if serial is None:
-            raise RuntimeError(_NO_PYSERIAL_MSG)
-        with self._lifecycle_lock:
-            self._close_locked()
-            s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
-            self._serial = s
-            self._reader_stop.clear()
-            self._reader = threading.Thread(
-                target=self._read_loop, daemon=True, name="triggerbox-reader"
-            )
-            self._reader.start()
-
-    def close(self) -> None:
-        with self._lifecycle_lock:
-            self._close_locked()
-
-    def _close_locked(self) -> None:
-        self._reader_stop.set()
-        with self._write_lock:
-            s, self._serial = self._serial, None
-            if s is not None:
-                s.close()
-        if self._reader is not None:
-            self._reader.join(timeout=1.0)
-            self._reader = None
-
-    def _mark_broken(self) -> None:
-        with self._write_lock:
-            s, self._serial = self._serial, None
-            if s is not None:
-                try:
-                    s.close()
-                except Exception:
-                    pass
-        if self._on_broken is not None:
-            try:
-                self._on_broken()
-            except Exception:
-                log.exception("triggerbox: on_broken callback error")
-
-    @property
-    def is_open(self) -> bool:
-        s = self._serial
-        return s is not None and s.is_open
-
-    def _write(self, data: bytes) -> bool:
-        """Write bytes; return whether they were handed to the OS successfully.
-
-        A wedged USB-CDC board fails here with EPIPE (a plain OSError, which
-        pyserial does not always wrap in SerialException), so both are caught and
-        reported as a failed write rather than raised."""
-        with self._write_lock:
-            s = self._serial
-            if s is None or not s.is_open:
-                return False
-            try:
-                s.write(data)
-                return True
-            except (OSError, serial.SerialException) as e:  # pyright: ignore[reportOptionalMemberAccess]
-                log.warning("triggerbox: serial write failed: %s", e)
-                return False
+    log_prefix = "triggerbox"
+    reader_name = "triggerbox-reader"
+    expected_banner = _EXPECTED_BANNER
 
     def send_arm(self, spec: ArmSpec) -> bool:
         return self._write(spec.to_bytes())
-
-    def send_cancel(self) -> None:
-        self._write(bytes([_CANCEL_MAGIC]))
-
-    def send_identify(self) -> None:
-        self._write(bytes([_IDENTIFY_MAGIC]))
-
-    @property
-    def identity(self) -> str | None:
-        return self._identity
-
-    def identify(self, timeout: float = 0.5) -> str | None:
-        """Query the firmware banner and wait briefly for the reply."""
-        self._identity = None
-        self._identity_event.clear()
-        self.send_identify()
-        self._identity_event.wait(timeout)
-        return self._identity
 
     def _read_loop(self) -> None:
         buf = bytearray()
@@ -534,21 +442,13 @@ class TriggerboxLink:
                 token = line.decode("ascii", "replace").strip()
                 if not token:
                     continue
-                if token.upper().startswith(_EXPECTED_BANNER):
+                if token.upper().startswith(self.expected_banner):
                     self._identity = token
                     self._identity_event.set()
                 elif token in _STATE_LABELS:
                     self._dispatch(self._on_status, token)
                 elif token[0] == "E":
                     self._dispatch(self._on_reject, token[1:])
-
-    def _dispatch(self, cb, arg) -> None:
-        if cb is None:
-            return
-        try:
-            cb(arg)
-        except Exception:
-            log.exception("triggerbox: status/reject callback error")
 
 
 # ============================================================================

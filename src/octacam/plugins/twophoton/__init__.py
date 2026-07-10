@@ -60,6 +60,7 @@ from pathlib import Path
 from octacam import firmware as fw
 from octacam import serial_ports
 from octacam.plugins import register
+from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
 
 try:
@@ -85,10 +86,9 @@ _NO_PYSERIAL_MSG = (
     "environment may be broken); reinstall with: pip install pyserial"
 )
 
-# Wire-format constants
+# Wire-format constants. The cancel (0xCA) / identify (0x3F) magics live in
+# _serial_link (shared with the triggerbox link).
 _ARM_MAGIC = 0xA5
-_CANCEL_MAGIC = 0xCA
-_IDENTIFY_MAGIC = 0x3F  # '?' -> firmware identity banner
 # magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) = 7 bytes
 _ARM_FORMAT = "<BHI"
 
@@ -147,127 +147,22 @@ class ArmParams:
         return cls(fps=fps, duration_ms=duration_ms)
 
 
-class TwoPhotonLink:
+class TwoPhotonLink(SerialReaderLink):
     """Serial link to the 2-photon trigger Arduino.
 
-    Writes arm/cancel packets to the Arduino and reads back single-byte status
-    replies on a dedicated background thread. The status callback is called from
-    that thread; callers must be thread-safe.
+    Inherits the shared open/close/write/identify lifecycle from
+    :class:`~octacam.plugins._serial_link.SerialReaderLink`; only the single-byte
+    status / banner reader grammar (:meth:`_read_loop`) and the arm packet
+    (:meth:`send_arm`) are 2-photon-specific. The status callback runs on the
+    reader thread; callers must be thread-safe.
     """
 
-    def __init__(
-        self,
-        on_status: Callable[[str], None],
-        on_broken: Callable[[], None] | None = None,
-    ):
-        self._serial = None
-        self._write_lock = threading.Lock()
-        # Serializes the open/close/reconnect lifecycle so two concurrent
-        # reconnects (double-click, two browser tabs, or a reconnect racing
-        # teardown) cannot each create a port and leak the loser's FD + reader.
-        self._lifecycle_lock = threading.Lock()
-        self._on_status = on_status
-        # Called from the reader thread when the port dies mid-session (not on a
-        # clean close), so the owner can surface the lost link to the GUI.
-        self._on_broken = on_broken
-        self._reader: threading.Thread | None = None
-        self._reader_stop = threading.Event()
-        self._identity: str | None = None
-        self._identity_event = threading.Event()
-
-    def open(self, device: str, baud: int) -> None:
-        if serial is None:
-            raise RuntimeError(_NO_PYSERIAL_MSG)
-        with self._lifecycle_lock:
-            self._close_locked()
-            s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
-            self._serial = s
-            self._reader_stop.clear()
-            self._reader = threading.Thread(
-                target=self._read_loop, daemon=True, name="twophoton-reader"
-            )
-            self._reader.start()
-
-    def close(self) -> None:
-        with self._lifecycle_lock:
-            self._close_locked()
-
-    def _close_locked(self) -> None:
-        """Tear down the port and reader. Caller must hold ``_lifecycle_lock``."""
-        self._reader_stop.set()
-        with self._write_lock:
-            s, self._serial = self._serial, None
-            if s is not None:
-                s.close()
-        if self._reader is not None:
-            self._reader.join(timeout=1.0)
-            self._reader = None
-
-    def _mark_broken(self) -> None:
-        """Drop the handle after the port dies under the reader thread.
-
-        Without this the reader exits but pyserial's ``is_open`` stays True, so
-        ``is_open``/``is_ready`` would report a dead link as usable forever and
-        the GUI would never offer reconnect. Touches only ``_write_lock`` (never
-        the lifecycle lock) so it can't deadlock a concurrent close() joining us.
-        """
-        with self._write_lock:
-            s, self._serial = self._serial, None
-            if s is not None:
-                try:
-                    s.close()
-                except Exception:
-                    pass
-        # Notify outside the write lock (and never the lifecycle lock) so a
-        # broadcast hook can't deadlock a concurrent close() that is joining us.
-        if self._on_broken is not None:
-            try:
-                self._on_broken()
-            except Exception:
-                log.exception("2-photon trigger: on_broken callback error")
-
-    @property
-    def is_open(self) -> bool:
-        s = self._serial
-        return s is not None and s.is_open
-
-    def _write(self, data: bytes) -> bool:
-        """Write bytes to the link; return whether they reached the OS.
-
-        False means the link is closed or ``serial.write`` raised — the caller
-        (e.g. send_arm) can then surface the failure instead of silently no-oping."""
-        with self._write_lock:
-            s = self._serial
-            if s is None or not s.is_open:
-                return False
-            try:
-                s.write(data)
-            except serial.SerialException as e:  # pyright: ignore[reportOptionalMemberAccess]
-                log.warning("2-photon trigger: serial write failed: %s", e)
-                return False
-            return True
+    log_prefix = "2-photon trigger"
+    reader_name = "twophoton-reader"
+    expected_banner = _EXPECTED_BANNER
 
     def send_arm(self, params: ArmParams) -> bool:
         return self._write(params.to_bytes())
-
-    def send_cancel(self) -> None:
-        self._write(bytes([_CANCEL_MAGIC]))
-
-    def send_identify(self) -> None:
-        self._write(bytes([_IDENTIFY_MAGIC]))
-
-    @property
-    def identity(self) -> str | None:
-        return self._identity
-
-    def identify(self, timeout: float = 0.5) -> str | None:
-        """Query the firmware banner and wait briefly for the reply (None if the
-        board has no identify command — e.g. older firmware)."""
-        self._identity = None
-        self._identity_event.clear()
-        self.send_identify()
-        self._identity_event.wait(timeout)
-        return self._identity
 
     def _read_loop(self) -> None:
         # The firmware emits bare single-byte statuses ('A'/'T'/'D') AND, in reply
@@ -304,7 +199,7 @@ class TwoPhotonLink:
             if byte == 0x0A:  # '\n' — end of a banner line
                 line = buf.decode("ascii", "replace").strip()
                 buf.clear()
-                if line.upper().startswith(_EXPECTED_BANNER):
+                if line.upper().startswith(self.expected_banner):
                     self._identity = line
                     self._identity_event.set()
                 continue
@@ -314,10 +209,7 @@ class TwoPhotonLink:
                     buf.clear()
                 continue
             if byte in _STATUS_BYTES:
-                try:
-                    self._on_status(chr(byte))
-                except Exception:
-                    log.exception("2-photon trigger: status callback error")
+                self._dispatch(self._on_status, chr(byte))
             else:
                 buf.append(byte)  # start of a banner line
 

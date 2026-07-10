@@ -20,6 +20,7 @@ from octacam.cameras.base import (
     FeatureInfo,
     Frame,
     NodeInfo,
+    coerce_bool,
 )
 
 log = logging.getLogger("octacam")
@@ -55,14 +56,6 @@ def _typed_value_attr(node, getter: str):
         return getattr(node, getter)()
     except (AttributeError, genicam.GenericException):
         return None
-
-
-def _coerce_bool(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _basler_feature(typed) -> FeatureInfo | None:
@@ -365,7 +358,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             elif kind == "float":
                 typed.SetValue(float(value))
             elif kind == "bool":
-                typed.SetValue(_coerce_bool(value))
+                typed.SetValue(coerce_bool(value))
             elif kind in ("enum", "string"):
                 typed.FromString(str(value))
             else:
@@ -421,7 +414,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
     # ----------------------------------------------------------- triggering
 
     def enable_frame_trigger(self) -> None:
-        if not self.raw.IsOpen():
+        # is_open() (not raw.IsOpen()) so a closed camera no-ops cleanly instead of
+        # raising AttributeError when self.raw is None (matches the other backends).
+        if not self.is_open():
             return
         self._clear_freerun_cap()  # drop any free-run preview cap before triggering
         self.raw.TriggerSelector.Value = "FrameStart"

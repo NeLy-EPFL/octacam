@@ -46,18 +46,12 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from octacam.cameras import _genicam_features
-from octacam.cameras._genicam_config import (
-    apply_config,
-    apply_freerun_rate_cap,
-    clear_freerun_rate_cap,
-    dump_config,
-    normalize_trigger_source,
-    parse_config,
-)
+from octacam.cameras._genicam_config import GenICamTriggerConfig
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     GEOMETRY_FEATURES,
@@ -257,7 +251,7 @@ def _device_info_for(harvester, serial: str):
     return None
 
 
-class HarvestersBackend(SoftwareTriggerHandoff):
+class HarvestersBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     """A single camera driven through Harvesters over a GenTL producer."""
 
     extension = "txt"
@@ -465,99 +459,14 @@ class HarvestersBackend(SoftwareTriggerHandoff):
     def execute_command(self, name: str) -> None:
         _genicam_features.execute_command(genapi, self._nodemap(), name)
 
-    def config_values(self, config_str: str) -> dict[str, str]:
-        return dict(parse_config(config_str))
+    # config_values / load_params / save_params and the software-trigger chain
+    # (enable_frame_trigger / set_trigger_source / begin_software_trigger_preview
+    # / trigger_once / begin_freerun / _enable_trigger_overlap) are inherited
+    # unchanged from GenICamTriggerConfig.
 
-    def load_params(self, config_str: str) -> None:
-        # Native GenApi persistence TSV, applied best-effort in file order (see
-        # _genicam_config). Runs after open(), so open()'s Mono8 stays authoritative.
-        if config_str:
-            apply_config(self, config_str)
-        self._original_trigger_source = self._get_enum("TriggerSource")
-
-    def save_params(self) -> str:
-        return normalize_trigger_source(dump_config(self), self._original_trigger_source)
-
-    # ----------------------------------------------------------- triggering
-
-    def _enable_trigger_overlap(self) -> None:
-        """Let a trigger be accepted during the previous frame's readout.
-
-        Without this (``TriggerOverlap=Off``, the FLIR default) a FrameStart
-        software trigger fired while the sensor is still reading out the previous
-        frame is **silently ignored**, so the camera accepts only ~every other
-        trigger — roughly halving the software-triggered frame rate and adding a
-        full grab-timeout stall on each dropped one. ``ReadOut`` pipelines
-        back-to-back triggers and restores the sensor's real rate (measured on
-        the Spinnaker backends: ~4.7 → ~64 fps at 4 ms exposure; see
-        ``docs/plan-spinnaker-c-backend.md``). Mirrors the same fix in
-        :mod:`~octacam.cameras.spinnaker_c` / :mod:`~octacam.cameras.flir`.
-        Best-effort: a producer/model without the node keeps its default.
-        """
-        try:
-            self._set_enum("TriggerOverlap", "ReadOut")
-        except BackendError as e:
-            log.debug("Could not set TriggerOverlap on camera %s: %s", self._serial, e)
-
-    def enable_frame_trigger(self) -> None:
-        if not self.is_open():
-            return
-        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
-        self._set_enum("TriggerSelector", "FrameStart")
-        self._set_enum("TriggerMode", "On")
-        self._enable_trigger_overlap()
-
-    def set_trigger_source(self, use_software: bool) -> None:
-        if not self.is_open():
-            return
-        try:
-            if use_software:
-                self._set_enum("TriggerSource", "Software")
-            elif self._original_trigger_source is not None:
-                self._set_enum("TriggerSource", self._original_trigger_source)
-        except BackendError as e:
-            log.warning(
-                "Failed to set trigger source on camera %s: %s", self._serial, e
-            )
-
-    def begin_software_trigger_preview(self) -> None:
-        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
-        self._set_enum("TriggerSelector", "FrameStart")
-        self._set_enum("TriggerMode", "On")
-        self._set_enum("TriggerSource", "Software")
-        self._enable_trigger_overlap()
-
-    def trigger_once(self) -> None:
-        # Only bump the pending counter; retrieve() fires the device trigger on
-        # the grab thread so the shared trigger timer never blocks on this camera.
-        self._bump_trigger()
-
-    def begin_freerun(self, fps: float | None = None) -> bool:
-        """Switch to continuous free-run (TriggerMode Off).
-
-        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
-        by free-run *preview* (``fps`` set, so the rate is capped at the target and
-        the preview draws the same bandwidth as an fps-matched recording).
-        Best-effort: a failure returns False so the caller skips free-run for this
-        camera. A later ``begin_software_trigger_preview`` re-arms the FrameStart
-        trigger (and clears the cap), so no explicit restore is needed.
-        """
-        if not self.is_open():
-            return False
-        try:
-            self._set_enum("TriggerMode", "Off")
-            try:
-                self._set_enum("AcquisitionMode", "Continuous")
-            except BackendError:
-                pass
-            if fps is not None:
-                apply_freerun_rate_cap(self, fps)
-            return True
-        except BackendError as e:
-            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
-            return False
-
-    def retrieve_freerun(self, timeout_ms: int, wants_array) -> Frame | None:
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
         # Free-run: the camera pushes frames continuously, so fetch the next one
         # without waiting on / firing a software trigger.
         ia = self._ia
@@ -594,7 +503,9 @@ class HarvestersBackend(SoftwareTriggerHandoff):
         except Exception:
             pass
 
-    def retrieve(self, timeout_ms: int, wants_array) -> Frame | None:
+    def retrieve(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
         # Wait for a pending software trigger, then fire exactly one device
         # trigger and fetch exactly one frame on this camera's own grab thread.
         if not self._wait_pending(timeout_ms):

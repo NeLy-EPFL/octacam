@@ -62,7 +62,9 @@ OFFSET_FEATURES = {"OffsetX": "center_x", "OffsetY": "center_y"}
 # Nodes octacam drives itself at runtime; surfaced in the Camera tab read-only so
 # an operator can see the value but cannot break preview/recording by editing it.
 # PixelFormat is forced to Mono8 (the GRAY8 writer); DeviceLinkThroughputLimit is
-# maximised at open(); the Trigger* chain and AcquisitionMode are reprogrammed by
+# maximised at open() on the FLIR/Spinnaker backends (the other backends do not
+# touch it) and is kept read-only everywhere so it can't be edited into a
+# bandwidth mismatch; the Trigger* chain and AcquisitionMode are reprogrammed by
 # the preview/record/benchmark grab paths; TLParamsLocked is transport state.
 RUNTIME_MANAGED_FEATURES = frozenset({
     "PixelFormat",
@@ -280,6 +282,18 @@ class CameraBackend(Protocol):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
 
+    # Optional external-trigger record fetch. The record loop discovers it with
+    # ``getattr(backend, "retrieve_external", None)`` and falls back to
+    # ``retrieve_freerun`` when a backend does not define it, so a real hardware
+    # backend (whose externally-triggered frames arrive on their own) simply omits
+    # it. Only a backend that models the external source itself — the in-memory
+    # fake, via its trigger counter — implements it, so an external recording with
+    # no pulses correctly yields nothing. Declared here to document the seam the
+    # core relies on; it is not required for structural conformance.
+    def retrieve_external(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None: ...
+
 
 def snap_value(value: float, info: NodeInfo) -> float:
     """Clamp to [min, max] and round to the node's increment grid."""
@@ -292,6 +306,21 @@ def snap_value(value: float, info: NodeInfo) -> float:
     if hi is not None:
         value = min(hi, value)
     return value
+
+
+def coerce_bool(value: object) -> bool:
+    """Coerce an arbitrary config/feature value to ``bool``.
+
+    A real ``bool`` passes through unchanged; a number is truthy when non-zero;
+    anything else is parsed as a string flag (``"1"``/``"true"``/``"yes"``/``"on"``,
+    case-insensitive). Shared by every backend's boolean feature write and the
+    native GenApi TSV config applier so the coercion is defined once.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
 class LatestFrame:
