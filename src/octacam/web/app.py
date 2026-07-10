@@ -60,6 +60,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 # import() URL, so only allow names that can't escape the /plugins/ prefix.
 _PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
+# How many recent controller events to replay to a (re)connecting client so the
+# event log shows history immediately instead of starting blank. The controller
+# keeps a bounded event deque; this is a recent slice of it (and is bounded by
+# the per-client send deque, which is the same size).
+EVENT_BACKLOG_REPLAY = 50
 # Longest preview edge for a normal (unfocused) tile. A client's adaptive
 # request may only make its preview *coarser* than this; going finer than the
 # baseline is reserved for a focused tile (maximized or zoomed, see _ViewSpec).
@@ -1249,6 +1254,14 @@ def create_app(
                 client.queue_text(
                     "diagnostics", json.dumps({"type": "diagnostics", **last_diag})
                 )
+            # Replay recent event history so a (re)connecting browser's log shows
+            # what already happened instead of a blank panel. The controller keeps
+            # a bounded deque of {time, level, message}; send a recent slice as
+            # ordinary "event" messages the client's existing handler renders.
+            # Queued after state/settings so the newest entries land last, in
+            # order.
+            for event in list(controller.events)[-EVENT_BACKLOG_REPLAY:]:
+                client.queue_event(json.dumps({"type": "event", **event}))
             while True:
                 text = await ws.receive_text()
                 try:

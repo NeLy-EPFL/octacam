@@ -219,6 +219,25 @@ body {
   background: var(--lime);
 }
 
+/* Prominent, hard-to-miss badge over a tile whose writer failed mid-recording
+   (a subtle red name tint alone is easy to overlook on a busy multi-cam grid).
+   Persists until the flag clears on the next recording. */
+.tile-fail {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  padding: 2px 7px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border-radius: 3px;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
 /* ----------------------------------------------------------- sidebar */
 
 /* Drag handle that resizes the sidebar by driving --sidebar-width (which both
@@ -540,6 +559,20 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 /* status + hints */
 
+/* Persistent, prominent save-failure banner (item mirrors the per-tile badge).
+   A solid red fill rather than a tint so it can't be missed during a trial;
+   no animation, so it is fine under prefers-reduced-motion. */
+.writer-alert {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: var(--red);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
 #record-status {
   margin-top: 8px;
   min-height: 2.8em;
@@ -636,6 +669,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #conn-state.online { color: var(--green); }
 #conn-state.offline { color: var(--red); }
+/* Calm neutral while the handshake is in flight — neither alarming nor "up". */
+#conn-state.connecting { color: var(--text-dim); }
 
 /* shown only when another browser is also connected (shared control) */
 #peers::before { content: "● "; color: var(--text-dim); }
@@ -1140,4 +1175,37 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 .bench-limits {
   color: var(--red);
   font-weight: 600;
+}
+
+/* ------------------------------------------------ narrow / mobile layout */
+
+/* The default layout is a fixed horizontal split (grid + a resizable sidebar),
+   which is unusable on a phone-width window. Below this breakpoint, stack the
+   grid above the sidebar and let the page scroll, hide the drag-resizer (the
+   sidebar spans the full width), and span the banner edge-to-edge. */
+@media (max-width: 640px) {
+  body {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  #grid {
+    flex: none;
+    height: 45vh;
+    min-height: 220px;
+  }
+
+  #sidebar-resizer { display: none; }
+
+  #sidebar {
+    /* Full width overrides the JS-driven --sidebar-width (and its 240px floor),
+       so a narrow viewport is not held to the desktop minimum. */
+    width: 100%;
+    flex: none;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Sidebar sits below the grid now, so the banner spans the whole top edge. */
+  #banner { right: 0; }
 }

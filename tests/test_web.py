@@ -265,6 +265,27 @@ def test_websocket_broadcasts_presence(client):
         assert _wait_for_presence(ws1) == 1
 
 
+def test_websocket_replays_event_backlog(client):
+    # A (re)connecting browser should receive the controller's recent event
+    # backlog so its log shows history instead of starting blank.
+    controller = client.controller
+    controller._event("info", "first historical event")
+    controller._event("warning", "second historical event")
+
+    seen = []
+    with client.websocket_connect("/api/ws") as ws:
+        for _ in range(200):
+            message = ws.receive()
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                if payload.get("type") == "event":
+                    seen.append(payload["message"])
+                    if "second historical event" in seen:
+                        break
+    assert "first historical event" in seen
+    assert "second historical event" in seen
+
+
 def test_websocket_preview_and_telemetry(client):
     import cv2
 

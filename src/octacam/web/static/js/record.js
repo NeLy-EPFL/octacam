@@ -56,6 +56,7 @@ export class RecordTab {
     this.transferDir = document.getElementById("transfer-dir");
     this.transferChecksum = document.getElementById("transfer-checksum");
     this.button = document.getElementById("record-button");
+    this.writerAlert = document.getElementById("record-writer-alert");
     this.status = document.getElementById("record-status");
     this.progress = document.getElementById("record-progress");
     this.progressBar = document.getElementById("record-progress-bar");
@@ -68,7 +69,7 @@ export class RecordTab {
     }
 
     this.durationValue.addEventListener("change", () => this._commitDuration());
-    this.durationUnit.addEventListener("change", () => this._commitDuration());
+    this.durationUnit.addEventListener("change", () => this._reexpressDuration());
     this.fpsInput.addEventListener("change", () =>
       this._put({ fps: clampInput(this.fpsInput) }, [this.fpsInput])
     );
@@ -249,6 +250,24 @@ export class RecordTab {
     this.updateControls();
   }
 
+  // A failed writer during a trial can silently lose data, so surface it as a
+  // persistent, prominent banner (in addition to the per-tile grid badge) that
+  // stays until the flag clears (the next recording resets it). `failedNames`
+  // is the list of cameras whose writer failed; empty hides the banner.
+  setWriterFailure(failedNames) {
+    const el = this.writerAlert;
+    if (!el) return;
+    if (failedNames && failedNames.length) {
+      el.textContent =
+        `⚠ Save failed: ${failedNames.join(", ")} — the recording may be ` +
+        "incomplete. See the event log / server log.";
+      el.classList.remove("hidden");
+    } else {
+      el.textContent = "";
+      el.classList.add("hidden");
+    }
+  }
+
   // ------------------------------------------------------------ render
 
   updateControls() {
@@ -386,6 +405,18 @@ export class RecordTab {
       this.durationValue,
       this.durationUnit,
     ]);
+  }
+
+  // Changing the unit must only re-express the SAME recording length in the new
+  // unit, not rescale it (picking "min" after "20 s" must show 0.333, not make
+  // the recording 20 minutes). Recompute the shown number from the unchanged
+  // duration_s and issue no PUT — only editing the value commits a new duration.
+  _reexpressDuration() {
+    const factor = Number(this.durationUnit.value) || 1;
+    const seconds = this.settings?.duration_s;
+    if (typeof seconds === "number") {
+      this.durationValue.value = trimNum(seconds / factor);
+    }
   }
 
   // Current base-directory text (possibly uncommitted), so the directory picker

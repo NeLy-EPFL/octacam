@@ -1088,7 +1088,6 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
     Passive by default (never opens a port), so it is safe alongside a live
     session. ``probe=True`` (``--probe-serial``) additionally reads each board's
     firmware identity, skipping any port already held by a running session."""
-    from octacam import plugins as plugins_mod
     from octacam import serial_ports as sp
 
     report.section("Serial devices")
@@ -1920,6 +1919,58 @@ def config(
     console.print(f"  • Record headlessly:    octacam record {target}")
 
 
+def _drive_record_progress(controller, duration_s: float) -> None:
+    """Show live recording progress until the recording leaves the active state.
+
+    On a TTY a determinate rich bar tracks the countdown with a running total
+    frame count; off a TTY a periodic log heartbeat stands in (so a piped/cron
+    run still shows it is alive). Returns once the recording is no longer active
+    — the caller then join()s the monitor to finalize the summary."""
+    import time as _time
+
+    poll = 0.1
+    if not sys.stderr.isatty():
+        next_beat = 0.0
+        while controller.recording_active:
+            now = _time.monotonic()
+            if now >= next_beat:
+                snap = controller.snapshot()
+                frames = sum(c["frames"] for c in snap["cameras"])
+                log.info("Recording (%s): %d frames captured", snap["state"], frames)
+                next_beat = now + 2.0
+            _time.sleep(poll)
+        return
+
+    from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
+
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeRemainingColumn(),
+        console=_stderr_console(),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Waiting for the first frame…", total=duration_s)
+        while controller.recording_active:
+            snap = controller.snapshot()
+            state = snap["state"]
+            frames = sum(c["frames"] for c in snap["cameras"])
+            if state == "recording" and snap.get("remaining_ms") is not None:
+                elapsed = max(0.0, duration_s - snap["remaining_ms"] / 1000.0)
+                progress.update(
+                    task, completed=elapsed, description=f"Recording — {frames} frames"
+                )
+            elif state == "waiting":
+                progress.update(
+                    task,
+                    description="Waiting for the first frame / external trigger…",
+                )
+            elif state == "finishing":
+                progress.update(task, description=f"Finishing — {frames} frames")
+            _time.sleep(poll)
+        progress.update(task, completed=duration_s)
+
+
 @app.command()
 def record(
     config_dir: Annotated[
@@ -1957,6 +2008,15 @@ def record(
             "date, reflash it before recording (also lets a headless run flash).",
         ),
     ] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            "-F",
+            help="Overwrite an existing save directory without the interactive "
+            "confirmation prompt.",
+        ),
+    ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
 ) -> None:
@@ -1967,7 +2027,7 @@ def record(
     day-to-day values (fps and duration, or an explicit --output save directory).
     """
     from octacam import session_cache
-    from octacam.cameras import BackendUnavailable, CameraSystem
+    from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
     from octacam.controller import RecordingController, normalize_save_dir
     from octacam.plugins import build_plugins
@@ -2002,6 +2062,15 @@ def record(
         )
     except BackendUnavailable as e:
         sys.exit(str(e))
+    except BackendError as e:
+        # The cameras could not be opened — most often because another octacam
+        # already holds them (vendor SDKs open USB3 devices exclusively), or a
+        # camera is disconnected. A clean message beats a raw SDK traceback.
+        sys.exit(
+            f"Could not open the cameras: {e}\n"
+            "They may already be in use by another octacam instance on this "
+            "rig, or disconnected — only one process can open them at a time."
+        )
     if len(system) == 0:
         log.warning("No cameras opened. Exiting.")
         sys.exit(1)
@@ -2015,9 +2084,23 @@ def record(
     system.apply_display_config(config.cameras)
 
     if Path(settings.save_dir).exists():
-        log.warning(
-            "Directory already exists, data might be overwritten: %s", settings.save_dir
-        )
+        if force:
+            log.warning("Save directory exists; overwriting: %s", settings.save_dir)
+        elif sys.stdin.isatty() and sys.stderr.isatty():
+            # Interactive: let the operator confirm before clobbering data.
+            if not typer.confirm(
+                f"Save directory already exists and will be overwritten:\n"
+                f"  {settings.save_dir}\nContinue?"
+            ):
+                raise typer.Exit(1)
+        else:
+            # Non-interactive (scripted/cron): keep overwriting for backward
+            # compatibility, but say so loudly. Use --force to silence this.
+            log.warning(
+                "Save directory exists, data may be overwritten: %s "
+                "(pass --force to silence this)",
+                settings.save_dir,
+            )
 
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
     plugins.setup_all()
@@ -2064,6 +2147,7 @@ def record(
         )
         if not result.ok:
             sys.exit(f"Failed to start recording: {result.message}")
+        _drive_record_progress(controller, settings.duration_s)
         controller.join()
     finally:
         # controller.close() sets abort, joins the daemon recording monitor (so
@@ -2077,6 +2161,16 @@ def record(
     extension = settings.video_format().extension
     for camera in system:
         typer.echo(f"{Path(settings.save_dir) / camera.name}.{extension}")
+
+    # A camera that captured 0 frames wrote only a header (no video) — usually an
+    # external trigger that never fired during the window. Fail the exit code so a
+    # scripted rig can detect it instead of seeing a "successful" run of empty files.
+    empty = [c.name for c in system if c.frames_recorded == 0]
+    if empty:
+        sys.exit(
+            f"{len(empty)} camera(s) recorded 0 frames ({', '.join(empty)}); "
+            "the recording is incomplete (no trigger, or no frames delivered)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2785,7 +2879,13 @@ def benchmark(
     else:
         _render_benchmark(report)
 
-    if not report.achievable:
+    # The achievable verdict comes from the software-trigger trial. On an
+    # external-trigger rig the cameras are hardware-clocked and overlap
+    # exposure+transfer (so they can run faster than software triggering), and the
+    # rig records fine via its trigger box — a software-trigger "NOT achievable"
+    # there is a misleading lower bound, not a failure. Only fail the exit code
+    # for software/managed rigs, whose recording really does use this path.
+    if not report.achievable and settings.trigger_source != "external":
         raise typer.Exit(1)
 
 
@@ -3598,7 +3698,8 @@ def process(
         typer.Option(
             "--dry-run",
             help="For grid/transfer: log what would be done without running ffmpeg "
-            "or copying files. Transcoding still runs normally.",
+            "or copying files. Transcoding still runs normally; --delete-source is "
+            "suppressed (logged, not applied).",
         ),
     ] = False,
 ) -> None:
@@ -3707,8 +3808,10 @@ def process(
                             continue
                         completed += 1
                         folder_outputs.setdefault(folder, []).append(output)
-                        if delete_source:
+                        if delete_source and not dry_run:
                             _delete_source_files(input_path)
+                        elif delete_source and dry_run:
+                            log.info("[dry-run] would delete source: %s", input_path)
                 except KeyboardInterrupt:
                     interrupted = True
             if not interrupted:

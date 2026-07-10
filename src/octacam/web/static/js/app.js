@@ -12,7 +12,10 @@ import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
 
-const MAX_EVENTS = 5;
+// The server replays a recent slice of its event backlog on (re)connect, so the
+// client keeps a generous scrollback to actually hold that history plus the
+// live tail; the panel (#events) is scrollable.
+const MAX_EVENTS = 200;
 const events = [];
 
 function addEvent(evt) {
@@ -357,7 +360,8 @@ async function main() {
   // agree from the start.
   if (system.cameras.length) grid.select(0);
 
-  // Connection has four modes: "connected", "reconnecting" (unexpected drop),
+  // Connection has five modes: "connecting" (initial handshake / manual
+  // reconnect, calm), "connected", "reconnecting" (unexpected drop),
   // "offline" (user disconnected, calm) and "stopped" (server shut down).
   function setConnectionMode(mode) {
     connMode = mode;
@@ -368,10 +372,13 @@ async function main() {
       banner.textContent = "Disconnected — reconnecting…";
       banner.classList.remove("hidden");
     } else if (mode === "stopped") {
-      banner.textContent = "Server stopped.";
+      // Actionable: the socket won't come back on its own, so point at the
+      // recovery (the relabelled Reconnect button reloads the page).
+      banner.textContent = "Server stopped — reload to reconnect.";
       banner.classList.remove("hidden");
     } else {
-      banner.classList.add("hidden"); // connected, or user-initiated offline
+      // connected, user-initiated offline, or the calm initial "connecting".
+      banner.classList.add("hidden");
     }
     banner.classList.toggle("stopped", mode === "stopped");
 
@@ -379,10 +386,17 @@ async function main() {
     connState.textContent =
       mode === "connected"
         ? "connected"
-        : mode === "stopped"
-          ? "server stopped"
-          : "disconnected";
-    connState.className = connected ? "online" : "offline";
+        : mode === "connecting"
+          ? "connecting…"
+          : mode === "stopped"
+            ? "server stopped"
+            : "disconnected";
+    connState.className =
+      mode === "connected"
+        ? "online"
+        : mode === "connecting"
+          ? "connecting"
+          : "offline";
 
     record.setConnected(connected);
     grid.setConnected(connected);
@@ -401,8 +415,21 @@ async function main() {
     if (!connected) updatePeers(1);
 
     const disconnectBtn = document.getElementById("disconnect-btn");
-    disconnectBtn.textContent = mode === "offline" ? "Connect" : "Disconnect";
-    disconnectBtn.disabled = mode === "stopped";
+    disconnectBtn.textContent =
+      mode === "offline"
+        ? "Connect"
+        : mode === "stopped"
+          ? "Reconnect"
+          : "Disconnect";
+    disconnectBtn.title =
+      mode === "stopped"
+        ? "Reload the page to reconnect to the server"
+        : mode === "offline"
+          ? "Reconnect this browser to the server"
+          : "Disconnect this browser (the recording keeps running on the rig)";
+    // Stay clickable when stopped so recovery doesn't need the browser's own
+    // reload control; the click handler reloads the page in that mode.
+    disconnectBtn.disabled = false;
     document.getElementById("shutdown-btn").disabled = mode === "stopped";
   }
 
@@ -422,6 +449,7 @@ async function main() {
   }
 
   function applyCameraStats(cameras) {
+    const failed = [];
     cameras.forEach((c, i) => {
       const index = grid.indexBySerial.has(c.serial)
         ? grid.indexBySerial.get(c.serial)
@@ -431,7 +459,11 @@ async function main() {
         dropped: c.dropped,
         writerFailed: c.writer_failed,
       });
+      if (c.writer_failed) failed.push(c.name || `camera ${index}`);
     });
+    // Surface any writer failure as a persistent, prominent Record-tab banner
+    // (the grid badge covers the tiles; this covers the operator watching Record).
+    record.setWriterFailure(failed);
   }
 
   function handleJson(msg) {
@@ -489,9 +521,12 @@ async function main() {
   }
 
   document.getElementById("disconnect-btn").addEventListener("click", () => {
-    if (connMode === "offline") {
+    if (connMode === "stopped") {
+      // The server is gone; a full reload re-runs loadInitial + the handshake.
+      location.reload();
+    } else if (connMode === "offline") {
       userDisconnected = false;
-      setConnectionMode("reconnecting");
+      setConnectionMode("connecting");
       sock.connect();
     } else {
       userDisconnected = true;
@@ -543,6 +578,10 @@ async function main() {
 
   record.applyState(snap);
   benchmark.applyState(snap);
+  // Show a calm "connecting…" state through the initial WS handshake, so a
+  // working HTTP page whose socket never upgrades reads as connecting rather
+  // than a dead-looking blank status.
+  setConnectionMode("connecting");
   sock.connect();
 }
 

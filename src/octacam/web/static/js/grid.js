@@ -71,6 +71,7 @@ export class CameraGrid {
       <div class="tile-body">
         <canvas width="0" height="0"></canvas>
         <div class="tile-cross"><div class="cross-h"></div><div class="cross-v"></div></div>
+        <div class="tile-fail hidden">⚠ SAVE FAILED</div>
       </div>
       <button type="button" class="tile-max" title="Maximize" tabindex="-1"></button>
       <div class="tile-resize n" data-dir="n"></div>
@@ -95,6 +96,7 @@ export class CameraGrid {
       nameEl,
       fpsEl: el.querySelector(".tile-fps"),
       droppedEl: el.querySelector(".tile-dropped"),
+      failEl: el.querySelector(".tile-fail"),
       maxBtn: el.querySelector(".tile-max"),
       runtime: { rot: 0, fx: 1, fy: 1 },
       // natW/natH are the decoded JPEG's pixel size (a crop, when zoomed);
@@ -350,6 +352,9 @@ export class CameraGrid {
       t.nameEl.title = writerFailed
         ? `serial ${t.cam.serial} — writer failed`
         : `serial ${t.cam.serial}`;
+      // A red name tint alone is easy to miss on a busy grid, so also flag a
+      // prominent badge over the tile body until the flag clears.
+      if (t.failEl) t.failEl.classList.toggle("hidden", !writerFailed);
     }
   }
 

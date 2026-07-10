@@ -136,6 +136,7 @@
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
         title="Start or stop recording on all cameras at once">Start recording</button>
+      <div id="record-writer-alert" class="writer-alert hidden" role="alert"></div>
       <div id="record-status"></div>
       <div id="record-progress" class="hidden"><div id="record-progress-bar"></div></div>
     </section>
@@ -424,8 +425,8 @@
   </aside>
 
   <div id="save-dialog" class="modal hidden">
-    <div class="modal-card">
-      <h3>Save configuration</h3>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="save-dialog-title">
+      <h3 id="save-dialog-title">Save configuration</h3>
       <div class="row" title="Overwrite the active config, or create a new named one"><span>Target:</span>
         <span class="radio-group">
           <label title="Overwrite the currently loaded config"><input type="radio" name="save-target" value="active" checked> Active</label>
@@ -448,8 +449,8 @@
   </div>
 
   <div id="dir-dialog" class="modal hidden">
-    <div class="modal-card">
-      <h3>Choose save directory</h3>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dir-dialog-title">
+      <h3 id="dir-dialog-title">Choose save directory</h3>
       <div class="dir-current-row">
         <button type="button" id="dir-up" class="btn" title="Parent folder">&#8593;</button>
         <span id="dir-current" class="dir-current"></span>
