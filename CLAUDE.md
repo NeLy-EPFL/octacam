@@ -257,6 +257,19 @@ node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writabl
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.
 
+**Keyboard shortcuts** live in one place: `web/static/js/shortcuts.js`
+(`initShortcuts({grid})`, wired once in `app.js main()`). It installs a single
+document-level `keydown` listener driven by one binding table, from which the `?`
+help overlay and the button `title=` hints are also generated (so they can't
+drift). Invariants worth preserving: every binding routes through the same
+`suppressed()` guard (no bare key fires while a text/`select`/contenteditable is
+focused or a modal is open), no binding uses bare `Enter`/`Escape`/`Tab` (owned by
+field/modal handlers), and actions **click the real control / call the real grid
+method** so gating (`disabled`), state-aware labels, and confirms are reused, not
+duplicated. Recording start/stop is `Ctrl/Cmd+Enter` on purpose (a stray key must
+never abort a live trial). Add a `tests/test_frontend.py` case for any new
+binding.
+
 To **see** GUI changes without the rig: render the real frontend in the cached
 Playwright Chromium and read the screenshot (serve `web/static` over
 `http.server`, `import()` the real module, call pure methods on the prototype).

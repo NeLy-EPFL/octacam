@@ -11,6 +11,7 @@ import { initSidebarResize } from "./resize.js";
 import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
+import { initShortcuts } from "./shortcuts.js";
 
 // The server replays a recent slice of its event backlog on (re)connect, so the
 // client keeps a generous scrollback to actually hold that history plus the
@@ -359,6 +360,12 @@ async function main() {
   // Establish an initial current camera so the grid highlight and both pickers
   // agree from the start.
   if (system.cameras.length) grid.select(0);
+
+  // Global keyboard shortcuts (one document-level listener; see shortcuts.js).
+  // Wired here, after grid/record/cameraTab/benchmark/plugins exist, so its
+  // bindings reach real, built controls; it drives the same buttons/grid
+  // methods the mouse does, inheriting their gating.
+  initShortcuts({ grid });
 
   // Connection has five modes: "connecting" (initial handshake / manual
   // reconnect, calm), "connected", "reconnecting" (unexpected drop),

@@ -180,6 +180,60 @@ export class CameraGrid {
     this.onSelect?.(index);
   }
 
+  // -------------------------------------------------- keyboard navigation
+
+  // Step the selection to the next/previous tile (wrapping), so the keyboard
+  // can walk the grid the way clicking a tile does. Fires onSelect (Camera/View
+  // tabs stay in sync). No-op with no tiles.
+  selectNext() { this._step(1); }
+  selectPrev() { this._step(-1); }
+  _step(delta) {
+    const n = this.tiles.length;
+    if (!n) return;
+    if (this.selected < 0) {
+      this.select(delta > 0 ? 0 : n - 1);
+      return;
+    }
+    this.select((this.selected + delta + n) % n);
+  }
+
+  // Maximize/restore the selected tile. The mouse path (toggleMaximize) takes a
+  // tile object; bridge from the current selection. No-op with no selection.
+  toggleMaximizeSelected() {
+    const t = this.tiles[this.selected];
+    if (t) this.toggleMaximize(t);
+  }
+
+  // Keyboard zoom of the selected tile, about its centre (the wheel path pins
+  // the point under the cursor and needs a real WheelEvent). factor > 1 zooms
+  // in; zoom is clamped to [1, ZOOM_MAX] exactly like _onWheel, and the pan is
+  // re-scaled + re-clamped so the image can't sit past its own edge.
+  zoomSelected(factor) {
+    const t = this.tiles[this.selected];
+    if (!t) return;
+    const z = clamp(t.zoom * factor, 1, ZOOM_MAX);
+    if (z === t.zoom) return;
+    // With the cursor pinned to the centre, _onWheel's pan solve reduces to a
+    // simple rescale of the existing pan.
+    t.panX *= z / t.zoom;
+    t.panY *= z / t.zoom;
+    t.zoom = z;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
+  }
+
+  resetZoomSelected() {
+    const t = this.tiles[this.selected];
+    if (!t || (t.zoom === 1 && t.panX === 0 && t.panY === 0)) return;
+    t.zoom = 1;
+    t.panX = 0;
+    t.panY = 0;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
+  }
+
   setCrossVisible(visible) {
     this.container.classList.toggle("show-cross", visible);
   }

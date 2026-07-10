@@ -364,6 +364,198 @@ def test_advanced_fields_are_inside_advanced(page, field_id):
     assert inside is True
 
 
+# --- keyboard shortcuts ---------------------------------------------------- #
+
+
+def init_shortcuts(page: Page) -> None:
+    """Install the real shortcut layer against the loaded DOM. ``window.__calls``
+    records every method the (fake) grid receives, as ``[name, ...args]``."""
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/shortcuts.js');
+            window.__calls = [];
+            const grid = new Proxy({}, {
+                get: (_, k) => (...args) => { window.__calls.push([k, ...args]); },
+            });
+            window.__sc = m.initShortcuts({ grid });
+        }"""
+    )
+
+
+def key(page: Page, k: str, *, target: str | None = None, **mods) -> None:
+    """Dispatch a keydown. With ``target``, the event originates on that element
+    (so the typing-suppression guard sees it); otherwise on ``document``."""
+    page.evaluate(
+        """({ k, target, mods }) => {
+            const el = target ? document.querySelector(target) : document;
+            el.dispatchEvent(new KeyboardEvent('keydown', {
+                key: k, bubbles: true, cancelable: true,
+                ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, metaKey: !!mods.meta,
+            }));
+        }""",
+        {"k": k, "target": target, "mods": mods},
+    )
+
+
+def _hidden(page: Page, selector: str) -> bool:
+    return prop(page, selector, "e => e.classList.contains('hidden')")
+
+
+def test_bare_key_shortcut_fires_and_is_suppressed_while_typing(page):
+    """``t`` toggles the theme via the real button — but never while a text
+    field holds focus (the edit-heavy GUI must not let bare keys eat input)."""
+    init_shortcuts(page)
+    page.evaluate(
+        """() => {
+            window.__c = 0;
+            document.getElementById('theme-toggle')
+                .addEventListener('click', () => window.__c++);
+        }"""
+    )
+    key(page, "t")
+    assert page.evaluate("() => window.__c") == 1
+    # Same key, but originating from an input: suppressed.
+    key(page, "t", target="#fps")
+    assert page.evaluate("() => window.__c") == 1
+
+
+def test_record_shortcut_respects_disabled(page):
+    """Ctrl+Enter drives #record-button, and is a no-op while it's disabled — so
+    it inherits the app's connected/finishing/pending gating for free."""
+    init_shortcuts(page)
+    disabled = page.evaluate(
+        """() => {
+            const btn = document.getElementById('record-button');
+            window.__n = 0;
+            btn.addEventListener('click', () => window.__n++);
+            return btn.disabled;  // starts disabled in index.html
+        }"""
+    )
+    assert disabled is True
+    key(page, "Enter", ctrl=True)
+    assert page.evaluate("() => window.__n") == 0
+    page.evaluate("() => (document.getElementById('record-button').disabled = false)")
+    key(page, "Enter", ctrl=True)
+    assert page.evaluate("() => window.__n") == 1
+
+
+def test_global_preview_shortcuts_call_grid(page):
+    """[, ], f, 0 drive the grid's selection/zoom regardless of the active tab."""
+    init_shortcuts(page)
+    for k in ("[", "]", "f", "0"):
+        key(page, k)
+    names = page.evaluate("() => window.__calls.map(c => c[0])")
+    assert names == [
+        "selectPrev",
+        "selectNext",
+        "toggleMaximizeSelected",
+        "resetZoomSelected",
+    ]
+
+
+def test_view_shortcut_scoped_to_active_tab(page):
+    """``r`` rotates only while the View tab is active; on another tab it's inert
+    (so the same letter is free to mean other things per tab)."""
+    init_shortcuts(page)
+    key(page, "r")  # Record tab is active by default
+    assert page.evaluate("() => window.__calls.length") == 0
+    page.evaluate(
+        """() => document.querySelectorAll('#tabs button[data-tab]').forEach(
+            b => b.classList.toggle('active', b.dataset.tab === 'view'))"""
+    )
+    key(page, "r")
+    assert page.evaluate("() => window.__calls") == [
+        ["applyView", {"rotateDelta": 90}, "selected"]
+    ]
+
+
+def test_digit_switches_tab_by_fixed_order(page):
+    """Digit 3 clicks the View tab button (3rd in the fixed order), independent
+    of overflow-menu packing."""
+    init_shortcuts(page)
+    clicks = page.evaluate(
+        """() => {
+            const clicks = {};
+            for (const b of document.querySelectorAll('#tabs button[data-tab]')) {
+                b.addEventListener('click', () => {
+                    clicks[b.dataset.tab] = (clicks[b.dataset.tab] || 0) + 1;
+                });
+            }
+            document.dispatchEvent(new KeyboardEvent('keydown',
+                { key: '3', bubbles: true, cancelable: true }));
+            return clicks;
+        }"""
+    )
+    assert clicks == {"view": 1}
+
+
+def test_help_overlay_toggles_and_lists_bindings(page):
+    """``?`` opens the help overlay (rendered from the binding table), Escape
+    closes it; it lists the sections and real keycaps."""
+    init_shortcuts(page)
+    assert _hidden(page, "#shortcuts-overlay") is True
+    key(page, "?")
+    assert _hidden(page, "#shortcuts-overlay") is False
+    info = page.evaluate(
+        """() => {
+            const c = document.querySelector('#shortcuts-overlay .shortcuts-card');
+            return {
+                groups: [...c.querySelectorAll('.shortcuts-group-head')].map(e => e.textContent),
+                kbds: [...c.querySelectorAll('kbd')].map(k => k.textContent),
+                text: c.textContent,
+            };
+        }"""
+    )
+    assert "Recording" in info["groups"]
+    assert "Enter" in info["kbds"]
+    assert "Switch tab" in info["text"]
+    key(page, "Escape")
+    assert _hidden(page, "#shortcuts-overlay") is True
+
+
+def test_record_button_gets_shortcut_title_hint(page):
+    """The layer appends the shortcut to anchor buttons' tooltips for discovery."""
+    init_shortcuts(page)
+    title = prop(page, "#record-button", "e => e.title")
+    assert "(Ctrl+Enter)" in title
+
+
+def test_grid_keyboard_helpers_drive_selection_and_zoom(page):
+    """The new CameraGrid helpers the shortcuts call: selectNext/Prev wrap the
+    selection, zoomSelected/resetZoomSelected move zoom (and notify the server),
+    and toggleMaximizeSelected maximizes the current tile."""
+    result = page.evaluate(
+        """async () => {
+            const m = await import('./js/grid.js');
+            const cams = [0, 1, 2].map((i) => ({
+                serial: 'S' + i, name: 'C' + i, width: 640, height: 480,
+                transform: {}, layout: {},
+            }));
+            let views = 0;
+            const grid = new m.CameraGrid(
+                document.getElementById('grid'), cams, { onViewChange: () => views++ });
+            grid.select(0);
+            grid.selectNext();                    // 0 -> 1
+            const afterNext = grid.selected;
+            grid.selectPrev(); grid.selectPrev(); // 1 -> 0 -> 2 (wrap)
+            const afterWrap = grid.selected;
+            grid.zoomSelected(2);
+            const zoomed = grid.tiles[grid.selected].zoom;
+            grid.resetZoomSelected();
+            const reset = grid.tiles[grid.selected].zoom;
+            grid.toggleMaximizeSelected();
+            const maxed = grid.tiles[grid.selected].maximized;
+            return { afterNext, afterWrap, zoomed, reset, maxed, views };
+        }"""
+    )
+    assert result["afterNext"] == 1
+    assert result["afterWrap"] == 2  # wrapped past 0
+    assert result["zoomed"] > 1
+    assert result["reset"] == 1
+    assert result["maxed"] is True
+    assert result["views"] > 0  # zoom/maximize pushed a fresh view spec
+
+
 def test_advanced_toggle_reveals_and_hides_and_persists(page):
     """Flipping the switch shows/hides the advanced block and remembers the
     choice in localStorage."""

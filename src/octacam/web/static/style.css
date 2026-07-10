@@ -707,6 +707,72 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
 
+/* Compact glyph button (⌨) that opens the keyboard-shortcut overlay. */
+#shortcuts-help-btn {
+  flex: none;
+  padding: 2px 7px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* ---------------------------------------------- keyboard shortcuts overlay */
+
+/* Reuses .modal / .modal-card, but wider and scrollable for the binding list. */
+.shortcuts-card {
+  width: 460px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.shortcuts-head h3 { margin: 0; text-align: left; }
+.shortcuts-close { flex: none; padding: 2px 8px; }
+
+.shortcuts-group { margin-top: 12px; }
+
+.shortcuts-group-head {
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcuts-row {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.shortcuts-keys { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.shortcuts-sep { color: var(--text-dim); }
+.shortcuts-desc { color: var(--text); }
+
+/* Keycap styling, shared by anything rendering a <kbd>. */
+kbd {
+  display: inline-block;
+  min-width: 12px;
+  padding: 1px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text);
+}
+
 /* ------------------------------------------------ camera params tab */
 
 .name-edit { display: flex; gap: 6px; }
