@@ -1,19 +1,39 @@
 # CLI reference
 
-Every command supports `-h` / `--help`, which prints the authoritative,
-up-to-date option list (with Rich-styled panels). This page summarizes them.
+octacam installs a single `octacam` command with seven subcommands:
 
 ```
 octacam [GLOBAL OPTIONS] COMMAND [ARGS]
 ```
 
+| Command | Purpose |
+| --- | --- |
+| [`gui`](#gui) | Launch the live web GUI for a rig. |
+| [`list-cameras`](#list-cameras) | List detected cameras. |
+| [`list-plugins`](#list-plugins) | List bundled plugins and whether each can load. |
+| [`record`](#record) | Record headlessly from a rig. |
+| [`transcode`](#transcode) | Re-encode recordings to compressed video (with optional grid/NAS steps). |
+| [`grid`](#grid) | Build a composite grid video from transcoded recordings. |
+| [`nas`](#nas) | Copy recordings to a NAS or any destination. |
+
+!!! tip "`-h` / `--help` is authoritative"
+    Every command accepts `-h` or `--help`, which prints the exact option list
+    for the version you have installed. This page documents octacam
+    **0.2.0.dev0**.
+
 ## Global options
 
-| Option | Purpose |
-| --- | --- |
-| `--log-level`, `-l` | Logging verbosity: `debug` \| `info` \| `warning` \| `error` (default `info`). |
-| `--version` | Print the version and exit. |
-| `-h`, `--help` | Show help (on the root or any command). |
+These options appear before the subcommand (e.g. `octacam --log-level debug gui`).
+Running `octacam` with no subcommand prints the help and exits.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--log-level`, `-l` | `info` | Logging verbosity: `debug` \| `info` \| `warning` \| `error`. |
+| `--version` | — | Print the version and exit. |
+| `-h`, `--help` | — | Show help (on the root or any subcommand). |
+
+Logs are written to stderr so stdout stays clean for the machine-readable output
+of `list-cameras`, `record`, `transcode`, `grid`, and `nas`.
 
 ## `gui`
 
@@ -21,54 +41,59 @@ octacam [GLOBAL OPTIONS] COMMAND [ARGS]
 octacam gui [CONFIG_DIR]
 ```
 
-Launch the live web GUI for the cameras in `CONFIG_DIR` (default: current
-directory). See the [Web GUI guide](../guide/gui.md).
+Launch the octacam web GUI for the cameras in `CONFIG_DIR` (default: the current
+directory). The GUI serves preview, telemetry, recording control, and any loaded
+plugin tabs over one WebSocket.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | Bind address. Keep loopback and tunnel over SSH for remote use. |
-| `--port` | `8765` | Port to bind. |
-| `--no-browser` | off | Don't auto-open a browser (also auto-skipped over SSH / headless). |
-| `--plugin <name>` | — | Enable a [plugin](../guide/plugins.md) (repeatable). |
-| `--no-plugins` | off | Disable all plugins for this launch. |
+| `--host` | `127.0.0.1` | Bind address. Keep the loopback default and reach the GUI remotely with `ssh -L 8765:127.0.0.1:8765 <rig-hostname>`. |
+| `--port` | `8765` | Port to bind; override if it clashes with other software. |
+| `--no-browser` | off | Don't auto-open a browser. Auto-open is also skipped over SSH and on headless (no-display) sessions. |
+| `--plugin <name>` | — | Enable a plugin (repeatable); adds to the config's `plugins`, e.g. `--plugin flywheel`. See [`list-plugins`](#list-plugins). |
+| `--no-plugins` | off | Disable all plugins for this launch, ignoring the config. |
 
-## `doctor`
+!!! note "One octacam per rig"
+    `gui` takes an exclusive lock keyed on the config directory, so a second
+    `octacam gui <config_dir>` for the same rig is refused even on a different
+    `--port`. The chosen port is also probed up front, so a port clash fails
+    immediately instead of after opening the cameras.
 
-```bash
-octacam doctor [CONFIG_DIR]
-```
+On shutdown (Ctrl+C or the in-GUI shutdown control), if anything was recorded
+this session octacam prints the ready-to-run `transcode` commands for the
+recorded folders.
 
-Diagnose the install and, optionally, a rig. Lists detected cameras and bundled
-plugins and checks the encoding toolchain, storage, recording cache, and runtime
-conflicts. Passing `CONFIG_DIR` also validates that rig's config, resolves its
-save/transfer paths, and cross-checks declared vs detected cameras. It never
-opens a camera, so it is safe to run while a session is live.
-
-| Option | Purpose |
-| --- | --- |
-| `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: the whole available cascade. |
-| `--json` | Emit machine-readable JSON instead of the report. |
-| `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
-| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
-
-Exits `0` when no errors are found, so it works as a pre-flight check in scripts.
-
-## `config`
+## `list-cameras`
 
 ```bash
-octacam config [CONFIG_DIR]
+octacam list-cameras
 ```
 
-Interactively scaffold a new rig's `octacam_config.toml`: auto-detects the
-connected cameras, prompts for the record/transfer settings and an optional serial
-plugin, then writes the file (visual per-camera placement is left to `octacam
-gui`). If `CONFIG_DIR` is omitted you are prompted for one.
+List detected cameras, one per line. Output is tab-separated: `model<TAB>serial`
+for the Basler backend, and `serial<TAB>backend` for the others.
 
-| Option | Purpose |
-| --- | --- |
-| `--backend <name>` | Pin the rig to one backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: auto-detect through the cascade. |
-| `--force` | Overwrite an existing `octacam_config.toml` without asking. |
-| `--snapshot-params` / `--no-snapshot-params` | Open each detected camera once to save its current sensor parameters (`.pfs`/`.txt`); busy cameras are skipped. On by default. |
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--backend <name>` | `basler` | Camera backend to enumerate: `basler`, `flir`, or `fake`. |
+
+!!! tip "Run without hardware"
+    Set `PYLON_CAMEMU=N` to enumerate `N` emulated Basler cameras, or use
+    `--backend fake` for the synthetic test backend (serials come from
+    `OCTACAM_FAKE_CAMERAS`, default `FAKE-0,FAKE-1`).
+
+## `list-plugins`
+
+```bash
+octacam list-plugins
+```
+
+List the bundled, opt-in plugins and whether each can load. Takes no options.
+Output is tab-separated: `name<TAB>status<TAB>summary`, where `status` is
+`available` (the plugin's dependencies are present — the bundled plugins ship
+their deps by default) or `unavailable` (the summary carries the reason).
+
+Enable a plugin with `--plugin <name>` on [`gui`](#gui) or [`record`](#record),
+or with a `[[plugins]]` entry in the rig config.
 
 ## `record`
 
@@ -76,105 +101,160 @@ gui`). If `CONFIG_DIR` is omitted you are prompted for one.
 octacam record [CONFIG_DIR]
 ```
 
-Record headlessly (no browser). Encoding, save method, transform, and the
-save-directory template come from the config's `[record]` section; the options
-override only the day-to-day values. See [Recording](../guide/recording.md).
+Record videos headlessly from the cameras in `CONFIG_DIR` (default: the current
+directory). One output path per camera is printed on stdout when done.
 
-| Option | Purpose |
-| --- | --- |
-| `--fps`, `-f` | Frame rate (default: from config). |
-| `--duration`, `-d` | Duration in seconds (default: from config). |
-| `--output`, `-o` | Save directory, overriding the templated location. |
-| `--yes`, `-y` | Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash). |
-| `--plugin <name>` | Enable a plugin (repeatable). |
-| `--no-plugins` | Disable all plugins for this run. |
-
-## `flash`
-
-```bash
-octacam flash [CONFIG_DIR]
-```
-
-Check a serial plugin's board firmware against the bundled Arduino sketch and,
-unless `--check`, compile + upload the current sketch with arduino-cli. Pass
-`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both.
-
-| Option | Purpose |
-| --- | --- |
-| `--plugin <name>` | Serial plugin whose firmware to manage (e.g. `triggerbox`); enables it even if not in the config. |
-| `--device <path>` | Serial device override (e.g. `/dev/ttyACM0` or `auto`). |
-| `--yes`, `-y` | Flash without prompting when out of date. |
-| `--check` | Report only; exit nonzero if any board is out of date. Never flashes. |
-
-## `benchmark`
-
-```bash
-octacam benchmark [CONFIG_DIR]
-```
-
-A short instrumented dry-run against the cameras in `CONFIG_DIR` (no video is
-kept): tests whether the target frame rate is achievable, searches for the
-maximum achievable rate, and measures each pipeline stage — **acquire** (trigger
-+ exposure + USB transfer), **transform**, **enqueue**, **encode** — so you can
-see the limiting step. It reports the acquisition and encode ceilings, a verdict
-(achievable / not, with the bottleneck), and targeted recommendations.
-
-Like `record` it opens the cameras, so it cannot run at the same time as a live
-GUI or recording on the same rig. Exits nonzero when the target fps is not
-achievable, so it works as a pre-flight check in scripts. The same benchmark is
-available from the GUI's **Benchmark** tab.
+Every option that defaults to *from config* falls back to the rig's
+`octacam_config.toml` (`[gui]` defaults) when omitted.
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--fps`, `-f` | from config | Target fps to test. |
-| `--duration`, `-d` | `5` | Seconds spent measuring each scenario. |
-| `--find-max` / `--no-find-max` | on | Search for the maximum achievable fps (software trigger only). |
-| `--freerun` / `--no-freerun` | on | Also measure the free-run (external-trigger-equivalent) ceiling. |
-| `--sink` | `config` | `config` (encode through the rig's real save method — measures the encode cost) or `null` (discard frames to isolate acquisition). |
-| `--record-form` | from config | `display` (bake the transform) or `sensor`. |
-| `--backend` | from config | Override the camera backend. |
-| `--json` | off | Emit the report as JSON instead of the table. |
+| `--fps`, `-f` | from config | Frame rate. |
+| `--duration`, `-d` | from config | Recording duration in seconds. |
+| `--output`, `-o` | from config | Save directory. |
+| `--codec` | `x264` | `x264`: ffmpeg H.264 MKV (gray 4:0:0); `raw`: Mono8 dump for later [`transcode`](#transcode). |
+| `--crf` | from config | x264 quality (lower = better; `0` = lossless). |
+| `--preset` | from config | x264 speed preset. `ultrafast` is the only one validated at 8 cameras × 150 fps; slower presets compress better. |
+| `--x264-params` | from config | Extra libx264 options passed as ffmpeg `-x264-params`, e.g. `"keyint=30:scenecut=0"`. |
+| `--trigger` | `software` | `software`: trigger from a timer thread at `--fps`; `hardware`: use the trigger source configured in the `.pfs` files. |
+| `--record-form` | from config | `display`: bake each camera's rotation/flips into the video; `sensor`: save the raw, untransformed image. |
+| `--save-frame-timestamps` / `--no-save-frame-timestamps` | from config | Also write a per-frame timestamp CSV per camera, for debugging. |
+| `--plugin <name>` | — | Enable a plugin (repeatable); adds to the config's `plugins`. |
+| `--no-plugins` | off | Disable all plugins for this run. |
 
-## `process`
+!!! note "`--trigger hardware`"
+    With `--trigger hardware`, octacam does not pace the cameras itself: it arms
+    each camera's config-native trigger source and waits for an external master
+    to fire. If the external trigger never fires within the window, cameras can
+    finish with zero frames (a header-only file); octacam flags those on stdout
+    and skips them during transcode.
+
+## `transcode`
 
 ```bash
-octacam process [PATHS…]
+octacam transcode [PATHS...]
 ```
 
-Transcode recordings to mp4, build composite grid videos, and transfer to
-storage — all driven by each recording's embedded config snapshot. Pass
-recording folders (or parent directories with `-r`), or select from the cache
-with `--last` / `--last session` / `--all`. See
-[Processing](../guide/processing.md).
+Transcode recordings to compressed video, optionally building a composite grid
+video and copying results to a NAS afterwards. Recordings use a fast capture
+preset, so transcode always re-encodes (it never stream-copies) with the slower
+`veryslow` default preset where compression is actually gained.
 
-**Selecting what to process** (mutually exclusive; can't combine with explicit
-`PATHS`):
+`PATHS` may mix recording folders and individual video files (`.mkv`/`.raw`). A
+folder with a `recording_summary.json` is driven by it (which files, and each
+camera's display transform); a folder without one has its loose `.mkv`/`.raw`
+files transcoded with defaults and no transform.
 
-| Option | Purpose |
-| --- | --- |
-| `--last` (or `--last recording`) | The most recent recording folder. |
-| `--last session` | Every folder from the last GUI session. |
-| `--session-id <id>` | Every folder from one exact session id. |
-| `--all` | Every recording folder still in the cache. |
+### Selecting what to transcode
 
-**Controlling the steps:**
+Instead of `PATHS`, select folders from the recording cache. These selectors are
+**mutually exclusive** with each other and cannot be combined with explicit
+`PATHS`. They silently skip any folder that has since been deleted.
 
 | Option | Purpose |
 | --- | --- |
-| `-r`, `--recursive` | Recurse into the given folders. |
-| `--no-transcode` | Skip transcoding; grid/transfer act on existing mp4s. |
-| `--no-grid` | Skip building the grid video(s). |
-| `--no-transfer` | Skip transferring to the `[transfer]` destination. |
-| `--force` | Re-transcode / rebuild grids even if outputs already exist. |
-| `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
-| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
-| `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
-| `--dry-run` | Log the intended grid/transfer work without writing anything. |
+| `--last`, `--last-recording` | The most recent recording folder. |
+| `--session`, `--last-session` | Every folder from the last GUI session. |
+| `--session-id <id>` | Every folder from one exact session id (the value the GUI prints on exit; unlike `--session`, it is not hijacked by a later recording). |
+| `--all` | Every recording folder still in the cache (all sessions, all days). |
+
+Passing neither `PATHS` nor a selector is an error.
+
+### Encoding options
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-r`, `--recursive` | off | Recurse into the given folders. |
+| `--as-displayed` / `--as-saved` | `--as-saved` | `--as-displayed` applies each video's recorded display transform (skipped when already baked in); default reproduces the video as saved. |
+| `--format` | `mp4` | Output container. |
+| `--crf` | `20` | x264 quality. |
+| `--preset` | `veryslow` | x264 speed preset. |
+| `--pix-fmt` | `gray` | Pixel format. |
+| `--x264-params` | `""` | Extra libx264 `-x264-params`, e.g. `"keyint=30:scenecut=0"`. |
+| `--remove-source` | off | Delete each source `.mkv`/`.raw` (and a `.raw`'s `.json` sidecar) once it transcodes successfully. The `recording_summary.json` is kept. |
+| `--progress-style` | `octacam` | `octacam`: reformat ffmpeg's progress into an octacam-style progress bar. `ffmpeg`: stream ffmpeg's own output verbatim. |
+
+### Grid and NAS post-processing
+
+After transcoding, octacam can build a grid video and mirror results to a NAS.
+CLI flags override the corresponding `[grid]`/`[nas]` sections of `--config`.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--grid` / `--no-grid` | from config | Generate a composite grid video after each folder. When omitted, the `[grid] default` in `--config` decides; `--no-grid` always disables it. |
+| `--config`, `-C <dir>` | — | Rig config directory (`octacam_config.toml`). Supplies the grid layout, whether grid/NAS run by default (`[grid] default` and `[nas] path`), and the NAS local-base. |
+| `--nas-path <path>` | from config | Copy results to this destination after each folder. Overrides `[nas] path` from `--config`. |
+| `--nas-local-base <path>` | from config | Local root to strip for NAS path mirroring. Overrides `[nas] local_base` from `--config`. |
+| `--nas-verify` / `--no-nas-verify` | from config | Content-verify each NAS copy (checksum) before promoting it. When omitted, the `[nas] verify` value in `--config` decides (default on). |
+| `--nas-checksum` | off | Decide whether an already-present NAS file can be skipped by full checksum rather than size (repair mode). |
+| `--dry-run` | off | For `--grid` and `--nas-path`: log what would be done without running ffmpeg or copying files. Transcoding still runs normally. |
+
+!!! note "Interrupt-safe"
+    A Ctrl-C stops the batch where it stands; the in-flight file's partial output
+    is discarded, and files already finished keep their outputs. octacam warns if
+    a `transcode` is already running on the machine when you start a `gui` or
+    `record` session, since transcoding is CPU-heavy and can cause dropped frames.
+
+## `grid`
+
+```bash
+octacam grid PATHS... [OPTIONS]
+```
+
+Generate a composite grid video from already-transcoded recording folders. At
+least one `PATHS` argument is required, and each path must exist.
+
+Camera names and positions come from the `[grid]` section of the rig's
+`octacam_config.toml` (`--config`). Without a config, octacam falls back to its
+built-in 7-camera default layout. Missing cameras are filled with black frames,
+and the output is always `yuv420p` for QuickTime / Keynote compatibility.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `-r`, `--recursive` | off | Search each path recursively for recording directories (identified by `recording_summary.json`) and generate a grid in each. Without this flag every argument must itself be a recording directory. |
+| `--config`, `-C <dir>` | — | Config directory whose `octacam_config.toml` contains a `[grid]` layout section. When omitted the built-in 7-camera default is used. |
+| `--output-name`, `-o <name>` | `grid.mp4` | Output filename inside each folder. |
+| `--crf` | `20` | x264 quality. |
+| `--preset` | `veryslow` | x264 speed preset. |
+| `--pix-fmt` | `yuv420p` | Pixel format for the grid video. `yuv420p` is required for QuickTime / Keynote compatibility. |
+| `--dry-run` | off | With `-r`: list the recording directories that would be processed. Always: log the ffmpeg command without running it. |
+
+## `nas`
+
+```bash
+octacam nas PATHS... --nas-path PATH [OPTIONS]
+```
+
+Copy recordings to a NAS or any destination, preserving the directory tree. At
+least one `PATHS` argument is required, and each path must exist. `--nas-path` is
+**required**.
+
+Copies are atomic and resumable: each file is written to a temp and only swapped
+onto its final name once whole and (by default) checksum-verified, and a re-run
+skips files already present. The `.mp4` files (individual cameras and `grid.mp4`
+if present) and the `recording_summary.json` from each recording directory are
+copied.
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--nas-path <path>` | **required** | NAS destination root, e.g. `/mnt/nas/matthias`. |
+| `--nas-local-base <path>` | — | Local root to strip when computing the NAS sub-path, so the directory tree is mirrored. With `--nas-local-base /home/nely/data/MD`, a recording at `/home/nely/data/MD/260624_/Fly1/001-bhv` lands at `<nas-path>/260624_/Fly1/001-bhv`. Omit to use only the folder name. |
+| `-r`, `--recursive` | off | Search each path recursively for recording directories (identified by `recording_summary.json`) and copy each one. |
+| `--verify` / `--no-verify` | `--verify` | Content-verify each copied file (checksum) before promoting it to its final name. `--no-verify` falls back to a size-only check for trusted/fast links. |
+| `--checksum` | off | When a file already exists on the NAS, decide whether to skip it by full checksum rather than size (repair mode: re-copies files whose bytes differ). |
+| `--dry-run` | off | Log what would be copied without touching any files. |
+
+!!! tip "Automatic tree mirroring"
+    When `--nas-local-base` is omitted and several recordings are copied at once,
+    their common parent is used as the base automatically, so same-named trials
+    (e.g. two `001-bhv`) do not collide on the NAS.
 
 ## Environment variables
 
 | Variable | Effect |
 | --- | --- |
-| `PYLON_CAMEMU` | Number of emulated Basler cameras (run without hardware). |
-| `OCTACAM_CACHE_DIR` | Override the recording cache location (default `~/.cache/octacam`). |
-| `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one. |
+| `PYLON_CAMEMU` | Number of emulated Basler cameras to summon (run without hardware). |
+| `OCTACAM_FAKE_CAMERAS` | Comma-separated serials for the `fake` backend (default `FAKE-0,FAKE-1`). |
+| `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one (`imageio-ffmpeg`), or a system `ffmpeg` on `$PATH`. |
+| `OCTACAM_CACHE_DIR` | Override the recording-cache location. |
+| `XDG_CACHE_HOME` | Base for the recording cache when `OCTACAM_CACHE_DIR` is unset (falls back to `~/.cache/octacam`). |
