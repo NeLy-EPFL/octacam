@@ -304,3 +304,81 @@ def test_max_nvenc_sessions_change_rounds_to_int(page):
         }"""
     )
     assert body == {"max_nvenc_sessions": 4}
+
+
+# --- advanced-options toggle ----------------------------------------------- #
+
+
+def _flip_advanced(page, on: bool) -> None:
+    page.evaluate(
+        """(on) => {
+            const t = document.getElementById('record-advanced-toggle');
+            t.checked = on;
+            t.dispatchEvent(new Event('change'));
+        }""",
+        on,
+    )
+
+
+# The exact essentials/advanced partition from the spec. Parametrized below so a
+# regression that pushes an essential into the advanced block (or leaves an
+# advanced knob among the essentials) fails a named case — not just the two-field
+# spot-check the toggle test would otherwise give.
+ESSENTIAL_IDS = ["duration-value", "fps", "record-dir", "relative-dir", "transfer-dir"]
+ADVANCED_IDS = [
+    "trigger-source",
+    "preview-trigger-source",
+    "format",
+    "ffmpeg-params",
+    "nvenc-params",
+    "nvenc-auto",
+    "max-nvenc-sessions",
+    "record-form",
+    "save-frame-timestamps",
+    "writer-queue-size",
+    "transcode-ffmpeg-params",
+    "transfer-checksum",
+]
+
+
+def test_advanced_section_hidden_by_default(page):
+    """The advanced knobs start collapsed and the switch is off."""
+    make_tab(page)
+    assert prop(page, "#record-advanced-toggle", "e => e.checked") is False
+    assert prop(page, "#record-advanced", "e => e.hidden") is True
+
+
+@pytest.mark.parametrize("field_id", ESSENTIAL_IDS)
+def test_essential_fields_are_outside_advanced(page, field_id):
+    """Each always-visible essential must live outside the advanced block."""
+    make_tab(page)
+    inside = prop(page, f"#{field_id}", "e => !!e.closest('#record-advanced')")
+    assert inside is False
+
+
+@pytest.mark.parametrize("field_id", ADVANCED_IDS)
+def test_advanced_fields_are_inside_advanced(page, field_id):
+    """Every non-essential knob must be nested under the advanced toggle."""
+    make_tab(page)
+    inside = prop(page, f"#{field_id}", "e => !!e.closest('#record-advanced')")
+    assert inside is True
+
+
+def test_advanced_toggle_reveals_and_hides_and_persists(page):
+    """Flipping the switch shows/hides the advanced block and remembers the
+    choice in localStorage."""
+    make_tab(page)
+    _flip_advanced(page, True)
+    assert prop(page, "#record-advanced", "e => e.hidden") is False
+    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "1"
+    _flip_advanced(page, False)
+    assert prop(page, "#record-advanced", "e => e.hidden") is True
+    assert page.evaluate("() => localStorage.getItem('octacam.record.advanced')") == "0"
+
+
+def test_advanced_state_restored_from_storage(page):
+    """A remembered "open" choice is restored when the tab is (re)constructed."""
+    page.evaluate("() => localStorage.setItem('octacam.record.advanced', '1')")
+    make_tab(page)
+    assert prop(page, "#record-advanced-toggle", "e => e.checked") is True
+    assert prop(page, "#record-advanced", "e => e.hidden") is False

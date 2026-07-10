@@ -4,6 +4,27 @@ import { api, clamp, clampInput, formatBytes, formatHMS } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
+// Per-browser memory of the Advanced-options switch, so a power user who keeps
+// it open doesn't have to re-flip it every load (mirrors the theme/resize
+// localStorage idiom). Off is the default when storage is unavailable/unset.
+const ADV_KEY = "octacam.record.advanced";
+
+function readAdvancedPref() {
+  try {
+    return localStorage.getItem(ADV_KEY) === "1";
+  } catch {
+    return false; // storage unavailable (private mode / sandbox)
+  }
+}
+
+function writeAdvancedPref(open) {
+  try {
+    localStorage.setItem(ADV_KEY, open ? "1" : "0");
+  } catch {
+    // storage unavailable — the choice just won't persist
+  }
+}
+
 function trimNum(v) {
   return String(Math.round(v * 1000) / 1000);
 }
@@ -41,6 +62,9 @@ export class RecordTab {
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
     this.diskFree = document.getElementById("disk-free");
+    // The Advanced-options switch and the block of less-common knobs it reveals.
+    this.advancedToggle = document.getElementById("record-advanced-toggle");
+    this.advancedSection = document.getElementById("record-advanced");
     this.trigger = document.getElementById("trigger-source");
     this.previewTrigger = document.getElementById("preview-trigger-source");
     this.format = document.getElementById("format");
@@ -183,6 +207,7 @@ export class RecordTab {
       )
     );
     this.button.addEventListener("click", () => this._onButton());
+    this._initAdvancedToggle();
 
     // Re-render between telemetry updates so the countdown and progress bar
     // advance smoothly. Both are derived from `this.deadline`, so this only
@@ -193,6 +218,21 @@ export class RecordTab {
         this.renderStatus();
       }
     }, 250);
+  }
+
+  // Wire the Advanced-options switch: restore the remembered state, then
+  // show/hide the advanced block and persist the choice on every flip. The
+  // encoder-param rows inside stay governed by _syncSaveMethodFields — hiding
+  // the whole block doesn't touch their individual `hidden` state.
+  _initAdvancedToggle() {
+    const open = readAdvancedPref();
+    this.advancedToggle.checked = open;
+    this.advancedSection.hidden = !open;
+    this.advancedToggle.addEventListener("change", () => {
+      const shown = this.advancedToggle.checked;
+      this.advancedSection.hidden = !shown;
+      writeAdvancedPref(shown);
+    });
   }
 
   // ------------------------------------------------------ server -> UI
