@@ -68,7 +68,7 @@ def make_controller(tmp_path):
         return controller, system
 
     yield _make
-    for controller, system in created:
+    for controller, _system in created:
         controller.close()
 
 
