@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Annotated
 from octacam._compat import StrEnum
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rich.progress import TaskID
 
     from octacam.config import RecordConfig
@@ -642,23 +644,33 @@ class _Report:
 def _enumerate_harvesters_serials() -> list[str]:
     """Enumerate the harvesters (GenTL) tier's serials in a child process.
 
-    A GenTL producer's device scan runs third-party native code that can hard
-    crash the process — a broken producer SIGSEGVs inside ``IFUpdateDeviceList``
-    (observed with Balluff mvIMPACT), and a native crash cannot be caught by a
-    Python ``try/except``, so an in-process scan takes all of ``octacam doctor``
-    down with it (no output, just "Segmentation fault"). Running the scan in a
-    subprocess contains the blast radius: on a clean exit we read the serials it
-    printed; on a crashed/killed/timed-out child we raise so the caller reports
-    the tier as broken and the rest of the diagnostic still runs."""
+    A GenTL producer runs third-party native code that can hard-crash the process
+    two ways, neither catchable by a Python ``try/except``: a broken producer can
+    SIGSEGV *inside the device scan* (``IFUpdateDeviceList`` — observed with Balluff
+    mvIMPACT), and some producers SIGSEGV during *interpreter finalization* after a
+    clean scan (observed with Basler's pylon ``ProducerU3V``). An in-process scan
+    would take all of ``octacam doctor`` down with it. Running the scan in a
+    subprocess contains the blast radius, and the child ``os._exit(0)``s right after
+    printing so the finalization crash never turns a good scan into a bad exit code:
+    on a clean scan we read the serials it printed; on a scan that truly crashes we
+    raise so the caller reports the tier as broken and the rest of the diagnostic
+    still runs."""
     import subprocess
 
+    # os._exit(0) skips interpreter finalization (atexit + native destructors),
+    # which is where a producer like pylon's SIGSEGVs; flush first so the parent
+    # still receives the serials printed above. It only runs on a clean scan — an
+    # exception propagates past it to a non-zero exit, which the caller reports.
     code = (
+        "import os, sys\n"
         "from octacam.cameras.harvesters import enumerate_harvesters, teardown\n"
         "try:\n"
         "    for serial, _h in enumerate_harvesters(None):\n"
         "        print(serial)\n"
         "finally:\n"
         "    teardown()\n"
+        "sys.stdout.flush()\n"
+        "os._exit(0)\n"
     )
     try:
         proc = subprocess.run(
@@ -733,6 +745,159 @@ def _cascade_assignment() -> list[tuple[str, str, str | None]]:
             claimed[serial] = (backend, model)
             order.append(serial)
     return [(serial, claimed[serial][0], claimed[serial][1]) for serial in order]
+
+
+class _CameraScan:
+    """Enumerate each relevant camera backend exactly ONCE, concurrently.
+
+    ``octacam doctor`` used to enumerate the backends ~3× per run — the
+    Camera-backends sweep, the cascade-selection line, and the cameras-vs-config
+    cross-check each re-enumerated — and every re-entry into a vendor SDK paid a
+    steep re-init cost (``enumerate_spinnaker`` releases and re-acquires the
+    Spinnaker ``System`` on each call, ~2.4 s), so the redundancy dominated the
+    whole command (~11 s). This scans every backend the report will show once,
+    caches the result, and serves the three consumers (:meth:`get`,
+    :meth:`cascade`, :meth:`detected_serials`) from that single pass.
+
+    The scan runs the per-backend enumerations on worker threads, but every SDK is
+    imported first on the *calling* thread (the ``select_backend`` gate in
+    ``__init__``), so no two cold vendor-SDK imports race the Python import lock;
+    the worker threads only run the device scan itself. The slowest single backend
+    is the wall-clock floor — a hung/crashing GenTL producer (harvesters, a ~2.4 s
+    subprocess) now overlaps the in-process tiers instead of adding to them.
+
+    Enumeration never opens a camera, so this is safe alongside a live session.
+    """
+
+    def __init__(self, only_backend: str | None) -> None:
+        from octacam.cameras.registry import BACKENDS, CASCADE, select_backend
+
+        key = (only_backend or "").strip().lower()
+        self.only = key if key and key not in ("auto", "all") else None
+        # The backends doctor's Camera-backends section enumerates: a single
+        # explicit --backend, else every real tier (fake is synthetic, named-only).
+        display = [self.only] if self.only else [b for b in BACKENDS if b != "fake"]
+        # Gate on the main thread: select_backend triggers the SDK import / CDLL
+        # load, so the workers only do the (I/O-bound, GIL-releasing) device scan
+        # and no two cold imports ever race. An unavailable tier is dropped here
+        # and reported as "info" by _doctor_backends' own select_backend pass.
+        self.targets: list[str] = []
+        for name in display:
+            try:
+                select_backend(name)
+            except Exception:
+                continue
+            self.targets.append(name)
+        # Cascade selection order (priority) is CASCADE restricted to the tiers we
+        # scanned; harvesters is never a cascade tier, so it never claims a camera.
+        self._cascade_order = [b for b in CASCADE if b in self.targets]
+        self._cams: dict[str, list[tuple[str, str | None]]] = {}
+        self._errs: dict[str, Exception] = {}
+
+    def run(
+        self, on_done: "Callable[[str, Exception | None], None] | None" = None
+    ) -> None:
+        """Enumerate every target once, concurrently; cache results/exceptions.
+
+        ``on_done(name, err)`` fires as each backend finishes — on THIS thread (the
+        ``as_completed`` loop runs on the caller), so updating a rich ``Progress``
+        from it is safe. Calls the module-level :func:`_enumerate_backend` by name
+        so a test can count enumerations by monkeypatching it.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not self.targets:
+            return
+        with ThreadPoolExecutor(max_workers=max(1, len(self.targets))) as pool:
+            futures = {
+                pool.submit(_enumerate_backend, name): name for name in self.targets
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    self._cams[name] = future.result()
+                    err: Exception | None = None
+                except Exception as exc:  # native SDK / subprocess enumerate failure
+                    self._errs[name] = exc
+                    err = exc
+                if on_done is not None:
+                    on_done(name, err)
+
+    def get(self, name: str) -> list[tuple[str, str | None]]:
+        """Cached ``[(serial, model), ...]`` for a scanned backend.
+
+        Re-raises a stored enumeration failure so the caller reports it exactly as
+        the pre-scan direct ``_enumerate_backend`` call did. Case-insensitive to
+        match ``select_backend``/``_enumerate_backend`` — the cache is keyed by the
+        normalized name, so ``--backend BASLER`` resolves like ``basler``."""
+        key = name.strip().lower()
+        if key in self._errs:
+            raise self._errs[key]
+        return self._cams[key]
+
+    def cascade(self) -> list[tuple[str, str, str | None]]:
+        """``[(serial, backend, model), ...]``: the tier that claims each camera.
+
+        Mirrors :func:`_cascade_assignment` but reads the single scan instead of
+        re-enumerating; a tier whose scan failed is skipped, never re-raised."""
+        claimed: dict[str, tuple[str, str | None]] = {}
+        order: list[str] = []
+        for backend in self._cascade_order:
+            if backend in self._errs:
+                continue
+            for serial, model in self._cams.get(backend, []):
+                if serial in claimed:
+                    continue
+                claimed[serial] = (backend, model)
+                order.append(serial)
+        return [(s, claimed[s][0], claimed[s][1]) for s in order]
+
+    def detected_serials(self, backend: str | None) -> set[str]:
+        """Serials to cross-check the config against, mirroring ``_enumerate_backend``.
+
+        ``auto`` uses the cascade; a specific backend is served from the scan when
+        it was a target, else enumerated live once (a config that pins an
+        uninstalled backend — the live call raises and the caller warns, as before)."""
+        key = (backend or "auto").strip().lower()
+        if key in ("auto", "all", ""):
+            return {serial for serial, _backend, _model in self.cascade()}
+        if key in self._cams or key in self._errs:
+            return {serial for serial, _model in self.get(key)}
+        return {serial for serial, _model in _enumerate_backend(key)}
+
+
+def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
+    """Run the parallel backend scan behind a live per-backend spinner.
+
+    The report renders on stdout; this spinner lives on the stderr console, so it
+    never corrupts ``--json`` output or a piped report, and it is suppressed when
+    stderr is not a terminal or ``--json`` was requested. ``transient=True`` clears
+    it before the report prints. The work (``scan.run``) executes even when the
+    display is disabled — a disabled ``Progress`` just makes the updates no-ops."""
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    console = _stderr_console()
+    disable = quiet or not console.is_terminal
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+        disable=disable,
+    ) as progress:
+        tasks = {
+            name: progress.add_task(f"enumerating {name}…", total=1)
+            for name in scan.targets
+        }
+
+        def on_done(name: str, err: "Exception | None") -> None:
+            if err is not None:
+                desc = f"{name}: enumeration failed"
+            else:
+                desc = f"{name}: {len(scan.get(name))} camera(s)"
+            progress.update(tasks[name], completed=1, description=desc)
+
+        scan.run(on_done=on_done)
 
 
 def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
@@ -836,24 +1001,36 @@ def _doctor_system(report: _Report) -> None:
 
 
 def _report_harvesters_producers(report: _Report) -> None:
-    """List the GenTL producer ``.cti`` files the harvesters tier will load."""
-    try:
-        from octacam.cameras.harvesters import _find_cti_files
+    """Report the GenTL producers: which will load, and which are detected but not.
 
-        cti = _find_cti_files()
+    A producer that is installed but denylisted (e.g. Spinnaker's, which deadlocks
+    on close) is surfaced with its reason rather than silently dropped, so an
+    operator can see it was detected and why octacam won't use it."""
+    try:
+        from octacam.cameras.harvesters import report_producers
+
+        will_load, disabled = report_producers()
     except Exception:  # pragma: no cover - defensive; harvesters is a core dep
         return
-    if cti:
-        report.add("list", "GenTL producer(s): " + ", ".join(cti))
+    if will_load:
+        report.add("list", "GenTL producer(s) in use: " + ", ".join(will_load))
     else:
         report.add(
             "list",
-            "no GenTL producer found — set GENICAM_GENTL64_PATH (or OCTACAM_GENTL_CTI) "
-            "to a Vimba X / mvIMPACT .cti to enable this tier",
+            "no usable GenTL producer found — install one (e.g. Basler pylon's "
+            "ProducerU3V) and set GENICAM_GENTL64_PATH (or OCTACAM_GENTL_CTI) to "
+            "enable this opt-in tier",
+        )
+    for cti, reason in disabled:
+        report.add(
+            "info",
+            f"GenTL producer detected but not used: {os.path.basename(cti)} — {reason}",
         )
 
 
-def _doctor_backends(report: _Report, only_backend: str | None) -> None:
+def _doctor_backends(
+    report: _Report, only_backend: str | None, scan: _CameraScan
+) -> None:
     from octacam.cameras import BackendUnavailable
     from octacam.cameras.registry import BACKENDS, select_backend
 
@@ -880,7 +1057,9 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
         if name == "harvesters":
             _report_harvesters_producers(report)
         try:
-            cams = _enumerate_backend(name)
+            # Served from the single parallel scan; a select_backend success above
+            # guarantees this name was a scan target (see _CameraScan).
+            cams = scan.get(name)
         except Exception as e:
             report.add("warn", f"{name}: available, but enumeration failed ({e})")
             continue
@@ -894,7 +1073,7 @@ def _doctor_backends(report: _Report, only_backend: str | None) -> None:
         )
     # Under "auto" a camera may be seen by several tiers; show which one wins.
     if not only_backend:
-        assignment = _cascade_assignment()
+        assignment = scan.cascade()
         if assignment:
             report.add("info", "cascade selection (backend each camera opens through):")
             for serial, backend, model in assignment:
@@ -976,7 +1155,9 @@ def _doctor_config(report: _Report, config_dir: Path):
     return cfg
 
 
-def _doctor_cameras_vs_config(report: _Report, cfg, only_backend: str | None) -> None:
+def _doctor_cameras_vs_config(
+    report: _Report, cfg, only_backend: str | None, scan: _CameraScan
+) -> None:
     report.section("Cameras vs config")
     declared = [c.serial_number for c in cfg.cameras]
     if not declared:
@@ -985,7 +1166,7 @@ def _doctor_cameras_vs_config(report: _Report, cfg, only_backend: str | None) ->
     backend = only_backend or cfg.backend
     where = "across all backends" if backend in ("auto", "all", "") else f"on {backend}"
     try:
-        detected = {serial for serial, _model in _enumerate_backend(backend)}
+        detected = scan.detected_serials(backend)
     except Exception as e:
         report.add("warn", f"could not enumerate {where} to cross-check ({e})")
         return
@@ -1416,12 +1597,17 @@ def doctor(
     --check), so it is usable as a pre-flight check in scripts.
     """
     report = _Report()
+    # The only slow part of doctor is camera enumeration; do it ONCE, up front, in
+    # parallel across backends, behind a live progress spinner (suppressed under
+    # --json). Every _doctor_* section below reads this single cached scan.
+    scan = _CameraScan(backend)
+    _run_scan_with_progress(scan, quiet=json_output)
     _doctor_system(report)
-    _doctor_backends(report, backend)
+    _doctor_backends(report, backend, scan)
     _doctor_encoding(report)
     cfg = _doctor_config(report, config_dir) if config_dir is not None else None
     if cfg is not None:
-        _doctor_cameras_vs_config(report, cfg, backend)
+        _doctor_cameras_vs_config(report, cfg, backend, scan)
         _doctor_storage(report, cfg)
     _doctor_plugins(report, cfg)
     _doctor_serial(report, cfg, probe=probe_serial)

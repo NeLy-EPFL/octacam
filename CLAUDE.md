@@ -113,20 +113,27 @@ CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 | — | `harvesters` | GenTL producer | **Opt-in only, never auto** (see below) |
 | — | `fake` | synthetic | CI vehicle; only used when named |
 
-**Why `harvesters` is not in the cascade:** the only freely-installable U3V GenTL
-producer we validated is Balluff's **mvIMPACT**, whose free eval expires after
-~8 s of streaming and stamps a "BALLUFF … evaluation period ended" watermark onto
-frames (its EULA also restricts third-party-hardware use to paid licensing).
-Auto-routing a FLIR through it would silently watermark recordings, so
-`harvesters` is used only when a rig explicitly sets `backend = "harvesters"`.
+**Why `harvesters` is not in the cascade:** every GenTL producer is a
+user-installed, vendor-EULA'd `.cti` with its own quirks (watermarks, close
+deadlocks, vendor-only enumeration), so a camera lacking a vendor SDK must never
+be auto-routed through one. `harvesters` is used only when a rig explicitly sets
+`backend = "harvesters"`. The validated producer is now Basler's pylon
+`ProducerU3V`.
 
 ### GenTL producer facts (empirical, on the test rig)
-- **mvIMPACT** (`/opt/ImpactAcquire`): the only producer that sees all cameras
-  (incl. Basler over U3V) and closes cleanly (~0.3 s). Correct choice when
-  harvesters is used. Selection via `OCTACAM_GENTL_PRODUCER` + a default denylist.
+- **pylon `ProducerU3V`** (`/opt/pylon/lib/gentlproducer/gtl`): **the recommended
+  producer.** Opens/**closes cleanly**, no watermark. Enumerates **Basler U3V
+  only** (does *not* see FLIR — use `spinnaker`/`flir` for those). Two quirks
+  handled in code: no `Buffer.timestamp_ns` (fall back to raw `timestamp` —
+  `harvesters._buffer_timestamp_ns`), and it SIGSEGVs during *interpreter
+  finalization* after a clean scan (the `octacam doctor` enum subprocess dodges it
+  with `os._exit`).
 - **Spinnaker GenTL** (`Spinnaker_GenTL.cti`): **`DevClose` deadlocks AND holds
   the GIL** → wedges the whole process; only an external SIGKILL ends it.
-  Denylisted; disabled from the GenTL path.
+  Denylisted; `octacam doctor` shows it as *detected but not used*.
+- **mvIMPACT** (`mvGenTLProducer.cti`): **removed and denylisted.** SIGSEGVs inside
+  `IFUpdateDeviceList` during the device scan and watermarks third-party frames
+  after an ~8 s eval window. Do not reinstall as the octacam producer.
 - **Vimba X USB TL**: AVT-vendor-only → sees 0 third-party cameras. Useless here.
 
 ### Backend contract (`cameras/base.py :: CameraBackend`)
@@ -281,7 +288,8 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
 - **Test rig:** 2× FLIR GS3-U3-41C6NIR (SN 17475185/17475187, 2048², CMV4000
   CMOS) + up to 4× Basler acA1920-150um (SN 40018619/40018631/40018632/40022761,
   and 40023151; 1920×1200); external trigger via the common-trigger-circuit Nano
-  ESP32. SDKs at `/opt/spinnaker` (Spinnaker) and `/opt/ImpactAcquire` (mvIMPACT).
+  ESP32. SDKs at `/opt/spinnaker` (Spinnaker) and `/opt/pylon` (Basler pylon,
+  incl. its `ProducerU3V` GenTL producer). mvIMPACT was removed.
 
 ## Where the deep detail lives
 

@@ -24,17 +24,18 @@ The tiers, best-to-floor:
 3. **pycameleon** — libusb-only, a core dependency, so it is always present and
    the guaranteed final fallback.
 
-The ``harvesters`` GenTL tier is deliberately **NOT** in the auto cascade. The
-only freely-installable U3V GenTL producer we found is Balluff's mvIMPACT, whose
-free evaluation licence expires after ~8 s of streaming and stamps a "BALLUFF …
-unsupported third party device / evaluation period ended" watermark onto the
-frames (its EULA also restricts third-party-hardware use to paid licensing). So
-auto-selecting harvesters would silently route any GenICam camera lacking a
-vendor SDK (e.g. a FLIR on modern Python) through a watermarking, time-limited
-producer. harvesters remains fully supported but only when a rig **explicitly**
-names ``backend = "harvesters"`` — i.e. the operator has a licensed/non-expiring
-producer and opts in. Everything the cascade would have sent to harvesters now
-lands on the always-free pycameleon floor instead.
+The ``harvesters`` GenTL tier is deliberately **NOT** in the auto cascade —
+every GenTL producer depends on a user-installed, vendor-EULA'd ``.cti`` with its
+own quirks, so a camera lacking a vendor SDK must never be silently routed through
+one. The validated producer is now Basler's pylon ``ProducerU3V`` (opens/closes
+cleanly, watermark-free, but enumerates only Basler U3V cameras); the previously
+used Balluff mvIMPACT producer was removed because it watermarks third-party
+frames after an ~8 s eval window and SIGSEGVs during the device scan, and
+Teledyne's Spinnaker GenTL producer is unusable (its close deadlocks holding the
+GIL). See :mod:`octacam.cameras.harvesters` for the full producer notes.
+harvesters remains fully supported but only when a rig **explicitly** names
+``backend = "harvesters"`` and opts in. Everything the cascade would have sent to
+harvesters lands on the always-free pycameleon floor instead.
 """
 
 import importlib
@@ -48,9 +49,9 @@ BACKENDS = ("basler", "flir", "spinnaker", "harvesters", "pycameleon", "fake")
 # (the Spinnaker C API via ctypes) sits at the FLIR-vendor position just below
 # ``flir`` so it claims the FLIRs on modern Python where PySpin is unavailable,
 # before they fall through to the pycameleon floor. ``harvesters`` is
-# intentionally absent (see the module docstring): the only freely-installable
-# GenTL producer (mvIMPACT) watermarks frames after an ~8 s evaluation window, so
-# it must never be picked automatically — a rig opts into it by name.
+# intentionally absent (see the module docstring): every GenTL producer is a
+# user-installed, vendor-EULA'd .cti with its own quirks, so it must never be
+# picked automatically — a rig opts into it by name.
 CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 
 # The real (non-``fake``) backends an auto-detecting rig sweeps, in cascade

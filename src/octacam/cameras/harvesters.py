@@ -10,20 +10,35 @@ the vendor tiers: it adds full node **bounds** and **hardware timestamps** that
 pycameleon lacks, for any camera a producer enumerates.
 
 The producer is a user-installed system dependency (like PySpin/the Spinnaker
-SDK). For third-party USB3 Vision cameras (e.g. FLIR, Basler) the
-empirically-verified producer is Balluff **mvIMPACT / Impact Acquire**, which
-enumerates and cleanly closes any U3V camera (~0.3 s). Allied Vision **Vimba X**
-is *not* suitable for such rigs: its bundled USB transport layer only enumerates
-Allied Vision's own USB cameras (its third-party support is GigE Vision, not
-USB3), so it sees none of a FLIR/Basler USB3 rig. **Teledyne's Spinnaker producer
-must not be used**: its ``DevClose`` deadlocks *while holding the Python GIL*,
-which wedges the whole process — no bounded thread, ``os._exit``, or signal
-handler can recover (all need the GIL), only an external ``SIGKILL``. It is
-therefore excluded from auto-discovery (see :data:`_DENY_PRODUCERS`).
+SDK). This tier is **opt-in only** (``backend = "harvesters"``); the auto cascade
+never routes to it (see :mod:`octacam.cameras.registry`). Empirical producer
+findings on the FLIR + Basler USB3 test rig (why the default set is what it is):
+
+* **Basler pylon** ``ProducerU3V.cti`` (``/opt/pylon/lib/gentlproducer/gtl``) —
+  the recommended producer. Enumerates Basler U3V cameras and, crucially,
+  **opens *and* closes cleanly** (no deadlock, no watermark). Two quirks handled
+  in code: it does not implement ``Buffer.timestamp_ns`` (we fall back to the raw
+  ``timestamp`` tick — see :func:`_buffer_timestamp_ns`), and its native library
+  SIGSEGVs during *Python interpreter finalization* (a multi-lib teardown
+  interaction, after all work is done — the enumeration subprocess in
+  ``octacam doctor`` sidesteps it with ``os._exit``). It is a Basler-focused U3V
+  producer: it does **not** enumerate FLIR cameras (drive those with the
+  dedicated ``spinnaker``/``flir`` backends).
+* **Teledyne Spinnaker** ``Spinnaker_GenTL.cti`` — enumerates FLIR cameras but
+  **must not be used**: its ``DevClose`` deadlocks *while holding the Python GIL*,
+  wedging the whole process — no bounded thread, ``os._exit``, or signal handler
+  can recover (all need the GIL), only an external ``SIGKILL``. Denylisted.
+* **Balluff mvIMPACT / Impact Acquire** — previously the default, now removed and
+  denylisted: it SIGSEGVs inside ``IFUpdateDeviceList`` during the device scan and
+  watermarks frames after an ~8 s evaluation window. Do not reinstall it as the
+  octacam producer.
+* **Allied Vision Vimba X** — its USB transport layer only enumerates Allied
+  Vision's own cameras (third-party support is GigE, not USB3), so it sees none of
+  a FLIR/Basler USB3 rig.
 
 When several producers are installed, :func:`_find_cti_files` selects which to
 load: set ``OCTACAM_GENTL_PRODUCER`` (``os.pathsep``-separated, case-insensitive
-substrings) to pin/prioritise producers (e.g. ``mvGenTLProducer``); left unset,
+substrings) to pin/prioritise producers (e.g. ``ProducerU3V``); left unset,
 every discovered producer is loaded except the known-broken ones in
 :data:`_DENY_PRODUCERS`. :meth:`HarvestersBackend.open` binds each camera to the
 first (highest-priority) producer that enumerates its serial, so a camera seen by
@@ -111,13 +126,15 @@ def ensure_available() -> None:
     _require()
 
 
-def _find_cti_files() -> list[str]:
-    """Locate GenTL producer ``.cti`` files to load.
+def _discover_cti_files() -> list[str]:
+    """All GenTL producer ``.cti`` files on the search path (before selection).
 
     Scans the standard ``GENICAM_GENTL64_PATH``/``GENICAM_GENTL32_PATH`` search
     dirs plus an optional ``OCTACAM_GENTL_CTI`` override (``os.pathsep``-separated
     ``.cti`` files and/or directories) so a rig can point at a specific producer
-    without touching the GenICam env vars. Deduplicated by resolved path.
+    without touching the GenICam env vars. Deduplicated by resolved path. The
+    denylist / ``OCTACAM_GENTL_PRODUCER`` selection is applied by
+    :func:`_find_cti_files`; this raw list is what ``octacam doctor`` reports.
     """
     dirs: list[str] = []
     for var in ("GENICAM_GENTL64_PATH", "GENICAM_GENTL32_PATH"):
@@ -150,18 +167,30 @@ def _find_cti_files() -> list[str]:
                 _add(cti)
         except OSError:
             continue
-    return _select_producers(files)
+    return files
+
+
+def _find_cti_files() -> list[str]:
+    """The GenTL producer ``.cti`` files the harvesters tier will actually load.
+
+    :func:`_discover_cti_files` filtered by the ``OCTACAM_GENTL_PRODUCER``
+    allowlist / :data:`_DENY_PRODUCERS` denylist (see :func:`_select_producers`).
+    """
+    return _select_producers(_discover_cti_files())
 
 
 # GenTL producers excluded from auto-discovery, matched case-insensitively as a
 # substring of the .cti basename. Force one in anyway by naming it in
-# OCTACAM_GENTL_PRODUCER. Two kinds are excluded:
+# OCTACAM_GENTL_PRODUCER. Three kinds are excluded:
 #  - "spinnaker_gentl": Teledyne's Spinnaker producer deadlocks in DevClose *while
 #    holding the Python GIL*, so no bounded thread / os._exit / signal handler can
 #    recover — only an external SIGKILL (see the module docstring).
+#  - "mvgentlproducer": Balluff mvIMPACT SIGSEGVs inside IFUpdateDeviceList during
+#    the device scan and watermarks frames after an ~8 s eval window. Removed as
+#    octacam's producer; denylisted so a reinstall can't silently crash the scan.
 #  - "vimbacamerasimulator": Allied Vision's simulator TL always presents phantom
 #    virtual cameras, which the cascade would otherwise try to open and record.
-_DENY_PRODUCERS = ("spinnaker_gentl", "vimbacamerasimulator")
+_DENY_PRODUCERS = ("spinnaker_gentl", "mvgentlproducer", "vimbacamerasimulator")
 
 
 def _select_producers(files: list[str]) -> list[str]:
@@ -170,8 +199,9 @@ def _select_producers(files: list[str]) -> list[str]:
     ``OCTACAM_GENTL_PRODUCER`` (``os.pathsep``-separated, case-insensitive
     substrings) is both an allowlist and a priority order: only producers whose
     basename contains one of the substrings are kept, ordered by which substring
-    matched (so ``Vimba:mvGenTL`` prefers Vimba, then mvIMPACT). With it unset,
-    every discovered producer is kept except those matching :data:`_DENY_PRODUCERS`.
+    matched (so ``ProducerU3V:ProducerGEV`` prefers the U3V producer, then GEV).
+    With it unset, every discovered producer is kept except those matching
+    :data:`_DENY_PRODUCERS`.
     """
     prefs = [
         p.strip().lower()
@@ -201,6 +231,82 @@ def _select_producers(files: list[str]) -> list[str]:
         for f in files
         if not any(d in os.path.basename(f).lower() for d in _DENY_PRODUCERS)
     ]
+
+
+# Why each denylisted producer is not used, keyed by the same case-insensitive
+# basename substrings as _DENY_PRODUCERS. Surfaced by `octacam doctor` so an
+# installed-but-unusable producer is shown with its reason, not silently hidden.
+_PRODUCER_DENY_REASONS = {
+    "spinnaker_gentl": (
+        "Teledyne Spinnaker GenTL — DevClose deadlocks while holding the Python "
+        "GIL, which would wedge the whole process (recoverable only by external "
+        "SIGKILL). Drive FLIR cameras with the 'spinnaker' or 'flir' backend."
+    ),
+    "mvgentlproducer": (
+        "Balluff mvIMPACT — SIGSEGVs during the device scan and watermarks frames "
+        "after an ~8 s evaluation window. Removed as octacam's producer."
+    ),
+    "vimbacamerasimulator": (
+        "Allied Vision simulator TL — presents phantom virtual cameras; excluded "
+        "so the cascade never opens them."
+    ),
+}
+
+# Well-known GenTL producer install dirs to probe for *reporting* even when they
+# are not on GENICAM_GENTL64_PATH — e.g. the Spinnaker SDK installs its .cti
+# off-path, so without this `octacam doctor` could not show it as
+# detected-but-unusable. Never loaded from here; discovery for load still goes
+# through GENICAM_GENTL64_PATH / OCTACAM_GENTL_CTI only.
+_KNOWN_PRODUCER_DIRS = ("/opt/spinnaker/lib/spinnaker-gentl",)
+
+
+def _deny_reason(cti_path: str) -> str | None:
+    """The human-readable reason a producer is denylisted, or None if usable."""
+    name = os.path.basename(cti_path).lower()
+    for key, reason in _PRODUCER_DENY_REASONS.items():
+        if key in name:
+            return reason
+    return None
+
+
+def report_producers() -> tuple[list[str], list[tuple[str, str]]]:
+    """``(will_load, [(cti, reason), ...])`` for ``octacam doctor``.
+
+    ``will_load`` is exactly what the harvesters tier would load (honouring
+    ``OCTACAM_GENTL_PRODUCER`` and the denylist). The second list is every other
+    discovered-or-known producer that is present but *not* loaded, each with why —
+    so an installed producer such as Spinnaker's (denylisted for its close
+    deadlock) is visible rather than silently dropped.
+    """
+    will_load = _find_cti_files()
+
+    def _key(path: str) -> str:
+        try:
+            return str(Path(path).resolve())
+        except OSError:
+            return path
+
+    loaded_keys = {_key(p) for p in will_load}
+    candidates = list(_discover_cti_files())
+    for directory in _KNOWN_PRODUCER_DIRS:
+        try:
+            candidates.extend(str(p) for p in sorted(Path(directory).glob("*.cti")))
+        except OSError:
+            continue
+
+    disabled: list[tuple[str, str]] = []
+    seen: set[str] = set(loaded_keys)
+    for cti in candidates:
+        key = _key(cti)
+        if key in seen:
+            continue
+        seen.add(key)
+        reason = _deny_reason(cti) or (
+            "not selected by OCTACAM_GENTL_PRODUCER="
+            f"{os.environ.get('OCTACAM_GENTL_PRODUCER')!r}"
+        )
+        disabled.append((cti, reason))
+    return will_load, disabled
 
 
 def _get_harvester():
@@ -235,6 +341,26 @@ def _node_attr(node, attr: str):
         return getattr(node, attr)
     except Exception:
         return None
+
+
+def _buffer_timestamp_ns(buffer) -> int:
+    """Best-effort hardware timestamp in ns; 0 when the producer lacks it.
+
+    ``Buffer.timestamp_ns`` needs the producer to implement the GenTL
+    timestamp-frequency query. Some producers (e.g. Basler's pylon
+    ``ProducerU3V``) do not and *raise* ``NotImplementedException`` rather than
+    return — which ``getattr(..., 0)`` does not catch (it only defaults on
+    ``AttributeError``), so an unguarded read would cost us the whole frame. Fall
+    back to the raw ``timestamp`` device tick (nanoseconds on Basler/FLIR U3V),
+    then 0, so a producer without ``timestamp_ns`` still yields images."""
+    for attr in ("timestamp_ns", "timestamp"):
+        try:
+            value = getattr(buffer, attr)
+        except Exception:
+            continue
+        if value:
+            return int(value)
+    return 0
 
 
 def _device_info_for(harvester, serial: str):
@@ -315,12 +441,13 @@ class HarvestersBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except Exception:
                 pass
 
-        # Bounded close: a well-behaved producer (mvIMPACT) tears down in ~0.3 s, so
-        # the join returns immediately. This bound only protects against a merely
-        # *slow* close — it does NOT rescue a truly deadlocking producer: Spinnaker's
-        # DevClose holds the GIL, so the daemon can't release it, the join below can
-        # never re-acquire it, and the whole process wedges regardless. That is why
-        # such producers are excluded in _find_cti_files rather than tolerated here.
+        # Bounded close: a well-behaved producer (Basler's pylon ProducerU3V) tears
+        # down immediately, so the join returns at once. This bound only protects
+        # against a merely *slow* close — it does NOT rescue a truly deadlocking
+        # producer: Spinnaker's DevClose holds the GIL, so the daemon can't release
+        # it, the join below can never re-acquire it, and the whole process wedges
+        # regardless. That is why such producers are excluded in _find_cti_files
+        # rather than tolerated here.
         thread = threading.Thread(
             target=_teardown, name=f"harvesters-close-{self._serial}", daemon=True
         )
@@ -330,7 +457,7 @@ class HarvestersBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             log.warning(
                 "Camera %s did not close within %.0fs — the GenTL producer is slow "
                 "to tear down; leaving the handle to a daemon thread. Prefer the "
-                "mvIMPACT producer.",
+                "pylon ProducerU3V producer.",
                 self._serial,
                 _CLOSE_TIMEOUT_S,
             )
@@ -543,7 +670,7 @@ class HarvestersBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 return None  # no frame within the caller's window
             time.sleep(_FETCH_SLEEP_S)
         try:
-            timestamp = getattr(buffer, "timestamp_ns", 0) or 0
+            timestamp = _buffer_timestamp_ns(buffer)
             array = None
             if wants_array():
                 component = buffer.payload.components[0]

@@ -188,6 +188,55 @@ def test_retrieve_fires_trigger_reshapes_and_requeues():
     assert backend._pending == 0  # consumed
 
 
+def test_retrieve_survives_producer_without_timestamp_ns():
+    # Basler's pylon ProducerU3V does not implement Buffer.timestamp_ns and *raises*
+    # NotImplementedException rather than returning; the frame must still be
+    # delivered, timestamped from the raw device tick (see _buffer_timestamp_ns).
+    nm = FakeNodeMap()
+    backend = _backend(nm)
+    component = types.SimpleNamespace(
+        data=np.arange(6, dtype=np.uint8), width=3, height=2
+    )
+
+    class NoTimestampNsBuffer:
+        def __init__(self):
+            self.payload = types.SimpleNamespace(components=[component])
+            self.timestamp = 987
+            self.queued = False
+
+        @property
+        def timestamp_ns(self):
+            raise RuntimeError("Requested operation not implemented (ID: -1003)")
+
+        def queue(self):
+            self.queued = True
+
+    buffer = NoTimestampNsBuffer()
+    backend._ia._buffer = buffer
+    backend.start_grab_preview()
+    backend.trigger_once()
+    frame = backend.retrieve(100, lambda: True)
+    assert frame is not None  # NOT dropped despite timestamp_ns raising
+    array, timestamp = frame
+    assert array.shape == (2, 3) and timestamp == 987  # raw timestamp fallback
+    assert buffer.queued
+
+
+def test_buffer_timestamp_ns_fallbacks():
+    ns = types.SimpleNamespace(timestamp_ns=42, timestamp=7)
+    assert hv._buffer_timestamp_ns(ns) == 42  # prefers timestamp_ns
+
+    class RaisesNs:
+        timestamp = 7
+
+        @property
+        def timestamp_ns(self):
+            raise RuntimeError("not implemented")
+
+    assert hv._buffer_timestamp_ns(RaisesNs()) == 7  # falls back to raw tick
+    assert hv._buffer_timestamp_ns(types.SimpleNamespace()) == 0  # neither present
+
+
 def test_retrieve_none_without_a_pending_trigger():
     # No trigger armed: retrieve must not fire the device or block indefinitely.
     nm = FakeNodeMap()
@@ -217,7 +266,7 @@ def test_close_is_bounded_and_idempotent():
 
 
 def test_find_cti_uses_env(monkeypatch, tmp_path):
-    producer = tmp_path / "mvGenTLProducer.cti"
+    producer = tmp_path / "ProducerU3V.cti"
     producer.write_text("")
     monkeypatch.setenv("GENICAM_GENTL64_PATH", str(tmp_path))
     monkeypatch.delenv("GENICAM_GENTL32_PATH", raising=False)
@@ -234,12 +283,19 @@ def _seed_producers(monkeypatch, tmp_path, *names):
     monkeypatch.delenv("OCTACAM_GENTL_CTI", raising=False)
 
 
-def test_find_cti_denies_spinnaker_by_default(monkeypatch, tmp_path):
-    _seed_producers(monkeypatch, tmp_path, "Spinnaker_GenTL.cti", "mvGenTLProducer.cti")
+def test_find_cti_denies_known_bad_by_default(monkeypatch, tmp_path):
+    _seed_producers(
+        monkeypatch,
+        tmp_path,
+        "Spinnaker_GenTL.cti",
+        "mvGenTLProducer.cti",
+        "ProducerU3V.cti",
+    )
     monkeypatch.delenv("OCTACAM_GENTL_PRODUCER", raising=False)
     got = [os.path.basename(f) for f in _find_cti_files()]
-    assert "mvGenTLProducer.cti" in got
-    assert "Spinnaker_GenTL.cti" not in got  # known GIL-deadlock; denied by default
+    assert "ProducerU3V.cti" in got  # pylon's producer: the recommended one
+    assert "Spinnaker_GenTL.cti" not in got  # GIL-deadlock on close; denied
+    assert "mvGenTLProducer.cti" not in got  # mvIMPACT: watermark + scan crash; denied
 
 
 def test_producer_env_allowlists_and_orders(monkeypatch, tmp_path):
@@ -247,20 +303,31 @@ def test_producer_env_allowlists_and_orders(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         "Spinnaker_GenTL.cti",
-        "mvGenTLProducer.cti",
-        "VimbaUSBTL.cti",
+        "ProducerGEV.cti",
+        "ProducerU3V.cti",
     )
-    monkeypatch.setenv("OCTACAM_GENTL_PRODUCER", "Vimba" + os.pathsep + "mvGenTL")
+    monkeypatch.setenv("OCTACAM_GENTL_PRODUCER", "ProducerU3V" + os.pathsep + "ProducerGEV")
     got = [os.path.basename(f) for f in _find_cti_files()]
     # allowlist (Spinnaker dropped) applied in the requested priority order
-    assert got == ["VimbaUSBTL.cti", "mvGenTLProducer.cti"]
+    assert got == ["ProducerU3V.cti", "ProducerGEV.cti"]
 
 
 def test_producer_env_can_force_a_denied_producer(monkeypatch, tmp_path):
-    _seed_producers(monkeypatch, tmp_path, "Spinnaker_GenTL.cti", "mvGenTLProducer.cti")
+    _seed_producers(monkeypatch, tmp_path, "Spinnaker_GenTL.cti", "ProducerU3V.cti")
     monkeypatch.setenv("OCTACAM_GENTL_PRODUCER", "Spinnaker")
     got = [os.path.basename(f) for f in _find_cti_files()]
     assert got == ["Spinnaker_GenTL.cti"]  # explicit request overrides the deny
+
+
+def test_report_producers_splits_usable_from_detected_but_unused(monkeypatch, tmp_path):
+    _seed_producers(monkeypatch, tmp_path, "ProducerU3V.cti", "Spinnaker_GenTL.cti")
+    monkeypatch.delenv("OCTACAM_GENTL_PRODUCER", raising=False)
+    monkeypatch.setattr(hv, "_KNOWN_PRODUCER_DIRS", ())  # only the seeded dir
+    will_load, disabled = hv.report_producers()
+    assert [os.path.basename(f) for f in will_load] == ["ProducerU3V.cti"]
+    disabled_names = {os.path.basename(f): reason for f, reason in disabled}
+    assert "Spinnaker_GenTL.cti" in disabled_names
+    assert "deadlock" in disabled_names["Spinnaker_GenTL.cti"].lower()
 
 
 class FakeDeviceInfo:
@@ -293,7 +360,7 @@ class FakeHarvester:
 
 
 def test_open_binds_to_specific_producer_when_serial_is_ambiguous(monkeypatch):
-    # Same camera enumerated by two producers (as with Spinnaker + mvIMPACT).
+    # Same camera enumerated by two producers (e.g. pylon U3V + a second producer).
     infos = [FakeDeviceInfo("17475185"), FakeDeviceInfo("17475185")]
     fake = FakeHarvester(infos)
     monkeypatch.setattr(hv, "_get_harvester", lambda: fake)

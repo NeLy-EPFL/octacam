@@ -131,16 +131,18 @@ Point octacam at a producer by installing its SDK (which sets
 `GENICAM_GENTL64_PATH`) or listing the `.cti` explicitly:
 
 ```bash
-export OCTACAM_GENTL_CTI=/opt/ImpactAcquire/lib/x86_64/mvGenTLProducer.cti
+export OCTACAM_GENTL_CTI=/opt/pylon/lib/gentlproducer/gtl/ProducerU3V.cti
 octacam doctor    # confirm the producer + cameras are found
 ```
 
 **Choosing a producer:**
 
-- **Balluff / MatrixVision Impact Acquire (mvIMPACT)** — *recommended for
-  third-party USB3 Vision cameras* (FLIR, Basler). It enumerates and closes any
-  U3V camera cleanly (~0.3 s). Its EULA restricts non-Balluff hardware, so it is a
-  per-rig user install, never bundled.
+- **Basler pylon `ProducerU3V`** (`/opt/pylon/lib/gentlproducer/gtl`) —
+  *recommended.* Installed with the Basler pylon SDK, it opens and **closes
+  cleanly** with no watermark. It enumerates **Basler** U3V cameras only (it does
+  not see FLIR); drive FLIR cameras with the dedicated `spinnaker`/`flir`
+  backends. octacam handles its one quirk transparently — it does not implement
+  `Buffer.timestamp_ns`, so octacam falls back to the raw device timestamp.
 - **Allied Vision Vimba X** — only for **Allied Vision** cameras or **third-party
   GigE Vision** cameras. Its bundled *USB* transport layer enumerates Allied
   Vision USB cameras *only* (Vimba X's third-party support is GigE Vision, not
@@ -149,7 +151,11 @@ octacam doctor    # confirm the producer + cameras are found
 - **Teledyne Spinnaker producer** — **denied by default.** Its `DevClose`
   deadlocks *while holding the Python GIL*, which wedges the whole process — no
   bounded thread, `os._exit`, or signal handler can recover, only an external
-  `SIGKILL`. Use the vendor `flir` backend (PySpin) for FLIR, or mvIMPACT.
+  `SIGKILL`. Use the vendor `spinnaker`/`flir` backend for FLIR. `octacam doctor`
+  reports it as *detected but not used* so you can see it was found.
+- **Balluff mvIMPACT / Impact Acquire** — **removed and denylisted.** It
+  watermarks third-party frames after an ~8 s eval window and SIGSEGVs during the
+  device scan. Do not use it as the octacam producer.
 - **The Imaging Source** — vendor-locked to TIS cameras; unusable here.
 
 **Selecting among several producers.** When more than one `.cti` is on the path,
@@ -158,12 +164,12 @@ substrings to pin or prioritise them; a camera seen by two producers is bound to
 the highest-priority one:
 
 ```bash
-export OCTACAM_GENTL_PRODUCER=mvGenTLProducer   # load only mvIMPACT
-export OCTACAM_GENTL_PRODUCER=Vimba:mvGenTL     # prefer Vimba, then mvIMPACT
+export OCTACAM_GENTL_PRODUCER=ProducerU3V              # load only pylon's U3V producer
+export OCTACAM_GENTL_PRODUCER=ProducerU3V:ProducerGEV  # prefer U3V, then GEV
 ```
 
 Left unset, octacam loads every discovered producer except the known-bad ones
-(Spinnaker's GIL-deadlocking producer and Vimba's Camera Simulator).
+(Spinnaker's GIL-deadlocking producer, mvIMPACT, and Vimba's Camera Simulator).
 
 ## Tier 3 — pycameleon (the always-available floor)
 

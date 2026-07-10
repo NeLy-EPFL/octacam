@@ -22,7 +22,7 @@ Why this backend exists (see ``docs/plan-spinnaker-c-backend.md``):
   running while this one waits for its triggered frame.
 * **Clean close, no watermark.** This is the SDK C API, not the Spinnaker *GenTL
   producer* (``Spinnaker_GenTL.cti``) whose ``DevClose`` deadlocks while holding
-  the GIL; and unlike the Balluff mvIMPACT producer it stamps no evaluation
+  the GIL; and unlike an eval-limited third-party GenTL producer it stamps no
   watermark. We control the ``DeInit`` / ``ReleaseInstance`` ordering directly.
 
 Structure:

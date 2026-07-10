@@ -29,10 +29,10 @@ def test_backends_and_cascade_membership():
     # just below flir, so it claims the FLIRs on modern Python where PySpin drops.
     assert CASCADE.index("spinnaker") == CASCADE.index("flir") + 1
     assert "spinnaker" in BACKENDS
-    # harvesters is DELIBERATELY excluded from the auto cascade: the only
-    # freely-installable GenTL producer (Balluff mvIMPACT) watermarks frames after
-    # an ~8 s eval window, so it must never be auto-selected — only opted into by
-    # name. It stays a known backend and remains selectable explicitly.
+    # harvesters is DELIBERATELY excluded from the auto cascade: every GenTL
+    # producer is a user-installed, vendor-EULA'd .cti with its own quirks, so it
+    # must never be auto-selected — only opted into by name. It stays a known
+    # backend and remains selectable explicitly.
     assert "harvesters" not in CASCADE
     assert "harvesters" in BACKENDS
     assert resolve_backend_names("harvesters") == ["harvesters"]

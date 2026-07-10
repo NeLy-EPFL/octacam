@@ -75,13 +75,16 @@ camera would use.
 
 harvesters drives any GenICam camera through an installed GenTL *producer* (a
 `.cti` transport layer). Install a producer's SDK and point octacam at it via
-`GENICAM_GENTL64_PATH` or `OCTACAM_GENTL_CTI`. For third-party **USB3 Vision**
-cameras (FLIR, Basler), **Balluff mvIMPACT / Impact Acquire** is the recommended
-producer. **Allied Vision Vimba X** only covers Allied Vision cameras and
-third-party *GigE Vision* — its USB transport layer will not see FLIR/Basler USB3
-cameras. Teledyne's Spinnaker producer is denied by default (its device close
-deadlocks while holding the GIL, wedging the process). When several producers are
-installed, `OCTACAM_GENTL_PRODUCER` pins/prioritises them (see
+`GENICAM_GENTL64_PATH` or `OCTACAM_GENTL_CTI`. The recommended producer is the
+**Basler pylon `ProducerU3V`** (installed with the pylon SDK) — it opens and
+closes cleanly with no watermark, but enumerates **Basler** U3V cameras only
+(drive FLIR through the `spinnaker`/`flir` backends). **Allied Vision Vimba X**
+only covers Allied Vision cameras and third-party *GigE Vision* — its USB
+transport layer will not see FLIR/Basler USB3 cameras. Teledyne's Spinnaker
+producer is denied by default (its device close deadlocks while holding the GIL,
+wedging the process); **Balluff mvIMPACT** is denylisted (watermarks third-party
+frames and crashes the device scan). When several producers are installed,
+`OCTACAM_GENTL_PRODUCER` pins/prioritises them (see
 [Camera backends](guide/backends.md)).
 
 ### FLIR / Teledyne vendor SDK (tier 1)

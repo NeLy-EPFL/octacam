@@ -527,6 +527,84 @@ def test_doctor_flags_undetected_camera_and_exits_nonzero(tmp_path):
     assert "99999999" in result.output
 
 
+def _count_enumerations(monkeypatch):
+    """Return a Counter that ticks once per octacam.cli._enumerate_backend call.
+
+    doctor now enumerates the backends via a single parallel _CameraScan; this
+    seam lets a test assert the scan never re-enumerates a backend (the whole
+    point of the dedup — the old code enumerated the cascade ~3× per run)."""
+    import collections
+
+    from octacam import cli
+
+    counter: collections.Counter[str] = collections.Counter()
+    original = cli._enumerate_backend
+
+    def counting(name):
+        counter[name] += 1
+        return original(name)
+
+    monkeypatch.setattr("octacam.cli._enumerate_backend", counting)
+    return counter
+
+
+def test_doctor_enumerates_each_backend_at_most_once(monkeypatch):
+    # The dedup invariant: one parallel scan, so no backend is enumerated twice —
+    # even though the report has three consumers (the tier list, the cascade line,
+    # and the cameras-vs-config cross-check). basler is always present (emulated).
+    counter = _count_enumerations(monkeypatch)
+    result = runner.invoke(app, ["--log-level", "error", "doctor"])
+    assert result.exit_code == 0, result.output
+    assert counter["basler"] == 1
+    assert max(counter.values()) <= 1, dict(counter)
+
+
+def test_doctor_backend_filter_scans_only_that_backend(monkeypatch):
+    # `--backend X` must scan only X (no full-cascade sweep), so the other tiers
+    # are never touched.
+    counter = _count_enumerations(monkeypatch)
+    result = runner.invoke(app, ["--log-level", "error", "doctor", "--backend", "basler"])
+    assert result.exit_code == 0, result.output
+    assert set(counter) == {"basler"}, dict(counter)
+
+
+def test_doctor_backend_filter_is_case_insensitive():
+    # --backend is normalized like select_backend/_enumerate_backend, so an
+    # upper/mixed-case tier name still resolves to its cached scan (regression:
+    # the scan cache is keyed by the lowercased name).
+    result = runner.invoke(app, ["--log-level", "error", "doctor", "--backend", "BASLER"])
+    assert result.exit_code == 0, result.output
+    assert "BASLER: available" in result.output
+    assert "enumeration failed" not in result.output
+
+
+def test_doctor_json_has_no_progress_noise():
+    # The scan's live spinner renders on stderr and is suppressed for --json / when
+    # output is not a terminal, so machine-readable output is never corrupted.
+    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    assert "enumerating" not in result.output
+    json.loads(result.output)  # still valid JSON
+
+
+def test_doctor_report_order_is_deterministic():
+    # Parallel enumeration must not leak completion order into the report: the
+    # Camera-backends section is assembled in a fixed backend order both times.
+    def backends_section(output: str) -> str:
+        lines = output.splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "Camera backends")
+        end = next(
+            (i for i in range(start + 1, len(lines)) if lines[i].strip() == "Encoding toolchain"),
+            len(lines),
+        )
+        return "\n".join(lines[start:end])
+
+    first = runner.invoke(app, ["--log-level", "error", "doctor"])
+    second = runner.invoke(app, ["--log-level", "error", "doctor"])
+    assert first.exit_code == 0 and second.exit_code == 0
+    assert backends_section(first.output) == backends_section(second.output)
+
+
 # --- doctor: serial / Arduino devices ---------------------------------------
 
 
