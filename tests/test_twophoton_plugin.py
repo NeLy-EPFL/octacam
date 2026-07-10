@@ -46,10 +46,12 @@ class FakeLink:
     def close(self) -> None:
         self._open = False
 
-    def send_arm(self, params: ArmParams) -> None:
+    def send_arm(self, params: ArmParams) -> bool:
         with self._lock:
             if self._open:
                 self.written.append(params.to_bytes())
+                return True
+            return False
 
     def send_cancel(self) -> None:
         with self._lock:
@@ -206,6 +208,54 @@ def test_on_recording_start_silently_skips_when_port_closed():
     plugin, link = _plugin_with_fake(is_open=False)
     plugin.on_recording_start(None)   # must not raise
     assert link.snapshot() == []
+
+
+def test_default_start_params_emits_headless_slice():
+    # `octacam record` has no GUI to POST plugin_params, so the plugin must
+    # contribute an arm slice itself (fps + duration_ms) or the board is never
+    # armed and the external-triggered cameras hang forever.
+    from octacam.plugins import PluginManager
+
+    plugin, _ = _plugin_with_fake()
+    assert plugin.default_start_params(83.0, 12.0) == {"fps": 83, "duration_ms": 12000}
+    # And it must reach on_recording_start under the "twophoton" key via the manager.
+    params = PluginManager([plugin]).default_start_params(80.0, 5.0)
+    assert params == {"twophoton": {"fps": 80, "duration_ms": 5000}}
+
+
+def test_on_recording_start_surfaces_write_failure_to_gui():
+    # A wedged/closed CDC link makes the arm write silently no-op; the failure
+    # must reach the GUI (broadcast + _last_error), not just the server log.
+    plugin, link = _plugin_with_fake()
+    events: list[tuple[str, dict]] = []
+    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    link.send_arm = lambda params: False  # link open, but the write never lands
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin._last_error and "arm write" in plugin._last_error
+    assert any(
+        topic == "twophoton_state" and data["error"] == plugin._last_error
+        for topic, data in events
+    )
+
+
+def test_on_recording_start_surfaces_ack_timeout_to_gui():
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 0.05  # no reader to send 'A', so the wait elapses
+    events: list[tuple[str, dict]] = []
+    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin._last_error and "no arm ack" in plugin._last_error
+    assert any(
+        topic == "twophoton_state" and data["error"] == plugin._last_error
+        for topic, data in events
+    )
+
+
+def test_good_arm_clears_prior_arm_error():
+    plugin, _ = _plugin_with_fake()
+    plugin._last_error = "arm write to /dev/arduinoCams failed"
+    plugin._on_arduino_status("A")  # firmware reports armed
+    assert plugin._last_error is None
 
 
 # ---------------------------------------------------------------------------

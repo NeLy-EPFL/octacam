@@ -79,6 +79,29 @@ def test_dumps_escapes_strings():
     assert tomllib.loads(cw._dumps(doc))["gui"]["save_directory_default"] == 'a"b\\c'
 
 
+def test_dumps_escapes_del_control_char():
+    # U+007F (DEL) must be escaped; emitting it raw produces unparseable TOML
+    # that would silently reset the whole config to defaults on the next load.
+    doc = {"record": {"directory": "ab\x7fcd"}}
+    assert tomllib.loads(cw._dumps(doc))["record"]["directory"] == "ab\x7fcd"
+
+
+def test_dumps_serializes_date_and_datetime():
+    # The reader accepts an unquoted, date-like scalar (parsed to datetime.date);
+    # the writer must round-trip it instead of raising TypeError.
+    import datetime
+
+    doc = {
+        "record": {
+            "directory": datetime.date(2026, 7, 9),
+            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),
+        }
+    }
+    reparsed = tomllib.loads(cw._dumps(doc))["record"]
+    assert reparsed["directory"] == datetime.date(2026, 7, 9)
+    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)
+
+
 def test_plugin_options_roundtrip():
     doc = {
         "plugins": [

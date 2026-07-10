@@ -1,5 +1,6 @@
 """pycameleon backend node/param mapping, with a mocked camera (no hardware)."""
 
+import asyncio
 import types
 
 import numpy as np
@@ -30,6 +31,9 @@ class FakePyCam:
         }
         self.executed: list[str] = []
         self.streaming = False
+        # When True, receive_async never yields a frame, so _receive_bounded must
+        # hit its timeout (a stalled/disconnected trigger source).
+        self.stall = False
 
     def info(self):
         return {"serial_number": self._serial}
@@ -77,6 +81,11 @@ class FakePyCam:
     def receive(self, rx):
         return np.zeros((4, 4), dtype=np.uint8)
 
+    async def receive_async(self, rx):
+        if self.stall:
+            await asyncio.sleep(3600)  # never within any test timeout
+        return np.zeros((4, 4), dtype=np.uint8)
+
 
 def _open_backend():
     cam = FakePyCam()
@@ -122,6 +131,11 @@ def test_params_round_trip_and_trigger_normalization():
     )
     assert backend.read_node("exposure").value == 2222.0
     assert backend.read_node("width").value == 640
+    # Preview forces TriggerSource=Software on the live device; a config saved now
+    # must be normalized back to the captured original, else it bakes an
+    # unrecordable Software trigger (see normalize_trigger_source).
+    backend.begin_software_trigger_preview()
+    assert _cam._enum["TriggerSource"] == "Software"  # live override is in effect
     values = dict(parse_config(backend.save_params()))
     assert values["ExposureTime"] == "2222"  # _fmt_float drops the trailing .0
     assert values["TriggerSource"] == "Line1"  # captured original, not the override
@@ -165,6 +179,44 @@ def test_retrieve_executes_trigger_then_receives():
     assert array.shape == (4, 4) and timestamp == 0  # 0 ⇒ host-time fallback
     # With no pending trigger, retrieve times out and returns None.
     assert backend.retrieve(1, lambda: True) is None
+    backend.stop_grab()
+
+
+def test_retrieve_honors_timeout_when_receive_stalls():
+    # A stalled/disconnected trigger source must NOT park the grab thread forever:
+    # _receive_bounded honors timeout_ms and returns None so the grab loop can
+    # re-check the stop flag. Before the fix, receive() blocked with no timeout.
+    backend, cam = _open_backend()
+    backend.start_grab_preview()
+    cam.stall = True  # receive_async never yields a frame
+    backend.trigger_once()
+    got = backend.retrieve(20, lambda: True)  # ~20 ms bound, not forever
+    assert got is None
+    assert cam.executed == ["TriggerSoftware"]  # trigger still fired
+    # _lock was released, so a concurrent node read / stop does not deadlock.
+    assert backend.read_node("width").value == 1920
+    backend.stop_grab()
+    assert not backend.is_grabbing()
+
+
+def test_retrieve_freerun_honors_timeout_when_receive_stalls():
+    # Free-run has no pending-trigger gate, so its receive must be bounded too.
+    backend, cam = _open_backend()
+    backend.begin_freerun()
+    backend.start_grab_preview()
+    cam.stall = True
+    assert backend.retrieve_freerun(20, lambda: True) is None
+    backend.stop_grab()
+
+
+def test_retrieve_freerun_returns_frame():
+    backend, _cam = _open_backend()
+    backend.begin_freerun()
+    backend.start_grab_preview()
+    got = backend.retrieve_freerun(100, lambda: True)
+    assert got is not None
+    array, timestamp = got
+    assert array.shape == (4, 4) and timestamp == 0
     backend.stop_grab()
 
 

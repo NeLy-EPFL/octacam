@@ -282,6 +282,108 @@ def test_fake_zero_frame_recording_is_flagged(fake_system, tmp_path):
     assert any("external trigger" in m.lower() for m in errors)
 
 
+def test_teardown_preview_rearm_failure_goes_idle(fake_system, tmp_path, monkeypatch):
+    """A camera dropping out mid-recording can make the teardown preview re-arm
+    raise; the controller must still fire on_recording_stop and reach a terminal,
+    non-active state (idle) rather than wedging in "finishing" forever."""
+    from octacam.plugins.base import Plugin, PluginManager
+
+    stopped: list[bool] = []
+
+    class Spy(Plugin):
+        name = "spy"
+
+        def on_recording_stop(self, aborted):
+            stopped.append(aborted)
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.5, save_dir=str(tmp_path / "rec" / "001")
+    )
+    # auto_preview=True so teardown re-arms preview; make that arm raise.
+    controller = RecordingController(
+        fake_system, settings, PluginManager([Spy()]), auto_preview=True
+    )
+
+    def boom(*a, **k):
+        raise RuntimeError("camera dropped during re-arm")
+
+    monkeypatch.setattr(fake_system, "start_preview", boom)
+
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    assert controller.state == "idle"  # not stuck in "finishing"
+    assert not controller.recording_active
+    assert stopped == [False]  # on_recording_stop still fired (plugin disarmed)
+
+
+def test_start_recording_errors_when_start_record_raises(
+    fake_system, tmp_path, monkeypatch
+):
+    """A non-BackendError escaping camera_system.start_record must not orphan
+    partially-started cameras: start_recording tears them down, re-arms preview,
+    and returns ERROR instead of letting the exception escape."""
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(fake_system, settings, auto_preview=False)
+
+    def boom(*a, **k):
+        raise RuntimeError("bus dropped mid-start")
+
+    monkeypatch.setattr(fake_system, "start_record", boom)
+
+    result = controller.start_recording()
+    assert result.status == StartResult.ERROR
+    assert "bus dropped mid-start" in result.message
+    assert controller.state == "idle"
+    assert not controller.recording_active
+    # No orphaned recording cameras left grabbing.
+    for camera in fake_system:
+        assert not camera.backend.is_grabbing()
+
+
+def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
+    """While a finished recording's off-lock teardown tail is still running
+    (on_recording_stop + preview re-arm), the state has already left the active
+    set — a new start must still be refused (BUSY) so it cannot race the previous
+    recording's disarm over the shared trigger plugin."""
+    import threading as _t
+
+    from octacam.plugins.base import Plugin, PluginManager
+
+    in_stop = _t.Event()
+    release = _t.Event()
+
+    class Gate(Plugin):
+        name = "gate"
+
+        def on_recording_stop(self, aborted):
+            in_stop.set()
+            release.wait(10)  # hold the teardown tail open
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.3, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        fake_system, settings, PluginManager([Gate()]), auto_preview=False
+    )
+    assert controller.start_recording().ok
+    # Teardown reaches on_recording_stop only after the state left the active set.
+    assert in_stop.wait(20)
+    assert not controller.recording_active  # state already flipped to idle...
+    # ...yet a racing start is still refused while the tail runs.
+    assert controller.start_recording().status == StartResult.BUSY
+
+    release.set()
+    controller.join(timeout=20)
+    assert controller.state == "idle"
+    # Once the tail finishes the gate clears and a start is accepted again.
+    assert controller.start_recording(confirm_overwrite=True).ok
+    controller.stop_recording(abort=True)
+    controller.join(timeout=20)
+
+
 def test_fake_abort_recording(fake_system, tmp_path):
     import time
 

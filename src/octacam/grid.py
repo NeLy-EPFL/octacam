@@ -67,9 +67,16 @@ def auto_layout(camera_names: list[str]) -> list[list[str]]:
 
 
 def _fps_value(fps_str: str) -> float:
-    """Convert a ``num/den`` fraction string (from ffprobe) to a float."""
+    """Convert a ``num/den`` fraction string (from ffprobe) to a float.
+
+    Total for any input: ffprobe emits ``0/0`` for a stream with no defined
+    frame rate (degenerate/zero-frame mp4), so a zero denominator yields 0.0
+    instead of raising ZeroDivisionError."""
     num, _, den = fps_str.partition("/")
-    return float(num) / float(den) if den else float(num)
+    if not den:
+        return float(num)
+    den_f = float(den)
+    return float(num) / den_f if den_f else 0.0
 
 
 def _find_mp4(folder: Path, camera_name: str) -> Path | None:
@@ -154,31 +161,51 @@ def build_grid_video(
 
     # Resolve each grid slot to a source mp4 (None → black/missing).
     # Row-major order (left→right, top→bottom) matches xstack input order.
+    # A present-but-unprobeable file is treated as missing (a black lavfi cell)
+    # rather than aborting the whole grid, and the reference geometry/fps is
+    # taken from the first slot that probes successfully — so one bad camera no
+    # longer suppresses the grid for the whole rig.
     slot_files: list[Path | None] = []
-    found_any = False
+    ref_probe: tuple[int, int, str, float] | None = None
     for row in layout:
         for cell in row:
             if not cell:  # empty string = explicit black fill
                 slot_files.append(None)
-            else:
-                p = _find_mp4(folder, cell)
-                slot_files.append(p)
-                if p is not None:
-                    found_any = True
+                continue
+            p = _find_mp4(folder, cell)
+            if p is None:
+                slot_files.append(None)
+                continue
+            try:
+                probe = _probe_video(p)
+            except (
+                subprocess.CalledProcessError,
+                KeyError,
+                IndexError,
+                ValueError,
+            ) as e:
+                log.warning("Could not probe %s: %s — treating as a black cell", p, e)
+                slot_files.append(None)
+                continue
+            slot_files.append(p)
+            if ref_probe is None:
+                ref_probe = probe
 
-    if not found_any:
+    if ref_probe is None:
         log.warning(
-            "No mp4 files matching the grid layout found in %s — skipping grid", folder
+            "No probeable mp4 files matching the grid layout found in %s — skipping grid",
+            folder,
         )
         return None
 
-    # Probe the first real file for cell dimensions and fps.
-    ref = next(p for p in slot_files if p is not None)
-    try:
-        W, H, fps, dur = _probe_video(ref)
-    except (subprocess.CalledProcessError, KeyError, IndexError, ValueError) as e:
-        log.warning("Could not probe %s: %s — skipping grid", ref, e)
-        return None
+    W, H, fps, dur = ref_probe
+    # Round the cell dimensions up to even. Cells are padded to the exact
+    # reference W×H (below) and xstack composes a cols*W × rows*H frame, but a
+    # chroma-subsampled output (yuv420p) requires even width/height. An
+    # odd-dimension source (sensors with a 1-px size increment) would otherwise
+    # make ffmpeg refuse the grid with "not divisible by 2".
+    W += W & 1
+    H += H & 1
 
     total_frames = round(dur * _fps_value(fps))
 

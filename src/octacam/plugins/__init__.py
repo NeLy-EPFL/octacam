@@ -91,15 +91,20 @@ def register(name: str):
 def _import_builtin(name: str) -> None:
     """Lazily import a bundled plugin module so its @register call runs.
 
-    A missing optional dependency (or any import error) is downgraded to a
-    debug log; ``build_plugins`` then reports it as a skipped plugin.
+    Only bundled builtins reach here (other names are rejected up front). A
+    builtin that fails to import is a real problem, not a missing optional
+    third-party plugin, so the cause is logged at warning level; ``build_plugins``
+    then reports it as a skipped plugin.
     """
     if name in _REGISTRY or name not in _BUILTINS:
         return
     try:
         importlib.import_module(f"octacam.plugins.{name}")
     except Exception as e:
-        log.debug("Plugin module %r could not be imported: %s", name, e)
+        # A bundled builtin failing to import is a real problem, not the low-noise
+        # situation of an optional third-party entry point failing — surface it at
+        # warning level so the operator sees the actual cause.
+        log.warning("Builtin plugin module %r could not be imported: %s", name, e)
 
 
 def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
@@ -149,7 +154,16 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
         _import_builtin(name)
         factory = _REGISTRY.get(name)
         if factory is None:
-            log.warning("Unknown plugin %r; skipping", name)
+            if name in _BUILTINS:
+                # Known builtin whose module failed to import (the cause was logged
+                # by _import_builtin) — not the same as a genuinely unknown name.
+                log.warning(
+                    "Builtin plugin %r failed to import (run with debug logging "
+                    "for the cause); skipping",
+                    name,
+                )
+            else:
+                log.warning("Unknown plugin %r; skipping", name)
             continue
         try:
             plugins.append(factory(options))
@@ -183,14 +197,16 @@ def _plugin_summary(name: str) -> str:
     factory in a submodule (e.g. ``octacam_twophoton.plugin``), so fall back to
     the factory's own module whenever the ``octacam.plugins.<name>`` docstring
     is missing or blank."""
-    doc = getattr(sys.modules.get(f"octacam.plugins.{name}"), "__doc__", None) or ""
-    doc = doc.strip()
+    # Resolve the module object first: getattr(None, "__doc__", None) returns the
+    # NoneType class docstring (a truthy string), which would mask the fallback.
+    mod = sys.modules.get(f"octacam.plugins.{name}")
+    doc = (mod.__doc__ or "").strip() if mod is not None else ""
     if not doc:
         factory = _REGISTRY.get(name)
         factory_module = (
             sys.modules.get(getattr(factory, "__module__", "")) if factory else None
         )
-        doc = (getattr(factory_module, "__doc__", None) or "").strip()
+        doc = (factory_module.__doc__ or "").strip() if factory_module is not None else ""
     return doc.splitlines()[0] if doc else ""
 
 

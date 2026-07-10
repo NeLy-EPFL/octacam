@@ -343,9 +343,14 @@ class JogClock:
         finally:
             # Release the coils only if a newer jog has not superseded us, so a
             # restart's pulses are not clobbered by this thread's stray release.
-            # An atomic int read — no lock, so no deadlock with a joining caller.
-            if generation == self._generation:
-                self._write(release)
+            # The compare + release must be atomic w.r.t. start() (which bumps the
+            # generation under _lock), or a superseded thread could read its own
+            # generation and then release coils a newer thread has already taken
+            # over. No deadlock: no caller joins a worker while holding _lock
+            # (stop's join is outside its `with`).
+            with self._lock:
+                if generation == self._generation:
+                    self._write(release)
 
 
 @register("flywheel")
@@ -542,8 +547,13 @@ class FlywheelPlugin(Plugin):
         if not spec:
             return None
         try:
-            return Command.from_payload(spec)
-        except (KeyError, TypeError, ValueError):
+            cmd = Command.from_payload(spec)
+            cmd.to_bytes()  # force the struct pack so an out-of-range wire field
+            # is rejected here (struct.error is not a ValueError) rather than
+            # escaping later through write_command, matching the serial_command
+            # endpoint's validation.
+            return cmd
+        except (KeyError, TypeError, ValueError, struct.error):
             log.warning("Flywheel plugin: ignoring invalid command %r", spec)
             return None
 

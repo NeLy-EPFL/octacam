@@ -708,6 +708,7 @@ class TriggerboxPlugin(Plugin):
         )
         self._arduino_state = "idle"
         self._armed_event = threading.Event()
+        self._arm_lock = threading.Lock()  # serialize arms sharing _armed_event/_last_reject
         self._last_reject: str | None = None
         self._last_error: str | None = None
         self._ack_timeout_s = ACK_TIMEOUT_S
@@ -955,27 +956,33 @@ class TriggerboxPlugin(Plugin):
         Returns whether the link is open again afterwards. The ESP32-S3 USB-CDC
         occasionally wedges (writes/control transfers stall with EPIPE while the
         port stays enumerated), which strands external-triggered recordings; a
-        ``USBDEVFS_RESET`` re-initialises the link without a physical unplug."""
-        device = self.device
-        log.warning(
-            "triggerbox: %s; attempting a USB bus reset on %s to recover", why, device
-        )
-        self._link.close()
-        ok, msg = serial_ports.reset_usb_device(device)
-        log.warning("triggerbox: %s", msg)
-        if ok:
-            serial_ports.wait_for_device(device, timeout=3.0)
-        try:
-            self._link.open(device, self.baud)
-        except Exception as e:
+        ``USBDEVFS_RESET`` re-initialises the link without a physical unplug.
+
+        Held across the whole close→reset→reopen under the same port lock the
+        flash/reconnect scheme relies on, so a concurrent flash (or an off-lock
+        arm-path recovery) can't fight over the tty. Re-entrant: the ``_open()``
+        caller that already holds it on this thread is unaffected."""
+        with self._fw.port_lock:
+            device = self.device
             log.warning(
-                "triggerbox: reopen after USB reset failed: %s",
-                serial_ports.explain_open_failure(device, e),
+                "triggerbox: %s; attempting a USB bus reset on %s to recover", why, device
             )
-            return False
-        if self._link.is_open:
-            log.info("triggerbox: reopened %s after USB reset", device)
-        return self._link.is_open
+            self._link.close()
+            ok, msg = serial_ports.reset_usb_device(device)
+            log.warning("triggerbox: %s", msg)
+            if ok:
+                serial_ports.wait_for_device(device, timeout=3.0)
+            try:
+                self._link.open(device, self.baud)
+            except Exception as e:
+                log.warning(
+                    "triggerbox: reopen after USB reset failed: %s",
+                    serial_ports.explain_open_failure(device, e),
+                )
+                return False
+            if self._link.is_open:
+                log.info("triggerbox: reopened %s after USB reset", device)
+            return self._link.is_open
 
     def _banner_arm_compatible(self, banner: str | None) -> bool:
         """Fallback arm-compatibility check when the sketch source is unavailable
@@ -1197,16 +1204,22 @@ class TriggerboxPlugin(Plugin):
 
         Returns ``"ok"`` (running ack seen, or ack-wait disabled), ``"reject"``
         (board sent E<code>), ``"timeout"`` (no ack in time), or ``"write_failed"``
-        (the bytes never reached the OS — a wedged/closed link)."""
-        self._armed_event.clear()
-        self._last_reject = None
-        if not self._link.send_arm(arm):
-            return "write_failed"
-        if self._ack_timeout_s <= 0:
-            return "ok"
-        if not self._armed_event.wait(self._ack_timeout_s):
-            return "timeout"
-        return "reject" if self._last_reject is not None else "ok"
+        (the bytes never reached the OS — a wedged/closed link).
+
+        Serialized on ``_arm_lock`` so two concurrent arms (a managed-preview re-arm
+        and a recording arm, or two rapid preview re-arms) can't share the single
+        ``_armed_event``/``_last_reject`` and attribute a firmware ack/reject to the
+        wrong caller. Held across the up-to-ack_timeout wait; arms are infrequent."""
+        with self._arm_lock:
+            self._armed_event.clear()
+            self._last_reject = None
+            if not self._link.send_arm(arm):
+                return "write_failed"
+            if self._ack_timeout_s <= 0:
+                return "ok"
+            if not self._armed_event.wait(self._ack_timeout_s):
+                return "timeout"
+            return "reject" if self._last_reject is not None else "ok"
 
     def on_recording_stop(self, aborted: bool) -> None:
         # Cancel on any end (abort, manual stop, clean finish); a cancel to an

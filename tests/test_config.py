@@ -90,6 +90,18 @@ def test_duplicate_name_skipped(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
+def test_name_clashing_with_serial_fallback_skipped(tmp_path):
+    # A blank-name camera records under its serial as the filename stem, so a
+    # later entry whose explicit name equals that serial would clobber the same
+    # video file; the clash must be rejected at parse time.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "X"\n'
+        '[[cameras]]\nserial_number = "Y"\nname = "X"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert [c.serial_number for c in config.cameras] == ["X"]
+
+
 def test_unsafe_camera_name_dropped(tmp_path):
     # A name becomes a video filename stem; a traversal/separator name must not
     # survive the load (it would write outside the save dir). The camera is

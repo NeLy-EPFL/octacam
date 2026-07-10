@@ -194,7 +194,7 @@ def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
     """Where a camera's per-frame timestamps came from, from the fallback count.
 
     ``None`` when no frames were recorded; ``"hardware"`` when none fell back;
-    ``"host"`` when all did (a host-only backend like pycameleon/fake);
+    ``"host"`` when all did (a host-only backend like pycameleon);
     ``"mixed"`` when only some did (a stray-zero anomaly, surfaced honestly)."""
     if frames <= 0:
         return None
@@ -367,13 +367,21 @@ class RecordingController:
         # True while a camera's geometry is being changed (preview stopped and
         # restarted off-lock); blocks a recording from starting mid-cycle.
         self._reconfiguring = False
+        # True while a finished recording's teardown is still running its off-lock
+        # tail (on_recording_stop disarm + preview re-arm) after the state has
+        # already left the recording-active set; blocks a new recording from
+        # racing that tail over the shared trigger plugin.
+        self._tearing_down = False
         self._aborted = False
         self._stop_event = threading.Event()
         # Set once the off-lock on_recording_start plugin hooks have finished
         # dispatching. The monitor waits on it before on_first_frame and
         # on_recording_stop, so the start -> first_frame -> stop hook order holds
         # even though the arm runs on the caller thread — closing the race where
-        # an abort's cancel could overtake a not-yet-sent hardware arm.
+        # an abort's cancel could overtake a not-yet-sent hardware arm. A fresh
+        # Event is minted per recording in start_recording (and captured by that
+        # recording's monitor), so an old monitor can never be released early by —
+        # or block on — a subsequent recording's hooks.
         self._start_hooks_done = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
@@ -500,6 +508,16 @@ class RecordingController:
                     save_dir=compose_save_dir(
                         merged.record_directory, merged.relative_directory
                     ),
+                )
+            elif "save_dir" in changes:
+                # A lone save_dir edit (no split-path change) clears the stale
+                # split halves, mirroring the CLI --output precedent: otherwise
+                # _relative_directory would keep preferring the old
+                # relative_directory (mirroring to the wrong sub-path) and the
+                # post-recording increment would recompose save_dir from it,
+                # discarding the explicitly set path.
+                merged = dataclasses.replace(
+                    merged, record_directory="", relative_directory=""
                 )
             self._settings = merged
             if "fps" in changes:  # live-updates the software-trigger rate
@@ -917,6 +935,11 @@ class RecordingController:
         confirm_overwrite: bool = False,
         plugin_params: dict | None = None,
     ) -> StartResult:
+        # Bound up front so the off-lock tail below is provably assigned on every
+        # path (they are only *read* on the matching branch, but pyright can't
+        # connect the two `if not started` blocks / the early return).
+        failed_resume_mode: str | None = None
+        hooks_done: threading.Event | None = None
         with self._lock:
             if self.recording_active:
                 return StartResult(StartResult.BUSY, "Recording in progress")
@@ -925,6 +948,13 @@ class RecordingController:
             if self._reconfiguring:
                 return StartResult(
                     StartResult.BUSY, "Camera reconfiguration in progress"
+                )
+            if self._tearing_down:
+                # The previous recording's teardown tail (disarm + preview re-arm)
+                # is still running off-lock; starting now would race it over the
+                # shared trigger plugin.
+                return StartResult(
+                    StartResult.BUSY, "Previous recording is still finishing"
                 )
             settings = self._settings
             save_dir = Path(settings.save_dir)
@@ -942,21 +972,36 @@ class RecordingController:
                 )
 
             use_software_trigger = settings.trigger_source == "software"
-            self.camera_system.stop_software_trigger()
-            self.camera_system.enable_frame_trigger()
-            self.camera_system.set_trigger_source(use_software_trigger)
-            self.camera_system.set_software_trigger_frequency(settings.fps)
-            self._recording_start_wall_ns = time.time_ns()
-            started = self.camera_system.start_record(
-                save_dir,
-                settings.fps,
-                settings.video_format(),
-                settings.record_form,
-                use_software_trigger=use_software_trigger,
-            )
+            start_error: str | None = None
+            try:
+                self.camera_system.stop_software_trigger()
+                self.camera_system.enable_frame_trigger()
+                self.camera_system.set_trigger_source(use_software_trigger)
+                self.camera_system.set_software_trigger_frequency(settings.fps)
+                self._recording_start_wall_ns = time.time_ns()
+                started = self.camera_system.start_record(
+                    save_dir,
+                    settings.fps,
+                    settings.video_format(),
+                    settings.record_form,
+                    use_software_trigger=use_software_trigger,
+                )
+            except Exception as e:
+                # A non-BackendError escaping the trigger-config or start_record
+                # (CameraSystem only log-and-skips per-camera failures) can leave
+                # some cameras already grabbing to disk with live ffmpeg writers
+                # and no monitor. Tear them all down and fall into the `not
+                # started` re-arm path below, so no orphaned recording cameras
+                # are left behind and the state never stays half-advanced.
+                log.exception("Recording failed to start")
+                with contextlib.suppress(Exception):
+                    self.camera_system.stop()
+                start_error = f"Recording failed to start: {e}"
+                started = None
             total = len(self.camera_system)
             if not started:
-                self._event("error", "No camera could start recording")
+                if start_error is None:
+                    self._event("error", "No camera could start recording")
                 # Re-arm the preview cameras under the lock; the (possibly
                 # blocking) driving-plugin arm is dispatched off the lock below.
                 failed_resume_mode = self._resume_preview()
@@ -985,7 +1030,12 @@ class RecordingController:
 
                 self._aborted = False
                 self._stop_event.clear()
-                self._start_hooks_done.clear()
+                # Mint a fresh per-recording hooks-done event and capture it (both
+                # as the current attribute and in a local this monitor closes over)
+                # so an old monitor can never be released early by — or block on —
+                # a later recording's hooks.
+                hooks_done = threading.Event()
+                self._start_hooks_done = hooks_done
                 self._deadline = None
                 self._set_state("waiting")
                 self._monitor = threading.Thread(
@@ -995,6 +1045,7 @@ class RecordingController:
                         plugin_params,
                         len(started),
                         not use_software_trigger,
+                        hooks_done,
                     ),
                     daemon=True,
                 )
@@ -1003,7 +1054,9 @@ class RecordingController:
             # No camera recorded: dispatch the preview re-arm OFF the lock (a
             # driving-plugin arm can block on a serial write + ack), then bail.
             self._dispatch_preview_arm(failed_resume_mode)
-            return StartResult(StartResult.ERROR, "No camera could start recording")
+            return StartResult(
+                StartResult.ERROR, start_error or "No camera could start recording"
+            )
         # Arm plugins off the controller lock — like on_first_frame below — so a
         # plugin's blocking serial write (e.g. the twophoton arm, write_timeout=1
         # s) can't stall snapshot()/telemetry while self._lock is held. The
@@ -1023,7 +1076,10 @@ class RecordingController:
             # of whether the arm ran or raised — the event guards ordering, not
             # success. The monitor waits on it so a cancel can never overtake the
             # arm even when this dispatch is slow (e.g. the bounded ack wait).
-            self._start_hooks_done.set()
+            # Set this recording's own event (captured locally) rather than
+            # self._start_hooks_done, which a later recording may have replaced.
+            if hooks_done is not None:
+                hooks_done.set()
         return StartResult(StartResult.OK)
 
     def _resume_preview(self) -> str | None:
@@ -1156,10 +1212,25 @@ class RecordingController:
             log.exception("Benchmark failed")
             self._event("error", "Benchmark failed (see the log for details)")
         finally:
-            # Always return to preview/idle, even on failure or cancel.
-            with self._lock:
-                resume_mode = self._resume_preview()
-            self._dispatch_preview_arm(resume_mode)  # re-arm managed preview off-lock
+            # Always leave the "diagnosing" state, even on failure or cancel — a
+            # camera dropping out during the benchmark can make the preview re-arm
+            # raise BackendError, which would otherwise wedge the controller in
+            # "diagnosing" (camera control locked) for the rest of the process.
+            try:
+                with self._lock:
+                    resume_mode = self._resume_preview()
+            except Exception:
+                log.exception("Preview re-arm failed after benchmark; going idle")
+                self._event("error", "Preview could not resume after the benchmark")
+                with self._lock:
+                    self._set_state("idle")
+                resume_mode = None
+            # re-arm managed preview off-lock; a plugin dispatch error here must
+            # not leak out of the thread either (the state is already terminal).
+            try:
+                self._dispatch_preview_arm(resume_mode)
+            except Exception:
+                log.exception("Preview plugin re-arm failed after benchmark")
 
     def cancel_diagnostic(self) -> None:
         """Ask a running benchmark to stop early (no-op if none is running)."""
@@ -1169,8 +1240,26 @@ class RecordingController:
         """The most recent benchmark report (as a dict), or None if none has run."""
         return self._last_diagnostic
 
-    def _monitor_loop(
-        self, duration_s, plugin_params, expected_started, external_trigger
+    def _monitor_loop(self, *args) -> None:
+        """Run the recording monitor, guaranteeing a terminal, non-active state.
+
+        Wraps :meth:`_run_monitor_loop` so that ANY unexpected exception (which in
+        a daemon thread would otherwise die silently, leaking recording_active=True
+        and wedging the whole controller) still leaves it idle, the trigger plugin
+        disarmed, and the teardown gate cleared."""
+        try:
+            self._run_monitor_loop(*args)
+        except Exception:
+            log.exception("Recording monitor crashed; forcing idle")
+            with contextlib.suppress(Exception):
+                self.plugins.dispatch("on_recording_stop", self._aborted)
+            with self._lock:
+                self._tearing_down = False
+                self._set_state("idle")
+            self._event("error", "Recording monitor crashed (see log); forced idle")
+
+    def _run_monitor_loop(
+        self, duration_s, plugin_params, expected_started, external_trigger, hooks_done
     ) -> None:
         # --- wait for the first frame from the cameras that started (Qt's
         # check_record_started_timer). Warn after 3 s. With the software
@@ -1215,7 +1304,9 @@ class RecordingController:
             # Let the off-lock on_recording_start hooks finish first (normally
             # done long before a frame arrives; only blocks in the rare case a
             # frame lands mid-arm) so first-frame motion can't precede the arm.
-            self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
+            # Wait on this recording's own captured event (not the attribute,
+            # which a later recording may have replaced).
+            hooks_done.wait(START_HOOKS_TIMEOUT_S)
             # Fire plugin first-frame hooks at the t0 of the countdown, in the
             # same place the inline flywheel write used to live, so stepper
             # motion (or any plugin) stays synchronised to actual capture.
@@ -1276,40 +1367,73 @@ class RecordingController:
             self._write_timestamps()
         self._note_in_session_cache()
 
+        # From here the recording leaves the active set (state -> preview/idle),
+        # but the off-lock disarm + preview re-arm below are still pending. Hold a
+        # `_tearing_down` gate across them so a new start cannot race this tail
+        # over the shared trigger plugin, and clear it in the finally.
         with self._lock:
-            self._deadline = None
-            aborted = self._aborted
-            if not aborted:
-                # Bump the trailing 3-digit run so the next recording lands in a
-                # fresh folder. Increment the relative sub-path (keeping the base
-                # fixed) and recompose so both halves stay consistent; fall back
-                # to bumping save_dir directly when there is no relative part.
-                if self._settings.relative_directory.strip():
-                    next_rel = increment_trailing_number(
-                        self._settings.relative_directory
+            self._tearing_down = True
+        try:
+            with self._lock:
+                self._deadline = None
+                aborted = self._aborted
+                if not aborted:
+                    # Bump the trailing 3-digit run so the next recording lands in
+                    # a fresh folder. Increment the relative sub-path (keeping the
+                    # base fixed) and recompose so both halves stay consistent;
+                    # fall back to bumping save_dir directly when there is no
+                    # relative part.
+                    if self._settings.relative_directory.strip():
+                        next_rel = increment_trailing_number(
+                            self._settings.relative_directory
+                        )
+                        self._settings = dataclasses.replace(
+                            self._settings,
+                            relative_directory=next_rel,
+                            save_dir=compose_save_dir(
+                                self._settings.record_directory, next_rel
+                            ),
+                        )
+                    else:
+                        self._settings = dataclasses.replace(
+                            self._settings,
+                            save_dir=increment_trailing_number(
+                                self._settings.save_dir
+                            ),
+                        )
+                # Guard the preview re-arm: a camera dropped mid-recording can make
+                # start_preview raise BackendError, which — since _set_state runs
+                # only after it succeeds — would otherwise wedge the controller in
+                # "finishing". On failure go idle (recording_active False) and
+                # still run on_recording_stop below so the trigger plugin is
+                # disarmed.
+                try:
+                    resume_mode = self._resume_preview()
+                except Exception:
+                    log.exception(
+                        "Preview re-arm failed after recording; going idle"
                     )
-                    self._settings = dataclasses.replace(
-                        self._settings,
-                        relative_directory=next_rel,
-                        save_dir=compose_save_dir(
-                            self._settings.record_directory, next_rel
-                        ),
+                    self._event(
+                        "error", "Preview could not resume after the recording"
                     )
-                else:
-                    self._settings = dataclasses.replace(
-                        self._settings,
-                        save_dir=increment_trailing_number(self._settings.save_dir),
-                    )
-            resume_mode = self._resume_preview()
-        # Wait out the on_recording_start hooks so a stop/abort cancel can never
-        # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when
-        # the recording is stopped in the window right after it starts.
-        self._start_hooks_done.wait(START_HOOKS_TIMEOUT_S)
-        self.plugins.dispatch("on_recording_stop", aborted)
-        # Re-arm the driving plugin for preview (managed only) AFTER the recording
-        # cancel, off the lock, so the record arm is fully torn down first.
-        self._dispatch_preview_arm(resume_mode)
-        self._event("info", "Recording aborted" if aborted else "Recording finished")
+                    self._set_state("idle")
+                    resume_mode = None
+            # Wait out the on_recording_start hooks so a stop/abort cancel can never
+            # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when
+            # the recording is stopped in the window right after it starts. Wait on
+            # this recording's own captured event, not the attribute.
+            hooks_done.wait(START_HOOKS_TIMEOUT_S)
+            self.plugins.dispatch("on_recording_stop", aborted)
+            # Re-arm the driving plugin for preview (managed only) AFTER the
+            # recording cancel, off the lock, so the record arm is fully torn down
+            # first.
+            self._dispatch_preview_arm(resume_mode)
+            self._event(
+                "info", "Recording aborted" if aborted else "Recording finished"
+            )
+        finally:
+            with self._lock:
+                self._tearing_down = False
 
     def _snapshot_config(self) -> None:
         """Copy the rig config into the recording folder for `octacam process`.

@@ -510,11 +510,16 @@ class BaslerBackend(SoftwareTriggerHandoff):
         raw = self.raw
         if raw is None or not self._grabbing:
             return None
-        result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        try:
+            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        except genicam.GenericException:
+            return None
         try:
             if not result.IsValid() or not result.GrabSucceeded():
                 return None
             return (result.Array if wants_array() else None, result.TimeStamp)
+        except genicam.GenericException:
+            return None
         finally:
             result.Release()
 
@@ -545,9 +550,21 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # serializes execute→RetrieveResult on the single grab thread thereafter,
         # so at most one exposure is ever in flight and OneByOne's bounded output
         # queue can never overflow.
-        return self.raw.WaitForFrameTriggerReady(
-            TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
-        )
+        #
+        # base.start_record does NOT call stop_grab on a False/raising return, so
+        # a failed gate must leave the camera NOT grabbing itself — otherwise the
+        # native grab (and _grabbing) stays on with no record thread, wedging the
+        # camera against the next StartGrabbing. stop_grab() is idempotent.
+        try:
+            ready = self.raw.WaitForFrameTriggerReady(
+                TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
+            )
+        except genicam.GenericException:
+            self.stop_grab()
+            raise
+        if not ready:
+            self.stop_grab()
+        return ready
 
     def stop_grab(self) -> None:
         # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
@@ -575,7 +592,14 @@ class BaslerBackend(SoftwareTriggerHandoff):
             raw.ExecuteSoftwareTrigger()
         except genicam.GenericException:
             return None
-        result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        # RetrieveResult can raise (not just time out) on a device-level error
+        # — device removed/unplugged mid-record, grab-engine/transport failure —
+        # so guard it too, returning None (one lost frame) to uphold the
+        # never-raises contract the grab loop relies on for its post-loop cleanup.
+        try:
+            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        except genicam.GenericException:
+            return None
         try:
             # IsValid is the pypylon equivalent of C++'s `if (grab_result)`:
             # a timed-out RetrieveResult returns an empty result whose other
@@ -600,6 +624,8 @@ class BaslerBackend(SoftwareTriggerHandoff):
             timestamp = result.TimeStamp
             array = result.Array if wants_array() else None
             return (array, timestamp)
+        except genicam.GenericException:
+            return None
         finally:
             result.Release()
 

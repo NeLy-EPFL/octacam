@@ -18,6 +18,7 @@ Two design choices keep saves faithful:
 
 import contextlib
 import copy
+import datetime
 import os
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -57,7 +58,7 @@ def _toml_escape(value: str) -> str:
             out.append("\\r")
         elif ch == "\t":
             out.append("\\t")
-        elif ord(ch) < 0x20:
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
             out.append(f"\\u{ord(ch):04X}")
         else:
             out.append(ch)
@@ -73,6 +74,11 @@ def _toml_value(value: object) -> str:
         return repr(value)
     if isinstance(value, str):
         return _toml_escape(value)
+    # The reader accepts date/datetime scalars (config.py:_scalar_str coerces an
+    # unquoted, date-like value to text); mirror that here. Check datetime before
+    # date (datetime subclasses date) so full timestamps aren't truncated.
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     if isinstance(value, dict):

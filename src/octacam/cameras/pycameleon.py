@@ -33,6 +33,7 @@ Mapping notes vs. the other backends:
   so the camera is only ever touched by one thread at a time.
 """
 
+import asyncio
 import logging
 import threading
 from typing import Any
@@ -44,6 +45,7 @@ from octacam.cameras._genicam_config import (
     apply_freerun_rate_cap,
     clear_freerun_rate_cap,
     dump_config,
+    normalize_trigger_source,
     parse_config,
 )
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
@@ -108,6 +110,9 @@ class PycameleonBackend(SoftwareTriggerHandoff):
         self._context_xml: str | None = None
         # Streaming state, owned by start_grab_* / stop_grab.
         self._receiver = None
+        # Event loop that drives the timeout-bounded receive_async (see
+        # _receive_bounded); created lazily on the grab thread, closed by close().
+        self._recv_loop: asyncio.AbstractEventLoop | None = None
         # Serializes every device call (pycameleon allows only one at a time).
         # Reentrant so composed methods (read_node → _read_int_opt) can nest.
         self._lock = threading.RLock()
@@ -154,6 +159,12 @@ class PycameleonBackend(SoftwareTriggerHandoff):
                 log.warning("Error closing camera %s: %s", self._serial, e)
             self._cam = None
             self._open = False
+            if self._recv_loop is not None:
+                try:
+                    self._recv_loop.close()
+                except Exception:
+                    pass
+                self._recv_loop = None
 
     def is_open(self) -> bool:
         return self._cam is not None and self._open
@@ -302,7 +313,10 @@ class PycameleonBackend(SoftwareTriggerHandoff):
         self._original_trigger_source = self._read_enum_opt("TriggerSource")
 
     def save_params(self) -> str:
-        return dump_config(self)
+        # Undo any live TriggerSource=Software override (from a software-trigger
+        # preview) so a config saved mid-preview does not bake an unrecordable
+        # Software trigger — matches flir.py / harvesters.py.
+        return normalize_trigger_source(dump_config(self), self._original_trigger_source)
 
     # ----------------------------------------------------------- triggering
 
@@ -384,15 +398,19 @@ class PycameleonBackend(SoftwareTriggerHandoff):
 
     def retrieve_freerun(self, timeout_ms: int, wants_array) -> Frame | None:
         # Free-run: the camera streams continuously, so receive the next frame
-        # without waiting on / executing a software trigger.
+        # without waiting on / executing a software trigger. The receive is
+        # timeout_ms-bounded so a free-run source that stops (or a mid-record
+        # unplug) can't park the grab thread — and _lock — forever.
         with self._lock:
             if not self._grabbing or self._receiver is None or self._cam is None:
                 return None
             try:
-                array = self._cam.receive(self._receiver)
+                array = self._receive_bounded(timeout_ms)
             except Exception as e:
                 log.debug("receive failed on camera %s: %s", self._serial, e)
                 return None
+        if array is None:
+            return None  # timed out; the grab loop re-checks the stop flag
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)
 
@@ -437,13 +455,43 @@ class PycameleonBackend(SoftwareTriggerHandoff):
                 return None
             try:
                 self._cam.execute("TriggerSoftware")
-                array = self._cam.receive(self._receiver)
+                array = self._receive_bounded(timeout_ms)
             except Exception as e:
                 log.debug("receive failed on camera %s: %s", self._serial, e)
                 return None
+        if array is None:
+            return None  # timed out; the grab loop re-checks the stop flag
         # Own the frame; skip the copy when the display slot is full (preview).
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)
+
+    def _receive_bounded(self, timeout_ms: int):
+        """Receive the next frame, or return None after *timeout_ms*.
+
+        pycameleon's ``receive()`` is a blocking call with **no timeout**: a lost
+        software-triggered frame, a mid-record USB unplug, or a free-run source
+        that stops would park the grab thread inside ``receive()`` forever — with
+        ``_lock`` held — wedging ``stop_grab``/``join``/``close`` and any
+        concurrent node access. Instead await the non-blocking ``receive_async``
+        under a ``timeout_ms`` deadline (:func:`asyncio.wait_for`) and return None
+        on timeout, so the grab loop re-checks :meth:`is_grabbing` / the stop flag
+        and can exit. Mirrors the bounded-fetch design of the harvesters backend
+        (see ``harvesters._fetch_frame``). Called only under ``_lock`` from the
+        grab thread, so the reused event loop is single-threaded.
+        """
+        loop = self._recv_loop
+        if loop is None:
+            loop = self._recv_loop = asyncio.new_event_loop()
+
+        async def _await_frame():
+            return await self._cam.receive_async(self._receiver)
+
+        try:
+            return loop.run_until_complete(
+                asyncio.wait_for(_await_frame(), max(timeout_ms, 0) / 1000.0)
+            )
+        except TimeoutError:
+            return None
 
 
 def _read_serial(cam) -> str:

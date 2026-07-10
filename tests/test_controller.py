@@ -169,6 +169,38 @@ def test_update_settings_validation():
         controller.update_settings(fps=10.0)
 
 
+def test_update_settings_lone_save_dir_clears_split_halves():
+    # Setting save_dir alone (no record_directory/relative_directory in the same
+    # patch) must clear the stale split halves — otherwise _relative_directory
+    # keeps preferring the old relative_directory and the post-recording increment
+    # recomposes save_dir from it, discarding the explicitly set path.
+    import threading
+
+    controller = RecordingController.__new__(RecordingController)
+    controller._settings = RecordingSettings(
+        record_directory="/base",
+        relative_directory="240101/001",
+        save_dir="/base/240101/001",
+    )
+    controller._state = "idle"
+    controller._lock = threading.RLock()
+    controller._auto_preview = False
+
+    merged = controller.update_settings(save_dir="/other/place")
+    assert merged.save_dir.endswith("/other/place")
+    assert merged.record_directory == ""
+    assert merged.relative_directory == ""
+
+    # Editing a split half still recomposes save_dir from the halves (unchanged
+    # behaviour), taking precedence over a save_dir supplied in the same patch.
+    merged = controller.update_settings(
+        record_directory="/b", relative_directory="run/002", save_dir="/ignored"
+    )
+    assert merged.record_directory == "/b"
+    assert merged.relative_directory == "run/002"
+    assert merged.save_dir.endswith("/b/run/002")
+
+
 def test_sanitize_camera_name():
     assert sanitize_camera_name("  cam left  ") == "cam left"
     assert sanitize_camera_name("cam_01") == "cam_01"

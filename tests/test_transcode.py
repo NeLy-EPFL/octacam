@@ -668,6 +668,24 @@ def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
     assert not (tmp_path / "cam0.mp4").exists()
 
 
+def test_single_file_skips_zero_frame_capture_with_warning(tmp_path):
+    from octacam.cli import _transcode_jobs
+
+    # Naming a 0-frame capture's file directly must skip it (mirror the folder
+    # scan) instead of feeding a header-only file to ffmpeg.
+    (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)  # header-only stub
+    _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
+    handler = _ListHandler()
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        jobs = _transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
+    finally:
+        logger.removeHandler(handler)
+    assert jobs == []
+    assert any("0 frames" in m for m in handler.messages)
+
+
 def test_single_file_uses_summary_in_its_folder(tmp_path):
     # A .raw named directly picks up its geometry from the summary in its folder;
     # reproduced as-saved, so the saved geometry is preserved.

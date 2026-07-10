@@ -533,27 +533,32 @@ def gui(
     controller = RecordingController(
         system, settings, plugins, session_id=session_id, config_dir=config_dir
     )
-    controller.start_preview()
-    app = create_app(controller, config, plugins, config_dir=str(config_dir))
-    log.info(
-        "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
-        host,
-        port,
-        port,
-        port,
-    )
-    browser_url = f"http://{browser_host}:{port}/"
-    skip = _browser_skip_reason(no_browser)
-    if skip:
-        log.info("Not opening a browser automatically: %s.", skip)
-    else:
-        log.info("Opening the web GUI in your default browser…")
-        threading.Thread(
-            target=_open_browser_when_ready,
-            args=(browser_url, host, port),
-            daemon=True,
-        ).start()
     try:
+        # start_preview() arms the trigger board / lights over serial and
+        # create_app() (plus the browser/log lines below) can raise; keep them
+        # inside the try so the finally always runs controller.close() and
+        # plugins.teardown_all() — otherwise a failure here leaves the Arduino
+        # strobing triggers/lights because send_cancel is never sent.
+        controller.start_preview()
+        app = create_app(controller, config, plugins, config_dir=str(config_dir))
+        log.info(
+            "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
+            host,
+            port,
+            port,
+            port,
+        )
+        browser_url = f"http://{browser_host}:{port}/"
+        skip = _browser_skip_reason(no_browser)
+        if skip:
+            log.info("Not opening a browser automatically: %s.", skip)
+        else:
+            log.info("Opening the web GUI in your default browser…")
+            threading.Thread(
+                target=_open_browser_when_ready,
+                args=(browser_url, host, port),
+                daemon=True,
+            ).start()
         # ws_ping_timeout: uvicorn's websocket keepalive pings the browser and
         # drops the socket if no pong returns within this window. That same
         # socket also carries the preview stream (up to ~8 cameras worth of JPEG
@@ -2061,7 +2066,12 @@ def record(
             sys.exit(f"Failed to start recording: {result.message}")
         controller.join()
     finally:
-        system.close()
+        # controller.close() sets abort, joins the daemon recording monitor (so
+        # its finishing block writes recording-summary.json/timestamps.npz and the
+        # session-cache note), then closes the camera system exactly once — mirror
+        # of the gui shutdown above. Calling system.close() directly would race the
+        # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
+        controller.close()
         plugins.teardown_all()
 
     extension = settings.video_format().extension
@@ -2833,6 +2843,15 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
             pixel_format=entry.get("pixel_format") or "Mono8",
         )
 
+    def _warn_zero_frames(video: Path) -> None:
+        # A 0-frame recording is a header-only file with no video (e.g. an
+        # external trigger that never fired). Feeding it to ffmpeg only yields a
+        # cryptic matroska/EBML error, so skip it here with a clear message.
+        log.warning(
+            "Skipping %s: recording captured 0 frames (empty header-only file)",
+            video,
+        )
+
     def handle_dir(directory: Path) -> None:
         summary_path = directory / RECORDING_SUMMARY_FILENAME
         if summary_path.exists():
@@ -2847,15 +2866,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
                     if not video.exists():
                         log.warning("%s lists %s but it is missing", summary_path, name)
                     elif entry.get("frames") == 0:
-                        # A 0-frame recording is a header-only file with no video
-                        # (e.g. an external trigger that never fired). Feeding it
-                        # to ffmpeg only yields a cryptic matroska/EBML error, so
-                        # skip it here with a clear message instead.
-                        log.warning(
-                            "Skipping %s: recording captured 0 frames "
-                            "(empty header-only file)",
-                            video,
-                        )
+                        _warn_zero_frames(video)
                     else:
                         add(_job_from_entry(video, entry, fps_target))
                 return
@@ -2902,7 +2913,11 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
                         ),
                         None,
                     )
-            if entry is not None:
+            if entry is not None and entry.get("frames") == 0:
+                # Mirror handle_dir: a directly-named 0-frame capture is a
+                # header-only file ffmpeg can't transcode — skip it too.
+                _warn_zero_frames(path)
+            elif entry is not None:
                 add(_job_from_entry(path, entry, fps_target))
             else:
                 log.warning(

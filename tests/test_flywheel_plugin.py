@@ -119,6 +119,27 @@ def test_on_first_frame_without_params_is_noop():
     assert link.written == []
 
 
+def test_on_first_frame_skips_out_of_range_command():
+    # Fix 8: an out-of-range wire field (n_steps beyond int16, etc.) makes
+    # to_bytes() raise struct.error; the recording path must reject it the same
+    # way the /api/serial/command endpoint does, not let struct.error escape
+    # through write_command and silently drop the stepper motion.
+    plugin = FlywheelPlugin()
+    plugin._link = link = FakeLink()
+    plugin.on_first_frame(
+        {
+            "flywheel": {
+                "n_steps": 40000,  # > int16 max
+                "step_interval_us": 70000,  # > uint16 max
+                "rest_duration_ms": 0,
+                "n_repeats": 300,  # > uint8 max
+                "init_wait_duration_s": 0,
+            }
+        }
+    )  # must not raise
+    assert link.snapshot() == []  # invalid command dropped, nothing written
+
+
 # --------------------------------------------------------- jog pulse clock
 
 
@@ -220,6 +241,48 @@ def test_jog_restart_switches_direction():
     assert Command(n_steps=-1).to_bytes() in writes
     # The superseded forward thread must not have injected a stray release.
     assert writes.count(RELEASE) == 1
+
+
+def test_jog_finally_release_is_atomic_with_start():
+    # Fix 9: the generation compare + coil-release write in _run's finally happen
+    # together under _lock, so a concurrent start() (which bumps the generation
+    # under the same lock) can't slip in between the compare and the release. We
+    # observe this by blocking inside the release write and asserting start()'s
+    # lock is unavailable while the release is in flight.
+    gate = threading.Event()
+    in_release = threading.Event()
+
+    def write(cmd):
+        if cmd.to_bytes() == RELEASE:
+            in_release.set()
+            gate.wait(2.0)
+
+    clock = JogClock(write=write)
+    clock._generation = 1  # captured generation below is still current -> releases
+    stop = threading.Event()
+    stop.set()  # exit the pulse loop immediately, straight into the finally
+    t = threading.Thread(target=lambda: clock._run(1, 0.001, stop, 1))
+    t.start()
+    try:
+        assert in_release.wait(1.0)  # inside the locked release write
+        # start() bumps the generation under _lock; while the release holds _lock
+        # it must not be acquirable, proving the compare+release is atomic w.r.t. it.
+        assert clock._lock.acquire(blocking=False) is False
+    finally:
+        gate.set()
+    t.join(timeout=2.0)
+
+
+def test_jog_superseded_thread_suppresses_release():
+    # Fix 9 (guard still honoured under the lock): a thread whose captured
+    # generation is stale must NOT release coils a newer jog now owns.
+    writes: list[bytes] = []
+    clock = JogClock(write=lambda cmd: writes.append(cmd.to_bytes()))
+    clock._generation = 2  # a newer jog has already taken over
+    stop = threading.Event()
+    stop.set()
+    clock._run(1, 0.001, stop, generation=1)  # stale generation
+    assert RELEASE not in writes
 
 
 # ---- multi-client jog ownership (one shared motor, many browsers) ----

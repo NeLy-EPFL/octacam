@@ -468,10 +468,24 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             stderr=subprocess.PIPE,
             bufsize=0,
         )
-        self._stderr_thread = threading.Thread(
-            target=self._drain_stderr, args=(self._proc,), daemon=True
-        )
-        self._stderr_thread.start()
+        # Reap the child if anything after Popen fails (e.g. thread exhaustion
+        # raising from .start()) — otherwise AsyncFrameWriter.open catches, returns
+        # False, and close() short-circuits on _thread is None, orphaning ffmpeg.
+        # BaseException so no post-Popen failure can leak the process/pipes.
+        try:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr, args=(self._proc,), daemon=True
+            )
+            self._stderr_thread.start()
+        except BaseException:
+            try:
+                self._proc.stdin.close()
+                self._proc.kill()
+                self._proc.wait()
+            finally:
+                self._proc = None
+                self._stderr_thread = None
+            raise
 
     def _drain_stderr(self, proc):
         with proc.stderr:

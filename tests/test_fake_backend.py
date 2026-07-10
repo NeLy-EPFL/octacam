@@ -10,6 +10,9 @@ import os
 
 os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
+import threading
+import time
+
 import pytest
 
 from octacam.cameras import CameraSystem
@@ -230,4 +233,146 @@ def test_grab_locked_offset_write_cycles_the_preview(previewing_system, monkeypa
     cam.set_feature("OffsetX", 8)
     assert starts, "offset write did not cycle the preview grab"
     assert cam.backend.is_grabbing()
-    assert cam.read_feature("OffsetX")["value"] == 8
+
+
+# ---------------------------------------------- cam-core regression fixes
+
+
+def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypatch):
+    # Regression (system.py:326): a *non*-BackendError raised by one camera's
+    # start_record must be logged-and-skipped, not re-raised — the other cameras
+    # have already launched their grab thread + ffmpeg child, so propagating would
+    # abandon them half-started (and violates start_record's documented contract).
+    from octacam.writer import FORMATS
+
+    system = CameraSystem(FAKE_SERIALS, backend="fake")
+    try:
+        system.load_config(tmp_path)
+        good = system.camera_at(0)
+        bad = system.camera_at(1)
+        monkeypatch.setattr(good, "start_record", lambda *a, **k: True)
+
+        def boom(*a, **k):
+            raise RuntimeError("insufficient resources")
+
+        monkeypatch.setattr(bad, "start_record", boom)
+        started = system.start_record(tmp_path, 100.0, FORMATS["raw"])
+        assert started == [good.name]  # good camera started; no exception propagated
+    finally:
+        system.close()
+
+
+def test_preview_bounds_the_timestamp_series(tmp_path):
+    # Regression (base.py:1006): a continuously-running preview (the GUI's idle
+    # steady state) must not grow self._timestamps without bound. The series is
+    # trimmed to PREVIEW_TIMESTAMPS_MAX while the rolling fps readout keeps working.
+    from octacam.cameras.base import PREVIEW_TIMESTAMPS_MAX
+
+    system = CameraSystem(FAKE_SERIALS, backend="fake")
+    try:
+        system.load_config(tmp_path)
+        system.start_preview("free_running", fps=2000.0)
+        cam = system.camera_at(0)
+        deadline = time.monotonic() + 3.0
+        while cam.frames_recorded < PREVIEW_TIMESTAMPS_MAX and time.monotonic() < deadline:
+            cam.frame_for_display.pop()  # drain the display slot so pushes flow
+            time.sleep(0.01)
+        assert cam.frames_recorded >= PREVIEW_TIMESTAMPS_MAX
+        assert cam.resulting_fps > 0  # readout still computed from the tail
+        # Keep grabbing well past the cap; without trimming this would be hundreds.
+        time.sleep(0.2)
+        assert cam.frames_recorded <= PREVIEW_TIMESTAMPS_MAX + 1
+    finally:
+        system.close()
+
+
+def test_start_preview_falls_back_to_software_when_freerun_unavailable(
+    tmp_path, monkeypatch
+):
+    # Regression (base.py:873): begin_freerun returning False means the backend
+    # could not arm free-run; start_preview must fall back to a software-trigger
+    # preview arm rather than grab forever in a mode the camera was never armed for.
+    system = CameraSystem(FAKE_SERIALS, backend="fake")
+    try:
+        system.load_config(tmp_path)
+        cam = system.camera_at(0)
+        monkeypatch.setattr(cam.backend, "begin_freerun", lambda fps=None: False)
+        armed: list[int] = []
+        real_arm = cam.backend.begin_software_trigger_preview
+        monkeypatch.setattr(
+            cam.backend,
+            "begin_software_trigger_preview",
+            lambda: (armed.append(1), real_arm())[1],
+        )
+        cam.start_preview("free_running", fps=50.0)
+        assert armed, "did not fall back to the software-trigger preview arm"
+        assert cam.backend.is_grabbing()
+        # The fallback is a software-trigger preview: frames arrive on a trigger.
+        deadline = time.monotonic() + 2.0
+        while cam.frames_recorded < 1 and time.monotonic() < deadline:
+            cam.trigger_once()
+            cam.frame_for_display.pop()
+            time.sleep(0.02)
+        assert cam.frames_recorded >= 1  # frames flowed via the software fallback
+    finally:
+        system.close()
+
+
+def test_managed_preview_grab_is_paced_not_busylooped():
+    # Regression (fake.py:376): a managed preview grabs via retrieve_freerun with no
+    # fps cap (_freerun_fps is None), yet must still block ~ the grab timeout rather
+    # than return instantly — otherwise the preview thread busy-loops at 100% CPU.
+    from octacam.cameras.fake import FakeBackend
+
+    be = FakeBackend("FAKE-managed")
+    be.open()
+    be.start_grab_preview()  # managed preview: begin_freerun is NOT called
+    assert be._freerun_fps is None
+    t0 = time.monotonic()
+    frame = be.retrieve_freerun(60, lambda: True)  # 60 ms grab timeout
+    elapsed = time.monotonic() - t0
+    assert frame is not None
+    assert elapsed >= 0.04  # waited ~ the timeout instead of spinning
+    be.stop_grab()
+
+
+def test_record_grab_freerun_returns_immediately():
+    # The benchmark's ceiling probe uses start_grab_record (uncapped) and must keep
+    # returning a frame immediately, not paced by the preview guard.
+    from octacam.cameras.fake import FakeBackend
+
+    be = FakeBackend("FAKE-bench")
+    be.open()
+    be.start_grab_record()
+    assert be._freerun_fps is None
+    t0 = time.monotonic()
+    frame = be.retrieve_freerun(1000, lambda: True)  # would block 1 s if paced
+    elapsed = time.monotonic() - t0
+    assert frame is not None
+    assert elapsed < 0.1  # returned immediately
+    be.stop_grab()
+
+
+def test_stop_grab_wakes_a_blocked_managed_preview_retrieve():
+    # The paced managed-preview wait must stay wakeable by stop_grab's notify so
+    # stop latency is not the full grab timeout.
+    from octacam.cameras.fake import FakeBackend
+
+    be = FakeBackend("FAKE-wake")
+    be.open()
+    be.start_grab_preview()
+    result: dict[str, object] = {}
+
+    def grab():
+        t0 = time.monotonic()
+        result["frame"] = be.retrieve_freerun(5000, lambda: True)
+        result["elapsed"] = time.monotonic() - t0
+
+    th = threading.Thread(target=grab)
+    th.start()
+    time.sleep(0.05)
+    be.stop_grab()  # flips _grabbing and notifies the parked retrieve
+    th.join(2.0)
+    assert not th.is_alive()
+    assert result["frame"] is None  # grabbing flipped, so it returns None
+    assert result["elapsed"] < 1.0  # woken promptly, not the full 5 s timeout

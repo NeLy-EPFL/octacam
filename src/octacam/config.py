@@ -593,14 +593,17 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
                 index,
             )
             camera.name = ""
-        if camera.name:
-            if camera.name in used_names:
-                log.warning(
-                    'Ignoring the %dth entry of "cameras" as its "name" is not unique',
-                    index,
-                )
-                continue
-            used_names.add(camera.name)
+        # A blank name records under the serial number as the filename stem, so
+        # validate the *effective* name (name or serial) to catch a later entry
+        # whose explicit name collides with this camera's serial fallback.
+        effective_name = camera.name or serial_number
+        if effective_name in used_names:
+            log.warning(
+                'Ignoring the %dth entry of "cameras" as its "name" is not unique',
+                index,
+            )
+            continue
+        used_names.add(effective_name)
         cameras.append(camera)
     return cameras
 

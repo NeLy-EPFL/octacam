@@ -540,6 +540,94 @@ def test_diagnose_freerun_trial_measures_hardware_max(fake_system):
         assert not camera.backend.is_grabbing()
 
 
+def test_run_target_trial_aborts_when_writer_open_fails(fake_system, monkeypatch):
+    # A failed encoder open (ffmpeg missing / bad params) must abort the trial
+    # with a clear setup error, not proceed and misreport ~100% ENCODE drops.
+    from types import SimpleNamespace
+
+    closed: list = []
+
+    class BadWriter:
+        frames_written = 0
+
+        def open(self, *a):
+            return False  # _open_sink failed
+
+        def close(self):
+            closed.append(self)
+
+    monkeypatch.setattr(dg, "_make_writer", lambda vf, *, profile: BadWriter())
+
+    with pytest.raises(RuntimeError, match="writer failed to open"):
+        dg.run_target_trial(
+            list(fake_system), SimpleNamespace(extension="mkv"), 60.0, 0.2
+        )
+    # Every writer created for the trial is closed before the abort propagates,
+    # and no backend was left grabbing.
+    assert len(closed) == len(FAKE_SERIALS)
+    for camera in fake_system:
+        assert not camera.backend.is_grabbing()
+
+
+def test_run_target_trial_tears_down_on_arm_failure(fake_system, monkeypatch):
+    # A per-camera arm failure after the writers are open must tear everything
+    # down (stop every backend, close every writer) before the error propagates.
+    cams = list(fake_system)
+    monkeypatch.setattr(
+        cams[0].backend,
+        "start_grab_record",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bus dropped")),
+    )
+    with pytest.raises(RuntimeError, match="bus dropped"):
+        dg.run_target_trial(cams, None, 60.0, 0.2)  # null sink
+    for camera in fake_system:
+        assert not camera.backend.is_grabbing()
+
+
+def test_measure_grab_ceiling_arm_failure_drops_camera(fake_system, monkeypatch):
+    # A camera whose arm raises is dropped from the results (not counted), but
+    # its stop_grab still runs in the finally so no backend is left grabbing.
+    cams = list(fake_system)
+    monkeypatch.setattr(
+        cams[0].backend,
+        "start_grab_preview",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("arm failed")),
+    )
+    fps = dg.measure_grab_ceiling(cams, 0.2, warmup_s=0.1)
+    assert cams[0].serial_number not in fps  # arm-failed camera dropped
+    assert cams[1].serial_number in fps  # the healthy one still measured
+    for camera in fake_system:
+        assert not camera.backend.is_grabbing()
+
+
+def test_diagnose_notes_camera_missing_from_grab_ceiling(fake_system, monkeypatch):
+    # When a camera is missing from the grab ceiling (it failed to arm), the
+    # runner must flag it — otherwise grab_min silently improves over the
+    # survivors. Simulate the drop at the measure boundary so the full pipeline
+    # (which shares the fake backend's arm path) still runs and diagnose completes.
+    real = dg.measure_grab_ceiling
+    dropped = FAKE_SERIALS[0]
+
+    def drop_one(cameras, *args, **kwargs):
+        result = real(cameras, *args, **kwargs)
+        result.pop(dropped, None)
+        return result
+
+    monkeypatch.setattr(dg, "measure_grab_ceiling", drop_one)
+
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        target_fps=60.0,
+        duration_s=0.3,
+        find_max=False,
+        sink="null",
+    )
+    assert dropped not in report.ceilings.grab_fps
+    assert any("failed to arm" in n for n in report.notes)
+
+
 def test_diagnose_warns_on_high_machine_load(fake_system, monkeypatch):
     # A machine already busy before the run skews results → a warning is emitted.
     monkeypatch.setattr(dg, "_probe_system_load", lambda: (95.0, 3.0))
@@ -610,6 +698,29 @@ def test_run_diagnostic_via_controller(fake_system):
     assert controller.get_last_diagnostic() is not None
     assert got and got[0]["backend"] == "fake"
     # camera control works again once the benchmark is done
+    controller.set_camera_param(0, "exposure", 2000.0)
+
+
+def test_benchmark_preview_rearm_failure_leaves_idle(fake_system, monkeypatch):
+    """A camera dropping out during a benchmark can make the finally-block preview
+    re-arm raise; the diagnostic thread must still leave the "diagnosing" state
+    (dropping the camera lock) rather than wedging the controller."""
+    settings = RecordingSettings(fps=60.0, trigger_source="software")
+    controller = RecordingController(fake_system, settings, auto_preview=True)
+
+    def boom(*a, **k):
+        raise RuntimeError("camera dropped during re-arm")
+
+    monkeypatch.setattr(fake_system, "start_preview", boom)
+
+    assert controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null").ok
+    deadline = time.time() + 30
+    while controller.diagnosing and time.time() < deadline:
+        time.sleep(0.05)
+
+    assert controller.state == "idle"  # not wedged in "diagnosing"
+    assert not controller._camera_locked
+    # Camera control (and a recording) work again once the benchmark is done.
     controller.set_camera_param(0, "exposure", 2000.0)
 
 

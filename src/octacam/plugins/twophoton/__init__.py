@@ -231,18 +231,24 @@ class TwoPhotonLink:
         s = self._serial
         return s is not None and s.is_open
 
-    def _write(self, data: bytes) -> None:
+    def _write(self, data: bytes) -> bool:
+        """Write bytes to the link; return whether they reached the OS.
+
+        False means the link is closed or ``serial.write`` raised — the caller
+        (e.g. send_arm) can then surface the failure instead of silently no-oping."""
         with self._write_lock:
             s = self._serial
             if s is None or not s.is_open:
-                return
+                return False
             try:
                 s.write(data)
             except serial.SerialException as e:  # pyright: ignore[reportOptionalMemberAccess]
                 log.warning("2-photon trigger: serial write failed: %s", e)
+                return False
+            return True
 
-    def send_arm(self, params: ArmParams) -> None:
-        self._write(params.to_bytes())
+    def send_arm(self, params: ArmParams) -> bool:
+        return self._write(params.to_bytes())
 
     def send_cancel(self) -> None:
         self._write(bytes([_CANCEL_MAGIC]))
@@ -427,6 +433,7 @@ class TwoPhotonPlugin(Plugin):
         state = _STATE_LABELS.get(status, "idle")
         if state == "armed":
             self._armed_event.set()  # release a pending on_recording_start ack wait
+            self._last_error = None  # a good arm clears a prior arm-failure notice
         self._set_arduino_state(state)
 
     def _on_link_broken(self) -> None:
@@ -568,6 +575,19 @@ class TwoPhotonPlugin(Plugin):
 
     # -------------------------------------------------- recording lifecycle
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict:
+        """Headless (CLI) arm slice for ``octacam record``.
+
+        The GUI supplies this slice from its tab; ``octacam record`` has no UI, so
+        contribute it here (built from the recording's fps/duration) or the board
+        is never armed and the external-triggered cameras hang forever. Only
+        fps/duration_ms are consumed (ArmParams.from_payload); the plugin's
+        configured defaults still apply as per-field fallbacks."""
+        return {
+            "fps": int(round(fps)),
+            "duration_ms": max(1, int(round(duration_s * 1000))),
+        }
+
     def on_recording_start(self, params: dict | None) -> None:
         """Arm the Arduino when the GUI's "Arm with recording" checkbox is checked.
 
@@ -599,12 +619,22 @@ class TwoPhotonPlugin(Plugin):
             "2-photon trigger: arming at %d fps for %d ms", arm.fps, arm.duration_ms
         )
         self._armed_event.clear()
-        self._link.send_arm(arm)
+        if not self._link.send_arm(arm):
+            # The write never reached the OS (wedged/closed link). Surface it to
+            # the GUI, not just the log, or the operator sees an "armed" checkbox
+            # while the cameras wait on a trigger that never fires.
+            self._last_error = f"arm write to {self.device} failed"
+            log.warning("2-photon trigger: %s", self._last_error)
+            self._broadcast_state()
+            return
         # Wait briefly for the firmware's 'A' acknowledgement. A dropped or
         # garbled arm packet (or one whose payload arrives too late for the
         # firmware's parse window) otherwise fails silently and the cameras wait
-        # on an external trigger that never fires; warn so the operator knows.
+        # on an external trigger that never fires; surface it so the operator knows.
         if self._ack_timeout_s > 0 and not self._armed_event.wait(self._ack_timeout_s):
+            self._last_error = (
+                f"no arm ack from {self.device} within {self._ack_timeout_s:.1f}s"
+            )
             log.warning(
                 "2-photon trigger: no arm acknowledgement from %s within %.1f s; "
                 "the board may not have armed (cameras could wait for a trigger "
@@ -612,6 +642,7 @@ class TwoPhotonPlugin(Plugin):
                 self.device,
                 self._ack_timeout_s,
             )
+            self._broadcast_state()
 
     def on_recording_stop(self, aborted: bool) -> None:
         # Stop the hardware trigger whenever a recording ends — abort, manual

@@ -97,6 +97,43 @@ def test_ffmpeg_writer_failure_is_reported(tmp_path):
     assert not out.exists()
 
 
+def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch):
+    # If the stderr-drain thread fails to start after Popen (e.g. thread
+    # exhaustion), _open_sink must reap the ffmpeg child before re-raising —
+    # otherwise open() returns False, close() short-circuits on _thread is None,
+    # and the process/pipes leak.
+    import octacam.writer as writer_mod
+
+    created = []
+    real_popen = writer_mod.subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        created.append(proc)
+        return proc
+
+    monkeypatch.setattr(writer_mod.subprocess, "Popen", recording_popen)
+
+    class BoomThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(writer_mod.threading, "Thread", BoomThread)
+
+    out = tmp_path / "test.mkv"
+    writer = FfmpegVideoWriter(
+        ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray"
+    )
+    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT)) is False
+    assert created, "expected an ffmpeg child to have been spawned"
+    assert created[0].poll() is not None  # reaped: killed + waited, not orphaned
+    assert writer._proc is None
+    writer.close()  # no-op (writer thread never started), must not raise
+
+
 def test_raw_writer_and_transcode_roundtrip(tmp_path):
     frames = synthetic_frames(20)
     out = tmp_path / "cam.raw"

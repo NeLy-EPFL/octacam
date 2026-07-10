@@ -321,10 +321,16 @@ class CameraSystem:
         # (and the operator waits one start, not eight back to back).
         started: list[str] = []
         for camera, ok, exc in self._run_parallel(record_one):
-            if isinstance(exc, BackendError):
-                log.error("Camera %s failed to start recording", camera.name)
-            elif exc is not None:
-                raise exc
+            # Log-and-skip EVERY per-camera failure (not just BackendError): the
+            # other cameras have already launched their grab thread + ffmpeg
+            # child, so re-raising here would abandon them half-started. An
+            # unexpected (non-BackendError) failure still gets a full traceback.
+            if exc is not None:
+                log.error(
+                    "Camera %s failed to start recording",
+                    camera.name,
+                    exc_info=not isinstance(exc, BackendError),
+                )
             elif ok:
                 started.append(camera.name)
         return started

@@ -722,6 +722,68 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     assert calls == []  # a protocol reject is not a wedge; no USB reset
 
 
+def test_recover_usb_holds_port_lock(monkeypatch):
+    # Fix 1: _recover_usb must run under the provisioner's port_lock so a
+    # concurrent flash (which holds the same lock across close->upload->reopen)
+    # can't fight over the tty. With another thread holding the (re-entrant) lock,
+    # a _recover_usb on a different thread must block before it resets the device.
+    import octacam.serial_ports as sp
+
+    reset_calls: list[str] = []
+    monkeypatch.setattr(
+        sp, "reset_usb_device",
+        lambda device: (reset_calls.append(device), (True, "reset"))[1],
+    )
+    plugin, link = _plugin_with_fake()
+    started = threading.Event()
+    done = threading.Event()
+
+    def worker():
+        started.set()
+        plugin._recover_usb("test wedge")
+        done.set()
+
+    with plugin._fw.port_lock:
+        t = threading.Thread(target=worker)
+        t.start()
+        assert started.wait(1.0)
+        time.sleep(0.1)  # give the worker a chance to (fail to) proceed
+        assert reset_calls == []  # blocked on port_lock; no reset yet
+        assert not done.is_set()
+    t.join(timeout=2.0)
+    assert done.is_set()
+    assert reset_calls == [DEVICE]  # proceeded once the lock was released
+
+
+def test_arm_and_wait_serialized_by_arm_lock():
+    # Fix 6: the clear+send+wait window must be serialized so two concurrent arms
+    # can't share _armed_event/_last_reject and steal each other's ack/reject.
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 0.0
+    gate = threading.Event()
+    in_send = threading.Event()
+
+    def blocking_send(spec):
+        in_send.set()
+        gate.wait(2.0)
+        return True
+
+    link.send_arm = blocking_send
+    arm = plugin._build_arm_spec(80, 1000, plugin._cameras, plugin._lights)
+    t = threading.Thread(target=lambda: plugin._arm_and_wait(arm))
+    t.start()
+    try:
+        assert in_send.wait(1.0)  # arm A is inside the locked send window
+        # A holds _arm_lock across the whole send+wait, so a concurrent acquire fails.
+        assert plugin._arm_lock.acquire(blocking=False) is False
+    finally:
+        gate.set()
+    t.join(timeout=2.0)
+    # Once A finished the lock is free again.
+    assert plugin._arm_lock.acquire(blocking=False) is True
+    plugin._arm_lock.release()
+
+
 def test_on_recording_start_no_warning_when_ack_arrives():
     records, detach = _capture_octacam_logs()
     try:

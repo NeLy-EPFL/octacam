@@ -21,6 +21,7 @@ Mapping notes vs. the Basler backend:
   :class:`~octacam.cameras.system.CameraSystem` calls via the registry.
 """
 
+import atexit
 import logging
 from typing import Any
 
@@ -661,10 +662,18 @@ class FlirBackend(SoftwareTriggerHandoff):
             array = None
             if wants_array():
                 arr = image.GetNDArray()
-                if arr.ndim != 2:
+                # Reject anything that is not a single-byte 2-D (Mono8) frame:
+                # a Mono16/Bayer-raw frame is also 2-D (ndim==2) but wider than
+                # one byte, so it would be handed to the GRAY8 writer with the
+                # wrong dtype and corrupt the recording. Mirrors the C backend's
+                # bits-per-pixel==8 guard (which the bare ndim check misses).
+                if arr.ndim != 2 or arr.dtype.itemsize != 1:
                     log.warning(
-                        "Camera %s delivered a non-mono frame; skipping",
+                        "Camera %s delivered a non-Mono8 frame (ndim=%d, dtype=%s);"
+                        " skipping",
                         self._serial,
+                        arr.ndim,
+                        arr.dtype,
                     )
                     return None
                 array = arr.copy()  # own it; the SDK buffer is recycled on Release
@@ -692,6 +701,12 @@ def enumerate_flir(requested_serials: list[str] | None = None):
     """
     spin = _spin()
     global _system, _cam_list
+    # Release any prior session first. An enumerate-only path (octacam doctor
+    # sweeps the backend list AND the cascade, so it enumerates twice) would
+    # otherwise overwrite _system/_cam_list and orphan the previous System with
+    # its references still active. teardown() is idempotent.
+    if _system is not None or _cam_list is not None:
+        teardown()
     _system = spin.System.GetInstance()
     _cam_list = _system.GetCameras()
     count = _cam_list.GetSize()
@@ -742,3 +757,11 @@ def teardown() -> None:
         except Exception:
             pass
         _system = None
+
+
+# Net for enumerate-only paths that never construct a CameraSystem and so never
+# run teardown() — notably octacam doctor/probe/aborted runs, which read serials
+# and drop the CameraPtrs. Without this the System singleton is leaked with its
+# references still active. teardown() is idempotent and a no-op when the SDK was
+# never loaded, so this composes with CameraSystem.close() already calling it.
+atexit.register(teardown)

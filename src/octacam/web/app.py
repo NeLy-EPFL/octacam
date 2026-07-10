@@ -1267,9 +1267,16 @@ def create_app(
                 # blocking I/O never stalls the event loop. The client id lets
                 # a plugin scope per-connection state to the owning socket.
                 for plugin in state.plugins.plugins:
-                    handled = await loop.run_in_executor(
-                        None, plugin.on_ws_message, message, client.id
-                    )
+                    try:
+                        handled = await loop.run_in_executor(
+                            None, plugin.on_ws_message, message, client.id
+                        )
+                    except Exception:
+                        log.exception(
+                            "Plugin %s.on_ws_message failed",
+                            getattr(plugin, "name", repr(plugin)),
+                        )
+                        handled = True  # swallow: a bad message must not kill the socket
                     if handled:
                         break
         except WebSocketDisconnect:

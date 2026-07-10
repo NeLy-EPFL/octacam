@@ -168,6 +168,144 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
     assert "in use by another octacam" in result.output
 
 
+def _fake_camera_system(cam):
+    class FakeSystem:
+        def __init__(self, *_a, **_k):
+            self._cams = [cam]
+
+        def __len__(self):
+            return len(self._cams)
+
+        def __iter__(self):
+            return iter(self._cams)
+
+        def load_config(self, *_a, **_k):
+            pass
+
+        def apply_display_config(self, *_a, **_k):
+            pass
+
+        def close(self):
+            _FACADE_CALLS.append("system.close")
+
+    return FakeSystem
+
+
+_FACADE_CALLS: list[str] = []
+
+
+def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
+    # start_preview() arms the trigger board/lights over serial; if it or
+    # create_app() then raises, the finally must still run controller.close()
+    # and plugins.teardown_all() — otherwise the Arduino is left strobing.
+    import octacam.cli as cli_mod
+
+    _FACADE_CALLS.clear()
+    cam = SimpleNamespace(serial_number="s1", name="cam1")
+    config = SimpleNamespace(
+        cameras=[cam], backend="fake", record=None, transcode=None, transfer=None
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
+
+    class FakePlugins:
+        plugins: list = []
+
+        def setup_all(self):
+            _FACADE_CALLS.append("setup_all")
+
+        def teardown_all(self):
+            _FACADE_CALLS.append("teardown_all")
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+
+    class FakeController:
+        def __init__(self, *a, **k):
+            pass
+
+        def start_preview(self):
+            _FACADE_CALLS.append("start_preview")
+
+        def close(self):
+            _FACADE_CALLS.append("controller.close")
+
+    monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("create_app failed")
+
+    monkeypatch.setattr("octacam.web.app.create_app", _boom)
+    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: object())
+    monkeypatch.setattr(cli_mod, "_print_transcode_hints", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
+    assert result.exit_code != 0  # the RuntimeError propagates after cleanup
+    # The arm ran, then teardown ran despite the failure.
+    assert "start_preview" in _FACADE_CALLS
+    assert "controller.close" in _FACADE_CALLS
+    assert "teardown_all" in _FACADE_CALLS
+
+
+def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
+    # A Ctrl-C/exception during join() must trigger controller.close() (which
+    # aborts+joins the daemon monitor so metadata/timestamps are written, then
+    # closes cameras once) — never a bare system.close() that races the monitor.
+    import octacam.cli as cli_mod
+
+    _FACADE_CALLS.clear()
+    cam = SimpleNamespace(serial_number="s1", name="cam1")
+    config = SimpleNamespace(
+        cameras=[cam], backend="fake", record=object(), transcode=None, transfer=None
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
+
+    settings = SimpleNamespace(
+        save_dir=str(tmp_path / "does-not-exist"),
+        duration_s=1.0,
+        fps=10.0,
+    )
+    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
+    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+
+    class FakePlugins:
+        plugins: list = []
+
+        def setup_all(self):
+            _FACADE_CALLS.append("setup_all")
+
+        def teardown_all(self):
+            _FACADE_CALLS.append("teardown_all")
+
+        def default_start_params(self, *_a, **_k):
+            return {}
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+
+    class FakeController:
+        def __init__(self, *a, **k):
+            pass
+
+        def start_recording(self, *a, **k):
+            return SimpleNamespace(ok=True, message="")
+
+        def join(self):
+            raise RuntimeError("interrupted")  # stand in for a Ctrl-C stop
+
+        def close(self):
+            _FACADE_CALLS.append("controller.close")
+
+    monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
+    monkeypatch.setattr(
+        "octacam.controller.normalize_save_dir", lambda s: s, raising=False
+    )
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert result.exit_code != 0  # the RuntimeError from join() propagates
+    assert "controller.close" in _FACADE_CALLS
+    assert "system.close" not in _FACADE_CALLS  # no bare system teardown race
+
+
 def test_browser_skip_reason(monkeypatch):
     for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)

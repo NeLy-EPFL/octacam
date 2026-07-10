@@ -145,6 +145,10 @@ class FakeBackend(SoftwareTriggerHandoff):
         self._commands_run: dict[str, int] = {}
         self._frame_index = 0
         self._freerun_fps: float | None = None
+        # True while a preview grab is live (set in start_grab_preview, cleared in
+        # start_grab_record/stop_grab). Lets retrieve_freerun pace an uncapped
+        # managed preview without pacing the benchmark's uncapped record-grab probe.
+        self._preview_grab = False
         self._init_trigger_handoff()
         self._original_trigger_source = "Line1"
 
@@ -370,11 +374,18 @@ class FakeBackend(SoftwareTriggerHandoff):
             if not self._grabbing:
                 return None
             # Pace a *capped* free-run (a preview) to its target rate so it does
-            # not busy-loop — real backends block on the SDK fetch here. Uncapped
-            # (fps=None, the benchmark's ceiling probe) returns immediately.
-            # cond.wait releases the lock and is woken by stop_grab's notify.
-            if self._freerun_fps:
-                self._cond.wait(min(1.0 / self._freerun_fps, timeout_ms / 1000.0))
+            # not busy-loop — real backends block on the SDK fetch here. A managed
+            # preview grabs via retrieve_freerun with no fps cap (_freerun_fps is
+            # None), so also bound it to the grab timeout when this is a preview
+            # grab. Only the benchmark's uncapped record-grab probe (no cap, not a
+            # preview) returns immediately. cond.wait releases the lock and is
+            # woken by stop_grab's notify.
+            if self._freerun_fps or self._preview_grab:
+                self._cond.wait(
+                    min(1.0 / self._freerun_fps, timeout_ms / 1000.0)
+                    if self._freerun_fps
+                    else timeout_ms / 1000.0
+                )
                 if not self._grabbing:
                     return None
             self._frame_index += 1
@@ -387,13 +398,16 @@ class FakeBackend(SoftwareTriggerHandoff):
     # ------------------------------------------------------------- grabbing
 
     def start_grab_preview(self) -> None:
+        self._preview_grab = True
         self._begin_grab()
 
     def start_grab_record(self) -> bool:
         self.start_grab_preview()
+        self._preview_grab = False  # a record grab is uncapped (benchmark probe)
         return True
 
     def stop_grab(self) -> None:
+        self._preview_grab = False
         self._end_grab()
 
     def retrieve(

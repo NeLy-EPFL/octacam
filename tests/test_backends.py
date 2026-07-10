@@ -157,3 +157,238 @@ def test_teardown_backend_noop_for_non_session_backends():
     teardown_backend("basler")  # must not raise
     teardown_backend("fake")
     teardown_backend("pycameleon")
+
+
+# --------------------------------------------------------------------------
+# Basler backend unit tests (pypylon imports here — genicam.GenericException is
+# the real SDK exception type — but no camera is present, so the raw device is
+# faked and the backend is built without __init__'s InstantCamera construction).
+# --------------------------------------------------------------------------
+
+
+def _make_basler_backend(raw):
+    pytest.importorskip("pypylon")
+    from octacam.cameras.basler import BaslerBackend
+
+    be = BaslerBackend.__new__(BaslerBackend)
+    be._init_trigger_handoff()
+    be._serial = "test-basler"
+    be._incomplete_grabs = 0
+    be.raw = raw
+    return be
+
+
+class _FakeBaslerRaw:
+    def __init__(self, *, ready=True, ready_raises=False):
+        self._ready = ready
+        self._ready_raises = ready_raises
+        self.start_grabbing_calls = 0
+        self.stop_grabbing_calls = 0
+
+    def StartGrabbing(self, strategy):
+        self.start_grabbing_calls += 1
+
+    def StopGrabbing(self):
+        self.stop_grabbing_calls += 1
+
+    def WaitForFrameTriggerReady(self, timeout_ms, handling):
+        if self._ready_raises:
+            from pypylon import genicam
+
+            raise genicam.GenericException("not ready", "test", 0)
+        return self._ready
+
+
+def test_basler_start_grab_record_stops_on_ready_timeout():
+    # A False ready gate must leave the camera NOT grabbing (base.start_record
+    # does no stop_grab on a False return), else it wedges the device.
+    raw = _FakeBaslerRaw(ready=False)
+    be = _make_basler_backend(raw)
+    assert be.start_grab_record() is False
+    assert be.is_grabbing() is False
+    assert raw.stop_grabbing_calls == 1
+
+
+def test_basler_start_grab_record_stops_on_ready_raise():
+    # A raising ready gate must also flip _grabbing off before re-raising.
+    from pypylon import genicam
+
+    raw = _FakeBaslerRaw(ready_raises=True)
+    be = _make_basler_backend(raw)
+    with pytest.raises(genicam.GenericException):
+        be.start_grab_record()
+    assert be.is_grabbing() is False
+    assert raw.stop_grabbing_calls == 1
+
+
+def test_basler_start_grab_record_stays_grabbing_when_ready():
+    raw = _FakeBaslerRaw(ready=True)
+    be = _make_basler_backend(raw)
+    assert be.start_grab_record() is True
+    assert be.is_grabbing() is True
+    assert raw.stop_grabbing_calls == 0
+
+
+class _RaisingRetrieveRaw:
+    """A grabbing raw whose RetrieveResult raises a device-level SDK error."""
+
+    def ExecuteSoftwareTrigger(self):
+        pass
+
+    def RetrieveResult(self, timeout_ms, handling):
+        from pypylon import genicam
+
+        raise genicam.GenericException("device removed", "test", 0)
+
+
+def test_basler_retrieve_swallows_device_error():
+    # A device error out of RetrieveResult must become one lost frame (None),
+    # never propagate into the grab loop and orphan the ffmpeg writer.
+    be = _make_basler_backend(_RaisingRetrieveRaw())
+    be._begin_grab()  # arm the hand-off
+    be._pending = 1  # one pending trigger so _wait_pending returns True
+    assert be.retrieve(50, lambda: True) is None
+
+
+def test_basler_retrieve_freerun_swallows_device_error():
+    be = _make_basler_backend(_RaisingRetrieveRaw())
+    be._begin_grab()
+    assert be.retrieve_freerun(50, lambda: True) is None
+
+
+# --------------------------------------------------------------------------
+# FLIR backend unit tests (PySpin is absent here, so _spin() is faked).
+# --------------------------------------------------------------------------
+
+
+class _FakeSystem:
+    def __init__(self, cam_list):
+        self._cam_list = cam_list
+        self.released = 0
+
+    def GetCameras(self):
+        return self._cam_list
+
+    def ReleaseInstance(self):
+        self.released += 1
+
+
+class _FakeCamList:
+    def __init__(self, size=0):
+        self._size = size
+        self.cleared = 0
+
+    def GetSize(self):
+        return self._size
+
+    def Clear(self):
+        self.cleared += 1
+
+
+def test_flir_enumerate_releases_previous_system(monkeypatch):
+    # Re-enumeration (octacam doctor enumerates twice) must release the prior
+    # System first instead of orphaning it. Fix mirrors spinnaker_c's guard.
+    import octacam.cameras.flir as flir
+
+    prev_system = _FakeSystem(_FakeCamList())
+    prev_list = _FakeCamList()
+    monkeypatch.setattr(flir, "_system", prev_system)
+    monkeypatch.setattr(flir, "_cam_list", prev_list)
+
+    new_system = _FakeSystem(_FakeCamList(size=0))
+
+    class _FakeSpin:
+        class System:
+            @staticmethod
+            def GetInstance():
+                return new_system
+
+    monkeypatch.setattr(flir, "_spin", lambda: _FakeSpin)
+
+    assert flir.enumerate_flir(None) == []
+    # The stale session was torn down before GetInstance ran again.
+    assert prev_system.released == 1
+    assert prev_list.cleared == 1
+
+
+def test_flir_registers_atexit_teardown(monkeypatch):
+    # An enumerate-only path (doctor/probe) never runs teardown_backend, so the
+    # module must net the System release at interpreter shutdown. Reload the
+    # module with a recording atexit.register to prove it registers teardown().
+    import atexit
+    import importlib
+
+    import octacam.cameras.flir as flir
+
+    registered = []
+    monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: registered.append(fn))
+    try:
+        reloaded = importlib.reload(flir)
+        assert reloaded.teardown in registered
+    finally:
+        monkeypatch.undo()
+        importlib.reload(flir)  # restore the real module + its real atexit net
+
+
+class _FakeImage:
+    def __init__(self, arr):
+        self._arr = arr
+        self.released = 0
+
+    def IsIncomplete(self):
+        return False
+
+    def GetTimeStamp(self):
+        return 12345
+
+    def GetNDArray(self):
+        return self._arr
+
+    def Release(self):
+        self.released += 1
+
+
+class _FakeCam:
+    def __init__(self, image):
+        self._image = image
+
+    def GetNextImage(self, timeout_ms):
+        return self._image
+
+
+def _make_flir_backend(monkeypatch):
+    import octacam.cameras.flir as flir
+
+    class _FakeSpin:
+        class SpinnakerException(Exception):
+            pass
+
+    monkeypatch.setattr(flir, "_spin", lambda: _FakeSpin)
+    be = flir.FlirBackend.__new__(flir.FlirBackend)
+    be._serial = "test-flir"
+    return be
+
+
+def test_flir_fetch_image_rejects_mono16(monkeypatch):
+    # A 2-D uint16 (Mono8-set failed) frame passes the old ndim!=2 guard and is
+    # recorded as garbage; the tightened itemsize guard must drop it.
+    import numpy as np
+
+
+    be = _make_flir_backend(monkeypatch)
+    img = _FakeImage(np.zeros((4, 4), dtype=np.uint16))
+    assert be._fetch_image(_FakeCam(img), 50, lambda: True) is None
+    assert img.released == 1
+
+
+def test_flir_fetch_image_accepts_mono8(monkeypatch):
+    import numpy as np
+
+    be = _make_flir_backend(monkeypatch)
+    arr = np.zeros((4, 4), dtype=np.uint8)
+    img = _FakeImage(arr)
+    frame = be._fetch_image(_FakeCam(img), 50, lambda: True)
+    assert frame is not None
+    array, ts = frame
+    assert array.dtype == np.uint8 and ts == 12345
+    assert img.released == 1

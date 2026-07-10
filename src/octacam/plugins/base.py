@@ -201,9 +201,20 @@ class PluginManager:
     def status(self) -> dict:
         result: dict = {}
         for plugin in self.plugins:
+            name = self._name(plugin)
             try:
-                result[plugin.name] = {"ready": plugin.is_ready(), **plugin.status()}
+                ready = plugin.is_ready()
             except Exception:
-                log.exception("Plugin %s status failed", self._name(plugin))
-                result[self._name(plugin)] = {"ready": False}
+                log.exception("Plugin %s is_ready failed", name)
+                result[name] = {"ready": False}
+                continue
+            # Isolate the details call so its failure can't flip a known-ready
+            # plugin to not-ready, and put "ready" last so a plugin-supplied
+            # "ready" in status() can't shadow the authoritative is_ready().
+            try:
+                extra = plugin.status()
+            except Exception:
+                log.exception("Plugin %s status failed", name)
+                extra = {}
+            result[name] = {**extra, "ready": ready}
         return result

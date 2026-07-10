@@ -29,6 +29,11 @@ log = logging.getLogger("octacam")
 
 GRAB_TIMEOUT_MS = 100
 WRITER_QUEUE_SIZE = 20
+# Upper bound on the per-frame timestamp series kept during *preview* (the GUI's
+# idle steady state, never periodically restarted): preview only needs the last
+# few for the rolling fps readout, so the series is trimmed to this many instead
+# of growing without bound. Recording keeps the full, untrimmed series.
+PREVIEW_TIMESTAMPS_MAX = 64
 
 # Editable sensor parameters, mapped from the GUI's snake_case names to their
 # GenICam node names. These SFNC names (ExposureTime, Gain, Width, ...) are the
@@ -367,7 +372,9 @@ class Camera:
         # Frames whose backend timestamp was 0 and fell back to host time_ns.
         # A per-recording provenance signal (see timestamp_source in the summary):
         # normally 0 (all hardware) or == frames (host-only backend like
-        # pycameleon/fake); anything in between flags a stray-zero anomaly.
+        # pycameleon); anything in between flags a stray-zero anomaly. (The fake
+        # deliberately supplies a nonzero host-derived timestamp, so it never
+        # falls back and is classified "hardware".)
         self._host_fallback_count = 0
         self._resulting_fps = 0.0
         self._started = False
@@ -870,7 +877,12 @@ class Camera:
         if not self._backend.is_open():
             return
         if mode == "free_running":
-            self._backend.begin_freerun(fps)
+            # begin_freerun returns False when the backend cannot arm free-run;
+            # fall back to a software-trigger preview so preview shows frames
+            # instead of grabbing forever in a mode the camera was never armed for.
+            if not self._backend.begin_freerun(fps):
+                mode = "software"
+                self._backend.begin_software_trigger_preview()
         elif mode == "managed":
             self._backend.enable_frame_trigger()
             self._backend.set_trigger_source(False)  # restore the hardware line
@@ -1004,6 +1016,10 @@ class Camera:
             if frame is not None:
                 array, timestamp = frame
                 self._store_timestamp(timestamp)
+                # Preview runs indefinitely, so bound the series (the fps readout
+                # only reads the last few) instead of leaking a timestamp per frame.
+                if len(self._timestamps) > PREVIEW_TIMESTAMPS_MAX:
+                    del self._timestamps[0]
                 if array is not None and self.frame_for_display.push(array):
                     self._update_resulting_fps()
         backend.stop_grab()

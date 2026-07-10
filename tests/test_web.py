@@ -358,6 +358,48 @@ def test_plugin_contributions_wired_into_app(tmp_path):
         controller.close()
 
 
+def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
+    """A plugin's on_ws_message raising must not tear down the client socket."""
+    from octacam.plugins.base import Plugin, PluginManager
+
+    class RaisingPlugin(Plugin):
+        name = "raiser"
+
+        def on_ws_message(self, message, client_id):
+            raise ValueError("boom: malformed jog value")
+
+    system = CameraSystem(EMULATED_SERIALS)
+    system.load_config(tmp_path)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(system, settings)
+    controller.start_preview()
+    app = create_app(
+        controller,
+        OctacamConfig(),
+        PluginManager([RaisingPlugin()]),
+        config_dir=str(tmp_path),
+    )
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect("/api/ws") as ws:
+                # A message the plugin blows up on: the socket must survive.
+                ws.send_text(json.dumps({"type": "jog", "n": "not-a-number"}))
+                # The socket is still live: telemetry/frames keep flowing.
+                got_state = False
+                for _ in range(60):
+                    message = ws.receive()
+                    if message.get("text"):
+                        payload = json.loads(message["text"])
+                        got_state |= payload["type"] in ("state", "telemetry")
+                    if got_state:
+                        break
+                assert got_state
+    finally:
+        controller.close()
+
+
 def test_plugin_web_assets_served_and_advertised(tmp_path):
     """A plugin's co-located JS/CSS are mounted at /plugins/<name>/ (before the
     SPA catch-all) and advertised in /api/system so app.js can import them."""
@@ -1130,7 +1172,7 @@ def test_preview_factor_policy():
     """Adaptive decimation: a client that sends nothing is unchanged; a normal
     tile may only go coarser than the 640 baseline; a focused tile may go
     finer, bounded to a mid resolution while recording."""
-    from octacam.web.app import _preview_factor, _DEFAULT_VIEW, _ViewSpec
+    from octacam.web.app import _DEFAULT_VIEW, _preview_factor, _ViewSpec
 
     L = 2048  # sensor long edge; baseline ceil(2048/640) = 4
     # Default/legacy spec == today's baseline (backward compatible).
@@ -1158,7 +1200,7 @@ def test_preview_factor_policy():
 
 def test_client_apply_view_is_tolerant():
     """apply_view stores per-camera specs and never raises on garbage input."""
-    from octacam.web.app import _Client, _DEFAULT_VIEW, _ViewSpec
+    from octacam.web.app import _DEFAULT_VIEW, _Client, _ViewSpec
 
     client = _Client(Mock())
     client.apply_view(
@@ -1192,9 +1234,9 @@ def test_cap_variants_bounds_encode_count():
     shared full-frame baseline (never cross-merged), so encode count stays
     bounded and no client is dropped."""
     from octacam.web.app import (
-        _AppState,
         MAX_PREVIEW_VARIANTS_PER_CAMERA,
         PREVIEW_MAX_DIM,
+        _AppState,
     )
 
     W = H = 2048

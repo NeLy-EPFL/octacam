@@ -186,6 +186,24 @@ def test_arduino_cli_from_path(monkeypatch):
     assert fw.arduino_cli_path() == "/usr/bin/arduino-cli"
 
 
+def test_arduino_cli_prefers_highest_numeric_version(tmp_path, monkeypatch):
+    # Multiple versioned install dirs under /opt: the highest version must win.
+    # A lexical reverse sort wrongly orders 1.9.0 ahead of 1.10.0.
+    monkeypatch.delenv("OCTACAM_ARDUINO_CLI", raising=False)
+    monkeypatch.setattr(fw.shutil, "which", lambda name: None)
+    older = tmp_path / "arduino-cli-1.9.0" / "arduino-cli"
+    newer = tmp_path / "arduino-cli-1.10.0" / "arduino-cli"
+    for exe in (older, newer):
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    matches = [str(older), str(newer)]
+    monkeypatch.setattr(
+        fw.glob, "glob", lambda pat: matches if "/opt/" in pat else []
+    )
+    assert fw.arduino_cli_path() == str(newer)
+
+
 def test_arduino_cli_absent(monkeypatch):
     monkeypatch.delenv("OCTACAM_ARDUINO_CLI", raising=False)
     monkeypatch.setattr(fw.shutil, "which", lambda name: None)

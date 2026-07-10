@@ -30,6 +30,7 @@ import glob
 import hashlib
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -297,7 +298,14 @@ def arduino_cli_path() -> str | None:
     except (RuntimeError, OSError):
         pass
     for pat in patterns:
-        for m in sorted(glob.glob(pat), reverse=True):  # prefer the highest version dir
+        # Prefer the highest version dir. A numeric key orders 1.10.0 ahead of
+        # 1.9.0 (a plain string sort would pick the older 1.9.0); an unversioned
+        # /opt/arduino-cli has an empty key and so sorts last under reverse=True.
+        for m in sorted(
+            glob.glob(pat),
+            key=lambda p: [int(n) for n in re.findall(r"\d+", p)],
+            reverse=True,
+        ):
             if os.path.isfile(m) and os.access(m, os.X_OK):
                 return m
     return None

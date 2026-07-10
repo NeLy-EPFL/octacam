@@ -81,6 +81,19 @@ export default class TwoPhotonTab {
       this.ready = msg.ready;
       this._refresh();
     }
+    // Surface a backend arm failure (wedged/closed link, no ACK) to the operator —
+    // otherwise the checkbox keeps showing "armed" while the cameras wait on a
+    // trigger that never fires. Only notify on a change so a repeated state push
+    // carrying the same error doesn't spam. A cleared error (a later good arm)
+    // resets the guard so the next failure notifies again.
+    if (msg.error) {
+      if (msg.error !== this._lastShownError) {
+        this._lastShownError = msg.error;
+        this.notify("error", msg.error);
+      }
+    } else {
+      this._lastShownError = null;
+    }
     this.fw.applyState(msg);
     this._renderState();
   }

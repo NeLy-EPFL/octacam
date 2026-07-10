@@ -150,7 +150,17 @@ export class BenchmarkTab {
     this.status.textContent = "Starting benchmark…";
     this.status.className = "";
     this._showProgress();
-    const r = await api("POST", "/api/diagnostics/run", body);
+    let r;
+    try {
+      r = await api("POST", "/api/diagnostics/run", body);
+    } catch (e) {
+      // The start request never reached the server, so no running-state
+      // transition will ever fire to clear the bar — undo the optimistic UI
+      // here, then rethrow so _onButton's catch still emits the notify.
+      this.status.textContent = "";
+      this._hideProgress();
+      throw e;
+    }
     if (r.status !== 202) {
       this.status.textContent = "";
       this._hideProgress();

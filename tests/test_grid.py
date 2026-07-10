@@ -246,6 +246,71 @@ def test_grid_letterboxes_non_uniform_sizes(tmp_path):
     assert a.min() > 60 and a.max() < 140, (int(a.min()), int(a.max()))
 
 
+def test_fps_value_handles_degenerate_zero_denominator():
+    # ffprobe emits "0/0" for a stream with no defined frame rate; it must not
+    # raise ZeroDivisionError (it is called outside _probe_video's try/except).
+    from octacam.grid import _fps_value
+
+    assert _fps_value("100/1") == 100.0
+    assert abs(_fps_value("30000/1001") - 29.97) < 0.01
+    assert _fps_value("0/0") == 0.0
+    assert _fps_value("30") == 30.0  # bare numerator fallback preserved
+
+
+def test_grid_treats_unprobeable_file_as_black_cell(tmp_path):
+    # A present-but-unprobeable mp4 must become a black cell, not abort the whole
+    # grid, and the reference geometry/fps comes from the first file that probes.
+    _gray_mp4(tmp_path, "a")
+    (tmp_path / "b.mp4").write_bytes(b"not a real video")  # present but unprobeable
+    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    # b is fed as a lavfi black source at the reference size, not as -i b.mp4.
+    assert "b.mp4" not in cmd
+    assert f"color=black:size={W}x{H}" in cmd
+
+
+def test_grid_skips_only_when_no_file_probes(tmp_path):
+    # If every present file is unprobeable, the grid is skipped (returns None)
+    # rather than crashing.
+    (tmp_path / "a.mp4").write_bytes(b"garbage")
+    (tmp_path / "b.mp4").write_bytes(b"garbage")
+    out = build_grid_video(tmp_path, layout=[["a", "b"]], dry_run=True)
+    assert out is None
+
+
+def test_grid_rounds_odd_reference_dims_up_to_even(tmp_path):
+    # An odd-dimension source (gray tolerates odd; yuv420p does not) must be
+    # rounded up to even so the composed yuv420p grid actually encodes.
+    _gray_mp4_sized(tmp_path, "a", 63, 47, 120)  # odd width and height
+    out = build_grid_video(
+        tmp_path,
+        # 1 row (odd) -> composed height == cell height; odd 47 would break
+        # yuv420p unless rounded up to 48. Black second cell satisfies xstack's
+        # 2-input minimum.
+        layout=[["a", ""]],
+        ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
+        pix_fmt="yuv420p",
+    )
+    assert out is not None and out.exists()
+    dims = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert dims == "128x48", dims  # 2 cols x (63->64), 1 row x (47->48)
+
+
 def test_auto_layout_shapes():
     from octacam.grid import auto_layout
 

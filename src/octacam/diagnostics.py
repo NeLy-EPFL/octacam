@@ -47,6 +47,7 @@ is set by the hardware source), but the free-run ceiling gives it a hardware max
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
@@ -624,9 +625,22 @@ def measure_grab_ceiling(
 
     def loop(camera: Camera) -> None:
         backend = camera.backend
-        backend.begin_software_trigger_preview()
-        backend.start_grab_preview()
         try:
+            # Arm inside the try so stop_grab() always runs (harmless if the arm
+            # never completed). A BackendError here (e.g. a camera dropped off the
+            # bus) must not silently drop the camera from `results` — that would
+            # make grab_min improve over the survivors — so the runner detects the
+            # missing serial and notes it.
+            try:
+                backend.begin_software_trigger_preview()
+                backend.start_grab_preview()
+            except Exception:
+                log.debug(
+                    "grab-ceiling arm failed on %s",
+                    camera.serial_number,
+                    exc_info=True,
+                )
+                return
             warm_deadline = time.perf_counter() + warmup_s
             while time.perf_counter() < warm_deadline and not stop.is_set():
                 backend.trigger_once()
@@ -766,8 +780,12 @@ def measure_freerun_ceiling(
             log.debug("free-run arm failed on %s", camera.serial_number, exc_info=True)
             unsupported.append(camera.name)
             return
-        backend.start_grab_record()  # all-frames buffering, like a recording
         try:
+            # start_grab_record inside the try so stop_grab() runs on failure and
+            # a raise here (grab could not start) routes into the unsupported/notes
+            # path rather than dropping the camera from both results and notes or
+            # leaving it armed-but-not-grabbing.
+            backend.start_grab_record()  # all-frames buffering, like a recording
             warm_deadline = time.perf_counter() + warmup_s
             while time.perf_counter() < warm_deadline and not stop.is_set():
                 fetch(GRAB_TIMEOUT_MS, _wants_array)
@@ -778,6 +796,11 @@ def measure_freerun_ceiling(
                     grabbed += 1
             elapsed = time.perf_counter() - t0
             results[camera.serial_number] = (grabbed, elapsed)
+        except Exception:
+            log.debug(
+                "free-run grab failed on %s", camera.serial_number, exc_info=True
+            )
+            unsupported.append(camera.name)
         finally:
             backend.stop_grab()
 
@@ -971,121 +994,173 @@ def run_target_trial(
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
         tmpdir = Path(tmp)
         ext = video_format.extension if video_format else "null"
-        for camera, writer, size in zip(cameras, writers, sizes, strict=True):
-            path = tmpdir / f"{camera.serial_number}.{ext}"
-            writer.open(str(path), target_fps, size)
 
-        for backend in backends:
-            if free_run:
-                # Best-effort: a backend that cannot arm free-run just delivers
-                # no frames below (retrieve_freerun times out) — a low-fps row,
-                # never a crash. The orchestrator only runs the free-run trial
-                # once the free-run ceiling proved the mode works.
-                try:
-                    backend.begin_freerun()
-                except Exception:
-                    log.debug("free-run arm failed in trial", exc_info=True)
-            else:
-                backend.begin_software_trigger_preview()
-            backend.start_grab_record()
-
+        # Initialized before the try so the finally can tear everything down even
+        # if an arm/open raises before they are built.
         stop = threading.Event()
-
-        def grab(camera, backend, writer, accum, size) -> None:
-            bake = record_form == "display" and not camera.display_transform.is_identity
-            transform = camera.display_transform if bake else None
-            retrieve = backend.retrieve_freerun if free_run else backend.retrieve
-            while not stop.is_set() and backend.is_grabbing():
-                t0 = time.perf_counter_ns()
-                frame = retrieve(GRAB_TIMEOUT_MS, _wants_array)
-                t1 = time.perf_counter_ns()
-                if frame is None:
-                    continue
-                array, _timestamp = frame
-                if array is None:
-                    continue
-                accum.grab_ns.append(t1 - t0)
-                accum.grabbed += 1
-                if transform is not None:
-                    t2 = time.perf_counter_ns()
-                    to_write = apply_display_transform(array, transform)
-                    accum.transform_ns.append(time.perf_counter_ns() - t2)
-                else:
-                    to_write = array
-                t3 = time.perf_counter_ns()
-                accepted = writer.write(to_write)
-                accum.enqueue_ns.append(time.perf_counter_ns() - t3)
-                if not accepted:
-                    accum.dropped += 1
-
-        grab_threads = [
-            threading.Thread(
-                target=grab,
-                args=(c, b, w, a, sz),
-                name=f"trial-{c.serial_number}",
-                daemon=True,
-            )
-            for c, b, w, a, sz in zip(
-                cameras, backends, writers, accums, sizes, strict=True
-            )
-        ]
-
-        # Free-run has no software trigger: the cameras self-clock continuously,
-        # so there is no timer to fire trigger_once().
-        timer = None
-        if not free_run:
-            timer = PreciseTimer(lambda: [b.trigger_once() for b in backends])
-            timer.set_frequency(target_fps)
+        timer: PreciseTimer | None = None
+        grab_threads: list[threading.Thread] = []
         jitter = _JitterProbe()
+        jitter_started = False
         proc = _cpu_percent_probe()
+        jitter_p99: float | None = None
+        cpu: float | None = None
+        # Snapshotted at the instant the measurement window closes (before the
+        # producers are stopped), so the achieved-fps numerator spans exactly the
+        # window rather than the longer stop+join interval.
+        end_grabbed: list[int] = []
+        end_dropped: list[int] = []
+        end_grab_ns: list[int] = []
+        end_transform_ns: list[int] = []
+        end_enqueue_ns: list[int] = []
+        end_encode: list[int] = []
+        end_encode_ns: list[int] = []
+        window = 0.0
+        try:
+            for camera, writer, size in zip(cameras, writers, sizes, strict=True):
+                path = tmpdir / f"{camera.serial_number}.{ext}"
+                if not writer.open(str(path), target_fps, size):
+                    # A failed encoder open (ffmpeg missing, bad params) leaves the
+                    # writer not running, so every write() would count as a drop
+                    # and the trial would misreport ~100% ENCODE bottleneck. Abort
+                    # with a clear setup error instead; the finally closes any
+                    # writers already opened.
+                    raise RuntimeError(
+                        f"writer failed to open for {camera.serial_number}"
+                    )
 
-        for t in grab_threads:
-            t.start()
-        if timer is not None:
-            timer.start()
-        jitter.start()
+            for backend in backends:
+                if free_run:
+                    # Best-effort: a backend that cannot arm free-run just delivers
+                    # no frames below (retrieve_freerun times out) — a low-fps row,
+                    # never a crash. The orchestrator only runs the free-run trial
+                    # once the free-run ceiling proved the mode works.
+                    try:
+                        backend.begin_freerun()
+                    except Exception:
+                        log.debug("free-run arm failed in trial", exc_info=True)
+                else:
+                    backend.begin_software_trigger_preview()
+                backend.start_grab_record()
 
-        # Warm up, then snapshot the baselines and measure over the window.
-        _wait(warmup_s, cancel)
-        base_grabbed = [a.grabbed for a in accums]
-        base_dropped = [a.dropped for a in accums]
-        base_grab_ns = [len(a.grab_ns) for a in accums]
-        base_transform_ns = [len(a.transform_ns) for a in accums]
-        base_enqueue_ns = [len(a.enqueue_ns) for a in accums]
-        base_encode = [w.frames_written for w in writers]
-        base_encode_ns = [len(w.encode_ns_samples) for w in writers]
-        t_measure = time.perf_counter()
+            def grab(camera, backend, writer, accum, size) -> None:
+                bake = (
+                    record_form == "display"
+                    and not camera.display_transform.is_identity
+                )
+                transform = camera.display_transform if bake else None
+                retrieve = backend.retrieve_freerun if free_run else backend.retrieve
+                while not stop.is_set() and backend.is_grabbing():
+                    t0 = time.perf_counter_ns()
+                    frame = retrieve(GRAB_TIMEOUT_MS, _wants_array)
+                    t1 = time.perf_counter_ns()
+                    if frame is None:
+                        continue
+                    array, _timestamp = frame
+                    if array is None:
+                        continue
+                    accum.grab_ns.append(t1 - t0)
+                    accum.grabbed += 1
+                    if transform is not None:
+                        t2 = time.perf_counter_ns()
+                        to_write = apply_display_transform(array, transform)
+                        accum.transform_ns.append(time.perf_counter_ns() - t2)
+                    else:
+                        to_write = array
+                    t3 = time.perf_counter_ns()
+                    accepted = writer.write(to_write)
+                    accum.enqueue_ns.append(time.perf_counter_ns() - t3)
+                    if not accepted:
+                        accum.dropped += 1
 
-        _wait(duration_s, cancel)
+            grab_threads = [
+                threading.Thread(
+                    target=grab,
+                    args=(c, b, w, a, sz),
+                    name=f"trial-{c.serial_number}",
+                    daemon=True,
+                )
+                for c, b, w, a, sz in zip(
+                    cameras, backends, writers, accums, sizes, strict=True
+                )
+            ]
 
-        window = time.perf_counter() - t_measure
-        if timer is not None:
-            timer.stop()
-        stop.set()
-        for backend in backends:
-            backend.stop_grab()  # wakes any retrieve parked in _wait_pending
-        for t in grab_threads:
-            t.join(timeout=GRAB_TIMEOUT_MS / 1000.0 + 1.0)
-        for w in writers:
-            w.close()
-        jitter_p99 = jitter.stop()
-        cpu = proc.cpu_percent() if proc is not None else None
+            # Free-run has no software trigger: the cameras self-clock
+            # continuously, so there is no timer to fire trigger_once().
+            if not free_run:
+                timer = PreciseTimer(lambda: [b.trigger_once() for b in backends])
+                timer.set_frequency(target_fps)
+
+            for t in grab_threads:
+                t.start()
+            if timer is not None:
+                timer.start()
+            jitter.start()
+            jitter_started = True
+
+            # Warm up, then snapshot the baselines and measure over the window.
+            _wait(warmup_s, cancel)
+            base_grabbed = [a.grabbed for a in accums]
+            base_dropped = [a.dropped for a in accums]
+            base_grab_ns = [len(a.grab_ns) for a in accums]
+            base_transform_ns = [len(a.transform_ns) for a in accums]
+            base_enqueue_ns = [len(a.enqueue_ns) for a in accums]
+            base_encode = [w.frames_written for w in writers]
+            base_encode_ns = [len(w.encode_ns_samples) for w in writers]
+            t_measure = time.perf_counter()
+
+            _wait(duration_s, cancel)
+
+            # Close the window and snapshot the counters at the SAME instant, while
+            # the producers are still running, so the grabbed/dropped numerator
+            # matches the `window` denominator (before the ~1-frame stop+join tail).
+            window = time.perf_counter() - t_measure
+            end_grabbed = [a.grabbed for a in accums]
+            end_dropped = [a.dropped for a in accums]
+            end_grab_ns = [len(a.grab_ns) for a in accums]
+            end_transform_ns = [len(a.transform_ns) for a in accums]
+            end_enqueue_ns = [len(a.enqueue_ns) for a in accums]
+            end_encode = [w.frames_written for w in writers]
+            end_encode_ns = [len(w.encode_ns_samples) for w in writers]
+        finally:
+            stop.set()
+            if timer is not None:
+                timer.stop()
+            for backend in backends:
+                # wakes any retrieve parked in _wait_pending; harmless if the
+                # backend never started grabbing.
+                with contextlib.suppress(Exception):
+                    backend.stop_grab()
+            for t in grab_threads:
+                t.join(timeout=GRAB_TIMEOUT_MS / 1000.0 + 1.0)
+            for w in writers:
+                w.close()  # idempotent: early-returns when the writer never opened
+            # Only stop the jitter probe if it was actually started (its stop()
+            # joins its thread, which would raise on a never-started thread when
+            # an arm/open failed before the probe launched).
+            jitter_p99 = jitter.stop() if jitter_started else None
+            cpu = proc.cpu_percent() if proc is not None else None
 
     trials: list[CameraTrial] = []
     for i, camera in enumerate(cameras):
-        grabbed = accums[i].grabbed - base_grabbed[i]
-        dropped = accums[i].dropped - base_dropped[i]
-        encoded = writers[i].frames_written - base_encode[i]
+        grabbed = end_grabbed[i] - base_grabbed[i]
+        dropped = end_dropped[i] - base_dropped[i]
+        encoded = end_encode[i] - base_encode[i]
         stages = {
-            "acquire": _stage_timing("acquire", accums[i].grab_ns[base_grab_ns[i] :]),
+            "acquire": _stage_timing(
+                "acquire", accums[i].grab_ns[base_grab_ns[i] : end_grab_ns[i]]
+            ),
             "transform": _stage_timing(
-                "transform", accums[i].transform_ns[base_transform_ns[i] :]
+                "transform",
+                accums[i].transform_ns[base_transform_ns[i] : end_transform_ns[i]],
             ),
             "enqueue": _stage_timing(
-                "enqueue", accums[i].enqueue_ns[base_enqueue_ns[i] :]
+                "enqueue",
+                accums[i].enqueue_ns[base_enqueue_ns[i] : end_enqueue_ns[i]],
             ),
             "encode": _stage_timing(
-                "encode", writers[i].encode_ns_samples[base_encode_ns[i] :]
+                "encode",
+                writers[i].encode_ns_samples[base_encode_ns[i] : end_encode_ns[i]],
             ),
         }
         width, height = sizes[i]
@@ -1397,6 +1472,17 @@ def diagnose(
 
     emit(PHASE_ACQUIRE, f"({duration_s:g}s)")
     grab_fps = measure_grab_ceiling(cameras, duration_s, cancel=cancel)
+    # A camera that failed to arm is absent from grab_fps, so grab_min would be
+    # taken over the survivors only (an over-optimistic ceiling). Flag any missing
+    # so the number is not silently improved by a broken camera dropping out.
+    if not _cancelled(cancel):
+        missing = [c.name for c in cameras if c.serial_number not in grab_fps]
+        if missing:
+            report.notes.append(
+                "Acquisition ceiling not measured for "
+                f"{', '.join(missing)} (the camera failed to arm); the reported "
+                "grab ceiling reflects only the cameras that armed successfully."
+            )
 
     grab_solo_fps: dict[str, float] = {}
     if run_solo and not _cancelled(cancel):
