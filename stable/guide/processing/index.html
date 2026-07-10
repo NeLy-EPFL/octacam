@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#processing-recordings" class="md-skip">
+        <a href="#post-processing-recordings" class="md-skip">
           Skip to content
         </a>
       
@@ -519,10 +519,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#the-three-steps" class="md-nav__link">
+  <a href="#what-a-recording-folder-contains" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The three steps
+        What a recording folder contains
       
     </span>
   </a>
@@ -541,28 +541,6 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#grid-video" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Grid video
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#transfer" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Transfer
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#selecting-recordings-from-the-cache" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -574,10 +552,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-one-command-end-of-day-workflow" class="md-nav__link">
+  <a href="#grid-composites" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The one-command end-of-day workflow
+        Grid composites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nas-mirroring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NAS mirroring
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-pass-transcode-grid-nas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One pass: transcode + grid + NAS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config reference
       
     </span>
   </a>
@@ -826,10 +837,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#the-three-steps" class="md-nav__link">
+  <a href="#what-a-recording-folder-contains" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The three steps
+        What a recording folder contains
       
     </span>
   </a>
@@ -848,28 +859,6 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#grid-video" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Grid video
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#transfer" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Transfer
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#selecting-recordings-from-the-cache" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -881,10 +870,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#the-one-command-end-of-day-workflow" class="md-nav__link">
+  <a href="#grid-composites" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The one-command end-of-day workflow
+        Grid composites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#nas-mirroring" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NAS mirroring
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#one-pass-transcode-grid-nas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        One pass: transcode + grid + NAS
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#config-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Config reference
       
     </span>
   </a>
@@ -911,177 +933,427 @@
   
 
 
-<h1 id="processing-recordings">Processing recordings<a class="headerlink" href="#processing-recordings" title="Permanent link">&para;</a></h1>
-<p>Everything after recording — transcoding to archival video, tiling cameras into
-composite <strong>grid</strong> videos, and copying to shared storage — is a single command:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>&lt;paths…&gt;
-</code></pre></div>
-<p>There is no <code>--config</code> to pass. Each recording carries an embedded snapshot of
-its rig config (see <a href="../recording/#the-embedded-config-snapshot">Recording</a>), and
-<code>process</code> reads the encoder args, grid layouts, and transfer destination from
-that snapshot. Point it at recording folders (or, with <code>-r</code>, parent directories)
-and it does the rest.</p>
-<h2 id="the-three-steps">The three steps<a class="headerlink" href="#the-three-steps" title="Permanent link">&para;</a></h2>
-<p><code>process</code> runs three steps in order; skip any of them:</p>
+<h1 id="post-processing-recordings">Post-processing recordings<a class="headerlink" href="#post-processing-recordings" title="Permanent link">&para;</a></h1>
+<p>Recording writes fast, near-lossless capture files. Everything after that —
+re-encoding to compact archival video, tiling the cameras into a composite
+<strong>grid</strong>, and mirroring results to a NAS or shared store — is done offline by
+three commands:</p>
 <table>
 <thead>
 <tr>
-<th>Step</th>
-<th>Skip flag</th>
-<th>What it does</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Transcode</td>
-<td><code>--no-transcode</code></td>
-<td>Re-encode each recording to mp4 per its <code>recording_summary.json</code>.</td>
-</tr>
-<tr>
-<td>Grid</td>
-<td><code>--no-grid</code></td>
-<td>Build one composite tiled video per recording folder.</td>
-</tr>
-<tr>
-<td>Transfer</td>
-<td><code>--no-transfer</code></td>
-<td>Copy the outputs to the <code>[transfer]</code> destination.</td>
-</tr>
-</tbody>
-</table>
-<p>So <code>--no-transcode --no-transfer</code> regenerates just the grids after a layout
-change, and <code>--no-grid</code> skips the composite step.</p>
-<p>Other options:</p>
-<table>
-<thead>
-<tr>
-<th>Option</th>
+<th>Command</th>
 <th>Purpose</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>-r</code>, <code>--recursive</code></td>
-<td>Recurse into the given folders.</td>
+<td><a href="#transcoding"><code>octacam transcode</code></a></td>
+<td>Re-encode each recording to a compressed <code>.mp4</code>. Can also chain the grid and NAS steps.</td>
 </tr>
 <tr>
-<td><code>--force</code></td>
-<td>Re-transcode / rebuild grids even when the output already exists.</td>
+<td><a href="#grid-composites"><code>octacam grid</code></a></td>
+<td>Build a single composite grid video from a folder's transcoded <code>.mp4</code> files.</td>
 </tr>
 <tr>
-<td><code>--delete-source</code>, <code>-d</code></td>
-<td>Delete each <code>.mkv</code>/<code>.raw</code> once it transcodes successfully (the summary is always kept).</td>
-</tr>
-<tr>
-<td><code>--config</code>, <code>-c</code></td>
-<td>Fallback config dir for recordings that lack an embedded snapshot.</td>
-</tr>
-<tr>
-<td><code>--dry-run</code></td>
-<td>Log the intended grid/transfer work without writing anything.</td>
-</tr>
-<tr>
-<td><code>--progress-style</code></td>
-<td><code>octacam</code> (default) or <code>ffmpeg</code> (stream ffmpeg's native output).</td>
+<td><a href="#nas-mirroring"><code>octacam nas</code></a></td>
+<td>Copy transcoded results to a NAS or any writable path, mirroring the directory tree.</td>
 </tr>
 </tbody>
 </table>
-<h2 id="transcoding">Transcoding<a class="headerlink" href="#transcoding" title="Permanent link">&para;</a></h2>
-<p>Each folder is transcoded to mp4 according to its <code>recording_summary.json</code>;
-encoder settings come from the embedded config's <code>[transcode].ffmpeg_params</code>,
-not the command line. Recordings are reproduced as saved — any display transform
-was already baked in at record time (see
-<a href="../recording/#transformed-vs-raw-frames">transformed vs raw</a>).</p>
-<p><code>process</code> accepts any mix of recording folders. Already-transcoded outputs are
-skipped unless you pass <code>--force</code>. Pass <code>--delete-source</code>/<code>-d</code> to delete each
-source <code>.mkv</code>/<code>.raw</code> once it transcodes successfully.</p>
-<p>Progress is shown as an octacam-style bar (<code>[i/N] name</code>, percent, fps, speed,
-elapsed) reformatted live from ffmpeg's output. Use <code>--progress-style ffmpeg</code> to
-stream ffmpeg's own output verbatim instead.</p>
-<h2 id="grid-video">Grid video<a class="headerlink" href="#grid-video" title="Permanent link">&para;</a></h2>
-<p><code>process</code> generates one composite video per recording folder that tiles all
-cameras in a configurable grid, right after the individual files are transcoded.
-Each grid comes from a <code>[[visualization]]</code> entry in the rig's config; list
-several to produce several composites.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">[[visualization]]</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;grid.mp4&quot;</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LF&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RF&quot;</span><span class="p">],</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LM&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;camera_F&quot;</span><span class="p">,</span><span class="w">  </span><span class="s2">&quot;camera_RM&quot;</span><span class="p">],</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LH&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RH&quot;</span><span class="p">],</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="p">]</span>
-</code></pre></div>
-<p>Each cell is a camera name (as declared in <code>[[cameras]]</code>); an empty string <code>""</code>
-places a black fill. All rows must have the same number of columns.</p>
-<ul>
-<li>If a config lists <code>[[cameras]]</code> but no <code>[[visualization]]</code>, a near-square
-  layout is derived from that rig's own cameras.</li>
-<li>A cell naming a camera that isn't in <code>[[cameras]]</code> is reported (and renders
-  black) rather than failing silently.</li>
-</ul>
-<p>To regenerate grids for already-transcoded folders without re-running the
-transcode:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1"># single folder — grid only</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>octacam<span class="w"> </span>process<span class="w"> </span>/data/octacam/260620-wt/Fly1/001-bhv<span class="w"> </span>--no-transcode<span class="w"> </span>--no-transfer
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="c1"># a whole experiment tree at once — grids only</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>octacam<span class="w"> </span>process<span class="w"> </span>/data/octacam/260620-wt<span class="w"> </span>-r<span class="w"> </span>--no-transcode<span class="w"> </span>--no-transfer
-</code></pre></div>
-<h2 id="transfer">Transfer<a class="headerlink" href="#transfer" title="Permanent link">&para;</a></h2>
-<p><code>process</code> copies all transcoded mp4s, grid videos, and <code>recording_summary.json</code>
-to the transfer destination (a network share or any writable path), mirroring
-the recording's directory tree.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[transfer]</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/mnt/store/matthias&quot;</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">                      </span><span class="c1"># content-verify each copy (default)</span>
-</code></pre></div>
-<p>The destination is <code>transfer.directory</code> joined with the recording's
-<code>relative_directory</code> (resolved at record time and stored in the summary), so a
-recording made under <code>.../260620-wt/Fly1/001-bhv</code> lands at
-<code>&lt;transfer.directory&gt;/260620-wt/Fly1/001-bhv</code>, and distinct trials that share a
-name never collide.</p>
-<p><strong>Integrity and resume.</strong> Each file is streamed to a temporary name and only
-swapped onto its final name once it is whole and content-verified (a blake2b
-checksum of the source is compared against the written copy), so an interrupted
-copy never leaves a truncated file masquerading as complete. Re-running skips
-files already present (by size), so a killed copy simply resumes — at most the
-one in-progress file is redone. Set <code>checksum = false</code> for a faster size-only
-verify on trusted, fast links.</p>
-<h2 id="selecting-recordings-from-the-cache">Selecting recordings from the cache<a class="headerlink" href="#selecting-recordings-from-the-cache" title="Permanent link">&para;</a></h2>
-<p>Instead of typing paths, let octacam remember where it recorded. Every finished
-recording (from the GUI or <code>octacam record</code>) is noted in a small cache under
-<code>~/.cache/octacam</code> (override with <code>OCTACAM_CACHE_DIR</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--last<span class="w">          </span><span class="c1"># the most recent recording folder</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>octacam<span class="w"> </span>process<span class="w"> </span>--last<span class="w"> </span>session<span class="w">  </span><span class="c1"># every folder from the last GUI session</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all<span class="w">           </span><span class="c1"># every folder still in the cache</span>
-</code></pre></div>
-<ul>
-<li><code>--last</code> takes an optional value: bare <code>--last</code> (or <code>--last recording</code>) is the
-  single most recent recording folder; <code>--last session</code> is the <em>most recent</em>
-  session. <code>--session-id &lt;id&gt;</code> names an exact session (useful when a later
-  recording would otherwise steal "most recent").</li>
-<li>When a GUI session ends, octacam prints ready-to-run <code>--last session</code> and
-  <code>--all</code> commands.</li>
-<li>Folders deleted between recording and processing are silently skipped.</li>
-<li>The cache prunes itself (entries older than 30 days are dropped on each
-  write), so it never grows without bound.</li>
-</ul>
-<h2 id="the-one-command-end-of-day-workflow">The one-command end-of-day workflow<a class="headerlink" href="#the-one-command-end-of-day-workflow" title="Permanent link">&para;</a></h2>
-<p>Because each recording embeds its own config, the entire pipeline — transcode →
-grid → transfer — is one command:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
-</code></pre></div>
-<p>Each step shows a live progress bar (frame/fps/speed for transcode and grid;
-MB/s per file for transfer, then a verify pass). <code>--dry-run</code> logs the intended
-grid ffmpeg call and transfer plan without writing anything — handy for
-validating paths on a new workstation.</p>
+<p><code>octacam transcode</code> is the main entry point and can run all three phases in one
+pass; <code>grid</code> and <code>nas</code> are standalone commands for re-running just that phase.</p>
 <div class="admonition warning">
 <p class="admonition-title">Don't transcode while capturing</p>
 <p>Transcoding runs slow x264 presets across many files and saturates the CPU,
 so it competes with live capture and can cause dropped frames. <code>octacam gui</code>
-and <code>octacam record</code> warn at startup when an <code>octacam process</code> is already
-transcoding on the same machine.</p>
+and <code>octacam record</code> warn at startup when an <code>octacam transcode</code> is already
+running on the same machine.</p>
 </div>
+<h2 id="what-a-recording-folder-contains">What a recording folder contains<a class="headerlink" href="#what-a-recording-folder-contains" title="Permanent link">&para;</a></h2>
+<p>Each recording's save directory holds the files these commands consume:</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>When present</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;camera&gt;.mkv</code></td>
+<td>Per camera, with the default <code>x264</code> codec (H.264 in a Matroska container).</td>
+</tr>
+<tr>
+<td><code>&lt;camera&gt;.raw</code> + <code>&lt;camera&gt;.json</code></td>
+<td>Per camera, with the <code>raw</code> codec — a Mono8 dump plus a small geometry sidecar (<code>width</code>/<code>height</code>/<code>pixel_format</code>/<code>fps</code>).</td>
+</tr>
+<tr>
+<td><code>recording_summary.json</code></td>
+<td>Always. Lists each camera's file, resolution, fps, frame count, and display transform.</td>
+</tr>
+<tr>
+<td><code>&lt;camera&gt;.csv</code></td>
+<td>Only when frame-timestamp saving was enabled — a per-frame <code>frame_index,timestamp,dropped</code> log.</td>
+</tr>
+</tbody>
+</table>
+<p>A folder is treated as a recording directory when it contains a
+<code>recording_summary.json</code>; that is also how <code>-r/--recursive</code> identifies
+recordings nested under a parent directory.</p>
+<div class="admonition note">
+<p class="admonition-title">ffmpeg</p>
+<p>All three commands shell out to ffmpeg. The bundled <code>imageio-ffmpeg</code> binary
+is used by default; set <code>OCTACAM_FFMPEG=/path/to/ffmpeg</code> to override it (a
+system ffmpeg on <code>PATH</code> is the last fallback).</p>
+</div>
+<h2 id="transcoding">Transcoding<a class="headerlink" href="#transcoding" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>&lt;paths…&gt;
+</code></pre></div>
+<p><code>transcode</code> re-encodes each recording to a compressed <code>.mp4</code>. Captures are
+written with a fast preset to keep up with the cameras, so this offline pass —
+defaulting to <code>--preset veryslow --crf 20</code> — is where the compression is
+actually earned. <code>.mkv</code>/<code>.mp4</code> sources are <strong>always re-encoded</strong> (never
+stream-copied); a <code>.raw</code> source is encoded from its Mono8 dump, with the exact
+frame count derived from the file size.</p>
+<p><code>&lt;camera&gt;.mkv</code> becomes <code>&lt;camera&gt;.mp4</code> in the same folder. A folder with a
+<code>recording_summary.json</code> is driven by it (each listed camera file is transcoded
+with its recorded settings); a folder without one has its loose <code>.mkv</code>/<code>.raw</code>
+files transcoded with defaults and a warning.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
+<td>Recurse into the given folders.</td>
+</tr>
+<tr>
+<td><code>--format</code></td>
+<td><code>mp4</code></td>
+<td>Output container.</td>
+</tr>
+<tr>
+<td><code>--crf</code></td>
+<td><code>20</code></td>
+<td>x264 quality (lower = better; 0 = lossless).</td>
+</tr>
+<tr>
+<td><code>--preset</code></td>
+<td><code>veryslow</code></td>
+<td>x264 speed preset.</td>
+</tr>
+<tr>
+<td><code>--pix-fmt</code></td>
+<td><code>gray</code></td>
+<td>Output pixel format.</td>
+</tr>
+<tr>
+<td><code>--x264-params</code></td>
+<td><em>(none)</em></td>
+<td>Extra libx264 options, e.g. <code>"keyint=30:scenecut=0"</code>.</td>
+</tr>
+<tr>
+<td><code>--as-displayed</code> / <code>--as-saved</code></td>
+<td><code>--as-saved</code></td>
+<td>Bake each camera's recorded rotation/flip transform into the video, or reproduce it as saved.</td>
+</tr>
+<tr>
+<td><code>--remove-source</code></td>
+<td>off</td>
+<td>Delete each source <code>.mkv</code>/<code>.raw</code> (and a <code>.raw</code>'s <code>.json</code> sidecar) once it transcodes successfully. <code>recording_summary.json</code> is always kept.</td>
+</tr>
+<tr>
+<td><code>--progress-style</code></td>
+<td><code>octacam</code></td>
+<td><code>octacam</code> reformats ffmpeg's progress into an octacam-style bar; <code>ffmpeg</code> streams ffmpeg's own output verbatim.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># One trial, reproduced as saved</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>/data/octacam/260620-wt/Fly1/001-bhv
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># A whole experiment tree, baking in each camera&#39;s display transform</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>/data/octacam/260620-wt<span class="w"> </span>-r<span class="w"> </span>--as-displayed
+</code></pre></div>
+<div class="admonition info">
+<p class="admonition-title">Display transform</p>
+<p>With <code>--as-displayed</code>, each camera's recorded rotation/flip is applied via an
+ffmpeg <code>-vf</code> filter chain — unless the transform was already baked into the
+pixels at record time, in which case it is skipped so it is never applied
+twice.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Empty recordings are skipped</p>
+<p>A camera that captured 0 frames leaves a header-only file (the usual cause is
+an external trigger that never fired). <code>transcode</code> detects this from the
+summary and skips it with a clear message instead of feeding ffmpeg an empty
+file and producing a cryptic error.</p>
+</div>
+<p><strong>Interrupted transcodes are safe.</strong> Each encode is written to a hidden
+<code>.&lt;name&gt;.octacam-part.&lt;ext&gt;</code> temp and atomically renamed onto the final <code>.mp4</code>
+only once it is whole; any failure or Ctrl-C removes the temp, so a partial
+encode never appears at the final name and never clobbers an existing output.
+Ctrl-C stops the batch where it stands — files already finished keep their
+outputs.</p>
+<h2 id="selecting-recordings-from-the-cache">Selecting recordings from the cache<a class="headerlink" href="#selecting-recordings-from-the-cache" title="Permanent link">&para;</a></h2>
+<p>Instead of typing paths, let octacam recall where it recorded. Every finished
+recording (from the GUI or <code>octacam record</code>) is noted in a small cache under
+<code>~/.cache/octacam/recordings.jsonl</code> (override with <code>OCTACAM_CACHE_DIR</code>, or
+relocate via <code>XDG_CACHE_HOME</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--last<span class="w">          </span><span class="c1"># the most recent recording folder</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--session<span class="w">       </span><span class="c1"># every folder from the last GUI session</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--all<span class="w">           </span><span class="c1"># every folder still in the cache</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Selector</th>
+<th>Selects</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--last</code> (<code>--last-recording</code>)</td>
+<td>The single most recent recording folder.</td>
+</tr>
+<tr>
+<td><code>--session</code> (<code>--last-session</code>)</td>
+<td>Every folder from the most recent GUI/record session.</td>
+</tr>
+<tr>
+<td><code>--session-id &lt;id&gt;</code></td>
+<td>Every folder from one exact session — the id the GUI prints on exit. Unlike <code>--session</code>, a later recording can't hijack it.</td>
+</tr>
+<tr>
+<td><code>--all</code></td>
+<td>Every folder the cache still holds (all sessions, all days).</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The four selectors are mutually exclusive and cannot be combined with explicit
+  <code>PATHS</code>; giving neither is an error.</li>
+<li>When a GUI session ends, octacam prints the ready-to-run <code>--session</code> and
+  <code>--all</code> commands for what it just recorded.</li>
+<li>Folders deleted between recording and transcoding are silently skipped.</li>
+<li>The cache prunes itself on each write (entries older than 30 days are dropped),
+  so it never grows without bound.</li>
+</ul>
+<h2 id="grid-composites">Grid composites<a class="headerlink" href="#grid-composites" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>grid<span class="w"> </span>&lt;paths…&gt;
+</code></pre></div>
+<p><code>grid</code> tiles a recording folder's per-camera <strong>transcoded</strong> <code>.mp4</code> files into a
+single composite video (<code>grid.mp4</code> by default) using ffmpeg's <code>xstack</code>. Run it
+after <code>transcode</code>, or generate the grid as part of transcoding (see
+<a href="#one-pass-transcode-grid-nas">below</a>).</p>
+<p>The layout is a 2-D grid of camera names; an empty string <code>""</code> is a black fill
+cell. It is resolved in this order:</p>
+<ol>
+<li>The <code>[grid] layout</code> section of the rig config passed with <code>--config</code>/<code>-C</code>.</li>
+<li>Otherwise, a near-square layout derived from that config's <code>[[cameras]]</code>.</li>
+<li>Otherwise (no <code>--config</code>), the built-in 7-camera default layout.</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
+<td>Process every recording directory found beneath each path.</td>
+</tr>
+<tr>
+<td><code>--config</code>, <code>-C</code></td>
+<td><em>(none)</em></td>
+<td>Rig config directory whose <code>[grid]</code> section supplies the layout.</td>
+</tr>
+<tr>
+<td><code>--output-name</code>, <code>-o</code></td>
+<td><code>grid.mp4</code></td>
+<td>Output filename inside each folder.</td>
+</tr>
+<tr>
+<td><code>--crf</code></td>
+<td><code>20</code></td>
+<td>x264 quality.</td>
+</tr>
+<tr>
+<td><code>--preset</code></td>
+<td><code>veryslow</code></td>
+<td>x264 speed preset.</td>
+</tr>
+<tr>
+<td><code>--pix-fmt</code></td>
+<td><code>yuv420p</code></td>
+<td>Output pixel format; the default is required for QuickTime / Keynote playback.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>Log the ffmpeg command (and, with <code>-r</code>, the folders) without running it.</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Every trial in an experiment, using the rig&#39;s configured layout</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>octacam<span class="w"> </span>grid<span class="w"> </span>~/data/MD/260624_<span class="w"> </span>-r<span class="w"> </span>--config<span class="w"> </span>configs/2p_1
+</code></pre></div>
+<ul>
+<li>A cell naming a camera whose <code>.mp4</code> is missing is filled with a black frame, so
+  a partial set still composites.</li>
+<li>Cells whose resolution differs from the reference are letterboxed (centred with
+  black bars), never stretched.</li>
+<li>The output is always <code>yuv420p</code> with integer fps for broad player compatibility,
+  regardless of the per-camera pixel format.</li>
+</ul>
+<h2 id="nas-mirroring">NAS mirroring<a class="headerlink" href="#nas-mirroring" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>nas<span class="w"> </span>&lt;paths…&gt;<span class="w"> </span>--nas-path<span class="w"> </span>/mnt/nas/matthias
+</code></pre></div>
+<p><code>nas</code> copies each recording's <code>.mp4</code> files (individual cameras and <code>grid.mp4</code>
+when present) plus its <code>recording_summary.json</code> to a destination root — a NAS
+mount or any writable path. <code>--nas-path</code> is required.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--nas-path</code></td>
+<td><em>(required)</em></td>
+<td>Destination root, e.g. <code>/mnt/nas/matthias</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-local-base</code></td>
+<td><em>(auto)</em></td>
+<td>Local root to strip when building the destination sub-path, so the directory tree is mirrored.</td>
+</tr>
+<tr>
+<td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
+<td>Copy every recording directory found beneath each path.</td>
+</tr>
+<tr>
+<td><code>--verify</code> / <code>--no-verify</code></td>
+<td><code>--verify</code></td>
+<td>Content-verify (blake2b) each copy before promoting it; <code>--no-verify</code> falls back to a size-only check for trusted/fast links.</td>
+</tr>
+<tr>
+<td><code>--checksum</code></td>
+<td>off</td>
+<td>For files already on the NAS, decide skip-vs-recopy by full checksum rather than size (repair mode).</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>Log what would be copied without touching any files.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Path mirroring.</strong> With <code>--nas-local-base /home/nely/data/MD</code>, a recording at
+<code>…/MD/260624_/Fly1/001-bhv</code> lands at <code>&lt;nas-path&gt;/260624_/Fly1/001-bhv</code>, so fly
+and trial identity are preserved. When the base is omitted and several
+recordings are copied at once, their common parent is used automatically so
+same-named trials (two <code>001-bhv</code>, say) never collide; a colliding destination is
+detected and refused before any copy runs.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>nas<span class="w"> </span>~/data/MD/260624_<span class="w"> </span>-r<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">    </span>--nas-path<span class="w"> </span>/mnt/nas/matthias<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">    </span>--nas-local-base<span class="w"> </span>~/data/MD
+</code></pre></div>
+<p><strong>Integrity and resume.</strong> Each file is streamed to a unique hidden temp in the
+destination directory, fsync'd, optionally content-verified against the source,
+and only then atomically renamed onto its final name — so an interrupted copy
+never leaves a truncated file masquerading as complete. Re-running skips files
+already present (by size, or by full checksum with <code>--checksum</code>), so a killed
+copy resumes at file granularity rather than starting over.</p>
+<h2 id="one-pass-transcode-grid-nas">One pass: transcode + grid + NAS<a class="headerlink" href="#one-pass-transcode-grid-nas" title="Permanent link">&para;</a></h2>
+<p><code>octacam transcode</code> can run the grid and NAS phases automatically after each
+folder is encoded, so the whole end-of-day pipeline is a single command:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--all<span class="w"> </span>--config<span class="w"> </span>configs/2p_1
+</code></pre></div>
+<p>The extra options:</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--grid</code> / <code>--no-grid</code></td>
+<td>Force the grid on or off. When omitted, the <code>[grid] default</code> in <code>--config</code> decides.</td>
+</tr>
+<tr>
+<td><code>--config</code>, <code>-C</code></td>
+<td>Rig config directory supplying the grid layout, the <code>[grid]</code>/<code>[nas]</code> defaults, and the NAS local-base.</td>
+</tr>
+<tr>
+<td><code>--nas-path</code></td>
+<td>Copy results here after each folder. Overrides <code>[nas] path</code> from <code>--config</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-local-base</code></td>
+<td>Local root to strip for NAS mirroring. Overrides <code>[nas] local_base</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-verify</code> / <code>--no-nas-verify</code></td>
+<td>Content-verify each NAS copy. When omitted, <code>[nas] verify</code> decides (default on).</td>
+</tr>
+<tr>
+<td><code>--nas-checksum</code></td>
+<td>Skip-by-checksum repair mode for already-present NAS files.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>For the grid and NAS phases only, log what would be done without running ffmpeg or copying — transcoding still runs normally.</td>
+</tr>
+</tbody>
+</table>
+<p>Effective settings resolve as <strong>explicit CLI flag &gt; <code>--config</code> value &gt; off</strong>. The
+grid produced inside <code>transcode</code> is always <code>yuv420p</code> (the per-camera transcode
+<code>--pix-fmt</code> is not forwarded to it), and the grid <code>.mp4</code> is appended to each
+folder's NAS copy list. The grid and NAS phases run sequentially so their
+progress bars don't compete for the console.</p>
+<h2 id="config-reference">Config reference<a class="headerlink" href="#config-reference" title="Permanent link">&para;</a></h2>
+<p>Both post-processing steps read their defaults from the rig's
+<code>octacam_config.toml</code> when a config directory is supplied.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">[grid]</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">              </span><span class="c1"># auto-generate the grid during `octacam transcode --config …`</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LF&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RF&quot;</span><span class="p">],</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LM&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;camera_F&quot;</span><span class="p">,</span><span class="w">  </span><span class="s2">&quot;camera_RM&quot;</span><span class="p">],</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LH&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RH&quot;</span><span class="p">],</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">]</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="k">[nas]</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="n">path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/mnt/nas/matthias&quot;</span><span class="w">  </span><span class="c1"># destination root; enables the NAS phase in `transcode --config …`</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="n">local_base</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/home/nely/data/MD&quot;</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="n">verify</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">               </span><span class="c1"># content-checksum each copy before promoting it (false = size-only)</span>
+</code></pre></div>
+<ul>
+<li><code>[grid] layout</code> cells are camera names as declared in <code>[[cameras]]</code>; every row
+  must be the same length, and <code>""</code> is a black cell. A cell naming an unknown
+  camera is reported and renders black.</li>
+<li><code>[grid] default = true</code> makes <code>octacam transcode --config &lt;dir&gt;</code> build the grid
+  without needing <code>--grid</code>.</li>
+<li><code>[nas] path</code> set, plus <code>--config</code>, makes <code>octacam transcode</code> copy to the NAS
+  without needing <code>--nas-path</code>.</li>
+</ul>
+<p>Any CLI flag overrides the matching config value.</p>
 
 
 

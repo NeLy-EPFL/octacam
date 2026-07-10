@@ -603,13 +603,52 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#enabling-plugins" class="md-nav__link">
+  <a href="#listing-the-bundled-plugins" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Enabling plugins
+        Listing the bundled plugins
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enabling-a-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enabling a plugin
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Enabling a plugin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-the-rig-config-persistent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In the rig config (persistent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#at-launch-per-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At launch (per run)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -626,10 +665,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#flywheel-turntable-stepper-motor" class="md-nav__link">
+  <a href="#flywheel-stepper-motor-controller" class="md-nav__link">
     <span class="md-ellipsis">
       
-        flywheel — turntable stepper motor
+        flywheel — stepper-motor controller
       
     </span>
   </a>
@@ -647,17 +686,6 @@
   
 </li>
         
-          <li class="md-nav__item">
-  <a href="#triggerbox-configurable-camera-trigger-lights" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        triggerbox — configurable camera trigger + lights
-      
-    </span>
-  </a>
-  
-</li>
-        
       </ul>
     </nav>
   
@@ -668,6 +696,17 @@
     <span class="md-ellipsis">
       
         Finding the serial device
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#third-party-plugins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Third-party plugins
       
     </span>
   </a>
@@ -832,13 +871,52 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#enabling-plugins" class="md-nav__link">
+  <a href="#listing-the-bundled-plugins" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Enabling plugins
+        Listing the bundled plugins
       
     </span>
   </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#enabling-a-plugin" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Enabling a plugin
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Enabling a plugin">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-the-rig-config-persistent" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In the rig config (persistent)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#at-launch-per-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        At launch (per run)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -855,10 +933,10 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#flywheel-turntable-stepper-motor" class="md-nav__link">
+  <a href="#flywheel-stepper-motor-controller" class="md-nav__link">
     <span class="md-ellipsis">
       
-        flywheel — turntable stepper motor
+        flywheel — stepper-motor controller
       
     </span>
   </a>
@@ -876,17 +954,6 @@
   
 </li>
         
-          <li class="md-nav__item">
-  <a href="#triggerbox-configurable-camera-trigger-lights" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        triggerbox — configurable camera trigger + lights
-      
-    </span>
-  </a>
-  
-</li>
-        
       </ul>
     </nav>
   
@@ -897,6 +964,17 @@
     <span class="md-ellipsis">
       
         Finding the serial device
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#third-party-plugins" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Third-party plugins
       
     </span>
   </a>
@@ -924,100 +1002,180 @@
 
 
 <h1 id="plugins">Plugins<a class="headerlink" href="#plugins" title="Permanent link">&para;</a></h1>
-<p>Optional hardware and integration features ship as <strong>opt-in plugins</strong>. The
-default launch loads <strong>none</strong> — you choose what each rig needs.</p>
-<h2 id="enabling-plugins">Enabling plugins<a class="headerlink" href="#enabling-plugins" title="Permanent link">&para;</a></h2>
-<p>Enable a plugin persistently in the rig's <code>octacam_config.toml</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># Bare names work too: plugins = [&quot;flywheel&quot;]</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;flywheel&quot;</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;/dev/ttyACM0&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">baud</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">115200</span><span class="w"> </span><span class="p">}</span>
+<p>Serial-hardware and integration features ship as <strong>opt-in plugins</strong>. The default
+launch loads <strong>none</strong> — you enable only what a given rig needs.</p>
+<p>octacam bundles two plugins, both of which talk to an Arduino over a serial
+link:</p>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Purpose</th>
+<th>Firmware</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>flywheel</code></td>
+<td>Arduino stepper-motor / turntable controller</td>
+<td><a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/stepper_motor"><code>arduino/stepper_motor/</code></a></td>
+</tr>
+<tr>
+<td><code>twophoton</code></td>
+<td>Arduino hardware camera trigger for a 2-photon rig</td>
+<td><a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger"><code>arduino/2photon_trigger/</code></a></td>
+</tr>
+</tbody>
+</table>
+<p>Their only dependency, <strong>pyserial</strong>, ships with octacam by default, so neither
+needs an extra install.</p>
+<h2 id="listing-the-bundled-plugins">Listing the bundled plugins<a class="headerlink" href="#listing-the-bundled-plugins" title="Permanent link">&para;</a></h2>
+<p><code>octacam list-plugins</code> prints each bundled plugin and whether it can currently
+load. Output is tab-separated (<code>name</code>, status, summary):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>octacam<span class="w"> </span>list-plugins
 </code></pre></div>
-<p>…or per launch with <code>--plugin</code> (repeatable; adds to the config selection), and
-disable everything for one run with <code>--no-plugins</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--plugin<span class="w"> </span>flywheel<span class="w"> </span>--plugin<span class="w"> </span>twophoton
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--no-plugins
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>flywheel     available    Flywheel stepper-motor controller plugin (opt-in).
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>twophoton    available    2-photon rig hardware trigger plugin (opt-in).
 </code></pre></div>
-<p>Both <code>octacam gui</code> and <code>octacam record</code> accept these flags.</p>
-<p>The bundled plugins' dependencies (pyserial) ship with octacam by default, so
-they need no extra install. Run <code>octacam doctor</code> to see the bundled plugins and
-whether each one can load.</p>
-<h2 id="bundled-plugins">Bundled plugins<a class="headerlink" href="#bundled-plugins" title="Permanent link">&para;</a></h2>
-<h3 id="flywheel-turntable-stepper-motor"><code>flywheel</code> — turntable stepper motor<a class="headerlink" href="#flywheel-turntable-stepper-motor" title="Permanent link">&para;</a></h3>
-<p>Drives an Arduino stepper-motor controller over serial. Adds the web GUI's
-<strong>Flywheel</strong> tab (a loop program plus hold-to-jog manual control), and fires an
-armed loop command at the first captured frame so motion is synced to capture.</p>
-<p>The matching firmware is in
-<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/stepper_motor">arduino/stepper_motor/</a>.</p>
-<h3 id="twophoton-2-photon-hardware-trigger"><code>twophoton</code> — 2-photon hardware trigger<a class="headerlink" href="#twophoton-2-photon-hardware-trigger" title="Permanent link">&para;</a></h3>
-<p>Arms an Arduino hardware camera trigger for a 2-photon rig. The Arduino waits for
-a ThorSync rising edge, then emits a square-wave trigger at the recording's fps
-for its duration. Adds the web GUI's <strong>2-Photon</strong> tab (live Arduino state plus
-"arm with recording") and arms at recording start, so capture is synced to the
-ThorSync edge.</p>
-<p>The firmware and wiring notes are in
-<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger">arduino/2photon_trigger/</a>.</p>
-<h3 id="triggerbox-configurable-camera-trigger-lights"><code>triggerbox</code> — configurable camera trigger + lights<a class="headerlink" href="#triggerbox-configurable-camera-trigger-lights" title="Permanent link">&para;</a></h3>
-<p>Drives the EPFL <code>common-trigger-circuit</code> board (Arduino Nano ESP32) as a full
-camera-trigger + light controller. Adds the web GUI's <strong>triggerbox</strong> tab and,
-when "arm with recording" is on, arms the board at recording start so external
-hardware-triggered cameras are driven for the recording's fps + duration.</p>
-<p>Every output is chosen at run time from the config — no reflashing to rewire:</p>
-<ul>
-<li><strong>Camera lines</strong> — one or more <code>{ pin, pulse_us, delay_us }</code>. <code>pin</code> is any
-  broken-out line (<code>D5</code>–<code>D13</code>, <code>A0</code>–<code>A7</code>); <code>D2</code>/<code>D3</code>/<code>D4</code> are the status LED.</li>
-<li><strong>Light channels</strong> — the three CCS channels (1→D5, 2→D6, 3→D7), each
-  independently <code>off</code>, <code>strobe</code> (frame-locked; <code>duty_mode = "auto"</code> sizes the
-  on-time to bracket the longest live camera exposure + <code>strobe_guard_us</code>, or a
-  <code>manual</code> <code>duty_percent</code>), <code>continuous</code>, or an optogenetic <code>pulse_train</code>
-  (<code>freq_hz</code>, <code>pulse_us</code>, <code>start_delay_ms</code>, <code>train_ms</code>). All three channels are
-  electrically identical, so any channel can play any role.</li>
-</ul>
+<p><code>available</code> means the plugin's dependencies are present (they ship by default);
+an <code>unavailable</code> line carries the reason in its summary.</p>
+<h2 id="enabling-a-plugin">Enabling a plugin<a class="headerlink" href="#enabling-a-plugin" title="Permanent link">&para;</a></h2>
+<h3 id="in-the-rig-config-persistent">In the rig config (persistent)<a class="headerlink" href="#in-the-rig-config-persistent" title="Permanent link">&para;</a></h3>
+<p>Add a <code>[[plugins]]</code> entry to the rig's <code>octacam_config.toml</code>. Per-plugin settings
+go under a <code>[plugins.options]</code> sub-table:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;triggerbox&quot;</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;flywheel&quot;</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">[plugins.options]</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">device</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;auto&quot;</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">strobe_guard_us</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">cameras</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">pin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;D13&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">pulse_us</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">500</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">]</span>
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="n">lights</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="n">channel</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;strobe&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">duty_mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;auto&quot;</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="n">channel</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;strobe&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">duty_mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;manual&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">duty_percent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">20</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">  </span><span class="p">{</span><span class="w"> </span><span class="n">channel</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="n">mode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;pulse_train&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">freq_hz</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="n">pulse_us</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">5000</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="p">]</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">device</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/dev/ttyACM0&quot;</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">baud</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">115200</span>
 </code></pre></div>
-<p>Omitting <code>cameras</code>/<code>lights</code> defaults to the classic rig: one <code>D13</code> line plus
-channels 1 and 2 strobing. The firmware and wiring notes are in
-<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox">arduino/triggerbox/</a>.
-(The plugin was previously named <code>omniview</code>; that name still works as an alias.)</p>
-<p>If the board fails to arm — the ESP32-S3 USB link can occasionally <em>wedge</em>
-(every transfer stalls while the port stays enumerated), which would otherwise
-leave external-triggered cameras waiting forever — the plugin says so loudly in
-the GUI and log and, on Linux, automatically attempts a USB bus reset to clear
-the stall and re-arm. If recovery still fails, power-cycle or replug the board.</p>
-<p>These plugins talk to their Arduino over serial via pyserial, which ships with
-octacam.</p>
+<p>A bare-name array works too when you don't need options:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">plugins</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;flywheel&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;twophoton&quot;</span><span class="p">]</span>
+</code></pre></div>
+<p>Malformed or duplicate entries are warned about and skipped — the rig still
+launches.</p>
+<h3 id="at-launch-per-run">At launch (per run)<a class="headerlink" href="#at-launch-per-run" title="Permanent link">&para;</a></h3>
+<p>Both <code>octacam gui</code> and <code>octacam record</code> accept the same two flags:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Add plugins on top of the config selection (--plugin is repeatable)</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--plugin<span class="w"> </span>flywheel<span class="w"> </span>--plugin<span class="w"> </span>twophoton
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="c1"># Disable every plugin for this one run, ignoring the config</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--no-plugins
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">How the flags combine</p>
+<p><code>--plugin NAME</code> is <strong>added</strong> to whatever the config already selects (names
+already in the config aren't loaded twice). <code>--no-plugins</code> overrides
+everything and loads none. With neither flag, the config is used as-is.</p>
+</div>
+<p>Unknown names and any plugin whose dependency is missing are logged and skipped
+— octacam always keeps running.</p>
+<div class="admonition tip">
+<p class="admonition-title">Legacy name</p>
+<p>The <code>flywheel</code> plugin was previously called <code>arduino</code>. A config entry or
+<code>--plugin arduino</code> still resolves to <code>flywheel</code>, with a deprecation warning,
+so upgrading never silently drops a configured plugin.</p>
+</div>
+<h2 id="bundled-plugins">Bundled plugins<a class="headerlink" href="#bundled-plugins" title="Permanent link">&para;</a></h2>
+<h3 id="flywheel-stepper-motor-controller"><code>flywheel</code> — stepper-motor controller<a class="headerlink" href="#flywheel-stepper-motor-controller" title="Permanent link">&para;</a></h3>
+<p>Drives an Arduino stepper motor over serial. When loaded it adds a <strong>Flywheel</strong>
+tab to the web GUI (a loop program plus hold-to-jog manual control) and, at the
+first captured frame of a recording, fires an armed loop command so the motion
+is synchronised to actual capture.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device</code></td>
+<td><code>/dev/ttyACM0</code></td>
+<td>OS path to the board (e.g. <code>/dev/ttyACM0</code>, a udev symlink, or <code>COM3</code>)</td>
+</tr>
+<tr>
+<td><code>baud</code></td>
+<td><code>115200</code></td>
+<td>Serial baud rate</td>
+</tr>
+</tbody>
+</table>
+<p>The matching firmware lives in
+<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/stepper_motor"><code>arduino/stepper_motor/</code></a>.</p>
+<h3 id="twophoton-2-photon-hardware-trigger"><code>twophoton</code> — 2-photon hardware trigger<a class="headerlink" href="#twophoton-2-photon-hardware-trigger" title="Permanent link">&para;</a></h3>
+<p>Arms an Arduino camera trigger for a 2-photon rig. The Arduino waits for a
+ThorSync rising edge, then emits a square-wave camera trigger at the recording's
+frame rate for its duration. When loaded it adds a <strong>2-Photon</strong> tab to the web
+GUI (an "arm with recording" control plus live Arduino state, broadcast over the
+GUI WebSocket as <em>armed</em> → <em>triggered</em> → <em>done</em>), and arms the board at recording
+start so capture is synced to the ThorSync edge.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>device</code></td>
+<td><code>/dev/arduinoCams</code></td>
+<td>OS path to the board (udev symlink, <code>/dev/ttyACM0</code>, <code>COM3</code>, …)</td>
+</tr>
+<tr>
+<td><code>baud</code></td>
+<td><code>115200</code></td>
+<td>Serial baud rate</td>
+</tr>
+<tr>
+<td><code>default_fps</code></td>
+<td><code>100</code></td>
+<td>Fallback frame rate when the GUI doesn't send one</td>
+</tr>
+<tr>
+<td><code>default_duration_ms</code></td>
+<td><code>10000</code></td>
+<td>Fallback capture duration, in milliseconds</td>
+</tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[[plugins]]</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;twophoton&quot;</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="k">[plugins.options]</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">device</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/dev/arduinoCams&quot;</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">default_fps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="n">default_duration_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10000</span>
+</code></pre></div>
+<p>Because this rig is externally triggered, run it with an <strong>external</strong> trigger
+source so octacam lets the Arduino fire the frames rather than pacing a software
+trigger — set <code>trigger_source_default_index = 1</code> in the rig config's <code>[gui]</code>
+table (or pick <em>external</em> in the GUI), or pass <code>--trigger hardware</code> to
+<code>octacam record</code>. The firmware and wiring notes are in
+<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/2photon_trigger"><code>arduino/2photon_trigger/</code></a>.</p>
 <h2 id="finding-the-serial-device">Finding the serial device<a class="headerlink" href="#finding-the-serial-device" title="Permanent link">&para;</a></h2>
-<p>Each serial plugin's <code>device</code> option is the OS path to the board (e.g.
-<code>/dev/ttyACM0</code>, <code>/dev/arduinoCams</code>, <code>COM3</code>). To see what's connected and how
-octacam classifies it, run:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>doctor<span class="w">            </span><span class="c1"># lists a &quot;Serial devices&quot; section (board, path, VID:PID)</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>--probe-serial<span class="w">   </span><span class="c1"># also reads each board&#39;s firmware identity</span>
-</code></pre></div>
-<p><code>octacam doctor &lt;config_dir&gt;</code> cross-checks the device each enabled plugin is
-configured for against what's actually plugged in, and flags a missing or wrong
-one (with a suggested udev rule for a stable path).</p>
-<p>Instead of a fixed path you can set <code>device = "auto"</code>: the plugin picks the sole
-microcontroller-class port at launch, and reports a clear error if zero or more
-than one is present (so it never grabs the wrong board). An explicit path always
-wins over <code>"auto"</code>.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;triggerbox&quot;</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;auto&quot;</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1"># or &quot;/dev/ttyACM0&quot;, or a udev symlink</span>
-</code></pre></div>
-<p>In the GUI, each plugin tab's connection panel has a <strong>port dropdown</strong> so you can
-pick a detected board and (re)connect to it without editing the config — handy
-after an unplug/replug or when the path changed.</p>
+<p>Each plugin's <code>device</code> option is the OS path to its board — for example
+<code>/dev/ttyACM0</code> on Linux, a stable udev symlink such as <code>/dev/arduinoCams</code>, or
+<code>COM3</code> on Windows.</p>
+<div class="admonition warning">
+<p class="admonition-title">A missing board doesn't stop launch</p>
+<p>If the configured board is absent (or unplugged) when octacam starts, the
+plugin logs a warning and the GUI keeps running. Once the board is
+connected, use the plugin tab's <strong>Reconnect</strong> control to re-open the port
+without restarting the server. The plugin also warns loudly if it can't arm
+the hardware at recording start, so an external-triggered rig doesn't wait
+forever on a trigger that never fires.</p>
+</div>
+<h2 id="third-party-plugins">Third-party plugins<a class="headerlink" href="#third-party-plugins" title="Permanent link">&para;</a></h2>
+<p>Beyond the two bundled plugins, a separate package can register its own plugin
+under the <code>octacam.plugins</code> entry-point group; octacam discovers it at launch
+and it becomes selectable by name just like a builtin (the bundled names always
+win on a conflict). See <code>octacam.plugins.base</code> for the plugin contract.</p>
 
 
 

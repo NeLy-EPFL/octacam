@@ -359,6 +359,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#where-to-next" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -833,6 +844,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#the-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The commands
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#where-to-next" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -864,35 +886,41 @@
 
 
 <h1 id="octacam">octacam<a class="headerlink" href="#octacam" title="Permanent link">&para;</a></h1>
-<p>Preview, record, and save synchronized video from many scientific cameras
-through one fast, simple interface. octacam drives <strong>Basler</strong>, <strong>FLIR /
-Teledyne</strong>, and <strong>any GenICam USB3-Vision</strong> camera from a live web GUI, and turns
-a day's recordings into archived videos with one command. It auto-detects the
-best available driver per camera (a <a href="guide/backends/">backend cascade</a>) with a
-pip-installable floor, so it just works on modern Python. It is the successor to
-SeptaCam.</p>
+<p>Preview, record, and save synchronized video from multiple scientific cameras
+through one fast, simple interface. octacam drives <strong>Basler</strong> (USB3, via pypylon)
+and <strong>FLIR / Teledyne</strong> (USB3, via Spinnaker / PySpin) cameras from a live web
+GUI or a headless CLI, and turns a day's recordings into archived videos with one
+command. It is the successor to SeptaCam.</p>
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a7b6ac6e-5ae3-45fa-ae5a-2e3f5281e5c3" width="560"/>
 </p>
 
 <h2 id="what-it-does">What it does<a class="headerlink" href="#what-it-does" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Drives many cameras at once</strong> — 8 is not the limit despite the name.</li>
+<li><strong>Drives many cameras at once</strong> — 8 is not the limit despite the name. All
+  cameras open, start, and stream in parallel.</li>
 <li><strong>Live web GUI</strong> — preview every camera while recording, from the same machine
-  or over SSH.</li>
-<li><strong>Records straight to video</strong> — monochrome H.264 (or a raw byte dump), with a
-  per-recording summary that records dropped frames and timing.</li>
-<li><strong>One-command post-processing</strong> — <code>octacam process</code> transcodes, tiles cameras
-  into composite grid videos, and copies everything to shared storage, all from
-  a config snapshot each recording carries with it.</li>
-<li><strong>Opt-in plugins</strong> for rig hardware (turntable, 2-photon trigger, configurable
-  camera-trigger + lights box).</li>
+  or over a plain SSH tunnel. See <a href="guide/gui/">Web GUI</a>.</li>
+<li><strong>Records straight to video</strong> — monochrome H.264 by default (ffmpeg / libx264,
+  true 4:0:0 <code>gray</code>, crash-safe MKV), or a raw Mono8 byte dump for maximum
+  throughput with offline transcoding. See <a href="guide/recording/">Recording</a>.</li>
+<li><strong>Synchronized capture</strong> — pace a software trigger from octacam at your target
+  fps, or slave the rig to an external hardware trigger. See
+  <a href="guide/backends/">Camera backends</a>.</li>
+<li><strong>A per-recording summary</strong> — every recording writes a <code>recording_summary.json</code>
+  (per-camera fps, start timestamps, and dropped frame indices) alongside the
+  videos, plus an optional per-frame timestamp CSV.</li>
+<li><strong>One-command post-processing</strong> — <code>octacam transcode</code> re-encodes recordings,
+  optionally tiles the cameras into a composite grid video, and mirrors results
+  to a NAS. See <a href="guide/processing/">Processing recordings</a>.</li>
+<li><strong>Opt-in plugins</strong> for rig hardware — a flywheel turntable and a 2-photon
+  camera trigger. See <a href="guide/plugins/">Plugins</a>.</li>
 </ul>
 <h2 id="get-started">Get started<a class="headerlink" href="#get-started" title="Permanent link">&para;</a></h2>
 <div class="grid cards">
 <ul>
-<li><span class="twemoji"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 20h14v-2H5m14-9h-4V3H9v6H5l7 7z"/></svg></span> <strong><a href="installation/">Install</a></strong> — one line with uv; Basler
-  works out of the box.</li>
+<li><span class="twemoji"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 20h14v-2H5m14-9h-4V3H9v6H5l7 7z"/></svg></span> <strong><a href="installation/">Install</a></strong> — one line with uv; a Basler
+  rig works out of the box.</li>
 <li><span class="twemoji"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m13.13 22.19-1.63-3.83c1.57-.58 3.04-1.36 4.4-2.27zM5.64 12.5l-3.83-1.63 6.1-2.77C7 9.46 6.22 10.93 5.64 12.5M21.61 2.39S16.66.269 11 5.93c-2.19 2.19-3.5 4.6-4.35 6.71-.28.75-.09 1.57.46 2.13l2.13 2.12c.55.56 1.37.74 2.12.46A19.1 19.1 0 0 0 18.07 13c5.66-5.66 3.54-10.61 3.54-10.61m-7.07 7.07c-.78-.78-.78-2.05 0-2.83s2.05-.78 2.83 0c.77.78.78 2.05 0 2.83s-2.05.78-2.83 0m-5.66 7.07-1.41-1.41zM6.24 22l3.64-3.64c-.34-.09-.67-.24-.97-.45L4.83 22zM2 22h1.41l4.77-4.76-1.42-1.41L2 20.59zm0-2.83 4.09-4.08c-.21-.3-.36-.62-.45-.97L2 17.76z"/></svg></span> <strong><a href="quickstart/">Quickstart</a></strong> — record your first
   trial, with or without hardware.</li>
 <li><span class="twemoji"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 17v2h6v-2zM3 5v2h10V5zm10 16v-2h8v-2h-8v-2h-2v6zM7 9v2H3v2h4v2h2V9zm14 4v-2H11v2zm-6-4h2V7h4V5h-4V3h-2z"/></svg></span> <strong><a href="guide/configuration/">Configuration</a></strong> — the
@@ -900,17 +928,74 @@ SeptaCam.</p>
 </ul>
 </div>
 <h2 id="the-workflow-at-a-glance">The workflow at a glance<a class="headerlink" href="#the-workflow-at-a-glance" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># 1. Check the install and validate your rig</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>&lt;config_dir&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># 1. Preview + record from the web GUI</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w">                        </span><span class="c1"># → http://127.0.0.1:8765</span>
 <a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># 2. Preview + record from the web GUI</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;<span class="w">          </span><span class="c1"># → http://127.0.0.1:8765</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># 2. …or record headlessly (no browser) for scripted / remote runs</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>octacam<span class="w"> </span>record<span class="w"> </span>&lt;config_dir&gt;
 <a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
 <a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1"># 3. Transcode, build grid videos, and copy to storage — one command</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--all<span class="w"> </span>--config<span class="w"> </span>&lt;config_dir&gt;
 </code></pre></div>
-<p><code>octacam record &lt;config_dir&gt;</code> does step 2 headlessly (no browser) for scripted
-or remote runs.</p>
+<p>A rig's <code>&lt;config_dir&gt;</code> holds an <code>octacam_config.toml</code> (camera names, display
+layout, GUI defaults, the camera <a href="guide/backends/"><code>backend</code></a>, and optional
+plugins) plus one per-camera sensor-parameter file — <code>&lt;serial&gt;.pfs</code> for Basler,
+<code>&lt;serial&gt;.json</code> for FLIR.</p>
+<div class="admonition tip">
+<p class="admonition-title">Run without any hardware</p>
+<p>The Basler runtime ships with a camera emulator, so you can explore the GUI
+and the full pipeline on any machine:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">PYLON_CAMEMU</span><span class="o">=</span><span class="m">8</span><span class="w"> </span>octacam<span class="w"> </span>gui<span class="w"> </span>configs/emulate_8_cameras
+</code></pre></div>
+</div>
+<div class="admonition note">
+<p class="admonition-title">FLIR / Teledyne cameras</p>
+<p>Basler works with no extra setup (the pylon runtime is bundled). FLIR
+cameras need Teledyne's Spinnaker SDK and its PySpin wheel installed
+separately (PySpin is not on PyPI). See <a href="installation/">Installation</a>.</p>
+</div>
+<h2 id="the-commands">The commands<a class="headerlink" href="#the-commands" title="Permanent link">&para;</a></h2>
+<p>octacam is a single <code>octacam</code> executable with seven subcommands. Every command
+accepts <code>-h</code>/<code>--help</code>, and <code>--version</code> prints the version (<code>0.2.0.dev0</code>).</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>octacam gui &lt;config_dir&gt;</code></td>
+<td>Launch the web GUI for a rig</td>
+</tr>
+<tr>
+<td><code>octacam record &lt;config_dir&gt;</code></td>
+<td>Record headlessly (no browser)</td>
+</tr>
+<tr>
+<td><code>octacam transcode [paths…]</code></td>
+<td>Re-encode recordings; optionally build grids and copy to a NAS</td>
+</tr>
+<tr>
+<td><code>octacam grid &lt;paths…&gt;</code></td>
+<td>Build a composite grid video from transcoded folders</td>
+</tr>
+<tr>
+<td><code>octacam nas &lt;paths…&gt;</code></td>
+<td>Mirror recordings to a NAS, preserving the directory tree</td>
+</tr>
+<tr>
+<td><code>octacam list-cameras</code></td>
+<td>List detected cameras (<code>--backend basler\|flir\|fake</code>)</td>
+</tr>
+<tr>
+<td><code>octacam list-plugins</code></td>
+<td>List the bundled plugins and whether each can load</td>
+</tr>
+</tbody>
+</table>
+<p>See the <a href="reference/cli/">CLI reference</a> for every option.</p>
 <h2 id="where-to-next">Where to next<a class="headerlink" href="#where-to-next" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -926,11 +1011,11 @@ or remote runs.</p>
 </tr>
 <tr>
 <td><a href="guide/recording/">Recording</a></td>
-<td>Outputs, the recording summary, transformed vs raw</td>
+<td>Outputs, the recording summary, display vs sensor form</td>
 </tr>
 <tr>
-<td><a href="guide/processing/">Processing</a></td>
-<td>Transcode, grid videos, and transfer to storage</td>
+<td><a href="guide/processing/">Processing recordings</a></td>
+<td>Transcode, grid videos, and NAS export</td>
 </tr>
 <tr>
 <td><a href="guide/configuration/">Configuration</a></td>
@@ -938,11 +1023,11 @@ or remote runs.</p>
 </tr>
 <tr>
 <td><a href="guide/backends/">Camera backends</a></td>
-<td>The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon)</td>
+<td>Choosing Basler, FLIR, or the fake test backend per rig</td>
 </tr>
 <tr>
 <td><a href="guide/plugins/">Plugins</a></td>
-<td>Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights)</td>
+<td>The flywheel turntable and 2-photon trigger</td>
 </tr>
 <tr>
 <td><a href="reference/cli/">CLI reference</a></td>

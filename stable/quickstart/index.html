@@ -393,10 +393,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#2-check-your-rig" class="md-nav__link">
+  <a href="#2-what-a-config-directory-is" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Check your rig
+        2. What a config directory is
       
     </span>
   </a>
@@ -404,10 +404,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#3-what-is-a-config-directory" class="md-nav__link">
+  <a href="#3-preview-and-record-in-the-gui" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. What is a config directory?
+        3. Preview and record in the GUI
       
     </span>
   </a>
@@ -415,10 +415,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#4-preview-and-record" class="md-nav__link">
+  <a href="#4-record-headlessly" class="md-nav__link">
     <span class="md-ellipsis">
       
-        4. Preview and record
+        4. Record headlessly
       
     </span>
   </a>
@@ -426,10 +426,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#5-archive-everything" class="md-nav__link">
+  <a href="#5-what-a-recording-produces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. Archive everything
+        5. What a recording produces
       
     </span>
   </a>
@@ -437,10 +437,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#working-remotely" class="md-nav__link">
+  <a href="#working-remotely-over-ssh" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Working remotely
+        Working remotely over SSH
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next steps
       
     </span>
   </a>
@@ -835,10 +846,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#2-check-your-rig" class="md-nav__link">
+  <a href="#2-what-a-config-directory-is" class="md-nav__link">
     <span class="md-ellipsis">
       
-        2. Check your rig
+        2. What a config directory is
       
     </span>
   </a>
@@ -846,10 +857,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#3-what-is-a-config-directory" class="md-nav__link">
+  <a href="#3-preview-and-record-in-the-gui" class="md-nav__link">
     <span class="md-ellipsis">
       
-        3. What is a config directory?
+        3. Preview and record in the GUI
       
     </span>
   </a>
@@ -857,10 +868,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#4-preview-and-record" class="md-nav__link">
+  <a href="#4-record-headlessly" class="md-nav__link">
     <span class="md-ellipsis">
       
-        4. Preview and record
+        4. Record headlessly
       
     </span>
   </a>
@@ -868,10 +879,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#5-archive-everything" class="md-nav__link">
+  <a href="#5-what-a-recording-produces" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. Archive everything
+        5. What a recording produces
       
     </span>
   </a>
@@ -879,10 +890,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#working-remotely" class="md-nav__link">
+  <a href="#working-remotely-over-ssh" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Working remotely
+        Working remotely over SSH
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#next-steps" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Next steps
       
     </span>
   </a>
@@ -910,71 +932,149 @@
 
 
 <h1 id="quickstart">Quickstart<a class="headerlink" href="#quickstart" title="Permanent link">&para;</a></h1>
-<p>This walks through octacam end to end: preview, record, and archive — first with
-emulated cameras (no hardware needed), then on a real rig.</p>
-<h2 id="1-try-it-with-no-hardware">1. Try it with no hardware<a class="headerlink" href="#1-try-it-with-no-hardware" title="Permanent link">&para;</a></h2>
-<p>Basler's runtime includes a camera emulator. Set <code>PYLON_CAMEMU</code> to the number of
-fake cameras and launch the GUI with the bundled emulator config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nv">PYLON_CAMEMU</span><span class="o">=</span><span class="m">8</span><span class="w"> </span>octacam<span class="w"> </span>gui<span class="w"> </span>configs/emulate_basler
+<p>Get octacam running and capture your first recording — first with emulated
+cameras (no hardware needed), then the same steps on a real rig.</p>
+<p>If octacam isn't installed yet, see <a href="../installation/">Installation</a>. In short,
+with <a href="https://docs.astral.sh/uv/">uv</a>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>git+https://github.com/NeLy-EPFL/octacam.git
 </code></pre></div>
-<p>Your browser opens to <code>http://127.0.0.1:8765</code> with eight synthetic cameras. You
-can preview, adjust the layout, and record exactly as you would with real
-hardware — recordings land in the directory the config's <code>[record]</code> section
-points at.</p>
+<p>The Basler pylon runtime, OpenCV, and ffmpeg are bundled, so a Basler rig — and
+the emulator below — work out of the box. (FLIR / Teledyne cameras need the
+Spinnaker SDK installed separately; see <a href="../guide/backends/">Camera backends</a>.)</p>
+<h2 id="1-try-it-with-no-hardware">1. Try it with no hardware<a class="headerlink" href="#1-try-it-with-no-hardware" title="Permanent link">&para;</a></h2>
+<p>Basler's runtime ships a camera emulator. Set <code>PYLON_CAMEMU</code> to the number of
+fake cameras and launch the GUI with the bundled emulator config (from a clone of
+the repository):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">PYLON_CAMEMU</span><span class="o">=</span><span class="m">8</span><span class="w"> </span>octacam<span class="w"> </span>gui<span class="w"> </span>configs/emulate_8_cameras
+</code></pre></div>
+<p>Your default browser opens to <code>http://127.0.0.1:8765/</code> with eight synthetic
+cameras. You can preview, adjust the layout, and record exactly as you would with
+real hardware.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
-<p>The emulator is a great way to learn the GUI and validate a config before
-touching a rig. The <a href="../guide/backends/"><code>fake</code> backend</a> is a similar
-synthetic option used for tests and CI.</p>
+<p>The emulator is the easiest way to learn the GUI and validate a config
+before touching a rig. There is also a separate <code>fake</code> backend (synthetic
+in-memory frames) used for tests — see <a href="../guide/backends/">Camera backends</a>.</p>
 </div>
-<h2 id="2-check-your-rig">2. Check your rig<a class="headerlink" href="#2-check-your-rig" title="Permanent link">&para;</a></h2>
-<p>On a real rig, first confirm octacam sees your install and cameras:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>octacam<span class="w"> </span>doctor<span class="w">              </span><span class="c1"># toolchain + all detected cameras</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span><span class="c1"># …and validate a specific rig config</span>
-</code></pre></div>
-<p><code>doctor</code> lists detected cameras and bundled plugins, and checks the encoder,
-storage, and runtime for problems — cross-checking the cameras a config declares
-against the ones actually attached. It never opens a camera, so it is safe to
-run while a session is live. See <a href="../reference/cli/#doctor"><code>doctor</code> in the CLI reference</a>.</p>
-<h2 id="3-what-is-a-config-directory">3. What is a config directory?<a class="headerlink" href="#3-what-is-a-config-directory" title="Permanent link">&para;</a></h2>
-<p>Most commands take a <strong>config directory</strong>: a folder holding one
-<code>octacam_config.toml</code> (camera names, display layout, recording/encoder/transfer
-settings, and the <a href="../guide/backends/">camera backend</a>) plus one per-camera sensor
-file — <code>&lt;serial&gt;.pfs</code> for Basler, <code>&lt;serial&gt;.txt</code> (native GenApi TSV) for FLIR.</p>
+<h2 id="2-what-a-config-directory-is">2. What a config directory is<a class="headerlink" href="#2-what-a-config-directory-is" title="Permanent link">&para;</a></h2>
+<p>Every command takes a <strong>config directory</strong>: a folder holding one
+<code>octacam_config.toml</code> (camera names, display layout, GUI/encoder defaults, opt-in
+plugins, and the camera <a href="../guide/backends/"><code>backend</code></a>) plus one per-camera sensor
+file named by serial number.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>configs/my_rig/
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>├── octacam_config.toml     # names, layout, [record]/[transcode]/[transfer]/…
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>├── octacam_config.toml     # names, layout, [gui] defaults, [grid]/[nas], plugins
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>├── 40001978.pfs            # per-camera sensor parameters (Basler)
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>├── 40002335.pfs
 <a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>└── …
 </code></pre></div>
-<p>See <a href="https://github.com/NeLy-EPFL/octacam/tree/main/configs">configs/</a> for
-real examples, and the <a href="../guide/configuration/">Configuration reference</a> for
-every key.</p>
-<h2 id="4-preview-and-record">4. Preview and record<a class="headerlink" href="#4-preview-and-record" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;
+<p>The sensor-file extension depends on the backend:</p>
+<table>
+<thead>
+<tr>
+<th><code>backend</code></th>
+<th>SDK</th>
+<th>per-camera parameter file</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>basler</code> (default)</td>
+<td>pypylon (bundled)</td>
+<td><code>&lt;serial&gt;.pfs</code></td>
+</tr>
+<tr>
+<td><code>flir</code></td>
+<td>Spinnaker / PySpin</td>
+<td><code>&lt;serial&gt;.json</code></td>
+</tr>
+<tr>
+<td><code>fake</code></td>
+<td>none (in-memory)</td>
+<td><code>&lt;serial&gt;.fake</code></td>
+</tr>
+</tbody>
+</table>
+<p>The config is parsed tolerantly — a missing file, section, or field just falls
+back to a default rather than failing. With no <code>[[cameras]]</code> entries, every
+detected camera is used. See <a href="../guide/configuration/">Configuration</a> for every
+key, and <a href="https://github.com/NeLy-EPFL/octacam/tree/main/configs"><code>configs/</code></a> for
+real examples.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>To confirm a rig's cameras are detected before launching, list them:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>list-cameras<span class="w">                 </span><span class="c1"># Basler (default backend)</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>octacam<span class="w"> </span>list-cameras<span class="w"> </span>--backend<span class="w"> </span>flir<span class="w">  </span><span class="c1"># FLIR / Teledyne</span>
 </code></pre></div>
-<p>The GUI opens in your browser. Use the tabs to frame each camera (<strong>View</strong>),
-tune exposure/gain (<strong>Camera</strong>), and start/stop recording (<strong>Record</strong>). Frames
-are written to video as you record. See the <a href="../guide/gui/">Web GUI guide</a>.</p>
-<p>Prefer no browser (a script, or a remote box)? Record headlessly:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>record<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--duration<span class="w"> </span><span class="m">10</span><span class="w"> </span>--fps<span class="w"> </span><span class="m">100</span>
+</div>
+<h2 id="3-preview-and-record-in-the-gui">3. Preview and record in the GUI<a class="headerlink" href="#3-preview-and-record-in-the-gui" title="Permanent link">&para;</a></h2>
+<p>On a real rig, point <code>gui</code> at your config directory:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;
 </code></pre></div>
-<p>Either way, each recording writes its videos, a <code>recording_summary.json</code>, and a
-snapshot of the rig config into its own folder. See <a href="../guide/recording/">Recording</a>.</p>
-<h2 id="5-archive-everything">5. Archive everything<a class="headerlink" href="#5-archive-everything" title="Permanent link">&para;</a></h2>
-<p>Turn the day's recordings into transcoded videos, composite grid videos, and
-copies on shared storage — one command, no paths to type:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
+<p>The GUI opens in your browser. Use the tabs to:</p>
+<ul>
+<li><strong>View</strong> — frame and arrange each camera (rotate / flip / position).</li>
+<li><strong>Camera</strong> — tune exposure, gain, and the ROI (width/height/offset).</li>
+<li><strong>Record</strong> — set fps, duration, and the save directory, then start/stop a
+  recording. Live preview keeps running while you record.</li>
+</ul>
+<p>An enabled plugin (e.g. flywheel, twophoton) adds its own tab; see
+<a href="../guide/plugins/">Plugins</a>. Enable one per launch with <code>--plugin &lt;name&gt;</code>.</p>
+<div class="admonition note">
+<p class="admonition-title">One octacam per rig</p>
+<p>A rig's cameras can only be opened by one process at a time, so octacam takes
+an instance lock on the config directory: a second <code>octacam gui</code> for the same
+rig is refused (on any <code>--port</code>). Bind address and port are configurable with
+<code>--host</code> / <code>--port</code> (default <code>127.0.0.1:8765</code>); pass <code>--no-browser</code> to skip
+the automatic browser launch.</p>
+</div>
+<h2 id="4-record-headlessly">4. Record headlessly<a class="headerlink" href="#4-record-headlessly" title="Permanent link">&para;</a></h2>
+<p>For a script or a remote box with no browser, record straight from the command
+line. Options left unset fall back to the config's <code>[gui]</code> defaults:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>record<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--duration<span class="w"> </span><span class="m">10</span><span class="w"> </span>--fps<span class="w"> </span><span class="m">100</span>
 </code></pre></div>
-<p>octacam remembers where it recorded, so <code>--all</code> processes every recent recording.
-You can also pass explicit folders, or use <code>--last</code> / <code>--last session</code>. See
-<a href="../guide/processing/">Processing recordings</a>.</p>
-<h2 id="working-remotely">Working remotely<a class="headerlink" href="#working-remotely" title="Permanent link">&para;</a></h2>
-<p>Running octacam on a rig you reach over SSH? Tunnel the GUI to your laptop:</p>
+<p>octacam paces a <strong>software</strong> trigger at <code>--fps</code> by default; pass
+<code>--trigger hardware</code> to use the trigger source configured in each camera's sensor
+file instead. When it finishes, <code>record</code> prints one output file path per camera
+on stdout. See <a href="../guide/recording/">Recording</a> for every option.</p>
+<h2 id="5-what-a-recording-produces">5. What a recording produces<a class="headerlink" href="#5-what-a-recording-produces" title="Permanent link">&para;</a></h2>
+<p>A recording writes one file per camera into the save directory, alongside a
+summary:</p>
+<ul>
+<li><strong><code>&lt;camera_name&gt;.mkv</code></strong> per camera — H.264 (libx264), true monochrome 4:0:0.
+  This is the default <code>x264</code> codec; <code>--codec raw</code> dumps Mono8 for later
+  transcoding instead.</li>
+<li><strong><code>recording_summary.json</code></strong> — per-camera fps, start timestamp, and which frame
+  indices were dropped, plus the session start time and recording settings.</li>
+<li>A per-frame timestamp CSV per camera <strong>only</strong> when you opt in with
+  <code>--save-frame-timestamps</code> (off by default).</li>
+</ul>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>After a successful (non-aborted) recording, the trailing 3-digit group of the
+save directory auto-increments — e.g. <code>001-bhv</code> → <code>002-bhv</code> — so the next
+recording lands in a fresh folder.</p>
+</div>
+<p>The <code>dropped</code> count in the summary reflects only frames the encoder queue could
+not accept (the host couldn't keep up), not frames the camera or USB transport
+never delivered — enable <code>--save-frame-timestamps</code> and inspect the inter-frame
+gaps to find those.</p>
+<h2 id="working-remotely-over-ssh">Working remotely over SSH<a class="headerlink" href="#working-remotely-over-ssh" title="Permanent link">&para;</a></h2>
+<p>Running octacam on a rig you reach over SSH? The single WebSocket that carries
+preview and control tunnels cleanly, so forward the port to your laptop:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>ssh<span class="w"> </span>-L<span class="w"> </span><span class="m">8765</span>:127.0.0.1:8765<span class="w"> </span>&lt;rig-hostname&gt;<span class="w"> </span>octacam<span class="w"> </span>gui<span class="w"> </span>&lt;config_dir&gt;
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1"># then open http://localhost:8765 in your browser</span>
 </code></pre></div>
-<p>More on this in the <a href="../guide/gui/#remote-operation-over-ssh">Web GUI guide</a>.</p>
+<p>octacam detects the SSH session and skips the automatic browser launch (the
+browser would otherwise open on the rig).</p>
+<h2 id="next-steps">Next steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
+<p>Once you have recordings, turn them into compressed videos, composite grids, and
+copies on shared storage:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>transcode<span class="w"> </span>--last<span class="w">   </span><span class="c1"># transcode the most recent recording — no paths to type</span>
+</code></pre></div>
+<p>See <a href="../guide/processing/">Processing recordings</a> for the full transcode / grid /
+NAS workflow, or the <a href="../reference/cli/">CLI reference</a> for every command and flag.
+</content>
+</invoke></p>
 
 
 

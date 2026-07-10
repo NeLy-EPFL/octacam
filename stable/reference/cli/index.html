@@ -712,10 +712,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#doctor" class="md-nav__link">
+  <a href="#list-cameras" class="md-nav__link">
     <span class="md-ellipsis">
       
-        doctor
+        list-cameras
       
     </span>
   </a>
@@ -723,10 +723,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#config" class="md-nav__link">
+  <a href="#list-plugins" class="md-nav__link">
     <span class="md-ellipsis">
       
-        config
+        list-plugins
       
     </span>
   </a>
@@ -745,10 +745,60 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#flash" class="md-nav__link">
+  <a href="#transcode" class="md-nav__link">
     <span class="md-ellipsis">
       
-        flash
+        transcode
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="transcode">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#selecting-what-to-transcode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selecting what to transcode
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#encoding-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoding options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#grid-and-nas-post-processing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Grid and NAS post-processing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#grid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        grid
       
     </span>
   </a>
@@ -756,21 +806,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#benchmark" class="md-nav__link">
+  <a href="#nas" class="md-nav__link">
     <span class="md-ellipsis">
       
-        benchmark
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#process" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        process
+        nas
       
     </span>
   </a>
@@ -881,10 +920,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#doctor" class="md-nav__link">
+  <a href="#list-cameras" class="md-nav__link">
     <span class="md-ellipsis">
       
-        doctor
+        list-cameras
       
     </span>
   </a>
@@ -892,10 +931,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#config" class="md-nav__link">
+  <a href="#list-plugins" class="md-nav__link">
     <span class="md-ellipsis">
       
-        config
+        list-plugins
       
     </span>
   </a>
@@ -914,10 +953,60 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#flash" class="md-nav__link">
+  <a href="#transcode" class="md-nav__link">
     <span class="md-ellipsis">
       
-        flash
+        transcode
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="transcode">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#selecting-what-to-transcode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Selecting what to transcode
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#encoding-options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Encoding options
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#grid-and-nas-post-processing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Grid and NAS post-processing
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#grid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        grid
       
     </span>
   </a>
@@ -925,21 +1014,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#benchmark" class="md-nav__link">
+  <a href="#nas" class="md-nav__link">
     <span class="md-ellipsis">
       
-        benchmark
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#process" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        process
+        nas
       
     </span>
   </a>
@@ -978,38 +1056,90 @@
 
 
 <h1 id="cli-reference">CLI reference<a class="headerlink" href="#cli-reference" title="Permanent link">&para;</a></h1>
-<p>Every command supports <code>-h</code> / <code>--help</code>, which prints the authoritative,
-up-to-date option list (with Rich-styled panels). This page summarizes them.</p>
+<p>octacam installs a single <code>octacam</code> command with seven subcommands:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>octacam [GLOBAL OPTIONS] COMMAND [ARGS]
 </code></pre></div>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="#gui"><code>gui</code></a></td>
+<td>Launch the live web GUI for a rig.</td>
+</tr>
+<tr>
+<td><a href="#list-cameras"><code>list-cameras</code></a></td>
+<td>List detected cameras.</td>
+</tr>
+<tr>
+<td><a href="#list-plugins"><code>list-plugins</code></a></td>
+<td>List bundled plugins and whether each can load.</td>
+</tr>
+<tr>
+<td><a href="#record"><code>record</code></a></td>
+<td>Record headlessly from a rig.</td>
+</tr>
+<tr>
+<td><a href="#transcode"><code>transcode</code></a></td>
+<td>Re-encode recordings to compressed video (with optional grid/NAS steps).</td>
+</tr>
+<tr>
+<td><a href="#grid"><code>grid</code></a></td>
+<td>Build a composite grid video from transcoded recordings.</td>
+</tr>
+<tr>
+<td><a href="#nas"><code>nas</code></a></td>
+<td>Copy recordings to a NAS or any destination.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition tip">
+<p class="admonition-title"><code>-h</code> / <code>--help</code> is authoritative</p>
+<p>Every command accepts <code>-h</code> or <code>--help</code>, which prints the exact option list
+for the version you have installed. This page documents octacam
+<strong>0.2.0.dev0</strong>.</p>
+</div>
 <h2 id="global-options">Global options<a class="headerlink" href="#global-options" title="Permanent link">&para;</a></h2>
+<p>These options appear before the subcommand (e.g. <code>octacam --log-level debug gui</code>).
+Running <code>octacam</code> with no subcommand prints the help and exits.</p>
 <table>
 <thead>
 <tr>
 <th>Option</th>
+<th>Default</th>
 <th>Purpose</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>--log-level</code>, <code>-l</code></td>
-<td>Logging verbosity: <code>debug</code> | <code>info</code> | <code>warning</code> | <code>error</code> (default <code>info</code>).</td>
+<td><code>info</code></td>
+<td>Logging verbosity: <code>debug</code> | <code>info</code> | <code>warning</code> | <code>error</code>.</td>
 </tr>
 <tr>
 <td><code>--version</code></td>
+<td>—</td>
 <td>Print the version and exit.</td>
 </tr>
 <tr>
 <td><code>-h</code>, <code>--help</code></td>
-<td>Show help (on the root or any command).</td>
+<td>—</td>
+<td>Show help (on the root or any subcommand).</td>
 </tr>
 </tbody>
 </table>
+<p>Logs are written to stderr so stdout stays clean for the machine-readable output
+of <code>list-cameras</code>, <code>record</code>, <code>transcode</code>, <code>grid</code>, and <code>nas</code>.</p>
 <h2 id="gui"><code>gui</code><a class="headerlink" href="#gui" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>octacam<span class="w"> </span>gui<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
 </code></pre></div>
-<p>Launch the live web GUI for the cameras in <code>CONFIG_DIR</code> (default: current
-directory). See the <a href="../../guide/gui/">Web GUI guide</a>.</p>
+<p>Launch the octacam web GUI for the cameras in <code>CONFIG_DIR</code> (default: the current
+directory). The GUI serves preview, telemetry, recording control, and any loaded
+plugin tabs over one WebSocket.</p>
 <table>
 <thead>
 <tr>
@@ -1022,179 +1152,83 @@ directory). See the <a href="../../guide/gui/">Web GUI guide</a>.</p>
 <tr>
 <td><code>--host</code></td>
 <td><code>127.0.0.1</code></td>
-<td>Bind address. Keep loopback and tunnel over SSH for remote use.</td>
+<td>Bind address. Keep the loopback default and reach the GUI remotely with <code>ssh -L 8765:127.0.0.1:8765 &lt;rig-hostname&gt;</code>.</td>
 </tr>
 <tr>
 <td><code>--port</code></td>
 <td><code>8765</code></td>
-<td>Port to bind.</td>
+<td>Port to bind; override if it clashes with other software.</td>
 </tr>
 <tr>
 <td><code>--no-browser</code></td>
 <td>off</td>
-<td>Don't auto-open a browser (also auto-skipped over SSH / headless).</td>
+<td>Don't auto-open a browser. Auto-open is also skipped over SSH and on headless (no-display) sessions.</td>
 </tr>
 <tr>
 <td><code>--plugin &lt;name&gt;</code></td>
 <td>—</td>
-<td>Enable a <a href="../../guide/plugins/">plugin</a> (repeatable).</td>
+<td>Enable a plugin (repeatable); adds to the config's <code>plugins</code>, e.g. <code>--plugin flywheel</code>. See <a href="#list-plugins"><code>list-plugins</code></a>.</td>
 </tr>
 <tr>
 <td><code>--no-plugins</code></td>
 <td>off</td>
-<td>Disable all plugins for this launch.</td>
+<td>Disable all plugins for this launch, ignoring the config.</td>
 </tr>
 </tbody>
 </table>
-<h2 id="doctor"><code>doctor</code><a class="headerlink" href="#doctor" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>octacam<span class="w"> </span>doctor<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
+<div class="admonition note">
+<p class="admonition-title">One octacam per rig</p>
+<p><code>gui</code> takes an exclusive lock keyed on the config directory, so a second
+<code>octacam gui &lt;config_dir&gt;</code> for the same rig is refused even on a different
+<code>--port</code>. The chosen port is also probed up front, so a port clash fails
+immediately instead of after opening the cameras.</p>
+</div>
+<p>On shutdown (Ctrl+C or the in-GUI shutdown control), if anything was recorded
+this session octacam prints the ready-to-run <code>transcode</code> commands for the
+recorded folders.</p>
+<h2 id="list-cameras"><code>list-cameras</code><a class="headerlink" href="#list-cameras" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>octacam<span class="w"> </span>list-cameras
 </code></pre></div>
-<p>Diagnose the install and, optionally, a rig. Lists detected cameras and bundled
-plugins and checks the encoding toolchain, storage, recording cache, and runtime
-conflicts. Passing <code>CONFIG_DIR</code> also validates that rig's config, resolves its
-save/transfer paths, and cross-checks declared vs detected cameras. It never
-opens a camera, so it is safe to run while a session is live.</p>
+<p>List detected cameras, one per line. Output is tab-separated: <code>model&lt;TAB&gt;serial</code>
+for the Basler backend, and <code>serial&lt;TAB&gt;backend</code> for the others.</p>
 <table>
 <thead>
 <tr>
 <th>Option</th>
+<th>Default</th>
 <th>Purpose</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>--backend &lt;name&gt;</code></td>
-<td>Only enumerate this backend (<code>basler</code>/<code>flir</code>/<code>spinnaker</code>/<code>pycameleon</code>/<code>fake</code>). Default: the whole available cascade.</td>
-</tr>
-<tr>
-<td><code>--json</code></td>
-<td>Emit machine-readable JSON instead of the report.</td>
-</tr>
-<tr>
-<td><code>--check</code></td>
-<td>Exit non-zero on warnings too (for CI), not only on errors.</td>
-</tr>
-<tr>
-<td><code>--probe-serial</code></td>
-<td>Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed).</td>
+<td><code>basler</code></td>
+<td>Camera backend to enumerate: <code>basler</code>, <code>flir</code>, or <code>fake</code>.</td>
 </tr>
 </tbody>
 </table>
-<p>Exits <code>0</code> when no errors are found, so it works as a pre-flight check in scripts.</p>
-<h2 id="config"><code>config</code><a class="headerlink" href="#config" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>config<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
+<div class="admonition tip">
+<p class="admonition-title">Run without hardware</p>
+<p>Set <code>PYLON_CAMEMU=N</code> to enumerate <code>N</code> emulated Basler cameras, or use
+<code>--backend fake</code> for the synthetic test backend (serials come from
+<code>OCTACAM_FAKE_CAMERAS</code>, default <code>FAKE-0,FAKE-1</code>).</p>
+</div>
+<h2 id="list-plugins"><code>list-plugins</code><a class="headerlink" href="#list-plugins" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>list-plugins
 </code></pre></div>
-<p>Interactively scaffold a new rig's <code>octacam_config.toml</code>: auto-detects the
-connected cameras, prompts for the record/transfer settings and an optional serial
-plugin, then writes the file (visual per-camera placement is left to <code>octacam
-gui</code>). If <code>CONFIG_DIR</code> is omitted you are prompted for one.</p>
-<table>
-<thead>
-<tr>
-<th>Option</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>--backend &lt;name&gt;</code></td>
-<td>Pin the rig to one backend (<code>basler</code>/<code>flir</code>/<code>spinnaker</code>/<code>pycameleon</code>/<code>fake</code>). Default: auto-detect through the cascade.</td>
-</tr>
-<tr>
-<td><code>--force</code></td>
-<td>Overwrite an existing <code>octacam_config.toml</code> without asking.</td>
-</tr>
-<tr>
-<td><code>--snapshot-params</code> / <code>--no-snapshot-params</code></td>
-<td>Open each detected camera once to save its current sensor parameters (<code>.pfs</code>/<code>.txt</code>); busy cameras are skipped. On by default.</td>
-</tr>
-</tbody>
-</table>
+<p>List the bundled, opt-in plugins and whether each can load. Takes no options.
+Output is tab-separated: <code>name&lt;TAB&gt;status&lt;TAB&gt;summary</code>, where <code>status</code> is
+<code>available</code> (the plugin's dependencies are present — the bundled plugins ship
+their deps by default) or <code>unavailable</code> (the summary carries the reason).</p>
+<p>Enable a plugin with <code>--plugin &lt;name&gt;</code> on <a href="#gui"><code>gui</code></a> or <a href="#record"><code>record</code></a>,
+or with a <code>[[plugins]]</code> entry in the rig config.</p>
 <h2 id="record"><code>record</code><a class="headerlink" href="#record" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>record<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
 </code></pre></div>
-<p>Record headlessly (no browser). Encoding, save method, transform, and the
-save-directory template come from the config's <code>[record]</code> section; the options
-override only the day-to-day values. See <a href="../../guide/recording/">Recording</a>.</p>
-<table>
-<thead>
-<tr>
-<th>Option</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>--fps</code>, <code>-f</code></td>
-<td>Frame rate (default: from config).</td>
-</tr>
-<tr>
-<td><code>--duration</code>, <code>-d</code></td>
-<td>Duration in seconds (default: from config).</td>
-</tr>
-<tr>
-<td><code>--output</code>, <code>-o</code></td>
-<td>Save directory, overriding the templated location.</td>
-</tr>
-<tr>
-<td><code>--yes</code>, <code>-y</code></td>
-<td>Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash).</td>
-</tr>
-<tr>
-<td><code>--plugin &lt;name&gt;</code></td>
-<td>Enable a plugin (repeatable).</td>
-</tr>
-<tr>
-<td><code>--no-plugins</code></td>
-<td>Disable all plugins for this run.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="flash"><code>flash</code><a class="headerlink" href="#flash" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>flash<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
-</code></pre></div>
-<p>Check a serial plugin's board firmware against the bundled Arduino sketch and,
-unless <code>--check</code>, compile + upload the current sketch with arduino-cli. Pass
-<code>CONFIG_DIR</code> (whose serial plugins to check), <code>--plugin</code>, or both.</p>
-<table>
-<thead>
-<tr>
-<th>Option</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>--plugin &lt;name&gt;</code></td>
-<td>Serial plugin whose firmware to manage (e.g. <code>triggerbox</code>); enables it even if not in the config.</td>
-</tr>
-<tr>
-<td><code>--device &lt;path&gt;</code></td>
-<td>Serial device override (e.g. <code>/dev/ttyACM0</code> or <code>auto</code>).</td>
-</tr>
-<tr>
-<td><code>--yes</code>, <code>-y</code></td>
-<td>Flash without prompting when out of date.</td>
-</tr>
-<tr>
-<td><code>--check</code></td>
-<td>Report only; exit nonzero if any board is out of date. Never flashes.</td>
-</tr>
-</tbody>
-</table>
-<h2 id="benchmark"><code>benchmark</code><a class="headerlink" href="#benchmark" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>benchmark<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
-</code></pre></div>
-<p>A short instrumented dry-run against the cameras in <code>CONFIG_DIR</code> (no video is
-kept): tests whether the target frame rate is achievable, searches for the
-maximum achievable rate, and measures each pipeline stage — <strong>acquire</strong> (trigger
-+ exposure + USB transfer), <strong>transform</strong>, <strong>enqueue</strong>, <strong>encode</strong> — so you can
-see the limiting step. It reports the acquisition and encode ceilings, a verdict
-(achievable / not, with the bottleneck), and targeted recommendations.</p>
-<p>Like <code>record</code> it opens the cameras, so it cannot run at the same time as a live
-GUI or recording on the same rig. Exits nonzero when the target fps is not
-achievable, so it works as a pre-flight check in scripts. The same benchmark is
-available from the GUI's <strong>Benchmark</strong> tab.</p>
+<p>Record videos headlessly from the cameras in <code>CONFIG_DIR</code> (default: the current
+directory). One output path per camera is printed on stdout when done.</p>
+<p>Every option that defaults to <em>from config</em> falls back to the rig's
+<code>octacam_config.toml</code> (<code>[gui]</code> defaults) when omitted.</p>
 <table>
 <thead>
 <tr>
@@ -1207,55 +1241,88 @@ available from the GUI's <strong>Benchmark</strong> tab.</p>
 <tr>
 <td><code>--fps</code>, <code>-f</code></td>
 <td>from config</td>
-<td>Target fps to test.</td>
+<td>Frame rate.</td>
 </tr>
 <tr>
 <td><code>--duration</code>, <code>-d</code></td>
-<td><code>5</code></td>
-<td>Seconds spent measuring each scenario.</td>
+<td>from config</td>
+<td>Recording duration in seconds.</td>
 </tr>
 <tr>
-<td><code>--find-max</code> / <code>--no-find-max</code></td>
-<td>on</td>
-<td>Search for the maximum achievable fps (software trigger only).</td>
+<td><code>--output</code>, <code>-o</code></td>
+<td>from config</td>
+<td>Save directory.</td>
 </tr>
 <tr>
-<td><code>--freerun</code> / <code>--no-freerun</code></td>
-<td>on</td>
-<td>Also measure the free-run (external-trigger-equivalent) ceiling.</td>
+<td><code>--codec</code></td>
+<td><code>x264</code></td>
+<td><code>x264</code>: ffmpeg H.264 MKV (gray 4:0:0); <code>raw</code>: Mono8 dump for later <a href="#transcode"><code>transcode</code></a>.</td>
 </tr>
 <tr>
-<td><code>--sink</code></td>
-<td><code>config</code></td>
-<td><code>config</code> (encode through the rig's real save method — measures the encode cost) or <code>null</code> (discard frames to isolate acquisition).</td>
+<td><code>--crf</code></td>
+<td>from config</td>
+<td>x264 quality (lower = better; <code>0</code> = lossless).</td>
+</tr>
+<tr>
+<td><code>--preset</code></td>
+<td>from config</td>
+<td>x264 speed preset. <code>ultrafast</code> is the only one validated at 8 cameras × 150 fps; slower presets compress better.</td>
+</tr>
+<tr>
+<td><code>--x264-params</code></td>
+<td>from config</td>
+<td>Extra libx264 options passed as ffmpeg <code>-x264-params</code>, e.g. <code>"keyint=30:scenecut=0"</code>.</td>
+</tr>
+<tr>
+<td><code>--trigger</code></td>
+<td><code>software</code></td>
+<td><code>software</code>: trigger from a timer thread at <code>--fps</code>; <code>hardware</code>: use the trigger source configured in the <code>.pfs</code> files.</td>
 </tr>
 <tr>
 <td><code>--record-form</code></td>
 <td>from config</td>
-<td><code>display</code> (bake the transform) or <code>sensor</code>.</td>
+<td><code>display</code>: bake each camera's rotation/flips into the video; <code>sensor</code>: save the raw, untransformed image.</td>
 </tr>
 <tr>
-<td><code>--backend</code></td>
+<td><code>--save-frame-timestamps</code> / <code>--no-save-frame-timestamps</code></td>
 <td>from config</td>
-<td>Override the camera backend.</td>
+<td>Also write a per-frame timestamp CSV per camera, for debugging.</td>
 </tr>
 <tr>
-<td><code>--json</code></td>
+<td><code>--plugin &lt;name&gt;</code></td>
+<td>—</td>
+<td>Enable a plugin (repeatable); adds to the config's <code>plugins</code>.</td>
+</tr>
+<tr>
+<td><code>--no-plugins</code></td>
 <td>off</td>
-<td>Emit the report as JSON instead of the table.</td>
+<td>Disable all plugins for this run.</td>
 </tr>
 </tbody>
 </table>
-<h2 id="process"><code>process</code><a class="headerlink" href="#process" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>process<span class="w"> </span><span class="o">[</span>PATHS…<span class="o">]</span>
+<div class="admonition note">
+<p class="admonition-title"><code>--trigger hardware</code></p>
+<p>With <code>--trigger hardware</code>, octacam does not pace the cameras itself: it arms
+each camera's config-native trigger source and waits for an external master
+to fire. If the external trigger never fires within the window, cameras can
+finish with zero frames (a header-only file); octacam flags those on stdout
+and skips them during transcode.</p>
+</div>
+<h2 id="transcode"><code>transcode</code><a class="headerlink" href="#transcode" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>transcode<span class="w"> </span><span class="o">[</span>PATHS...<span class="o">]</span>
 </code></pre></div>
-<p>Transcode recordings to mp4, build composite grid videos, and transfer to
-storage — all driven by each recording's embedded config snapshot. Pass
-recording folders (or parent directories with <code>-r</code>), or select from the cache
-with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
-<a href="../../guide/processing/">Processing</a>.</p>
-<p><strong>Selecting what to process</strong> (mutually exclusive; can't combine with explicit
-<code>PATHS</code>):</p>
+<p>Transcode recordings to compressed video, optionally building a composite grid
+video and copying results to a NAS afterwards. Recordings use a fast capture
+preset, so transcode always re-encodes (it never stream-copies) with the slower
+<code>veryslow</code> default preset where compression is actually gained.</p>
+<p><code>PATHS</code> may mix recording folders and individual video files (<code>.mkv</code>/<code>.raw</code>). A
+folder with a <code>recording_summary.json</code> is driven by it (which files, and each
+camera's display transform); a folder without one has its loose <code>.mkv</code>/<code>.raw</code>
+files transcoded with defaults and no transform.</p>
+<h3 id="selecting-what-to-transcode">Selecting what to transcode<a class="headerlink" href="#selecting-what-to-transcode" title="Permanent link">&para;</a></h3>
+<p>Instead of <code>PATHS</code>, select folders from the recording cache. These selectors are
+<strong>mutually exclusive</strong> with each other and cannot be combined with explicit
+<code>PATHS</code>. They silently skip any folder that has since been deleted.</p>
 <table>
 <thead>
 <tr>
@@ -1265,70 +1332,250 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 </thead>
 <tbody>
 <tr>
-<td><code>--last</code> (or <code>--last recording</code>)</td>
+<td><code>--last</code>, <code>--last-recording</code></td>
 <td>The most recent recording folder.</td>
 </tr>
 <tr>
-<td><code>--last session</code></td>
+<td><code>--session</code>, <code>--last-session</code></td>
 <td>Every folder from the last GUI session.</td>
 </tr>
 <tr>
 <td><code>--session-id &lt;id&gt;</code></td>
-<td>Every folder from one exact session id.</td>
+<td>Every folder from one exact session id (the value the GUI prints on exit; unlike <code>--session</code>, it is not hijacked by a later recording).</td>
 </tr>
 <tr>
 <td><code>--all</code></td>
-<td>Every recording folder still in the cache.</td>
+<td>Every recording folder still in the cache (all sessions, all days).</td>
 </tr>
 </tbody>
 </table>
-<p><strong>Controlling the steps:</strong></p>
+<p>Passing neither <code>PATHS</code> nor a selector is an error.</p>
+<h3 id="encoding-options">Encoding options<a class="headerlink" href="#encoding-options" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
 <tr>
 <th>Option</th>
+<th>Default</th>
 <th>Purpose</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
 <td>Recurse into the given folders.</td>
 </tr>
 <tr>
-<td><code>--no-transcode</code></td>
-<td>Skip transcoding; grid/transfer act on existing mp4s.</td>
+<td><code>--as-displayed</code> / <code>--as-saved</code></td>
+<td><code>--as-saved</code></td>
+<td><code>--as-displayed</code> applies each video's recorded display transform (skipped when already baked in); default reproduces the video as saved.</td>
 </tr>
 <tr>
-<td><code>--no-grid</code></td>
-<td>Skip building the grid video(s).</td>
+<td><code>--format</code></td>
+<td><code>mp4</code></td>
+<td>Output container.</td>
 </tr>
 <tr>
-<td><code>--no-transfer</code></td>
-<td>Skip transferring to the <code>[transfer]</code> destination.</td>
+<td><code>--crf</code></td>
+<td><code>20</code></td>
+<td>x264 quality.</td>
 </tr>
 <tr>
-<td><code>--force</code></td>
-<td>Re-transcode / rebuild grids even if outputs already exist.</td>
+<td><code>--preset</code></td>
+<td><code>veryslow</code></td>
+<td>x264 speed preset.</td>
 </tr>
 <tr>
-<td><code>--delete-source</code>, <code>-d</code></td>
-<td>Delete each <code>.mkv</code>/<code>.raw</code> once it transcodes successfully.</td>
+<td><code>--pix-fmt</code></td>
+<td><code>gray</code></td>
+<td>Pixel format.</td>
 </tr>
 <tr>
-<td><code>--config</code>, <code>-c</code></td>
-<td>Fallback config dir for recordings with no embedded snapshot.</td>
+<td><code>--x264-params</code></td>
+<td><code>""</code></td>
+<td>Extra libx264 <code>-x264-params</code>, e.g. <code>"keyint=30:scenecut=0"</code>.</td>
+</tr>
+<tr>
+<td><code>--remove-source</code></td>
+<td>off</td>
+<td>Delete each source <code>.mkv</code>/<code>.raw</code> (and a <code>.raw</code>'s <code>.json</code> sidecar) once it transcodes successfully. The <code>recording_summary.json</code> is kept.</td>
 </tr>
 <tr>
 <td><code>--progress-style</code></td>
-<td><code>octacam</code> (default) or <code>ffmpeg</code> (native output).</td>
-</tr>
-<tr>
-<td><code>--dry-run</code></td>
-<td>Log the intended grid/transfer work without writing anything.</td>
+<td><code>octacam</code></td>
+<td><code>octacam</code>: reformat ffmpeg's progress into an octacam-style progress bar. <code>ffmpeg</code>: stream ffmpeg's own output verbatim.</td>
 </tr>
 </tbody>
 </table>
+<h3 id="grid-and-nas-post-processing">Grid and NAS post-processing<a class="headerlink" href="#grid-and-nas-post-processing" title="Permanent link">&para;</a></h3>
+<p>After transcoding, octacam can build a grid video and mirror results to a NAS.
+CLI flags override the corresponding <code>[grid]</code>/<code>[nas]</code> sections of <code>--config</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--grid</code> / <code>--no-grid</code></td>
+<td>from config</td>
+<td>Generate a composite grid video after each folder. When omitted, the <code>[grid] default</code> in <code>--config</code> decides; <code>--no-grid</code> always disables it.</td>
+</tr>
+<tr>
+<td><code>--config</code>, <code>-C &lt;dir&gt;</code></td>
+<td>—</td>
+<td>Rig config directory (<code>octacam_config.toml</code>). Supplies the grid layout, whether grid/NAS run by default (<code>[grid] default</code> and <code>[nas] path</code>), and the NAS local-base.</td>
+</tr>
+<tr>
+<td><code>--nas-path &lt;path&gt;</code></td>
+<td>from config</td>
+<td>Copy results to this destination after each folder. Overrides <code>[nas] path</code> from <code>--config</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-local-base &lt;path&gt;</code></td>
+<td>from config</td>
+<td>Local root to strip for NAS path mirroring. Overrides <code>[nas] local_base</code> from <code>--config</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-verify</code> / <code>--no-nas-verify</code></td>
+<td>from config</td>
+<td>Content-verify each NAS copy (checksum) before promoting it. When omitted, the <code>[nas] verify</code> value in <code>--config</code> decides (default on).</td>
+</tr>
+<tr>
+<td><code>--nas-checksum</code></td>
+<td>off</td>
+<td>Decide whether an already-present NAS file can be skipped by full checksum rather than size (repair mode).</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>For <code>--grid</code> and <code>--nas-path</code>: log what would be done without running ffmpeg or copying files. Transcoding still runs normally.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition note">
+<p class="admonition-title">Interrupt-safe</p>
+<p>A Ctrl-C stops the batch where it stands; the in-flight file's partial output
+is discarded, and files already finished keep their outputs. octacam warns if
+a <code>transcode</code> is already running on the machine when you start a <code>gui</code> or
+<code>record</code> session, since transcoding is CPU-heavy and can cause dropped frames.</p>
+</div>
+<h2 id="grid"><code>grid</code><a class="headerlink" href="#grid" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>grid<span class="w"> </span>PATHS...<span class="w"> </span><span class="o">[</span>OPTIONS<span class="o">]</span>
+</code></pre></div>
+<p>Generate a composite grid video from already-transcoded recording folders. At
+least one <code>PATHS</code> argument is required, and each path must exist.</p>
+<p>Camera names and positions come from the <code>[grid]</code> section of the rig's
+<code>octacam_config.toml</code> (<code>--config</code>). Without a config, octacam falls back to its
+built-in 7-camera default layout. Missing cameras are filled with black frames,
+and the output is always <code>yuv420p</code> for QuickTime / Keynote compatibility.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
+<td>Search each path recursively for recording directories (identified by <code>recording_summary.json</code>) and generate a grid in each. Without this flag every argument must itself be a recording directory.</td>
+</tr>
+<tr>
+<td><code>--config</code>, <code>-C &lt;dir&gt;</code></td>
+<td>—</td>
+<td>Config directory whose <code>octacam_config.toml</code> contains a <code>[grid]</code> layout section. When omitted the built-in 7-camera default is used.</td>
+</tr>
+<tr>
+<td><code>--output-name</code>, <code>-o &lt;name&gt;</code></td>
+<td><code>grid.mp4</code></td>
+<td>Output filename inside each folder.</td>
+</tr>
+<tr>
+<td><code>--crf</code></td>
+<td><code>20</code></td>
+<td>x264 quality.</td>
+</tr>
+<tr>
+<td><code>--preset</code></td>
+<td><code>veryslow</code></td>
+<td>x264 speed preset.</td>
+</tr>
+<tr>
+<td><code>--pix-fmt</code></td>
+<td><code>yuv420p</code></td>
+<td>Pixel format for the grid video. <code>yuv420p</code> is required for QuickTime / Keynote compatibility.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>With <code>-r</code>: list the recording directories that would be processed. Always: log the ffmpeg command without running it.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="nas"><code>nas</code><a class="headerlink" href="#nas" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>nas<span class="w"> </span>PATHS...<span class="w"> </span>--nas-path<span class="w"> </span>PATH<span class="w"> </span><span class="o">[</span>OPTIONS<span class="o">]</span>
+</code></pre></div>
+<p>Copy recordings to a NAS or any destination, preserving the directory tree. At
+least one <code>PATHS</code> argument is required, and each path must exist. <code>--nas-path</code> is
+<strong>required</strong>.</p>
+<p>Copies are atomic and resumable: each file is written to a temp and only swapped
+onto its final name once whole and (by default) checksum-verified, and a re-run
+skips files already present. The <code>.mp4</code> files (individual cameras and <code>grid.mp4</code>
+if present) and the <code>recording_summary.json</code> from each recording directory are
+copied.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--nas-path &lt;path&gt;</code></td>
+<td><strong>required</strong></td>
+<td>NAS destination root, e.g. <code>/mnt/nas/matthias</code>.</td>
+</tr>
+<tr>
+<td><code>--nas-local-base &lt;path&gt;</code></td>
+<td>—</td>
+<td>Local root to strip when computing the NAS sub-path, so the directory tree is mirrored. With <code>--nas-local-base /home/nely/data/MD</code>, a recording at <code>/home/nely/data/MD/260624_/Fly1/001-bhv</code> lands at <code>&lt;nas-path&gt;/260624_/Fly1/001-bhv</code>. Omit to use only the folder name.</td>
+</tr>
+<tr>
+<td><code>-r</code>, <code>--recursive</code></td>
+<td>off</td>
+<td>Search each path recursively for recording directories (identified by <code>recording_summary.json</code>) and copy each one.</td>
+</tr>
+<tr>
+<td><code>--verify</code> / <code>--no-verify</code></td>
+<td><code>--verify</code></td>
+<td>Content-verify each copied file (checksum) before promoting it to its final name. <code>--no-verify</code> falls back to a size-only check for trusted/fast links.</td>
+</tr>
+<tr>
+<td><code>--checksum</code></td>
+<td>off</td>
+<td>When a file already exists on the NAS, decide whether to skip it by full checksum rather than size (repair mode: re-copies files whose bytes differ).</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>off</td>
+<td>Log what would be copied without touching any files.</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition tip">
+<p class="admonition-title">Automatic tree mirroring</p>
+<p>When <code>--nas-local-base</code> is omitted and several recordings are copied at once,
+their common parent is used as the base automatically, so same-named trials
+(e.g. two <code>001-bhv</code>) do not collide on the NAS.</p>
+</div>
 <h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1340,15 +1587,23 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 <tbody>
 <tr>
 <td><code>PYLON_CAMEMU</code></td>
-<td>Number of emulated Basler cameras (run without hardware).</td>
+<td>Number of emulated Basler cameras to summon (run without hardware).</td>
 </tr>
 <tr>
-<td><code>OCTACAM_CACHE_DIR</code></td>
-<td>Override the recording cache location (default <code>~/.cache/octacam</code>).</td>
+<td><code>OCTACAM_FAKE_CAMERAS</code></td>
+<td>Comma-separated serials for the <code>fake</code> backend (default <code>FAKE-0,FAKE-1</code>).</td>
 </tr>
 <tr>
 <td><code>OCTACAM_FFMPEG</code></td>
-<td>Path to an ffmpeg binary to use instead of the bundled one.</td>
+<td>Path to an ffmpeg binary to use instead of the bundled one (<code>imageio-ffmpeg</code>), or a system <code>ffmpeg</code> on <code>$PATH</code>.</td>
+</tr>
+<tr>
+<td><code>OCTACAM_CACHE_DIR</code></td>
+<td>Override the recording-cache location.</td>
+</tr>
+<tr>
+<td><code>XDG_CACHE_HOME</code></td>
+<td>Base for the recording cache when <code>OCTACAM_CACHE_DIR</code> is unset (falls back to <code>~/.cache/octacam</code>).</td>
 </tr>
 </tbody>
 </table>
