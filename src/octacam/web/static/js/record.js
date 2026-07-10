@@ -47,6 +47,7 @@ export class RecordTab {
     this.ffmpegParams = document.getElementById("ffmpeg-params");
     this.recordForm = document.getElementById("record-form");
     this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
+    this.writerQueueSize = document.getElementById("writer-queue-size");
     // Process section: post-recording knobs seeded from the config's
     // [transcode]/[transfer] sections and baked into each recording's config
     // snapshot for `octacam process`.
@@ -112,6 +113,13 @@ export class RecordTab {
         [this.saveFrameTimestamps]
       )
     );
+    // Round to an integer: the server rejects a non-int writer_queue_size, and
+    // clampInput returns a float (a typed "64.5" would otherwise 422).
+    this.writerQueueSize.addEventListener("change", () => {
+      const v = Math.round(clampInput(this.writerQueueSize));
+      this.writerQueueSize.value = String(v);
+      this._put({ writer_queue_size: v }, [this.writerQueueSize]);
+    });
     this.transcodeFfmpegParams.addEventListener("change", () =>
       this._put(
         { transcode_ffmpeg_params: this.transcodeFfmpegParams.value },
@@ -202,6 +210,12 @@ export class RecordTab {
       canSet(this.saveFrameTimestamps)
     ) {
       this.saveFrameTimestamps.checked = s.save_frame_timestamps;
+    }
+    if (
+      typeof s.writer_queue_size === "number" &&
+      canSet(this.writerQueueSize)
+    ) {
+      this.writerQueueSize.value = trimNum(s.writer_queue_size);
     }
     if (
       typeof s.transcode_ffmpeg_params === "string" &&

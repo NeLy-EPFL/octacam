@@ -113,6 +113,10 @@
             title="Also write timestamps.npz: the capture timestamp of every frame for all cameras, in one compressed file"><span>Save timestamps:</span>
             <input id="save-frame-timestamps" type="checkbox">
           </label>
+          <label class="row"
+            title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
+            <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
+          </label>
         </details>
         <details id="record-process" class="advanced" open>
           <summary title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Process</summary>
