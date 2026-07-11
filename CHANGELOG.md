@@ -7,6 +7,8 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
+## [Unreleased]
+
 ## [0.3.1] - 2026-07-11
 
 ### Added
