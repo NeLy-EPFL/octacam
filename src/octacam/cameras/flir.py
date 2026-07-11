@@ -62,8 +62,10 @@ def _spin():
     if PySpin is None:
         raise BackendUnavailable(
             "flir",
-            "the Spinnaker SDK and its PySpin wheel must be installed "
-            "(they are not on PyPI; see the README)",
+            "PySpin (the Spinnaker SDK's Python binding) isn't importable — not on "
+            "PyPI and easily pruned by `uv sync`; reinstall the PySpin wheel to "
+            "restore this tier. FLIR cameras still work via the ctypes `spinnaker` "
+            "tier when libSpinnaker_C.so is present.",
         )
     return PySpin
 
@@ -598,6 +600,25 @@ def _read_serial(cam) -> str:
     if spin.IsAvailable(node) and spin.IsReadable(node):
         return node.GetValue()
     return cam.GetUniqueID()
+
+
+def read_model(cam) -> str | None:
+    """Best-effort ``DeviceModelName`` from the TL device nodemap (readable pre-Init).
+
+    The model-name analogue of :func:`_read_serial`: reads a transport-layer node
+    without opening/initializing the camera, so it is safe during a live session
+    (``octacam doctor`` enumerates but never opens). Returns ``None`` when the node
+    is absent or unreadable. Consumed by the doctor enumeration to label cameras.
+    """
+    spin = _spin()
+    try:
+        nodemap = cam.GetTLDeviceNodeMap()
+        node = spin.CStringPtr(nodemap.GetNode("DeviceModelName"))
+        if spin.IsAvailable(node) and spin.IsReadable(node):
+            return node.GetValue() or None
+    except Exception:
+        pass
+    return None
 
 
 def enumerate_flir(requested_serials: list[str] | None = None):

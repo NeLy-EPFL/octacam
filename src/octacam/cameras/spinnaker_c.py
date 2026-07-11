@@ -393,6 +393,19 @@ class _Spinnaker:
                 return got
         return ""
 
+    def read_model(self, hcam) -> str | None:
+        """DeviceModelName from the TL device nodemap (readable pre-Init).
+
+        The model-name analogue of :meth:`read_serial`; ``None`` when the node is
+        absent/unreadable. Reads a transport-layer node without initializing the
+        camera, so it is safe during a live session (octacam doctor).
+        """
+        try:
+            hmap = self._out_handle(self._lib.spinCameraGetTLDeviceNodeMap, hcam)
+            return self.read_string(hmap, "DeviceModelName") or None
+        except BackendError:
+            return None
+
     # ------------------------------------------------------- camera lifecycle
     def _out_handle(self, fn, hcam):
         h = ctypes.c_void_p()
@@ -1237,6 +1250,11 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return None
         finally:
             spin.image_release(image)  # MUST release every image
+
+
+def read_model(hcam) -> str | None:
+    """Module-level model reader used by the doctor enumeration (see the class method)."""
+    return _spin().read_model(hcam)
 
 
 def enumerate_spinnaker(requested_serials: list[str] | None = None):

@@ -17,6 +17,17 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   never updates itself, and the check is disabled by `OCTACAM_NO_UPDATE_CHECK` or
   `DO_NOT_TRACK`. Stays silent until octacam is published to PyPI.
 
+### Changed
+
+- **Compacter `octacam doctor`** — the camera list now collapses same-model
+  cameras onto one line (`acA1920-150um: 40018619, 40018631, …`) in both the
+  per-backend list and the cascade selection, and every backend (not just Basler)
+  labels its cameras with the model name — read from the transport-layer node map
+  without opening the device. Dropped two low-signal lines (the "GUI port is free"
+  happy path and the NVENC `save_method` how-to hint). The `flir`-unavailable
+  message now says plainly that only the PySpin wheel is missing (often pruned by
+  `uv sync`) and that the ctypes `spinnaker` tier still serves FLIR cameras.
+
 ## [0.3.0] - 2026-07-11
 
 The 0.3.0 line is a large step beyond 0.2: octacam gains a multi-vendor camera

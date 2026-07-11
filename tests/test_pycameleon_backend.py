@@ -6,14 +6,19 @@ import types
 import numpy as np
 
 from octacam.cameras._genicam_config import parse_config
-from octacam.cameras.pycameleon import PycameleonBackend, enumerate_pycameleon
+from octacam.cameras.pycameleon import (
+    PycameleonBackend,
+    enumerate_pycameleon,
+    read_model,
+)
 
 
 class FakePyCam:
     """Stands in for a pycameleon PyCameleonCamera handle."""
 
-    def __init__(self, serial="PC-1"):
+    def __init__(self, serial="PC-1", model="FakeCam-1"):
         self._serial = serial
+        self._model = model
         self._int = {
             "Width": 1920,
             "Height": 1200,
@@ -36,7 +41,7 @@ class FakePyCam:
         self.stall = False
 
     def info(self):
-        return {"serial_number": self._serial}
+        return {"serial_number": self._serial, "model_name": self._model}
 
     def open(self):
         pass
@@ -231,3 +236,20 @@ def test_enumerate_sorts_then_filters(monkeypatch):
     assert [serial for serial, _handle in out] == ["A", "B", "C"]
     filtered = enumerate_pycameleon(["C", "A"])
     assert [serial for serial, _handle in filtered] == ["C", "A"]
+
+
+def test_read_model_from_info_descriptor():
+    # doctor labels each camera with the model from info(); absent/broken → None.
+    assert read_model(FakePyCam(model="Grasshopper3")) == "Grasshopper3"
+    assert read_model(FakePyCam(model="")) is None
+
+    class _NoModel:
+        def info(self):
+            return {"serial_number": "X"}
+
+    class _Broken:
+        def info(self):
+            raise RuntimeError("device gone")
+
+    assert read_model(_NoModel()) is None
+    assert read_model(_Broken()) is None

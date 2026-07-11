@@ -651,9 +651,14 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     returns each camera once, claimed by the highest-priority tier that sees it
     (so a Basler served by the vendor tier is not also listed under the pycameleon
     floor) — mirroring how :class:`CameraSystem` opens them. Basler goes through
-    the pylon TL factory directly so model names come along; other backends expose
-    only serials via their enumeration function. Enumeration never opens/grabs a
-    device, so this is safe to run alongside a live session."""
+    the pylon TL factory directly so model names come along; every other backend
+    exposes an optional module-level ``read_model(handle)`` (the model-name
+    analogue of its serial read, from the same pre-Init transport-layer node), so
+    doctor can label its cameras too — a backend without one simply yields
+    ``None``. Enumeration never opens/grabs a device, so this is safe alongside a
+    live session."""
+    import importlib
+
     from octacam.cameras import select_backend
 
     key = (name or "auto").strip().lower()
@@ -665,7 +670,17 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
         devices = pylon.TlFactory.GetInstance().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
     enumerate_fn, _factory, _extension = select_backend(name)
-    return [(str(serial), None) for serial, _handle in enumerate_fn(None)]
+    read_model = getattr(importlib.import_module(enumerate_fn.__module__), "read_model", None)
+
+    def _model(handle) -> str | None:
+        if read_model is None:
+            return None
+        try:
+            return read_model(handle)
+        except Exception:  # a model read must never fail enumeration
+            return None
+
+    return [(str(serial), _model(handle)) for serial, handle in enumerate_fn(None)]
 
 
 def _cascade_assignment() -> list[tuple[str, str, str | None]]:
@@ -1002,6 +1017,24 @@ def _doctor_updates(report: _Report) -> None:
         report.add("info", f"update check skipped ({notice.note})")
 
 
+def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
+    """Collapse ``[(serial, model), ...]`` into compact ``model: s1, s2, …`` lines.
+
+    One line per distinct model (first-seen order), serials comma-joined, so four
+    same-model cameras read as a single line instead of four. Cameras whose model
+    is unknown fall back to a bare serial line each."""
+    groups: dict[str | None, list[str]] = {}
+    for serial, model in cams:
+        groups.setdefault(model, []).append(serial)
+    lines: list[str] = []
+    for model, serials in groups.items():
+        if model:
+            lines.append(f"{model}: {', '.join(serials)}")
+        else:
+            lines.extend(serials)  # unknown model → bare serial per line
+    return lines
+
+
 def _doctor_backends(
     report: _Report, only_backend: str | None, scan: _CameraScan
 ) -> None:
@@ -1034,8 +1067,8 @@ def _doctor_backends(
             report.add("warn", f"{name}: available, but enumeration failed ({e})")
             continue
         report.add("ok", f"{name}: available — {len(cams)} camera(s) detected")
-        for serial, model in cams:
-            report.add("list", f"{model}  {serial}" if model else serial)
+        for line in _camera_lines(cams):
+            report.add("list", line)
     if not only_backend and os.environ.get("PYLON_CAMEMU"):
         report.add(
             "info",
@@ -1046,8 +1079,14 @@ def _doctor_backends(
         assignment = scan.cascade()
         if assignment:
             report.add("info", "cascade selection (backend each camera opens through):")
+            # Group by (backend, model) in first-seen order so same-model cameras
+            # on one tier collapse to a single "model: s1, s2 → backend" line.
+            grouped: dict[tuple[str, str | None], list[str]] = {}
             for serial, backend, model in assignment:
-                label = f"{model}  {serial}" if model else serial
+                grouped.setdefault((backend, model), []).append(serial)
+            for (backend, model), serials in grouped.items():
+                joined = ", ".join(serials)
+                label = f"{model}: {joined}" if model else joined
                 report.add("list", f"{label} → {backend}")
 
 
@@ -1133,7 +1172,6 @@ def _doctor_gpu_encoding(report: _Report) -> None:
             "(cameras beyond record.max_nvenc_sessions encode on CPU)",
         )
     report.add("info", f"NVENC record params: {NVENC_H264_PARAMS}")
-    report.add("info", 'enable per rig with  record.save_method = "nvenc"')
 
 
 def _doctor_config(report: _Report, config_dir: Path):
@@ -1495,9 +1533,8 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
             )
         else:
             report.add("ok", "no other octacam instance holds this rig")
-    if _port_available("127.0.0.1", 8765):
-        report.add("ok", "GUI port 8765 is free")
-    else:
+    # Report the GUI port only by exception — a free port is the unremarkable case.
+    if not _port_available("127.0.0.1", 8765):
         report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
     if _in_ssh_session():
         report.add(
