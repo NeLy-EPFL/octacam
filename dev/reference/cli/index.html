@@ -778,6 +778,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        jobs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cache" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cache
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#environment-variables" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -940,6 +962,28 @@
     <span class="md-ellipsis">
       
         process
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#jobs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        jobs
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cache" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cache
       
     </span>
   </a>
@@ -1327,8 +1371,87 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 <td><code>--dry-run</code></td>
 <td>Log the intended grid/transfer work without writing anything.</td>
 </tr>
+<tr>
+<td><code>--detach</code></td>
+<td>Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with <code>octacam jobs</code>.</td>
+</tr>
 </tbody>
 </table>
+<p>A running job (detached or foreground) auto-pauses while an <code>octacam gui</code>/<code>record</code>
+on the same machine owns the cameras, and resumes when they are free. See
+<a href="../../guide/processing/#running-in-the-background-detached">Processing</a>.</p>
+<h2 id="jobs"><code>jobs</code><a class="headerlink" href="#jobs" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">  </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+</code></pre></div>
+<p>Manage detached <code>octacam process --detach</code> jobs. <code>JOB</code> is a job id from
+<code>octacam jobs list</code>; omit it to target the most recent job.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>list</code></td>
+<td>Show each job's id, state, phase, progress, and age.</td>
+</tr>
+<tr>
+<td><code>attach</code></td>
+<td>Follow a job's live log + progress (Ctrl-C detaches — it does <strong>not</strong> cancel).</td>
+</tr>
+<tr>
+<td><code>pause</code></td>
+<td>Pause a running job (it parks at the next file/folder boundary).</td>
+</tr>
+<tr>
+<td><code>resume</code></td>
+<td>Clear a manual pause (a gui/record auto-pause clears on its own).</td>
+</tr>
+<tr>
+<td><code>cancel</code></td>
+<td>Stop a running job cleanly; already-finished work is kept.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cache"><code>cache</code><a class="headerlink" href="#cache" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>octacam<span class="w"> </span>cache<span class="w"> </span>info
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>octacam<span class="w"> </span>cache<span class="w"> </span>path
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>octacam<span class="w"> </span>cache<span class="w"> </span>clear<span class="w"> </span><span class="o">[</span>--all<span class="o">]</span><span class="w"> </span><span class="o">[</span>--yes<span class="o">]</span>
+</code></pre></div>
+<p>Inspect and clear octacam's on-disk cache under <code>~/.cache/octacam</code> (see
+<code>OCTACAM_CACHE_DIR</code> below): the recording list backing <code>octacam process
+--last/--all</code>, detached-job logs, and small activity markers.</p>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>info</code></td>
+<td>Show the cache location, total size, and a breakdown (recordings, jobs, live markers).</td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td>Print the cache directory (for scripting).</td>
+</tr>
+<tr>
+<td><code>clear</code></td>
+<td>Remove the recording list and stale activity markers.</td>
+</tr>
+</tbody>
+</table>
+<p><code>clear</code> <strong>never touches</strong> a live capture, transcode, or detached job — those are
+reported as kept. Finished detached-job logs are kept by default; add <code>--all</code> to
+remove them too. <code>--yes</code> (<code>-y</code>) skips the confirmation prompt.</p>
 <h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -1344,7 +1467,7 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 </tr>
 <tr>
 <td><code>OCTACAM_CACHE_DIR</code></td>
-<td>Override the recording cache location (default <code>~/.cache/octacam</code>).</td>
+<td>Override the octacam cache location (recording list, job logs, markers; default <code>~/.cache/octacam</code>). Inspect/clear it with <code>octacam cache</code>.</td>
 </tr>
 <tr>
 <td><code>OCTACAM_FFMPEG</code></td>

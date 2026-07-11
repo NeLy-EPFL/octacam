@@ -584,6 +584,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#running-in-the-background-detached" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running in the background (detached)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -891,6 +902,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#running-in-the-background-detached" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running in the background (detached)
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1075,12 +1097,37 @@ grid → transfer — is one command:</p>
 MB/s per file for transfer, then a verify pass). <code>--dry-run</code> logs the intended
 grid ffmpeg call and transfer plan without writing anything — handy for
 validating paths on a new workstation.</p>
-<div class="admonition warning">
-<p class="admonition-title">Don't transcode while capturing</p>
-<p>Transcoding runs slow x264 presets across many files and saturates the CPU,
-so it competes with live capture and can cause dropped frames. <code>octacam gui</code>
-and <code>octacam record</code> warn at startup when an <code>octacam process</code> is already
-transcoding on the same machine.</p>
+<h2 id="running-in-the-background-detached">Running in the background (detached)<a class="headerlink" href="#running-in-the-background-detached" title="Permanent link">&para;</a></h2>
+<p>Processing a full experiment can take a while, and over SSH a foreground
+<code>octacam process</code> dies when the connection drops. Add <code>--detach</code> to run the same
+pipeline as a background job that survives disconnect (no <code>tmux</code> needed):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all<span class="w"> </span>--detach<span class="w">      </span><span class="c1"># prints a job id, returns immediately</span>
+</code></pre></div>
+<p>Manage detached jobs with <code>octacam jobs</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list<span class="w">                   </span><span class="c1"># id, state, phase, progress, age</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w">                 </span><span class="c1"># follow the most recent job&#39;s live log + bar</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span>&lt;job-id&gt;<span class="w">        </span><span class="c1"># …or a specific one</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">                  </span><span class="c1"># park it at the next file/folder boundary</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w">                 </span><span class="c1"># clear a manual pause</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w">                 </span><span class="c1"># stop it cleanly (finished work is kept)</span>
+</code></pre></div>
+<p><code>attach</code> is tmux-like: it streams the job's log and progress, and <strong>Ctrl-C only
+detaches the viewer</strong> — the job keeps running, and you can reattach any time.
+Job state lives under <code>~/.cache/octacam/jobs/</code> (override with <code>OCTACAM_CACHE_DIR</code>);
+a job that finished is kept for 30 days so you can still read its final log.</p>
+<p>From the GUI, the <strong>shut down</strong> button offers a <em>Shut down &amp; process</em> choice: it
+starts a detached job for the session's recordings as it exits, which you then
+watch from a terminal with <code>octacam jobs attach</code>.</p>
+<div class="admonition info">
+<p class="admonition-title">Processing auto-pauses while the cameras are in use</p>
+<p>Transcoding runs slow x264 presets and saturates the CPU/GPU, so it would
+compete with live capture and risk dropped frames. A running <code>octacam
+process</code> (detached or foreground) therefore <strong>pauses between files/folders
+while an <code>octacam gui</code>/<code>octacam record</code> on the same machine owns the
+cameras</strong>, and resumes automatically when they are free. The pause releases
+the encoder between units (it holds no GPU/NVENC session while paused) and is
+crash-safe — if the gui/record crashes, the job resumes on its own. <code>octacam
+gui</code>/<code>record</code> also print a one-line note at startup when a job is active.</p>
 </div>
 
 

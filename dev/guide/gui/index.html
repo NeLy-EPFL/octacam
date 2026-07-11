@@ -463,6 +463,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#instant-startup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instant startup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-tabs" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -804,6 +815,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
+  <a href="#instant-startup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Instant startup
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#the-tabs" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -905,6 +927,15 @@ and exposes the sensor, layout, and recording controls.</p>
 </tbody>
 </table>
 <p>If the config directory is omitted it defaults to the current directory (<code>.</code>).</p>
+<h2 id="instant-startup">Instant startup<a class="headerlink" href="#instant-startup" title="Permanent link">&para;</a></h2>
+<p>The GUI serves the page <strong>before</strong> it opens the cameras, so it appears
+immediately — time-to-first-paint no longer waits on vendor-SDK camera
+enumeration or a trigger-board handshake. The preview area shows a <em>"Connecting
+to cameras…"</em> placeholder while the cameras and serial plugins are opened in
+parallel on a background thread; the grid fills in on its own once they are
+ready, with no reload. If the cameras cannot be opened (for example another
+octacam already holds them — see below), the reason is shown in the preview area
+instead of a spinner, and the server stays up.</p>
 <h2 id="the-tabs">The tabs<a class="headerlink" href="#the-tabs" title="Permanent link">&para;</a></h2>
 <ul>
 <li><strong>Record</strong> — set fps, duration, and the save location, then start/stop
