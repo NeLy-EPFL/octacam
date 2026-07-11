@@ -77,6 +77,28 @@ def test_latest_stable_none_on_bad_json(monkeypatch):
     assert updates.latest_stable() is None
 
 
+def test_latest_stable_none_on_incomplete_read(monkeypatch):
+    # A 200 whose body is severed mid-transfer raises http.client.IncompleteRead
+    # (an HTTPException — NOT OSError/URLError/ValueError). The "never raises"
+    # contract must still hold: latest_stable() returns None, not a traceback.
+    import http.client
+
+    class _Truncating:
+        def read(self):
+            raise http.client.IncompleteRead(b"partial")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(
+        updates.urllib.request, "urlopen", lambda req, timeout=None: _Truncating()
+    )
+    assert updates.latest_stable() is None
+
+
 # ----------------------------------------------------- detect_install_method
 
 
@@ -122,6 +144,31 @@ def test_detect_pip_default(monkeypatch, tmp_path):
     monkeypatch.setattr(updates, "_in_conda", lambda: False)
     monkeypatch.setattr(updates.sys, "prefix", str(tmp_path))
     assert updates.detect_install_method() == "pip"
+
+
+def test_read_direct_url_rejects_non_object(monkeypatch):
+    # A direct_url.json that is valid JSON but not an object (a malformed file
+    # could be a list/scalar) is treated as absent, so detect_install_method can
+    # assume a dict without a shape check.
+    monkeypatch.setattr(updates, "_read_dist_text", lambda name: "[1, 2, 3]")
+    assert updates._read_direct_url() is None
+    monkeypatch.setattr(updates, "_read_dist_text", lambda name: "42")
+    assert updates._read_direct_url() is None
+    monkeypatch.setattr(
+        updates, "_read_dist_text", lambda name: '{"dir_info": {"editable": true}}'
+    )
+    assert updates._read_direct_url() == {"dir_info": {"editable": True}}
+
+
+def test_detect_install_method_survives_malformed_dir_info(monkeypatch, tmp_path):
+    # dir_info present but null / a non-object must not raise (a malformed PEP 610
+    # file); classification just falls through to the path-based tells. Guards the
+    # "never raises" contract, since detect_install_method() runs on every doctor.
+    monkeypatch.setattr(updates, "_in_conda", lambda: False)
+    monkeypatch.setattr(updates.sys, "prefix", str(tmp_path))
+    for direct in ({"dir_info": None}, {"dir_info": "weird"}, {"other": 1}):
+        monkeypatch.setattr(updates, "_read_direct_url", lambda direct=direct: direct)
+        assert updates.detect_install_method() == "pip"
 
 
 # ------------------------------------------------------------------- advice_for

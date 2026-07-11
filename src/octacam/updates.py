@@ -18,6 +18,7 @@ here raises — an offline or air-gapped rig must be unaffected.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -88,11 +89,17 @@ def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
         # Fixed https PyPI URL (not user input); short timeout; errors caught below.
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+        # HTTPException covers a mid-body connection drop (IncompleteRead), which
+        # is neither an OSError nor a URLError. "Never raises" must hold here.
         return None
     versions = payload.get("versions") if isinstance(payload, dict) else None
     if not isinstance(versions, list):
         return None
+    # Known limitation: the Simple API's versions[] list carries no yank status
+    # (that lives per-file in files[]), so a fully-yanked latest release would be
+    # reported as newest and we'd advise an upgrade the package manager then
+    # refuses. Accepted for now — read-only advice, and octacam yanks are rare.
     best: Version | None = None
     for raw in versions:
         try:
@@ -114,14 +121,19 @@ def _read_dist_text(name: str) -> str | None:
 
 
 def _read_direct_url() -> dict | None:
-    """PEP 610 direct_url.json for the installed dist, or None."""
+    """PEP 610 direct_url.json for the installed dist, or None.
+
+    Returns None for anything that isn't a JSON object (a malformed file could
+    parse to a list/scalar), so callers can assume a dict without a shape check.
+    """
     text = _read_dist_text("direct_url.json")
     if not text:
         return None
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except ValueError:
         return None
+    return data if isinstance(data, dict) else None
 
 
 def _in_conda() -> bool:
@@ -142,7 +154,9 @@ def detect_install_method() -> str:
     """
     direct = _read_direct_url()
     if direct:
-        if direct.get("dir_info", {}).get("editable"):
+        dir_info = direct.get("dir_info")
+        # dir_info may be absent, null, or (in a malformed file) a non-object.
+        if isinstance(dir_info, dict) and dir_info.get("editable"):
             return "editable"
         if "vcs_info" in direct:
             return "vcs"
