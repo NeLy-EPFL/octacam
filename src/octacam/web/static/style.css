@@ -742,8 +742,14 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
-/* Compact icon button toggling the dark/light theme (☀ / ☾). */
-#theme-toggle {
+/* Compact icon-only buttons (☀️/🌙 theme, ⌨️ shortcuts help, 💾 save config,
+   🔌/🔗/🔄 disconnect-reconnect, 🛑 shutdown) — no visible label, title= carries
+   the tooltip. */
+#theme-toggle,
+#shortcuts-help-btn,
+#save-config-btn,
+#disconnect-btn,
+#shutdown-btn {
   flex: none;
   padding: 2px 7px;
   font-size: 13px;
@@ -751,14 +757,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
-
-/* Compact glyph button (⌨) that opens the keyboard-shortcut overlay. */
-#shortcuts-help-btn {
-  flex: none;
-  padding: 2px 7px;
-  font-size: 13px;
-  line-height: 1;
-}
 
 /* ---------------------------------------------- keyboard shortcuts overlay */
 

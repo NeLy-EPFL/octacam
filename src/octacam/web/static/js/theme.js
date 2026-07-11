@@ -43,7 +43,7 @@ export function initTheme() {
   renderToggle = () => {
     if (!btn) return;
     const light = isLight();
-    btn.textContent = light ? "☾" : "☀"; // ☾ : ☀
+    btn.textContent = light ? "🌙" : "☀️"; // 🌙 : ☀️
     btn.title = light ? "Switch to dark theme" : "Switch to light theme";
     btn.setAttribute("aria-pressed", String(light));
   };

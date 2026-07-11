@@ -307,6 +307,18 @@ async function main() {
   // loaded (e.g. the triggerbox); the server computes this from plugin capability.
   record.setManagedAvailable(!!system.managed_trigger_available);
 
+  // Disconnecting this browser (the rig keeps recording) is a rare, easy-to-
+  // misclick action, so — like the Record tab's own rarely-used knobs — it
+  // stays tucked behind the same Advanced-options switch.
+  {
+    const advancedToggle = document.getElementById("record-advanced-toggle");
+    const syncDisconnectVisibility = () => {
+      document.getElementById("disconnect-btn").hidden = !advancedToggle.checked;
+    };
+    syncDisconnectVisibility();
+    advancedToggle.addEventListener("change", syncDisconnectVisibility);
+  }
+
   // Each plugin that ships a UI advertises its entry module + optional CSS in
   // /api/system; import it from the plugin's own /plugins/<name>/ folder and
   // instantiate its tab. Per-plugin try/catch so one broken/missing module
@@ -429,16 +441,20 @@ async function main() {
     const disconnectBtn = document.getElementById("disconnect-btn");
     disconnectBtn.textContent =
       mode === "offline"
-        ? "Connect"
+        ? "🔗" // Connect: re-establish the socket after a voluntary disconnect
         : mode === "stopped"
-          ? "Reconnect"
-          : "Disconnect";
+          ? "🔄" // Reconnect: the click actually reloads the page
+          : "🔌"; // Disconnect: unplug this browser only
     disconnectBtn.title =
       mode === "stopped"
         ? "Reload the page to reconnect to the server"
         : mode === "offline"
           ? "Reconnect this browser to the server"
           : "Disconnect this browser (the recording keeps running on the rig)";
+    disconnectBtn.setAttribute(
+      "aria-label",
+      mode === "offline" ? "Connect" : mode === "stopped" ? "Reconnect" : "Disconnect"
+    );
     // Stay clickable when stopped so recovery doesn't need the browser's own
     // reload control; the click handler reloads the page in that mode.
     disconnectBtn.disabled = false;
