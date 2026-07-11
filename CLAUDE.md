@@ -67,12 +67,16 @@ To cut release `X.Y.Z`:
 4. Land it on `main`: fast-forward (or merge) `main` up to the tagged commit and push, so **`main` is always the latest stable release**; publish the tag too (`git push --tags`). A fresh `git clone` checks out `main`, so this is what makes cloning install stable octacam — the install docs rely on it.
 5. Back on the `dev-*` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
 
-The version string alone can't tell a rolling-`main` install whether it is
-behind, so an "is an update available?" check compares the installed commit
-against `git ls-remote origin main` (tags are the coarse release signal; commits
-are the fine one). Branch model: `main` == the latest stable release, advanced
-only at release tags (step 4 above; docs published as `stable`); `dev-*` are the
-development line (docs `dev`), published by mike on `gh-pages`.
+An **update notice** (`updates.py`, surfaced in `octacam doctor` and a dismissible
+GUI banner via `/api/system`'s `update` field) compares the installed version
+against the latest stable on **PyPI** and advises the correct per-install upgrade
+command (pip / uv tool / pipx / conda). It is read-only and fail-silent —
+**octacam never updates itself** (a library must not mutate its own install, and
+octacam is also sometimes a `uv add` dependency or lives in a conda env) — honors
+`OCTACAM_NO_UPDATE_CHECK` / `DO_NOT_TRACK`, and stays dormant until octacam is on
+PyPI (the Simple API 404s → no signal). Branch model: `main` is stable (docs
+published as `stable`); `dev-*` are the development line (docs `dev`), published
+by mike on `gh-pages`.
 
 ## Repo layout
 

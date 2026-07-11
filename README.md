@@ -84,3 +84,8 @@ Run `octacam --help` (or `<command> --help`) for the full option list.
 | [Camera backends](https://nely-epfl.github.io/octacam/guide/backends/) | The auto-detect cascade (Basler → FLIR → Spinnaker → pycameleon) |
 | [Plugins](https://nely-epfl.github.io/octacam/guide/plugins/) | Flywheel turntable, 2-photon trigger, and the configurable triggerbox (camera trigger + lights) |
 | [Troubleshooting](https://nely-epfl.github.io/octacam/reference/troubleshooting/) | Common errors and fixes |
+
+## License
+
+octacam is released under the [MIT License](LICENSE).
+© 2026 Neuroengineering Laboratory @EPFL — Ramdya Lab.

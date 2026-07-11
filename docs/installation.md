@@ -37,6 +37,13 @@ running with `octacam --version`. octacam never updates itself — you choose wh
 pull. Using a FLIR camera? Read [Keep PySpin across updates](#cameras) first — a
 plain reinstall drops the vendor wheel.
 
+`octacam doctor` reports when a newer release is available and prints the right
+upgrade command for how you installed it (uv tool / pip / pipx / conda); the web
+GUI shows the same as a dismissible banner. The check is read-only and
+fail-silent — it never updates anything for you, and it stays dormant until
+octacam is published to PyPI. Disable it with `OCTACAM_NO_UPDATE_CHECK=1` (or the
+cross-tool `DO_NOT_TRACK`).
+
 ## Pin to a release, or follow development
 
 `main` follows the latest stable release. From inside your clone, check out a

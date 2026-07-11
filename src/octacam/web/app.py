@@ -23,6 +23,7 @@ import os
 import re
 import signal
 import struct
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -43,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from starlette.websockets import WebSocketState
 
 import octacam
-from octacam import config_writer
+from octacam import config_writer, updates
 from octacam.config import OctacamConfig, find_config_file, parse_config
 from octacam.controller import (
     RecordingController,
@@ -561,6 +562,21 @@ class _AppState:
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._frame_counters: dict[int, int] = {}
+        # A newer-release notice for the GUI banner, filled once in the background
+        # (see create_app). None until the check runs / if it is skipped; octacam
+        # never updates itself, this only advises. See octacam.updates.
+        self._update_notice: updates.UpdateNotice | None = None
+
+    def refresh_update_notice(self) -> None:
+        """Populate _update_notice from a PyPI check. Fail-soft; never raises."""
+        try:
+            self._update_notice = updates.check()
+        except Exception:
+            log.debug("update check failed", exc_info=True)
+
+    def update_status(self) -> dict | None:
+        """The update notice for /api/system, or None if not (yet) known."""
+        return self._update_notice.as_dict() if self._update_notice else None
 
     # ------------------------------------------------------- broadcasting
 
@@ -800,6 +816,18 @@ def create_app(
 
     app = FastAPI(title="octacam", version=octacam.__version__, lifespan=lifespan)
 
+    # Check PyPI for a newer release once, in the background, and cache it on
+    # `state` for the /api/system banner — off the hot path so GUI load never
+    # waits on the network. octacam.updates is fail-soft and honors the user
+    # opt-out; additionally skip the unattended probe under CI / the test suite.
+    app.state.app_state = state  # test seam: a test can inject a notice here
+    if not (os.environ.get("CI") or os.environ.get("PYTEST_CURRENT_TEST")):
+        threading.Thread(
+            target=state.refresh_update_notice,
+            name="octacam-update-check",
+            daemon=True,
+        ).start()
+
     # Handlers are sync `def` on purpose: FastAPI runs them in its thread
     # pool, so blocking pylon/serial/filesystem calls never stall the
     # event loop that pumps the preview WebSocket.
@@ -856,6 +884,9 @@ def create_app(
             entry["web"] = web
         return {
             "version": octacam.__version__,
+            # Newer-release advice for the dismissible GUI banner (None until the
+            # background check runs, or if skipped). octacam never self-updates.
+            "update": state.update_status(),
             "config_dir": config_dir,
             "plugins": plugins_status,
             # Enables the "managed" trigger-source option in the GUI: true when a

@@ -12,6 +12,7 @@ import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
 import { initShortcuts } from "./shortcuts.js";
+import { initUpdateBanner } from "./update.js";
 
 // The server replays a recent slice of its event backlog on (re)connect, so the
 // client keeps a generous scrollback to actually hold that history plus the
@@ -193,6 +194,10 @@ async function main() {
   const versionEl = document.getElementById("version");
   versionEl.textContent = `octacam ${system.version}`;
   versionEl.title = system.config_dir;
+
+  // Read-only "a newer octacam is available" banner (dismissible; see update.js).
+  // The server computes system.update; octacam never self-updates from here.
+  initUpdateBanner(system.update);
 
   const reflowTabs = setupTabs();
   // Show optional plugin tabs only when the plugin is loaded. A not-ready

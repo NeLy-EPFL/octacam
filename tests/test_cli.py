@@ -605,6 +605,100 @@ def test_doctor_report_order_is_deterministic():
     assert backends_section(first.output) == backends_section(second.output)
 
 
+def test_camera_lines_groups_by_model_and_handles_unknown():
+    # Same-model cameras collapse to one "model: s1, s2" line (first-seen order);
+    # an unknown model falls back to a bare serial per line.
+    from octacam.cli import _camera_lines
+
+    assert _camera_lines(
+        [("s1", "M1"), ("s2", "M1"), ("s3", "M2"), ("s4", None), ("s5", None)]
+    ) == ["M1: s1, s2", "M2: s3", "s4", "s5"]
+    assert _camera_lines([]) == []
+
+
+def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
+    # End-to-end of the asymmetry fix: the REAL _enumerate_backend generic path
+    # must resolve the backend's module-level read_model (by module, by name) and
+    # map each enumerated handle to its model. Driven through pycameleon (always
+    # available) with fake handles, so the whole glue runs — not a monkeypatched
+    # stand-in. A regressed read_model lookup / handle→model mapping fails here.
+    import types
+
+    import octacam.cameras.pycameleon as pcmod
+    from octacam.cli import _enumerate_backend
+
+    class _Cam:
+        def __init__(self, serial, model):
+            self._serial, self._model = serial, model
+
+        def info(self):
+            return {"serial_number": self._serial, "model_name": self._model}
+
+    cams = [_Cam("17475187", "GS3-U3"), _Cam("17475185", "GS3-U3"), _Cam("B1", "")]
+    monkeypatch.setattr(
+        pcmod, "pycameleon", types.SimpleNamespace(enumerate_cameras=lambda: cams)
+    )
+    # enumerate sorts by serial; the blank model falls back to None (unknown).
+    assert _enumerate_backend("pycameleon") == [
+        ("17475185", "GS3-U3"),
+        ("17475187", "GS3-U3"),
+        ("B1", None),
+    ]
+
+
+def test_doctor_groups_cameras_by_model_including_non_basler(monkeypatch):
+    # The grouping half of the change: same-model cameras (including a non-basler
+    # tier's, now that every backend surfaces a model) render as a single grouped
+    # line. This stubs _enumerate_backend, so it covers _camera_lines + doctor
+    # rendering only — the read_model wiring is covered by the test above.
+    monkeypatch.setattr(
+        "octacam.cli._enumerate_backend",
+        lambda name: [
+            ("17475185", "GS3-U3-41C6NIR"),
+            ("17475187", "GS3-U3-41C6NIR"),
+            ("40018619", "acA1920-150um"),
+        ],
+    )
+    result = runner.invoke(
+        app, ["--log-level", "error", "doctor", "--backend", "pycameleon"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "GS3-U3-41C6NIR: 17475185, 17475187" in result.output
+    assert "acA1920-150um: 40018619" in result.output
+
+
+def test_doctor_omits_free_gui_port_line():
+    # The "GUI port is free" happy-path line was pruned — the port is reported only
+    # when in use. Port 8765 is normally free under test, so the old code would
+    # have printed this line; its absence proves the removal (not a vacuous check).
+    result = runner.invoke(app, ["--log-level", "error", "doctor"])
+    assert result.exit_code == 0, result.output
+    assert "GUI port 8765 is free" not in result.output
+
+
+def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
+    # The nvenc "enable per rig with save_method" hint was pruned. That line was the
+    # last statement of _doctor_gpu_encoding, reachable only WITH a GPU present, so a
+    # plain doctor run on a GPU-less box never emits it (a vacuous check). Force the
+    # GPU-present path so the section runs to its end: the NVENC-params line (the new
+    # last line) proves we got there, and the hint must be gone.
+    import octacam.writer as writer
+    from octacam.cli import _doctor_gpu_encoding, _Report
+
+    monkeypatch.setattr("octacam.cli._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
+    monkeypatch.setattr("octacam.cli._ffmpeg_version", lambda exe: "n7.1")
+    monkeypatch.setattr(writer, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(writer, "probe_nvenc_max_sessions", lambda: None)
+
+    report = _Report()
+    report.section("Encoding toolchain")
+    _doctor_gpu_encoding(report)
+    texts = [text for _status, text in report.sections[-1][1]]
+    assert any("NVIDIA GPU: FakeGPU" in t for t in texts)  # took the GPU-present path
+    assert any("NVENC record params" in t for t in texts)  # reached the section's end
+    assert not any("enable per rig" in t for t in texts)  # …yet the hint is gone
+
+
 # --- doctor: serial / Arduino devices ---------------------------------------
 
 
@@ -1075,3 +1169,48 @@ def test_config_rejects_unknown_backend(tmp_path):
     assert result.exit_code == 2
     assert "unknown backend" in result.output
     assert not (tmp_path / "rig").exists()
+
+
+# --------------------------------------------------------------------------- #
+# doctor's update-available line (octacam.updates), monkeypatched — no network.
+
+
+def _doctor_update_line(monkeypatch, notice):
+    from octacam import updates
+    from octacam.cli import _doctor_updates, _Report
+
+    monkeypatch.setattr(updates, "check", lambda: notice)
+    report = _Report()
+    report.section("System")
+    _doctor_updates(report)
+    return report.sections[-1][1][-1]  # (status, text) of the line just added
+
+
+def test_doctor_update_line_available(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch,
+        UpdateNotice("0.3.0", "0.9.0", True, "uv-tool", "uv tool upgrade octacam", ""),
+    )
+    assert status == "warn"
+    assert "0.9.0" in text and "uv tool upgrade octacam" in text
+
+
+def test_doctor_update_line_up_to_date(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch, UpdateNotice("0.3.0", "0.3.0", False, "pip", "", "")
+    )
+    assert status == "ok" and "latest release" in text
+
+
+def test_doctor_update_line_skipped_for_dev_install(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch,
+        UpdateNotice("0.3.1.dev0", None, False, "editable", "", "development install"),
+    )
+    assert status == "info" and "development install" in text

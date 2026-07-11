@@ -1424,3 +1424,32 @@ def test_view_message_server_side_crop(client):
         assert (hsw, hsh) == (w, h)  # header reports the full sensor size
         # need == crop long edge -> factor 1 -> the crop is sent at 1:1.
         assert image.shape == (ch, cw)
+
+
+# --------------------------------------------------------------------------- #
+# /api/system exposes the update notice for the GUI banner. The background PyPI
+# probe is skipped under the test suite (PYTEST_CURRENT_TEST), so it defaults to
+# None; a notice is injected via the app.state test seam to check surfacing.
+
+
+def test_system_update_defaults_to_none(client):
+    data = client.get("/api/system").json()
+    assert "update" in data
+    assert data["update"] is None  # no unattended network call under pytest
+
+
+def test_system_surfaces_injected_update_notice(client):
+    from octacam.updates import UpdateNotice
+
+    client.app.state.app_state._update_notice = UpdateNotice(
+        current="0.3.0",
+        latest="0.9.0",
+        update_available=True,
+        install_method="uv-tool",
+        command="uv tool upgrade octacam",
+        note="",
+    )
+    data = client.get("/api/system").json()
+    assert data["update"]["available"] is True
+    assert data["update"]["latest"] == "0.9.0"
+    assert data["update"]["command"] == "uv tool upgrade octacam"

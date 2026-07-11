@@ -414,6 +414,21 @@ def _read_serial(cam) -> str:
     return str(serial) if serial else ""
 
 
+def read_model(cam) -> str | None:
+    """Best-effort model name from a PyCameleonCamera's ``info()`` descriptor.
+
+    The model-name analogue of :func:`_read_serial` (``info()`` is read without
+    opening the device). ``None`` when the descriptor omits ``model_name``.
+    Consumed by the doctor enumeration to label cameras.
+    """
+    try:
+        info = cam.info()
+        model = info.get("model_name") if isinstance(info, dict) else None
+    except Exception:
+        model = None
+    return str(model) if model else None
+
+
 def enumerate_pycameleon(requested_serials: list[str] | None = None):
     """Return ``[(serial, PyCameleonCamera), ...]`` for the requested cameras.
 
