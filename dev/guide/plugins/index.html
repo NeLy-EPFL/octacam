@@ -988,8 +988,7 @@ hardware-triggered cameras are driven for the recording's fps + duration.</p>
 </code></pre></div>
 <p>Omitting <code>cameras</code>/<code>lights</code> defaults to the classic rig: one <code>D13</code> line plus
 channels 1 and 2 strobing. The firmware and wiring notes are in
-<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox">arduino/triggerbox/</a>.
-(The plugin was previously named <code>omniview</code>; that name still works as an alias.)</p>
+<a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox">arduino/triggerbox/</a>.</p>
 <p>If the board fails to arm — the ESP32-S3 USB link can occasionally <em>wedge</em>
 (every transfer stalls while the port stays enumerated), which would otherwise
 leave external-triggered cameras waiting forever — the plugin says so loudly in

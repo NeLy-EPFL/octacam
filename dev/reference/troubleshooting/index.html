@@ -1011,10 +1011,12 @@ free one:</p>
 <h2 id="flir-pyspin-missing">FLIR: PySpin missing<a class="headerlink" href="#flir-pyspin-missing" title="Permanent link">&para;</a></h2>
 <p>If a config pins <code>backend = "flir"</code> without PySpin installed, octacam exits with a
 clear message. The FLIR vendor tier needs the Spinnaker SDK and its PySpin wheel
-(the PySpin wheel is cp310-only, so this tier needs Python 3.10) — see
+(Spinnaker 4.4 ships PySpin wheels for cp310–cp314 — install the one matching your
+interpreter) — see
 <a href="../../guide/backends/#tier-1-flir-teledyne-spinnaker-pyspin">Tier 1 — FLIR / Teledyne</a>.
-Under the default <code>auto</code> cascade octacam instead drives FLIR cameras through the
-<code>spinnaker</code> C-API tier (or the pycameleon floor), so no pin is needed. Confirm with:</p>
+When PySpin is not installed, the default <code>auto</code> cascade instead drives FLIR
+cameras through the <code>spinnaker</code> C-API tier (or the pycameleon floor), so no pin is
+needed. Confirm with:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>--backend<span class="w"> </span>flir
 </code></pre></div>
 <h2 id="dropped-frames">Dropped frames<a class="headerlink" href="#dropped-frames" title="Permanent link">&para;</a></h2>

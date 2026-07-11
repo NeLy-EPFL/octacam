@@ -944,7 +944,7 @@ USB3-Vision (GenICam) camera and simply use whatever is plugged in.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1"># backend = &quot;auto&quot;       # default (and what an absent key means): the cascade</span>
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1"># backend = &quot;basler&quot;     # pin to Basler (pypylon)</span>
 <a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="c1"># backend = &quot;flir&quot;       # pin to FLIR / Teledyne (Spinnaker / PySpin)</span>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># backend = &quot;spinnaker&quot;  # pin FLIRs to the Spinnaker C-API tier (no cp310 wheel limit)</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1"># backend = &quot;spinnaker&quot;  # pin FLIRs to the Spinnaker C-API tier (no PySpin wheel needed)</span>
 <a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="c1"># backend = &quot;pycameleon&quot; # pin to the libusb USB3-Vision floor</span>
 </code></pre></div>
 <h2 id="the-cascade">The cascade<a class="headerlink" href="#the-cascade" title="Permanent link">&para;</a></h2>
@@ -974,7 +974,7 @@ by <code>auto</code> — it is named-only, reached by pinning the <code>backend<
 <td>1 (vendor)</td>
 <td><code>flir</code></td>
 <td>Spinnaker + PySpin</td>
-<td><strong>manual</strong>, cp310 wheel only</td>
+<td><strong>manual</strong>; PySpin wheels cp310–cp314</td>
 <td>full</td>
 </tr>
 <tr>
@@ -1032,14 +1032,15 @@ files (pylon's native format).</p>
 </code></pre></div>
 <h2 id="tier-1-flir-teledyne-spinnaker-pyspin">Tier 1 — FLIR / Teledyne (Spinnaker + PySpin)<a class="headerlink" href="#tier-1-flir-teledyne-spinnaker-pyspin" title="Permanent link">&para;</a></h2>
 <p>FLIR / Teledyne cameras use the Spinnaker SDK's <strong>PySpin</strong> wheel, which is <strong>not
-on PyPI</strong> (it ships with the SDK installer) and only has a <strong>cp310</strong> wheel — so
-the FLIR <em>vendor</em> tier is reachable <strong>only on Python 3.10</strong> (the PySpin wheel is
-cp310-only). On newer Python this vendor tier is simply absent and the cascade
-claims the FLIR through the <code>spinnaker</code> tier (the Spinnaker SDK C API via ctypes)
-if the SDK is installed, otherwise through the always-present <code>pycameleon</code> floor —
-both drive FLIR cameras (just without the PySpin vendor SDK).</p>
+on PyPI</strong> (it ships with the SDK installer) but is provided for <strong>cp310–cp314</strong>
+(as of Spinnaker 4.4) — so the FLIR <em>vendor</em> tier is available on any supported
+Python whenever the wheel matching your interpreter is installed. If PySpin is
+not installed, the cascade claims the FLIR through the <code>spinnaker</code> tier (the
+Spinnaker SDK C API via ctypes) if the SDK is installed, otherwise through the
+always-present <code>pycameleon</code> floor — both drive FLIR cameras (just without the
+PySpin vendor SDK).</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># 1. Install the Spinnaker SDK for your platform (from Teledyne).</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="c1"># 2. Install the matching PySpin wheel into octacam&#39;s environment (Python 3.10):</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="c1"># 2. Install the PySpin wheel matching your interpreter into octacam&#39;s environment:</span>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>pip<span class="w"> </span>install<span class="w"> </span>spinnaker_python-*.whl
 <a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="c1"># 3. (optional) record the intent — installs nothing on its own:</span>
 <a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;octacam[flir]&quot;</span>
@@ -1050,17 +1051,16 @@ feature-persistence TSV). If a config pins
 rather than a traceback; under <code>auto</code> it just uses a lower tier.</p>
 <h2 id="tier-2-spinnaker-spinnaker-c-api">Tier 2 — spinnaker (Spinnaker C-API)<a class="headerlink" href="#tier-2-spinnaker-spinnaker-c-api" title="Permanent link">&para;</a></h2>
 <p>The <code>spinnaker</code> tier drives FLIR / Teledyne cameras through the Spinnaker SDK's
-<strong>C API</strong> (<code>libSpinnaker_C.so</code>) via <code>ctypes</code> — no PySpin wheel, so it has <strong>no
-cp310 limit and runs on any modern Python</strong>. It needs the Spinnaker SDK installed
-(the same system SDK the <code>flir</code> vendor tier uses), but not the PySpin Python
-wheel; when <code>libSpinnaker_C.so</code> can't be loaded the tier self-disables, exactly
-like <code>flir</code>.</p>
+<strong>C API</strong> (<code>libSpinnaker_C.so</code>) via <code>ctypes</code> — <strong>no PySpin wheel needed at all</strong>.
+It needs the Spinnaker SDK installed (the same system SDK the <code>flir</code> vendor tier
+uses), but not the PySpin Python wheel; when <code>libSpinnaker_C.so</code> can't be loaded
+the tier self-disables, exactly like <code>flir</code>.</p>
 <p>Because <code>ctypes</code> releases the GIL around the blocking grab call, a slow FLIR
 exposure does not starve co-recorded cameras. The tier reports full node bounds
 and hardware timestamps, and persists per-camera parameters as <code>&lt;serial&gt;.txt</code> (the
 native GenApi feature-persistence TSV). In the <code>auto</code> cascade it sits <strong>below the
-<code>flir</code> vendor tier and above the <code>pycameleon</code> floor</strong>, so on any Python where
-PySpin is unavailable the FLIRs are claimed here before falling to pycameleon.</p>
+<code>flir</code> vendor tier and above the <code>pycameleon</code> floor</strong>, so whenever PySpin is not
+installed the FLIRs are claimed here before falling to pycameleon.</p>
 <h2 id="tier-3-pycameleon-the-always-available-floor">Tier 3 — pycameleon (the always-available floor)<a class="headerlink" href="#tier-3-pycameleon-the-always-available-floor" title="Permanent link">&para;</a></h2>
 <p><a href="https://pypi.org/project/pycameleon/">pycameleon</a> (MIT) speaks USB3 Vision
 directly through <code>libusb</code> — no vendor SDK, no EULA, nothing to install per vendor —

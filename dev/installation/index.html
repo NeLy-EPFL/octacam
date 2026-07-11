@@ -391,6 +391,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Update">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pin-to-a-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pin to a release
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -900,6 +917,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Update">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#pin-to-a-release" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pin to a release
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -996,13 +1030,14 @@ isolated Python without touching your system environment.</p>
 <div class="admonition note">
 <p class="admonition-title">Python version and the FLIR vendor tier</p>
 <p>Any Python ≥3.10 runs octacam and drives Basler, FLIR, and any GenICam
-USB3-Vision camera through the <a href="../guide/backends/">backend cascade</a>. The one
-exception is the <em>FLIR vendor SDK</em> (Spinnaker/PySpin), whose wheel is
-cp310-only — so if you specifically want that tier, use Python 3.10. On newer
-Python octacam still drives FLIR cameras through the Spinnaker C-API backend
-(<code>spinnaker</code>) — the SDK's <code>libSpinnaker_C.so</code> via ctypes, which has no cp310
-wheel limit — falling back to the always-present pycameleon floor if the SDK
-is absent.</p>
+USB3-Vision camera through the <a href="../guide/backends/">backend cascade</a> — every
+tier works on any supported Python. The <em>FLIR vendor SDK</em> (Spinnaker/PySpin)
+ships its PySpin wheel for multiple Python versions (cp310–cp314 as of
+Spinnaker 4.4); install the one matching your interpreter. If PySpin is not
+installed, octacam still drives FLIR cameras through the Spinnaker C-API
+backend (<code>spinnaker</code>) — the SDK's <code>libSpinnaker_C.so</code> via ctypes, which needs
+no PySpin wheel — falling back to the always-present pycameleon floor if the
+SDK is absent too.</p>
 </div>
 <h2 id="install-with-uv">Install with uv<a class="headerlink" href="#install-with-uv" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>git+https://github.com/NeLy-EPFL/octacam.git
@@ -1022,10 +1057,29 @@ is absent.</p>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>pip<span class="w"> </span>install<span class="w"> </span>.<span class="w">          </span><span class="c1"># into an existing environment</span>
 </code></pre></div>
 <h2 id="update">Update<a class="headerlink" href="#update" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>upgrade<span class="w"> </span>octacam
+<p>octacam is released from git (there is no PyPI package), so <strong>how you update
+depends on how you installed it</strong>. Check what you are running first:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>--version
 </code></pre></div>
-<p>Or reinstall from the latest <code>main</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>--force<span class="w"> </span>git+https://github.com/NeLy-EPFL/octacam.git
+<p><strong>uv tool install</strong> (the recommended install — tracks the latest <code>main</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>upgrade<span class="w"> </span>--reinstall<span class="w"> </span>octacam
+</code></pre></div>
+<p><code>--reinstall</code> forces uv to re-fetch the git source and rebuild; plain
+<code>uv tool upgrade octacam</code> may reuse a cached checkout of the branch.</p>
+<p><strong>pip install:</strong></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>pip<span class="w"> </span>install<span class="w"> </span>--upgrade<span class="w"> </span>--force-reinstall<span class="w"> </span>git+https://github.com/NeLy-EPFL/octacam.git
+</code></pre></div>
+<p><code>--force-reinstall</code> is required: pip deduplicates by version, and a rolling
+<code>main</code> install keeps the same version between releases.</p>
+<p><strong>Development checkout</strong> (<code>git clone</code> + <code>uv sync</code>):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>git<span class="w"> </span>pull<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>uv<span class="w"> </span>sync
+</code></pre></div>
+<h3 id="pin-to-a-release">Pin to a release<a class="headerlink" href="#pin-to-a-release" title="Permanent link">&para;</a></h3>
+<p>Releases are tagged <code>vX.Y.Z</code> (see the
+<a href="https://github.com/NeLy-EPFL/octacam/releases">releases page</a> and the
+<code>CHANGELOG.md</code> in the repository root). To install or hold a rig at a specific
+release instead of the moving <code>main</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>uv<span class="w"> </span>tool<span class="w"> </span>install<span class="w"> </span>--force<span class="w"> </span>git+https://github.com/NeLy-EPFL/octacam.git@v0.3.0
 </code></pre></div>
 <h2 id="cameras-what-you-need-per-tier">Cameras: what you need per tier<a class="headerlink" href="#cameras-what-you-need-per-tier" title="Permanent link">&para;</a></h2>
 <p>octacam auto-detects the best available driver per camera (the
@@ -1053,12 +1107,12 @@ core, so <strong>a rig works out of the box</strong>; only the two non-pip piece
 <tr>
 <td><strong>FLIR C-API</strong> (<code>spinnaker</code>)</td>
 <td>Spinnaker SDK (<code>libSpinnaker_C.so</code>)</td>
-<td>❌ Install the SDK separately; works on any Python — no PySpin wheel</td>
+<td>❌ Install the SDK separately; works on any Python — no PySpin wheel needed</td>
 </tr>
 <tr>
 <td><strong>FLIR / Teledyne vendor</strong> (PySpin)</td>
 <td>Spinnaker SDK + PySpin</td>
-<td>❌ Install separately, Python 3.10 only — the PySpin vendor tier (below)</td>
+<td>❌ Install separately — the PySpin vendor tier (below); wheels for cp310–cp314</td>
 </tr>
 </tbody>
 </table>
@@ -1067,27 +1121,27 @@ core, so <strong>a rig works out of the box</strong>; only the two non-pip piece
 camera. Run <code>octacam doctor</code> to see which tiers are available and which one each
 camera would use.</p>
 <h3 id="flir-teledyne-vendor-sdk-tier-1">FLIR / Teledyne vendor SDK (tier 1)<a class="headerlink" href="#flir-teledyne-vendor-sdk-tier-1" title="Permanent link">&para;</a></h3>
-<p>PySpin is <strong>not on PyPI</strong> — it ships with Teledyne's Spinnaker SDK — and only has
-a <strong>cp310</strong> wheel, so this tier requires <strong>Python 3.10</strong>. On newer Python the
-cascade drives FLIR cameras through the <code>spinnaker</code> C-API backend
-(<code>libSpinnaker_C.so</code> via ctypes — needs the Spinnaker SDK but no PySpin/cp310
-wheel), falling back to the pycameleon floor.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># 1. Install the Spinnaker SDK for your platform (from Teledyne), on Python 3.10.</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1"># 2. Install the matching PySpin wheel into octacam&#39;s environment:</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>pip<span class="w"> </span>install<span class="w"> </span>spinnaker_python-*.whl
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="c1"># 3. (optional) record the intent — installs nothing on its own:</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;octacam[flir]&quot;</span>
+<p>PySpin is <strong>not on PyPI</strong> — it ships with Teledyne's Spinnaker SDK — but Spinnaker
+4.4 provides wheels for <strong>cp310–cp314</strong>, so install the one matching your
+interpreter. If PySpin is not installed, the cascade drives FLIR cameras through
+the <code>spinnaker</code> C-API backend (<code>libSpinnaker_C.so</code> via ctypes — needs the
+Spinnaker SDK but no PySpin wheel), falling back to the pycameleon floor.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># 1. Install the Spinnaker SDK for your platform (from Teledyne).</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="c1"># 2. Install the PySpin wheel matching your interpreter into octacam&#39;s environment:</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>pip<span class="w"> </span>install<span class="w"> </span>spinnaker_python-*.whl
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="c1"># 3. (optional) record the intent — installs nothing on its own:</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;octacam[flir]&quot;</span>
 </code></pre></div>
 <p>If a config pins <code>backend = "flir"</code> and PySpin is missing, octacam exits with a
 clear message rather than a traceback. Run <code>octacam doctor --backend flir</code> to
 confirm the backend loads.</p>
 <h2 id="development-install">Development install<a class="headerlink" href="#development-install" title="Permanent link">&para;</a></h2>
 <p>To hack on octacam itself, clone it and let uv manage the environment:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NeLy-EPFL/octacam.git
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nb">cd</span><span class="w"> </span>octacam
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>uv<span class="w"> </span>sync<span class="w">                     </span><span class="c1"># create the venv with runtime + dev dependencies</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>uv<span class="w"> </span>run<span class="w"> </span>octacam<span class="w"> </span>--help<span class="w">       </span><span class="c1"># run from the checkout</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w">               </span><span class="c1"># run the test suite</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/NeLy-EPFL/octacam.git
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="nb">cd</span><span class="w"> </span>octacam
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>uv<span class="w"> </span>sync<span class="w">                     </span><span class="c1"># create the venv with runtime + dev dependencies</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>uv<span class="w"> </span>run<span class="w"> </span>octacam<span class="w"> </span>--help<span class="w">       </span><span class="c1"># run from the checkout</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w">               </span><span class="c1"># run the test suite</span>
 </code></pre></div>
 <p><code>uv sync</code> reads the <code>dev</code> dependency group (pytest, ruff, pyright, …) from
 <code>pyproject.toml</code>. To pull in the latest changes later, <code>git pull</code> and re-run
@@ -1095,7 +1149,7 @@ confirm the backend loads.</p>
 <h3 id="build-the-documentation">Build the documentation<a class="headerlink" href="#build-the-documentation" title="Permanent link">&para;</a></h3>
 <p>This site is built with <a href="https://squidfunk.github.io/mkdocs-material/">Material for MkDocs</a>.
 Preview it locally with live reload:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mkdocs<span class="w"> </span>serve<span class="w">     </span><span class="c1"># → http://127.0.0.1:8000</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>uv<span class="w"> </span>run<span class="w"> </span>--group<span class="w"> </span>docs<span class="w"> </span>mkdocs<span class="w"> </span>serve<span class="w">     </span><span class="c1"># → http://127.0.0.1:8000</span>
 </code></pre></div>
 <h2 id="next-steps">Next steps<a class="headerlink" href="#next-steps" title="Permanent link">&para;</a></h2>
 <p>Head to the <a href="../quickstart/">Quickstart</a> to record your first trial — no cameras

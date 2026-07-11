@@ -879,6 +879,11 @@ its own quirks and the always-present <code>pycameleon</code> floor covers the g
 GenICam-USB3 camera better. The mentions below are preserved as accurate
 history; the current backend set is basler / flir / spinnaker / pycameleon
 (+ fake). See <a href="../guide/backends/">Camera backends</a>.</p>
+<p><strong>Update (2026-07):</strong> PySpin now ships cp310–cp314 wheels (Spinnaker 4.4), so
+the <code>flir</code> (PySpin) tier no longer drops out on modern Python — it is the
+default FLIR path whenever PySpin imports, and <code>spinnaker</code> (the ctypes C-API
+tier) claims the FLIRs when PySpin is not installed. The GIL-release rationale
+below for the ctypes tier still stands; the "py3.14 drops out" framing does not.</p>
 </blockquote>
 <p><strong>Status:</strong> IMPLEMENTED and hardware-verified (2026-07-04). Branch
 <code>feat/harvesters-backend</code>. See "## Outcome" at the bottom.
