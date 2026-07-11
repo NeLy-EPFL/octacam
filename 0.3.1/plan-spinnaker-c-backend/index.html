@@ -1,0 +1,1277 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR).">
+      
+      
+        <meta name="author" content="NeLy-EPFL">
+      
+      
+        <link rel="canonical" href="https://nely-epfl.github.io/octacam/0.3.1/plan-spinnaker-c-backend/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Plan: Spinnaker C-API FLIR backend (spinnaker tier) - octacam</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#plan-spinnaker-c-api-flir-backend-spinnaker-tier" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="octacam" class="md-header__button md-logo" aria-label="octacam" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            octacam
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Plan: Spinnaker C-API FLIR backend (spinnaker tier)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/NeLy-EPFL/octacam" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    NeLy-EPFL/octacam
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="octacam" class="md-nav__button md-logo" aria-label="octacam" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    octacam
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/NeLy-EPFL/octacam" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    NeLy-EPFL/octacam
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/gui/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web GUI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/recording/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recording
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/processing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Processing recordings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Camera backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guide/plugins/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plugins
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../reference/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#background-what-is-already-done-shipped-on-this-branch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Background — what is already done (shipped on this branch)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-remaining-problem-this-plan-solves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The remaining problem this plan solves
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#design" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Design">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#registry-cascade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Registry / cascade
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#minimal-c-call-sequence-verified-names-from-the-research-pass" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal C call sequence (verified names from the research pass)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#effort-risks" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Effort &amp; risks
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-gotchas-discovered" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment gotchas discovered
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#verification-checklist-on-the-rig-unsandboxed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verification checklist (on the rig, unsandboxed)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#follow-up-deferred-user-approved-order-after-the-above" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Follow-up (deferred, user-approved order: after the above)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#outcome-2026-07-04-implemented-verified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Outcome (2026-07-04, implemented + verified)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#post-verification-perf-fix-2026-07-04-triggeroverlapreadout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Post-verification perf fix (2026-07-04): TriggerOverlap=ReadOut
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reaching-the-90-fps-spec-2026-07-04-devicelinkthroughputlimit-exposure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reaching the 90 fps spec (2026-07-04): DeviceLinkThroughputLimit + exposure
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="plan-spinnaker-c-api-flir-backend-spinnaker-tier">Plan: Spinnaker C-API FLIR backend (<code>spinnaker</code> tier)<a class="headerlink" href="#plan-spinnaker-c-api-flir-backend-spinnaker-tier" title="Permanent link">&para;</a></h1>
+<blockquote>
+<p><strong>Historical planning document.</strong> The <code>spinnaker</code> backend described here has
+<strong>shipped</strong> (commit <code>e8357af</code> on <code>feat/harvesters-backend</code>); this page is kept
+for design context, not as an open to-do. Where the plan and the shipped code
+differ, the code wins — e.g. the persisted parameter-file extension landed as
+<code>"txt"</code> (the GenApi feature-persistence TSV), not the <code>"json"</code> sketched below.
+See "## Outcome" at the bottom for what actually landed.</p>
+<p><strong>Superseded (later on this branch):</strong> the <code>harvesters</code> GenTL tier referenced
+below as the "opt-in" backend was <strong>removed entirely</strong> — module, deps, and docs
+— because every GenTL producer is a user-installed, vendor-EULA'd <code>.cti</code> with
+its own quirks and the always-present <code>pycameleon</code> floor covers the general
+GenICam-USB3 camera better. The mentions below are preserved as accurate
+history; the current backend set is basler / flir / spinnaker / pycameleon
+(+ fake). See <a href="../guide/backends/">Camera backends</a>.</p>
+<p><strong>Update (2026-07):</strong> PySpin now ships cp310–cp314 wheels (Spinnaker 4.4), so
+the <code>flir</code> (PySpin) tier no longer drops out on modern Python — it is the
+default FLIR path whenever PySpin imports, and <code>spinnaker</code> (the ctypes C-API
+tier) claims the FLIRs when PySpin is not installed. The GIL-release rationale
+below for the ctypes tier still stands; the "py3.14 drops out" framing does not.</p>
+</blockquote>
+<p><strong>Status:</strong> IMPLEMENTED and hardware-verified (2026-07-04). Branch
+<code>feat/harvesters-backend</code>. See "## Outcome" at the bottom.
+<strong>Why:</strong> give FLIR cameras a fast, watermark-free, Python-3.14 path that does not
+starve co-recorded cameras. The two shipped fixes below make FLIR <em>work</em> on
+py3.14 without a watermark; this plan makes it <em>fast</em>.</p>
+<h2 id="background-what-is-already-done-shipped-on-this-branch">Background — what is already done (shipped on this branch)<a class="headerlink" href="#background-what-is-already-done-shipped-on-this-branch" title="Permanent link">&para;</a></h2>
+<p>Two problems the user reported were fixed and hardware-verified:</p>
+<ol>
+<li>
+<p><strong>BALLUFF watermark.</strong> The auto cascade used to fall the FLIRs through to the
+   <code>harvesters</code> tier, whose only freely-installable GenTL producer is Balluff
+   <strong>mvIMPACT</strong>, which stamps a "BALLUFF … evaluation period ended" rectangle onto
+   the frames after ~8 s and is EULA-restricted for third-party cameras.
+   <strong>Fix:</strong> <code>registry.CASCADE</code> is now <code>("basler", "flir", "pycameleon")</code> —
+   <code>harvesters</code> is removed from auto-selection and is opt-in only
+   (<code>backend = "harvesters"</code>). FLIRs now land on the always-free <code>pycameleon</code>
+   floor. No producer, no watermark, no EULA.</p>
+</li>
+<li>
+<p><strong>Shared trigger thread throttled the Basler.</strong> <code>CameraSystem._trigger_all</code>
+   calls <code>trigger_once()</code> on every camera serially on one thread; the Basler and
+   harvesters/FLIR backends did the device software-trigger <em>there</em> (a native,
+   GIL-holding call), so a slow camera delayed the fast one.
+   <strong>Fix:</strong> new <code>cameras/_trigger_handoff.py::SoftwareTriggerHandoff</code> mixin —
+   <code>trigger_once()</code> only bumps a <code>_pending</code> counter (cap <code>PENDING_MAX=2</code>,
+   drop-newest with a rate-limited warning); each camera's own <code>retrieve()</code> fires
+   the device trigger and fetches one frame. Adopted by fake, pycameleon, basler,
+   harvesters, flir. Keeps the invariant <em>one frame recorded per trigger fired</em>.</p>
+</li>
+</ol>
+<p>Full suite 406 pass, ruff clean, pyright 0 new errors (21→17 on <code>cameras/</code>).</p>
+<h2 id="the-remaining-problem-this-plan-solves">The remaining problem this plan solves<a class="headerlink" href="#the-remaining-problem-this-plan-solves" title="Permanent link">&para;</a></h2>
+<p><strong><code>pycameleon.receive()</code> holds the Python GIL for the whole exposure wait.</strong>
+Measured on the rig (2× FLIR Grasshopper3 GS3-U3-41C6NIR @ 1920×1200,
+auto-exposure ≈ 44 ms; 1× Basler acA1920-150um):</p>
+<table>
+<thead>
+<tr>
+<th>scenario</th>
+<th>Basler fps</th>
+<th>FLIR fps (each)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Basler alone (no writer)</td>
+<td>~69 (USB/exposure ceiling at full ROI)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Basler + 2 FLIR via <strong>pycameleon</strong></td>
+<td><strong>~5</strong> (starved)</td>
+<td>~4–5</td>
+</tr>
+<tr>
+<td>2 FLIR only via pycameleon</td>
+<td>—</td>
+<td>~4 (they starve each other)</td>
+</tr>
+<tr>
+<td>Basler + 2 FLIR via <strong>mvIMPACT</strong> (old, watermarked)</td>
+<td>~30</td>
+<td>~16</td>
+</tr>
+</tbody>
+</table>
+<p>The GIL hold was measured directly: a 1 ms ticker thread saw <strong>57 ms</strong> max stalls
+during <code>receive()</code>. mvIMPACT is faster <em>only</em> because <code>HarvestersBackend.retrieve</code>
+polls with <code>try_fetch(2 ms)</code> + <code>time.sleep(3 ms)</code> and <code>time.sleep</code> <strong>releases the
+GIL</strong>. pycameleon's <code>receive()</code> has no timeout parameter, so the same
+poll-and-sleep trick cannot be applied; its <code>receive_async</code> needs a running
+asyncio loop (calls <code>get_running_loop()</code> at call time), which does not fit
+octacam's threaded grab-loop model without a larger rewrite.</p>
+<p><strong>Decision (user):</strong> build a thin ctypes binding to the Spinnaker <strong>C API</strong> first
+(this plan); fork pycameleon to release the GIL later as a fallback/secondary win.
+The C API path is the only one that is simultaneously fast, watermark-free,
+Python-3.14-capable, and clean-closing (we control DeInit/ReleaseInstance
+ordering directly, sidestepping the GenTL producer's GIL-holding <code>DevClose</code>
+deadlock — see [[harvesters-migration]]).</p>
+<h2 id="design">Design<a class="headerlink" href="#design" title="Permanent link">&para;</a></h2>
+<p>New module <code>src/octacam/cameras/spinnaker_c.py</code> implementing the <code>CameraBackend</code>
+protocol (<code>cameras/base.py</code>) over <code>libSpinnaker_C.so</code> via <code>ctypes</code>. Mirror the
+structure of <code>flir.py</code> (PySpin) — same SFNC node names, same <code>PARAM_NODES</code>, same
+<code>extension = "txt"</code>, same <code>teardown()</code> for the session-wide <code>spinSystem</code>
+singleton — but call the flat C ABI instead of PySpin.</p>
+<p>Reuse <code>SoftwareTriggerHandoff</code>: <code>trigger_once()</code> → <code>_bump_trigger()</code>; the device
+<code>TriggerSoftware</code> execute + <code>spinCameraGetNextImageEx</code> happen in <code>retrieve()</code> on
+the grab thread. <strong>The GIL win:</strong> <code>ctypes</code> releases the GIL around every foreign
+call by default, so <code>spinCameraGetNextImageEx(timeout)</code> blocking for the exposure
+does NOT hold the GIL — the Basler thread keeps running. (This is the whole point
+vs pycameleon; must be verified, see below.)</p>
+<h3 id="registry-cascade">Registry / cascade<a class="headerlink" href="#registry-cascade" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Add <code>"spinnaker"</code> to <code>registry.BACKENDS</code> and to <code>CASCADE</code> <strong>above</strong> <code>pycameleon</code>
+  and (probably) at the FLIR-vendor position: <code>("basler", "flir", "spinnaker",
+  "pycameleon")</code>. Rationale: <code>flir</code> (PySpin) stays highest for the cp310 rigs that
+  have it; on py3.14 <code>flir</code> drops out and <code>spinnaker</code> (C API) claims the FLIRs
+  before the <code>pycameleon</code> floor.</li>
+<li><code>select_backend("spinnaker")</code> imports <code>cameras.spinnaker_c</code> defensively and
+  returns <code>(enumerate_spinnaker, SpinnakerBackend, "txt")</code>; raises
+  <code>BackendUnavailable("spinnaker", "the Spinnaker SDK (libSpinnaker_C.so) is not
+  installed")</code> when <code>ctypes.CDLL("libSpinnaker_C.so")</code> fails — so it self-disables
+  on boxes without the SDK, exactly like <code>flir</code>.</li>
+<li>Add <code>"spinnaker": "octacam.cameras.spinnaker_c"</code> to <code>_TEARDOWN_MODULES</code> (the
+  <code>spinSystem</code> handle must be released once after all cameras close).</li>
+</ul>
+<h3 id="minimal-c-call-sequence-verified-names-from-the-research-pass">Minimal C call sequence (verified names from the research pass)<a class="headerlink" href="#minimal-c-call-sequence-verified-names-from-the-research-pass" title="Permanent link">&para;</a></h3>
+<p>All are <code>spinError</code>-returning functions on opaque handles; wrap each in a helper
+that raises <code>BackendError</code> on non-<code>SPINNAKER_ERR_SUCCESS</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>enumerate:  spinSystemGetInstance(&amp;hSystem)
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>            spinCameraListCreateEmpty(&amp;hCamList)
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>            spinSystemGetCameras(hSystem, hCamList)
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>            spinCameraListGetSize(hCamList, &amp;n)
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>            spinCameraListGet(hCamList, i, &amp;hCam)
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>            -&gt; read DeviceSerialNumber node for each (TL device nodemap)
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>open:       spinCameraInit(hCam)
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>            spinCameraGetNodeMap(hCam, &amp;hNodeMap)
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>            set PixelFormat=Mono8, TriggerSelector=FrameStart,
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>                TriggerMode=On, TriggerSource=Software
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>              (spinNodeMapGetNode + spinEnumerationGetEntryByName +
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>               spinEnumerationEntryGetEnumValue + spinEnumerationSetEnumValue)
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>grab start: spinCameraBeginAcquisition(hCam)
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>trigger:    node TriggerSoftware -&gt; spinCommandExecute
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>retrieve:   spinCameraGetNextImageEx(hCam, timeout_ms, &amp;hImage)  # GIL-free
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>            spinImageIsIncomplete(hImage, &amp;incomplete)
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>            spinImageGetWidth/Height/GetData/GetTimeStamp
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>            spinImageRelease(hImage)   # MUST release every image
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>stop:       spinCameraEndAcquisition(hCam)
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>close:      spinCameraDeInit(hCam) ; drop hCam
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>teardown:   spinCameraListClear(hCamList); spinCameraListDestroy(hCamList)
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>            spinSystemReleaseInstance(hSystem)   # exactly once, after all DeInit
+</code></pre></div>
+<p>Node read/write (bounds + values, for <code>read_node</code>/<code>write_node</code>): use the GenApi C
+functions from <code>SpinnakerGenApiC.h</code> — <code>spinNodeMapGetNode</code>,
+<code>spinFloatGetValue/SetValue/GetMin/GetMax</code>, <code>spinIntegerGetValue/...</code>,
+<code>spinNodeGetAccessMode</code> for writability. This gives the <strong>bounds + HW timestamps</strong>
+pycameleon lacks (a bonus over the current floor).</p>
+<p>References for exact signatures/ctypes prototypes (no complete open-source ctypes
+binding exists — we write the first):
+- Spinnaker.jl (Julia <code>ccall</code>, v1.2.0) — complete call signatures.
+- bytedeco/javacpp-presets <code>spinnaker</code> (JNI) — full API surface mapping.
+- FLIR's bundled C examples (<code>Acquisition_C</code>, <code>Enumeration_C</code>, <code>Trigger_C</code>).</p>
+<h2 id="effort-risks">Effort &amp; risks<a class="headerlink" href="#effort-risks" title="Permanent link">&para;</a></h2>
+<ul>
+<li>~1–2 days: minimal enumerate→Mono8→software-trigger→grab→close is ~25–30
+  distinct C functions; parameter-complete (bounds) is the longer tail.</li>
+<li><strong>Own the binding</strong> — no upstream to lean on. Struct layouts (<code>spinImage</code>
+  handle is opaque, fine) and enum values must match <code>SpinnakerDefsC.h</code>.</li>
+<li>Error-code discipline: every call returns <code>spinError</code>; a missed check on
+  <code>GetNextImageEx</code>/<code>ImageRelease</code> leaks image buffers and stalls acquisition.</li>
+<li>Clean close: replicate the PySpin ordering (EndAcquisition → DeInit → drop →
+  ReleaseInstance once) that already closes cleanly for the FLIR C++ SDK.</li>
+</ul>
+<h2 id="environment-gotchas-discovered">Environment gotchas discovered<a class="headerlink" href="#environment-gotchas-discovered" title="Permanent link">&para;</a></h2>
+<ul>
+<li>The Spinnaker C runtime is registered in <code>ldconfig</code> as
+  <code>libSpinnaker_C.so → /opt/spinnaker/lib/libSpinnaker_C.so</code> (SDK <strong>4.3.0.189</strong>),
+  but <code>/opt/spinnaker</code> is <strong>not directly accessible from the sandboxed Bash tool</strong>
+  in this environment — <code>ls</code>/<code>find</code>/<code>head</code> and even <code>ctypes.CDLL</code> failed there.
+  Build/test this backend <strong>unsandboxed</strong> (or add <code>/opt/spinnaker</code> to the sandbox
+  allowlist). Camera enumeration via mvIMPACT/pycameleon worked because those libs
+  live elsewhere on the ldconfig path.</li>
+<li>Dev headers are dpkg-registered under <code>/opt/spinnaker/include/spinc/</code>
+  (<code>SpinnakerC.h</code>, <code>SpinnakerGenApiC.h</code>, <code>SpinnakerDefsC.h</code>, …) but were not
+  readable here for the same sandbox reason — read them when building for the
+  authoritative prototypes/enum values.</li>
+<li><strong>Do NOT</strong> revive the Spinnaker <em>GenTL producer</em> (<code>Spinnaker_GenTL.cti</code>) via
+  Harvesters: it enumerated 0 of the 3 USB3 cameras here and its <code>DevClose</code>
+  deadlocks while holding the GIL (rig-confirmed; see [[harvesters-migration]]).
+  This plan uses the <em>SDK C API</em>, a different, deadlock-free code path.</li>
+</ul>
+<h2 id="verification-checklist-on-the-rig-unsandboxed">Verification checklist (on the rig, unsandboxed)<a class="headerlink" href="#verification-checklist-on-the-rig-unsandboxed" title="Permanent link">&para;</a></h2>
+<ol>
+<li><code>spinnaker</code> backend enumerates the 2 FLIR serials (17475185, 17475187).</li>
+<li>FLIR via <code>spinnaker</code>: open → Mono8 → software-trigger → grab N frames →
+   <strong>clean close</strong> (no hang). No BALLUFF watermark in the saved mkv.</li>
+<li>GIL test: 1 ms ticker sees &lt; ~10 ms stalls during <code>GetNextImageEx</code> (proves
+   ctypes releases the GIL — the pycameleon failure mode is gone).</li>
+<li>A Basler + 2 FLIR config: Basler holds ~69 fps (its ceiling) with 2 FLIR
+   co-recording via <code>spinnaker</code>; FLIR ≥ ~16 fps each. i.e. no cross-starvation.</li>
+<li><code>read_node</code> returns real min/max/inc/unit for exposure/gain/width/height.</li>
+<li>Full suite + ruff + pyright green; add <code>tests/test_spinnaker_backend.py</code> with a
+   ctypes-mocked lib (mirror <code>test_harvesters_backend.py</code>'s fake-handle approach).</li>
+</ol>
+<h2 id="follow-up-deferred-user-approved-order-after-the-above">Follow-up (deferred, user-approved order: after the above)<a class="headerlink" href="#follow-up-deferred-user-approved-order-after-the-above" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Fork <code>pycameleon</code> to wrap its blocking <code>receive()</code> in <code>py.allow_threads</code> so the
+  Rust core releases the GIL during the wait. Restores the clean MIT/libusb/no-SDK
+  deploy as a GIL-friendly floor and could add the missing node bounds + per-frame
+  HW timestamp (the Rust core already has both). Needs cargo+maturin to build
+  wheels; publish or upstream. See [[harvesters-migration]] gaps list.</li>
+</ul>
+<h2 id="outcome-2026-07-04-implemented-verified">Outcome (2026-07-04, implemented + verified)<a class="headerlink" href="#outcome-2026-07-04-implemented-verified" title="Permanent link">&para;</a></h2>
+<p>Built <code>src/octacam/cameras/spinnaker_c.py</code>: a thin <code>ctypes</code> binding (<code>_Spinnaker</code>
+façade that sets every function's argtypes/restype — mandatory on 64-bit or the
+opaque handles truncate — and raises <code>BackendError</code> on any non-success
+<code>spinError</code>) plus <code>SpinnakerBackend</code>, structurally identical to <code>FlirBackend</code>.
+Registry wired: <code>BACKENDS</code> gains <code>spinnaker</code>; <code>CASCADE = ("basler","flir",
+"spinnaker","pycameleon")</code>; <code>select_backend("spinnaker")</code> loads
+<code>libSpinnaker_C.so</code> lazily and self-disables via <code>BackendUnavailable</code> when absent
+(exactly like FLIR/PySpin); <code>_TEARDOWN_MODULES</code> gains it (System released once
+after all cameras close). Unit test <code>tests/test_spinnaker_backend.py</code> fakes the
+façade (17 tests); <code>tests/test_backends.py</code> updated for the new cascade.</p>
+<p><strong>On-rig (2× FLIR GS3-U3-41C6NIR, 2048×2048 Mono8, exposure forced 40 ms):</strong>
+- Enumerate → <code>17475185</code>, <code>17475187</code>. Open → Mono8 → software-trigger → grab →
+  <strong>clean close</strong> (~1.0 s/cam DeInit+Release, teardown 2.7 s; NO hang — this is
+  the SDK C API, not the deadlocking Spinnaker <em>GenTL producer</em>). Process exits
+  code 0.
+- <strong>GIL PROBE PASSED — the whole point.</strong> A 1 ms ticker thread ran while BOTH
+  FLIRs grabbed concurrently on their own threads (each blocking ~40 ms in
+  <code>spinCameraGetNextImageEx</code>): ticker p50=1.05 ms, <strong>p99=1.06 ms, max=2.38 ms</strong>.
+  So <code>ctypes</code> (a <code>CDLL</code>, not <code>PyDLL</code>) releases the GIL around the blocking grab —
+  the pycameleon failure mode (57 ms stalls) is gone. The ticker stands in for the
+  Basler thread; it never stalled ⇒ no cross-starvation by construction.
+- Both FLIRs sustained <strong>18.7 / 18.8 fps</strong> each (exposure-limited; ≥ the ~16 fps
+  target), with no watermark over a 12 s run (&gt; the 8 s mvIMPACT eval window; this
+  path loads no GenTL producer, so there is no watermark mechanism).
+- <code>read_node</code> returns real bounds: width 32/2048/32, height 2/2048/2, exposure
+  16.1–351828 µs, gain 0–9.83 dB. C-API quirk (verified, documented in code):
+  integer nodes expose no unit and float nodes no increment
+  (<code>SpinnakerGenApiC.h</code> has no <code>spinIntegerGetUnit</code> / <code>spinFloatGetInc</code>);
+  <code>snap_value</code> tolerates both.
+- Full suite <strong>425 pass</strong> (was 406; +17 spinnaker + 2 selection tests), ruff
+  clean, pyright 0 new on <code>cameras/</code> (stays at the 17-error baseline).</p>
+<p>NOT run end-to-end: the literal "Basler + 2 FLIR co-record, Basler holds ~69 fps"
+mixed-rig test (checklist #4) — the Basler needs pypylon + a udev rule and wasn't
+wired here. The GIL ticker probe is the direct mechanistic proof of the same
+claim (a real Basler grab thread keeps running exactly as the ticker did).</p>
+<h2 id="post-verification-perf-fix-2026-07-04-triggeroverlapreadout">Post-verification perf fix (2026-07-04): <code>TriggerOverlap=ReadOut</code><a class="headerlink" href="#post-verification-perf-fix-2026-07-04-triggeroverlapreadout" title="Permanent link">&para;</a></h2>
+<p>On the mixed rig the user saw the FLIRs at ~6–11 fps (and, historically, the Basler
+starved). Diagnosis: the Basler starvation was already fixed (spinnaker releases the
+GIL — mixed rig Basler = 74 fps), but the FLIRs were throttled by the FLIR default
+<code>TriggerOverlap=Off</code>: a FrameStart software trigger fired during the previous frame's
+readout is <strong>silently ignored</strong>, so the camera accepts only ~every other trigger →
+half rate + a full 200 ms grab-timeout stall on each dropped one.</p>
+<p>Single-FLIR bench @ 4 ms exposure, 2048² Mono8:
+| mode | frames | fps | getnext p50 / max |
+|---|---|---|---|
+| SW trigger, TriggerOverlap=Off (before) | 76/150 | 4.7 | 15 / <strong>200</strong> ms |
+| SW trigger, TriggerOverlap=ReadOut (after) | 150/150 | <strong>64</strong> | 15 / 15 ms |
+| Continuous free-run (hexaview-style) | 100/100 | <strong>78</strong> | 12 / 66 ms |</p>
+<p>Fix: <code>SpinnakerBackend._enable_trigger_overlap()</code> sets <code>TriggerOverlap=ReadOut</code>
+(best-effort) in <code>enable_frame_trigger</code> + <code>begin_software_trigger_preview</code>; mirrored
+into <code>flir.py</code>. Mixed rig after fix @ 4 ms / 80 Hz: Basler 73.6, FLIR 62.4 / 62.6 fps.</p>
+<h2 id="reaching-the-90-fps-spec-2026-07-04-devicelinkthroughputlimit-exposure">Reaching the 90 fps spec (2026-07-04): <code>DeviceLinkThroughputLimit</code> + exposure<a class="headerlink" href="#reaching-the-90-fps-spec-2026-07-04-devicelinkthroughputlimit-exposure" title="Permanent link">&para;</a></h2>
+<p>The GS3-U3-41C6NIR is rated 90 fps at full 2048² (Sony ICX814 CCD). On-rig
+characterisation (single camera, 2048² Mono8; bench scripts in the session
+scratchpad — <code>bench_queue.py</code>, <code>final_validate.py</code>):</p>
+<ul>
+<li>
+<p>The camera has <strong>no</strong> <code>AcquisitionFrameRate</code> / <code>AcquisitionResultingFrameRate</code> /
+  <code>AdcBitDepth</code> nodes. The one fps knob is <strong><code>DeviceLinkThroughputLimit</code></strong>, shipped
+  capped at <strong>350.6 MB/s</strong> (→ 83.6 fps transfer ceiling) while <code>DeviceMaxThroughput</code>
+  is <strong>384.4 MB/s</strong> (→ 91.6 fps). <strong>Fix (shipped): <code>open()</code> raises it to the node
+  max</strong> (<code>_maximize_link_throughput()</code>, best-effort, in <code>spinnaker_c.py</code> and mirrored
+  into <code>flir.py</code>). New test <code>test_open_maximizes_link_throughput</code>.</p>
+</li>
+<li>
+<p><strong>A software-triggered frame costs <code>transfer (11.1 ms) + exposure</code>, serially</strong> —
+  this CCD does <em>not</em> overlap exposure with readout for software FrameStart triggers,
+  even with <code>TriggerOverlap=ReadOut</code> and any trigger queue depth (1–4 benched
+  identical; firing triggers ahead does nothing). So delivered fps ≈ <code>1/(11.1 ms +
+  exposure)</code>:</p>
+</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>exposure</th>
+<th>fps (facade loop)</th>
+<th>fps (real timer+retrieve+copy)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4000 µs</td>
+<td>65</td>
+<td>63.7</td>
+</tr>
+<tr>
+<td>1000 µs</td>
+<td>81</td>
+<td>—</td>
+</tr>
+<tr>
+<td>100 µs</td>
+<td>90</td>
+<td>85 (both FLIRs on the shared bus: 84 each)</td>
+</tr>
+</tbody>
+</table>
+<p>The throughput fix is worth +3 fps at short exposure and is neutral at long
+  exposure (exposure-bound). The real-path ~5 fps shortfall vs the facade ceiling is
+  Python per-frame overhead (Condition wait, per-frame <code>TriggerSoftware</code> node lookup,
+  timer-thread scheduling).</p>
+<ul>
+<li><strong>Free-run</strong> (continuous, <code>TriggerMode Off</code>) <em>does</em> overlap exposure with transfer
+  → 90 fps at 4 ms. That is why hexaview reaches 90 fps at its 4 ms exposure: it uses
+  a <strong>hardware</strong> trigger (Arduino PWM strobe), an externally-clocked overlapped
+  acquisition, not a per-frame software trigger. octacam's <code>trigger_source=external</code>
+  is the equivalent.</li>
+</ul>
+<p><strong>Bottom line:</strong> to hit ~90 fps via <em>software</em> trigger, max the throughput [done]
+<strong>and</strong> use a short exposure (~100 µs). At the hexaview 4 ms exposure, software
+trigger is hardware-capped ~65 fps on this CCD — use <code>trigger_source=external</code> for
+90 fps at 4 ms. octacam configs set no exposure, so the operator sets it via the GUI
+slider (then <code>octacam config</code> snapshots it to a <code>{serial}.txt</code> — the native GenApi
+feature-persistence TSV; see <code>octacam/cameras/_genicam_config.py</code>).</p>
+<p>Still deferred (unchanged): the pycameleon GIL fork in the follow-up above.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/NeLy-EPFL/octacam" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
