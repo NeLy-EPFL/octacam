@@ -925,7 +925,7 @@ wheels = [
 
 [[package]]
 name = "octacam"
-version = "0.3.1.dev0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
