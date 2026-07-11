@@ -1,176 +1,99 @@
 # Installation
 
-octacam is a Python package (Python **3.11+**). The recommended way to install it
-is with [uv](https://docs.astral.sh/uv/), which installs octacam and its own
-isolated Python without touching your system environment.
-
-Everything octacam needs to record from a **Basler** rig is installed
-automatically — including the Basler pylon runtime (bundled by
-[pypylon](https://github.com/basler/pypylon)), OpenCV, and ffmpeg (via
-imageio-ffmpeg). No SDK downloads or C++ toolchain are required. **FLIR /
-Teledyne** cameras need the Spinnaker SDK installed separately (see
-[FLIR / Teledyne setup](#flir-teledyne-setup)).
-
-!!! note "Supported cameras"
-    octacam drives **Basler** (USB3, via pypylon) and **FLIR / Teledyne** (USB3,
-    via Spinnaker/PySpin) cameras through one common interface, plus a `fake`
-    in-memory backend used for tests and hardware-free demos. See
-    [Camera backends](guide/backends.md).
-
-## Install with uv
-
-```bash
-uv tool install git+https://github.com/NeLy-EPFL/octacam.git
-```
-
-This puts an `octacam` command on your `PATH`. Verify it:
-
-```bash
-octacam --version         # prints 0.2.0.dev0
-octacam list-cameras      # list detected Basler cameras (--backend basler|flir|fake)
-```
-
-`octacam list-cameras` opens the camera SDK to enumerate connected devices; with
-no cameras attached it simply prints nothing.
+octacam is installed from git with [uv](https://docs.astral.sh/uv/) — there is no
+PyPI package. Clone the repository and install it as a uv tool. Cloning is the
+recommended path for everyone, not just developers: the repo ships the `configs/`
+example rigs and the emulator config the [Quickstart](quickstart.md) uses to run
+with no hardware.
 
 !!! tip "Don't have uv?"
     Install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` (see the
     [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
 
-### Alternatives
-
-From a clone, or with pip:
-
-```bash
-uv tool install .      # from a checkout
-pip install .          # into an existing environment
-```
-
-## Update
-
-```bash
-uv tool upgrade octacam
-```
-
-Or reinstall from the latest `main`:
-
-```bash
-uv tool install --force git+https://github.com/NeLy-EPFL/octacam.git
-```
-
-## Try it without hardware
-
-octacam ships with Basler's camera emulator, so you can run the full GUI with no
-cameras attached. Set `PYLON_CAMEMU` to the number of emulated cameras and point
-`octacam gui` at the bundled example config:
-
-```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
-```
-
-Then open <http://127.0.0.1:8765>. See the [Quickstart](quickstart.md) for a
-full walk-through.
-
-## Camera backends
-
-octacam picks one camera backend **per rig**, via the top-level `backend` key in
-that rig's `octacam_config.toml` (one vendor per config directory). The default
-is `basler`.
-
-| `backend` | SDK | Per-camera parameter file | Ships with octacam? |
-| --------- | --- | ------------------------- | ------------------- |
-| `basler`  | pypylon (bundled)  | `<serial>.pfs`  | ✅ Yes — works out of the box (default) |
-| `flir`    | Spinnaker / PySpin | `<serial>.json` | ❌ Install the Spinnaker SDK separately |
-| `fake`    | none (in-memory)   | `<serial>.fake` | ✅ Yes — synthetic frames for tests/demos |
-
-Preview, recording, the software trigger, per-camera exposure/gain/ROI controls,
-the recording summary, and the web GUI behave identically across backends. See
-[Camera backends](guide/backends.md) for details.
-
-### FLIR / Teledyne setup
-
-PySpin is **not on PyPI** — it ships with Teledyne's Spinnaker SDK. Install the
-SDK and its PySpin wheel into octacam's environment, then (optionally) record the
-intent with the `flir` extra:
-
-```bash
-# 1. Install the Spinnaker SDK for your platform (from Teledyne).
-# 2. Install the matching PySpin wheel into octacam's environment:
-pip install spinnaker_python-*.whl
-# 3. (optional) records the dependency; installs nothing on its own:
-pip install "octacam[flir]"
-```
-
-!!! warning "The `flir` extra installs nothing"
-    `octacam[flir]` is an empty, documented install marker — it does **not** pull
-    in PySpin (which cannot be published on PyPI). You must install the Spinnaker
-    SDK and its PySpin wheel by hand.
-
-If a config pins `backend = "flir"` and PySpin is missing, octacam exits with a
-clear message ("the Spinnaker SDK and its PySpin wheel must be installed") rather
-than a traceback. Confirm the backend loads with:
-
-```bash
-octacam list-cameras --backend flir
-```
-
-## Plugins
-
-Optional hardware/integration features ship as opt-in
-[plugins](guide/plugins.md). **The default launch loads none.** The two bundled
-plugins — `flywheel` (Arduino stepper-motor controller) and `twophoton` (Arduino
-2-photon hardware trigger) — talk to an Arduino over serial via
-[pyserial](https://pyserial.readthedocs.io/), which is a **core dependency**.
-No extra install is needed:
-
-```bash
-octacam list-plugins      # bundled plugins and whether each can load
-```
-
-!!! note "The `flywheel` / `twophoton` extras also install nothing"
-    Like `flir`, the `flywheel` and `twophoton` optional-dependency extras are
-    empty documentation markers; pyserial already ships in the core dependencies
-    so both plugins work out of the box once enabled.
-
-Enable a plugin per-launch with `--plugin <name>` on `gui`/`record`, or
-persistently with a `[[plugins]]` entry in the rig's `octacam_config.toml` — see
-[Plugins](guide/plugins.md) and [Configuration](guide/configuration.md).
-
-## Development install
-
-To hack on octacam itself, clone it and let uv manage the environment:
+## Install
 
 ```bash
 git clone https://github.com/NeLy-EPFL/octacam.git
 cd octacam
-uv sync                     # create the venv with runtime + dev dependencies
-uv run octacam --help       # run from the checkout
-uv run pytest               # run the test suite (against Basler's emulator)
+uv tool install .            # puts an `octacam` command on your PATH
+octacam doctor               # diagnose the install and list detected cameras
 ```
 
-`uv sync` reads the `dev` dependency group (pytest, pytest-cov, ruff, pyright,
-av, httpx, psutil) from `pyproject.toml`. To pull in later changes, `git pull`
-and re-run `uv sync`.
+A fresh clone is on `main`, which is **always the latest stable release**, so this
+installs stable octacam. `uv tool install` manages an isolated Python and every
+dependency for you; the `octacam` command then works from any directory.
 
-### Build the documentation
+## Update
 
-This site is built with
-[Material for MkDocs](https://squidfunk.github.io/mkdocs-material/). Preview it
-locally with live reload using the `docs` dependency group:
+Run this from inside your octacam clone (the folder you `git clone`d into):
 
 ```bash
-uv run --group docs mkdocs serve     # → http://127.0.0.1:8000
+git pull && uv tool install --force .
 ```
 
-## Troubleshooting
+`git pull` advances your clone to the latest stable `main`; `--force` rebuilds the
+tool so the `octacam` command matches what you just pulled. Check what you are
+running with `octacam --version`. octacam never updates itself — you choose when to
+pull. Using a FLIR camera? Read [Keep PySpin across updates](#cameras) first — a
+plain reinstall drops the vendor wheel.
 
-!!! failure "\"Insufficient system resources exist to complete the API\" at start of streaming"
-    pylon's USB stack needs roughly **150 open file descriptors and ~16 MB of
-    usbfs memory per camera**. octacam raises its own soft file-descriptor limit
-    at startup, but if the session's hard limit is still too low (`ulimit -Hn`),
-    raise it in `/etc/security/limits.conf` or run Basler's `setup-usb.sh`. Also
-    make sure `usbcore.usbfs_memory_mb=1000` is set (check
-    `/sys/module/usbcore/parameters/usbfs_memory_mb`).
+`octacam doctor` reports when a newer release is available and prints the right
+upgrade command for how you installed it (uv tool / pip / pipx / conda); the web
+GUI shows the same as a dismissible banner. The check is read-only and
+fail-silent — it never updates anything for you, and it stays dormant until
+octacam is published to PyPI. Disable it with `OCTACAM_NO_UPDATE_CHECK=1` (or the
+cross-tool `DO_NOT_TRACK`).
+
+## Pin to a release, or follow development
+
+`main` follows the latest stable release. From inside your clone, check out a
+different ref and reinstall to hold a rig on a specific release:
+
+```bash
+git checkout v0.3.0 && uv tool install --force .   # pin to a tagged release
+git checkout main   && uv tool install --force .   # back to the latest stable
+```
+
+Releases are tagged `vX.Y.Z` — see the
+[releases page](https://github.com/NeLy-EPFL/octacam/releases) and the repository
+root's `CHANGELOG.md`. To follow active development instead, check out the current
+`dev-*` branch before installing.
+
+## Cameras
+
+Basler (pypylon) and the always-on pycameleon USB3-Vision floor ship in core, so
+**a rig works out of the box**; the only system requirement is `libusb-1.0`.
+octacam auto-detects the best driver per camera — run `octacam doctor` to see which
+backend each camera would use.
+
+FLIR / Teledyne cameras additionally need Teledyne's Spinnaker SDK, plus the PySpin
+wheel for the default FLIR tier (cp310–cp314; the SDK's C-API backend works without
+it). See [Camera backends](guide/backends.md) for the setup.
+
+!!! warning "Keep PySpin across updates"
+    PySpin is a manually installed vendor wheel, **not** a declared dependency, so
+    rebuilding or syncing the environment on update drops it unless you re-include
+    it. Point `spinnaker_python-*.whl` at the wheel you installed the Spinnaker SDK
+    from:
+
+    - **Tool install (the default):** pass the wheel every time you install or
+      update — `uv tool install --force . --with spinnaker_python-*.whl`.
+    - **Development checkout:** install it once with
+      `uv pip install spinnaker_python-*.whl`, then update with `uv sync --inexact`.
+      A plain `uv sync` prunes packages that aren't declared dependencies;
+      `--inexact` keeps them, and `uv run octacam` never prunes.
+
+## Develop octacam
+
+To hack on octacam, work from the clone with an editable environment instead of the
+tool install:
+
+```bash
+uv sync                              # venv with runtime + dev dependencies
+uv run octacam --help                # run from the checkout
+uv run pytest                        # test suite
+uv run --group docs mkdocs serve     # docs with live reload → http://127.0.0.1:8000
+```
 
 ## Next steps
 

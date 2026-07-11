@@ -2,14 +2,20 @@ name: Deploy docs
 
 # Publishes VERSIONED Material for MkDocs docs to the gh-pages branch via `mike`.
 #
-#   push to main          -> deploy the "stable" version and point the site root
-#                            at it (branch-based model: main == the stable trunk).
+#   push a tag vX.Y.Z      -> deploy the NUMBERED version X.Y.Z, (re)point the
+#                             `stable` alias at it, and make it the site default.
+#                             This is the authoritative per-release publish.
+#   push to main           -> deploy the current pyproject version as the `stable`
+#                             alias + default (main == the latest stable release),
+#                             so a docs fix landing on main between releases still
+#                             refreshes stable.
 #   push to a dev-* branch -> deploy the rolling "dev" version. Because it neither
-#                            names "stable" nor moves the default, the stable
-#                            version and the root redirect are left untouched.
+#                             touches `stable` nor moves the default, the released
+#                             versions and the root redirect are left untouched.
 #
-# When octacam starts cutting tagged releases, switch the main path to numbered
-# versions + a "latest" alias (see mike docs); the dev path stays as-is.
+# So the version dropdown accumulates every tagged release (0.3.0, 0.3.1, …) plus
+# `dev`, with `stable` aliasing (and the root redirecting to) the newest release.
+# Older numbered versions are preserved across deploys (mike never drops them).
 #
 # All versions live in their own subdirectory of gh-pages; the header version
 # selector (mkdocs.yml `extra.version.provider: mike`) reads versions.json at the
@@ -26,6 +32,8 @@ on:
     branches:
       - main
       - "dev-*"          # dev-0.3.0 and future dev branches
+    tags:
+      - "v*"             # every release tag -> its own numbered doc version
     paths:
       - "docs/**"
       - "mkdocs.yml"
@@ -72,12 +80,22 @@ jobs:
       - name: Deploy with mike
         env:
           REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
           run_mike() { uv run --no-project --with mkdocs-material --with mike mike "$@"; }
-          if [ "$REF" = "main" ]; then
-            echo "Deploying stable docs (branch: main)"
-            run_mike deploy --push stable
+          pyproject_version() {
+            sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml | head -1
+          }
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="${REF#v}"                          # v0.3.1 -> 0.3.1
+            echo "Deploying release docs $VERSION (alias: stable, default)"
+            run_mike deploy --push --update-aliases "$VERSION" stable
+            run_mike set-default --push stable
+          elif [ "$REF" = "main" ]; then
+            VERSION="$(pyproject_version)"
+            echo "Deploying stable docs from main: $VERSION (alias: stable, default)"
+            run_mike deploy --push --update-aliases "$VERSION" stable
             run_mike set-default --push stable
           else
             echo "Deploying development docs as version 'dev' (branch: $REF)"

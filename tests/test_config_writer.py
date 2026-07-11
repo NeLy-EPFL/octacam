@@ -1,12 +1,12 @@
 """TOML config writer: round-trip fidelity, strftime safety, atomic writes."""
 
 import glob
-import tomllib
 from pathlib import Path
 
 import pytest
 
 from octacam import config_writer as cw
+from octacam._compat import tomllib
 from octacam.config import parse_config
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))
@@ -56,9 +56,50 @@ def test_merge_updates_existing_and_appends_new():
     assert by_serial["B"]["name"] == "camB" and by_serial["B"]["window_x"] == 0.5
 
 
+def test_merge_persists_center_flags(tmp_path):
+    # The ROI auto-centering flags travel with the display fields and survive a
+    # write -> reparse round-trip (including an explicit False).
+    raw = {"cameras": [{"serial_number": "A"}]}
+    doc = cw.merge_camera_display(
+        raw,
+        [
+            {"serial": "A", "center_x": True, "center_y": False},
+            {"serial": "B", "center_x": True, "center_y": True},
+        ],
+    )
+    cw.write_config(tmp_path, doc)
+    config = parse_config(tmp_path / "octacam_config.toml")
+    by_serial = {c.serial_number: c for c in config.cameras}
+    assert by_serial["A"].center_x is True and by_serial["A"].center_y is False
+    assert by_serial["B"].center_x is True and by_serial["B"].center_y is True
+
+
 def test_dumps_escapes_strings():
     doc = {"gui": {"save_directory_default": 'a"b\\c'}}
     assert tomllib.loads(cw._dumps(doc))["gui"]["save_directory_default"] == 'a"b\\c'
+
+
+def test_dumps_escapes_del_control_char():
+    # U+007F (DEL) must be escaped; emitting it raw produces unparseable TOML
+    # that would silently reset the whole config to defaults on the next load.
+    doc = {"record": {"directory": "ab\x7fcd"}}
+    assert tomllib.loads(cw._dumps(doc))["record"]["directory"] == "ab\x7fcd"
+
+
+def test_dumps_serializes_date_and_datetime():
+    # The reader accepts an unquoted, date-like scalar (parsed to datetime.date);
+    # the writer must round-trip it instead of raising TypeError.
+    import datetime
+
+    doc = {
+        "record": {
+            "directory": datetime.date(2026, 7, 9),
+            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),
+        }
+    }
+    reparsed = tomllib.loads(cw._dumps(doc))["record"]
+    assert reparsed["directory"] == datetime.date(2026, 7, 9)
+    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)
 
 
 def test_plugin_options_roundtrip():
@@ -70,15 +111,44 @@ def test_plugin_options_roundtrip():
     assert tomllib.loads(cw._dumps(doc)) == doc
 
 
-def test_grid_and_nas_sections_roundtrip():
-    # A GUI save round-trips through _dumps; it must not wipe the [grid]/[nas]
-    # post-processing sections (incl. the nested layout list-of-lists).
+def test_plugin_options_inline_table_arrays_roundtrip():
+    # The triggerbox plugin nests arrays-of-inline-tables (cameras/lights) under
+    # [plugins.options]; a GUI camera-display save re-dumps the whole config, so
+    # these must survive _dumps (previously _toml_value raised on a dict).
     doc = {
-        "grid": {
-            "default": True,
-            "layout": [["camera_LF", "", "camera_RF"], ["camera_LM", "camera_F", ""]],
-        },
-        "nas": {"path": "/mnt/nas", "local_base": "/data", "verify": False},
+        "plugins": [
+            {
+                "name": "triggerbox",
+                "options": {
+                    "device": "auto",
+                    "strobe_guard_us": 100,
+                    "cameras": [{"pin": "D13", "pulse_us": 500}],
+                    "lights": [
+                        {"channel": 1, "mode": "strobe", "duty_mode": "auto"},
+                        {"channel": 3, "mode": "pulse_train", "freq_hz": 10.0},
+                    ],
+                },
+            }
+        ]
+    }
+    assert tomllib.loads(cw._dumps(doc)) == doc
+
+
+def test_visualization_and_transfer_sections_roundtrip():
+    # A GUI save round-trips through _dumps; it must not wipe the
+    # [[visualization]] (array-of-tables, incl. the nested layout list-of-lists)
+    # or [transfer] post-processing sections.
+    doc = {
+        "visualization": [
+            {
+                "name": "grid.mp4",
+                "layout": [
+                    ["camera_LF", "", "camera_RF"],
+                    ["camera_LM", "camera_F", ""],
+                ],
+            }
+        ],
+        "transfer": {"directory": "/mnt/store", "checksum": False},
     }
     assert tomllib.loads(cw._dumps(doc)) == doc
 
@@ -141,6 +211,29 @@ def test_pfs_helpers_honor_a_non_pfs_extension(tmp_path):
     assert cw.read_pfs_files(tmp_path) == {}
 
 
+def test_pfs_helpers_handle_a_mixed_vendor_rig(tmp_path):
+    # A Basler+FLIR rig writes each camera's params in its own format and reads
+    # them all back: write_pfs_files takes a per-serial extension map, and
+    # read_pfs_files / copy_auxiliary_pfs take the set of suffixes in play.
+    ext_by_serial = {"BAS-1": "pfs", "FLIR-1": "json"}
+    cw.write_pfs_files(tmp_path, {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}, ext_by_serial)
+    assert (tmp_path / "BAS-1.pfs").exists()
+    assert (tmp_path / "FLIR-1.json").exists()
+
+    both = cw.read_pfs_files(tmp_path, ("pfs", "json"))
+    assert both == {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}
+    # A single suffix still reads only its own files.
+    assert cw.read_pfs_files(tmp_path, "json") == {"FLIR-1": "{}\n"}
+
+    # copy_auxiliary_pfs preserves non-live per-camera files across both formats.
+    (tmp_path / "aux.pfs").write_text("<aux/>\n")
+    dst = tmp_path / "dst"
+    cw.copy_auxiliary_pfs(tmp_path, dst, {"BAS-1", "FLIR-1"}, ("pfs", "json"))
+    assert (dst / "aux.pfs").exists()
+    assert not (dst / "BAS-1.pfs").exists()  # a live serial is not copied
+    assert not (dst / "FLIR-1.json").exists()
+
+
 def test_backend_key_preserved_through_save(tmp_path):
     raw = {"backend": "flir", "gui": {"fps_default": 30.0}, "cameras": []}
     doc = cw.merge_camera_display(raw, [{"serial": "A", "rotation_deg": 90.0}])
@@ -148,3 +241,70 @@ def test_backend_key_preserved_through_save(tmp_path):
     written = (tmp_path / "octacam_config.toml").read_text()
     assert tomllib.loads(written)["backend"] == "flir"
     assert parse_config(tmp_path / "octacam_config.toml").backend == "flir"
+
+
+def test_with_process_params_overlays_and_preserves_other_sections():
+    raw = {
+        "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
+        "transfer": {"directory": "~/store", "checksum": True},
+        "visualization": [{"name": "grid.mp4", "layout": [["a", "b"]]}],
+    }
+    edited = cw.with_process_params(
+        raw,
+        transcode_ffmpeg_params="-c:v ffv1",
+        transfer_directory="~/other",
+        transfer_checksum=False,
+    )
+    assert edited["transcode"]["ffmpeg_params"] == "-c:v ffv1"
+    assert edited["transfer"] == {"directory": "~/other", "checksum": False}
+    # Untouched sections (incl. the 2D visualization layout) are preserved and
+    # the input dict is not mutated.
+    assert edited["visualization"] == raw["visualization"]
+    assert raw["transcode"]["ffmpeg_params"] == "-c:v libx264 -crf 20"
+
+
+def test_with_process_params_noop_when_values_match():
+    # Unchanged values -> the copy compares equal, so the snapshot stays a
+    # byte-verbatim copy rather than a re-emit.
+    raw = {
+        "record": {"fps": 100.0},
+        "transcode": {"ffmpeg_params": "-c:v libx264 -crf 20"},
+        "transfer": {"directory": "~/store", "checksum": True},
+    }
+    assert (
+        cw.with_process_params(
+            raw,
+            transcode_ffmpeg_params="-c:v libx264 -crf 20",
+            transfer_directory="~/store",
+            transfer_checksum=True,
+        )
+        == raw
+    )
+
+
+def test_with_process_params_adds_sections_only_when_diverging():
+    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+
+    # No [transcode]/[transfer] and default/blank values -> no sections added,
+    # so a rig without a transfer destination never grows an empty one.
+    base = {"record": {"fps": 100.0}}
+    assert (
+        cw.with_process_params(
+            base,
+            transcode_ffmpeg_params=DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+            transfer_directory="",
+            transfer_checksum=True,
+        )
+        == base
+    )
+    # A non-default transcode arg / non-blank transfer dir creates the sections.
+    added = cw.with_process_params(
+        {},
+        transcode_ffmpeg_params="-c:v ffv1",
+        transfer_directory="~/store",
+        transfer_checksum=False,
+    )
+    assert added == {
+        "transcode": {"ffmpeg_params": "-c:v ffv1"},
+        "transfer": {"directory": "~/store", "checksum": False},
+    }

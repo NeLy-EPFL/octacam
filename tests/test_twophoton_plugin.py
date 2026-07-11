@@ -46,15 +46,28 @@ class FakeLink:
     def close(self) -> None:
         self._open = False
 
-    def send_arm(self, params: ArmParams) -> None:
+    def send_arm(self, params: ArmParams) -> bool:
         with self._lock:
             if self._open:
                 self.written.append(params.to_bytes())
+                return True
+            return False
 
     def send_cancel(self) -> None:
         with self._lock:
             if self._open:
                 self.written.append(bytes([CANCEL_MAGIC]))
+
+    def send_identify(self) -> None:
+        pass
+
+    def identify(self, timeout: float = 0.5):
+        # Tests set `link.banner` to control the classified firmware state.
+        return getattr(self, "banner", None)
+
+    @property
+    def identity(self):
+        return getattr(self, "banner", None)
 
     def snapshot(self) -> list[bytes]:
         with self._lock:
@@ -197,6 +210,54 @@ def test_on_recording_start_silently_skips_when_port_closed():
     assert link.snapshot() == []
 
 
+def test_default_start_params_emits_headless_slice():
+    # `octacam record` has no GUI to POST plugin_params, so the plugin must
+    # contribute an arm slice itself (fps + duration_ms) or the board is never
+    # armed and the external-triggered cameras hang forever.
+    from octacam.plugins import PluginManager
+
+    plugin, _ = _plugin_with_fake()
+    assert plugin.default_start_params(83.0, 12.0) == {"fps": 83, "duration_ms": 12000}
+    # And it must reach on_recording_start under the "twophoton" key via the manager.
+    params = PluginManager([plugin]).default_start_params(80.0, 5.0)
+    assert params == {"twophoton": {"fps": 80, "duration_ms": 5000}}
+
+
+def test_on_recording_start_surfaces_write_failure_to_gui():
+    # A wedged/closed CDC link makes the arm write silently no-op; the failure
+    # must reach the GUI (broadcast + _last_error), not just the server log.
+    plugin, link = _plugin_with_fake()
+    events: list[tuple[str, dict]] = []
+    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    link.send_arm = lambda params: False  # link open, but the write never lands
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin._last_error and "arm write" in plugin._last_error
+    assert any(
+        topic == "twophoton_state" and data["error"] == plugin._last_error
+        for topic, data in events
+    )
+
+
+def test_on_recording_start_surfaces_ack_timeout_to_gui():
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 0.05  # no reader to send 'A', so the wait elapses
+    events: list[tuple[str, dict]] = []
+    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin._last_error and "no arm ack" in plugin._last_error
+    assert any(
+        topic == "twophoton_state" and data["error"] == plugin._last_error
+        for topic, data in events
+    )
+
+
+def test_good_arm_clears_prior_arm_error():
+    plugin, _ = _plugin_with_fake()
+    plugin._last_error = "arm write to /dev/arduinoCams failed"
+    plugin._on_arduino_status("A")  # firmware reports armed
+    assert plugin._last_error is None
+
+
 # ---------------------------------------------------------------------------
 # Plugin: Arduino status callback and broadcast
 # ---------------------------------------------------------------------------
@@ -218,16 +279,17 @@ def test_broadcast_called_on_status_change():
     plugin.set_broadcast(lambda kind, payload: received.append((kind, payload)))
 
     plugin._on_arduino_status("A")
-    assert received == [
-        ("twophoton_state", {"state": "armed", "device": "/dev/arduinoCams", "ready": True})
-    ]
+    assert len(received) == 1
+    kind, payload = received[0]
+    assert kind == "twophoton_state"
+    assert payload["state"] == "armed"
+    assert payload["device"] == "/dev/arduinoCams"
+    assert payload["ready"] is True
 
     received.clear()
     plugin._on_arduino_status("T")
-    assert received[0] == (
-        "twophoton_state",
-        {"state": "triggered", "device": "/dev/arduinoCams", "ready": True},
-    )
+    assert received[0][0] == "twophoton_state"
+    assert received[0][1]["state"] == "triggered"
 
 
 def test_no_broadcast_when_callback_not_set():
@@ -303,6 +365,19 @@ def test_reconnect_endpoint_surfaces_failure(monkeypatch):
     assert data["error"] == "could not open /dev/arduinoCams"
 
 
+def test_reconnect_endpoint_accepts_device_override():
+    # A {"device": …} body switches the port before reopening (GUI dropdown).
+    plugin, link = _plugin_with_fake(is_open=False)
+    r = _test_client(plugin).post(
+        "/api/twophoton/reconnect", json={"device": "/dev/ttyUSB3"}
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ready"] is True
+    assert data["device"] == "/dev/ttyUSB3"
+    assert plugin._configured_device == "/dev/ttyUSB3"
+
+
 def test_from_payload_clamps_duration_to_uint32():
     # An out-of-range duration must clamp, not blow up to_bytes() with struct.error.
     p = ArmParams.from_payload({"duration_ms": 2**40}, 100, 10_000)
@@ -337,10 +412,13 @@ def test_on_recording_stop_aborted_resets_state_and_broadcasts():
     plugin.on_recording_stop(aborted=True)
     # Firmware goes IDLE silently on cancel; the host must reset+broadcast itself.
     assert plugin._arduino_state == "idle"
-    assert (
-        "twophoton_state",
-        {"state": "idle", "device": "/dev/arduinoCams", "ready": True},
-    ) in events
+    assert any(
+        topic == "twophoton_state"
+        and data["state"] == "idle"
+        and data["device"] == "/dev/arduinoCams"
+        and data["ready"] is True
+        for topic, data in events
+    )
     assert link.snapshot() == [bytes([CANCEL_MAGIC])]
 
 
@@ -402,10 +480,11 @@ def test_link_broken_broadcasts_not_ready():
     plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
     link._open = False  # reader saw the port die
     plugin._on_link_broken()
-    assert events[-1] == (
-        "twophoton_state",
-        {"state": "idle", "device": "/dev/arduinoCams", "ready": False},
-    )
+    topic, data = events[-1]
+    assert topic == "twophoton_state"
+    assert data["state"] == "idle"
+    assert data["device"] == "/dev/arduinoCams"
+    assert data["ready"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -659,3 +738,143 @@ def test_builtin_not_overridden_by_entry_point(monkeypatch):
     finally:
         if saved is not None:
             _REGISTRY["twophoton"] = saved
+
+
+# ---------------------------------------------------------------------------
+# Firmware provisioning: identity classification, reader, flash, endpoints
+# ---------------------------------------------------------------------------
+
+import octacam.firmware as fw_mod  # noqa: E402
+from octacam.plugins.twophoton import TwoPhotonLink  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_real_flash(monkeypatch):
+    """Never shell out to arduino-cli or poll for a real /dev node; make can_flash
+    deterministic. Runs before the plugin is built, so the provisioner captures the
+    stubbed wait_for_device."""
+    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
+    monkeypatch.setattr("octacam.serial_ports.wait_for_device", lambda device, timeout=3.0: True)
+
+    def _fake_flash(spec, port, needed_build, **kwargs):
+        return fw_mod.FlashResult(
+            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
+            build=needed_build,
+        )
+
+    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
+
+
+def _verify_with_banner(plugin, link, banner):
+    link.banner = banner
+    plugin._verify_identity()
+
+
+class _FeedSerial:
+    """Minimal pyserial stand-in that yields a fixed byte feed one byte at a time."""
+
+    def __init__(self, feed: bytes):
+        self._buf = bytearray(feed)
+        self.is_open = True
+        self.written = bytearray()
+
+    def read(self, n=1):
+        if self._buf:
+            b = bytes(self._buf[:1])
+            del self._buf[:1]
+            return b
+        time.sleep(0.005)
+        return b""
+
+    def write(self, data):
+        self.written.extend(data)
+
+    def close(self):
+        self.is_open = False
+
+
+def test_reader_distinguishes_bare_status_from_banner():
+    """The reader must emit bare 'A'/'T'/'D' statuses AND capture the newline-
+    terminated '2PHOTON …' banner — the two never collide because the banner
+    starts with '2'."""
+    statuses: list[str] = []
+    link = TwoPhotonLink(statuses.append)
+    link._serial = _FeedSerial(b"A2PHOTON 1 deadbeef\nT")
+    link._reader_stop.clear()
+    t = threading.Thread(target=link._read_loop, daemon=True)
+    t.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while link.identity is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.05)  # let the trailing 'T' status flush
+    finally:
+        link._reader_stop.set()
+        t.join(timeout=1.0)
+    assert link.identity == "2PHOTON 1 deadbeef"
+    assert statuses == ["A", "T"]
+
+
+def test_identify_current_and_outdated():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, f"2PHOTON 1 {plugin._fw.needed_build}")
+    assert plugin._firmware_ok
+    assert plugin.firmware_provisioning()["state"] == "current"
+    assert plugin.firmware_provisioning()["needs_flash"] is False
+
+    _verify_with_banner(plugin, link, "2PHOTON 1")  # older, no fingerprint
+    assert plugin._firmware_ok  # still arms
+    assert plugin.firmware_provisioning()["state"] == "outdated"
+
+
+def test_identify_unidentified_still_arms():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, None)  # blank / no identify (old firmware)
+    assert plugin._firmware_ok
+    prov = plugin.firmware_provisioning()
+    assert prov["state"] == "unidentified"
+    assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
+
+
+def test_identify_foreign_board_disables_arming():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2 abcd")
+    assert plugin._firmware_ok is False
+    assert plugin.firmware_provisioning()["state"] == "wrong_board"
+
+
+def test_flash_firmware_success():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "2PHOTON 1")  # out of date
+    link.banner = f"2PHOTON 1 {plugin._fw.needed_build}"  # reports current after flash
+    result = plugin.flash_firmware()
+    assert result.ok
+    assert plugin.firmware_provisioning()["needs_flash"] is False
+
+
+def test_flash_refused_while_armed():
+    plugin, link = _plugin_with_fake()
+    plugin._arduino_state = "armed"
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert "armed" in result.message
+
+
+def test_on_recording_start_refuses_on_incompatible_firmware():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "TRIGGERBOX 2 abcd")  # foreign -> firmware_ok False
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
+    assert link.snapshot() == []  # nothing armed
+
+
+def test_firmware_and_flash_endpoints():
+    plugin, link = _plugin_with_fake()
+    _verify_with_banner(plugin, link, "2PHOTON 1")
+    client = _test_client(plugin)
+    body = client.get("/api/twophoton/firmware").json()
+    assert body["state"] == "outdated" and body["needs_flash"] is True
+
+    link.banner = f"2PHOTON 1 {plugin._fw.needed_build}"
+    flashed = client.post("/api/twophoton/flash", json={}).json()
+    assert flashed["ok"] is True
+    assert flashed["provisioning"]["needs_flash"] is False

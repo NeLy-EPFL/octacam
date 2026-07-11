@@ -2,7 +2,10 @@
 //
 // Served from /plugins/flywheel/, so it cannot import core "./util.js" (that
 // would 404). Shared helpers (api, clampInput) are passed in via the ctx the
-// host (app.js) constructs.
+// host (app.js) constructs. The serial helpers live at /js/ (absolute path,
+// since a relative import would resolve under /plugins/flywheel/ and 404).
+import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
+import { FirmwareFlash } from "/js/firmware-flash.js";
 
 const STEPS_PER_REVOLUTION = 4096;
 
@@ -24,7 +27,24 @@ export default class FlywheelTab {
     this.statusBox = document.getElementById("flywheel-status");
     this.statusMsg = document.getElementById("flywheel-status-msg");
     this.reconnectBtn = document.getElementById("flywheel-reconnect");
+    this.portSelect = document.getElementById("flywheel-port");
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
+
+    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
+    // while jogging so a flash (which resets the board) can't interrupt motion.
+    this.fw = new FirmwareFlash({
+      api: this.api,
+      notify: this.notify,
+      prefix: "flywheel",
+      ids: {
+        banner: "flywheel-fw-flash",
+        msg: "flywheel-fw-flash-msg",
+        btn: "flywheel-fw-flash-btn",
+        log: "flywheel-fw-flash-log",
+      },
+      isActive: () => this.jogging,
+    });
+    this.fw.setReady(this.ready);
 
     this.dirCw = document.getElementById("loop-dir-cw");
     this.steps = document.getElementById("loop-steps");
@@ -57,7 +77,15 @@ export default class FlywheelTab {
     this._setupJog(document.getElementById("jog-cw"), 1);
 
     this.updateInfo();
+    this._loadPorts();
     this._refresh();
+    this.fw.load();
+  }
+
+  // Populate the port dropdown with the currently detected serial ports,
+  // keeping the active device selected.
+  async _loadPorts() {
+    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
 
   // ----------------------------------------------------- serial state
@@ -72,6 +100,7 @@ export default class FlywheelTab {
   // controls are usable only when both are up; otherwise show why.
   _refresh() {
     this.fields.disabled = !this.connected || !this.ready;
+    this.fw?.setReady(this.ready);
     if (this.ready) {
       this.statusBox.classList.add("hidden");
     } else {
@@ -85,9 +114,12 @@ export default class FlywheelTab {
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
+    // Connect to the port picked in the dropdown (device override); with no
+    // selection the backend reopens the configured device.
+    const device = this.portSelect?.value || "";
     let r;
     try {
-      r = await this.api("POST", "/api/serial/reconnect");
+      r = await this.api("POST", "/api/serial/reconnect", device ? { device } : {});
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");
@@ -100,7 +132,10 @@ export default class FlywheelTab {
     }
     this.ready = Boolean(r.data?.ready);
     if (r.data?.device) this.device = r.data.device;
+    this.fw.applyResponse(r.data);
+    this.fw.load();
     this._refresh();
+    this._loadPorts(); // refresh the list + selection after the attempt
     if (this.ready) {
       this.notify("info", `Serial port ${this.device} connected.`);
     } else {

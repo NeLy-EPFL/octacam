@@ -1,26 +1,60 @@
 [project]
 name = "octacam"
-version = "0.2.0.dev0"
-description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR)"
+version = "0.3.1"
+description = "Preview, record, and save video streams from multiple scientific cameras (Basler, FLIR, and any GenICam USB3-Vision camera)"
 readme = "README.md"
-requires-python = ">=3.11"
+# SPDX license expression (PEP 639); the text lives in LICENSE and is packaged.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Neuroengineering Laboratory (Ramdya Lab), EPFL" },
+]
+# 3.10 is the floor: it is the lowest Python octacam supports (and the lowest
+# PySpin wheel Teledyne ships). Every backend tier runs on any Python from 3.10
+# up — PySpin now ships cp310-cp314 wheels (Spinnaker 4.4), so the FLIR vendor
+# tier is no longer pinned to 3.10.
+requires-python = ">=3.10"
+# No `License ::` classifier: PEP 639 supersedes it with the `license` expression
+# above, and listing both trips a metadata conflict in modern build backends.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Video :: Capture",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
+    # Basler vendor tier (uv-installable, so it lives in core).
     "pypylon>=4.0",
+    # Floor tier: libusb-only USB3-Vision, always present so the cascade has a
+    # guaranteed backend on any Python where no vendor SDK is set up. It is the
+    # general-purpose path for any GenICam USB3-Vision camera without a vendor SDK.
+    "pycameleon>=0.2.11",
     "numpy>=1.26",
     "opencv-python-headless>=4.9",
     "pydantic>=2",
     "typer>=0.15",
     "rich>=13.7",
+    # PEP 440 version parsing for the PyPI "update available" check (updates.py).
+    "packaging>=23",
     "fastapi>=0.136.3",
     "uvicorn>=0.49.0",
     # uvicorn ships no WebSocket implementation on its own; the preview/
-    # telemetry/jog socket (octacam serve) needs one at runtime.
+    # telemetry/jog socket (octacam gui) needs one at runtime.
     "websockets>=16.0",
     "imageio-ffmpeg>=0.6.0",
     # The flywheel and twophoton plugins talk to an Arduino over serial. It's a
     # light, pure-Python dep needed by every bundled plugin, so it ships by
     # default rather than as an extra people can forget to install.
     "pyserial>=3.5",
+    # Python 3.10 has no stdlib tomllib (the TOML reader); tomli is the drop-in.
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
@@ -30,13 +64,20 @@ dependencies = [
 flywheel = []
 twophoton = []
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
-# PyPI (it ships with the SDK installer). This extra is therefore a documented,
-# greppable install marker rather than a dependency list: install the Spinnaker
-# SDK and `pip install spinnaker_python-*.whl` manually (see the README).
+# PyPI (it ships with the SDK installer; Spinnaker 4.4 provides cp310-cp314
+# wheels — install the one matching your interpreter). This extra is therefore a
+# documented, greppable install marker rather than a dependency list: install the
+# Spinnaker SDK and `pip install spinnaker_python-*.whl` manually (see the README).
 flir = []
 
 [project.scripts]
 octacam = "octacam.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/NeLy-EPFL/octacam"
+Documentation = "https://nely-epfl.github.io/octacam/"
+Repository = "https://github.com/NeLy-EPFL/octacam.git"
+Changelog = "https://github.com/NeLy-EPFL/octacam/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
@@ -49,11 +90,20 @@ dev = [
     "pyright>=1.1.390",
 ]
 # Documentation site (Material for MkDocs). Preview locally with
-# `uv run --group docs mkdocs serve`; CI publishes the versioned site
-# (main -> "stable", dev-* -> "dev") to GitHub Pages via mike.
+# `uv run --group docs mkdocs serve`; CI publishes it to GitHub Pages.
 docs = [
     "mkdocs-material>=9.5",
+    # Versioned docs (main -> "stable", dev-* -> "dev"). Deployed by CI; also
+    # usable locally: `uv run --group docs mike serve`.
     "mike>=2.1",
+]
+# Browser-driven tests for the vanilla-JS frontend (tests/test_frontend.py):
+# loads the real ES modules in a headless Chromium against the real index.html.
+# Opt-in so the default `uv run pytest` never needs a browser. Run with
+# `uv run --group frontend pytest tests/test_frontend.py` (first time also needs
+# `uv run --group frontend playwright install chromium`).
+frontend = [
+    "playwright>=1.49",
 ]
 
 [build-system]
@@ -61,7 +111,7 @@ requires = ["uv_build>=0.11.0,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py310"
 line-length = 88
 
 [tool.ruff.lint]
@@ -77,7 +127,7 @@ extend-immutable-calls = ["fastapi.Body", "fastapi.Depends", "fastapi.Query"]
 # The library is the type-check surface; tests use stubs/fakes and monkeypatch
 # private attributes, which intentionally fight static typing.
 include = ["src"]
-pythonVersion = "3.11"
+pythonVersion = "3.10"
 typeCheckingMode = "standard"
 
 [tool.pytest.ini_options]

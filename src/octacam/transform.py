@@ -36,6 +36,11 @@ log = logging.getLogger("octacam")
 # next to DisplayTransform, so the recording and transcode sides never drift.
 RECORDING_SUMMARY_FILENAME = "recording_summary.json"
 
+# Optional per-frame timestamp store (opt-in via record.save_timestamps). One
+# compressed NumPy archive for the whole recording, holding every camera's
+# per-frame timestamp/dropped series — replacing the old per-camera CSVs.
+TIMESTAMPS_FILENAME = "timestamps.npz"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

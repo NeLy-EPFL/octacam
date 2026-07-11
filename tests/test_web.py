@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import time
 from unittest.mock import Mock
@@ -91,26 +92,52 @@ def test_shutdown_refused_while_recording(shutdown_client):
     shutdown_client.controller.stop_recording(abort=True)
 
 
+def test_static_assets_served_no_cache(client):
+    # The GUI's static assets are unversioned, so they are served with
+    # Cache-Control: no-cache and the browser revalidates on every reload —
+    # development always sees up-to-date pages instead of a stale cached copy.
+    for path in ("/", "/style.css", "/js/app.js"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert "no-cache" in response.headers.get("cache-control", ""), path
+
+    # no-cache is not no-store: an unchanged asset still revalidates to a cheap
+    # 304 (via ETag), so nothing is re-downloaded unless it actually changed.
+    fresh = client.get("/style.css")
+    etag = fresh.headers.get("etag")
+    assert etag, "static assets should carry an ETag for revalidation"
+    revalidated = client.get("/style.css", headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+
+
 def test_system_and_settings_endpoints(client):
     system = client.get("/api/system").json()
     assert len(system["cameras"]) == 2
     assert system["cameras"][0]["width"] > 0
-    assert {f["codec"] for f in system["formats"]} == {
-        "x264",
+    assert {f["save_method"] for f in system["formats"]} == {
+        "ffmpeg",
+        "nvenc",
         "raw",
     }
     # no plugins loaded in tests -> empty plugin status, no serial endpoint
     assert system["plugins"] == {}
+    # the rig's default GUI theme is surfaced for the client (defaults to dark)
+    assert system["theme"] == "dark"
+    # No driving plugin loaded -> the "managed" trigger source is unavailable.
+    assert system["managed_trigger_available"] is False
 
     settings = client.get("/api/settings").json()
     assert settings["fps"] == 50.0
     # New recording-output toggles default to display form, CSV off.
     assert settings["record_form"] == "display"
     assert settings["save_frame_timestamps"] is False
+    # Preview trigger source defaults to mirroring the recording trigger.
+    assert settings["preview_trigger_source"] == "auto"
 
-    response = client.put("/api/settings", json={"fps": 60.0, "crf": 18})
+    response = client.put("/api/settings", json={"fps": 60.0, "save_method": "raw"})
     assert response.status_code == 200
     assert response.json()["fps"] == 60.0
+    assert response.json()["save_method"] == "raw"
 
     # record_form/save_frame_timestamps patch; invalid record_form is rejected.
     patched = client.put(
@@ -121,14 +148,55 @@ def test_system_and_settings_endpoints(client):
     assert patched.json()["record_form"] == "sensor"
     assert patched.json()["save_frame_timestamps"] is True
     assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
+    # Preview trigger source + the managed recording source round-trip; bad values 422.
+    pv = client.put("/api/settings", json={"preview_trigger_source": "free_running"})
+    assert pv.status_code == 200 and pv.json()["preview_trigger_source"] == "free_running"
+    mg = client.put("/api/settings", json={"trigger_source": "managed"})
+    assert mg.status_code == 200 and mg.json()["trigger_source"] == "managed"
+    assert (
+        client.put("/api/settings", json={"preview_trigger_source": "x"}).status_code
+        == 422
+    )
+    assert client.put("/api/settings", json={"trigger_source": "x"}).status_code == 422
+    # ffmpeg_params is a live setting (the GUI's Advanced box edits it); a bad
+    # save_method is still rejected, and other encoder knobs stay unknown (422).
+    ffmpeg = client.put("/api/settings", json={"ffmpeg_params": "-c:v ffv1"})
+    assert ffmpeg.status_code == 200
+    assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
+    assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
-    # libx264 knobs (crf and the free-form -x264-params passthrough) patch too
-    patched = client.put("/api/settings", json={"x264_params": "keyint=30:scenecut=0"})
-    assert patched.status_code == 200
-    assert patched.json()["x264_params"] == "keyint=30:scenecut=0"
+    # The GPU save method + its params/session-limit knobs round-trip; a negative
+    # limit 422s. max_nvenc_sessions=null selects auto-detect.
+    gpu = client.put(
+        "/api/settings",
+        json={
+            "save_method": "nvenc",
+            "nvenc_params": "-c:v h264_nvenc -cq 20 -pix_fmt yuv420p",
+            "max_nvenc_sessions": 4,
+        },
+    )
+    assert gpu.status_code == 200
+    assert gpu.json()["save_method"] == "nvenc"
+    assert gpu.json()["nvenc_params"] == "-c:v h264_nvenc -cq 20 -pix_fmt yuv420p"
+    assert gpu.json()["max_nvenc_sessions"] == 4
+    auto = client.put("/api/settings", json={"max_nvenc_sessions": None})
+    assert auto.status_code == 200 and auto.json()["max_nvenc_sessions"] is None
+    assert (
+        client.put("/api/settings", json={"max_nvenc_sessions": -1}).status_code == 422
+    )
 
     assert client.put("/api/settings", json={"fps": -1}).status_code == 422
     assert client.put("/api/settings", json={"bogus": 1}).status_code == 422
+    assert client.put("/api/settings", json={"crf": 18}).status_code == 422
+
+    # writer_queue_size round-trips; sub-1 values are rejected (422). (A JSON
+    # bool coerces to int at the SettingsPatch boundary, so it is not tested
+    # here; the controller guard rejects a real bool — see test_controller.)
+    assert settings["writer_queue_size"] == 64
+    wq = client.put("/api/settings", json={"writer_queue_size": 128})
+    assert wq.status_code == 200 and wq.json()["writer_queue_size"] == 128
+    assert client.put("/api/settings", json={"writer_queue_size": 0}).status_code == 422
+    assert client.put("/api/settings", json={"writer_queue_size": -1}).status_code == 422
 
     validation = client.post(
         "/api/save-dir/validate", json={"path": "~/somewhere"}
@@ -149,6 +217,76 @@ def test_system_and_settings_endpoints(client):
         1,
     )
     assert client.post("/api/serial/command", json=command).status_code in (404, 405)
+
+
+def test_nvenc_capabilities_endpoint(client, monkeypatch):
+    # The GUI fetches this lazily to show/default the GPU session cap. Mock the
+    # detector so the test never loads the GPU.
+    import octacam.web.app as appmod
+
+    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": 6)
+    data = client.get("/api/nvenc/capabilities").json()
+    assert data["available"] is True
+    assert data["max_sessions"] == 6
+    assert data["encoder"] == "h264_nvenc"
+    assert data["default_params"] == appmod.NVENC_H264_PARAMS
+
+
+def test_nvenc_capabilities_unavailable(client, monkeypatch):
+    import octacam.web.app as appmod
+
+    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
+    data = client.get("/api/nvenc/capabilities").json()
+    assert data["available"] is False and data["max_sessions"] is None
+
+
+def test_directory_split_recomposes_save_dir(client, tmp_path):
+    base = str(tmp_path / "data" / "TL")
+    # Setting the base directory alone recomposes save_dir under it (no relative
+    # part yet, so save_dir == the normalized base).
+    r = client.put("/api/settings", json={"record_directory": base})
+    assert r.status_code == 200
+    assert r.json()["record_directory"] == base
+    assert r.json()["save_dir"] == base
+
+    # Adding a relative sub-path joins it onto the base; the base is untouched.
+    r = client.put("/api/settings", json={"relative_directory": "250701/Fly1/001"})
+    assert r.status_code == 200
+    assert r.json()["record_directory"] == base
+    assert r.json()["relative_directory"] == "250701/Fly1/001"
+    assert r.json()["save_dir"] == f"{base}/250701/Fly1/001"
+
+    # Repointing the base keeps the relative part and re-joins under the new base.
+    other = str(tmp_path / "scratch")
+    r = client.put("/api/settings", json={"record_directory": other})
+    assert r.status_code == 200
+    assert r.json()["save_dir"] == f"{other}/250701/Fly1/001"
+
+
+def test_process_params_are_live_settings(client):
+    # The Process section's transcode/transfer knobs are live settings that the
+    # snapshot bakes into each recording for `octacam process`.
+    r = client.put(
+        "/api/settings",
+        json={
+            "transcode_ffmpeg_params": "-c:v libx264 -crf 20 -pix_fmt yuv420p",
+            "transfer_directory": "~/store/TL",
+            "transfer_checksum": False,
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["transcode_ffmpeg_params"] == "-c:v libx264 -crf 20 -pix_fmt yuv420p"
+    assert body["transfer_directory"] == "~/store/TL"
+    assert body["transfer_checksum"] is False
+    # Unparseable transcode args (bad quoting) are rejected up front rather than
+    # silently falling back to the default when `octacam process` runs.
+    assert (
+        client.put(
+            "/api/settings", json={"transcode_ffmpeg_params": 'a "b'}
+        ).status_code
+        == 422
+    )
 
 
 def _wait_for_presence(ws, tries=200):
@@ -178,6 +316,27 @@ def test_websocket_broadcasts_presence(client):
         assert _wait_for_presence(ws1) == 1
 
 
+def test_websocket_replays_event_backlog(client):
+    # A (re)connecting browser should receive the controller's recent event
+    # backlog so its log shows history instead of starting blank.
+    controller = client.controller
+    controller._event("info", "first historical event")
+    controller._event("warning", "second historical event")
+
+    seen = []
+    with client.websocket_connect("/api/ws") as ws:
+        for _ in range(200):
+            message = ws.receive()
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                if payload.get("type") == "event":
+                    seen.append(payload["message"])
+                    if "second historical event" in seen:
+                        break
+    assert "first historical event" in seen
+    assert "second historical event" in seen
+
+
 def test_websocket_preview_and_telemetry(client):
     import cv2
 
@@ -197,11 +356,12 @@ def test_websocket_preview_and_telemetry(client):
 
     assert got_state and got_settings
     assert len(frames) >= 4
-    version, kind, camera_index, flags, number, ts, fps, dropped = FRAME_HEADER.unpack(
-        frames[0][: FRAME_HEADER.size]
-    )
-    assert (version, kind) == (1, 1)
+    (version, kind, camera_index, flags, number, ts, fps, dropped, cx, cy, cw, ch,
+     sw, sh) = FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
+    assert (version, kind) == (2, 1)
     assert camera_index in (0, 1)
+    # A default client is un-cropped: the crop rect is the whole sensor.
+    assert (cx, cy) == (0, 0) and (cw, ch) == (sw, sh)
     jpeg = np.frombuffer(frames[0][FRAME_HEADER.size :], np.uint8)
     image = cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE)
     assert image is not None and image.size > 0
@@ -266,6 +426,48 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             n, client_id = stub.jogs[0]
             assert n == 5
             assert isinstance(client_id, int) and client_id > 0
+    finally:
+        controller.close()
+
+
+def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
+    """A plugin's on_ws_message raising must not tear down the client socket."""
+    from octacam.plugins.base import Plugin, PluginManager
+
+    class RaisingPlugin(Plugin):
+        name = "raiser"
+
+        def on_ws_message(self, message, client_id):
+            raise ValueError("boom: malformed jog value")
+
+    system = CameraSystem(EMULATED_SERIALS)
+    system.load_config(tmp_path)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(system, settings)
+    controller.start_preview()
+    app = create_app(
+        controller,
+        OctacamConfig(),
+        PluginManager([RaisingPlugin()]),
+        config_dir=str(tmp_path),
+    )
+    try:
+        with TestClient(app) as client:
+            with client.websocket_connect("/api/ws") as ws:
+                # A message the plugin blows up on: the socket must survive.
+                ws.send_text(json.dumps({"type": "jog", "n": "not-a-number"}))
+                # The socket is still live: telemetry/frames keep flowing.
+                got_state = False
+                for _ in range(60):
+                    message = ws.receive()
+                    if message.get("text"):
+                        payload = json.loads(message["text"])
+                        got_state |= payload["type"] in ("state", "telemetry")
+                    if got_state:
+                        break
+                assert got_state
     finally:
         controller.close()
 
@@ -342,8 +544,8 @@ def test_recording_cycle_over_rest(client, tmp_path):
 
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
-    # Per-frame CSVs are opt-in now; by default only the compact summary lands.
-    assert not any(v.with_suffix(".csv").exists() for v in videos)
+    # Per-frame timestamps are opt-in now; by default only the compact summary lands.
+    assert not (save_dir / "timestamps.npz").exists()
     summary = json.loads((save_dir / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
@@ -359,7 +561,45 @@ def test_recording_cycle_over_rest(client, tmp_path):
     assert needs_confirm.json()["status"] == "needs_confirm"
 
 
-def test_recording_writes_csv_when_enabled(client, tmp_path):
+def test_recording_with_split_directory(client, tmp_path):
+    base = tmp_path / "data" / "TL"
+    assert (
+        client.put(
+            "/api/settings",
+            json={"record_directory": str(base), "relative_directory": "day/001"},
+        ).status_code
+        == 200
+    )
+    save_dir = base / "day" / "001"
+
+    response = client.post("/api/recording/start", json={"confirm_overwrite": False})
+    assert response.status_code == 202, response.text
+
+    deadline = time.monotonic() + 25
+    state = None
+    while time.monotonic() < deadline:
+        state = client.get("/api/state").json()
+        if state["state"] == "preview" and state["cameras"][0]["frames"]:
+            break
+        time.sleep(0.2)
+    assert state is not None and state["state"] == "preview"
+
+    # Videos land under base/relative, and the summary records the relative part
+    # verbatim (what the transfer step mirrors onto the destination).
+    assert len(sorted(save_dir.glob("*.mkv"))) == 2
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert summary["relative_directory"] == "day/001"
+
+    # Both halves increment together; the base stays fixed.
+    settings = client.get("/api/settings").json()
+    assert settings["record_directory"] == str(base)
+    assert settings["relative_directory"] == "day/002"
+    assert settings["save_dir"] == f"{base}/day/002"
+
+
+def test_recording_writes_timestamps_when_enabled(client, tmp_path):
+    import numpy as np
+
     save_dir = tmp_path / "rec" / "001"
     assert (
         client.put("/api/settings", json={"save_frame_timestamps": True}).status_code
@@ -379,10 +619,14 @@ def test_recording_writes_csv_when_enabled(client, tmp_path):
 
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
-    assert all(v.with_suffix(".csv").exists() for v in videos)
-    for video in videos:
-        lines = video.with_suffix(".csv").read_text().splitlines()
-        assert lines[0] == "frame_index,timestamp,dropped"
+    # A single compressed file for all cameras (no per-camera CSVs).
+    assert not any(save_dir.glob("*.csv"))
+    with np.load(save_dir / "timestamps.npz") as data:
+        for video in videos:
+            name = video.stem
+            timestamps = data[f"{name}/timestamp_ns"]
+            assert timestamps.dtype == np.int64
+            assert len(timestamps) == len(data[f"{name}/dropped"]) > 0
 
 
 def test_live_transform_is_baked_into_display_recording(client, tmp_path):
@@ -685,6 +929,114 @@ def test_camera_params_locked_while_recording(client):
         client.controller.stop_recording(abort=True)
 
 
+# --------------------------------------------- full device node map (Camera tab)
+
+
+def test_camera_features_endpoint(client):
+    system = client.get("/api/system").json()
+    # /api/system exposes the live centering flags per camera.
+    assert system["cameras"][0]["center_x"] is False
+    assert system["cameras"][0]["center_y"] is False
+
+    payload = client.get("/api/cameras/0/features").json()
+    assert {"index", "serial", "center_x", "center_y", "features"} <= set(payload)
+    by = {f["name"]: f for f in payload["features"]}
+    assert len(by) > 10  # full node map, not the six curated params
+    assert by["PixelFormat"]["managed"] is True
+
+    assert client.get("/api/cameras/99/features").status_code == 404
+
+
+def test_camera_feature_write_and_managed_reject(client):
+    r = client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 2500.0})
+    assert r.status_code == 200, r.text
+    by = {f["name"]: f for f in r.json()["updated"][0]["features"]}
+    assert abs(by["ExposureTime"]["value"] - 2500.0) < 2.0
+
+    # Managed node -> 422; unknown node -> 422; extra field -> 422.
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "PixelFormat", "value": "Mono12"}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "Bogus", "value": 1}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/0/features", json={"name": "Gain", "value": 1, "x": 2}
+    ).status_code == 422
+    assert client.put(
+        "/api/cameras/99/features", json={"name": "Gain", "value": 1}
+    ).status_code == 404
+
+
+def test_camera_feature_scope_all(client):
+    r = client.put(
+        "/api/cameras/0/features", json={"name": "ExposureTime", "value": 2000.0, "scope": "all"}
+    )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["updated"]) == 2  # both emulated cameras updated
+
+
+def test_camera_center_endpoint(client):
+    client.put("/api/cameras/0/features", json={"name": "Width", "value": 512})
+    r = client.put("/api/cameras/0/center", json={"axis": "x", "enabled": True})
+    assert r.status_code == 200, r.text
+    entry = r.json()["updated"][0]
+    assert entry["center_x"] is True
+    by = {f["name"]: f for f in entry["features"]}
+    assert by["OffsetX"]["writable"] is False  # octacam owns it while centered
+
+    # Bad axis -> 422.
+    assert client.put(
+        "/api/cameras/0/center", json={"axis": "z", "enabled": True}
+    ).status_code == 422
+    # Turning it back off frees the offset.
+    off = client.put("/api/cameras/0/center", json={"axis": "x", "enabled": False})
+    off_by = {f["name"]: f for f in off.json()["updated"][0]["features"]}
+    assert off_by["OffsetX"]["writable"] is True
+
+
+def test_camera_command_endpoint(client):
+    features = client.get("/api/cameras/0/features").json()["features"]
+    commands = [f["name"] for f in features if f["type"] == "command"]
+    assert commands, "emulator exposes command nodes"
+    r = client.post("/api/cameras/0/commands", json={"name": commands[0]})
+    assert r.status_code == 200, r.text
+    # A non-existent command is a clean 422, not a 500.
+    assert client.post(
+        "/api/cameras/0/commands", json={"name": "NotACommand"}
+    ).status_code == 422
+
+
+def test_camera_feature_reset_prefers_config(client, tmp_path):
+    # Save the current params so a per-serial config file exists to reset to.
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    baseline = None
+    for f in client.get("/api/cameras/0/features").json()["features"]:
+        if f["name"] == "ExposureTime":
+            baseline = f["value"]
+    assert baseline is not None
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
+    r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+    assert r.status_code == 200, r.text
+    restored = {f["name"]: f for f in r.json()["updated"][0]["features"]}["ExposureTime"]["value"]
+    assert abs(restored - baseline) < 2.0
+
+
+def test_camera_features_locked_while_recording(client):
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        for call in (
+            client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 3000.0}),
+            client.put("/api/cameras/0/center", json={"axis": "x", "enabled": True}),
+            client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"}),
+        ):
+            assert call.status_code == 409, call.text
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
 def _save_client(tmp_path, config_dir):
     from octacam.config import parse_config
 
@@ -762,6 +1114,32 @@ def test_config_save_active_and_new(tmp_path):
                 json={"target": "new", "name": "../evil", "cameras": cams},
             )
             assert bad.status_code == 422
+    finally:
+        controller.close()
+
+
+def test_config_save_persists_center_flags(tmp_path):
+    active = tmp_path / "rigs" / "active"
+    active.mkdir(parents=True)
+    (active / "octacam_config.toml").write_text("[gui]\n")
+    controller, app = _save_client(tmp_path, active)
+    cams = [
+        {"serial": EMULATED_SERIALS[0], "center_x": True, "center_y": True},
+        {"serial": EMULATED_SERIALS[1], "center_x": False, "center_y": False},
+    ]
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/config/save",
+                json={"target": "active", "save_sensor": False, "cameras": cams},
+            )
+            assert r.status_code == 200, r.text
+            toml = (active / "octacam_config.toml").read_text()
+            assert "center_x = true" in toml
+            # The saved config is adopted live, re-applying centering.
+            sysinfo = client.get("/api/system").json()
+            assert sysinfo["cameras"][0]["center_x"] is True
+            assert sysinfo["cameras"][1]["center_x"] is False
     finally:
         controller.close()
 
@@ -860,3 +1238,218 @@ def test_client_is_ready_for_tracks_unsent_frames():
     # Draining the pending dict (what sender() does on each wakeup) clears it.
     client.frames.clear()
     assert client.is_ready_for(0)
+
+
+def test_preview_factor_policy():
+    """Adaptive decimation: a client that sends nothing is unchanged; a normal
+    tile may only go coarser than the 640 baseline; a focused tile may go
+    finer, bounded to a mid resolution while recording."""
+    from octacam.web.app import _DEFAULT_VIEW, _preview_factor, _ViewSpec
+
+    L = 2048  # sensor long edge; baseline ceil(2048/640) = 4
+    # Default/legacy spec == today's baseline (backward compatible).
+    assert _preview_factor(L, L, _DEFAULT_VIEW, False) == 4
+    # A small unfocused tile sends less data (coarser)...
+    assert _preview_factor(L, L, _ViewSpec(need=300), False) == 7
+    # ...but a large unfocused tile is still capped at the baseline, so a HiDPI
+    # client can't silently upgrade every camera above today's cost.
+    assert _preview_factor(L, L, _ViewSpec(need=1500), False) == 4
+    # A focused (maximized) tile may exceed the baseline, up to the sensor.
+    assert _preview_factor(L, L, _ViewSpec(need=1500, full=True), False) == 1
+    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), False) == 1
+    # While recording, a focused tile is bounded so the preview encode can't
+    # starve the writer (ceil(2048/1280) = 2 -> 1024 px <= 1280 cap)...
+    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), True) == 2
+    # ...and the cap is a true ceiling for mid-band regions too (round() would
+    # leak factor 1 = full res).
+    assert _preview_factor(1600, 1600, _ViewSpec(need=100000, full=True), True) == 2
+    # A cropped focused tile picks the factor from the CROP's long edge (2nd
+    # arg), not the sensor's, so a small crop is delivered near 1:1 (full detail)
+    # while a bigger crop still decimates to about the requested size.
+    assert _preview_factor(L, 400, _ViewSpec(need=400, full=True), False) == 1
+    assert _preview_factor(L, 800, _ViewSpec(need=400, full=True), False) == 2
+
+
+def test_client_apply_view_is_tolerant():
+    """apply_view stores per-camera specs and never raises on garbage input."""
+    from octacam.web.app import _DEFAULT_VIEW, _Client, _ViewSpec
+
+    client = _Client(Mock())
+    client.apply_view(
+        {
+            "type": "view",
+            "cameras": {
+                "0": {"want": True, "need": 512, "full": True,
+                      "crop": {"x": 10, "y": 20, "w": 300, "h": 400}},
+                "1": {"want": False},
+                "2": {"need": -5},  # invalid need -> treated as baseline (None)
+                "4": {"crop": {"x": 0, "y": 0, "w": 0, "h": 5}},  # bad crop -> None
+                "bad": {"need": 100},  # non-int key -> skipped
+                "3": "notadict",  # non-dict entry -> skipped
+            },
+        }
+    )
+    assert client.view_for(0) == _ViewSpec(
+        want=True, need=512, full=True, crop=(10, 20, 300, 400)
+    )
+    assert client.view_for(1).want is False
+    assert client.view_for(2).need is None
+    assert client.view_for(4).crop is None  # malformed crop dropped
+    assert client.view_for(9) is _DEFAULT_VIEW  # never set -> default
+    # Malformed top-level payloads are ignored, not raised.
+    client.apply_view({"cameras": "nope"})
+    client.apply_view({})
+
+
+def test_cap_variants_bounds_encode_count():
+    """Beyond the per-camera cap, the priciest extra variants are demoted to the
+    shared full-frame baseline (never cross-merged), so encode count stays
+    bounded and no client is dropped."""
+    from octacam.web.app import (
+        MAX_PREVIEW_VARIANTS_PER_CAMERA,
+        PREVIEW_MAX_DIM,
+        _AppState,
+    )
+
+    W = H = 2048
+    baseline_f = math.ceil(W / PREVIEW_MAX_DIM)  # 4
+    baseline_key = ((0, 0, W, H), baseline_f)
+    # Six distinct (crop, factor) variants — more than the cap of 4.
+    groups = {
+        baseline_key: ["a"],
+        ((0, 0, 400, 400), 1): ["b"],
+        ((0, 0, 2048, 2048), 1): ["c"],  # full res — priciest, must demote
+        ((0, 0, 1600, 1600), 1): ["d"],
+        ((100, 100, 1200, 1200), 1): ["e"],
+        ((0, 0, 800, 800), 1): ["f"],
+    }
+    total = sum(len(v) for v in groups.values())
+    _AppState._cap_variants(groups, W, H, W)
+    assert len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA
+    assert sum(len(v) for v in groups.values()) == total  # nobody dropped
+    assert baseline_key in groups  # demotion target survives
+    # The priciest full-res crop was demoted onto the baseline (client folded in).
+    assert ((0, 0, 2048, 2048), 1) not in groups
+    assert "c" in groups[baseline_key]
+
+
+def test_view_message_selects_resolution_and_pauses(client):
+    """A `view` message maximizes one camera to full resolution and pauses the
+    other: the server sends full-res frames for the focused camera and stops
+    sending the paused one."""
+    import cv2
+
+    cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
+    long0 = max(cams[0]["width"], cams[0]["height"])
+    assert long0 > 640, "emulator sensor should exceed the preview cap"
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "view",
+                    "cameras": {
+                        "0": {"want": True, "need": 100000, "full": True},
+                        "1": {"want": False},
+                    },
+                }
+            )
+        )
+        full_seen = False
+        cam1_after_full = 0
+        for _ in range(150):
+            message = ws.receive()
+            buf = message.get("bytes")
+            if not buf:
+                continue
+            index = buf[2]  # header byte 2 is the camera index
+            jpeg = np.frombuffer(buf[FRAME_HEADER.size :], np.uint8)
+            image = cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE)
+            if index == 0 and max(image.shape) == long0:
+                full_seen = True  # only reachable with the view spec applied
+            elif full_seen and index == 1:
+                # A stale pre-view frame arrives strictly before the first
+                # full-res frame (later tick), so any cam-1 frame after that
+                # means the pause was ignored.
+                cam1_after_full += 1
+            if full_seen and _ > 80:
+                break
+
+    assert full_seen, "camera 0 never reached full resolution after the view"
+    assert cam1_after_full == 0, "paused camera 1 kept sending frames"
+
+
+def test_view_message_server_side_crop(client):
+    """A `view` message with a crop makes the server send only that sub-rectangle
+    (reported in the frame header) rather than the whole sensor."""
+    import cv2
+
+    cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
+    w, h = cams[0]["width"], cams[0]["height"]
+    # A centered quarter-area crop, requested at ~1:1 (need == crop long edge).
+    cx, cy, cw, ch = w // 4, h // 4, w // 2, h // 2
+
+    with client.websocket_connect("/api/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "view",
+                    "cameras": {
+                        "0": {
+                            "want": True,
+                            "full": True,
+                            "need": max(cw, ch),
+                            "crop": {"x": cx, "y": cy, "w": cw, "h": ch},
+                        },
+                    },
+                }
+            )
+        )
+        seen = None
+        for _ in range(150):
+            message = ws.receive()
+            buf = message.get("bytes")
+            if not buf or buf[2] != 0:  # header byte 2 is the camera index
+                continue
+            (_v, _k, _i, _f, _n, _t, _fps, _d, hx, hy, hcw, hch, hsw, hsh) = (
+                FRAME_HEADER.unpack(buf[: FRAME_HEADER.size])
+            )
+            if (hx, hy, hcw, hch) == (cx, cy, cw, ch):
+                jpeg = np.frombuffer(buf[FRAME_HEADER.size :], np.uint8)
+                seen = (cv2.imdecode(jpeg, cv2.IMREAD_GRAYSCALE), hsw, hsh)
+                break
+
+        assert seen is not None, "server never sent the requested crop"
+        image, hsw, hsh = seen
+        assert (hsw, hsh) == (w, h)  # header reports the full sensor size
+        # need == crop long edge -> factor 1 -> the crop is sent at 1:1.
+        assert image.shape == (ch, cw)
+
+
+# --------------------------------------------------------------------------- #
+# /api/system exposes the update notice for the GUI banner. The background PyPI
+# probe is skipped under the test suite (PYTEST_CURRENT_TEST), so it defaults to
+# None; a notice is injected via the app.state test seam to check surfacing.
+
+
+def test_system_update_defaults_to_none(client):
+    data = client.get("/api/system").json()
+    assert "update" in data
+    assert data["update"] is None  # no unattended network call under pytest
+
+
+def test_system_surfaces_injected_update_notice(client):
+    from octacam.updates import UpdateNotice
+
+    client.app.state.app_state._update_notice = UpdateNotice(
+        current="0.3.0",
+        latest="0.9.0",
+        update_available=True,
+        install_method="uv-tool",
+        command="uv tool upgrade octacam",
+        note="",
+    )
+    data = client.get("/api/system").json()
+    assert data["update"]["available"] is True
+    assert data["update"]["latest"] == "0.9.0"
+    assert data["update"]["command"] == "uv tool upgrade octacam"

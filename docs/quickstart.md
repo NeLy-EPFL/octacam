@@ -1,160 +1,99 @@
 # Quickstart
 
-Get octacam running and capture your first recording — first with emulated
-cameras (no hardware needed), then the same steps on a real rig.
-
-If octacam isn't installed yet, see [Installation](installation.md). In short,
-with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv tool install git+https://github.com/NeLy-EPFL/octacam.git
-```
-
-The Basler pylon runtime, OpenCV, and ffmpeg are bundled, so a Basler rig — and
-the emulator below — work out of the box. (FLIR / Teledyne cameras need the
-Spinnaker SDK installed separately; see [Camera backends](guide/backends.md).)
+This walks through octacam end to end: preview, record, and archive — first with
+emulated cameras (no hardware needed), then on a real rig.
 
 ## 1. Try it with no hardware
 
-Basler's runtime ships a camera emulator. Set `PYLON_CAMEMU` to the number of
-fake cameras and launch the GUI with the bundled emulator config (from a clone of
-the repository):
+Basler's runtime includes a camera emulator. Set `PYLON_CAMEMU` to the number of
+fake cameras and launch the GUI with the bundled emulator config:
 
 ```bash
-PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras
+PYLON_CAMEMU=8 octacam gui configs/emulate_basler
 ```
 
-Your default browser opens to `http://127.0.0.1:8765/` with eight synthetic
-cameras. You can preview, adjust the layout, and record exactly as you would with
-real hardware.
+Your browser opens to `http://127.0.0.1:8765` with eight synthetic cameras. You
+can preview, adjust the layout, and record exactly as you would with real
+hardware — recordings land in the directory the config's `[record]` section
+points at.
 
 !!! note
-    The emulator is the easiest way to learn the GUI and validate a config
-    before touching a rig. There is also a separate `fake` backend (synthetic
-    in-memory frames) used for tests — see [Camera backends](guide/backends.md).
+    The emulator is a great way to learn the GUI and validate a config before
+    touching a rig. The [`fake` backend](guide/backends.md) is a similar
+    synthetic option used for tests and CI.
 
-## 2. What a config directory is
+## 2. Check your rig
 
-Every command takes a **config directory**: a folder holding one
-`octacam_config.toml` (camera names, display layout, GUI/encoder defaults, opt-in
-plugins, and the camera [`backend`](guide/backends.md)) plus one per-camera sensor
-file named by serial number.
+On a real rig, first confirm octacam sees your install and cameras:
+
+```bash
+octacam doctor              # toolchain + all detected cameras
+octacam doctor <config_dir> # …and validate a specific rig config
+```
+
+`doctor` lists detected cameras and bundled plugins, and checks the encoder,
+storage, and runtime for problems — cross-checking the cameras a config declares
+against the ones actually attached. It never opens a camera, so it is safe to
+run while a session is live. See [`doctor` in the CLI reference](reference/cli.md#doctor).
+
+## 3. What is a config directory?
+
+Most commands take a **config directory**: a folder holding one
+`octacam_config.toml` (camera names, display layout, recording/encoder/transfer
+settings, and the [camera backend](guide/backends.md)) plus one per-camera sensor
+file — `<serial>.pfs` for Basler, `<serial>.txt` (native GenApi TSV) for FLIR.
 
 ```
 configs/my_rig/
-├── octacam_config.toml     # names, layout, [gui] defaults, [grid]/[nas], plugins
+├── octacam_config.toml     # names, layout, [record]/[transcode]/[transfer]/…
 ├── 40001978.pfs            # per-camera sensor parameters (Basler)
 ├── 40002335.pfs
 └── …
 ```
 
-The sensor-file extension depends on the backend:
+See [configs/](https://github.com/NeLy-EPFL/octacam/tree/main/configs) for
+real examples, and the [Configuration reference](guide/configuration.md) for
+every key.
 
-| `backend` | SDK | per-camera parameter file |
-| --------- | --- | ------------------------- |
-| `basler` (default) | pypylon (bundled) | `<serial>.pfs` |
-| `flir` | Spinnaker / PySpin | `<serial>.json` |
-| `fake` | none (in-memory) | `<serial>.fake` |
-
-The config is parsed tolerantly — a missing file, section, or field just falls
-back to a default rather than failing. With no `[[cameras]]` entries, every
-detected camera is used. See [Configuration](guide/configuration.md) for every
-key, and [`configs/`](https://github.com/NeLy-EPFL/octacam/tree/main/configs) for
-real examples.
-
-!!! tip
-    To confirm a rig's cameras are detected before launching, list them:
-
-    ```bash
-    octacam list-cameras                 # Basler (default backend)
-    octacam list-cameras --backend flir  # FLIR / Teledyne
-    ```
-
-## 3. Preview and record in the GUI
-
-On a real rig, point `gui` at your config directory:
+## 4. Preview and record
 
 ```bash
 octacam gui <config_dir>
 ```
 
-The GUI opens in your browser. Use the tabs to:
+The GUI opens in your browser. Use the tabs to frame each camera (**View**),
+tune exposure/gain (**Camera**), and start/stop recording (**Record**). Frames
+are written to video as you record. See the [Web GUI guide](guide/gui.md).
 
-- **View** — frame and arrange each camera (rotate / flip / position).
-- **Camera** — tune exposure, gain, and the ROI (width/height/offset).
-- **Record** — set fps, duration, and the save directory, then start/stop a
-  recording. Live preview keeps running while you record.
-
-An enabled plugin (e.g. flywheel, twophoton) adds its own tab; see
-[Plugins](guide/plugins.md). Enable one per launch with `--plugin <name>`.
-
-!!! note "One octacam per rig"
-    A rig's cameras can only be opened by one process at a time, so octacam takes
-    an instance lock on the config directory: a second `octacam gui` for the same
-    rig is refused (on any `--port`). Bind address and port are configurable with
-    `--host` / `--port` (default `127.0.0.1:8765`); pass `--no-browser` to skip
-    the automatic browser launch.
-
-## 4. Record headlessly
-
-For a script or a remote box with no browser, record straight from the command
-line. Options left unset fall back to the config's `[gui]` defaults:
+Prefer no browser (a script, or a remote box)? Record headlessly:
 
 ```bash
 octacam record <config_dir> --duration 10 --fps 100
 ```
 
-octacam paces a **software** trigger at `--fps` by default; pass
-`--trigger hardware` to use the trigger source configured in each camera's sensor
-file instead. When it finishes, `record` prints one output file path per camera
-on stdout. See [Recording](guide/recording.md) for every option.
+Either way, each recording writes its videos, a `recording_summary.json`, and a
+snapshot of the rig config into its own folder. See [Recording](guide/recording.md).
 
-## 5. What a recording produces
+## 5. Archive everything
 
-A recording writes one file per camera into the save directory, alongside a
-summary:
+Turn the day's recordings into transcoded videos, composite grid videos, and
+copies on shared storage — one command, no paths to type:
 
-- **`<camera_name>.mkv`** per camera — H.264 (libx264), true monochrome 4:0:0.
-  This is the default `x264` codec; `--codec raw` dumps Mono8 for later
-  transcoding instead.
-- **`recording_summary.json`** — per-camera fps, start timestamp, and which frame
-  indices were dropped, plus the session start time and recording settings.
-- A per-frame timestamp CSV per camera **only** when you opt in with
-  `--save-frame-timestamps` (off by default).
+```bash
+octacam process --all
+```
 
-!!! note
-    After a successful (non-aborted) recording, the trailing 3-digit group of the
-    save directory auto-increments — e.g. `001-bhv` → `002-bhv` — so the next
-    recording lands in a fresh folder.
+octacam remembers where it recorded, so `--all` processes every recent recording.
+You can also pass explicit folders, or use `--last` / `--last session`. See
+[Processing recordings](guide/processing.md).
 
-The `dropped` count in the summary reflects only frames the encoder queue could
-not accept (the host couldn't keep up), not frames the camera or USB transport
-never delivered — enable `--save-frame-timestamps` and inspect the inter-frame
-gaps to find those.
+## Working remotely
 
-## Working remotely over SSH
-
-Running octacam on a rig you reach over SSH? The single WebSocket that carries
-preview and control tunnels cleanly, so forward the port to your laptop:
+Running octacam on a rig you reach over SSH? Tunnel the GUI to your laptop:
 
 ```bash
 ssh -L 8765:127.0.0.1:8765 <rig-hostname> octacam gui <config_dir>
 # then open http://localhost:8765 in your browser
 ```
 
-octacam detects the SSH session and skips the automatic browser launch (the
-browser would otherwise open on the rig).
-
-## Next steps
-
-Once you have recordings, turn them into compressed videos, composite grids, and
-copies on shared storage:
-
-```bash
-octacam transcode --last   # transcode the most recent recording — no paths to type
-```
-
-See [Processing recordings](guide/processing.md) for the full transcode / grid /
-NAS workflow, or the [CLI reference](reference/cli.md) for every command and flag.
-</content>
-</invoke>
+More on this in the [Web GUI guide](guide/gui.md#remote-operation-over-ssh).

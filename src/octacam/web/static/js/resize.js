@@ -29,7 +29,12 @@ export function initSidebarResize() {
 
   // Cap the panel so the grid can never be squeezed away entirely.
   const maxWidth = () => Math.min(680, Math.round(window.innerWidth * 0.6));
-  const clampW = (w) => Math.max(MIN, Math.min(maxWidth(), Math.round(w)));
+  // Relax the 240px floor on a narrow viewport (where MIN would otherwise exceed
+  // the whole window) so the width math stays sane; the CSS breakpoint stacks
+  // the panel below the grid at phone widths regardless.
+  const minWidth = () => Math.min(MIN, Math.max(140, window.innerWidth - 80));
+  const clampW = (w) =>
+    Math.max(minWidth(), Math.min(maxWidth(), Math.round(w)));
   const apply = (w) => root.style.setProperty("--sidebar-width", `${w}px`);
   const current = () =>
     parseInt(getComputedStyle(root).getPropertyValue("--sidebar-width"), 10);

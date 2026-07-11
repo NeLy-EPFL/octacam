@@ -1,60 +1,126 @@
 # Configuration
 
-A **config directory** describes one rig. It holds two kinds of file:
+A **config directory** describes one rig. It holds:
 
-- one `octacam_config.toml` — the camera [backend](backends.md), the camera list
-  and display layout, GUI/recording defaults, opt-in [plugins](plugins.md), and
-  the grid/NAS post-processing settings;
-- one **per-camera sensor parameter file** per camera — `<serial>.pfs` for
-  Basler, `<serial>.json` for FLIR, `<serial>.fake` for the fake backend —
-  holding that camera's exposure, gain, ROI, and trigger settings.
+- one `octacam_config.toml` — camera names, display layout, and the
+  recording/encoding/transfer settings, plus the [camera backend](backends.md);
+- one per-camera **sensor parameter file** — `<serial>.pfs` for Basler,
+  `<serial>.txt` (the native GenApi feature-persistence TSV) for FLIR/GenICam,
+  written by the GUI's *Save…* dialog.
 
-You point every command at a config directory: `octacam gui <config_dir>`,
-`octacam record <config_dir>`, and `octacam transcode --config <config_dir>`.
+Everything below is optional and has a sensible default — an empty or missing
+`octacam_config.toml` uses all detected cameras with defaults. octacam parses the
+file **leniently**: a malformed value is warned about and falls back to its
+default rather than crashing the rig.
 
-Everything in `octacam_config.toml` is optional and has a sensible default: a
-missing or empty file simply uses **all detected cameras** with default
-settings. See [`configs/`](https://github.com/NeLy-EPFL/octacam/tree/main/configs)
-for complete, working examples.
+See [configs/](https://github.com/NeLy-EPFL/octacam/tree/main/configs) for
+complete, working examples.
 
-!!! info "Parsing is deliberately tolerant"
-    The loader never raises. A malformed file, section, or field is logged as a
-    warning and replaced with its default, so a typo in the config can never stop
-    the rig from starting. Unknown keys are ignored.
+## Scaffolding a config
 
-## Editing the config
+You rarely have to write the file by hand. `octacam config` walks you through it:
+it auto-detects the connected cameras (through the backend cascade, so a mixed
+Basler + FLIR + GenICam rig is picked up in one go), prompts for the record and
+transfer settings, writes an `octacam_config.toml`, and snapshots each camera's
+current sensor parameters into a per-camera file.
 
-You rarely need to write the whole file by hand. The web GUI's **View** and
-**Camera** tabs tune the per-camera display layout and sensor parameters against
-a live preview, and its **Save…** dialog writes them back. A GUI save
-round-trips through the raw TOML and patches only the per-camera display fields
-(and names) it changed — your `[gui]`, `[[plugins]]`, `[grid]`, and `[nas]`
-sections are preserved verbatim, and every write is atomic (temp file +
-rename), so a crash can never leave a truncated config behind.
+```bash
+octacam config <config_dir>    # or omit the dir to be prompted for a name
+```
+
+By default the wizard opens each detected camera once to save its current sensor
+parameters into a `<serial>.pfs` (Basler) or `<serial>.txt` (FLIR/GenICam) file. A
+camera that is busy — held by a live session — is skipped with a warning; you
+can capture its parameters later from the GUI's *Save…* dialog. Pass
+`--no-snapshot-params` to skip that step entirely (enumeration only, no camera is
+opened). Pass `--backend basler|flir|spinnaker|pycameleon|fake` to pin
+the rig to one backend instead of auto-detecting, or `--force` to overwrite an
+existing file. The wizard
+deliberately leaves the **visual**
+settings — per-camera window placement, rotation, and the grid — to `octacam
+gui`, which tunes them against a live preview; run it next on the new directory.
+Everything the wizard writes stays hand-editable afterward.
 
 ## Top level
 
 ```toml
-backend = "basler"   # "basler" (default) | "flir" | "fake"
+# backend = "auto"   # "auto" (default) | "basler" | "flir" | "spinnaker" | "pycameleon" | "fake"
+```
+
+`backend` is optional. Omit it (or set `"auto"`) and the rig runs the preference
+cascade: each camera is claimed by the best available driver that sees it (vendor
+SDK for Basler/FLIR → the Spinnaker C-API tier → the always-present pycameleon
+floor), so Basler, FLIR, and other GenICam cameras can run together in one config,
+each keeping its own parameter-file format. Set a concrete value to pin the rig
+to a single backend. See [Camera backends](backends.md).
+
+## `[record]`
+
+Controls capture and how frames are written.
+
+```toml
+[record]
+fps = 100.0
+duration = 5.0
+duration_unit = "seconds"      # frames | seconds | minutes | hours
+trigger_source = "software"    # software | managed | external
+
+directory = "/data/octacam"
+relative_directory = "%y%m%d-genotype/Fly1/001-bhv"   # strftime template
+
+save_method = "ffmpeg"         # ffmpeg | raw
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+save_transformed = true
+save_timestamps = false
 ```
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `backend` | `"basler"` | Which camera SDK this rig uses — one vendor per config directory. Any other value warns and falls back to `basler`. See [Camera backends](backends.md). |
+| `fps` | `100.0` | Frame rate. |
+| `duration` | `5.0` | Recording length, in `duration_unit`. |
+| `duration_unit` | `"seconds"` | `frames` \| `seconds` \| `minutes` \| `hours`. |
+| `trigger_source` | `"software"` | `software`, `managed` (octacam drives the hardware trigger), or an `external` hardware trigger. |
+| `preview_trigger_source` | `"auto"` | How preview is triggered so it approximates the recording: `auto` (mirror `trigger_source`), `software`, or `free_running`. |
+| `directory` | `"./"` | Base save directory. |
+| `relative_directory` | `""` | Sub-path appended to `directory`; a `strftime` template (e.g. `%y%m%d/…`), so trials sort into a date/subject/trial tree. |
+| `save_method` | `"ffmpeg"` | `ffmpeg` (encoded video) or `raw` (a `.raw` byte dump per camera). |
+| `ffmpeg_params` | ultrafast x264, see above | Encoder args used at record time. |
+| `save_transformed` | `true` | Bake each camera's rotation/flips into the file (see [Recording](recording.md#transformed-vs-raw-frames)). |
+| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`) covering all cameras. |
 
-The three backends and their per-camera parameter-file extensions:
+## `[transcode]`
 
-| `backend` | Driver | Parameter file |
+Encoder args `octacam process` uses to re-encode recordings to archival mp4.
+Usually a slower, higher-quality preset than the record-time params.
+
+```toml
+[transcode]
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+```
+
+## `[transfer]`
+
+Where `octacam process` copies finished outputs. Omit the whole section to
+disable transfer.
+
+```toml
+[transfer]
+directory = "/mnt/store/matthias"    # strftime %-codes expand here too
+checksum = true                      # content-verify each copy (default)
+```
+
+| Key | Default | Meaning |
 | --- | --- | --- |
-| `basler` | pypylon (bundled) | `<serial>.pfs` |
-| `flir` | Spinnaker SDK + PySpin (installed separately) | `<serial>.json` |
-| `fake` | in-memory synthetic frames (for testing) | `<serial>.fake` |
+| `directory` | `""` | Destination base folder; recordings mirror into it under their relative directory. Blank disables transfer. |
+| `checksum` | `true` | blake2b content-verify each copy. `false` = faster size-only verify. |
+
+See [Processing → Transfer](processing.md#transfer).
 
 ## `[[cameras]]`
 
-One entry per camera, keyed by serial number. Pins each camera's **name** and
-its place in the preview and grid layout. With **no** `[[cameras]]` entries,
-every detected camera is used with auto-assigned names.
+One entry per camera, keyed by serial number. Pins each camera's **name** and its
+place in the preview/grid layout. With no `[[cameras]]` entries, every detected
+camera is used with auto-assigned names and a default layout.
 
 ```toml
 [[cameras]]
@@ -71,202 +137,64 @@ window_height = 0.25
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `serial_number` | — (required) | The camera's serial number. An unquoted integer serial is coerced to a string. |
-| `name` | `""` | Display name; also the name you reference in a `[grid]` layout. Becomes the video filename stem (`<name>.mkv`), so it must be a single safe path segment. |
-| `scale_x`, `scale_y` | `1.0` | Preview scale on each axis. A **negative** value is a flip (horizontal / vertical); the magnitude is ignored. |
-| `rotation_deg` | `0.0` | Display rotation, clockwise, in 90° steps. |
-| `window_x`, `window_y` | `-1.0` | Preview-tile top-left position, as a fraction of the canvas. `-1` means auto-place. |
-| `window_width`, `window_height` | `-1.0` | Preview-tile size, as a fraction of the canvas. `-1` means auto-size. |
-
-!!! note "Flips and rotation are baked into recordings"
-    `scale_x`/`scale_y` (as flips) and `rotation_deg` form the camera's *display
-    transform*. When a recording is made in the default `display` record form,
-    that transform is baked into the video pixels; only 90° rotation steps can be
-    baked (a non-multiple of 90 is dropped with a warning). See
-    [Recording](recording.md).
-
-Duplicate serial numbers, and duplicate or unsafe names (`..`, path separators),
-are skipped with a warning; an unsafe name falls back to the serial number.
-
-## `[gui]`
-
-Defaults that seed the web GUI's controls and the `octacam record` fallbacks.
-Every field is optional.
-
-```toml
-[gui]
-fps_default = 100.0
-duration_default = 5.0
-duration_unit_default_index = 0        # 0 = seconds, 1 = minutes, 2 = hours
-save_directory_default = "/data/octacam/%y%m%d/Fly1/001-bhv"
-trigger_source_default_index = 0       # 0 = software, 1 = external
-record_form_default = "display"        # "display" | "sensor"
-save_frame_timestamps_default = false
-```
-
-### Recording defaults
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `fps_default` | `100.0` | Initial frame rate. |
-| `fps_min`, `fps_max` | `0.01`, `1000.0` | Allowed frame-rate range in the GUI. |
-| `duration_default` | `5.0` | Initial recording length, in the selected unit. |
-| `duration_min`, `duration_max` | `0.01`, `1000000.0` | Allowed duration range. |
-| `duration_unit_default_index` | `0` | Duration unit dropdown: `0` = seconds, `1` = minutes, `2` = hours. |
-| `save_directory_default` | `"./"` | Save-directory template. `strftime` codes (e.g. `%y%m%d`) are expanded **when the config is parsed**. |
-| `trigger_source_default_index` | `0` | Trigger dropdown: `0` = `software` (octacam paces a software trigger at `fps`), `1` = `external` (an outside master fires the cameras). See [Recording](recording.md). |
-| `record_form_default` | `"display"` | `display` bakes each camera's rotation/flips into the video; `sensor` saves the raw, untransformed image. |
-| `save_frame_timestamps_default` | `false` | When true, also writes a per-frame timestamp CSV per camera (debugging only). |
-
-### Encoder defaults (x264 codec)
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `video_writer_default` | `""` | Explicit codec key, `"x264"` or `"raw"`. Preferred over the positional index below. |
-| `video_writer_default_index` | `0` | Positional codec fallback: `0` = `x264` (H.264 MKV), `1` = `raw` (Mono8 dump). |
-| `crf_default` | `18` | libx264 quality (lower is better; 0 = lossless). |
-| `preset_default` | `"ultrafast"` | libx264 speed preset used at capture time. |
-| `pix_fmt_default` | `"gray"` | Pixel format (true monochrome 4:0:0). |
-| `x264_params_default` | `""` | Extra `-x264-params` passed verbatim to ffmpeg (e.g. `"keyint=30:scenecut=0"`). |
+| `serial_number` | — (required) | The camera's serial number. |
+| `name` | `""` | Display name; also the name you use in grid layouts. |
+| `scale_x`, `scale_y` | `1.0` | Preview scale. |
+| `rotation_deg` | `0.0` | Display rotation (baked into recordings when `save_transformed`). |
+| `window_x`, `window_y`, `window_width`, `window_height` | `-1.0` | Preview tile placement as fractions of the canvas; `-1` means auto-place. |
+| `center_x`, `center_y` | `false` | Auto-center the sensor ROI on that axis: OffsetX/OffsetY are derived from the sensor and ROI size and recomputed when the ROI changes. |
 
 !!! tip
-    These x264 defaults are the fast, near-lossless *capture* settings. The
-    slower, higher-compression pass happens offline in
-    [`octacam transcode`](processing.md).
+    You normally set these from the GUI's **View** and **Camera** tabs and save
+    them back, rather than editing the TOML by hand.
 
-### UI cadence and layout
+## `[[visualization]]`
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `display_refresh_interval_ms` | `33` | Preview refresh cadence (~30 Hz). |
-| `record_countdown_timer_interval_ms` | `1000` | Recording countdown tick. |
-| `check_record_started_timer_interval_ms` | `100` | Poll interval for "recording started". |
-| `dock_min_width`, `dock_max_width` | `200`, `300` | Side-panel width bounds. |
-| `save_dir_edit_height_factor` | `4` | Save-directory text box height factor. |
-
-## `[grid]`
-
-Defines the composite **grid video** `octacam transcode`/`octacam grid` build
-from a folder's per-camera videos. See [Processing](processing.md).
+Defines the composite **grid** video(s) `octacam process` builds. List several
+entries to produce several grids. See
+[Processing → Grid video](processing.md#grid-video).
 
 ```toml
-[grid]
-default = true    # auto-build grid.mp4 when a --config is passed to `octacam transcode`
+[[visualization]]
+name = "grid.mp4"            # output filename inside each recording folder
 layout = [
     ["camera_LF", "",          "camera_RF"],
     ["camera_LM", "camera_F",  "camera_RM"],
     ["camera_LH", "",          "camera_RH"],
 ]
+# ffmpeg_params = ""         # optional per-grid encoder override
 ```
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `default` | `false` | When true and a `--config` is supplied to `octacam transcode`, a `grid.mp4` is generated automatically (no `--grid` flag needed). |
-| `layout` | — (required for the section) | A 2-D array (rows × columns) of camera `name`s. `""` is a black fill cell. **All rows must have the same length.** |
-
-A layout cell naming a camera that is not in `[[cameras]]` is warned about and
-renders as a black tile. If the whole `[grid]` section is malformed (missing
-`layout`, ragged rows, non-string cells), it is dropped with a warning.
-
-## `[nas]`
-
-Where `octacam transcode`/`octacam nas` mirror finished outputs, preserving the
-directory tree. Omit the section (or leave `path` blank) to disable automatic
-NAS export.
-
-```toml
-[nas]
-path = "/mnt/nas/matthias"      # destination root
-local_base = "/home/nely/data/MD"  # local root stripped to mirror the tree
-verify = true                    # checksum each copy before promoting it
-```
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `path` | `""` | Destination root. Blank disables NAS export. |
-| `local_base` | `""` | Local root stripped from the recording path to compute the sub-path reproduced under `path`. Blank uses just the folder name. |
-| `verify` | `true` | Content-checksum each copied file before promoting it to its final name. `false` = faster size-only check. Overridden by `--nas-verify`/`--no-nas-verify`. |
+Each cell is a camera `name`; `""` is a black fill. All rows must have the same
+number of columns. With no `[[visualization]]`, a near-square layout is derived
+from the rig's cameras.
 
 ## `[[plugins]]`
 
-Enables opt-in serial-hardware [plugins](plugins.md). The default launch loads
-**none**. Two plugins ship with octacam: `flywheel` (Arduino stepper-motor
-controller) and `twophoton` (Arduino hardware camera trigger for a 2-photon
-rig). Their serial dependency (pyserial) ships by default, so no extra install
-is needed.
+Enables opt-in [plugins](plugins.md). The default launch loads none.
 
 ```toml
+# Bare names work too: plugins = ["flywheel"]
 [[plugins]]
 name = "flywheel"
-
-[plugins.options]
-device = "/dev/ttyACM0"
-baud = 115200
+options = { device = "/dev/ttyACM0", baud = 115200 }
 ```
 
-| Key | Meaning |
-| --- | --- |
-| `name` | Plugin name: `flywheel` or `twophoton` (the legacy alias `arduino` still resolves to `flywheel`). |
-| `[plugins.options]` | Optional per-plugin settings sub-table (e.g. `device`, `baud`; `twophoton` also takes `default_fps`, `default_duration_ms`). |
-
-A bare-name array is also accepted:
+## `[gui]`
 
 ```toml
-plugins = ["flywheel", "twophoton"]
+[gui]
+display_refresh_interval_ms = 33     # preview refresh cadence (~30 Hz)
+theme = "dark"                       # "dark" | "light" rig default; the per-browser toggle overrides it
 ```
 
-Plugins can also be enabled per launch with `--plugin <name>` on `gui`/`record`
-(repeatable, adds to the config selection), and disabled for one run with
-`--no-plugins`. Run `octacam list-plugins` to see which are available.
+## Validate a config
 
-## Per-camera sensor parameter files
+Check a directory before recording — this cross-checks declared vs detected
+cameras and resolves the save/transfer paths:
 
-Alongside `octacam_config.toml`, each camera has one **sensor parameter file**
-named after its serial number, holding the device-side settings (exposure, gain,
-ROI, trigger). The file format matches the active `backend`:
+```bash
+octacam doctor <config_dir>
+```
 
-| Backend | File | Format |
-| --- | --- | --- |
-| `basler` | `<serial>.pfs` | native pylon feature-persistence stream |
-| `flir` | `<serial>.json` | JSON (`params`, `trigger_mode`, `trigger_source`) |
-| `fake` | `<serial>.fake` | JSON (same shape as FLIR) |
-
-These files are written by the GUI's **Save…** dialog (from the values you tune
-in the **Camera** tab) and loaded when octacam opens a camera. The editable
-sensor parameters are:
-
-| GUI field | GenICam node | Notes |
-| --- | --- | --- |
-| `width`, `height` | `Width`, `Height` | Geometry; only writable while the camera is **not** grabbing (the GUI cycles the preview around the change). |
-| `exposure` | `ExposureTime` | Writable live. |
-| `gain` | `Gain` | Writable live. |
-| `offset_x`, `offset_y` | `OffsetX`, `OffsetY` | ROI origin; writable live. |
-
-!!! note "Missing parameter file"
-    If a camera's `<serial>.<ext>` is absent, octacam opens it at its current
-    on-device defaults and logs a warning — recording still works.
-
-!!! warning "Trigger source is normalized on save"
-    Live preview always drives the camera with a software trigger. When the
-    Save… dialog persists a parameter file it **restores the camera's original
-    (config) trigger source** and sets the frame-trigger mode back off, so a save
-    taken during a software-triggered preview never bakes `TriggerSource=Software`
-    into the file — which would otherwise make a later external-trigger recording
-    silently never start.
-
-Auxiliary `.pfs`/`.json` files in the directory whose stem is not a live camera
-serial (for example a shared `fictrac_camera_config.pfs`) are read but simply
-never match a camera, and are carried along when a new preset directory is
-created from the GUI.
-
-## Example configs
-
-The [`configs/`](https://github.com/NeLy-EPFL/octacam/tree/main/configs)
-directory ships complete rigs you can copy and adapt:
-
-| Directory | What it shows |
-| --- | --- |
-| `2p_1` | 7-camera Basler 2-photon behavior rig with a 3×3 `[grid]` and a `[nas]` template. |
-| `emulate_8_cameras` | 8 emulated Basler cameras — run hardware-free with `PYLON_CAMEMU=8 octacam gui configs/emulate_8_cameras`. |
-| `flir_example` | `backend = "flir"` with no pinned `[[cameras]]` (uses every detected FLIR); documents the `<serial>.json` parameter files. |
-| `scape_fly_facing_left_wide` | 8 Basler cameras, some mirrored via `scale_x = -1`, with a grid and NAS section. |
+See [`doctor`](../reference/cli.md#doctor).

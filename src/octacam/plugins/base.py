@@ -52,6 +52,26 @@ class OctacamPlugin(Protocol):
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
 
+    # Headless-record (CLI) start params. The GUI supplies each plugin's
+    # start-time slice from its tab; `octacam record` has no UI, so a plugin that
+    # must act at record start (e.g. arm a hardware trigger) contributes its slice
+    # here, built from the recording's fps/duration. None = nothing to contribute.
+    # See PluginManager.default_start_params.
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
+
+    # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
+    # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
+    # idle preview too, so the preview approximates the recording. It advertises
+    # this with drives_preview_trigger() -> True; the controller then arms the
+    # cameras in hardware-trigger mode and dispatches on_preview_start (arm the
+    # board indefinitely, strobing as the recording will) and on_preview_stop
+    # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
+    # plugin arm can block on a serial write + ack. params is the same
+    # {name: slice} shape as default_start_params / the recording hooks.
+    def drives_preview_trigger(self) -> bool: ...
+    def on_preview_start(self, params: dict | None) -> None: ...
+    def on_preview_stop(self) -> None: ...
+
     # ---- web contribution (optional) ----
     # client_id identifies the WebSocket connection a message/disconnect came
     # from, so a plugin can scope per-connection state (e.g. a hold-to-jog) to
@@ -95,6 +115,18 @@ class Plugin:
         pass
 
     def on_recording_stop(self, aborted: bool) -> None:
+        pass
+
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        return None
+
+    def drives_preview_trigger(self) -> bool:
+        return False
+
+    def on_preview_start(self, params: dict | None) -> None:
+        pass
+
+    def on_preview_stop(self) -> None:
         pass
 
     def api_router(self) -> APIRouter | None:
@@ -144,12 +176,45 @@ class PluginManager:
             except Exception:
                 log.exception("Plugin %s.%s failed", self._name(plugin), hook)
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict:
+        """Collect each plugin's headless-record start slice, keyed by name.
+
+        ``octacam record`` has no GUI to POST ``plugin_params``, so a plugin that
+        must act at record start (e.g. triggerbox arming the trigger board)
+        contributes its slice via :meth:`Plugin.default_start_params`. Plugins
+        returning ``None`` are omitted. The result mirrors the ``{name: params}``
+        shape the GUI sends, so it can be passed straight to ``start_recording``.
+        """
+        params: dict = {}
+        for plugin in self.plugins:
+            try:
+                slice_ = plugin.default_start_params(fps, duration_s)
+            except Exception:
+                log.exception(
+                    "Plugin %s.default_start_params failed", self._name(plugin)
+                )
+                slice_ = None
+            if slice_ is not None:
+                params[self._name(plugin)] = slice_
+        return params
+
     def status(self) -> dict:
         result: dict = {}
         for plugin in self.plugins:
+            name = self._name(plugin)
             try:
-                result[plugin.name] = {"ready": plugin.is_ready(), **plugin.status()}
+                ready = plugin.is_ready()
             except Exception:
-                log.exception("Plugin %s status failed", self._name(plugin))
-                result[self._name(plugin)] = {"ready": False}
+                log.exception("Plugin %s is_ready failed", name)
+                result[name] = {"ready": False}
+                continue
+            # Isolate the details call so its failure can't flip a known-ready
+            # plugin to not-ready, and put "ready" last so a plugin-supplied
+            # "ready" in status() can't shadow the authoritative is_ready().
+            try:
+                extra = plugin.status()
+            except Exception:
+                log.exception("Plugin %s status failed", name)
+                extra = {}
+            result[name] = {**extra, "ready": ready}
         return result

@@ -6,12 +6,18 @@ import { CameraGrid } from "./grid.js";
 import { RecordTab } from "./record.js";
 import { ViewTab } from "./view.js";
 import { CameraTab } from "./camera.js";
+import { BenchmarkTab } from "./diagnose.js";
 import { initSidebarResize } from "./resize.js";
-import { initTheme } from "./theme.js";
+import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
 import { DirPicker } from "./dirpicker.js";
+import { initShortcuts } from "./shortcuts.js";
+import { initUpdateBanner } from "./update.js";
 
-const MAX_EVENTS = 5;
+// The server replays a recent slice of its event backlog on (re)connect, so the
+// client keeps a generous scrollback to actually hold that history plus the
+// live tail; the panel (#events) is scrollable.
+const MAX_EVENTS = 200;
 const events = [];
 
 function addEvent(evt) {
@@ -35,18 +41,108 @@ function addEvent(evt) {
   list.scrollTop = list.scrollHeight;
 }
 
+// Wire the tab bar and its "priority+" overflow menu. Returns a reflow() the
+// caller runs once the set of tabs is final (plugin tabs are removed after this
+// is called), so the overflow packing is computed against the real tab list.
 function setupTabs() {
   const nav = document.getElementById("tabs");
+
+  // Tabs that don't fit the sidebar width collapse into a "⋯" dropdown, so the
+  // bar stays a single row no matter how many plugins contribute tabs. The
+  // active tab is always kept out of the menu.
+  const moreBtn = document.createElement("button");
+  moreBtn.type = "button";
+  moreBtn.id = "tabs-more";
+  moreBtn.className = "tabs-more";
+  moreBtn.setAttribute("aria-haspopup", "true");
+  moreBtn.setAttribute("aria-expanded", "false");
+  moreBtn.title = "More tabs";
+  moreBtn.textContent = "⋯";
+  moreBtn.hidden = true;
+  const menu = document.createElement("div");
+  menu.id = "tabs-menu";
+  menu.className = "tabs-menu";
+  nav.append(moreBtn, menu);
+
+  let order = null; // stable tab-button list, captured after plugin tabs settle
+  const closeMenu = () => {
+    menu.classList.remove("open");
+    moreBtn.setAttribute("aria-expanded", "false");
+  };
+
+  function reflow() {
+    if (!order) order = [...nav.querySelectorAll("button[data-tab]")];
+    // Put every tab back in the row (before the menu button) and measure.
+    for (const b of order) nav.insertBefore(b, moreBtn);
+    menu.replaceChildren();
+    moreBtn.hidden = true;
+    closeMenu();
+
+    const avail = nav.clientWidth;
+    const widths = order.map((b) => b.offsetWidth);
+    if (widths.reduce((a, w) => a + w, 0) <= avail) return; // all fit
+
+    moreBtn.hidden = false;
+    // Keep a contiguous prefix of tabs visible and overflow the rest, so tabs
+    // never reorder or leave a gap (stop at the first one that doesn't fit).
+    let used = moreBtn.offsetWidth;
+    let cut = order.length;
+    for (let i = 0; i < order.length; i++) {
+      if (used + widths[i] <= avail) used += widths[i];
+      else { cut = i; break; }
+    }
+    const visible = order.slice(0, cut);
+    // Keep the active tab visible: if it overflowed, evict trailing visible tabs
+    // until it fits, then show it at the end of the row.
+    const active = order.find((b) => b.classList.contains("active"));
+    if (active && !visible.includes(active)) {
+      while (visible.length && used + active.offsetWidth > avail) {
+        used -= visible.pop().offsetWidth;
+      }
+      visible.push(active);
+    }
+    for (const b of order) if (!visible.includes(b)) menu.appendChild(b);
+  }
+
   nav.addEventListener("click", (e) => {
+    if (e.target.closest("#tabs-more")) {
+      const open = menu.classList.toggle("open");
+      moreBtn.setAttribute("aria-expanded", String(open));
+      return;
+    }
     const btn = e.target.closest("button[data-tab]");
     if (!btn) return;
-    for (const b of nav.querySelectorAll("button")) {
+    for (const b of nav.querySelectorAll("button[data-tab]")) {
       b.classList.toggle("active", b === btn);
     }
     for (const panel of document.querySelectorAll(".tab")) {
       panel.classList.toggle("active", panel.id === `tab-${btn.dataset.tab}`);
     }
+    closeMenu();
+    reflow(); // pull the newly-active tab out of the overflow menu if it was in it
+    // Let tabs (incl. plugin tabs) react when they become visible — e.g. the
+    // triggerbox tab re-reads the Record-tab fps to redraw its timing diagram.
+    document.dispatchEvent(
+      new CustomEvent("tab-shown", { detail: { tab: btn.dataset.tab } })
+    );
   });
+
+  // Close the dropdown when clicking outside the tab bar.
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#tabs")) closeMenu();
+  });
+
+  // Re-pack when the sidebar is resized. reflow() never changes nav's own width
+  // (the menu is absolutely positioned), so this can't loop.
+  if (typeof ResizeObserver !== "undefined") {
+    let lastW = 0;
+    new ResizeObserver(() => {
+      const w = Math.round(nav.clientWidth);
+      if (w && w !== lastW) { lastW = w; reflow(); }
+    }).observe(nav);
+  }
+
+  return reflow;
 }
 
 function wsUrl() {
@@ -91,11 +187,19 @@ async function main() {
   initSidebarResize();
   const [system, snap] = await loadInitial();
 
+  // Apply the rig's configured default theme now that the config has loaded
+  // (a per-browser toggle choice in localStorage still wins).
+  applyConfigTheme(system.theme);
+
   const versionEl = document.getElementById("version");
   versionEl.textContent = `octacam ${system.version}`;
   versionEl.title = system.config_dir;
 
-  setupTabs();
+  // Read-only "a newer octacam is available" banner (dismissible; see update.js).
+  // The server computes system.update; octacam never self-updates from here.
+  initUpdateBanner(system.update);
+
+  const reflowTabs = setupTabs();
   // Show optional plugin tabs only when the plugin is loaded. A not-ready
   // plugin still shows its tab (with a "serial unavailable" notice and a
   // Reconnect button) so a missing/unplugged board is diagnosable. Plugin tab
@@ -104,17 +208,40 @@ async function main() {
   for (const el of document.querySelectorAll("[data-plugin]")) {
     if (!system.plugins?.[el.dataset.plugin]) el.remove();
   }
+  reflowTabs(); // pack the (now-final) tab set into the bar + overflow menu
 
   let cameraTab = null;
   let viewTab = null;
   let saveDialog = null;
   let dirPicker = null;
+
+  // The grid reports (via onViewChange) whenever the resolution/pause state the
+  // server should honor changes — a tile resized, maximized, or zoomed. Coalesce
+  // a burst of those into one WS message per animation frame, and skip the send
+  // when the composed spec is unchanged.
+  let viewRaf = 0;
+  let lastViewJson = "";
+  function sendViewNow() {
+    viewRaf = 0;
+    const cameras = grid.getViewSpec();
+    const json = JSON.stringify(cameras);
+    if (json === lastViewJson) return;
+    if (sock.send({ type: "view", cameras })) lastViewJson = json;
+  }
+  function scheduleViewSend() {
+    if (!viewRaf) viewRaf = requestAnimationFrame(sendViewNow);
+  }
+  // devicePixelRatio can change (browser zoom, dragging the window between
+  // monitors) with no element resize, so refresh the spec on window resize too.
+  window.addEventListener("resize", scheduleViewSend);
+
   const grid = new CameraGrid(document.getElementById("grid"), system.cameras, {
     onSelect: (i) => {
       cameraTab?.selectCamera(i);
       viewTab?.selectCamera(i);
     },
     onRename: (i, name) => cameraTab?.renameCamera(i, name),
+    onViewChange: scheduleViewSend,
   });
   viewTab = new ViewTab({
     cameras: system.cameras,
@@ -136,7 +263,13 @@ async function main() {
   let peerCount = 1; // browsers connected to the server (control is shared)
 
   const sock = new ReconnectingSocket(wsUrl(), {
-    onOpen: () => setConnectionMode("connected"),
+    onOpen: () => {
+      setConnectionMode("connected");
+      // A (re)connected socket starts with no server-side view state, so resend
+      // the current spec unconditionally.
+      lastViewJson = "";
+      scheduleViewSend();
+    },
     onClose: () =>
       setConnectionMode(
         serverStopped
@@ -170,6 +303,9 @@ async function main() {
     },
     notify,
   });
+  // Enable the "managed" trigger-source option only when a driving plugin is
+  // loaded (e.g. the triggerbox); the server computes this from plugin capability.
+  record.setManagedAvailable(!!system.managed_trigger_available);
 
   // Each plugin that ships a UI advertises its entry module + optional CSS in
   // /api/system; import it from the plugin's own /plugins/<name>/ folder and
@@ -214,6 +350,7 @@ async function main() {
       viewTab?.applyName(i, name);
     },
   });
+  const benchmark = new BenchmarkTab({ notify });
   saveDialog = new SaveDialog({
     grid,
     notify,
@@ -221,15 +358,22 @@ async function main() {
   });
   dirPicker = new DirPicker({
     notify,
-    onPick: (path) => record.setSaveDir(path),
-    getStart: () => record.getSaveDir(),
+    onPick: (path) => record.setRecordDir(path),
+    getStart: () => record.getRecordDir(),
   });
 
   // Establish an initial current camera so the grid highlight and both pickers
-  // agree from the start (and "Apply to: Selected" always has a target).
+  // agree from the start.
   if (system.cameras.length) grid.select(0);
 
-  // Connection has four modes: "connected", "reconnecting" (unexpected drop),
+  // Global keyboard shortcuts (one document-level listener; see shortcuts.js).
+  // Wired here, after grid/record/cameraTab/benchmark/plugins exist, so its
+  // bindings reach real, built controls; it drives the same buttons/grid
+  // methods the mouse does, inheriting their gating.
+  initShortcuts({ grid });
+
+  // Connection has five modes: "connecting" (initial handshake / manual
+  // reconnect, calm), "connected", "reconnecting" (unexpected drop),
   // "offline" (user disconnected, calm) and "stopped" (server shut down).
   function setConnectionMode(mode) {
     connMode = mode;
@@ -240,10 +384,13 @@ async function main() {
       banner.textContent = "Disconnected — reconnecting…";
       banner.classList.remove("hidden");
     } else if (mode === "stopped") {
-      banner.textContent = "Server stopped.";
+      // Actionable: the socket won't come back on its own, so point at the
+      // recovery (the relabelled Reconnect button reloads the page).
+      banner.textContent = "Server stopped — reload to reconnect.";
       banner.classList.remove("hidden");
     } else {
-      banner.classList.add("hidden"); // connected, or user-initiated offline
+      // connected, user-initiated offline, or the calm initial "connecting".
+      banner.classList.add("hidden");
     }
     banner.classList.toggle("stopped", mode === "stopped");
 
@@ -251,14 +398,22 @@ async function main() {
     connState.textContent =
       mode === "connected"
         ? "connected"
-        : mode === "stopped"
-          ? "server stopped"
-          : "disconnected";
-    connState.className = connected ? "online" : "offline";
+        : mode === "connecting"
+          ? "connecting…"
+          : mode === "stopped"
+            ? "server stopped"
+            : "disconnected";
+    connState.className =
+      mode === "connected"
+        ? "online"
+        : mode === "connecting"
+          ? "connecting"
+          : "offline";
 
     record.setConnected(connected);
     grid.setConnected(connected);
     cameraTab?.setConnected(connected);
+    benchmark.setConnected(connected);
     saveDialog?.setConnected(connected);
     dirPicker?.setConnected(connected);
     // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
@@ -272,8 +427,21 @@ async function main() {
     if (!connected) updatePeers(1);
 
     const disconnectBtn = document.getElementById("disconnect-btn");
-    disconnectBtn.textContent = mode === "offline" ? "Connect" : "Disconnect";
-    disconnectBtn.disabled = mode === "stopped";
+    disconnectBtn.textContent =
+      mode === "offline"
+        ? "Connect"
+        : mode === "stopped"
+          ? "Reconnect"
+          : "Disconnect";
+    disconnectBtn.title =
+      mode === "stopped"
+        ? "Reload the page to reconnect to the server"
+        : mode === "offline"
+          ? "Reconnect this browser to the server"
+          : "Disconnect this browser (the recording keeps running on the rig)";
+    // Stay clickable when stopped so recovery doesn't need the browser's own
+    // reload control; the click handler reloads the page in that mode.
+    disconnectBtn.disabled = false;
     document.getElementById("shutdown-btn").disabled = mode === "stopped";
   }
 
@@ -293,6 +461,7 @@ async function main() {
   }
 
   function applyCameraStats(cameras) {
+    const failed = [];
     cameras.forEach((c, i) => {
       const index = grid.indexBySerial.has(c.serial)
         ? grid.indexBySerial.get(c.serial)
@@ -302,7 +471,11 @@ async function main() {
         dropped: c.dropped,
         writerFailed: c.writer_failed,
       });
+      if (c.writer_failed) failed.push(c.name || `camera ${index}`);
     });
+    // Surface any writer failure as a persistent, prominent Record-tab banner
+    // (the grid badge covers the tiles; this covers the operator watching Record).
+    record.setWriterFailure(failed);
   }
 
   function handleJson(msg) {
@@ -313,15 +486,32 @@ async function main() {
           msg.state
         );
         record.applyState(msg);
+        benchmark.applyState(msg);
         grid.setRecording(recordingActive);
         cameraTab?.setRecording(recordingActive);
         if (Array.isArray(msg.cameras)) applyCameraStats(msg.cameras);
         break;
       case "settings":
         record.applySettings(msg);
+        benchmark.applySettings(msg);
+        break;
+      case "diagnostics":
+        benchmark.applyReport(msg);
+        break;
+      case "diagnostics_progress":
+        benchmark.applyProgress(msg);
         break;
       case "camera_params":
         cameraTab?.applyParams(msg);
+        break;
+      case "camera_features_dirty":
+        cameraTab?.applyFeaturesDirty(msg);
+        // Let plugin tabs (e.g. triggerbox's timing diagram) react to a camera
+        // feature change without coupling core to each plugin — the exposure or
+        // trigger delay they read may have just moved.
+        document.dispatchEvent(
+          new CustomEvent("camera-features-changed", { detail: { index: msg.index } })
+        );
         break;
       case "camera_name":
         cameraTab?.applyName(msg);
@@ -336,13 +526,19 @@ async function main() {
       case "twophoton_state":
         pluginTabs.get("twophoton")?.applyState(msg);
         break;
+      case "triggerbox_state":
+        pluginTabs.get("triggerbox")?.applyState(msg);
+        break;
     }
   }
 
   document.getElementById("disconnect-btn").addEventListener("click", () => {
-    if (connMode === "offline") {
+    if (connMode === "stopped") {
+      // The server is gone; a full reload re-runs loadInitial + the handshake.
+      location.reload();
+    } else if (connMode === "offline") {
       userDisconnected = false;
-      setConnectionMode("reconnecting");
+      setConnectionMode("connecting");
       sock.connect();
     } else {
       userDisconnected = true;
@@ -393,6 +589,11 @@ async function main() {
   });
 
   record.applyState(snap);
+  benchmark.applyState(snap);
+  // Show a calm "connecting…" state through the initial WS handshake, so a
+  // working HTTP page whose socket never upgrades reads as connecting rather
+  // than a dead-looking blank status.
+  setConnectionMode("connecting");
   sock.connect();
 }
 

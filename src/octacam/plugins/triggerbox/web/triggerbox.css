@@ -1,0 +1,184 @@
+/* triggerbox plugin styles. Served from /plugins/triggerbox/ and injected by the
+   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+
+/* Arduino state chip */
+.triggerbox-state {
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.triggerbox-state--running { color: var(--green); }
+.triggerbox-state--done    { color: var(--text-dim); }
+
+/* Small square icon button (add camera). */
+.btn-icon {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+/* ---- Firmware flash prompt ------------------------------------------- */
+/* Shown when the board's firmware doesn't match the sketch source (out of
+   date, incompatible, or blank) — offers a one-click compile + upload. */
+.triggerbox-fw-flash {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  font-size: 12.5px;
+}
+.triggerbox-fw-flash > span { flex: 1; color: var(--text); }
+.triggerbox-fw-flash .btn { white-space: nowrap; }
+.triggerbox-fw-log {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Camera lines + light channels ----------------------------------- */
+.triggerbox-section {
+  margin: 8px 0;
+}
+.triggerbox-section-head {
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.tb-cam-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.tb-field {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--text-dim);
+  gap: 2px;
+}
+.tb-field input {
+  width: 6em;
+}
+.tb-cam-pin {
+  align-self: center;
+}
+.tb-cam-remove {
+  align-self: center;
+}
+
+.tb-light-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+.tb-light-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.tb-light-mode {
+  max-width: 12em;
+}
+.tb-light-fields {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---- Frame-timing visualization -------------------------------------- */
+.triggerbox-timing {
+  margin: 8px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+}
+.triggerbox-timing-head {
+  justify-content: space-between;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.triggerbox-timing-viz {
+  width: 100%;
+}
+.tb-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+#triggerbox-timing-summary {
+  margin-top: 4px;
+}
+
+/* SVG marks — all theme-aware via the core :root variables. The diagram is
+   drawn at real pixel size (see _buildSvg), so these px sizes render 1:1. */
+.tb-lane    { fill: var(--panel-2); }
+.tb-trigger { fill: var(--accent); }
+.tb-led     { fill: var(--amber); }
+.tb-guard   { fill: var(--amber); opacity: 0.4; }
+.tb-pulse   { fill: var(--purple, #a970ff); }
+.tb-exposure { fill: var(--green); opacity: 0.78; }
+.tb-exposure--gov {
+  opacity: 1;
+  stroke: var(--text);
+  stroke-width: 1;
+}
+.tb-grid  { stroke: var(--border); stroke-width: 1; }
+.tb-guide {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+.tb-axis { stroke: var(--border); stroke-width: 1; }
+/* Row labels sit above their bar; a card-coloured stroke halo (paint-order:
+   stroke) knocks out any gridline/guide that would otherwise run through them. */
+.tb-rowlabel {
+  fill: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.tb-axis-label { fill: var(--text-dim); font-size: 10.5px; }
+.tb-tag {
+  fill: var(--text-dim);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: var(--panel-2);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+.tb-trunc {
+  fill: var(--text-dim);
+  font-size: 10px;
+  paint-order: stroke;
+  stroke: var(--panel);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}

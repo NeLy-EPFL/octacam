@@ -10,9 +10,19 @@ sub-table)::
     [plugins.options]
     device = "/dev/ttyACM0"
     baud = 115200
+    fqbn = "arduino:avr:uno"  # stepper board for firmware flashing (Nano: arduino:avr:nano)
+    auto_flash = false        # headless: reflash a stale board without prompting
 
 or with ``octacam gui --plugin flywheel``. Its serial dependency (pyserial)
 ships with octacam by default, so no extra install is needed.
+
+**Firmware provisioning.** The firmware reports a banner ``"FLYWHEEL <ver> <build>"``
+in reply to a *backward-compatible identify sentinel* (an 8-byte command with
+``n_steps=0`` and a marker in ``step_interval_us`` — old firmware just releases the
+coils and stays silent, so the command wire format is unchanged and no reflash is
+forced). octacam compares ``<build>`` to the ``arduino/stepper_motor`` source and
+offers to compile + upload (arduino-cli, ``fqbn`` above) from the GUI's *Flash
+firmware* button or ``octacam flash``. See :mod:`octacam.firmware`.
 
 It contributes:
   * an ``on_first_frame`` hook that fires an armed loop command at the first
@@ -30,6 +40,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from octacam import firmware as fw
+from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins.base import Plugin
 
@@ -66,6 +78,34 @@ COMMAND_FIELDS = (
     "n_repeats",
     "init_wait_duration_s",
 )
+
+# Firmware identity + provisioning (see octacam.firmware). The stepper protocol is
+# frameless (raw 8-byte Command structs), so identify is a *sentinel command*:
+# n_steps == 0 (a harmless coil release on any firmware) with step_interval_us set
+# to this marker. Firmware that understands it replies "FLYWHEEL <ver> <build>\n";
+# older firmware just releases the coils and stays silent. This keeps the command
+# wire format unchanged — no reflash is forced, and a board that doesn't answer is
+# reported as "no identity" so octacam can offer a (backward-compatible) reflash.
+_IDENTIFY_MARKER = 0xFFFF
+_EXPECTED_BANNER = "FLYWHEEL"
+_DEFAULT_FQBN = "arduino:avr:uno"  # override with the `fqbn` option for a Nano etc.
+_PROTOCOL_VERSION = 1
+
+
+def _firmware_spec(fqbn: str) -> fw.FirmwareSpec | None:
+    """The stepper firmware spec for :mod:`octacam.firmware`, or None when the
+    sketch source can't be located (a wheel install without a checkout)."""
+    sketch = fw.resolve_sketch_dir("stepper_motor")
+    if sketch is None:
+        return None
+    return fw.FirmwareSpec(
+        name="flywheel",
+        sketch_dir=sketch,
+        fqbn=fqbn,
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="FLYWHEEL_FW_BUILD",
+    )
 
 
 @dataclass
@@ -146,6 +186,43 @@ class SerialLink:
                 self._serial.write(command.to_bytes())
             except serial.SerialException as e:  # pyright: ignore[reportOptionalMemberAccess]
                 log.warning("Serial write failed: %s", e)
+
+    def identify(self, banner_prefix: str, timeout: float = 0.5) -> str | None:
+        """Send the identify sentinel and read the banner line it triggers.
+
+        Synchronous (there is no background reader): sends the sentinel command,
+        then reads a newline-terminated banner. Returns None on a silent board
+        (older firmware) or any error. Holds the write lock briefly; only called
+        at open, before any jog/loop, so it never contends with motion."""
+        sentinel = Command(n_steps=0, step_interval_us=_IDENTIFY_MARKER)
+        with self._lock:
+            s = self._serial
+            if s is None or not s.is_open:
+                return None
+            try:
+                try:
+                    s.reset_input_buffer()
+                except Exception:
+                    pass
+                s.write(sentinel.to_bytes())
+                s.flush()
+                deadline = time.monotonic() + timeout
+                buf = bytearray()
+                while time.monotonic() < deadline:
+                    b = s.read(1)
+                    if not b:
+                        if buf:
+                            break
+                        continue
+                    if b[0] == 0x0A:  # newline terminates the banner
+                        break
+                    buf.append(b[0])
+                    if len(buf) > 64:
+                        break
+                line = buf.decode("ascii", "replace").strip()
+                return line if line.upper().startswith(banner_prefix.upper()) else None
+            except Exception:
+                return None
 
 
 def _clamp_jog_interval_us(value) -> int:
@@ -266,9 +343,14 @@ class JogClock:
         finally:
             # Release the coils only if a newer jog has not superseded us, so a
             # restart's pulses are not clobbered by this thread's stray release.
-            # An atomic int read — no lock, so no deadlock with a joining caller.
-            if generation == self._generation:
-                self._write(release)
+            # The compare + release must be atomic w.r.t. start() (which bumps the
+            # generation under _lock), or a superseded thread could read its own
+            # generation and then release coils a newer thread has already taken
+            # over. No deadlock: no caller joins a worker while holding _lock
+            # (stop's join is outside its `with`).
+            with self._lock:
+                if generation == self._generation:
+                    self._write(release)
 
 
 @register("flywheel")
@@ -288,16 +370,43 @@ def _build(options: dict) -> FlywheelPlugin:
             DEFAULT_BAUD,
         )
         baud = DEFAULT_BAUD
-    return FlywheelPlugin(device=device, baud=baud)
+    fqbn = str(options.get("fqbn", _DEFAULT_FQBN)) or _DEFAULT_FQBN
+    auto_flash = options.get("auto_flash", False)
+    if isinstance(auto_flash, str):
+        auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
+    return FlywheelPlugin(device=device, baud=baud, fqbn=fqbn, auto_flash=bool(auto_flash))
 
 
 class FlywheelPlugin(Plugin):
     name = "flywheel"
 
-    def __init__(self, device: str = DEFAULT_DEVICE, baud: int = DEFAULT_BAUD):
+    def __init__(
+        self,
+        device: str = DEFAULT_DEVICE,
+        baud: int = DEFAULT_BAUD,
+        fqbn: str = _DEFAULT_FQBN,
+        auto_flash: bool = False,
+    ):
+        # _configured_device is what the config asked for (a path, or "auto");
+        # self.device is the currently-active/display device, resolved on open.
+        self._configured_device = device
         self.device = device
         self.baud = baud
+        self._auto_flash = bool(auto_flash)
+        self._firmware: str | None = None
+        self._firmware_ok = True
+        self._last_error: str | None = None
         self._link = SerialLink()
+        # Firmware detection + flash lifecycle (shared with the other serial
+        # plugins). Owns the port lock; _open takes it too. See octacam.firmware.
+        self._fw = fw.FirmwareProvisioner(
+            _firmware_spec(fqbn),
+            resolve_device=lambda: serial_ports.resolve_device(self._configured_device, self.baud),
+            reopen=self._open,
+            close_link=lambda: self._link.close(),
+            wait_for_device=serial_ports.wait_for_device,
+            is_busy=self._fw_is_busy,
+        )
         # Bound method (not self._link.write_command) so the clock always
         # writes through the current link, even after a reconnect swaps it.
         self._jog = JogClock(self._write)
@@ -311,6 +420,13 @@ class FlywheelPlugin(Plugin):
     def _write(self, command: Command) -> None:
         self._link.write_command(command)
 
+    def _fw_is_busy(self) -> tuple[bool, str]:
+        """Refuse to flash while the motor is jogging (a reset mid-jog would drop
+        the coil state)."""
+        if getattr(self, "_jog_owner", None) is not None:
+            return True, "refusing to flash while the motor is jogging — release it first"
+        return False, ""
+
     # ---------------------------------------------------- process lifecycle
 
     def setup(self) -> None:
@@ -320,14 +436,74 @@ class FlywheelPlugin(Plugin):
         """(Re)open the serial link, returning an error message on failure (else
         None). Never raises: a missing board must not stop the GUI launching,
         and it can be retried at runtime via the reconnect endpoint once the
-        board is plugged in."""
-        try:
-            self._link.open(self.device, self.baud)
-        except Exception as e:
-            log.warning("Flywheel plugin: failed to open %s: %s", self.device, e)
-            return str(e)
-        log.info("Flywheel plugin: opened %s @ %d", self.device, self.baud)
-        return None
+        board is plugged in.
+
+        Resolves ``device="auto"`` to a single detected board, reads the firmware
+        identity, and enriches an open failure with the detected candidate ports.
+        Held under the provisioner's port lock so a concurrent flash can't fight
+        over the port (re-entrant: flash's reopen calls this on the same thread)."""
+        with self._fw.port_lock:
+            self._firmware = None
+            self._firmware_ok = True
+            self._last_error = None
+            device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+            if device is None:
+                log.warning("Flywheel plugin: %s", reason)
+                return reason
+            if device != self.device:
+                log.info("Flywheel plugin: %s", reason)
+                self.device = device
+            try:
+                self._link.open(device, self.baud)
+            except Exception as e:
+                msg = serial_ports.explain_open_failure(device, e)
+                log.warning("Flywheel plugin: %s", msg)
+                return msg
+            log.info("Flywheel plugin: opened %s @ %d", device, self.baud)
+            self._verify_identity()
+            return None
+
+    def _verify_identity(self) -> None:
+        """Read the firmware banner (via the identify sentinel) and classify it.
+
+        The stepper command protocol is unchanged, so an OUTDATED or UNIDENTIFIED
+        board still accepts commands; only a foreign banner or wrong version
+        disables driving and offers a reflash."""
+        banner = self._link.identify(_EXPECTED_BANNER)
+        self._firmware = banner
+        check = self._fw.classify(banner)
+        if check is None:
+            if banner:
+                name, version, _ = fw.parse_banner(banner)
+                self._firmware_ok = name == _EXPECTED_BANNER.upper() and (
+                    version is None or version == _PROTOCOL_VERSION
+                )
+            else:
+                self._firmware_ok = True
+            return
+        self._firmware_ok = fw.arm_compatible(check)
+        if check.needs_flash and check.state is not fw.FirmwareState.OUTDATED:
+            log.warning("Flywheel plugin: %s — %s; run `octacam flash` to update.",
+                        self.device, check.detail)
+
+    def firmware_provisioning(self) -> dict:
+        """Firmware picture for `octacam flash` and the GUI."""
+        return self._fw.provisioning(
+            plugin_name=self.name,
+            device=self.device,
+            firmware=self._firmware,
+            firmware_ok=self._firmware_ok,
+            extra={"auto_flash": self._auto_flash},
+        )
+
+    def flash_firmware(self, on_line=None) -> fw.FlashResult:
+        """Compile + upload the current stepper firmware. Delegates the
+        close→upload→reopen→re-verify lifecycle to the shared provisioner. Never
+        raises."""
+        result = self._fw.flash(on_line=on_line)
+        if not result.ok:
+            self._last_error = result.message
+        return result
 
     def teardown(self) -> None:
         with self._jog_lock:
@@ -347,7 +523,15 @@ class FlywheelPlugin(Plugin):
         return self._link.is_open
 
     def status(self) -> dict:
-        return {"device": self.device}
+        check = self._fw.check
+        return {
+            "device": self.device,
+            "firmware": self._firmware,
+            "firmware_ok": self._firmware_ok,
+            "firmware_state": check.state.value if check else None,
+            "needs_flash": bool(check and check.needs_flash),
+            "error": self._last_error,
+        }
 
     # -------------------------------------------------- recording lifecycle
 
@@ -363,8 +547,13 @@ class FlywheelPlugin(Plugin):
         if not spec:
             return None
         try:
-            return Command.from_payload(spec)
-        except (KeyError, TypeError, ValueError):
+            cmd = Command.from_payload(spec)
+            cmd.to_bytes()  # force the struct pack so an out-of-range wire field
+            # is rejected here (struct.error is not a ValueError) rather than
+            # escaping later through write_command, matching the serial_command
+            # endpoint's validation.
+            return cmd
+        except (KeyError, TypeError, ValueError, struct.error):
             log.warning("Flywheel plugin: ignoring invalid command %r", spec)
             return None
 
@@ -380,16 +569,47 @@ class FlywheelPlugin(Plugin):
         router = APIRouter()
 
         @router.post("/api/serial/reconnect")
-        def serial_reconnect():
+        def serial_reconnect(payload: dict = Body(default={})):
             """Re-attempt opening the serial port.
 
             Lets the operator recover from a board that was unplugged or absent
-            at launch (and is now connected) without restarting the server. The
-            response carries the resulting ``ready`` state so the GUI can flip
-            the Flywheel tab from its "serial unavailable" notice to usable.
+            at launch (and is now connected) without restarting the server. An
+            optional ``{"device": "/dev/…"}`` body switches to a different port
+            (e.g. picked from the GUI dropdown) before reopening. The response
+            carries the resulting ``ready`` state so the GUI can flip the
+            Flywheel tab from its "serial unavailable" notice to usable.
             """
+            device = payload.get("device") if isinstance(payload, dict) else None
+            if isinstance(device, str) and device.strip():
+                self._configured_device = device.strip()
             error = self._open()
-            return {"ready": self._link.is_open, "device": self.device, "error": error}
+            check = self._fw.check
+            return {
+                "ready": self._link.is_open,
+                "device": self.device,
+                "error": error,
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "firmware_state": check.state.value if check else None,
+                "needs_flash": bool(check and check.needs_flash),
+            }
+
+        @router.get("/api/flywheel/firmware")
+        def get_firmware():
+            """Firmware state vs. the sketch source + whether octacam can flash it."""
+            return self.firmware_provisioning()
+
+        @router.post("/api/flywheel/flash")
+        def flash(payload: dict = Body(default={})):
+            """Compile + upload the current firmware, then report the new state."""
+            result = self.flash_firmware()
+            return {
+                **result.to_dict(),
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "ready": self._link.is_open,
+                "provisioning": self.firmware_provisioning(),
+            }
 
         @router.post("/api/serial/command")
         def serial_command(payload: dict = Body(...)):

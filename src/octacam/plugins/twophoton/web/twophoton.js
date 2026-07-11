@@ -2,7 +2,10 @@
 //
 // Served from /plugins/twophoton/, so it cannot import core "./util.js" (that
 // would 404). The shared fetch helper (api) is passed in via the ctx the host
-// (app.js) constructs.
+// (app.js) constructs. The serial helpers live at /js/ (absolute path, since a
+// relative import would resolve under /plugins/twophoton/ and 404).
+import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
+import { FirmwareFlash } from "/js/firmware-flash.js";
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -24,14 +27,40 @@ export default class TwoPhotonTab {
     this.statusBox     = document.getElementById("twophoton-status");
     this.statusMsg     = document.getElementById("twophoton-status-msg");
     this.reconnectBtn  = document.getElementById("twophoton-reconnect");
+    this.portSelect    = document.getElementById("twophoton-port");
     this.stateLabel    = document.getElementById("twophoton-state-label");
     this.stateValue    = document.getElementById("twophoton-state-value");
     this.armWithRec    = document.getElementById("twophoton-arm-with-recording");
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
+    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
+    // while the trigger is armed/running so a flash can't interrupt a capture.
+    this.fw = new FirmwareFlash({
+      api: this.api,
+      notify: this.notify,
+      prefix: "twophoton",
+      ids: {
+        banner: "twophoton-fw-flash",
+        msg: "twophoton-fw-flash-msg",
+        btn: "twophoton-fw-flash-btn",
+        log: "twophoton-fw-flash-log",
+      },
+      isActive: () => this.arduinoState === "armed" || this.arduinoState === "triggered",
+    });
+    this.fw.setReady(this.ready);
+    this.fw.applyState(status);
+
+    this._loadPorts();
     this._refresh();
     this._renderState();
+    this.fw.load();
+  }
+
+  // Populate the port dropdown with the currently detected serial ports,
+  // keeping the active device selected.
+  async _loadPorts() {
+    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
 
   // -------------------------------------------------- WS / connection state
@@ -52,6 +81,20 @@ export default class TwoPhotonTab {
       this.ready = msg.ready;
       this._refresh();
     }
+    // Surface a backend arm failure (wedged/closed link, no ACK) to the operator —
+    // otherwise the checkbox keeps showing "armed" while the cameras wait on a
+    // trigger that never fires. Only notify on a change so a repeated state push
+    // carrying the same error doesn't spam. A cleared error (a later good arm)
+    // resets the guard so the next failure notifies again.
+    if (msg.error) {
+      if (msg.error !== this._lastShownError) {
+        this._lastShownError = msg.error;
+        this.notify("error", msg.error);
+      }
+    } else {
+      this._lastShownError = null;
+    }
+    this.fw.applyState(msg);
     this._renderState();
   }
 
@@ -98,9 +141,12 @@ export default class TwoPhotonTab {
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
+    // Connect to the port picked in the dropdown (device override); with no
+    // selection the backend reopens the configured device.
+    const device = this.portSelect?.value || "";
     let r;
     try {
-      r = await this.api("POST", "/api/twophoton/reconnect");
+      r = await this.api("POST", "/api/twophoton/reconnect", device ? { device } : {});
     } catch {
       this.reconnectBtn.disabled = false;
       this.notify("error", "Reconnect failed: server unreachable");
@@ -117,7 +163,10 @@ export default class TwoPhotonTab {
       this.arduinoState = r.data.arduino_state;
       this._renderState();
     }
+    this.fw.applyResponse(r.data);
+    this.fw.load();
     this._refresh();
+    this._loadPorts(); // refresh the list + selection after the attempt
     if (this.ready) {
       this.notify("info", `Serial port ${this.device} connected.`);
     } else {

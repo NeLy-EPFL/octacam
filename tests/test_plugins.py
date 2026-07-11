@@ -93,6 +93,95 @@ def test_status_shape():
     assert PluginManager([Demo()]).status() == {"demo": {"ready": True, "foo": 1}}
 
 
+def test_status_is_ready_wins_over_status_ready_key():
+    # A plugin-supplied "ready" in status() must not shadow the authoritative
+    # is_ready() value.
+    class Sneaky(Plugin):
+        name = "sneaky"
+
+        def is_ready(self):
+            return True
+
+        def status(self):
+            return {"ready": False, "foo": 1}
+
+    assert PluginManager([Sneaky()]).status() == {"sneaky": {"ready": True, "foo": 1}}
+
+
+def test_status_detail_failure_preserves_ready():
+    # A status() that raises after is_ready() already succeeded must not flip the
+    # plugin to not-ready — only the details are dropped.
+    class Half(Plugin):
+        name = "half"
+
+        def is_ready(self):
+            return True
+
+        def status(self):
+            raise RuntimeError("detail boom")
+
+    assert PluginManager([Half()]).status() == {"half": {"ready": True}}
+
+
+def test_status_is_ready_failure_reports_not_ready():
+    class Broken(Plugin):
+        name = "broken"
+
+        def is_ready(self):
+            raise RuntimeError("boom")
+
+    assert PluginManager([Broken()]).status() == {"broken": {"ready": False}}
+
+
+def test_plugin_summary_falls_back_to_factory_module_doc():
+    # A third-party entry-point plugin has no octacam.plugins.<name> module, so
+    # sys.modules.get(...) is None. The summary must fall back to the factory
+    # module's docstring, not the truthy NoneType class docstring.
+    from octacam.plugins import _plugin_summary
+
+    @register("spy_summary")
+    def _factory(options):
+        p = Plugin()
+        p.name = "spy_summary"
+        return p
+
+    summary = _plugin_summary("spy_summary")
+    # This module's docstring first line.
+    assert summary == "Plugin registry + manager behavior."
+    assert "NoneType" not in summary
+
+
+def test_builtin_import_failure_reports_distinct_warning(monkeypatch):
+    # A known builtin whose module fails to import must NOT be reported as an
+    # "Unknown plugin" (which is indistinguishable from a typo); it gets a
+    # builtin-specific warning instead.
+    import logging
+
+    import octacam.plugins as plugins_mod
+
+    # Simulate the module never importing: neutralize the import and drop any
+    # already-registered factory so build_plugins sees factory is None.
+    monkeypatch.setattr(plugins_mod, "_import_builtin", lambda name: None)
+    monkeypatch.delitem(plugins_mod._REGISTRY, "flywheel", raising=False)
+
+    # Capture on the octacam logger directly rather than via caplog: another test
+    # (e.g. the CLI's _setup_logging) may leave propagate=False, which would empty
+    # caplog's root-level capture.
+    msgs: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: msgs.append(record.getMessage())
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
+        manager = build_plugins(config)
+    finally:
+        logger.removeHandler(handler)
+    assert manager.plugins == []
+    assert any("Builtin plugin 'flywheel' failed to import" in m for m in msgs)
+    assert not any("Unknown plugin" in m for m in msgs)
+
+
 class _FakeLink:
     """Stand-in for flywheel.SerialLink so tests need no real serial device."""
 
@@ -113,6 +202,9 @@ class _FakeLink:
     def is_open(self):
         return self._open
 
+    def identify(self, banner_prefix, timeout=0.5):
+        return None  # no board / no banner in these open-path tests
+
 
 def test_flywheel_open_reports_success_and_failure():
     """_open never raises; it returns None on success, the message on failure."""
@@ -126,7 +218,9 @@ def test_flywheel_open_reports_success_and_failure():
     assert plugin.is_ready() is True
 
     link.fail = OSError("no such device")
-    assert plugin._open() == "no such device"
+    # The message is enriched with detected-port hints (env-dependent), but it
+    # always preserves the underlying open error.
+    assert plugin._open().startswith("failed to open /dev/test: no such device")
     assert plugin.is_ready() is False  # a failed open leaves the port closed
 
 
@@ -148,19 +242,18 @@ def test_flywheel_reconnect_endpoint_surfaces_ready_state():
     link.fail = OSError("no such device")
     r = client.post("/api/serial/reconnect")
     assert r.status_code == 200
-    assert r.json() == {
-        "ready": False,
-        "device": "/dev/test",
-        "error": "no such device",
-    }
+    body = r.json()
+    assert body["ready"] is False
+    assert body["device"] == "/dev/test"
+    # Error is enriched with detected-port hints but preserves the base message.
+    assert body["error"].startswith("failed to open /dev/test: no such device")
 
-    # Board now present: reconnect succeeds.
+    # Board now present: reconnect succeeds (response also carries firmware fields).
     link.fail = None
-    assert client.post("/api/serial/reconnect").json() == {
-        "ready": True,
-        "device": "/dev/test",
-        "error": None,
-    }
+    body = client.post("/api/serial/reconnect").json()
+    assert body["ready"] is True
+    assert body["device"] == "/dev/test"
+    assert body["error"] is None
 
 
 def test_setup_teardown_order():

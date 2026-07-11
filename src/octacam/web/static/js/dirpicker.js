@@ -4,12 +4,12 @@
 // the browser cannot pick natively. This walks /api/browse one level at a time
 // and hands the chosen path back to the Record tab.
 
-import { api } from "./util.js";
+import { api, ModalFocus } from "./util.js";
 
 export class DirPicker {
   // `onPick(path)` receives the chosen directory; `getStart()` returns the
-  // path to open at (the current save-dir text, possibly uncommitted/blank —
-  // the server falls back to the active save directory when it is blank).
+  // path to open at (the current base-directory text, possibly uncommitted/blank
+  // — the server falls back to the active save directory when it is blank).
   constructor({ notify, onPick, getStart }) {
     this.notify = notify;
     this.onPick = onPick;
@@ -19,6 +19,7 @@ export class DirPicker {
     this.busy = false;
 
     this.dialog = document.getElementById("dir-dialog");
+    this.focus = new ModalFocus(this.dialog.querySelector(".modal-card"));
     this.pathEl = document.getElementById("dir-current");
     this.list = document.getElementById("dir-list");
     this.upBtn = document.getElementById("dir-up");
@@ -56,11 +57,14 @@ export class DirPicker {
     this.error.textContent = "";
     this.newName.value = "";
     this.dialog.classList.remove("hidden");
+    this.focus.activate();
     await this._load(this.getStart?.() ?? "");
   }
 
   close() {
+    if (this.dialog.classList.contains("hidden")) return;
     this.dialog.classList.add("hidden");
+    this.focus.deactivate();
   }
 
   async _load(path) {

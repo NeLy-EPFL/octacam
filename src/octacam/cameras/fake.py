@@ -13,46 +13,128 @@ PreciseTimer that drives the real cameras drives the fake.
 cameras.
 """
 
-import json
 import logging
 import os
-import threading
 import time
 from collections.abc import Callable
 
 import numpy as np
 
-from octacam.cameras.base import BackendError, Frame, NodeInfo
+from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
+from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
+    PARAM_NODES,
+    BackendError,
+    FeatureInfo,
+    Frame,
+    NodeInfo,
+    coerce_bool,
+)
 
 log = logging.getLogger("octacam")
 
 FAKE_CAMERAS_ENV = "OCTACAM_FAKE_CAMERAS"
 _DEFAULT_SERIALS = "FAKE-0,FAKE-1"
 
+# Full sensor size the fake models; Width/Height ROI sits within it and the
+# offset ranges (and centering) are derived from it, like real hardware.
+_SENSOR_W, _SENSOR_H = 1920, 1200
+
+# The fake's node model is keyed by SFNC name (matching real GenICam backends);
+# the six legacy snake_case params (read_node/write_node/set_live_param) map onto
+# it via PARAM_NODES. Nodes the fake does not model are skipped by the config
+# applier/serialiser and never appear in the feature browser.
+_PARAM_TO_SFNC = dict(PARAM_NODES)
+
 
 def _default_nodes() -> dict[str, dict]:
-    """A fresh editable-parameter table with realistic bounds and types.
+    """A fresh SFNC-keyed node table spanning every widget kind.
 
-    Width/Height/OffsetX/OffsetY are integers (so the shared int-snapping path
-    is exercised); ExposureTime/Gain are floats.
+    Each entry carries the descriptor fields the feature browser needs
+    (display_name/type/category/bounds/entries/visibility). Int/float exercise
+    the numeric-snap path; enum/bool/string/command exercise the other widgets.
+    ``writable`` is False for read-only device info and the octacam-managed nodes
+    (PixelFormat/TriggerMode/...), which the Camera core also locks.
     """
-    return {
-        "width": {"value": 1920, "min": 16, "max": 1920, "inc": 16, "unit": "px"},
-        "height": {"value": 1200, "min": 16, "max": 1200, "inc": 16, "unit": "px"},
-        "exposure": {
-            "value": 5000.0,
-            "min": 20.0,
-            "max": 1_000_000.0,
-            "inc": 1.0,
-            "unit": "us",
-        },
-        "gain": {"value": 0.0, "min": 0.0, "max": 24.0, "inc": 0.1, "unit": "dB"},
-        "offset_x": {"value": 0, "min": 0, "max": 1904, "inc": 4, "unit": "px"},
-        "offset_y": {"value": 0, "min": 0, "max": 1184, "inc": 2, "unit": "px"},
-    }
+
+    def n(name, display, kind, category, value, **kw):
+        e = {"name": name, "display_name": display, "type": kind,
+             "category": category, "value": value, "writable": kw.pop("writable", True),
+             "visibility": kw.pop("visibility", "beginner")}
+        e.update(kw)
+        return name, e
+
+    nodes = dict([
+        # --- ImageFormatControl ---
+        n("Width", "Width", "int", "ImageFormatControl", _SENSOR_W,
+          min=16, max=_SENSOR_W, inc=16, unit="px"),
+        n("Height", "Height", "int", "ImageFormatControl", _SENSOR_H,
+          min=16, max=_SENSOR_H, inc=16, unit="px"),
+        n("OffsetX", "Offset X", "int", "ImageFormatControl", 0,
+          min=0, max=_SENSOR_W - 16, inc=4, unit="px"),
+        n("OffsetY", "Offset Y", "int", "ImageFormatControl", 0,
+          min=0, max=_SENSOR_H - 16, inc=2, unit="px"),
+        n("WidthMax", "Width Max", "int", "ImageFormatControl", _SENSOR_W,
+          min=16, max=_SENSOR_W, inc=1, unit="px", writable=False, visibility="expert"),
+        n("HeightMax", "Height Max", "int", "ImageFormatControl", _SENSOR_H,
+          min=16, max=_SENSOR_H, inc=1, unit="px", writable=False, visibility="expert"),
+        n("PixelFormat", "Pixel Format", "enum", "ImageFormatControl", "Mono8",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Mono8", "Mono16")]),
+        n("ReverseX", "Reverse X", "bool", "ImageFormatControl", False,
+          visibility="expert"),
+        n("TestPattern", "Test Pattern", "enum", "ImageFormatControl", "Off",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Off", "GreyRamp", "ColorBars")]),
+        # --- AcquisitionControl ---
+        n("ExposureTime", "Exposure Time", "float", "AcquisitionControl", 5000.0,
+          min=20.0, max=1_000_000.0, inc=1.0, unit="us"),
+        n("ExposureAuto", "Exposure Auto", "enum", "AcquisitionControl", "Off",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Off", "Once", "Continuous")]),
+        n("AcquisitionFrameRate", "Acquisition Frame Rate", "float",
+          "AcquisitionControl", 100.0, min=1.0, max=1000.0, inc=0.1, unit="Hz",
+          visibility="expert"),
+        n("TriggerMode", "Trigger Mode", "enum", "AcquisitionControl", "Off",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Off", "On")]),
+        n("TriggerSource", "Trigger Source", "enum", "AcquisitionControl", "Line1",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Software", "Line0", "Line1")]),
+        # --- AnalogControl ---
+        n("Gain", "Gain", "float", "AnalogControl", 0.0,
+          min=0.0, max=24.0, inc=0.1, unit="dB"),
+        n("GainAuto", "Gain Auto", "enum", "AnalogControl", "Off",
+          entries=[{"value": v, "display": v, "available": True}
+                   for v in ("Off", "Once", "Continuous")]),
+        n("BlackLevel", "Black Level", "float", "AnalogControl", 0.0,
+          min=0.0, max=63.0, inc=0.1, unit="%", visibility="expert"),
+        n("Gamma", "Gamma", "float", "AnalogControl", 1.0,
+          min=0.25, max=4.0, inc=0.01, visibility="expert"),
+        n("GammaEnable", "Gamma Enable", "bool", "AnalogControl", True,
+          visibility="expert"),
+        # --- DeviceControl ---
+        n("DeviceModelName", "Device Model Name", "string", "DeviceControl",
+          "FakeCamera", writable=False),
+        n("DeviceUserID", "Device User ID", "string", "DeviceControl", "",
+          visibility="expert"),
+        n("DeviceLinkThroughputLimit", "Device Link Throughput Limit", "int",
+          "DeviceControl", 380_000_000, min=1_000_000, max=380_000_000, inc=1,
+          unit="Bps", visibility="expert"),
+    ])
+    return nodes
 
 
-class FakeBackend:
+# Command nodes the fake exposes (name -> (display, category, visibility)). The
+# execute is a no-op that bumps a counter so tests can assert it ran.
+_COMMANDS = {
+    "TimestampLatch": ("Timestamp Latch", "DeviceControl", "expert"),
+    "DeviceReset": ("Device Reset", "DeviceControl", "guru"),
+}
+
+
+class FakeBackend(SoftwareTriggerHandoff):
     """A single in-memory camera driven by software triggers."""
 
     extension = "fake"
@@ -60,12 +142,15 @@ class FakeBackend:
     def __init__(self, serial: str):
         self._serial = serial
         self._open = False
-        self._grabbing = False
         self._nodes = _default_nodes()
+        self._commands_run: dict[str, int] = {}
         self._frame_index = 0
-        self._pending = 0
-        self._cond = threading.Condition()
-        self._original_trigger_source = "Line1"
+        self._freerun_fps: float | None = None
+        # True while a preview grab is live (set in start_grab_preview, cleared in
+        # start_grab_record/stop_grab). Lets retrieve_freerun pace an uncapped
+        # managed preview without pacing the benchmark's uncapped record-grab probe.
+        self._preview_grab = False
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -84,59 +169,180 @@ class FakeBackend:
     def is_grabbing(self) -> bool:
         return self._grabbing
 
+    def grab_locked_features(self) -> frozenset[str]:
+        # The fake models a live-offset camera (FLIR-like): only Width/Height are
+        # grab-locked. A test can monkeypatch this to exercise the Basler-style
+        # offset-grab-lock path.
+        return GEOMETRY_FEATURES
+
     def width(self) -> int:
-        return int(self._nodes["width"]["value"])
+        return int(self._nodes["Width"]["value"])
 
     def height(self) -> int:
-        return int(self._nodes["height"]["value"])
+        return int(self._nodes["Height"]["value"])
 
     # ----------------------------------------------------- sensor parameters
 
+    def _offset_max(self, sfnc: str) -> int:
+        """Dynamic offset ceiling: sensor size minus the current ROI size, like
+        real hardware (so centering exercises the (full - size) path)."""
+        if sfnc == "OffsetX":
+            return int(self._nodes["WidthMax"]["value"] - self._nodes["Width"]["value"])
+        return int(self._nodes["HeightMax"]["value"] - self._nodes["Height"]["value"])
+
     def read_node(self, name: str) -> NodeInfo:
+        """One of the six legacy snake_case params (maps to its SFNC node)."""
+        sfnc = _PARAM_TO_SFNC.get(name, name)
         try:
-            node = self._nodes[name]
+            node = self._nodes[sfnc]
         except KeyError as e:
             raise BackendError(f"unknown node: {name}") from e
+        max_val = node.get("max")
+        if sfnc in ("OffsetX", "OffsetY"):
+            max_val = self._offset_max(sfnc)
         return NodeInfo(
             value=node["value"],
-            min=node["min"],
-            max=node["max"],
-            inc=node["inc"],
-            unit=node["unit"],
-            writable=self._open,
+            min=node.get("min"),
+            max=max_val,
+            inc=node.get("inc"),
+            unit=node.get("unit"),
+            writable=self._open and node.get("writable", True),
         )
 
     def write_node(self, name: str, value: float) -> None:
-        if name not in self._nodes:
+        sfnc = _PARAM_TO_SFNC.get(name, name)
+        if sfnc not in self._nodes:
             raise BackendError(f"unknown node: {name}")
-        self._nodes[name]["value"] = value
+        self._nodes[sfnc]["value"] = value
 
-    def load_params(self, config_str: str) -> None:
-        if not config_str:
-            return
-        try:
-            data = json.loads(config_str)
-        except (ValueError, TypeError) as e:
-            raise BackendError(f"invalid fake parameters: {e}") from e
-        if not isinstance(data, dict):
-            raise BackendError("invalid fake parameters: expected an object")
-        for name, value in (data.get("params") or {}).items():
-            if name in self._nodes:
-                self._nodes[name]["value"] = value
-        self._original_trigger_source = data.get(
-            "trigger_source", self._original_trigger_source
+    # Typed-setter seam used by the native-TSV config applier (_genicam_config),
+    # keyed by SFNC name straight into the node table. A node the fake does not
+    # model raises/returns-None so the applier and serialiser skip it, exactly as
+    # a real camera skips a node it lacks.
+    def _set_enum(self, name: str, value: str) -> None:
+        node = self._nodes.get(name)
+        if node is None or node["type"] != "enum":
+            raise BackendError(f"fake has no enumeration {name}")
+        node["value"] = value
+
+    def _get_enum(self, name: str) -> str | None:
+        node = self._nodes.get(name)
+        return node["value"] if node and node["type"] == "enum" else None
+
+    def _set_bool(self, name: str, value: bool) -> None:
+        node = self._nodes.get(name)
+        if node is None or node["type"] != "bool":
+            raise BackendError(f"fake has no boolean {name}")
+        node["value"] = bool(value)
+
+    def _get_bool(self, name: str) -> bool | None:
+        node = self._nodes.get(name)
+        return bool(node["value"]) if node and node["type"] == "bool" else None
+
+    def _set_number(self, name: str, value: float, is_int: bool) -> None:
+        node = self._nodes.get(name)
+        if node is None or node["type"] not in ("int", "float"):
+            raise BackendError(f"fake has no node {name}")
+        node["value"] = int(value) if is_int else float(value)
+
+    def _get_number(self, name: str, is_int: bool) -> float | int | None:
+        node = self._nodes.get(name)
+        if node is None or node["type"] not in ("int", "float"):
+            return None
+        return int(node["value"]) if is_int else float(node["value"])
+
+    # ---------------------------------------------------- full device node map
+
+    def _feature(self, sfnc: str) -> FeatureInfo:
+        node = self._nodes[sfnc]
+        kind = node["type"]
+        max_val = node.get("max")
+        if sfnc in ("OffsetX", "OffsetY"):
+            max_val = self._offset_max(sfnc)
+        return FeatureInfo(
+            name=sfnc,
+            display_name=node["display_name"],
+            type=kind,
+            category=node["category"],
+            value=node["value"],
+            min=node.get("min") if kind in ("int", "float") else None,
+            max=max_val if kind in ("int", "float") else None,
+            inc=node.get("inc") if kind in ("int", "float") else None,
+            unit=node.get("unit") if kind in ("int", "float") else None,
+            entries=node.get("entries") if kind == "enum" else None,
+            readable=True,
+            writable=self._open and node.get("writable", True),
+            visibility=node.get("visibility", "beginner"),
         )
 
+    def _command_feature(self, name: str) -> FeatureInfo:
+        display, category, visibility = _COMMANDS[name]
+        return FeatureInfo(
+            name=name,
+            display_name=display,
+            type="command",
+            category=category,
+            readable=False,
+            writable=self._open,
+            visibility=visibility,
+        )
+
+    def list_features(self) -> list[FeatureInfo]:
+        if not self._open:
+            return []
+        features = [self._feature(sfnc) for sfnc in self._nodes]
+        # The genicam walker surfaces Beginner/Expert/Guru (only Invisible is
+        # dropped); the browser's level selector filters client-side. All fake
+        # command nodes are at or below Guru, so none are skipped here.
+        features += [self._command_feature(name) for name in _COMMANDS]
+        return features
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        if name in self._nodes:
+            return self._feature(name)
+        if name in _COMMANDS:
+            return self._command_feature(name)
+        raise BackendError(f"no such node: {name}")
+
+    def write_feature(self, name: str, value: object) -> None:
+        node = self._nodes.get(name)
+        if node is None:
+            raise BackendError(f"no such node: {name}")
+        kind = node["type"]
+        if not node.get("writable", True):
+            raise BackendError(f"node {name} is not writable")
+        if kind == "int":
+            node["value"] = int(round(float(value)))
+        elif kind == "float":
+            node["value"] = float(value)
+        elif kind == "bool":
+            node["value"] = coerce_bool(value)
+        elif kind == "enum":
+            valid = {e["value"] for e in node.get("entries", [])}
+            if valid and str(value) not in valid:
+                raise BackendError(f"{value!r} is not a valid {name} entry")
+            node["value"] = str(value)
+        elif kind == "string":
+            node["value"] = str(value)
+        else:
+            raise BackendError(f"node {name} is not writable ({kind})")
+
+    def execute_command(self, name: str) -> None:
+        if name not in _COMMANDS:
+            raise BackendError(f"no such command: {name}")
+        self._commands_run[name] = self._commands_run.get(name, 0) + 1
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        return dict(parse_config(config_str))
+
+    def load_params(self, config_str: str) -> None:
+        if config_str:
+            apply_config(self, config_str)
+
     def save_params(self) -> str:
-        # Mirror the Basler normalization: a saved snapshot ships with the
-        # FrameStart trigger Off and the originally-loaded source, not the
-        # live-preview Software override.
-        data = {
-            "params": {name: node["value"] for name, node in self._nodes.items()},
-            "trigger_mode": "Off",
-            "trigger_source": self._original_trigger_source,
-        }
-        return json.dumps(data, indent=2) + "\n"
+        # dump_config walks CONFIG_NODES and emits only the nodes the fake models
+        # (via the typed getters above), in the native GenApi persistence TSV.
+        return dump_config(self, "FakeCamera")
 
     # ----------------------------------------------------------- triggering
 
@@ -150,42 +356,87 @@ class FakeBackend:
         pass
 
     def trigger_once(self) -> None:
+        self._bump_trigger()
+
+    def begin_freerun(self, fps: float | None = None) -> bool:
+        # The fake has no exposure pipeline, so free-run is simply "produce a
+        # frame per fetch with no trigger" — always supported. ``fps`` is the
+        # free-run preview rate cap; the fake honours it only to pace
+        # retrieve_freerun (see there), since it has no real sensor timing.
+        self._freerun_fps = fps
+        return True
+
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
         with self._cond:
-            if self._grabbing:
-                self._pending += 1
-                self._cond.notify()
+            if not self._grabbing:
+                return None
+            # Pace a *capped* free-run (a preview) to its target rate so it does
+            # not busy-loop — real backends block on the SDK fetch here. A managed
+            # preview grabs via retrieve_freerun with no fps cap (_freerun_fps is
+            # None), so also bound it to the grab timeout when this is a preview
+            # grab. Only the benchmark's uncapped record-grab probe (no cap, not a
+            # preview) returns immediately. cond.wait releases the lock and is
+            # woken by stop_grab's notify.
+            if self._freerun_fps or self._preview_grab:
+                self._cond.wait(
+                    min(1.0 / self._freerun_fps, timeout_ms / 1000.0)
+                    if self._freerun_fps
+                    else timeout_ms / 1000.0
+                )
+                if not self._grabbing:
+                    return None
+            self._frame_index += 1
+            index = self._frame_index
+            width = int(self._nodes["Width"]["value"])
+            height = int(self._nodes["Height"]["value"])
+        array = _render(width, height, index) if wants_array() else None
+        return (array, time.time_ns())
 
     # ------------------------------------------------------------- grabbing
 
     def start_grab_preview(self) -> None:
-        with self._cond:
-            self._pending = 0
-            self._grabbing = True
+        self._preview_grab = True
+        self._begin_grab()
 
     def start_grab_record(self) -> bool:
         self.start_grab_preview()
+        self._preview_grab = False  # a record grab is uncapped (benchmark probe)
         return True
 
     def stop_grab(self) -> None:
-        with self._cond:
-            self._grabbing = False
-            self._cond.notify_all()
+        self._preview_grab = False
+        self._end_grab()
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
+        if not self._wait_pending(timeout_ms):
+            return None
         with self._cond:
-            if self._pending <= 0 and self._grabbing:
-                self._cond.wait(timeout_ms / 1000.0)
-            if self._pending <= 0 or not self._grabbing:
-                return None
-            self._pending -= 1
             self._frame_index += 1
             index = self._frame_index
-            width = int(self._nodes["width"]["value"])
-            height = int(self._nodes["height"]["value"])
+            width = int(self._nodes["Width"]["value"])
+            height = int(self._nodes["Height"]["value"])
         array = _render(width, height, index) if wants_array() else None
         return (array, time.time_ns())
+
+    def retrieve_external(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """External-trigger record fetch.
+
+        The fake has no hardware buffer, so it models the *external* source with
+        the same trigger counter as software mode: a frame arrives only once
+        ``trigger_once`` has fired (the "external pulse"). This is exactly
+        :meth:`retrieve` minus the (absent) device software trigger, and — unlike
+        ``retrieve_freerun``, which fabricates a frame on every call — it lets an
+        external recording with no pulses correctly yield nothing, so the
+        controller's "wait for the first external frame" / "flag a zero-frame
+        capture" paths stay exercised.
+        """
+        return self.retrieve(timeout_ms, wants_array)
 
 
 def _render(width: int, height: int, index: int) -> np.ndarray:
@@ -209,7 +460,9 @@ def enumerate_fake(requested_serials: list[str] | None = None):
     available = _available_serials()
     if not available:
         return []
-    log.info("Detected %d camera(s)", len(available))
+    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
+    # logs the single attributed "Detected N" summary (see basler backend).
+    log.debug("fake enumerated %d camera(s)", len(available))
     final = sorted(available) if not requested_serials else list(requested_serials)
     out = []
     for serial in final:
