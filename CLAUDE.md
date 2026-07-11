@@ -65,7 +65,7 @@ To cut release `X.Y.Z`:
 2. Set `pyproject.toml` version to `X.Y.Z` (drop `.devN`); commit `release: vX.Y.Z`.
 3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"`.
 4. Land it on `main`: merge (or fast-forward) `main` up to the tagged commit and push, so **`main` is always the latest stable release**; publish the tag too (`git push origin vX.Y.Z`). A fresh `git clone` checks out `main`, so this is what makes cloning install stable octacam — the install docs rely on it. Pushing the tag also deploys the numbered doc version `X.Y.Z` and repoints the `stable` docs alias at it (`.github/workflows/docs.yml`).
-5. Back on the `dev-*` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
+5. Back on the `develop` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
 
 An **update notice** (`updates.py`, surfaced in `octacam doctor` and a dismissible
 GUI banner via `/api/system`'s `update` field) compares the installed version
@@ -74,10 +74,12 @@ command (pip / uv tool / pipx / conda). It is read-only and fail-silent —
 **octacam never updates itself** (a library must not mutate its own install, and
 octacam is also sometimes a `uv add` dependency or lives in a conda env) — honors
 `OCTACAM_NO_UPDATE_CHECK` / `DO_NOT_TRACK`, and stays dormant until octacam is on
-PyPI (the Simple API 404s → no signal). Branch model: `main` is stable; `dev-*`
-are the development line. mike publishes versioned docs to `gh-pages`: each
-release tag becomes a numbered version, the `stable` alias (and the site root)
-follows the newest release, and `dev-*` pushes refresh the rolling `dev` version.
+PyPI (the Simple API 404s → no signal). Branch model (git-flow): `main` is stable;
+`develop` is the single permanent development line (feature work branches off it;
+a maintenance line for an older release, if ever needed, is named by series like
+`0.3.x` — never a versioned `dev-*`). mike publishes versioned docs to `gh-pages`:
+each release tag becomes a numbered version, the `stable` alias (and the site root)
+follows the newest release, and `develop` pushes refresh the rolling `dev` version.
 
 ## Repo layout
 

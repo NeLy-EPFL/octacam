@@ -93,7 +93,7 @@ dev = [
 # `uv run --group docs mkdocs serve`; CI publishes it to GitHub Pages.
 docs = [
     "mkdocs-material>=9.5",
-    # Versioned docs (main -> "stable", dev-* -> "dev"). Deployed by CI; also
+    # Versioned docs (main -> "stable", develop -> "dev"). Deployed by CI; also
     # usable locally: `uv run --group docs mike serve`.
     "mike>=2.1",
 ]
