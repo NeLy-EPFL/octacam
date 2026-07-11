@@ -16,20 +16,24 @@ successor to SeptaCam.
 - 🖥️ **Live web GUI** — preview every camera while recording; run it locally or over SSH
 - 💾 **Record straight to video** — monochrome H.264 (or raw) with per-frame drop tracking
 - ⚙️ **One-command post-processing** — transcode, tile into grid videos, and copy to storage
-- 📦 **One-line install** with [uv](https://docs.astral.sh/uv/)
+- 📦 **Clone-and-go install** with [uv](https://docs.astral.sh/uv/)
 
 📖 **Full documentation: <https://nely-epfl.github.io/octacam/>**
 
 ## Install
 
 ```bash
-uv tool install git+https://github.com/NeLy-EPFL/octacam.git
+git clone https://github.com/NeLy-EPFL/octacam.git
+cd octacam
+uv tool install .    # puts an `octacam` command on your PATH
 ```
 
-The Python-installable backends (pypylon and the always-on pycameleon floor)
-all ship in core, so **a rig works out of the box** on Python 3.10+. One tier is
-an optional manual install: the FLIR vendor SDK (Spinnaker/PySpin, Python ≤3.10).
-See the [installation guide](https://nely-epfl.github.io/octacam/installation/) and
+Cloning `main` (always the latest stable release) also gives you the `configs/`
+example rigs and the emulator config the quickstart uses. The Python-installable
+backends (pypylon and the always-on pycameleon floor) all ship in core, so **a rig
+works out of the box** on Python 3.10+. FLIR / Teledyne cameras need one manual
+step — Teledyne's Spinnaker SDK plus the PySpin wheel (cp310–cp314). See the
+[installation guide](https://nely-epfl.github.io/octacam/installation/) and
 [camera backends](https://nely-epfl.github.io/octacam/guide/backends/).
 
 ## Quickstart

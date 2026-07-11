@@ -63,14 +63,16 @@ To cut release `X.Y.Z`:
 
 1. Roll `CHANGELOG.md`'s `[Unreleased]` items under a new `## [X.Y.Z] - <date>` heading.
 2. Set `pyproject.toml` version to `X.Y.Z` (drop `.devN`); commit `release: vX.Y.Z`.
-3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"` (publish with `git push --tags`).
-4. Bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
+3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"`.
+4. Land it on `main`: fast-forward (or merge) `main` up to the tagged commit and push, so **`main` is always the latest stable release**; publish the tag too (`git push --tags`). A fresh `git clone` checks out `main`, so this is what makes cloning install stable octacam — the install docs rely on it.
+5. Back on the `dev-*` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
 
 The version string alone can't tell a rolling-`main` install whether it is
 behind, so an "is an update available?" check compares the installed commit
 against `git ls-remote origin main` (tags are the coarse release signal; commits
-are the fine one). Branch model: `main` is stable (docs published as `stable`);
-`dev-*` are the development line (docs `dev`), published by mike on `gh-pages`.
+are the fine one). Branch model: `main` == the latest stable release, advanced
+only at release tags (step 4 above; docs published as `stable`); `dev-*` are the
+development line (docs `dev`), published by mike on `gh-pages`.
 
 ## Repo layout
 

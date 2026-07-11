@@ -29,8 +29,8 @@ SeptaCam.
 
 <div class="grid cards" markdown>
 
-- :material-download: **[Install](installation.md)** — one line with uv; Basler
-  works out of the box.
+- :material-download: **[Install](installation.md)** — clone the repo and install
+  with uv; Basler works out of the box.
 - :material-rocket-launch: **[Quickstart](quickstart.md)** — record your first
   trial, with or without hardware.
 - :material-tune: **[Configuration](guide/configuration.md)** — the
