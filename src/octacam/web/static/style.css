@@ -1387,6 +1387,8 @@ kbd {
     border-top: 1px solid var(--border);
   }
 
-  /* Sidebar sits below the grid now, so the banner spans the whole top edge. */
-  #banner { right: 0; }
+  /* Sidebar sits below the grid now, so the banners span the whole top edge
+     (--sidebar-width is not reset here, so both must drop their right inset). */
+  #banner,
+  #update-banner { right: 0; }
 }
