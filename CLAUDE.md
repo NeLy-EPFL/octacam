@@ -10,9 +10,10 @@ FastAPI web GUI and a headless CLI, plus Arduino-driven trigger/strobe hardware
 and one-command post-processing. It targets neuroscience rigs and is the
 successor to SeptaCam.
 
-> Active development is on branch `feat/harvesters-backend` (migrating the camera
-> layer off pypylon/PySpin toward a multi-tier GenICam cascade that runs on
-> Python 3.10–3.14). `requires-python >= 3.10`.
+> Active development is on the `develop` branch (git-flow: `main` tracks the
+> latest stable release, `develop` is the next). The camera layer is a multi-tier
+> GenICam cascade (basler / flir / spinnaker / pycameleon; see below) running on
+> Python 3.10–3.14; `requires-python >= 3.10`.
 
 ## Dev workflow
 
