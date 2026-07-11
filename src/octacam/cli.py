@@ -977,6 +977,29 @@ def _doctor_system(report: _Report) -> None:
         report.add("ok", f"open-file limit {soft}→{hard} (raised to hard at launch)")
     else:
         report.add("ok", f"open-file limit {soft}")
+    _doctor_updates(report)
+
+
+def _doctor_updates(report: _Report) -> None:
+    """Add one line to the System section: is a newer octacam release available?
+
+    Read-only and fail-soft — octacam never updates itself, this only advises the
+    correct command for the install (see octacam.updates). Stays silent/graceful
+    (a dev install or a pre-PyPI package returns no signal), and a slow/unreachable
+    PyPI never fails the command.
+    """
+    from octacam import updates
+
+    notice = updates.check()
+    if notice.update_available and notice.latest:
+        msg = f"octacam {notice.latest} is available (you have {notice.current})"
+        if notice.command:
+            msg += f" — update with: {notice.command}"
+        report.add("warn", msg)
+    elif notice.latest:
+        report.add("ok", f"octacam {notice.current} is the latest release")
+    else:
+        report.add("info", f"update check skipped ({notice.note})")
 
 
 def _doctor_backends(

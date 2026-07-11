@@ -574,3 +574,54 @@ def test_advanced_state_restored_from_storage(page):
     make_tab(page)
     assert prop(page, "#record-advanced-toggle", "e => e.checked") is True
     assert prop(page, "#record-advanced", "e => e.hidden") is False
+
+
+# --- update-available banner (update.js) ----------------------------------- #
+
+UPDATE_AVAILABLE = {
+    "available": True,
+    "current": "0.3.0",
+    "latest": "0.9.0",
+    "command": "uv tool upgrade octacam",
+}
+
+
+def _init_banner(page, payload):
+    """Call the real initUpdateBanner against the loaded DOM; returns its bool."""
+    return page.evaluate(
+        """async (payload) => {
+            const m = await import('./js/update.js');
+            return m.initUpdateBanner(payload);
+        }""",
+        payload,
+    )
+
+
+def test_update_banner_shows_command_when_available(page):
+    assert _init_banner(page, UPDATE_AVAILABLE) is True
+    assert prop(page, "#update-banner", "e => e.classList.contains('hidden')") is False
+    assert "0.9.0" in prop(page, "#update-banner", "e => e.textContent")
+    assert (
+        prop(page, "#update-banner .update-cmd", "e => e.textContent")
+        == "uv tool upgrade octacam"
+    )
+
+
+def test_update_banner_hidden_when_no_update(page):
+    payload = {"available": False, "current": "0.3.0", "latest": None, "command": ""}
+    assert _init_banner(page, payload) is False
+    assert prop(page, "#update-banner", "e => e.classList.contains('hidden')") is True
+
+
+def test_update_banner_dismiss_persists_until_newer(page):
+    page.evaluate("() => localStorage.removeItem('octacam.updateDismissed')")
+    assert _init_banner(page, UPDATE_AVAILABLE) is True
+    page.click("#update-dismiss-btn")
+    assert prop(page, "#update-banner", "e => e.classList.contains('hidden')") is True
+    assert (
+        page.evaluate("() => localStorage.getItem('octacam.updateDismissed')")
+        == "0.9.0"
+    )
+    # Same version stays dismissed; a newer release re-shows the banner.
+    assert _init_banner(page, UPDATE_AVAILABLE) is False
+    assert _init_banner(page, {**UPDATE_AVAILABLE, "latest": "1.0.0"}) is True

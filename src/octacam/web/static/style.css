@@ -79,6 +79,51 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* -------------------------------------------- update-available banner */
+
+/* Read-only "a newer octacam is available" notice (js/update.js). Accent, not
+   red — informational and dismissible. Fixed to the top edge like the
+   connection banner; sits behind it (z 99 vs 100) on the rare overlap. */
+#update-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: calc(var(--sidebar-width) + var(--resizer-width));
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  color: var(--text);
+  border-bottom: 1px solid var(--accent);
+  font-size: 12.5px;
+}
+#update-banner .update-cmd {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  user-select: all;
+}
+#update-banner .update-dismiss {
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+}
+#update-banner .update-dismiss:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
 /* ------------------------------------------------------- camera grid */
 
 #grid {

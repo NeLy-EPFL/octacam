@@ -66,11 +66,16 @@ To cut release `X.Y.Z`:
 3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"` (publish with `git push --tags`).
 4. Bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
 
-The version string alone can't tell a rolling-`main` install whether it is
-behind, so an "is an update available?" check compares the installed commit
-against `git ls-remote origin main` (tags are the coarse release signal; commits
-are the fine one). Branch model: `main` is stable (docs published as `stable`);
-`dev-*` are the development line (docs `dev`), published by mike on `gh-pages`.
+An **update notice** (`updates.py`, surfaced in `octacam doctor` and a dismissible
+GUI banner via `/api/system`'s `update` field) compares the installed version
+against the latest stable on **PyPI** and advises the correct per-install upgrade
+command (pip / uv tool / pipx / conda). It is read-only and fail-silent —
+**octacam never updates itself** (a library must not mutate its own install, and
+octacam is also sometimes a `uv add` dependency or lives in a conda env) — honors
+`OCTACAM_NO_UPDATE_CHECK` / `DO_NOT_TRACK`, and stays dormant until octacam is on
+PyPI (the Simple API 404s → no signal). Branch model: `main` is stable (docs
+published as `stable`); `dev-*` are the development line (docs `dev`), published
+by mike on `gh-pages`.
 
 ## Repo layout
 

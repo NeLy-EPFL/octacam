@@ -9,7 +9,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Update notice** — `octacam doctor` and a dismissible GUI banner tell you when
+  a newer release is available on PyPI and print the correct upgrade command for
+  your install (pip / uv tool / pipx / conda). Read-only and fail-silent: octacam
+  never updates itself, and the check is disabled by `OCTACAM_NO_UPDATE_CHECK` or
+  `DO_NOT_TRACK`. Stays silent until octacam is published to PyPI.
 
 ## [0.3.0] - 2026-07-11
 

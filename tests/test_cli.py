@@ -1075,3 +1075,48 @@ def test_config_rejects_unknown_backend(tmp_path):
     assert result.exit_code == 2
     assert "unknown backend" in result.output
     assert not (tmp_path / "rig").exists()
+
+
+# --------------------------------------------------------------------------- #
+# doctor's update-available line (octacam.updates), monkeypatched — no network.
+
+
+def _doctor_update_line(monkeypatch, notice):
+    from octacam import updates
+    from octacam.cli import _doctor_updates, _Report
+
+    monkeypatch.setattr(updates, "check", lambda: notice)
+    report = _Report()
+    report.section("System")
+    _doctor_updates(report)
+    return report.sections[-1][1][-1]  # (status, text) of the line just added
+
+
+def test_doctor_update_line_available(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch,
+        UpdateNotice("0.3.0", "0.9.0", True, "uv-tool", "uv tool upgrade octacam", ""),
+    )
+    assert status == "warn"
+    assert "0.9.0" in text and "uv tool upgrade octacam" in text
+
+
+def test_doctor_update_line_up_to_date(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch, UpdateNotice("0.3.0", "0.3.0", False, "pip", "", "")
+    )
+    assert status == "ok" and "latest release" in text
+
+
+def test_doctor_update_line_skipped_for_dev_install(monkeypatch):
+    from octacam.updates import UpdateNotice
+
+    status, text = _doctor_update_line(
+        monkeypatch,
+        UpdateNotice("0.3.1.dev0", None, False, "editable", "", "development install"),
+    )
+    assert status == "info" and "development install" in text

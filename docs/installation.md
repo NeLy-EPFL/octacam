@@ -50,6 +50,12 @@ depends on how you installed it**. Check what you are running first:
 octacam --version
 ```
 
+`octacam doctor` reports whether a newer release is available (once octacam is
+published to PyPI) and prints the right upgrade command for how you installed it;
+the web GUI shows the same as a dismissible banner. **octacam never updates
+itself** — it only tells you. Set `OCTACAM_NO_UPDATE_CHECK=1` (or the cross-tool
+`DO_NOT_TRACK`) to disable the check.
+
 **uv tool install** (the recommended install — tracks the latest `main`):
 
 ```bash
