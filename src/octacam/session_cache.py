@@ -507,10 +507,19 @@ def transcode_running() -> int:
     return _count_live_markers(_transcode_dir())
 
 
+def capture_running() -> int:
+    """How many gui/record captures currently own cameras on this machine.
+
+    Usually 0 or 1, but two different rigs can capture at once (the instance lock
+    only stops two octacams sharing one config), so this is a count, not a flag.
+    """
+    return _count_live_markers(_capture_dir())
+
+
 def capture_active() -> bool:
     """True while a gui/record on this machine currently owns the cameras.
 
     ``octacam process`` polls this at each work-unit boundary and pauses while it
     holds, so a detached job never contends with a live recording.
     """
-    return _count_live_markers(_capture_dir()) > 0
+    return capture_running() > 0

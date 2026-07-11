@@ -197,10 +197,32 @@ Manage detached `octacam process --detach` jobs. `JOB` is a job id from
 | `resume` | Clear a manual pause (a gui/record auto-pause clears on its own). |
 | `cancel` | Stop a running job cleanly; already-finished work is kept. |
 
+## `cache`
+
+```bash
+octacam cache info
+octacam cache path
+octacam cache clear [--all] [--yes]
+```
+
+Inspect and clear octacam's on-disk cache under `~/.cache/octacam` (see
+`OCTACAM_CACHE_DIR` below): the recording list backing `octacam process
+--last/--all`, detached-job logs, and small activity markers.
+
+| Command | Purpose |
+| --- | --- |
+| `info` | Show the cache location, total size, and a breakdown (recordings, jobs, live markers). |
+| `path` | Print the cache directory (for scripting). |
+| `clear` | Remove the recording list and stale activity markers. |
+
+`clear` **never touches** a live capture, transcode, or detached job — those are
+reported as kept. Finished detached-job logs are kept by default; add `--all` to
+remove them too. `--yes` (`-y`) skips the confirmation prompt.
+
 ## Environment variables
 
 | Variable | Effect |
 | --- | --- |
 | `PYLON_CAMEMU` | Number of emulated Basler cameras (run without hardware). |
-| `OCTACAM_CACHE_DIR` | Override the recording cache location (default `~/.cache/octacam`). |
+| `OCTACAM_CACHE_DIR` | Override the octacam cache location (recording list, job logs, markers; default `~/.cache/octacam`). Inspect/clear it with `octacam cache`. |
 | `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one. |

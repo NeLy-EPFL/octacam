@@ -20,6 +20,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Shut down & process** — the GUI shut-down button now offers to start a
   detached processing job for the session's recordings on the way out; reattach
   from a terminal with `octacam jobs attach`.
+- **Cache management** — a new `octacam cache` command inspects and clears
+  octacam's on-disk cache under `~/.cache/octacam` (the recording list, detached-
+  job logs, and activity markers): `cache info` shows the location, size, and a
+  breakdown; `cache path` prints the directory; `cache clear [--all] [--yes]`
+  removes the recording list and stale markers (add `--all` to also drop finished
+  job logs). Clearing never touches a live capture, transcode, or job.
 
 ### Changed
 

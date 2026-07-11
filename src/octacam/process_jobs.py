@@ -571,14 +571,41 @@ def prune(retention_days: int = RETENTION_DAYS) -> None:
             _cleanup_dir(jd)
 
 
+def _is_finished(jd: Path) -> bool:
+    """True when a job dir is safe to remove: genuinely finished or crashed-past-grace.
+
+    Uses the same reconcile-on-read rule as :func:`list_jobs` rather than the raw
+    flock, so a job in its ``starting`` grace window is never treated as finished.
+    That window matters here: ``spawn_detached`` writes ``status.json`` and returns,
+    but the re-exec'd child only creates and flocks ``job.lock`` much later (after a
+    full interpreter + CLI startup), so for ~a second :func:`is_live` reads False on
+    a job that is very much alive — and an ungraced clear would delete it out from
+    under the arming worker. A live job (lock held) or one still ``starting`` inside
+    the grace is kept; a terminal or crashed-past-grace one is removable.
+    """
+    status = read_status(jd)
+    if status is not None:
+        return _reconcile(jd, status).state in _TERMINAL
+    # No readable status yet — junk, unless the dir was only just reserved (the
+    # brief window in spawn_detached before the first status write).
+    if is_live(jd):
+        return False
+    try:
+        age = time.time() - jd.stat().st_mtime
+    except OSError:
+        return True
+    return age >= _STALE_STARTING_AGE_S
+
+
 def clear_finished() -> tuple[int, int]:
-    """Remove every finished (non-live) job directory now; return (removed, live_kept).
+    """Remove every finished job directory now; return (removed, kept).
 
     Like :func:`prune` but ignores the retention window — used by
-    ``octacam cache clear --all`` to drop finished job logs immediately. A live
-    job (its worker still holds ``job.lock``) is never touched.
+    ``octacam cache clear --all`` to drop finished job logs immediately. A live or
+    still-arming job (see :func:`_is_finished`) is never touched; ``kept`` counts
+    those left in place.
     """
-    removed = live = 0
+    removed = kept = 0
     try:
         entries = list(jobs_dir().iterdir())
     except OSError:
@@ -586,19 +613,20 @@ def clear_finished() -> tuple[int, int]:
     for jd in entries:
         if not jd.is_dir():
             continue
-        if is_live(jd):
-            live += 1
-            continue
-        _cleanup_dir(jd)
-        removed += 1
-    return removed, live
+        if _is_finished(jd):
+            _cleanup_dir(jd)
+            removed += 1
+        else:
+            kept += 1
+    return removed, kept
 
 
 def job_dir_counts() -> tuple[int, int]:
     """(live, finished) job-directory counts on disk, without pruning.
 
-    Counts directories, not reconciled statuses, so it matches exactly what
-    :func:`clear_finished` would remove (finished) vs keep (live).
+    Uses the same predicate as :func:`clear_finished`, so ``finished`` is exactly
+    what a ``cache clear --all`` would remove and ``live`` what it would keep (a
+    still-arming ``starting`` job counts as live).
     """
     live = finished = 0
     try:
@@ -608,10 +636,10 @@ def job_dir_counts() -> tuple[int, int]:
     for jd in entries:
         if not jd.is_dir():
             continue
-        if is_live(jd):
-            live += 1
-        else:
+        if _is_finished(jd):
             finished += 1
+        else:
+            live += 1
     return live, finished
 
 

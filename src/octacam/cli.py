@@ -4496,9 +4496,7 @@ def cache_info() -> None:
 
     n_recordings = session_cache.recordings_count()
     live_jobs, finished_jobs = process_jobs.job_dir_counts()
-    live_markers = session_cache.transcode_running() + (
-        1 if session_cache.capture_active() else 0
-    )
+    live_markers = session_cache.transcode_running() + session_cache.capture_running()
     rec_size = _human_size(session_cache.dir_size(root / session_cache.CACHE_FILENAME))
     jobs_size = _human_size(session_cache.dir_size(process_jobs.jobs_dir()))
 
@@ -4535,28 +4533,32 @@ def cache_clear(
     """
     from octacam import process_jobs, session_cache
 
-    live_transcode = session_cache.transcode_running()
-    live_capture = session_cache.capture_active()
-    live_jobs, finished_jobs = process_jobs.job_dir_counts()
+    # A pre-confirm snapshot, used only for the "will clear" preview. The report
+    # below re-reads the live/finished picture *after* clearing, so a job that
+    # finishes (or a capture that ends) while the operator dwells at the prompt is
+    # never both "Cleared" and "Kept: live".
     n_recordings = session_cache.recordings_count()
     rec_exists = (session_cache.cache_dir() / session_cache.CACHE_FILENAME).exists()
 
     if not yes:
+        _, pre_finished = process_jobs.job_dir_counts()
         targets = []
         if rec_exists:
             targets.append(
                 f"the recording list ({n_recordings} "
                 f"{_plural(n_recordings, 'entry', 'entries')})"
             )
-        if all_ and finished_jobs:
+        if all_ and pre_finished:
             targets.append(
-                f"{finished_jobs} finished detached-job "
-                f"{_plural(finished_jobs, 'log', 'logs')}"
+                f"{pre_finished} finished detached-job "
+                f"{_plural(pre_finished, 'log', 'logs')}"
             )
         targets.append("stale activity markers")
         typer.echo(f"Cache dir: {session_cache.cache_dir()}")
         typer.echo("Will clear: " + "; ".join(targets) + ".")
-        protected = _live_summary(live_jobs, live_transcode, live_capture)
+        protected = _live_summary(
+            *_live_counts(session_cache, process_jobs)
+        )
         if protected:
             typer.echo(f"Protected (kept live): {protected}.")
         typer.confirm("Proceed?", abort=True)
@@ -4578,6 +4580,9 @@ def cache_clear(
         )
     typer.echo("Cleared: " + ", ".join(cleared) + "." if cleared else "Nothing needed clearing.")
 
+    # Re-read the post-clear picture so the report matches what remains on disk.
+    live_jobs, live_transcode, live_capture = _live_counts(session_cache, process_jobs)
+    finished_jobs = process_jobs.job_dir_counts()[1]
     kept = _live_summary(live_jobs, live_transcode, live_capture)
     if not all_ and finished_jobs:
         note = (
@@ -4589,7 +4594,16 @@ def cache_clear(
         typer.echo(f"Kept: {kept}.")
 
 
-def _live_summary(live_jobs: int, live_transcode: int, live_capture: bool) -> str:
+def _live_counts(session_cache, process_jobs) -> tuple[int, int, int]:
+    """(live_jobs, live_transcodes, live_captures) on this machine right now."""
+    return (
+        process_jobs.job_dir_counts()[0],
+        session_cache.transcode_running(),
+        session_cache.capture_running(),
+    )
+
+
+def _live_summary(live_jobs: int, live_transcode: int, live_capture: int) -> str:
     """Join the currently-live processes into a human phrase (empty if none)."""
     bits = []
     if live_jobs:
@@ -4599,7 +4613,7 @@ def _live_summary(live_jobs: int, live_transcode: int, live_capture: bool) -> st
             f"{live_transcode} live {_plural(live_transcode, 'transcode', 'transcodes')}"
         )
     if live_capture:
-        bits.append("a live capture")
+        bits.append(f"{live_capture} live {_plural(live_capture, 'capture', 'captures')}")
     return ", ".join(bits)
 
 
