@@ -7,7 +7,7 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
-## [Unreleased]
+## [0.3.1] - 2026-07-11
 
 ### Added
 
@@ -16,16 +16,20 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   your install (pip / uv tool / pipx / conda). Read-only and fail-silent: octacam
   never updates itself, and the check is disabled by `OCTACAM_NO_UPDATE_CHECK` or
   `DO_NOT_TRACK`. Stays silent until octacam is published to PyPI.
+- **MIT license** — octacam now ships a `LICENSE` file (MIT, matching SeptaCam)
+  and declares it in the package metadata alongside trove classifiers and project
+  URLs.
 
 ### Changed
 
 - **Compacter `octacam doctor`** — the camera list now collapses same-model
   cameras onto one line (`acA1920-150um: 40018619, 40018631, …`) in both the
   per-backend list and the cascade selection, and every backend (not just Basler)
-  labels its cameras with the model name — read from the transport-layer node map
-  without opening the device. Dropped two low-signal lines (the "GUI port is free"
-  happy path and the NVENC `save_method` how-to hint). The `flir`-unavailable
-  message now says plainly that only the PySpin wheel is missing (often pruned by
+  labels its cameras with the model name, read without opening the device (from
+  the transport-layer node map for flir/spinnaker, or the device descriptor for
+  basler/pycameleon). Dropped two low-signal lines (the "GUI port is free" happy
+  path and the NVENC `save_method` how-to hint). The `flir`-unavailable message
+  now says plainly that only the PySpin wheel is missing (often pruned by
   `uv sync`) and that the ctypes `spinnaker` tier still serves FLIR cameras.
 
 ## [0.3.0] - 2026-07-11
@@ -87,4 +91,5 @@ one-command post-processing, and a much richer web GUI.
   libusb `pycameleon` floor covers the general GenICam-USB3 camera without a
   vendor producer or EULA.
 
+[0.3.1]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.1
 [0.3.0]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.0
