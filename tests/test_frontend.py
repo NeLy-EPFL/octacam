@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import socketserver
 import threading
 from pathlib import Path
@@ -703,3 +704,133 @@ def test_shutdown_cancel_button_resolves_cancel(page):
         }"""
     )
     assert choice == "cancel"
+
+
+# --- deferred startup: shell renders first, grid fills in later ------------- #
+
+# Replaces window.WebSocket before app.js boots so main()'s socket never hits a
+# real server; window.__pushWs(obj) delivers a JSON message to the live socket.
+_WS_STUB = """
+window.__wsSockets = [];
+class FakeWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 1;
+    this.binaryType = "blob";
+    window.__wsSockets.push(this);
+    setTimeout(() => this.onopen && this.onopen({}), 0);
+  }
+  send() {}
+  close() { this.readyState = 3; this.onclose && this.onclose({}); }
+}
+FakeWebSocket.CONNECTING = 0;
+FakeWebSocket.OPEN = 1;
+FakeWebSocket.CLOSING = 2;
+FakeWebSocket.CLOSED = 3;
+window.WebSocket = FakeWebSocket;
+window.__pushWs = (obj) => {
+  const ws = window.__wsSockets[window.__wsSockets.length - 1];
+  if (ws && ws.onmessage) ws.onmessage({ data: JSON.stringify(obj) });
+};
+"""
+
+
+def _system_payload(*, ready):
+    payload = {
+        "version": "test",
+        "update": None,
+        "ready": ready,
+        "init_error": None,
+        "config_dir": "/x",
+        "plugins": {},
+        "managed_trigger_available": False,
+        "display_refresh_interval_ms": 100,
+        "theme": "dark",
+        "formats": [
+            {"save_method": "ffmpeg", "label": "H.264"},
+            {"save_method": "raw", "label": "Raw"},
+        ],
+        "cameras": [],
+    }
+    if ready:
+        payload["cameras"] = [
+            {
+                "index": 0,
+                "serial": "S0",
+                "name": "cam0",
+                "width": 640,
+                "height": 480,
+                "params": {},
+                "layout": {
+                    "window_x": -1.0,
+                    "window_y": -1.0,
+                    "window_width": -1.0,
+                    "window_height": -1.0,
+                },
+                "transform": {"scale_x": 1.0, "scale_y": 1.0, "rotation_deg": 0.0},
+                "center_x": False,
+                "center_y": False,
+            }
+        ]
+    return payload
+
+
+def _state_payload(*, ready):
+    return {
+        "state": "idle",
+        "ready": ready,
+        "init_error": None,
+        "remaining_ms": None,
+        "recording_id": None,
+        "recordings_made": 0,
+        "save_dir": "/x",
+        "disk_free_bytes": 0,
+        "settings": {"fps": 50.0, "duration_s": 20.0, "save_dir": "/x"},
+        "cameras": [],
+    }
+
+
+def test_grid_placeholder_shows_then_fills_on_system_push(static_server, browser):
+    """The real main() serves the shell immediately against a not-ready system
+    (loading placeholder, no tiles), then builds the grid when a ready `system`
+    message arrives over the socket — the whole point of deferred startup."""
+    page = browser.new_page()
+    ready = {"v": False}
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    # Catch-all first so specific routes (registered after) win; anything else
+    # the SPA fetches at load (e.g. nvenc capabilities) just gets {}.
+    page.route("**/api/**", json_route(dict))
+    page.route("**/api/system", json_route(lambda: _system_payload(ready=ready["v"])))
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=ready["v"])))
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+
+        # Shell served against the not-ready system: a placeholder, zero tiles.
+        page.wait_for_selector(".grid-placeholder", timeout=5000)
+        assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 0
+        assert "Connecting" in page.eval_on_selector(
+            ".grid-placeholder", "el => el.textContent"
+        )
+
+        # Cameras finished opening on the server: push the ready `system` message.
+        ready["v"] = True
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {"type": "system", **_system_payload(ready=True)},
+        )
+
+        # The grid fills in and the placeholder is gone — no reload.
+        page.wait_for_selector("#grid .tile", timeout=5000)
+        assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 1
+        assert page.eval_on_selector_all(".grid-placeholder", "els => els.length") == 0
+    finally:
+        page.close()

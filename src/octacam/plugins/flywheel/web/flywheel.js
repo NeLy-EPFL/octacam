@@ -96,6 +96,17 @@ export default class FlywheelTab {
     this._refresh();
   }
 
+  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
+  // server's background init finishes opening the serial port after the page
+  // loaded, or on a reconnect), so the controls flip from "not open" to ready
+  // without the operator clicking Reconnect.
+  applyStatus(info) {
+    if (!info) return;
+    this.ready = Boolean(info.ready);
+    if (info.device) this.device = info.device;
+    this._refresh();
+  }
+
   // Reflect the current (websocket, serial) state in the UI: the loop/jog
   // controls are usable only when both are up; otherwise show why.
   _refresh() {

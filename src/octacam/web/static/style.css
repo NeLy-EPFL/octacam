@@ -136,6 +136,42 @@ body {
   isolation: isolate;
 }
 
+/* Shown in the grid area while the server opens the cameras on its background
+   init thread (the page is served before the hardware is ready); replaced by
+   buildCameras() when the camera list arrives, or shows the init error. */
+.grid-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+.grid-placeholder.error {
+  color: var(--red);
+  white-space: pre-line;
+}
+.grid-placeholder .grid-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.55;
+  animation: grid-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .grid-placeholder .grid-spinner { animation-duration: 2.4s; }
+}
+@keyframes grid-spin {
+  to { transform: rotate(360deg); }
+}
+
 #grid.auto-tile {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

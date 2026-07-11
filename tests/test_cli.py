@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,31 +148,75 @@ def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
 
 
 def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
-    # When the port is free but the cameras cannot be opened (e.g. another
-    # octacam holds them, since SDKs open USB3 devices exclusively), the GUI
-    # exits with a clean message rather than a raw SDK traceback.
+    # The GUI now serves the page before opening the cameras, so a camera-open
+    # failure (e.g. another octacam holds them — SDKs open USB3 devices
+    # exclusively) no longer exits the process. It is surfaced in the GUI: the
+    # background init calls controller.fail_init with a clean message (not a raw
+    # SDK traceback), the server stays up, and the browser shows the reason.
+    import octacam.cameras as cameras_mod
     from octacam.cameras import BackendError
+    from octacam.controller import RecordingSettings
+
+    real_cs = cameras_mod.CameraSystem
+
+    class BusyCameraSystem:
+        @classmethod
+        def pending(cls, backend="auto"):
+            # The sync path still builds a real hardware-free placeholder to
+            # serve against; only opening the real cameras fails.
+            return real_cs.pending(backend)
+
+        def __init__(self, *_a, **_k):
+            raise BackendError("The device is controlled by another application.")
+
+    monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
 
     config = SimpleNamespace(
-        cameras=[SimpleNamespace(serial_number="0815-0000")], backend="fake"
+        cameras=[SimpleNamespace(serial_number="0815-0000", name="cam0")],
+        backend="fake",
+        record=None,
+        transcode=None,
+        transfer=None,
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
+    monkeypatch.setattr(
+        "octacam.cli._settings_from_record",
+        lambda *a, **k: RecordingSettings(save_dir=str(tmp_path / "rec")),
+    )
 
-    def _busy(*_args, **_kwargs):
-        raise BackendError("The device is controlled by another application.")
+    captured = {}
 
-    monkeypatch.setattr("octacam.cameras.CameraSystem", _busy)
-    # --port 0 binds an ephemeral port for the availability probe, so the run
-    # reaches the camera-open step regardless of what else is listening.
+    def fake_run(app_obj, **_kwargs):
+        # Stand in for uvicorn.run: capture the controller, wait for the
+        # background init to finish (fail), then "shut down" by returning.
+        ctrl = app_obj.state.app_state.controller
+        captured["controller"] = ctrl
+        for _ in range(500):
+            if ctrl.ready or ctrl.init_error:
+                break
+            time.sleep(0.01)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    # --port 0 binds an ephemeral port for the availability probe.
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
-    assert result.exit_code != 0
-    assert "in use by another octacam" in result.output
+    assert result.exit_code == 0, result.output  # served + shut down cleanly
+    ctrl = captured["controller"]
+    assert ctrl.ready is False
+    assert "in use by another octacam" in (ctrl.init_error or "")
 
 
 def _fake_camera_system(cam):
     class FakeSystem:
         def __init__(self, *_a, **_k):
             self._cams = [cam]
+
+        @classmethod
+        def pending(cls, *_a, **_k):
+            # The GUI builds a hardware-free placeholder to serve against before
+            # opening the real cameras; the fake returns itself so len()/iter work.
+            return cls()
 
         def __len__(self):
             return len(self._cams)
@@ -194,10 +239,23 @@ def _fake_camera_system(cam):
 _FACADE_CALLS: list[str] = []
 
 
+class _FakePlugins:
+    plugins: list = []
+
+    def setup_all(self):
+        _FACADE_CALLS.append("setup_all")
+
+    def teardown_all(self):
+        _FACADE_CALLS.append("teardown_all")
+
+    def status(self):
+        return {}
+
+
 def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
-    # start_preview() arms the trigger board/lights over serial; if it or
-    # create_app() then raises, the finally must still run controller.close()
-    # and plugins.teardown_all() — otherwise the Arduino is left strobing.
+    # create_app() runs inside the try (before any hardware is armed); if it
+    # raises, the finally must still run controller.close() and
+    # plugins.teardown_all() so nothing is left half-initialized.
     import octacam.cli as cli_mod
 
     _FACADE_CALLS.clear()
@@ -207,24 +265,11 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
-
-    class FakePlugins:
-        plugins: list = []
-
-        def setup_all(self):
-            _FACADE_CALLS.append("setup_all")
-
-        def teardown_all(self):
-            _FACADE_CALLS.append("teardown_all")
-
-    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
 
     class FakeController:
         def __init__(self, *a, **k):
             pass
-
-        def start_preview(self):
-            _FACADE_CALLS.append("start_preview")
 
         def close(self):
             _FACADE_CALLS.append("controller.close")
@@ -240,8 +285,8 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
     assert result.exit_code != 0  # the RuntimeError propagates after cleanup
-    # The arm ran, then teardown ran despite the failure.
-    assert "start_preview" in _FACADE_CALLS
+    # Teardown ran despite the failure — the background init thread never started
+    # (create_app raised first), so nothing was armed to leak.
     assert "controller.close" in _FACADE_CALLS
     assert "teardown_all" in _FACADE_CALLS
 

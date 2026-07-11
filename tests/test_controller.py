@@ -332,6 +332,45 @@ def collect_states(controller):
     return states
 
 
+def test_deferred_startup_ready_attach_and_fail(camera_system):
+    from octacam.camera import CameraSystem
+
+    # The GUI starts the controller against a hardware-free placeholder so the
+    # web server can serve before the cameras open.
+    pending = CameraSystem.pending()
+    assert len(pending) == 0
+    controller = RecordingController(
+        pending, RecordingSettings(), auto_preview=False, ready=False
+    )
+    assert controller.ready is False
+    snap = controller.snapshot()
+    assert snap["ready"] is False and snap["cameras"] == [] and snap["init_error"] is None
+
+    # Attaching the real system (as the init thread does) flips ready and the
+    # snapshot now reports the live cameras.
+    controller.attach_system(camera_system)
+    assert controller.ready is True
+    snap = controller.snapshot()
+    assert snap["ready"] is True
+    assert [c["serial"] for c in snap["cameras"]] == EMULATED_SERIALS
+    # Don't close(): the attached system is the fixture's, closed by its teardown.
+
+    # A failed init leaves ready False, records the reason, and logs an event.
+    broken = RecordingController(
+        CameraSystem.pending(), RecordingSettings(), auto_preview=False, ready=False
+    )
+    events = []
+    broken.add_listener(
+        lambda kind, payload: events.append(payload) if kind == "event" else None
+    )
+    broken.fail_init("Could not open the cameras: boom")
+    assert broken.ready is False
+    assert broken.init_error == "Could not open the cameras: boom"
+    assert broken.snapshot()["init_error"] == "Could not open the cameras: boom"
+    assert any("boom" in e["message"] and e["level"] == "error" for e in events)
+    broken.close()
+
+
 def test_full_recording_cycle(camera_system, tmp_path):
     save_dir = tmp_path / "rec" / "001-trial"
     settings = RecordingSettings(fps=50.0, duration_s=1.5, save_dir=str(save_dir))

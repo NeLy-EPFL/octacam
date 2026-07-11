@@ -128,6 +128,77 @@ def test_static_assets_served_no_cache(client):
     assert revalidated.status_code == 304
 
 
+def test_system_and_state_report_ready(client):
+    # A normally-constructed controller is ready; /api/system and /api/state both
+    # say so, and the WS handshake sends the current `system` descriptor.
+    system = client.get("/api/system").json()
+    assert system["ready"] is True and system["init_error"] is None
+    assert client.get("/api/state").json()["ready"] is True
+    with client.websocket_connect("/api/ws") as ws:
+        sys_msg = None
+        for _ in range(60):
+            message = ws.receive()
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                if payload["type"] == "system":
+                    sys_msg = payload
+                    break
+        assert sys_msg is not None
+        assert sys_msg["ready"] is True
+        assert len(sys_msg["cameras"]) == 2
+
+
+def test_deferred_startup_serves_then_fills_in(tmp_path):
+    # The GUI serves against a hardware-free placeholder: /api/system reports
+    # ready=False + no cameras, and a browser connecting during init gets the
+    # not-ready descriptor over the socket, then a ready one once the real system
+    # is attached and broadcast — filling the grid without a reload.
+    pending = CameraSystem.pending()
+    assert len(pending) == 0
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    controller = RecordingController(pending, settings, ready=False)
+    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    try:
+        with TestClient(app) as client:
+            sys0 = client.get("/api/system").json()
+            assert sys0["ready"] is False and sys0["cameras"] == []
+            assert client.get("/api/state").json()["ready"] is False
+
+            with client.websocket_connect("/api/ws") as ws:
+
+                def next_system():
+                    for _ in range(120):
+                        message = ws.receive()
+                        if message.get("text"):
+                            payload = json.loads(message["text"])
+                            if payload["type"] == "system":
+                                return payload
+                    return None
+
+                first = next_system()
+                assert first is not None and first["ready"] is False
+
+                # Attach the real (emulated) system as the init thread does, then
+                # broadcast; the connected client receives a ready `system`.
+                real = CameraSystem(EMULATED_SERIALS)
+                real.load_config(tmp_path)
+                controller.attach_system(real)
+                app.state.app_state.broadcast_system()
+
+                ready_msg = None
+                for _ in range(5):
+                    msg = next_system()
+                    if msg and msg["ready"]:
+                        ready_msg = msg
+                        break
+                assert ready_msg is not None
+                assert len(ready_msg["cameras"]) == 2
+
+            assert client.get("/api/system").json()["ready"] is True
+    finally:
+        controller.close()  # closes the attached real system (once)
+
+
 def test_system_and_settings_endpoints(client):
     system = client.get("/api/system").json()
     assert len(system["cameras"]) == 2

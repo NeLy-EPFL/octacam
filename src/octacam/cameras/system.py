@@ -37,6 +37,8 @@ class CameraSystem:
         self,
         requested_serial_numbers: list[str] | None = None,
         backend: str = "auto",
+        *,
+        _defer_open: bool = False,
     ):
         self.cameras: list[Camera] = []
         self._trigger_timer = PreciseTimer(self._trigger_all)
@@ -47,6 +49,14 @@ class CameraSystem:
         # each one's session resources (only FLIR needs it).
         self.backend = backend
         self._backends_used: set[str] = set()
+
+        # ``_defer_open`` builds an empty shell that touches no hardware — the GUI
+        # uses it as a placeholder so the web server can bind and serve the page
+        # before the (slow) camera enumeration/open runs on a background thread.
+        # The real system is built with a normal constructor and swapped in via
+        # ``RecordingController.attach_system``. See :meth:`pending`.
+        if _defer_open:
+            return
 
         entries = self._enumerate(backend, requested_serial_numbers)
         if not entries:
@@ -68,6 +78,19 @@ class CameraSystem:
             camera, exc = failures[0]
             log.error("Failed to open camera %s", camera.serial_number)
             raise exc
+
+    @classmethod
+    def pending(cls, backend: str = "auto") -> "CameraSystem":
+        """An empty, hardware-free placeholder for deferred startup.
+
+        Opens no devices and enumerates nothing; ``len()`` is 0 and iterating it
+        yields no cameras, so every consumer (snapshot, the preview loop, the
+        ``/api/system`` descriptor) reports an "initializing" system safely. The
+        GUI holds one of these while it binds the web server, then builds the
+        real :class:`CameraSystem` on a background thread and swaps it in via
+        :meth:`RecordingController.attach_system`.
+        """
+        return cls(backend=backend, _defer_open=True)
 
     def _enumerate(
         self, backend: str, requested_serial_numbers: list[str] | None

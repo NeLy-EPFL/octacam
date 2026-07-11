@@ -565,6 +565,10 @@ class _AppState:
             config_writer.load_raw_config(config_dir) if config_dir else {}
         )
         self.plugins = plugins
+        # Which loaded plugins ship a web UI bundle, {name: assets_dir}. Filled by
+        # create_app once (from web_assets()); read by system_descriptor so the
+        # /api/system payload and its WS re-broadcast agree on the plugin UI list.
+        self.plugin_web: dict[str, Path] = {}
         # Set by POST /api/shutdown {process_after: true}; read by cli.gui's
         # teardown to kick off a detached processing job for this session.
         self.process_after = False
@@ -586,6 +590,108 @@ class _AppState:
     def update_status(self) -> dict | None:
         """The update notice for /api/system, or None if not (yet) known."""
         return self._update_notice.as_dict() if self._update_notice else None
+
+    def system_descriptor(self) -> dict:
+        """The full /api/system payload: version, plugins, cameras, formats, …
+
+        Shared by the GET /api/system handler and the WS ``system`` message so a
+        browser gets the same shape whether it fetched at load or received the
+        push. ``ready`` is False (with ``cameras: []``) while the GUI's
+        background init is still opening the cameras; the frontend renders a
+        loading placeholder and re-reads this on the ``system`` push that the
+        init broadcasts once the real system is attached.
+        """
+        controller = self.controller
+        config_by_serial = {c.serial_number: c for c in self.config.cameras}
+        cameras = []
+        for index, camera in enumerate(controller.camera_system):
+            camera_config = config_by_serial.get(camera.serial_number)
+            cameras.append(
+                {
+                    "index": index,
+                    "serial": camera.serial_number,
+                    "name": camera.name,
+                    "width": camera.width,
+                    "height": camera.height,
+                    "params": camera.read_params(),
+                    "layout": {
+                        key: getattr(camera_config, key) if camera_config else -1.0
+                        for key in (
+                            "window_x",
+                            "window_y",
+                            "window_width",
+                            "window_height",
+                        )
+                    },
+                    "transform": {
+                        key: getattr(camera_config, key) if camera_config else default
+                        for key, default in (
+                            ("scale_x", 1.0),
+                            ("scale_y", 1.0),
+                            ("rotation_deg", 0.0),
+                        )
+                    },
+                    # Live ROI-centering state, so the save dialog can persist it
+                    # for a camera whose Camera tab was never opened this session.
+                    "center_x": camera.center_x,
+                    "center_y": camera.center_y,
+                }
+            )
+        # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
+        # dynamically import each plugin's <name>.js from its own folder instead
+        # of statically importing every plugin by name. Nested under the
+        # existing per-plugin object, so the top-level shape is unchanged.
+        plugins_status = self.plugins.status()
+        for name, adir in self.plugin_web.items():
+            entry = plugins_status.get(name)
+            if entry is None:
+                continue
+            web = {"module": f"/plugins/{name}/{name}.js"}
+            if (adir / f"{name}.css").is_file():
+                web["css"] = f"/plugins/{name}/{name}.css"
+            entry["web"] = web
+        return {
+            "version": octacam.__version__,
+            # Newer-release advice for the dismissible GUI banner (None until the
+            # background check runs, or if skipped). octacam never self-updates.
+            "update": self.update_status(),
+            # False while the cameras are still opening on the init thread.
+            "ready": controller.ready,
+            # Set if that background init failed to open any camera, so the SPA
+            # shows the reason instead of an endless "connecting" placeholder.
+            "init_error": controller.init_error,
+            "config_dir": self.config_dir,
+            "plugins": plugins_status,
+            # Enables the "managed" trigger-source option in the GUI: true when a
+            # loaded plugin can drive the trigger (e.g. the triggerbox).
+            "managed_trigger_available": controller.managed_trigger_available,
+            "display_refresh_interval_ms": (
+                self.config.gui.display_refresh_interval_ms
+            ),
+            "theme": self.config.gui.theme,
+            "formats": [
+                {"save_method": save_method, "label": video_format.label}
+                for save_method, video_format in FORMATS.items()
+            ],
+            "cameras": cameras,
+        }
+
+    def broadcast_system(self) -> None:
+        """Push a fresh /api/system descriptor to every connected browser.
+
+        Called (from the GUI's init thread) once the real camera system is
+        attached, so a page that loaded against the empty placeholder fills in
+        its grid and plugin readiness without a reload. No-ops when there are no
+        clients / the loop is down (a browser connecting later gets the current
+        descriptor from the WS-connect handshake instead)."""
+        # Skip building the descriptor at all when nobody is listening — it reads
+        # every camera's params over USB, so it is not free. A client that
+        # connects later gets the current descriptor from the WS-connect
+        # handshake, so nothing is lost.
+        loop = self.loop
+        if loop is None or loop.is_closed() or not self.clients:
+            return
+        self.broadcast_threadsafe("system", self.system_descriptor())
 
     # ------------------------------------------------------- broadcasting
 
@@ -808,6 +914,8 @@ def create_app(
             )
             continue
         plugin_web[name] = adir
+    # system_descriptor() reads this to advertise each plugin's UI bundle.
+    state.plugin_web = plugin_web
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -843,74 +951,7 @@ def create_app(
 
     @app.get("/api/system")
     def get_system():
-        config_by_serial = {c.serial_number: c for c in state.config.cameras}
-        cameras = []
-        for index, camera in enumerate(controller.camera_system):
-            camera_config = config_by_serial.get(camera.serial_number)
-            cameras.append(
-                {
-                    "index": index,
-                    "serial": camera.serial_number,
-                    "name": camera.name,
-                    "width": camera.width,
-                    "height": camera.height,
-                    "params": camera.read_params(),
-                    "layout": {
-                        key: getattr(camera_config, key) if camera_config else -1.0
-                        for key in (
-                            "window_x",
-                            "window_y",
-                            "window_width",
-                            "window_height",
-                        )
-                    },
-                    "transform": {
-                        key: getattr(camera_config, key) if camera_config else default
-                        for key, default in (
-                            ("scale_x", 1.0),
-                            ("scale_y", 1.0),
-                            ("rotation_deg", 0.0),
-                        )
-                    },
-                    # Live ROI-centering state, so the save dialog can persist it
-                    # for a camera whose Camera tab was never opened this session.
-                    "center_x": camera.center_x,
-                    "center_y": camera.center_y,
-                }
-            )
-        # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
-        # dynamically import each plugin's <name>.js from its own folder instead
-        # of statically importing every plugin by name. Nested under the
-        # existing per-plugin object, so the top-level shape is unchanged.
-        plugins_status = state.plugins.status()
-        for name, adir in plugin_web.items():
-            entry = plugins_status.get(name)
-            if entry is None:
-                continue
-            web = {"module": f"/plugins/{name}/{name}.js"}
-            if (adir / f"{name}.css").is_file():
-                web["css"] = f"/plugins/{name}/{name}.css"
-            entry["web"] = web
-        return {
-            "version": octacam.__version__,
-            # Newer-release advice for the dismissible GUI banner (None until the
-            # background check runs, or if skipped). octacam never self-updates.
-            "update": state.update_status(),
-            "config_dir": config_dir,
-            "plugins": plugins_status,
-            # Enables the "managed" trigger-source option in the GUI: true when a
-            # loaded plugin can drive the trigger (e.g. the triggerbox).
-            "managed_trigger_available": state.controller.managed_trigger_available,
-            "display_refresh_interval_ms": (
-                state.config.gui.display_refresh_interval_ms
-            ),
-            "theme": state.config.gui.theme,
-            "formats": [
-                {"save_method": save_method, "label": video_format.label}
-                for save_method, video_format in FORMATS.items()
-            ],
-            "cameras": cameras,
-        }
+        return state.system_descriptor()
 
     @app.get("/api/serial/ports")
     def get_serial_ports():
@@ -1299,6 +1340,14 @@ def create_app(
         sender = asyncio.create_task(client.sender())
         loop = asyncio.get_running_loop()
         try:
+            # Send the current /api/system descriptor so a browser connecting
+            # after (or during) the background camera init fills in its grid and
+            # plugin readiness from the socket, without waiting for — or racing —
+            # the one-shot broadcast the init thread fires on completion.
+            descriptor = await loop.run_in_executor(None, state.system_descriptor)
+            client.queue_text(
+                "system", json.dumps({"type": "system", **descriptor})
+            )
             snapshot = await loop.run_in_executor(None, controller.snapshot)
             client.queue_text("state", json.dumps({"type": "state", **snapshot}))
             client.queue_text(

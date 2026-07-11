@@ -29,6 +29,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- **Instant GUI startup** — `octacam gui` now binds the web server and serves the
+  page *before* opening the cameras. The browser shows the full UI immediately
+  (with a "connecting to cameras" placeholder in the preview area); the cameras
+  and serial plugins are opened in parallel on a background thread and the grid
+  fills in over the WebSocket once they are ready — so time-to-first-paint no
+  longer waits on vendor-SDK camera enumeration or a trigger-board handshake. A
+  camera-open failure is now surfaced in the GUI instead of aborting the process.
 - **Processing auto-pauses during capture** — a running `octacam process`
   (detached or foreground) now pauses between files/folders while an
   `octacam gui`/`octacam record` on the same machine owns the cameras, and

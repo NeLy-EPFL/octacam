@@ -281,7 +281,28 @@ flash time (the repo tree is never dirtied). `firmware.py` +
 ## Web GUI
 
 FastAPI + a vanilla-JS static frontend (`web/static/`). Preview/telemetry/control
-share one WebSocket. The **adaptive preview** protocol sends a per-client
+share one WebSocket.
+
+**Deferred startup (serve-first).** `octacam gui` binds uvicorn and serves the
+page *before* touching hardware, so time-to-first-paint never waits on vendor-SDK
+camera enumeration or a trigger-board handshake. The controller is constructed
+`ready=False` against a hardware-free `CameraSystem.pending()` placeholder (0
+cameras — every consumer, snapshot/preview-loop/`/api/system`, reports an
+"initializing" system safely). A daemon init thread then opens the cameras and
+arms the serial plugins **in parallel** (independent USB vs serial hardware),
+loads params, calls `controller.attach_system(real)` (atomic reference swap
+under the GIL — the preview/telemetry loops re-read `camera_system` each tick, so
+a reader sees the empty placeholder or the real system, never a torn state),
+starts preview, then pushes a fresh `system` WS message. The
+frontend renders the whole shell up front with a grid placeholder and builds the
+grid/View+Camera tabs/Save dialog lazily in `buildCameras()` when the camera list
+arrives (from the initial `/api/system`, the WS-connect handshake — which sends
+`system` too, closing the connect-vs-init race — or the init broadcast). Plugin
+readiness fills in via each tab's `applyStatus(info)`. Camera-open failure calls
+`controller.fail_init(msg)` (surfaced in the GUI + logged) instead of aborting
+the now-running server. On shutdown the finally sets a `stopping` event and
+`join()`s the init thread before `controller.close()`, so arming can't race
+teardown. The **adaptive preview** protocol sends a per-client
 per-camera "view spec"; the server encodes each distinct on-screen resolution
 once and shares it (cost tracks resolutions, not clients), with server-side crop
 of a zoomed region (frame header v2). The **Camera tab** is a full GenApi

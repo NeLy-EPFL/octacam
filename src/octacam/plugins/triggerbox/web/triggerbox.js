@@ -210,6 +210,15 @@ export default class TriggerboxTab {
     this._renderState();
   }
 
+  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
+  // server's background init finishes arming the board after the page loaded, or
+  // on a reconnect). The status shape names the state field `arduino_state`;
+  // map it to the `state` key applyState expects and reuse that path.
+  applyStatus(info) {
+    if (!info) return;
+    this.applyState({ ...info, state: info.arduino_state });
+  }
+
   // --------------------------------------------------------- start params
 
   // The full arm spec for a recording start, or null when arm-with-recording is

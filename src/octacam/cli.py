@@ -553,59 +553,139 @@ def gui(
     # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()
 
-    try:
-        system = CameraSystem(
-            [c.serial_number for c in config.cameras], backend=config.backend
-        )
-    except BackendUnavailable as e:
-        sys.exit(str(e))
-    except BackendError as e:
-        # The cameras could not be opened — most often because another octacam
-        # already holds them (vendor SDKs open USB3 devices exclusively), but
-        # also a disconnected camera. Either way, a clean message beats a raw
-        # pylon/PySpin traceback.
-        sys.exit(
-            f"Could not open the cameras: {e}\n"
-            "They may already be in use by another octacam instance on this "
-            "rig, or disconnected — only one process can open them at a time."
-        )
-    if len(system) == 0:
-        log.warning("No cameras opened. Exiting.")
-        sys.exit(1)
-    log.info("Opened %d camera(s)", len(system))
-
-    names = {c.serial_number: c.name for c in config.cameras if c.name}
-    for camera in system:
-        camera.name = names.get(camera.serial_number, camera.name)
-    system.load_config(config_dir)
-    system.apply_display_config(config.cameras)
-
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
-    plugins.setup_all()
 
     settings = _settings_from_record(config.record, config.transcode, config.transfer)
     # One session id for this GUI run; every recording made before shutdown is
     # tagged with it in the session cache so `octacam process --last session`
     # can find the whole batch later (and we print the commands on the way out).
     session_id = session_cache.new_session_id()
+    # Serve the page *before* touching hardware: the controller starts holding a
+    # hardware-free placeholder system (ready=False) so uvicorn can bind and the
+    # browser render the shell immediately. The slow work — opening the cameras,
+    # arming the serial plugins, starting preview — runs on the init thread below
+    # and is swapped in via controller.attach_system, which pushes the filled-in
+    # system to every connected browser.
+    system = CameraSystem.pending(config.backend)
     controller = RecordingController(
-        system, settings, plugins, session_id=session_id, config_dir=config_dir
+        system,
+        settings,
+        plugins,
+        session_id=session_id,
+        config_dir=config_dir,
+        ready=False,
     )
-    app = None  # so the finally can safely read app.state even if create_app raised
+    # Assigned by create_app() inside the try so a failure there still runs the
+    # finally (controller.close + plugins.teardown_all); the init closure and the
+    # finally read it lazily and tolerate None.
+    app = None
+
     capture_stack = contextlib.ExitStack()
+    # Set on shutdown so a still-running init bails before arming hardware the
+    # teardown is about to release (join() below also serializes the two).
+    stopping = threading.Event()
+
+    def _initialize_rig() -> None:
+        """Open the cameras + arm the plugins (in parallel), load params, start
+        preview, then push the ready system to any connected browser.
+
+        Runs on a daemon thread so ``octacam gui`` serves the page immediately.
+        A failure here surfaces to the GUI (an error event + placeholder) and the
+        log rather than aborting the already-running server."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        app_state = getattr(getattr(app, "state", None), "app_state", None)
+
+        def _publish() -> None:
+            # Push the current system descriptor + state to every connected
+            # browser, on success OR failure. On failure this still matters: the
+            # serial plugins arm in parallel with the camera open and may have
+            # succeeded, so their tabs must flip to ready even though the grid
+            # shows the init error — otherwise an armed board reads as
+            # "unavailable" until a manual reload (the WS-connect handshake, sent
+            # before setup_all finished, reported it not-ready).
+            if app_state is not None:
+                app_state.broadcast_system()
+            controller.notify_state()
+
+        def _open_cameras() -> CameraSystem:
+            opened = CameraSystem(
+                [c.serial_number for c in config.cameras], backend=config.backend
+            )
+            if len(opened) == 0:
+                opened.close()
+                raise BackendError("no cameras were opened")
+            names = {c.serial_number: c.name for c in config.cameras if c.name}
+            for camera in opened:
+                camera.name = names.get(camera.serial_number, camera.name)
+            opened.load_config(config_dir)
+            opened.apply_display_config(config.cameras)
+            return opened
+
+        opened_system: CameraSystem | None = None
+        try:
+            # Cameras (USB) and serial plugins are independent hardware, so open
+            # and arm them concurrently — startup is bounded by the slower of the
+            # two, not their sum. plugins.setup_all logs and swallows its own
+            # errors; the ThreadPoolExecutor's exit waits for it even if the
+            # camera open raises first.
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rig-init") as ex:
+                cam_future = ex.submit(_open_cameras)
+                ex.submit(plugins.setup_all)
+                opened_system = cam_future.result()
+        except BackendUnavailable as e:
+            controller.fail_init(str(e))
+            _publish()
+            return
+        except BackendError as e:
+            # Most often another octacam already holds the cameras (vendor SDKs
+            # open USB3 devices exclusively), or one is disconnected.
+            controller.fail_init(
+                f"Could not open the cameras: {e}. They may already be in use by "
+                "another octacam instance on this rig, or disconnected — only one "
+                "process can open them at a time."
+            )
+            _publish()
+            return
+        except Exception as e:  # never let the init thread die silently
+            log.exception("Camera initialization failed")
+            controller.fail_init(f"Camera initialization failed: {e}")
+            _publish()
+            return
+
+        if stopping.is_set():
+            # Shutdown began while we were opening; release rather than arm
+            # hardware the finally is about to close (it join()s us first). Don't
+            # publish — we're on our way down.
+            with contextlib.suppress(Exception):
+                opened_system.close()
+            return
+
+        controller.attach_system(opened_system)
+        log.info("Opened %d camera(s)", len(opened_system))
+        try:
+            controller.start_preview()
+        except Exception:
+            log.exception("Failed to start live preview")
+        # Fill in the already-served GUI: push the now-ready system descriptor +
+        # a fresh state so a browser that loaded against the placeholder shows the
+        # grid (and enables camera controls) without a reload.
+        _publish()
+
+    init_thread = threading.Thread(
+        target=_initialize_rig, name="octacam-init", daemon=True
+    )
     try:
+        # Build the app first (inside the try so a failure still hits the finally,
+        # though no hardware is armed yet); the init closure reads `app` lazily.
+        app = create_app(controller, config, plugins, config_dir=str(config_dir))
         # While this GUI owns the cameras, publish a capture-active marker so any
         # detached `octacam process` job on this machine pauses (it resumes when
         # we exit). Best-effort; released in the finally before we might kick off
         # a new job on shutdown.
         capture_stack.enter_context(session_cache.mark_capture_active("gui session"))
-        # start_preview() arms the trigger board / lights over serial and
-        # create_app() (plus the browser/log lines below) can raise; keep them
-        # inside the try so the finally always runs controller.close() and
-        # plugins.teardown_all() — otherwise a failure here leaves the Arduino
-        # strobing triggers/lights because send_cancel is never sent.
-        controller.start_preview()
-        app = create_app(controller, config, plugins, config_dir=str(config_dir))
+        # Kick off the hardware init in the background, then serve immediately.
+        init_thread.start()
         log.info(
             "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
             host,
@@ -652,6 +732,13 @@ def gui(
         # Cleanup can take a moment (finalizing recordings, draining ffmpeg,
         # closing cameras), so bracket it with messages.
         log.info("Shutting down — finalizing recordings and releasing cameras…")
+        # Tell a still-running init thread to skip arming, then wait for it: the
+        # join makes its attach_system/start_preview happen-before the close
+        # below, so the two never race over the cameras. Bounded so a wedged SDK
+        # open can't hang shutdown forever.
+        stopping.set()
+        if init_thread.ident is not None:  # skip if create_app raised before start
+            init_thread.join(timeout=30)
         controller.close()
         plugins.teardown_all()
         # Release the single-instance lock so a relaunch is not briefly blocked

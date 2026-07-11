@@ -389,8 +389,19 @@ class RecordingController:
         session_id: str | None = None,
         record_kind: str = "gui",
         config_dir: str | Path | None = None,
+        ready: bool = True,
     ):
         self.camera_system = camera_system
+        # False while the GUI's background init thread is still opening the
+        # cameras (the controller was handed a hardware-free placeholder system;
+        # see :meth:`attach_system`). Surfaced in :meth:`snapshot` so the web UI
+        # can render a "connecting to cameras" placeholder and gate camera-only
+        # controls until the real system is swapped in. Headless `octacam record`
+        # and unit tests build the real system up front and stay ready.
+        self._ready = ready
+        # Set (via fail_init) if the GUI's background init could not open the
+        # cameras, so the web UI shows the reason instead of an endless spinner.
+        self._init_error: str | None = None
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
@@ -487,6 +498,50 @@ class RecordingController:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def ready(self) -> bool:
+        """False while the GUI's background init is still opening the cameras."""
+        return self._ready
+
+    @property
+    def init_error(self) -> str | None:
+        """Why the GUI's background camera init failed, or None."""
+        return self._init_error
+
+    def attach_system(self, camera_system: CameraSystem) -> None:
+        """Swap the hardware-free placeholder for the real, opened system.
+
+        Called once by the GUI's background init thread after the cameras are
+        open and their parameters loaded. The reference swap is atomic under the
+        GIL and the loops that read ``camera_system`` (preview/telemetry) re-read
+        it every tick, so a concurrent reader sees either the empty placeholder
+        (no cameras -> no work) or the real system, never a torn state. Flips
+        ``ready`` so the next snapshot/broadcast reports the live rig.
+        """
+        with self._lock:
+            self.camera_system = camera_system
+            self._ready = True
+            self._init_error = None
+
+    def fail_init(self, message: str) -> None:
+        """Record that the GUI's background camera init failed.
+
+        Leaves ``ready`` False (no cameras were attached) but sets
+        :attr:`init_error` so the web UI can show *why* instead of spinning
+        forever, and emits an error event so it lands in the log panel too."""
+        with self._lock:
+            self._init_error = message
+        self._event("error", message)
+
+    def notify_state(self) -> None:
+        """Broadcast the current snapshot to listeners.
+
+        Used by the GUI's background init thread to push a fresh ``state`` (with
+        ``ready`` now true) after the real system is attached and preview armed,
+        so an already-connected browser fills in without waiting for the next
+        telemetry tick."""
+        self._notify("state", self.snapshot())
 
     @property
     def recording_active(self) -> bool:
@@ -1664,6 +1719,8 @@ class RecordingController:
             free_bytes = 0
         return {
             "state": self._state,
+            "ready": self._ready,
+            "init_error": self._init_error,
             "remaining_ms": remaining_ms,
             "recording_id": recording_id,
             "recordings_made": self._recordings_made,
