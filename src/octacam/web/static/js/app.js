@@ -548,17 +548,19 @@ async function main() {
   });
 
   document.getElementById("shutdown-btn").addEventListener("click", async () => {
-    const others = peerCount - 1;
-    const extra =
-      others > 0
-        ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
-        : "";
-    const ok = window.confirm(
-      "Shut down the octacam server on the rig? This releases all cameras " +
-        "and disconnects every client." +
-        extra
-    );
-    if (!ok) return;
+    if (recordingActive) {
+      const others = peerCount - 1;
+      const extra =
+        others > 0
+          ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
+          : "";
+      const ok = window.confirm(
+        "Shut down the octacam server on the rig? This releases all cameras " +
+          "and disconnects every client." +
+          extra
+      );
+      if (!ok) return;
+    }
     let r;
     try {
       r = await api("POST", "/api/shutdown");
