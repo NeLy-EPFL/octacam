@@ -170,6 +170,32 @@ with `--last` / `--last session` / `--all`. See
 | `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
+| `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |
+
+A running job (detached or foreground) auto-pauses while an `octacam gui`/`record`
+on the same machine owns the cameras, and resumes when they are free. See
+[Processing](../guide/processing.md#running-in-the-background-detached).
+
+## `jobs`
+
+```bash
+octacam jobs list
+octacam jobs attach [JOB]
+octacam jobs pause  [JOB]
+octacam jobs resume [JOB]
+octacam jobs cancel [JOB]
+```
+
+Manage detached `octacam process --detach` jobs. `JOB` is a job id from
+`octacam jobs list`; omit it to target the most recent job.
+
+| Command | Purpose |
+| --- | --- |
+| `list` | Show each job's id, state, phase, progress, and age. |
+| `attach` | Follow a job's live log + progress (Ctrl-C detaches — it does **not** cancel). |
+| `pause` | Pause a running job (it parks at the next file/folder boundary). |
+| `resume` | Clear a manual pause (a gui/record auto-pause clears on its own). |
+| `cancel` | Stop a running job cleanly; already-finished work is kept. |
 
 ## Environment variables
 

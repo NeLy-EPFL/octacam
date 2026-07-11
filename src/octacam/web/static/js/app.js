@@ -10,6 +10,7 @@ import { BenchmarkTab } from "./diagnose.js";
 import { initSidebarResize } from "./resize.js";
 import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
+import { ShutdownDialog } from "./shutdown.js";
 import { DirPicker } from "./dirpicker.js";
 import { initShortcuts } from "./shortcuts.js";
 import { initUpdateBanner } from "./update.js";
@@ -260,6 +261,7 @@ async function main() {
   let userDisconnected = false; // user clicked Disconnect — suppress reconnect
   let serverStopped = false; // server was shut down from the UI
   let recordingActive = false; // a trial is in progress on the rig
+  let recordingsMade = 0; // recordings finished this session (for shut-down-&-process)
   let peerCount = 1; // browsers connected to the server (control is shared)
 
   const sock = new ReconnectingSocket(wsUrl(), {
@@ -501,6 +503,7 @@ async function main() {
         recordingActive = ["waiting", "recording", "finishing"].includes(
           msg.state
         );
+        recordingsMade = msg.recordings_made ?? recordingsMade;
         record.applyState(msg);
         benchmark.applyState(msg);
         grid.setRecording(recordingActive);
@@ -563,23 +566,19 @@ async function main() {
     }
   });
 
+  const shutdownDialog = new ShutdownDialog();
   document.getElementById("shutdown-btn").addEventListener("click", async () => {
-    if (recordingActive) {
-      const others = peerCount - 1;
-      const extra =
-        others > 0
-          ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
-          : "";
-      const ok = window.confirm(
-        "Shut down the octacam server on the rig? This releases all cameras " +
-          "and disconnects every client." +
-          extra
-      );
-      if (!ok) return;
-    }
+    const choice = await shutdownDialog.confirm({
+      recordingActive,
+      hasWork: recordingsMade > 0,
+      peerCount,
+    });
+    if (choice === "cancel") return;
     let r;
     try {
-      r = await api("POST", "/api/shutdown");
+      r = await api("POST", "/api/shutdown", {
+        process_after: choice === "process",
+      });
     } catch {
       notify("error", "Shutdown request failed: server unreachable");
       return;

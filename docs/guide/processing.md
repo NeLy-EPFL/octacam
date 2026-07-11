@@ -151,8 +151,42 @@ MB/s per file for transfer, then a verify pass). `--dry-run` logs the intended
 grid ffmpeg call and transfer plan without writing anything — handy for
 validating paths on a new workstation.
 
-!!! warning "Don't transcode while capturing"
-    Transcoding runs slow x264 presets across many files and saturates the CPU,
-    so it competes with live capture and can cause dropped frames. `octacam gui`
-    and `octacam record` warn at startup when an `octacam process` is already
-    transcoding on the same machine.
+## Running in the background (detached)
+
+Processing a full experiment can take a while, and over SSH a foreground
+`octacam process` dies when the connection drops. Add `--detach` to run the same
+pipeline as a background job that survives disconnect (no `tmux` needed):
+
+```bash
+octacam process --all --detach      # prints a job id, returns immediately
+```
+
+Manage detached jobs with `octacam jobs`:
+
+```bash
+octacam jobs list                   # id, state, phase, progress, age
+octacam jobs attach                 # follow the most recent job's live log + bar
+octacam jobs attach <job-id>        # …or a specific one
+octacam jobs pause                  # park it at the next file/folder boundary
+octacam jobs resume                 # clear a manual pause
+octacam jobs cancel                 # stop it cleanly (finished work is kept)
+```
+
+`attach` is tmux-like: it streams the job's log and progress, and **Ctrl-C only
+detaches the viewer** — the job keeps running, and you can reattach any time.
+Job state lives under `~/.cache/octacam/jobs/` (override with `OCTACAM_CACHE_DIR`);
+a job that finished is kept for 30 days so you can still read its final log.
+
+From the GUI, the **shut down** button offers a *Shut down & process* choice: it
+starts a detached job for the session's recordings as it exits, which you then
+watch from a terminal with `octacam jobs attach`.
+
+!!! info "Processing auto-pauses while the cameras are in use"
+    Transcoding runs slow x264 presets and saturates the CPU/GPU, so it would
+    compete with live capture and risk dropped frames. A running `octacam
+    process` (detached or foreground) therefore **pauses between files/folders
+    while an `octacam gui`/`octacam record` on the same machine owns the
+    cameras**, and resumes automatically when they are free. The pause releases
+    the encoder between units (it holds no GPU/NVENC session while paused) and is
+    crash-safe — if the gui/record crashes, the job resumes on its own. `octacam
+    gui`/`record` also print a one-line note at startup when a job is active.

@@ -444,7 +444,7 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
             cli._warn_if_transcoding()
     finally:
         logger.removeHandler(handler)
-    assert any("transcod" in m and "CPU-heavy" in m for m in handler.messages)
+    assert any("transcod" in m and "auto-pause" in m for m in handler.messages)
 
 
 def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):

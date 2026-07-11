@@ -9,6 +9,28 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ## [Unreleased]
 
+### Added
+
+- **Detachable processing** — `octacam process --detach` runs the
+  transcode → grid → transfer pipeline as a background job that survives an SSH
+  disconnect (no `tmux` needed), printing a job id. Manage jobs with the new
+  `octacam jobs` command: `list`, `attach` (a tmux-like live view of the log and
+  progress — Ctrl-C detaches without cancelling, reattach anytime), `pause`,
+  `resume`, and `cancel`. Job state lives under `~/.cache/octacam/jobs/`.
+- **Shut down & process** — the GUI shut-down button now offers to start a
+  detached processing job for the session's recordings on the way out; reattach
+  from a terminal with `octacam jobs attach`.
+
+### Changed
+
+- **Processing auto-pauses during capture** — a running `octacam process`
+  (detached or foreground) now pauses between files/folders while an
+  `octacam gui`/`octacam record` on the same machine owns the cameras, and
+  resumes automatically when they are free — so a background transcode no longer
+  competes with a live recording for CPU/GPU/disk. The pause releases the
+  encoder between units (it holds no NVENC session while paused), and is
+  crash-safe (a crashed gui/record auto-clears the pause).
+
 ## [0.3.1] - 2026-07-11
 
 ### Added

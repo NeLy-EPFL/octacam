@@ -269,6 +269,12 @@ class RecordingStartRequest(BaseModel):
     plugin_params: dict | None = None
 
 
+class ShutdownRequest(BaseModel):
+    # True asks cli.gui to start a detached processing job for this session on the
+    # way out (the "Shut down & process" choice).
+    process_after: bool = False
+
+
 class DiagnosticRunRequest(BaseModel):
     """Parameters for a Benchmark run (octacam.diagnostics)."""
 
@@ -559,6 +565,9 @@ class _AppState:
             config_writer.load_raw_config(config_dir) if config_dir else {}
         )
         self.plugins = plugins
+        # Set by POST /api/shutdown {process_after: true}; read by cli.gui's
+        # teardown to kick off a detached processing job for this session.
+        self.process_after = False
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._frame_counters: dict[int, int] = {}
@@ -1265,7 +1274,7 @@ def create_app(
         return controller.get_last_diagnostic() or {}
 
     @app.post("/api/shutdown")
-    def shutdown(background_tasks: BackgroundTasks):
+    def shutdown(background_tasks: BackgroundTasks, body: ShutdownRequest | None = None):
         # Shutting down releases the cameras for everyone, so refuse while a
         # recording is in progress rather than discarding it (controller.close
         # aborts). The background task runs after the 202 is flushed, so the
@@ -1275,6 +1284,9 @@ def create_app(
                 409,
                 "Stop the recording or benchmark before shutting down the server",
             )
+        # The body is optional so an empty POST (older clients / tests) still works.
+        # cli.gui reads this flag after uvicorn returns to start detached processing.
+        state.process_after = bool(body and body.process_after)
         background_tasks.add_task(shutdown_callback)
         return JSONResponse({"status": "shutting_down"}, status_code=202)
 

@@ -625,3 +625,81 @@ def test_update_banner_dismiss_persists_until_newer(page):
     # Same version stays dismissed; a newer release re-shows the banner.
     assert _init_banner(page, UPDATE_AVAILABLE) is False
     assert _init_banner(page, {**UPDATE_AVAILABLE, "latest": "1.0.0"}) is True
+
+
+# --- shutdown dialog (shut down & process) --------------------------------- #
+
+
+def _make_shutdown(page: Page) -> None:
+    """Construct the real ShutdownDialog against the loaded DOM as window.__sd."""
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/shutdown.js');
+            window.__sd = new m.ShutdownDialog();
+        }"""
+    )
+
+
+def test_shutdown_offers_three_way_choice_when_work_exists(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            const visible = !document.getElementById('shutdown-dialog').classList.contains('hidden');
+            const btns = ['shutdown-cancel', 'shutdown-plain', 'shutdown-process']
+                .every(id => document.getElementById(id) !== null);
+            document.getElementById('shutdown-process').click();
+            return { visible, btns, choice: await p };
+        }"""
+    )
+    assert result == {"visible": True, "btns": True, "choice": "process"}
+
+
+def test_shutdown_plain_button_resolves_shutdown(page):
+    _make_shutdown(page)
+    choice = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            document.getElementById('shutdown-plain').click();
+            return await p;
+        }"""
+    )
+    assert choice == "shutdown"
+
+
+def test_shutdown_no_modal_when_nothing_recorded(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            const choice = await window.__sd.confirm({ recordingActive: false, hasWork: false });
+            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            return { choice, hidden };
+        }"""
+    )
+    assert result == {"choice": "shutdown", "hidden": True}
+
+
+def test_shutdown_while_recording_uses_binary_confirm(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            window.confirm = () => true;  // operator accepts the speed-bump
+            const modalShown = [];
+            const choice = await window.__sd.confirm({ recordingActive: true, hasWork: false, peerCount: 2 });
+            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            return { choice, hidden };  // no 3-way modal while recording
+        }"""
+    )
+    assert result == {"choice": "shutdown", "hidden": True}
+
+
+def test_shutdown_cancel_button_resolves_cancel(page):
+    _make_shutdown(page)
+    choice = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            document.getElementById('shutdown-cancel').click();
+            return await p;
+        }"""
+    )
+    assert choice == "cancel"

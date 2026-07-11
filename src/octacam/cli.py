@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from octacam.config import RecordConfig
     from octacam.controller import RecordingSettings
+    from octacam.process_jobs import JobReporter
     from octacam.writer import ProgressCallback
 
 import typer
@@ -181,6 +182,24 @@ app = typer.Typer(
     # Accept `-h` alongside `--help` on the root and every subcommand.
     context_settings={"help_option_names": ["-h", "--help"]},
 )
+
+# `octacam jobs …` manages detached `octacam process --detach` jobs. Kept as a
+# sub-group (its own verbs) rather than more flags on `process`.
+jobs_app = typer.Typer(
+    no_args_is_help=True,
+    help="Manage detached `octacam process` jobs (list, attach, pause, cancel).",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(jobs_app, name="jobs")
+
+# `octacam cache …` inspects and clears octacam's on-disk cache under
+# ~/.cache/octacam (the recording list, detached-job logs, activity markers).
+cache_app = typer.Typer(
+    no_args_is_help=True,
+    help="Inspect and clear the octacam cache (recording list, job logs, markers).",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(cache_app, name="cache")
 
 
 def _version_callback(value: bool) -> None:
@@ -395,12 +414,46 @@ def _warn_if_transcoding() -> None:
         return
     if count:
         log.warning(
-            "%d octacam process run%s transcoding on this machine — transcoding "
-            "is CPU-heavy and may slow capture/encoding (risking dropped frames). "
-            "Consider waiting for it to finish.",
+            "%d octacam process run%s transcoding on this machine. A detached job "
+            "auto-pauses while these cameras run and resumes when they are free; a "
+            "foreground `octacam process` does not — it may slow capture (risking "
+            "dropped frames).",
             count,
             " is" if count == 1 else "s are",
         )
+
+
+def _finish_gui_session(session_id: str, config_dir: Path, process_after: bool) -> None:
+    """On GUI shutdown, either kick off detached processing or print the hints.
+
+    If the operator chose "shut down & process" and this session actually recorded
+    something, start a detached `octacam process --session-id …` job (which they
+    reattach to from a terminal). Best-effort: any failure falls back to printing
+    the ready-to-run hints and never raises during teardown.
+    """
+    from octacam import process_jobs, session_cache
+
+    if process_after:
+        try:
+            folders = session_cache.session_folders(session_id)
+            if not folders:
+                log.info("Nothing was recorded this session; not starting processing.")
+                return
+            status = process_jobs.spawn_detached(
+                argv_tail=["--session-id", session_id, "--config", str(config_dir)],
+                folders=folders,
+                session_id=session_id,
+            )
+            log.info(
+                "Started detached processing job %s for this session. "
+                "Reattach with: octacam jobs attach %s",
+                status.job_id,
+                status.job_id,
+            )
+            return
+        except Exception:
+            log.exception("Could not start detached processing; printing hints instead")
+    _print_transcode_hints(session_id)
 
 
 @app.callback(invoke_without_command=True)
@@ -538,7 +591,14 @@ def gui(
     controller = RecordingController(
         system, settings, plugins, session_id=session_id, config_dir=config_dir
     )
+    app = None  # so the finally can safely read app.state even if create_app raised
+    capture_stack = contextlib.ExitStack()
     try:
+        # While this GUI owns the cameras, publish a capture-active marker so any
+        # detached `octacam process` job on this machine pauses (it resumes when
+        # we exit). Best-effort; released in the finally before we might kick off
+        # a new job on shutdown.
+        capture_stack.enter_context(session_cache.mark_capture_active("gui session"))
         # start_preview() arms the trigger board / lights over serial and
         # create_app() (plus the browser/log lines below) can raise; keep them
         # inside the try so the finally always runs controller.close() and
@@ -597,9 +657,15 @@ def gui(
         # Release the single-instance lock so a relaunch is not briefly blocked
         # while this process lingers; the OS would also drop it on exit.
         instance_lock.close()
-        # If anything was recorded this session, print the ready-to-run transcode
-        # commands for it.
-        _print_transcode_hints(session_id)
+        # Drop the capture-active marker before a kicked-off job starts, so it
+        # runs unpaused rather than parking on our just-released cameras.
+        capture_stack.close()
+        # The shutdown button can ask us to start processing this session's
+        # recordings on the way out (POST /api/shutdown {process_after}); else we
+        # just print the ready-to-run `octacam process` hints.
+        state = getattr(getattr(app, "state", None), "app_state", None)
+        process_after = bool(getattr(state, "process_after", False))
+        _finish_gui_session(session_id, config_dir, process_after)
         log.info("octacam stopped.")
 
 
@@ -2369,6 +2435,10 @@ def record(
     for plugin in plugins.plugins:
         if hasattr(plugin, "set_controller"):
             plugin.set_controller(controller)
+    # While this recording owns the cameras, publish a capture-active marker so a
+    # detached `octacam process` on this machine pauses until we are done.
+    capture_stack = contextlib.ExitStack()
+    capture_stack.enter_context(session_cache.mark_capture_active("recording"))
     try:
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",
@@ -2397,6 +2467,7 @@ def record(
         # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
         controller.close()
         plugins.teardown_all()
+        capture_stack.close()
 
     extension = settings.video_format().extension
     for camera in system:
@@ -3706,11 +3777,15 @@ def _grid_and_transfer(
     dry_run: bool,
     show_bar: bool,
     force: bool = False,
+    reporter: JobReporter | None = None,
+    job_dir: Path | None = None,
 ) -> int:
     """Build visualization grids and/or transfer each folder to its destination.
 
     Two sequential phases (grids then transfers) so each gets its own progress
-    bar. Returns the number of files that failed to transfer."""
+    bar. Returns the number of files that failed to transfer. When ``reporter`` is
+    set (a detached job) each phase reports progress and pauses between folders
+    while a gui/record owns the cameras."""
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
     from octacam.transform import RECORDING_SUMMARY_FILENAME
@@ -3726,8 +3801,13 @@ def _grid_and_transfer(
             else None
         )
         grid_skipped = 0
+        if reporter is not None:
+            reporter.begin_phase("grid", len(folder_outputs))
         with grid_bar or contextlib.nullcontext():
             for i, folder in enumerate(folder_outputs, 1):
+                _pause_gate(reporter, job_dir, unit="folder")
+                if reporter is not None:
+                    reporter.item_started(i, len(folder_outputs), folder)
                 cfg = folder_cfgs[folder]
                 summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
                 summary_cams = [
@@ -3757,6 +3837,8 @@ def _grid_and_transfer(
                     if out is not None:
                         built.append(out)
                 grid_files[folder] = built
+                if reporter is not None:
+                    reporter.item_done()
         if grid_skipped:
             log.info(
                 "%sGrid: %d already exist — skipping (use --force to rebuild)",
@@ -3769,25 +3851,37 @@ def _grid_and_transfer(
     if do_transfer:
         n_copied = n_skipped = 0
         transfer_bar = _TransferProgressBar() if (show_bar and not dry_run) else None
+        if reporter is not None:
+            reporter.begin_phase("transfer", len(folder_outputs))
         with transfer_bar or contextlib.nullcontext():
             transfer_cb = transfer_bar.make_callback() if transfer_bar else None
-            for folder, outputs in folder_outputs.items():
+            for i, (folder, outputs) in enumerate(folder_outputs.items(), 1):
+                _pause_gate(reporter, job_dir, unit="folder")
+                if reporter is not None:
+                    reporter.item_started(i, len(folder_outputs), folder)
                 cfg = folder_cfgs[folder]
                 dest = _transfer_dest(cfg, folder)
                 if dest is None:
+                    if reporter is not None:
+                        reporter.item_done()
                     continue
                 files = list(outputs) + grid_files.get(folder, [])
+                on_prog = transfer_cb
+                if transfer_bar is None and reporter is not None:
+                    on_prog = reporter.transfer_progress(i, len(folder_outputs))
                 result = transfer_folder(
                     folder,
                     dest,
                     files_only=files,
                     dry_run=dry_run,
                     verify=cfg.transfer.checksum,
-                    on_progress=transfer_cb,
+                    on_progress=on_prog,
                 )
                 n_copied += len(result.copied)
                 n_skipped += len(result.skipped)
                 transfer_failed += len(result.failed)
+                if reporter is not None:
+                    reporter.item_done()
         if dry_run:
             log.info(
                 "[dry-run] Transfer: %d to copy, %d already up to date",
@@ -3804,6 +3898,82 @@ def _grid_and_transfer(
             if transfer_failed:
                 log.error("%d file(s) failed to transfer", transfer_failed)
     return transfer_failed
+
+
+def _rebuild_process_argv(
+    folders: list[Path],
+    *,
+    recursive: bool,
+    no_transcode: bool,
+    no_grid: bool,
+    no_transfer: bool,
+    force: bool,
+    config_dir: Path | None,
+    delete_source: bool,
+    dry_run: bool,
+) -> list[str]:
+    """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
+
+    Cache selectors (``--last``/``--session-id``/``--all``) are already resolved to
+    ``folders`` so they are dropped; every path is made absolute (the child runs
+    from ``$HOME`` with no inherited cwd). ``--progress-style`` is omitted so the
+    detached ``log.txt`` stays line-oriented rather than a verbatim ffmpeg stream.
+    """
+    argv: list[str] = []
+    if no_transcode:
+        argv.append("--no-transcode")
+    if no_grid:
+        argv.append("--no-grid")
+    if no_transfer:
+        argv.append("--no-transfer")
+    if force:
+        argv.append("--force")
+    if recursive:
+        argv.append("--recursive")
+    if delete_source:
+        argv.append("--delete-source")
+    if dry_run:
+        argv.append("--dry-run")
+    if config_dir is not None:
+        argv += ["--config", str(config_dir.resolve())]
+    argv += [str(Path(f).resolve()) for f in folders]
+    return argv
+
+
+def _pause_gate(reporter: JobReporter | None, job_dir: Path | None, *, unit: str) -> None:
+    """Block at a work-unit boundary while capture is active or a manual pause is set.
+
+    Polls ~1 s and stays paused while either condition holds, then resumes at the
+    next un-done unit (the idempotent output-exists skip gives resume-in-place).
+    It deliberately does NOT catch ``KeyboardInterrupt``, so a cancel/Ctrl-C during
+    the pause interrupts the sleep and wins over the pause. A plain foreground run
+    (``reporter``/``job_dir`` None) pauses the same way — only the capture-active
+    condition applies there (there is no job to manually pause).
+    """
+    from octacam import process_jobs, session_cache
+
+    announced = False
+    while True:
+        capture = session_cache.capture_active()
+        manual = job_dir is not None and process_jobs.is_manually_paused(job_dir)
+        if not (capture or manual):
+            break
+        reasons = []
+        if capture:
+            reasons.append("capture-active")
+        if manual:
+            reasons.append("manual")
+        reason = "+".join(reasons)
+        if not announced:
+            log.info("Paused before next %s — %s. Resumes automatically.", unit, reason)
+            announced = True
+        if reporter is not None:
+            reporter.set_paused(True, reason)
+        time.sleep(1.0)
+    if announced:
+        if reporter is not None:
+            reporter.set_paused(False, None)
+        log.info("Resumed processing.")
 
 
 def _inject_default_last(args: list[str]) -> list[str]:
@@ -3942,6 +4112,21 @@ def process(
             "suppressed (logged, not applied).",
         ),
     ] = False,
+    detach: Annotated[
+        bool,
+        typer.Option(
+            "--detach",
+            help="Run the pipeline as a detached background job that survives an "
+            "SSH disconnect, then return its id. Watch it with `octacam jobs "
+            "attach`; a running gui/record auto-pauses it.",
+        ),
+    ] = False,
+    job_dir: Annotated[
+        Path | None,
+        # Internal: set on the re-exec'd detached child so it writes status/logs
+        # into its job dir. Not for direct use.
+        typer.Option("--_job-dir", hidden=True),
+    ] = None,
 ) -> None:
     """Post-recording pipeline: transcode, build grids, and transfer recordings.
 
@@ -3961,7 +4146,7 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
     """
-    from octacam import session_cache
+    from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
 
     do_transcode = not no_transcode
@@ -3974,127 +4159,222 @@ def process(
         list(paths or []), last, session_id, all_
     )
 
-    raw_output = progress_style is ProgressStyle.ffmpeg
-    show_bar = not raw_output and _stderr_console().is_terminal
-    # Which output mp4s exist per source folder, so grid/transfer run once per
-    # folder after its files are done. Insertion-ordered (3.7+).
-    folder_outputs: dict[Path, list[Path]] = {}
-    cfg_cache: dict[Path, object] = {}
-    failures = 0
-    completed = 0
-    skipped = 0
-    interrupted = False
+    # --detach: re-exec this same, already-resolved pipeline as a background job
+    # that survives an SSH disconnect, then return its id. (The re-exec'd child
+    # runs the very same command with --_job-dir set — the worker branch below.)
+    if detach and job_dir is None:
+        argv_tail = _rebuild_process_argv(
+            folders,
+            recursive=recursive,
+            no_transcode=no_transcode,
+            no_grid=no_grid,
+            no_transfer=no_transfer,
+            force=force,
+            config_dir=config_dir,
+            delete_source=delete_source,
+            dry_run=dry_run,
+        )
+        status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
+        typer.echo(status.job_id)  # stdout: scriptable
+        log.info(
+            "Detached processing job %s — watch it with: octacam jobs attach %s",
+            status.job_id,
+            status.job_id,
+        )
+        raise typer.Exit()
 
-    # --- Transcode phase ----------------------------------------------------
-    if do_transcode:
-        jobs = _transcode_jobs(folders, recursive)
-        if not jobs:
-            log.warning("No videos to transcode in: %s", ", ".join(map(str, folders)))
-        else:
-            bar = _TranscodeProgressBar(len(jobs)) if show_bar else None
-            with (
-                session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
-                bar or contextlib.nullcontext(),
-            ):
-                # A Ctrl-C stops the batch where it stands: transcode_file kills
-                # its ffmpeg child and discards the partial output.
-                try:
-                    for index, job in enumerate(jobs, 1):
-                        input_path = job.input_path
-                        output = input_path.with_suffix(".mp4")
-                        if output.resolve() == input_path.resolve():
-                            log.warning(
-                                "Skipping %s: already in target format (mp4)",
-                                input_path,
-                            )
-                            folder_outputs.setdefault(input_path.parent, []).append(
-                                output
-                            )
-                            continue
-                        folder = input_path.parent
-                        if output.exists() and not force:
-                            # Idempotent re-run: a finished .mp4 already sits at
-                            # the target. Transcoding is atomic (temp + rename),
-                            # so its presence means a complete encode — skip
-                            # re-encoding, but still feed it to grid/transfer.
-                            # Counted for the summary rather than logged per file
-                            # so a full re-run doesn't spam one line per output.
-                            skipped += 1
+    # Worker mode: the detached child records progress/logs into its job dir.
+    worker = process_jobs.worker_start(job_dir) if job_dir is not None else None
+    reporter = worker.reporter if worker is not None else None
+
+    raw_output = progress_style is ProgressStyle.ffmpeg
+    # A detached worker (job_dir set) forces color into its log.txt, which makes
+    # the stderr console report is_terminal — but its animated bar would then
+    # pollute the log with cursor-control codes and, worse, bypass the reporter's
+    # status.json percent that `octacam jobs attach` renders. Keep the live bar to
+    # real foreground runs; the worker's progress rides status.json instead.
+    show_bar = not raw_output and worker is None and _stderr_console().is_terminal
+
+    def _run() -> None:
+        # Which output mp4s exist per source folder, so grid/transfer run once per
+        # folder after its files are done. Insertion-ordered (3.7+).
+        folder_outputs: dict[Path, list[Path]] = {}
+        cfg_cache: dict[Path, object] = {}
+        failures = 0
+        completed = 0
+        skipped = 0
+        interrupted = False
+
+        # --- Transcode phase ------------------------------------------------
+        if do_transcode:
+            jobs = _transcode_jobs(folders, recursive)
+            if not jobs:
+                log.warning("No videos to transcode in: %s", ", ".join(map(str, folders)))
+            else:
+                bar = _TranscodeProgressBar(len(jobs)) if show_bar else None
+                if reporter is not None:
+                    reporter.begin_phase("transcode", len(jobs))
+                with (
+                    session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
+                    bar or contextlib.nullcontext(),
+                ):
+                    # A Ctrl-C stops the batch where it stands: transcode_file kills
+                    # its ffmpeg child and discards the partial output.
+                    try:
+                        for index, job in enumerate(jobs, 1):
+                            # Pause between files while a gui/record owns the
+                            # cameras (or a manual pause is set); a queued cancel
+                            # (SIGINT) breaks the gate and wins.
+                            _pause_gate(reporter, job_dir, unit="file")
+                            input_path = job.input_path
+                            output = input_path.with_suffix(".mp4")
+                            if reporter is not None:
+                                reporter.item_started(index, len(jobs), input_path)
+                            if output.resolve() == input_path.resolve():
+                                log.warning(
+                                    "Skipping %s: already in target format (mp4)",
+                                    input_path,
+                                )
+                                folder_outputs.setdefault(input_path.parent, []).append(
+                                    output
+                                )
+                                if reporter is not None:
+                                    reporter.item_done()
+                                continue
+                            folder = input_path.parent
+                            if output.exists() and not force:
+                                # Idempotent re-run: a finished .mp4 already sits at
+                                # the target. Transcoding is atomic (temp + rename),
+                                # so its presence means a complete encode — skip
+                                # re-encoding, but still feed it to grid/transfer.
+                                # Counted for the summary rather than logged per
+                                # file so a full re-run doesn't spam one line per
+                                # output.
+                                skipped += 1
+                                folder_outputs.setdefault(folder, []).append(output)
+                                if reporter is not None:
+                                    reporter.item_done()
+                                continue
+                            cfg = cfg_cache.get(folder)
+                            if cfg is None:
+                                cfg = _config_for_recording(folder, config_dir)
+                                cfg_cache[folder] = cfg
+                            if bar is not None:
+                                on_progress = bar.file(index, input_path)
+                            elif reporter is not None:
+                                on_progress = reporter.transcode_progress(index, len(jobs))
+                            else:
+                                on_progress = None
+                            try:
+                                result = transcode_file(
+                                    input_path,
+                                    output,
+                                    ffmpeg_params=cfg.transcode.ffmpeg_params,
+                                    width=job.width,
+                                    height=job.height,
+                                    fps=job.fps,
+                                    pixel_format=job.pixel_format,
+                                    frames=job.frames,
+                                    total_frames=job.frames,
+                                    on_progress=on_progress,
+                                    raw_output=raw_output,
+                                )
+                                typer.echo(result)
+                            except Exception as e:  # one bad file must not abort the batch
+                                failures += 1
+                                log.error("Failed to transcode %s: %s", input_path, e)
+                                continue
+                            completed += 1
                             folder_outputs.setdefault(folder, []).append(output)
-                            continue
-                        cfg = cfg_cache.get(folder)
-                        if cfg is None:
-                            cfg = _config_for_recording(folder, config_dir)
-                            cfg_cache[folder] = cfg
-                        on_progress = bar.file(index, input_path) if bar else None
-                        try:
-                            result = transcode_file(
-                                input_path,
-                                output,
-                                ffmpeg_params=cfg.transcode.ffmpeg_params,
-                                width=job.width,
-                                height=job.height,
-                                fps=job.fps,
-                                pixel_format=job.pixel_format,
-                                frames=job.frames,
-                                total_frames=job.frames,
-                                on_progress=on_progress,
-                                raw_output=raw_output,
-                            )
-                            typer.echo(result)
-                        except Exception as e:  # one bad file must not abort the batch
-                            failures += 1
-                            log.error("Failed to transcode %s: %s", input_path, e)
-                            continue
-                        completed += 1
-                        folder_outputs.setdefault(folder, []).append(output)
-                        if delete_source and not dry_run:
-                            _delete_source_files(input_path)
-                        elif delete_source and dry_run:
-                            log.info("[dry-run] would delete source: %s", input_path)
-                except KeyboardInterrupt:
-                    interrupted = True
-            if not interrupted:
-                log.info(
-                    "Transcode: %d done, %d skipped, %d failed%s",
-                    completed,
-                    skipped,
-                    failures,
-                    " (use --force to re-transcode existing)"
-                    if skipped and not force
-                    else "",
+                            if reporter is not None:
+                                reporter.item_done()
+                            if delete_source and not dry_run:
+                                _delete_source_files(input_path)
+                            elif delete_source and dry_run:
+                                log.info("[dry-run] would delete source: %s", input_path)
+                    except KeyboardInterrupt:
+                        interrupted = True
+                if not interrupted:
+                    log.info(
+                        "Transcode: %d done, %d skipped, %d failed%s",
+                        completed,
+                        skipped,
+                        failures,
+                        " (use --force to re-transcode existing)"
+                        if skipped and not force
+                        else "",
+                    )
+        else:
+            # No transcode: grid/transfer act on the mp4s already present, ignoring
+            # any orphaned partial (.octacam-part) temp a hard kill may have left.
+            for folder in _find_recording_dirs(folders, recursive):
+                folder_outputs.setdefault(
+                    folder,
+                    sorted(p for p in folder.glob("*.mp4") if not is_partial_transcode(p)),
                 )
-    else:
-        # No transcode: grid/transfer act on the mp4s already present, ignoring
-        # any orphaned partial (.octacam-part) temp a hard kill may have left.
-        for folder in _find_recording_dirs(folders, recursive):
-            folder_outputs.setdefault(
-                folder,
-                sorted(p for p in folder.glob("*.mp4") if not is_partial_transcode(p)),
+
+        # --- Grid + transfer phases -----------------------------------------
+        transfer_failed = 0
+        if not interrupted and (do_grid or do_transfer) and folder_outputs:
+            transfer_failed = _grid_and_transfer(
+                folder_outputs,
+                do_grid,
+                do_transfer,
+                config_dir,
+                dry_run,
+                show_bar,
+                force,
+                reporter=reporter,
+                job_dir=job_dir,
             )
 
-    # --- Grid + transfer phases ---------------------------------------------
-    transfer_failed = 0
-    if not interrupted and (do_grid or do_transfer) and folder_outputs:
-        transfer_failed = _grid_and_transfer(
-            folder_outputs, do_grid, do_transfer, config_dir, dry_run, show_bar, force
-        )
+        # Report outside the `with` so messages land after the live bar is gone.
+        if interrupted:
+            log.warning(
+                "Interrupted — stopped after %d file(s); the in-progress transcode "
+                "was discarded.",
+                completed,
+            )
+            raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
+        problems = []
+        if failures:
+            problems.append(f"{failures} file(s) failed to transcode")
+        if transfer_failed:
+            problems.append(f"{transfer_failed} file(s) failed to transfer")
+        if problems:
+            sys.exit("; ".join(problems))
 
-    # Report outside the `with` so messages land after the live bar is gone.
-    if interrupted:
-        log.warning(
-            "Interrupted — stopped after %d file(s); the in-progress transcode "
-            "was discarded.",
-            completed,
-        )
-        raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
-    problems = []
-    if failures:
-        problems.append(f"{failures} file(s) failed to transcode")
-    if transfer_failed:
-        problems.append(f"{transfer_failed} file(s) failed to transfer")
-    if problems:
-        sys.exit("; ".join(problems))
+    # A plain foreground run just executes; a worker records its terminal state.
+    if worker is None:
+        _run()
+        return
+    try:
+        _run()
+    except typer.Exit as e:
+        code = e.exit_code
+        if code == 130:
+            worker.finish(process_jobs.CANCELLED, 130, None)
+        elif code:
+            worker.finish(
+                process_jobs.FAILED,
+                code if isinstance(code, int) else 1,
+                "process reported failures",
+            )
+        else:
+            worker.finish(process_jobs.DONE, 0, None)
+        raise
+    except SystemExit as e:
+        msg = e.code if isinstance(e.code, str) else "process failed"
+        worker.finish(process_jobs.FAILED, 1, msg)
+        raise
+    except BaseException as e:
+        if isinstance(e, KeyboardInterrupt):
+            worker.finish(process_jobs.CANCELLED, 130, None)
+        else:
+            worker.finish(process_jobs.FAILED, 1, repr(e))
+        raise
+    else:
+        worker.finish(process_jobs.DONE, 0, None)
 
 
 def _delete_source_files(input_path: Path) -> None:
@@ -4106,6 +4386,221 @@ def _delete_source_files(input_path: Path) -> None:
         input_path.unlink(missing_ok=True)
     except OSError as e:
         log.warning("Could not remove %s: %s", input_path, e)
+
+
+# ---------------------------------------------------------------------------
+# `octacam jobs` — manage detached processing jobs
+# ---------------------------------------------------------------------------
+
+_JobArg = Annotated[
+    str | None,
+    typer.Argument(
+        metavar="[JOB]",
+        help="Job id (from `octacam jobs list`). Omit for the most recent job.",
+    ),
+]
+
+
+@jobs_app.command("list")
+def jobs_list() -> None:
+    """List detached processing jobs and their progress."""
+    from octacam import process_jobs
+
+    process_jobs.render_table(process_jobs.list_jobs())
+
+
+@jobs_app.command("attach")
+def jobs_attach(job_id: _JobArg = None) -> None:
+    """Follow a detached job's live log + progress (Ctrl-C detaches, does not cancel)."""
+    from octacam import process_jobs
+
+    job = process_jobs.resolve_job(job_id)
+    if job is None:
+        sys.exit("No such job." if job_id else "No processing jobs to attach to.")
+    raise typer.Exit(process_jobs.attach(job, _stderr_console()))
+
+
+@jobs_app.command("pause")
+def jobs_pause(job_id: _JobArg = None) -> None:
+    """Pause a running detached job (it parks at its next file/folder boundary)."""
+    from octacam import process_jobs
+
+    job = process_jobs.resolve_job(job_id, require_live=True)
+    if job is None:
+        sys.exit("No such live job." if job_id else "No live processing jobs to pause.")
+    if process_jobs.pause(job):
+        log.info("Requested pause of job %s.", job.job_id)
+    else:
+        sys.exit(f"Could not pause job {job.job_id}.")
+
+
+@jobs_app.command("resume")
+def jobs_resume(job_id: _JobArg = None) -> None:
+    """Clear a manual pause (a gui/record auto-pause clears on its own)."""
+    from octacam import process_jobs
+
+    job = process_jobs.resolve_job(job_id, require_live=True)
+    if job is None:
+        sys.exit("No such live job." if job_id else "No live processing jobs to resume.")
+    if process_jobs.resume(job):
+        log.info("Cleared manual pause of job %s.", job.job_id)
+    else:
+        sys.exit(f"Could not resume job {job.job_id}.")
+
+
+@jobs_app.command("cancel")
+def jobs_cancel(job_id: _JobArg = None) -> None:
+    """Cancel a running detached job (a clean stop; already-done work is kept)."""
+    from octacam import process_jobs
+
+    job = process_jobs.resolve_job(job_id, require_live=True)
+    if job is None:
+        sys.exit("No such live job." if job_id else "No live processing jobs to cancel.")
+    if process_jobs.cancel(job):
+        log.info("Cancelling job %s.", job.job_id)
+    else:
+        sys.exit(f"Could not cancel job {job.job_id} (it may have already finished).")
+
+
+def _human_size(num_bytes: int) -> str:
+    """A short human-readable byte size (e.g. ``0 B``, ``7.0 KB``, ``2.1 MB``)."""
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+@cache_app.command("path")
+def cache_path() -> None:
+    """Print the octacam cache directory (respects OCTACAM_CACHE_DIR / XDG_CACHE_HOME)."""
+    from octacam import session_cache
+
+    typer.echo(str(session_cache.cache_dir()))
+
+
+@cache_app.command("info")
+def cache_info() -> None:
+    """Show the cache location, size, and a breakdown of what is cached."""
+    from octacam import process_jobs, session_cache
+
+    root = session_cache.cache_dir()
+    if not root.exists():
+        typer.echo(f"{root}  (nothing cached yet)")
+        return
+
+    n_recordings = session_cache.recordings_count()
+    live_jobs, finished_jobs = process_jobs.job_dir_counts()
+    live_markers = session_cache.transcode_running() + (
+        1 if session_cache.capture_active() else 0
+    )
+    rec_size = _human_size(session_cache.dir_size(root / session_cache.CACHE_FILENAME))
+    jobs_size = _human_size(session_cache.dir_size(process_jobs.jobs_dir()))
+
+    typer.echo(f"{root}  ({_human_size(session_cache.dir_size(root))})")
+    typer.echo(
+        f"  recordings   {rec_size:>8}   "
+        f"{n_recordings} {_plural(n_recordings, 'entry', 'entries')}"
+    )
+    typer.echo(
+        f"  jobs         {jobs_size:>8}   {live_jobs} live, {finished_jobs} finished"
+    )
+    typer.echo(f"  markers      {'—':>8}   {live_markers} live")
+
+
+@cache_app.command("clear")
+def cache_clear(
+    all_: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            help="Also remove finished detached-job logs (kept by default).",
+        ),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Clear without the confirmation prompt."),
+    ] = False,
+) -> None:
+    """Clear cached state under the cache dir.
+
+    Removes the recording list and orphaned activity markers; with `--all` it also
+    removes finished detached-job logs. A live capture, transcode, or job is never
+    touched.
+    """
+    from octacam import process_jobs, session_cache
+
+    live_transcode = session_cache.transcode_running()
+    live_capture = session_cache.capture_active()
+    live_jobs, finished_jobs = process_jobs.job_dir_counts()
+    n_recordings = session_cache.recordings_count()
+    rec_exists = (session_cache.cache_dir() / session_cache.CACHE_FILENAME).exists()
+
+    if not yes:
+        targets = []
+        if rec_exists:
+            targets.append(
+                f"the recording list ({n_recordings} "
+                f"{_plural(n_recordings, 'entry', 'entries')})"
+            )
+        if all_ and finished_jobs:
+            targets.append(
+                f"{finished_jobs} finished detached-job "
+                f"{_plural(finished_jobs, 'log', 'logs')}"
+            )
+        targets.append("stale activity markers")
+        typer.echo(f"Cache dir: {session_cache.cache_dir()}")
+        typer.echo("Will clear: " + "; ".join(targets) + ".")
+        protected = _live_summary(live_jobs, live_transcode, live_capture)
+        if protected:
+            typer.echo(f"Protected (kept live): {protected}.")
+        typer.confirm("Proceed?", abort=True)
+
+    removed_rec = session_cache.clear_recordings()
+    swept, _live_markers = session_cache.sweep_orphan_markers()
+    removed_jobs = 0
+    if all_:
+        removed_jobs, _ = process_jobs.clear_finished()
+
+    cleared = []
+    if removed_rec:
+        cleared.append("recording list")
+    if swept:
+        cleared.append(f"{swept} stale {_plural(swept, 'marker', 'markers')}")
+    if removed_jobs:
+        cleared.append(
+            f"{removed_jobs} finished job {_plural(removed_jobs, 'log', 'logs')}"
+        )
+    typer.echo("Cleared: " + ", ".join(cleared) + "." if cleared else "Nothing needed clearing.")
+
+    kept = _live_summary(live_jobs, live_transcode, live_capture)
+    if not all_ and finished_jobs:
+        note = (
+            f"{finished_jobs} finished job "
+            f"{_plural(finished_jobs, 'log', 'logs')} (use --all to remove)"
+        )
+        kept = f"{kept}, {note}" if kept else note
+    if kept:
+        typer.echo(f"Kept: {kept}.")
+
+
+def _live_summary(live_jobs: int, live_transcode: int, live_capture: bool) -> str:
+    """Join the currently-live processes into a human phrase (empty if none)."""
+    bits = []
+    if live_jobs:
+        bits.append(f"{live_jobs} live {_plural(live_jobs, 'job', 'jobs')}")
+    if live_transcode:
+        bits.append(
+            f"{live_transcode} live {_plural(live_transcode, 'transcode', 'transcodes')}"
+        )
+    if live_capture:
+        bits.append("a live capture")
+    return ", ".join(bits)
 
 
 def main() -> None:

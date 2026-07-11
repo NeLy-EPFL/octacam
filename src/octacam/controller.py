@@ -419,6 +419,9 @@ class RecordingController:
         # (e.g. in unit tests that construct a controller directly).
         self._session_id = session_id
         self._record_kind = record_kind
+        # How many recordings this session has finished — surfaced in snapshot()
+        # so the GUI can offer "shut down & process" only when there is work.
+        self._recordings_made = 0
         self._lock = threading.RLock()
         self._state = "idle"
         # True while a camera's geometry is being changed (preview stopped and
@@ -1623,6 +1626,9 @@ class RecordingController:
         best-effort, so a cache failure never disturbs recording teardown. Runs
         before save_dir is incremented, so it captures the just-written folder.
         """
+        # Count every finished recording (even without a session id) so the GUI's
+        # "shut down & process" offer reflects real work made this run.
+        self._recordings_made += 1
         if not self._session_id:
             return
         folder = Path(self._settings.save_dir)
@@ -1660,6 +1666,7 @@ class RecordingController:
             "state": self._state,
             "remaining_ms": remaining_ms,
             "recording_id": recording_id,
+            "recordings_made": self._recordings_made,
             "save_dir": settings.save_dir,
             "disk_free_bytes": free_bytes,
             "settings": dataclasses.asdict(settings),

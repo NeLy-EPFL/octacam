@@ -44,6 +44,9 @@ RETENTION_DAYS = 30
 # `record` launch can warn about the CPU contention. A marker the checker can
 # lock is orphaned (the transcode crashed); once clearly old it is swept away.
 TRANSCODE_DIR_NAME = "transcode-active"
+# A `gui`/`record` publishes an flock-held marker here while it owns the cameras;
+# `octacam process` pauses between work units while one is live.
+CAPTURE_DIR_NAME = "capture-active"
 _STALE_MARKER_AGE_S = 60.0
 
 
@@ -254,12 +257,79 @@ def all_folders() -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Transcode-activity markers
+# Cache maintenance (backing `octacam cache info` / `octacam cache clear`)
+# ---------------------------------------------------------------------------
+
+
+def dir_size(path: Path) -> int:
+    """Total size in bytes of a file or directory tree (best-effort; 0 on error).
+
+    Does not follow directory symlinks (``os.walk`` default), so a marker or log
+    pointing outside the tree can't inflate the total.
+    """
+    try:
+        if path.is_file():
+            return path.stat().st_size
+        if not path.exists():
+            return 0
+    except OSError:
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def recordings_count() -> int:
+    """How many recording entries the cache currently holds."""
+    return len(_read_entries())
+
+
+def clear_recordings() -> bool:
+    """Delete the recording list (and any crashed-writer temp). Returns True if it existed.
+
+    Held under the recordings lock so a concurrent writer isn't caught mid-rewrite.
+    The now-idle lock file is removed afterwards, outside the lock (best-effort; it
+    self-recreates on the next write) — so the fd we hold is never the one unlinked.
+    """
+    path = _cache_file()
+    directory = cache_dir()
+    removed = False
+    with _locked():
+        try:
+            if path.exists():
+                path.unlink()
+                removed = True
+        except OSError as e:
+            log.debug("Could not remove the recording cache %s: %s", path, e)
+        try:
+            for tmp in directory.glob(f".{CACHE_FILENAME}.*.tmp"):
+                tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        (directory / LOCK_FILENAME).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Activity markers (transcode + capture)
 #
-# Transcoding (slow x264 presets across many files) saturates the CPU, so a
-# `gui`/`record` launch warns when one is in flight. A running transcode holds
-# an exclusive flock on a per-run marker file; the OS drops that lock on exit or
-# crash, so liveness needs no PID bookkeeping — a marker we can lock is dead.
+# Two flock-held marker namespaces under the cache dir signal cross-process
+# liveness with no PID bookkeeping — the OS drops an flock on exit or crash, so a
+# marker whose lock we *can* take is dead (and, once clearly old, swept away):
+#
+# - ``transcode-active`` is published by a running ``octacam process`` and read
+#   by a ``gui``/``record`` launch, which warns about the CPU contention.
+# - ``capture-active`` is published by ``gui``/``record`` while they own the
+#   cameras and read by ``octacam process``, which parks between work units until
+#   it clears — so a detached job never fights a live recording for CPU/GPU/disk.
 # ---------------------------------------------------------------------------
 
 
@@ -267,14 +337,17 @@ def _transcode_dir() -> Path:
     return cache_dir() / TRANSCODE_DIR_NAME
 
 
+def _capture_dir() -> Path:
+    return cache_dir() / CAPTURE_DIR_NAME
+
+
 @contextmanager
-def mark_transcode_active(detail: str = "") -> Iterator[None]:
-    """Publish an flock-held marker for the lifetime of a transcode run.
+def _mark_active(directory: Path, detail: str) -> Iterator[None]:
+    """Publish an flock-held marker under ``directory`` for the block's lifetime.
 
     Best-effort: if the marker cannot be created (e.g. an unwritable cache dir)
-    the transcode runs without it rather than failing.
+    the block runs without it rather than failing.
     """
-    directory = _transcode_dir()
     handle = None
     path = None
     try:
@@ -287,7 +360,7 @@ def mark_transcode_active(detail: str = "") -> Iterator[None]:
         handle.write(f"{os.getpid()} {detail}\n")
         handle.flush()
     except OSError as e:
-        log.debug("Could not publish a transcode marker (%s); continuing", e)
+        log.debug("Could not publish an activity marker in %s (%s); continuing", directory, e)
         if handle is not None:
             handle.close()
             handle = None
@@ -306,6 +379,20 @@ def mark_transcode_active(detail: str = "") -> Iterator[None]:
                 pass
 
 
+@contextmanager
+def mark_transcode_active(detail: str = "") -> Iterator[None]:
+    """Publish an flock-held marker for the lifetime of a transcode run."""
+    with _mark_active(_transcode_dir(), detail):
+        yield
+
+
+@contextmanager
+def mark_capture_active(detail: str = "") -> Iterator[None]:
+    """Publish an flock-held marker while a gui/record owns the cameras."""
+    with _mark_active(_capture_dir(), detail):
+        yield
+
+
 def _maybe_remove_stale(marker: Path) -> None:
     """Remove an unlocked marker once it is clearly past any publish window."""
     try:
@@ -319,14 +406,14 @@ def _maybe_remove_stale(marker: Path) -> None:
             pass
 
 
-def transcode_running() -> int:
-    """How many `octacam transcode` runs are active on this machine right now.
+def _count_live_markers(directory: Path) -> int:
+    """How many flock-held markers in ``directory`` are still live.
 
-    A marker whose flock we can take is orphaned (the transcode exited or
+    A marker whose flock we can take is orphaned (its publisher exited or
     crashed); it is ignored and, once stale, swept away.
     """
     try:
-        markers = [p for p in _transcode_dir().iterdir() if p.suffix == ".lock"]
+        markers = [p for p in directory.iterdir() if p.suffix == ".lock"]
     except OSError:
         return 0
     active = 0
@@ -344,7 +431,7 @@ def transcode_running() -> int:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                active += 1  # still held -> a live transcode
+                active += 1  # still held -> a live publisher
                 continue
             # We took the lock, so nobody owns it: orphaned (or mid-publish).
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -352,3 +439,78 @@ def transcode_running() -> int:
         finally:
             handle.close()
     return active
+
+
+def _sweep_markers(directory: Path) -> tuple[int, int]:
+    """Remove clearly-orphaned markers in ``directory``; return (removed, live_kept).
+
+    Mirrors :func:`_count_live_markers`, but for an explicit cache clear. A marker
+    whose flock is still held signals a live publisher and is left alone (counted
+    in ``live_kept``). An orphaned (lock-takeable) marker is removed only once it
+    is past the mid-publish window (:data:`_STALE_MARKER_AGE_S`) — the same
+    conservative rule the liveness checks use — so a clear can never delete a
+    marker a just-armed capture/transcode is still holding open but hasn't locked.
+    """
+    try:
+        markers = [p for p in directory.iterdir() if p.suffix == ".lock"]
+    except OSError:
+        return 0, 0
+    removed = live = 0
+    for marker in markers:
+        try:
+            handle = open(marker)
+        except OSError:
+            continue
+        held = False
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                held = True
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+        if held:
+            live += 1
+            continue
+        try:
+            age = _now().timestamp() - marker.stat().st_mtime
+        except OSError:
+            continue
+        if age > _STALE_MARKER_AGE_S:
+            try:
+                marker.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+    return removed, live
+
+
+def sweep_orphan_markers() -> tuple[int, int]:
+    """Sweep clearly-orphaned transcode/capture markers; return (removed, live_kept).
+
+    Summed across both marker namespaces. Used by ``octacam cache clear`` to tidy
+    markers left by crashed runs while never disturbing a currently-live capture
+    or transcode.
+    """
+    removed = live = 0
+    for directory in (_transcode_dir(), _capture_dir()):
+        r, held = _sweep_markers(directory)
+        removed += r
+        live += held
+    return removed, live
+
+
+def transcode_running() -> int:
+    """How many `octacam process` runs are transcoding on this machine right now."""
+    return _count_live_markers(_transcode_dir())
+
+
+def capture_active() -> bool:
+    """True while a gui/record on this machine currently owns the cameras.
+
+    ``octacam process`` polls this at each work-unit boundary and pauses while it
+    holds, so a detached job never contends with a live recording.
+    """
+    return _count_live_markers(_capture_dir()) > 0

@@ -92,6 +92,24 @@ def test_shutdown_refused_while_recording(shutdown_client):
     shutdown_client.controller.stop_recording(abort=True)
 
 
+def test_shutdown_process_after_flag(shutdown_client):
+    state = shutdown_client.app.state.app_state
+    # Explicit true is recorded so cli.gui starts detached processing on exit.
+    assert shutdown_client.post("/api/shutdown", json={"process_after": True}).status_code == 202
+    assert state.process_after is True
+    # An empty body (older clients / plain shutdown) leaves it false.
+    shutdown_client.post("/api/shutdown")
+    assert state.process_after is False
+    # Explicit false, too.
+    shutdown_client.post("/api/shutdown", json={"process_after": False})
+    assert state.process_after is False
+
+
+def test_state_snapshot_has_recordings_made(client):
+    body = client.get("/api/state").json()
+    assert body.get("recordings_made") == 0
+
+
 def test_static_assets_served_no_cache(client):
     # The GUI's static assets are unversioned, so they are served with
     # Cache-Control: no-cache and the browser revalidates on every reload —
