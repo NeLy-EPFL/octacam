@@ -1,6 +1,6 @@
 # {05D8C294-F295-4dfb-9D01-096BD04049F4}
 # GenApi persistence file (version 3.5.0)
-# Device = Basler::UsbCameraParams -- Basler USB3Vision camera interface -- Device version = 1.0.0 -- Product GUID = 5a809e15-f447-480f-a21f-0fb7256b8400 -- Product version GUID = E93A8010-AA2E-4113-AFF3-8FB9038F267B
+# Device = Basler::UsbCameraParams -- Basler USB3Vision camera interface -- Device version = 1.0.0 -- Product GUID = 5a809e15-f447-480f-a21f-0fb7256b8400 -- Product version GUID = E44BCFD5-84D0-428F-ABC1-B6BF050F4788
 ExposureAuto	Off
 GainAuto	Off
 CenterX	1
@@ -84,6 +84,7 @@ LineDebouncerTime	{LineSelector=Line4}	0.00000
 LineMinimumOutputPulseWidth	{LineSelector=Line2}	0.000
 LineSelector	Line2
 UserOutputValueAll	0x0
+BslLightControlMode	Off
 TimerDuration	{TimerSelector=Timer1}	0.0
 TimerSelector	Timer1
 TimerDelay	{TimerSelector=Timer1}	0.0
@@ -96,6 +97,7 @@ CounterSelector	Counter1
 CounterResetSource	{CounterSelector=Counter1}	Off
 CounterResetSource	{CounterSelector=Counter2}	Counter2End
 CounterSelector	Counter1
+BslLightControlTriggerMode	ExposureActive
 EventNotification	{EventSelector=ExposureEnd}	Off
 EventNotification	{EventSelector=FrameStart}	Off
 EventNotification	{EventSelector=FrameBurstStart}	Off
