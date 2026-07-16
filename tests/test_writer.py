@@ -391,3 +391,60 @@ def test_transcode_raw_without_geometry_raises(tmp_path):
     # Supplying only a partial geometry is still insufficient.
     with pytest.raises(FileNotFoundError):
         transcode_raw(raw, width=WIDTH, height=HEIGHT)
+
+
+def test_ffmpeg_probes_and_transcode_never_grab_the_tty(tmp_path, monkeypatch):
+    # Regression: an ffmpeg with the controlling terminal on stdin flips the tty
+    # to no-echo/cbreak (to watch for keypresses) and only restores on a clean
+    # exit. `octacam doctor`'s NVENC probes launch encodes (probe_nvenc_max_sessions
+    # runs 12 concurrent ones — their save/restore reliably races echo off), and a
+    # timeout-killed encode never restores at all, leaving the user's shell with
+    # invisible input. Every probe/transcode launch must keep ffmpeg off the tty:
+    # -nostdin in the args AND stdin=subprocess.DEVNULL. (The record path is
+    # exempt — it feeds frames through a stdin PIPE — and is not covered here.)
+    import subprocess
+    from types import SimpleNamespace
+
+    import octacam.writer as writer_mod
+
+    def assert_off_tty(cmd, kwargs, what):
+        assert "-nostdin" in cmd, f"{what}: missing -nostdin in {cmd}"
+        assert kwargs.get("stdin") is subprocess.DEVNULL, (
+            f"{what}: stdin not redirected to DEVNULL (kwargs={kwargs})"
+        )
+
+    # 1. ffmpeg_encoder_works — a single real encode via subprocess.run.
+    writer_mod._ENCODER_OK.clear()
+    runs: list[tuple[list, dict]] = []
+
+    def fake_run(cmd, **kwargs):
+        runs.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(writer_mod.subprocess, "run", fake_run)
+    assert writer_mod.ffmpeg_encoder_works("/fake/ffmpeg", "h264_nvenc") is True
+    assert runs, "encoder probe should have launched ffmpeg"
+    assert_off_tty(runs[0][0], runs[0][1], "ffmpeg_encoder_works")
+
+    # 2. probe_nvenc_max_sessions — up to 12 concurrent encodes via Popen.
+    monkeypatch.setattr(writer_mod, "find_ffmpeg", lambda **_: "/fake/ffmpeg")
+    launches: list[tuple[list, dict]] = []
+
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            launches.append((cmd, kwargs))
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(writer_mod.subprocess, "Popen", FakeProc)
+    assert writer_mod.probe_nvenc_max_sessions(ceiling=12) == 12
+    assert len(launches) == 12
+    for cmd, kwargs in launches:
+        assert_off_tty(cmd, kwargs, "probe_nvenc_max_sessions")
+
+    # 3. _reporting_args injects -nostdin for both the piped-progress and the
+    #    opt-in raw-view transcode modes (grid xstack routes through here too).
+    for raw in (False, True):
+        flags = writer_mod._reporting_args(["/fake/ffmpeg", "-i", "in.mkv"], raw)
+        assert "-nostdin" in flags, f"_reporting_args(raw_output={raw}) missing -nostdin"

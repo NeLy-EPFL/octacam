@@ -44,6 +44,17 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   encoder between units (it holds no NVENC session while paused), and is
   crash-safe (a crashed gui/record auto-clears the pause).
 
+### Fixed
+
+- **`octacam doctor` no longer breaks the terminal** — the GPU/NVENC probes ran
+  ffmpeg encodes with the controlling terminal on stdin, so ffmpeg switched the
+  tty to no-echo mode (to watch for keypresses) and left it that way (the
+  concurrent session-count probe reliably raced echo off; a timeout-killed probe
+  never restored it), making typed input invisible after doctor exited. Every
+  ffmpeg probe/transcode/remux launch now runs with `-nostdin` and a redirected
+  stdin, so ffmpeg never touches the terminal. The same hardening covers a
+  Ctrl-C'd `octacam process` transcode.
+
 ## [0.3.1] - 2026-07-11
 
 ### Added

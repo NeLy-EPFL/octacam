@@ -1016,7 +1016,12 @@ def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
 def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
     """Run a fast, read-only ffmpeg query and return its combined output ("" on error)."""
     try:
-        out = subprocess.run([exe, *args], capture_output=True, text=True, timeout=10)
+        # stdin=DEVNULL keeps even these non-encoding queries off the controlling
+        # tty, so a timeout kill can never leave the terminal in no-echo mode.
+        out = subprocess.run(
+            [exe, *args], stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=10,
+        )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         return ""
     return (out.stdout or "") + (out.stderr or "")

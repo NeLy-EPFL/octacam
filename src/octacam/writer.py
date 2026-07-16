@@ -242,12 +242,18 @@ def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
     try:
         proc = subprocess.run(
             [
-                exe, "-hide_banner", "-loglevel", "error",
+                # -nostdin (+ stdin=DEVNULL below): never let ffmpeg touch the
+                # controlling tty. With a terminal on stdin ffmpeg switches it to
+                # no-echo/cbreak to read keypresses and only restores on a clean
+                # exit — the timeout kill below (hung GPU/driver) would leave the
+                # terminal with echo off, wedging the user's shell.
+                exe, "-nostdin", "-hide_banner", "-loglevel", "error",
                 # 256x256: comfortably above NVENC's minimum frame dimensions
                 # (a smaller probe frame fails init on its own).
                 "-f", "lavfi", "-i", "color=c=black:s=256x256:r=5",
                 "-frames:v", "1", "-c:v", encoder, "-f", "null", "-",
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
         )  # fmt: skip
@@ -282,10 +288,16 @@ def probe_nvenc_max_sessions(
         try:
             proc = subprocess.Popen(
                 [
-                    exe, "-hide_banner", "-loglevel", "error", "-re",
+                    # -nostdin (+ stdin=DEVNULL): these encodes overlap, and any
+                    # ffmpeg holding the tty flips it to no-echo. With N of them
+                    # racing on save/restore one restores the already-off state,
+                    # leaving the terminal echo-off after doctor exits. Keep them
+                    # off the tty entirely.
+                    exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-re",
                     "-f", "lavfi", "-i", "testsrc=size=256x256:rate=10",
                     "-t", "2", "-c:v", encoder, "-f", "null", "-",
                 ],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )  # fmt: skip
@@ -757,6 +769,9 @@ class FfmpegVideoWriter(AsyncFrameWriter):
         result = subprocess.run(
             [
                 find_ffmpeg(),
+                # -nostdin (+ stdin=DEVNULL): keep ffmpeg off the controlling
+                # tty so it can never leave the terminal in no-echo mode.
+                "-nostdin",
                 "-hide_banner",
                 "-loglevel",
                 "warning",
@@ -767,6 +782,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
                 "copy",
                 str(target),
             ],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
         )
         if result.returncode == 0:
@@ -1164,10 +1180,16 @@ def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
         if tok in ("-hide_banner", "-stats", "-nostats"):
             continue
         cleaned.append(tok)
+    # -nostdin in both modes (+ stdin=DEVNULL at the launch): a transcode reads
+    # from -i, never the tty, so ffmpeg has no reason to grab the terminal — and
+    # if it does, a Ctrl-C mid-encode kills it before it restores echo, wedging
+    # the shell. Raw mode still streams ffmpeg's native stats via inherited
+    # stdout/stderr; it only loses the interactive 'q' key (use Ctrl-C).
     if raw_output:
-        flags = ["-hide_banner", "-loglevel", "info", "-stats"]
+        flags = ["-nostdin", "-hide_banner", "-loglevel", "info", "-stats"]
     else:
         flags = [
+            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "warning",
@@ -1251,14 +1273,20 @@ def _run_ffmpeg(
     and surfaced only when the encode fails."""
     args = _reporting_args(args, raw_output)
     if raw_output:
-        # Inherit stdout/stderr so ffmpeg's stats/log paint the terminal live.
-        returncode = subprocess.run(args).returncode
+        # Inherit stdout/stderr so ffmpeg's stats/log paint the terminal live,
+        # but keep stdin off the tty (see _reporting_args) so a killed encode
+        # can't leave the terminal in no-echo mode.
+        returncode = subprocess.run(args, stdin=subprocess.DEVNULL).returncode
         if returncode != 0:
             raise RuntimeError(f"ffmpeg failed for {src} (exit code {returncode})")
         return
 
     proc = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        args,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     assert proc.stdout is not None and proc.stderr is not None  # PIPE => set
     stderr_tail: deque[str] = deque(maxlen=40)
