@@ -661,6 +661,67 @@ def test_camera_lines_groups_by_model_and_handles_unknown():
     assert _camera_lines([]) == []
 
 
+def test_usb_camera_links_reads_speeds_and_filters_non_cameras(tmp_path):
+    # The sysfs link-speed reader: camera-vendor devices (Basler 2676, FLIR 1e10)
+    # and any detected serial are reported with their negotiated speed; non-camera
+    # devices and entries without a serial node are ignored.
+    from octacam.cli import _usb_camera_links
+
+    def mkdev(name, **fields):
+        d = tmp_path / name
+        d.mkdir()
+        for k, v in fields.items():
+            (d / k).write_text(v)
+
+    mkdev("basler-bad", serial="40018619", idVendor="2676",
+          product="acA1920-150um", speed="480")
+    mkdev("basler-ok", serial="40018631", idVendor="2676",
+          product="acA1920-150um", speed="5000")
+    mkdev("flir-bad", serial="010AA673", idVendor="1e10",
+          product="Grasshopper3", speed="480")
+    mkdev("generic-detected", serial="GEN1", idVendor="ffff",
+          product="Cam", speed="480")  # unknown vendor, but octacam detected it
+    mkdev("keyboard", serial="KB1", idVendor="046d", speed="12")  # non-camera vendor
+    mkdev("hub", idVendor="1d6b", speed="480")  # no serial node -> skipped
+
+    got = {s: (p, spd) for s, p, spd in _usb_camera_links({"GEN1"}, root=tmp_path)}
+    assert got["40018619"] == ("acA1920-150um", 480)
+    assert got["40018631"] == ("acA1920-150um", 5000)
+    assert got["010AA673"][1] == 480  # FLIR matched by vendor id
+    assert got["GEN1"][1] == 480  # unknown vendor but detected serial
+    assert "KB1" not in got  # non-camera vendor, not detected
+    slow = {s for s, (_p, spd) in got.items() if spd < 5000}
+    assert slow == {"40018619", "010AA673", "GEN1"}
+
+
+def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
+    # doctor never opens a camera, so a USB3 camera that fell back to USB 2.0 must
+    # be surfaced from its sysfs link speed — the gap the user hit (the GUI warned,
+    # doctor was silent). The warning names the camera, the speed, and the fix.
+    from octacam import cli
+    from octacam.cli import _doctor_backends, _Report
+
+    monkeypatch.setattr(
+        cli, "_usb_camera_links",
+        lambda _detected: [("40018619", "acA1920-150um", 480)],
+    )
+
+    class _FakeScan:
+        def get(self, _name):
+            return []
+
+        def cascade(self):
+            return []
+
+    report = _Report()
+    _doctor_backends(report, only_backend="fake", scan=_FakeScan())
+    warns = [t for _title, items in report.sections for s, t in items if s == "warn"]
+    assert any(
+        "40018619" in w and "480 Mb/s" in w and "USB 2.0" in w and "cable" in w
+        for w in warns
+    ), warns
+
+
 def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     # End-to-end of the asymmetry fix: the REAL _enumerate_backend generic path
     # must resolve the backend's module-level read_model (by module, by name) and

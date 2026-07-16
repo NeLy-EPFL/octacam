@@ -5,6 +5,8 @@ these assert the cascade *structure* and the missing-SDK → BackendUnavailable
 contract rather than any particular camera being present.
 """
 
+import logging
+
 import pytest
 
 from octacam.cameras import select_backend
@@ -241,6 +243,169 @@ def test_basler_retrieve_freerun_swallows_device_error():
     be = _make_basler_backend(_RaisingRetrieveRaw())
     be._begin_grab()
     assert be.retrieve_freerun(50, lambda: True) is None
+
+
+class _FakeBaslerDevice:
+    def __init__(self, serial):
+        self._serial = serial
+
+    def GetSerialNumber(self):
+        return self._serial
+
+
+class _FakeTlFactory:
+    """pylon transport-layer factory stand-in with no hardware.
+
+    ``CreateDevice`` raises the real SDK exception for any serial in ``bad`` — as
+    pylon does when a USB3 camera's SuperSpeed link trained down to USB 2.0 —
+    and returns a sentinel handle otherwise.
+    """
+
+    def __init__(self, serials, bad):
+        self._devices = [_FakeBaslerDevice(s) for s in serials]
+        self._bad = set(bad)
+        self.created: list[str] = []
+
+    def EnumerateDevices(self):
+        return self._devices
+
+    def CreateDevice(self, device):
+        serial = device.GetSerialNumber()
+        if serial in self._bad:
+            from pypylon import genicam
+
+            raise genicam.RuntimeException(
+                "Failed to open device for XML file download. Error: 'The "
+                "device cannot be operated on an USB 2.0 port. The device "
+                "requires an USB 3.0 compatible port.'"
+            )
+        self.created.append(serial)
+        return ("device-handle", serial)
+
+
+class _FakePylon:
+    class TlFactory:
+        _instance = None
+
+        @staticmethod
+        def GetInstance():
+            return _FakePylon.TlFactory._instance
+
+
+def _patch_basler_factory(monkeypatch, serials, bad):
+    pytest.importorskip("pypylon")
+    from octacam.cameras import basler
+
+    factory = _FakeTlFactory(serials, bad)
+    _FakePylon.TlFactory._instance = factory
+    monkeypatch.setattr(basler, "pylon", _FakePylon)
+    return factory
+
+
+def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(monkeypatch):
+    # A camera whose SuperSpeed link fell back to USB 2.0 (CreateDevice raises)
+    # is reported with a None handle — the sentinel that lets CameraSystem claim
+    # the serial (so no lower cascade tier retries it) without opening it — while
+    # the working cameras carry real handles. Enumeration never raises.
+    from octacam.cameras.basler import enumerate_basler
+
+    _patch_basler_factory(
+        monkeypatch, ["40018619", "40018631", "40018632"], bad={"40018619"}
+    )
+    # Capture on the octacam logger directly, not via caplog: another test (the
+    # CLI's _setup_logging) may leave propagate=False, emptying caplog's capture.
+    msgs: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: msgs.append(record.getMessage())
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        out = enumerate_basler()
+    finally:
+        logger.removeHandler(handler)
+    by_serial = dict(out)
+    assert by_serial["40018619"] is None  # present but unusable
+    assert by_serial["40018631"] is not None and by_serial["40018632"] is not None
+    assert any("40018619" in m and "USB 2.0" in m for m in msgs)
+
+
+def test_enumerate_basler_all_uncreatable_have_none_handles(monkeypatch):
+    # Every camera failing the same way yields all-None handles (CameraSystem
+    # then opens nothing and surfaces "no cameras were opened") rather than
+    # raising a raw SDK exception out of enumeration.
+    from octacam.cameras.basler import enumerate_basler
+
+    _patch_basler_factory(monkeypatch, ["A", "B"], bad={"A", "B"})
+    out = enumerate_basler()
+    assert [serial for serial, _h in out] == ["A", "B"]
+    assert all(handle is None for _serial, handle in out)
+
+
+def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):
+    # Regression: a higher tier reporting (serial, None) — "present but unusable"
+    # — must CLAIM the serial so a lower cascade tier does not pointlessly retry
+    # the same broken device (for a USB3 camera on a USB 2.0 link that retry just
+    # fails to open on every backend and, for pycameleon, wastes a stream-timeout
+    # + destabilizes native teardown).
+    from octacam.cameras import system as sysmod
+    from octacam.cameras.system import CameraSystem
+
+    def top_enum(_req):  # a vendor tier: sees SN1 but declines it (None handle)
+        return [("SN1", None), ("SN2", object())]
+
+    def floor_enum(_req):  # the pycameleon-style floor: sees everything
+        return [("SN1", object()), ("SN2", object()), ("SN3", object())]
+
+    monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["top", "floor"])
+    monkeypatch.setattr(
+        sysmod,
+        "select_backend",
+        lambda name: (
+            (top_enum if name == "top" else floor_enum),
+            (lambda h: object()),
+            "x",
+        ),
+    )
+    sys = CameraSystem.pending()  # hardware-free shell; _enumerate opens nothing
+    serials = [serial for serial, _h, _mk in sys._enumerate("auto", None)]
+    assert "SN1" not in serials  # declined by 'top', NOT retried by 'floor'
+    assert set(serials) == {"SN2", "SN3"}
+
+
+def test_single_backend_filters_declined_camera(monkeypatch):
+    # The single-backend path also drops a None-handle (declined) camera.
+    from octacam.cameras import system as sysmod
+    from octacam.cameras.system import CameraSystem
+
+    def only_enum(_req):
+        return [("SN1", None), ("SN2", object())]
+
+    monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["solo"])
+    monkeypatch.setattr(
+        sysmod, "select_backend", lambda _n: (only_enum, (lambda h: object()), "x")
+    )
+    sys = CameraSystem.pending()
+    serials = [serial for serial, _h, _mk in sys._enumerate("solo", None)]
+    assert serials == ["SN2"]
+
+
+def test_describe_open_failure_usb2_is_actionable():
+    from octacam.cameras.basler import _describe_open_failure
+
+    msg = _describe_open_failure(
+        "40018619", RuntimeError("cannot be operated on an USB 2.0 port")
+    )
+    assert "40018619" in msg
+    assert "cable" in msg.lower()
+    assert "5000M" in msg and "480M" in msg
+
+
+def test_describe_open_failure_generic_passthrough():
+    from octacam.cameras.basler import _describe_open_failure
+
+    msg = _describe_open_failure("SN9", RuntimeError("some other boom"))
+    assert "SN9" in msg
+    assert "some other boom" in msg
 
 
 # --------------------------------------------------------------------------

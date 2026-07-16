@@ -66,18 +66,28 @@ class CameraSystem:
 
         # Open in parallel: each open() blocks on USB round-trips with the GIL
         # released, so 8 cameras open in roughly the time one used to take.
+        # A single camera that fails to open is dropped with a loud message
+        # rather than aborting the whole rig — the others still come up, exactly
+        # as a not-connected serial is skipped during enumeration and a failed
+        # camera is skipped in start_record. This also catches a camera the auto
+        # cascade's pycameleon floor claimed after a vendor tier declined it (a
+        # USB3 link that fell back to USB 2.0 opens on no backend). Only a total
+        # failure (nothing opened) is fatal; it re-raises the first error so the
+        # caller can explain it.
         failures = [
             (camera, exc)
             for camera, _result, exc in self._run_parallel(lambda c: c.open())
             if exc is not None
         ]
         if failures:
-            for camera in self.cameras:
-                camera.close()  # close() no-ops on cameras that never opened
+            failed = {id(camera) for camera, _exc in failures}
+            for camera, exc in failures:
+                camera.close()  # close() no-ops on a camera that never opened
+                log.error("Failed to open camera %s: %s", camera.serial_number, exc)
+            self.cameras = [c for c in self.cameras if id(c) not in failed]
+        if not self.cameras:
             self._teardown_backends()
-            camera, exc = failures[0]
-            log.error("Failed to open camera %s", camera.serial_number)
-            raise exc
+            raise failures[0][1]
 
     @classmethod
     def pending(cls, backend: str = "auto") -> "CameraSystem":
@@ -132,6 +142,7 @@ class CameraSystem:
             entries = [
                 (serial, handle, make_backend)
                 for serial, handle in enumerate_fn(requested_serial_numbers)
+                if handle is not None  # None = present but unusable (already logged)
             ]
             if entries:
                 log.info("Detected %d camera(s) via %s", len(entries), name)
@@ -148,6 +159,12 @@ class CameraSystem:
                 if serial in claimed:
                     continue  # a higher-priority tier already owns this camera
                 claimed.add(serial)
+                if handle is None:
+                    # Present but unusable (e.g. a USB3 link that fell back to USB
+                    # 2.0); the backend already logged why. Claim the serial so no
+                    # lower tier pointlessly retries the same broken device, but
+                    # don't collect it for opening.
+                    continue
                 claimed_by[serial] = name
                 collected.append((serial, handle, make_backend))
         if not requested_serial_numbers:
@@ -158,7 +175,10 @@ class CameraSystem:
         for serial in requested_serial_numbers:
             entry = by_serial.get(serial)
             if entry is None:
-                log.warning("Camera with serial number %s not found", serial)
+                # A claimed-but-unusable serial already logged its real reason;
+                # only warn for one that no tier detected at all.
+                if serial not in claimed:
+                    log.warning("Camera with serial number %s not found", serial)
                 continue
             ordered.append(entry)
         self._log_detected(ordered, claimed_by)

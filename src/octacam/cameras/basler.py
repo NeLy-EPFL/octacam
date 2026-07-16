@@ -625,12 +625,42 @@ class BaslerBackend(SoftwareTriggerHandoff):
             result.Release()
 
 
+def _describe_open_failure(serial: str, exc: Exception) -> str:
+    """An actionable, operator-facing reason a Basler camera cannot be opened.
+
+    The frequent gotcha is a USB3 camera whose SuperSpeed link fails to train and
+    falls back to USB 2.0: it is physically in a USB 3 port, yet pylon refuses it
+    with "The device cannot be operated on an USB 2.0 port." That wording reads
+    like a wrong-port mistake when the real cause is the cable/connector/port
+    link, so translate it into something the operator can act on. Any other
+    open error is passed through verbatim.
+    """
+    text = str(exc)
+    if "USB 2.0" in text or "USB 3.0 compatible port" in text:
+        return (
+            f"Camera {serial} came up on a USB 2.0 link and cannot be opened. A "
+            "USB3 camera whose SuperSpeed link fails to train drops back to USB "
+            "2.0 even in a USB 3 port, so the cause is the cable or connector, "
+            "not the port choice. Reseat both ends of its cable (or swap in a "
+            "known-good USB3 cable), or move it to another USB 3 port, then "
+            "reload. `lsusb -t` shows each camera's link speed — a healthy one "
+            "reads 5000M, this one 480M. Skipping this camera for now."
+        )
+    return f"Camera {serial} could not be opened and will be skipped: {text}"
+
+
 def enumerate_basler(requested_serials: list[str] | None = None):
     """Return ``[(serial, device_handle), ...]`` for the requested cameras.
 
     With no requested serials, every detected camera is returned (sorted by
     serial); otherwise the listed serials are returned in order, warning about
-    any that are not connected. Mirrors the original CameraSystem enumeration.
+    any that are not connected. A camera that is present but cannot be brought
+    up (most often a USB3 link that trained down to USB 2.0) is reported with a
+    ``None`` handle and a loud, actionable message rather than aborting the whole
+    rig. ``CameraSystem._enumerate`` reads that ``None`` as "present but
+    unusable": it claims the serial (so the auto cascade's lower tiers don't
+    pointlessly retry the same broken device) but never opens it. Mirrors the
+    original CameraSystem enumeration otherwise.
     """
     tl_factory = pylon.TlFactory.GetInstance()
     devices = tl_factory.EnumerateDevices()
@@ -651,5 +681,18 @@ def enumerate_basler(requested_serials: list[str] | None = None):
         except ValueError:
             log.warning("Camera with serial number %s not found", serial)
             continue
-        out.append((serial, tl_factory.CreateDevice(devices[index])))
+        try:
+            device = tl_factory.CreateDevice(devices[index])
+        except genicam.GenericException as e:
+            # CreateDevice downloads the camera's XML over USB, so a device that
+            # enumerated but can't be operated (e.g. a SuperSpeed link that fell
+            # back to USB 2.0) throws here. One bad camera must not crash the
+            # enumeration of the whole rig. Report it with a None handle — the
+            # sentinel CameraSystem._enumerate reads as "present but unusable":
+            # the serial is claimed (so the auto cascade's lower tiers don't
+            # pointlessly retry the same broken device) but never opened.
+            log.error("%s", _describe_open_failure(serial, e))
+            out.append((serial, None))
+            continue
+        out.append((serial, device))
     return out

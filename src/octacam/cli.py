@@ -1188,6 +1188,51 @@ def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
     return lines
 
 
+# USB vendor IDs of the USB3-Vision camera makers octacam drives. Used by the
+# doctor USB-link-speed check to spot a camera without opening it; extend as more
+# vendors are used (the pycameleon floor also matches any detected serial).
+_CAMERA_USB_VENDORS = {"2676": "Basler", "1e10": "FLIR"}
+_SUPERSPEED_MBPS = 5000
+
+
+def _usb_camera_links(
+    detected_serials: "set[str]", root: Path = Path("/sys/bus/usb/devices")
+) -> "list[tuple[str, str, int]]":
+    """``[(serial, product, speed_mbps), ...]`` for connected camera USB devices.
+
+    Reads sysfs (``<root>/*/{idVendor,serial,product,speed}``) so it needs no
+    device open — safe during a live session and backend-agnostic. A device
+    counts as a camera if its vendor is a known camera maker or its serial
+    matches one octacam detected. Returns ``[]`` on any platform without that
+    sysfs layout (doctor then simply skips the link-speed check)."""
+
+    def _read(dev: Path, field: str) -> str:
+        try:
+            return (dev / field).read_text().strip()
+        except OSError:
+            return ""
+
+    out: list[tuple[str, str, int]] = []
+    seen: set[str] = set()
+    try:
+        devices = sorted(root.iterdir())
+    except OSError:
+        return out
+    for dev in devices:
+        serial = _read(dev, "serial")
+        if not serial or serial in seen:
+            continue
+        if _read(dev, "idVendor") not in _CAMERA_USB_VENDORS and serial not in detected_serials:
+            continue
+        try:
+            speed = int(float(_read(dev, "speed")))
+        except ValueError:
+            continue  # no/garbled speed node (e.g. a non-USB match); skip it
+        seen.add(serial)
+        out.append((serial, _read(dev, "product"), speed))
+    return out
+
+
 def _doctor_backends(
     report: _Report, only_backend: str | None, scan: _CameraScan
 ) -> None:
@@ -1201,6 +1246,7 @@ def _doctor_backends(
     backends = (
         (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
     )
+    detected_serials: set[str] = set()
     for name in backends:
         try:
             select_backend(name)
@@ -1220,8 +1266,25 @@ def _doctor_backends(
             report.add("warn", f"{name}: available, but enumeration failed ({e})")
             continue
         report.add("ok", f"{name}: available — {len(cams)} camera(s) detected")
+        detected_serials.update(serial for serial, _model in cams)
         for line in _camera_lines(cams):
             report.add("list", line)
+    # USB link-speed check: a USB3 camera whose SuperSpeed link fails to train
+    # falls back to USB 2.0 (480 Mb/s) and then fails to open — the error the GUI
+    # reports at open time. doctor never opens a camera, so surface it from the
+    # negotiated link speed in sysfs, visible without touching a device.
+    for serial, product, speed in _usb_camera_links(detected_serials):
+        if speed >= _SUPERSPEED_MBPS:
+            continue
+        label = f"{product} {serial}" if product else serial
+        usb2 = " (USB 2.0)" if speed == 480 else ""
+        report.add(
+            "warn",
+            f"{label} is linked at only {speed} Mb/s{usb2}, not USB 3 SuperSpeed "
+            f"({_SUPERSPEED_MBPS} Mb/s) — it will fail to open. A USB3 camera whose "
+            "SuperSpeed link fails to train drops back to USB 2.0 even in a USB 3 "
+            "port; check/replace its cable, reseat it, or try another USB 3 port.",
+        )
     if not only_backend and os.environ.get("PYLON_CAMEMU"):
         report.add(
             "info",

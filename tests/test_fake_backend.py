@@ -10,6 +10,7 @@ import os
 
 os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
+import logging
 import threading
 import time
 
@@ -260,6 +261,53 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
         assert started == [good.name]  # good camera started; no exception propagated
     finally:
         system.close()
+
+
+def test_open_phase_skips_one_camera_that_fails_to_open(tmp_path, monkeypatch):
+    # Regression: a single camera that fails to open must be dropped (logged),
+    # not abort the whole rig — mirroring the enumerate "not found" skip and the
+    # start_record skip. This is what lets the auto cascade survive a USB3 camera
+    # that fell back to USB 2.0 and got claimed by the pycameleon floor (it opens
+    # on no backend), instead of one bad camera crashing every camera.
+    from octacam.cameras.fake import FakeBackend
+
+    real_open = FakeBackend.open
+
+    def flaky_open(self):
+        if self.serial_number == "FAKE-1":
+            raise RuntimeError("simulated open failure (USB 2.0 fallback)")
+        real_open(self)
+
+    monkeypatch.setattr(FakeBackend, "open", flaky_open)
+    # Capture on the octacam logger directly, not via caplog: another test (the
+    # CLI's _setup_logging) may leave propagate=False, emptying caplog's capture.
+    msgs: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: msgs.append(record.getMessage())
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        system = CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
+    finally:
+        logger.removeHandler(handler)
+    try:
+        assert [c.serial_number for c in system] == ["FAKE-0"]  # bad one dropped
+        assert any("FAKE-1" in m for m in msgs)
+    finally:
+        system.close()
+
+
+def test_open_phase_raises_only_when_every_camera_fails(monkeypatch):
+    # If nothing opens, construction still raises so the caller can surface it
+    # (cli.py turns this into a clean fail_init, never a raw traceback).
+    from octacam.cameras.fake import FakeBackend
+
+    def always_fail(self):
+        raise RuntimeError("all dead")
+
+    monkeypatch.setattr(FakeBackend, "open", always_fail)
+    with pytest.raises(RuntimeError, match="all dead"):
+        CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
 
 
 def test_preview_bounds_the_timestamp_series(tmp_path):
