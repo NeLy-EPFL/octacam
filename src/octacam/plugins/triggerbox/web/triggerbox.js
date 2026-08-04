@@ -188,7 +188,9 @@ export default class TriggerboxTab {
     const became = connected && !this.connected;
     this.connected = connected;
     this._refresh();
-    if (became) this._loadExposures();
+    // Debounced (not immediate) so this connect edge and the handshake's `system`
+    // push coalesce into one exposure read instead of two.
+    if (became) this._scheduleExposureReload();
   }
 
   applyState(msg) {
@@ -217,6 +219,13 @@ export default class TriggerboxTab {
   applyStatus(info) {
     if (!info) return;
     this.applyState({ ...info, state: info.arduino_state });
+    // That same push is also how this page learns the cameras finally opened:
+    // with serve-first startup the constructor's exposure read ran against the
+    // empty placeholder system and saw zero cameras. Re-read them, or an Auto
+    // (cover exposure) strobe would keep drawing its manual-duty fallback for
+    // the rest of the session while the board is armed with the real
+    // exposure+guard on-time.
+    this._scheduleExposureReload();
   }
 
   // --------------------------------------------------------- start params

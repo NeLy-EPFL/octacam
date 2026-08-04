@@ -868,6 +868,29 @@ def test_exposures_endpoint_empty_without_controller():
     assert _test_client(plugin).get("/api/triggerbox/exposures").json()["cameras"] == []
 
 
+def test_exposures_endpoint_follows_a_late_attached_camera_system():
+    """The endpoint is a live read, not a snapshot taken at set_controller time.
+
+    Serve-first startup hands the plugin a controller whose camera system is
+    still the hardware-free placeholder (zero cameras), and swaps in the real one
+    seconds later. The same client must see the exposures appear — that is what
+    makes the tab's re-read on the init push (triggerbox.js applyStatus) work."""
+    plugin, _link = _plugin_with_fake(strobe_guard_us=100)
+    controller = FakeController([])
+    plugin.set_controller(controller)
+    client = _test_client(plugin)
+
+    assert client.get("/api/triggerbox/exposures").json()["cameras"] == []
+    assert plugin._auto_led_on_us() is None
+
+    controller.camera_system = [FakeCamera("a", 5000, 0)]
+
+    assert client.get("/api/triggerbox/exposures").json()["cameras"] == [
+        {"index": 0, "name": "a", "exposure_us": 5000.0, "trigger_delay_us": 0.0}
+    ]
+    assert plugin._auto_led_on_us() == 5100.0
+
+
 def test_reconnect_endpoint(monkeypatch):
     plugin, _link = _plugin_with_fake()
     monkeypatch.setattr(plugin, "_open", lambda: None)

@@ -40,6 +40,18 @@ from playwright.sync_api import (
 )
 
 STATIC = Path(__file__).resolve().parents[1] / "src" / "octacam" / "web" / "static"
+# Plugin UI bundles live in each plugin's own folder, served at /plugins/<name>/;
+# the static server above only covers web/static, so a test that loads one routes
+# it in from here (see the triggerbox timing-plot test).
+TRIGGERBOX_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "triggerbox"
+    / "web"
+    / "triggerbox.js"
+)
 
 # The save-method dropdown is populated from these (mirrors writer.FORMATS as the
 # server serializes it). NVENC_FORMATS adds the GPU method for the nvenc tests.
@@ -735,14 +747,14 @@ window.__pushWs = (obj) => {
 """
 
 
-def _system_payload(*, ready):
+def _system_payload(*, ready, plugins=None):
     payload = {
         "version": "test",
         "update": None,
         "ready": ready,
         "init_error": None,
         "config_dir": "/x",
-        "plugins": {},
+        "plugins": plugins or {},
         "managed_trigger_available": False,
         "display_refresh_interval_ms": 100,
         "theme": "dark",
@@ -832,5 +844,137 @@ def test_grid_placeholder_shows_then_fills_on_system_push(static_server, browser
         page.wait_for_selector("#grid .tile", timeout=5000)
         assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 1
         assert page.eval_on_selector_all(".grid-placeholder", "els => els.length") == 0
+    finally:
+        page.close()
+
+
+# The triggerbox tab's status slice: one Auto (cover exposure) strobe on ch1, so
+# the timing plot has a light row whose on-time comes from the live exposures.
+_TRIGGERBOX_STATUS = {
+    "ready": True,
+    "device": "/dev/ttyACM0",
+    "arduino_state": "idle",
+    "firmware": "TRIGGERBOX 2 abc1234",
+    "firmware_ok": True,
+    "firmware_state": "current",
+    "needs_flash": False,
+    "error": None,
+    "guard_us": 100,
+    "cameras": [{"pin": "D13", "pulse_us": 500, "delay_us": 0}],
+    "lights": [
+        {
+            "channel": 1,
+            "pin": "D5",
+            "mode": "strobe",
+            "duty_mode": "auto",
+            "duty_percent": 20,
+            "delay_us": 0,
+        }
+    ],
+    "web": {"module": "/plugins/triggerbox/triggerbox.js"},
+}
+
+
+def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
+    static_server, browser
+):
+    """An Auto strobe's on-time reaches the timing plot after deferred startup.
+
+    Serve-first startup means the triggerbox tab is constructed — and reads
+    /api/triggerbox/exposures — while the server still holds the hardware-free
+    placeholder camera system, so it sees zero exposures and every Auto (cover
+    exposure) strobe falls back to its manual duty percent. The `system` push
+    that fills the grid in must also make the tab re-read the exposures, or the
+    plot disagrees with the on-time the board is actually armed with for the
+    whole session."""
+    page = browser.new_page()
+    ready = {"v": False}
+    exposure_reads = {"n": 0}
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    def exposures():
+        exposure_reads["n"] += 1
+        # Before the cameras open the endpoint reports no cameras at all (it
+        # iterates controller.camera_system, which is CameraSystem.pending()).
+        cameras = (
+            [{"index": 0, "name": "cam0", "exposure_us": 5000.0,
+              "trigger_delay_us": 0.0}]
+            if ready["v"]
+            else []
+        )
+        return {"guard_us": 100, "duty_auto_default": False, "cameras": cameras}
+
+    plugins = {"triggerbox": _TRIGGERBOX_STATUS}
+    # Catch-all first so the specific routes registered after it win.
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=ready["v"], plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=ready["v"])))
+    page.route("**/api/triggerbox/exposures", json_route(exposures))
+    # The plugin's UI bundle lives outside web/static; serve the real file.
+    page.route(
+        "**/plugins/triggerbox/triggerbox.js",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/javascript",
+            body=TRIGGERBOX_JS.read_text(),
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+
+        # No exposures yet: the Auto strobe is drawn at its manual duty (20% of
+        # the 20 ms period = 4 ms) and the summary says so.
+        page.wait_for_function(
+            """() => document.getElementById('triggerbox-timing-summary')
+                     ?.textContent.includes('no camera exposures yet')""",
+            timeout=5000,
+        )
+        assert (
+            page.eval_on_selector(
+                "#triggerbox-timing-viz rect.tb-led title", "el => el.textContent"
+            )
+            == "on 4.00 ms"
+        )
+
+        # Cameras finished opening on the server: push the ready `system`, which
+        # carries each plugin's status slice through to its tab.
+        ready["v"] = True
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {"type": "system", **_system_payload(ready=True, plugins=plugins)},
+        )
+
+        # The Auto strobe now brackets the longest exposure + the guard band.
+        page.wait_for_function(
+            """() => document.getElementById('triggerbox-timing-summary')
+                     ?.textContent.includes('longest exposure 5.00 ms + 100 µs guard')""",
+            timeout=5000,
+        )
+        assert (
+            page.eval_on_selector(
+                "#triggerbox-timing-viz rect.tb-led title", "el => el.textContent"
+            )
+            == "on 5.10 ms"  # 5 ms exposure + 100 µs guard
+        )
+        # …and the guard band is drawn past the exposure it covers.
+        assert (
+            page.eval_on_selector_all(
+                "#triggerbox-timing-viz rect.tb-guard", "els => els.length"
+            )
+            == 1
+        )
+        # The reads are debounced: a page load must not turn into a fetch storm.
+        assert 2 <= exposure_reads["n"] <= 4, exposure_reads["n"]
     finally:
         page.close()

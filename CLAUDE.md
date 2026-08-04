@@ -311,7 +311,11 @@ frontend renders the whole shell up front with a grid placeholder and builds the
 grid/View+Camera tabs/Save dialog lazily in `buildCameras()` when the camera list
 arrives (from the initial `/api/system`, the WS-connect handshake — which sends
 `system` too, closing the connect-vs-init race — or the init broadcast). Plugin
-readiness fills in via each tab's `applyStatus(info)`. Camera-open failure calls
+readiness fills in via each tab's `applyStatus(info)` — which is also a plugin
+tab's **only** signal that the cameras are now open, so a tab that reads camera
+state at construction (e.g. triggerbox's timing plot pulling
+`/api/triggerbox/exposures` for its auto strobe duty) must re-read it there or it
+shows placeholder-era data for the whole session. Camera-open failure calls
 `controller.fail_init(msg)` (surfaced in the GUI + logged) instead of aborting
 the now-running server. On shutdown the finally sets a `stopping` event and
 `join()`s the init thread before `controller.close()`, so arming can't race

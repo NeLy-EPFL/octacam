@@ -46,6 +46,14 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Auto strobe duty now shows up in the triggerbox timing plot** — with instant
+  (serve-first) GUI startup the triggerbox tab read the camera exposures before
+  the cameras were open, and the WebSocket push that fills the rest of the UI in
+  never made it re-read them, so a light channel set to "Auto (cover exposure)"
+  stayed drawn at its manual duty percent — with the note "no camera exposures
+  yet" — for the rest of the session. Only the plot was wrong: an actual arm
+  recomputes the on-time server-side, so the board still strobed over the real
+  exposure. The tab now re-reads the exposures when that push arrives.
 - **Switching rigs no longer fails to open the cameras** — a camera keeps its ROI
   until it is power-cycled, and a GenICam camera's `Width`/`Height` maximum is
   `sensor - offset`, so launching a rig whose config wants the full sensor right
