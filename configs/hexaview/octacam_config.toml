@@ -1,0 +1,55 @@
+backend = "auto"
+
+[record]
+fps = 80.0
+duration = 10.0
+duration_unit = "seconds"
+trigger_source = "managed"
+preview_trigger_source = "auto"
+directory = "~/octacam/data/hexaview"
+relative_directory = "%y%m%d/Fly1/001"
+save_method = "ffmpeg"
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+save_transformed = true
+save_timestamps = true
+
+[transcode]
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+
+[[cameras]]
+serial_number = "17475187"
+name = "top"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = 0.0
+window_y = 0.0
+window_width = 0.5
+window_height = 1.0
+center_x = true
+center_y = false
+
+[[cameras]]
+serial_number = "17475185"
+name = "bottom"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = 0.5
+window_y = 0.0
+window_width = 0.5
+window_height = 1.0
+center_x = false
+center_y = false
+
+[[plugins]]
+name = "triggerbox"
+[plugins.options]
+device = "/dev/ttyACM0"
+cameras = [{pin = "D13", pulse_us = 500}]
+lights = [{channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 3, mode = "off"}]
+strobe_guard_us = 100
+
+[transfer]
+directory = "~/octacam/server/hexaview"
+checksum = true
