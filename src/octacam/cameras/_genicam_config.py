@@ -185,6 +185,43 @@ def _fmt_float(value: float) -> str:
 # Both spellings are written best-effort so one call covers every GenICam vendor.
 _FRAMERATE_ENABLE_NODES = ("AcquisitionFrameRateEnable", "AcquisitionFrameRateEnabled")
 
+# (size node, the ROI origin that clamps it). SFNC defines a size node's max as
+# (sensor - offset), so the origin must be programmed *after* the size — see
+# _clear_roi_offsets.
+_ROI_PAIRS = (("Width", "OffsetX"), ("Height", "OffsetY"))
+
+
+def _clear_roi_offsets(backend, names: set[str], serial: str) -> None:
+    """Zero the ROI origins that the incoming config's Width/Height must clear.
+
+    A size node's valid range depends on the origin currently on the device:
+    ``Width`` maxes out at ``WidthMax - OffsetX`` (likewise Height/OffsetY). A
+    camera keeps its ROI until it is power-cycled, so a *previous* session that
+    left a cropped, offset ROI clamps the size nodes for the next one — and the
+    file's own (larger) size is then rejected outright. Concretely: previewing a
+    rig whose config crops to ``Height=1408, OffsetY=278``, then launching a rig
+    whose config wants the full ``Height=2048``, made the applier write 2048
+    against a max of 2048-278=1770.
+
+    So zero each origin whose size node this file sets, before applying anything.
+    The size write then sees the full sensor, and the file's own ``OffsetX``/
+    ``OffsetY`` lines — which follow the size lines in :data:`CONFIG_NODES` order
+    — put the real origin back. A file that sets a size but no matching origin
+    (a hand-trimmed one; :func:`dump_config` always emits both) lands at origin 0
+    rather than on whatever the last session happened to leave, which is the
+    deterministic reading of "this file is the camera's state".
+
+    Best-effort per node, like the rest of the applier: a model without the
+    offset node just skips it.
+    """
+    for size, offset in _ROI_PAIRS:
+        if size not in names:
+            continue
+        try:
+            backend._set_number(offset, 0, True)
+        except BackendError as e:
+            log.debug("Could not zero %s on camera %s: %s", offset, serial, e)
+
 
 def apply_freerun_rate_cap(backend, fps: float) -> None:
     """Best-effort: cap a free-running camera's rate at ``fps``.
@@ -248,7 +285,14 @@ def apply_config(backend, text: str) -> None:
     Nodes in :data:`CONFIG_SKIP_NODES` are left to octacam's runtime management.
     Unknown/absent nodes and failed writes are logged at debug and skipped, so a
     partial or cross-model file still applies what it can (mirrors how the FLIR C
-    config tool guards each node with an availability check).
+    config tool guards each node with an availability check). This best-effort
+    guarantee needs every backend's typed setters to raise
+    :class:`~octacam.cameras.base.BackendError` rather than a raw SDK exception —
+    a leak there turns one rejected node into a failed rig init.
+
+    One write is *not* in file order: the ROI origins are zeroed up front, since a
+    stale origin from a previous session clamps the size nodes (see
+    :func:`_clear_roi_offsets`).
     """
     serial = getattr(backend, "serial_number", "?")
     pairs = parse_config(text)
@@ -260,6 +304,10 @@ def apply_config(backend, text: str) -> None:
         # empty one — reject it so callers like the web reset endpoint still fail
         # loudly instead of silently applying nothing.
         raise BackendError("no GenApi feature lines found in configuration")
+    # Before anything else, clear the ROI origins this file's Width/Height have to
+    # grow into (see _clear_roi_offsets) — otherwise a cropped ROI left on the
+    # device by an earlier session makes the file's own size out of range.
+    _clear_roi_offsets(backend, {name for name, _ in pairs}, serial)
     for name, value in pairs:
         if name in CONFIG_SKIP_NODES:
             continue

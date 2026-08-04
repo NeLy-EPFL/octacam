@@ -237,6 +237,19 @@ make a later external-trigger recording silently never start). Every backend's
 `save_params`/`dump_config` restores the camera's original (config) trigger
 source via `normalize_trigger_source` — keep this parity when adding a backend.
 
+**ROI apply order:** a camera **keeps its ROI until power-cycled**, and SFNC makes
+a size node's max `sensor - origin`, so the *previous* session's cropped/offset
+ROI clamps the *next* config's `Width`/`Height` (hexaview's `OffsetY=278` made
+triggerbox's `Height=2048` out of range at max 1770 — it failed the whole rig
+init). `apply_config` therefore zeroes the origin whose size node the file sets
+(`_clear_roi_offsets`) **before** the file-order loop; the file's own
+`OffsetX`/`OffsetY` lines follow and restore it. Two invariants this rests on:
+every backend's typed setters (`_set_enum`/`_set_bool`/`_set_number`) must raise
+`BackendError` and **never leak a raw SDK exception** — that is what makes
+`apply_config`'s skip-and-continue best-effort real, and a leak turns one refused
+value into a dead rig — and the `fake` backend models the ROI coupling in both
+directions so wrong-order programming is caught without hardware.
+
 `config_writer._toml_value` must serialize every scalar the loader can produce —
 including inline tables (triggerbox's nested `cameras`/`lights` arrays) and
 date/datetime scalars (a bare serial number or date-like save dir parses as one).

@@ -123,6 +123,34 @@ def test_reset_params_invalid_keeps_previewing(previewing_system):
     assert cam.frame_for_display.pop() is not None
 
 
+def test_load_params_grows_roi_past_a_previous_sessions_offset(previewing_system):
+    """Launching rig B after rig A must not be clamped by rig A's cropped ROI.
+
+    A camera keeps its ROI until it is power-cycled, and a size node's max is
+    (sensor - origin), so applying rig B's full-sensor Height while rig A's
+    OffsetY is still on the device is out of range — on the rig this took down the
+    whole GUI init ("Value = 2048 must be equal or smaller than Max = 1770").
+    The applier clears the origin before programming the size."""
+    cam = previewing_system.camera_at(0)
+    full_w, full_h = cam.width, cam.height
+
+    def roi(width, height, offset_y=0):
+        return (
+            "# {octacam GenApi persistence}\n"
+            f"Width\t{width}\nHeight\t{height}\nOffsetX\t0\nOffsetY\t{offset_y}\n"
+        )
+
+    # Rig A: a cropped, vertically offset ROI (as configs/hexaview ships).
+    cam.load_params(roi(full_w, full_h - 640, offset_y=278))
+    assert (cam.width, cam.height) == (full_w, full_h - 640)
+    assert cam._backend._get_number("OffsetY", True) == 278
+
+    # Rig B: the whole sensor back (as configs/triggerbox ships).
+    cam.load_params(roi(full_w, full_h))
+    assert (cam.width, cam.height) == (full_w, full_h)
+    assert cam._backend._get_number("OffsetY", True) == 0
+
+
 def test_save_all_params_covers_every_camera(previewing_system):
     out = previewing_system.save_all_params()
     assert set(out) == set(FAKE_SERIALS)

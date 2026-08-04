@@ -295,22 +295,34 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         raw = self._nodemap().GetNode(PARAM_NODES[name])
         return spin.CIntegerPtr(raw) if name in _INT_PARAMS else spin.CFloatPtr(raw)
 
+    # Every setter below wraps SpinnakerException in BackendError. An
+    # availability/writability check does not cover a *value* the node refuses
+    # (out of range, wrong increment, a dependency not yet satisfied), and the
+    # config applier and node-map walk both guard themselves with `except
+    # BackendError` — a raw PySpin exception escaping here propagates out of
+    # load_params and aborts the whole rig init on one unsettable node.
     def _set_enum(self, name: str, value: str) -> None:
         spin = _spin()
         node = spin.CEnumerationPtr(self._nodemap().GetNode(name))
         if not spin.IsAvailable(node) or not spin.IsWritable(node):
             raise BackendError(f"enumeration {name} is not writable")
-        entry = node.GetEntryByName(value)
-        if not spin.IsAvailable(entry) or not spin.IsReadable(entry):
-            raise BackendError(f"enumeration {name} has no entry {value!r}")
-        node.SetIntValue(entry.GetValue())
+        try:
+            entry = node.GetEntryByName(value)
+            if not spin.IsAvailable(entry) or not spin.IsReadable(entry):
+                raise BackendError(f"enumeration {name} has no entry {value!r}")
+            node.SetIntValue(entry.GetValue())
+        except spin.SpinnakerException as e:
+            raise BackendError(str(e)) from e
 
     def _get_enum(self, name: str) -> str | None:
         spin = _spin()
         node = spin.CEnumerationPtr(self._nodemap().GetNode(name))
         if not spin.IsAvailable(node) or not spin.IsReadable(node):
             return None
-        entry = node.GetCurrentEntry()
+        try:
+            entry = node.GetCurrentEntry()
+        except spin.SpinnakerException:
+            return None
         return entry.GetSymbolic() if entry is not None else None
 
     # Typed-setter seam used by the native-TSV config applier (_genicam_config).
@@ -319,14 +331,20 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         node = spin.CBooleanPtr(self._nodemap().GetNode(name))
         if not spin.IsAvailable(node) or not spin.IsWritable(node):
             raise BackendError(f"boolean {name} is not writable")
-        node.SetValue(bool(value))
+        try:
+            node.SetValue(bool(value))
+        except spin.SpinnakerException as e:
+            raise BackendError(str(e)) from e
 
     def _get_bool(self, name: str) -> bool | None:
         spin = _spin()
         node = spin.CBooleanPtr(self._nodemap().GetNode(name))
         if not spin.IsAvailable(node) or not spin.IsReadable(node):
             return None
-        return bool(node.GetValue())
+        try:
+            return bool(node.GetValue())
+        except spin.SpinnakerException:
+            return None
 
     def _set_number(self, name: str, value: float, is_int: bool) -> None:
         spin = _spin()
@@ -334,7 +352,10 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         node = spin.CIntegerPtr(raw) if is_int else spin.CFloatPtr(raw)
         if not spin.IsAvailable(node) or not spin.IsWritable(node):
             raise BackendError(f"node {name} is not writable")
-        node.SetValue(int(value) if is_int else float(value))
+        try:
+            node.SetValue(int(value) if is_int else float(value))
+        except spin.SpinnakerException as e:
+            raise BackendError(str(e)) from e
 
     def _get_number(self, name: str, is_int: bool) -> float | int | None:
         spin = _spin()

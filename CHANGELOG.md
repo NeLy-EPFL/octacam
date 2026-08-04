@@ -46,6 +46,20 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Switching rigs no longer fails to open the cameras** — a camera keeps its ROI
+  until it is power-cycled, and a GenICam camera's `Width`/`Height` maximum is
+  `sensor - offset`, so launching a rig whose config wants the full sensor right
+  after one whose config cropped and offset the ROI made the parameter load write
+  an out-of-range size (`Height = 2048 must be equal or smaller than Max = 1770`)
+  and abort camera initialization for the whole rig. The applier now clears the
+  ROI origin before programming the size, then restores the origin the config
+  asks for. Affects the flir / spinnaker / pycameleon backends (Basler `.pfs`
+  files are applied by pylon, which already ordered this correctly).
+- **One unsettable camera parameter no longer takes down the rig** — the FLIR
+  (PySpin) backend's typed setters let a raw `SpinnakerException` escape, which
+  defeated the parameter applier's deliberate best-effort, skip-and-continue
+  guard: any single value the device refused (out of range, bad increment) failed
+  the entire startup instead of being logged and skipped.
 - **`octacam doctor` no longer breaks the terminal** — the GPU/NVENC probes ran
   ffmpeg encodes with the controlling terminal on stdin, so ffmpeg switched the
   tty to no-echo mode (to watch for keypresses) and left it that way (the

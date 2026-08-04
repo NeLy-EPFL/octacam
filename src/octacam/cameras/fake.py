@@ -190,6 +190,27 @@ class FakeBackend(SoftwareTriggerHandoff):
             return int(self._nodes["WidthMax"]["value"] - self._nodes["Width"]["value"])
         return int(self._nodes["HeightMax"]["value"] - self._nodes["Height"]["value"])
 
+    def _roi_max(self, sfnc: str) -> int | None:
+        """The dynamic ceiling of a ROI node, or None for any other node.
+
+        The coupling runs both ways on a real GenICam camera: an origin maxes out
+        at (sensor - size), and a size maxes out at (sensor - origin). Modelling
+        the second direction is what lets the hardware-free suite catch a caller
+        that programs the ROI in the wrong order — growing Width/Height while a
+        stale origin is still on the device (see
+        ``_genicam_config._clear_roi_offsets``)."""
+        if sfnc in ("OffsetX", "OffsetY"):
+            return self._offset_max(sfnc)
+        if sfnc == "Width":
+            return int(
+                self._nodes["WidthMax"]["value"] - self._nodes["OffsetX"]["value"]
+            )
+        if sfnc == "Height":
+            return int(
+                self._nodes["HeightMax"]["value"] - self._nodes["OffsetY"]["value"]
+            )
+        return None
+
     def read_node(self, name: str) -> NodeInfo:
         """One of the six legacy snake_case params (maps to its SFNC node)."""
         sfnc = _PARAM_TO_SFNC.get(name, name)
@@ -243,6 +264,13 @@ class FakeBackend(SoftwareTriggerHandoff):
         node = self._nodes.get(name)
         if node is None or node["type"] not in ("int", "float"):
             raise BackendError(f"fake has no node {name}")
+        # Reject an out-of-range ROI value the way a real camera does. Only the
+        # four coupled ROI nodes are bounds-checked (see _roi_max); every other
+        # node stays a permissive value store, so the applier's other paths keep
+        # exercising the same round-trips as before.
+        limit = self._roi_max(name)
+        if limit is not None and value > limit:
+            raise BackendError(f"fake: {name} value {int(value)} exceeds max {limit}")
         node["value"] = int(value) if is_int else float(value)
 
     def _get_number(self, name: str, is_int: bool) -> float | int | None:
