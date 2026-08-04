@@ -3932,7 +3932,7 @@ def _grid_and_transfer(
     dry_run: bool,
     show_bar: bool,
     force: bool = False,
-    reporter: JobReporter | None = None,
+    reporter: "JobReporter | None" = None,
     job_dir: Path | None = None,
 ) -> int:
     """Build visualization grids and/or transfer each folder to its destination.
@@ -4095,7 +4095,9 @@ def _rebuild_process_argv(
     return argv
 
 
-def _pause_gate(reporter: JobReporter | None, job_dir: Path | None, *, unit: str) -> None:
+def _pause_gate(
+    reporter: "JobReporter | None", job_dir: Path | None, *, unit: str
+) -> None:
     """Block at a work-unit boundary while capture is active or a manual pause is set.
 
     Polls ~1 s and stays paused while either condition holds, then resumes at the

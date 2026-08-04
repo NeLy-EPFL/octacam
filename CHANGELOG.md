@@ -46,6 +46,17 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **`octacam` now starts on Python 3.10–3.13 again** — the CLI annotated two
+  helpers with `JobReporter`, a name imported only under `if TYPE_CHECKING:`, and
+  without quotes. Python 3.14 evaluates annotations lazily (PEP 649) so the dev
+  machine never saw it, but every older supported interpreter evaluates them when
+  the `def` runs: importing `octacam.cli` raised `NameError: name 'JobReporter' is
+  not defined`, so **no** command worked (`requires-python` is `>= 3.10`). Both
+  annotations are quoted now, matching how the rest of the module already refers
+  to type-checking-only names, and a new AST test (`tests/test_typing_hygiene.py`)
+  fails on any `TYPE_CHECKING`-only name used in an annotation Python evaluates —
+  a check that works on every version, since an import test cannot catch this on
+  3.14.
 - **Auto strobe duty now shows up in the triggerbox timing plot** — with instant
   (serve-first) GUI startup the triggerbox tab read the camera exposures before
   the cameras were open, and the WebSocket push that fills the rest of the UI in

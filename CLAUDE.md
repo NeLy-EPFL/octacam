@@ -47,6 +47,21 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   a GUI control, so "shipped a knob with no widget" gets caught.
 - **Full-suite runtime is ~8 min.** Run the relevant `tests/test_*.py` file(s)
   during development; run the whole suite before committing.
+- **Don't run the frontend group inside a full-suite run.** playwright's *sync*
+  API leaves a running event loop in the process, so any later test calling
+  `asyncio.run` dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
+  retrieve cases — one browser test anywhere earlier is enough). That is what the
+  opt-in group buys: keep them two commands, as above. If a venv has playwright
+  installed, `uv run pytest` collects them and shows those failures.
+- **The dev rig runs Python 3.14, but `requires-python` is `>= 3.10`.** 3.14
+  evaluates annotations lazily (PEP 649), so a bug that a 3.10–3.13 user hits at
+  *import* is invisible here. Concretely: a name imported only under
+  `if TYPE_CHECKING:` must be **quoted** where it appears in an annotation Python
+  evaluates (function signatures; module/class-level variable annotations —
+  function-*local* annotations are never evaluated, so `self._task: TaskID | None`
+  inside a method is fine). An unquoted one took out the whole CLI on every
+  supported interpreter below 3.14. `tests/test_typing_hygiene.py` walks the AST
+  for this and so catches it on any version; an import test cannot.
 - **Known crash:** on some setups `pytest` can SIGSEGV *at process teardown* when
   pypylon + genicam are both loaded in one process (a multi-lib native-teardown
   interaction, not octacam code — the tests themselves pass). Don't chase it.
