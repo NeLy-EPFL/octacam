@@ -2,7 +2,7 @@
 // to the active config dir or a new sibling config dir. The browser owns the
 // display state (runtime rotate/flip + tile layout), so it sends it up.
 
-import { api } from "./util.js";
+import { api, ModalFocus } from "./util.js";
 
 export class SaveDialog {
   constructor({ grid, notify, getRecording }) {
@@ -12,6 +12,7 @@ export class SaveDialog {
     this.busy = false;
 
     this.dialog = document.getElementById("save-dialog");
+    this.focus = new ModalFocus(this.dialog.querySelector(".modal-card"));
     this.nameRow = document.getElementById("save-name-row");
     this.nameInput = document.getElementById("save-name");
     this.sensor = document.getElementById("save-sensor");
@@ -54,10 +55,13 @@ export class SaveDialog {
     this.error.textContent = "";
     this._syncTarget();
     this.dialog.classList.remove("hidden");
+    this.focus.activate();
   }
 
   close() {
+    if (this.dialog.classList.contains("hidden")) return;
     this.dialog.classList.add("hidden");
+    this.focus.deactivate();
   }
 
   _target() {

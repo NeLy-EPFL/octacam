@@ -1,4 +1,4 @@
-"""The recording-session cache that backs `octacam transcode --last/--session/--all`."""
+"""The recording-session cache backing `octacam process --last/--last session/--all`."""
 
 import datetime
 import os
@@ -171,3 +171,34 @@ def test_transcode_running_keeps_fresh_unlocked_marker(cache_dir):
     fresh.write_text("12345\n")
     assert session_cache.transcode_running() == 0
     assert fresh.exists()
+
+
+def test_capture_active_zero_when_idle(cache_dir):
+    assert session_cache.capture_active() is False
+
+
+def test_capture_active_detects_marker(cache_dir):
+    assert session_cache.capture_active() is False
+    with session_cache.mark_capture_active("gui session"):
+        assert session_cache.capture_active() is True
+        # The two marker namespaces are independent: a capture marker is not a
+        # transcode marker and vice-versa.
+        assert session_cache.transcode_running() == 0
+    assert session_cache.capture_active() is False
+
+
+def test_capture_marker_independent_of_transcode_marker(cache_dir):
+    with session_cache.mark_transcode_active("1 file(s)"):
+        assert session_cache.transcode_running() == 1
+        assert session_cache.capture_active() is False
+
+
+def test_capture_active_ignores_and_cleans_stale_marker(cache_dir):
+    directory = session_cache._capture_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    stale = directory / "999999-dead.lock"  # nobody holds its flock
+    stale.write_text("999999 crashed\n")
+    old = session_cache._now().timestamp() - 3600
+    os.utime(stale, (old, old))
+    assert session_cache.capture_active() is False  # not counted as live
+    assert not stale.exists()  # and swept once clearly stale

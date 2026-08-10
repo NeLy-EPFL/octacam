@@ -1,8 +1,9 @@
 """Bundled, opt-in plugin registry for octacam.
 
-Plugins are selected by name from the ``plugins:`` section of
-``octacam_config.yml`` (each entry may carry options) and/or the ``--plugin``
-CLI flag. The default launch loads none. Selection resolves to instantiated
+Plugins are selected by name from the ``[[plugins]]`` section of
+``octacam_config.toml`` (each entry may carry an ``[plugins.options]`` table)
+and/or the ``--plugin`` CLI flag. The default launch loads none. Selection
+resolves to instantiated
 plugins via a name -> factory registry, mirroring ``writer.FORMATS``.
 
 Bundled plugins under ``octacam.plugins.<name>`` are always preferred; third-
@@ -38,7 +39,13 @@ _REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
 
 # Bundled plugins live at octacam.plugins.<name>; importing the module runs its
 # @register call. Listed here so build_plugins knows what it may import.
-_BUILTINS = ("arduino", "twophoton")
+_BUILTINS = ("flywheel", "twophoton", "triggerbox")
+
+# Legacy plugin names → current name. The stepper plugin was renamed
+# arduino → flywheel; existing rig configs (name = "arduino") and
+# `--plugin arduino` still resolve, with a deprecation warning, so upgrading
+# does not silently drop a configured plugin.
+_ALIASES = {"arduino": "flywheel"}
 
 
 def _discover_entry_points() -> None:
@@ -82,15 +89,20 @@ def register(name: str):
 def _import_builtin(name: str) -> None:
     """Lazily import a bundled plugin module so its @register call runs.
 
-    A missing optional dependency (or any import error) is downgraded to a
-    debug log; ``build_plugins`` then reports it as a skipped plugin.
+    Only bundled builtins reach here (other names are rejected up front). A
+    builtin that fails to import is a real problem, not a missing optional
+    third-party plugin, so the cause is logged at warning level; ``build_plugins``
+    then reports it as a skipped plugin.
     """
     if name in _REGISTRY or name not in _BUILTINS:
         return
     try:
         importlib.import_module(f"octacam.plugins.{name}")
     except Exception as e:
-        log.debug("Plugin module %r could not be imported: %s", name, e)
+        # A bundled builtin failing to import is a real problem, not the low-noise
+        # situation of an optional third-party entry point failing — surface it at
+        # warning level so the operator sees the actual cause.
+        log.warning("Builtin plugin module %r could not be imported: %s", name, e)
 
 
 def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
@@ -122,11 +134,34 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     _discover_entry_points()
     selection = _resolve_selection(getattr(config, "plugins", []), enabled)
     plugins: list[OctacamPlugin] = []
+    seen: set[str] = set()
     for name, options in selection:
+        canonical = _ALIASES.get(name)
+        if canonical is not None:
+            log.warning(
+                "Plugin %r was renamed to %r; please update your config / "
+                "--plugin flag (loading %r for now).",
+                name,
+                canonical,
+                canonical,
+            )
+            name = canonical
+        if name in seen:
+            continue  # dedup after aliasing so arduino + flywheel don't double-load
+        seen.add(name)
         _import_builtin(name)
         factory = _REGISTRY.get(name)
         if factory is None:
-            log.warning("Unknown plugin %r; skipping", name)
+            if name in _BUILTINS:
+                # Known builtin whose module failed to import (the cause was logged
+                # by _import_builtin) — not the same as a genuinely unknown name.
+                log.warning(
+                    "Builtin plugin %r failed to import (run with debug logging "
+                    "for the cause); skipping",
+                    name,
+                )
+            else:
+                log.warning("Unknown plugin %r; skipping", name)
             continue
         try:
             plugins.append(factory(options))
@@ -152,24 +187,45 @@ class PluginInfo:
 
 
 def _plugin_summary(name: str) -> str:
-    """First line of a bundled plugin module's docstring (best-effort)."""
-    module = sys.modules.get(f"octacam.plugins.{name}")
-    doc = (getattr(module, "__doc__", None) or "").strip()
+    """First line of a plugin's module docstring (best-effort).
+
+    Bundled plugins live at ``octacam.plugins.<name>`` (a package whose
+    ``__init__`` holds the implementation and its docstring). A third-party
+    plugin registered through the entry-point group may instead keep its
+    factory in a submodule (e.g. ``octacam_twophoton.plugin``), so fall back to
+    the factory's own module whenever the ``octacam.plugins.<name>`` docstring
+    is missing or blank."""
+    # Resolve the module object first: getattr(None, "__doc__", None) returns the
+    # NoneType class docstring (a truthy string), which would mask the fallback.
+    mod = sys.modules.get(f"octacam.plugins.{name}")
+    doc = (mod.__doc__ or "").strip() if mod is not None else ""
+    if not doc:
+        factory = _REGISTRY.get(name)
+        factory_module = (
+            sys.modules.get(getattr(factory, "__module__", "")) if factory else None
+        )
+        doc = (factory_module.__doc__ or "").strip() if factory_module is not None else ""
     return doc.splitlines()[0] if doc else ""
 
 
 def available_plugins() -> list[PluginInfo]:
-    """Describe every bundled plugin and whether it can load right now.
+    """Describe every loadable plugin and whether it can load right now.
 
-    Mirrors :func:`build_plugins`: each builtin is imported (running its
-    ``@register``) and dry-run built with no options. A plugin whose optional
-    dependency is missing raises during that build; it is reported as
-    ``available=False`` with the error as ``detail`` rather than propagating.
+    Mirrors :func:`build_plugins`: each bundled builtin (and any third-party
+    plugin discovered via the ``octacam.plugins`` entry-point group) is dry-run
+    built with no options. A plugin whose dependency is missing raises during
+    that build; it is reported as ``available=False`` with the error as
+    ``detail`` rather than propagating.
     """
     _discover_entry_points()
     infos: list[PluginInfo] = []
-    for name in _BUILTINS:
-        _import_builtin(name)
+    # Bundled builtins first, then any third-party names discovered via entry
+    # points, so `octacam doctor` reflects everything build_plugins could load
+    # rather than only the builtins.
+    names = list(_BUILTINS) + [n for n in _REGISTRY if n not in _BUILTINS]
+    for name in names:
+        if name in _BUILTINS:
+            _import_builtin(name)
         summary = _plugin_summary(name)
         factory = _REGISTRY.get(name)
         if factory is None:

@@ -28,5 +28,19 @@ dist/
 htmlcov/
 .pytest_cache/
 
-# Benchmark outputs
-benchmarks/results/
+# Recorded camera data
+data/
+# Local transfer destination used for testing `octacam process`
+server/
+
+# MkDocs build output
+site/
+
+# Vendor SDK packages (user-installed, not vendored in-repo)
+spinnaker-*-pkg.tar.gz
+
+# EPFL common-trigger-circuit board repo — cloned alongside for reference
+# (its own git repo; the firmware octacam flashes lives in arduino/triggerbox/).
+common-trigger-circuit/
+# Basler pylon SDK debs archive (large binary, local install artifact)
+pylon-*_linux-*.tar

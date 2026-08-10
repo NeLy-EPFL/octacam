@@ -1,16 +1,17 @@
 """Plugin contract for octacam.
 
 A plugin is any object implementing (a subset of) the ``OctacamPlugin``
-Protocol. Hooks are called synchronously. The recording hooks
-(``on_recording_start``, ``on_first_frame``, ``on_recording_stop``) fire from
-the controller's monitor thread, so implementations must be thread-safe and
-fast — ``on_first_frame`` in particular runs at the t0 of the recording
-countdown, so it must not block.
+Protocol. Hooks are called synchronously and must be thread-safe and fast.
+``on_first_frame`` and ``on_recording_stop`` fire from the controller's monitor
+thread; ``on_recording_start`` fires on the caller's thread (the web executor or
+the CLI thread) just after a recording starts, off the controller lock.
+``on_first_frame`` in particular runs at the t0 of the recording countdown, so
+it must not block.
 
 Plugins are bundled in-repo under ``octacam.plugins.<name>`` and registered via
 the ``@register`` decorator (see :mod:`octacam.plugins`). They are opt-in: the
-default launch loads none. A user enables them through the ``plugins:`` section
-of ``octacam_config.yml`` or the ``--plugin`` CLI flag.
+default launch loads none. A user enables them through the ``[[plugins]]``
+section of ``octacam_config.toml`` or the ``--plugin`` CLI flag.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ import logging
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fastapi import APIRouter
 
 log = logging.getLogger("octacam")
@@ -40,12 +43,34 @@ class OctacamPlugin(Protocol):
     def is_ready(self) -> bool: ...
     def status(self) -> dict: ...
 
-    # ---- recording lifecycle (called from the controller monitor thread) ----
+    # ---- recording lifecycle ----
+    # on_first_frame/on_recording_stop run on the controller monitor thread;
+    # on_recording_start runs on the caller's thread just after start.
     # params is this plugin's slice of the recording-start request, keyed by
-    # plugin name (e.g. {"arduino": {...}}).
+    # plugin name (e.g. {"flywheel": {...}}).
     def on_recording_start(self, params: dict | None) -> None: ...
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
+
+    # Headless-record (CLI) start params. The GUI supplies each plugin's
+    # start-time slice from its tab; `octacam record` has no UI, so a plugin that
+    # must act at record start (e.g. arm a hardware trigger) contributes its slice
+    # here, built from the recording's fps/duration. None = nothing to contribute.
+    # See PluginManager.default_start_params.
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
+
+    # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
+    # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
+    # idle preview too, so the preview approximates the recording. It advertises
+    # this with drives_preview_trigger() -> True; the controller then arms the
+    # cameras in hardware-trigger mode and dispatches on_preview_start (arm the
+    # board indefinitely, strobing as the recording will) and on_preview_stop
+    # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
+    # plugin arm can block on a serial write + ack. params is the same
+    # {name: slice} shape as default_start_params / the recording hooks.
+    def drives_preview_trigger(self) -> bool: ...
+    def on_preview_start(self, params: dict | None) -> None: ...
+    def on_preview_stop(self) -> None: ...
 
     # ---- web contribution (optional) ----
     # client_id identifies the WebSocket connection a message/disconnect came
@@ -56,6 +81,11 @@ class OctacamPlugin(Protocol):
         self, message: dict, client_id: int
     ) -> bool: ...  # True = handled
     def on_ws_disconnect(self, client_id: int) -> None: ...  # a control socket closed
+
+    # Directory of static web assets (JS/CSS) the plugin ships alongside its
+    # Python. Served under /plugins/<name>/; the entry module is <name>.js and
+    # an optional stylesheet is <name>.css. None means the plugin has no UI.
+    def web_assets(self) -> Path | None: ...
 
 
 class Plugin:
@@ -87,6 +117,18 @@ class Plugin:
     def on_recording_stop(self, aborted: bool) -> None:
         pass
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        return None
+
+    def drives_preview_trigger(self) -> bool:
+        return False
+
+    def on_preview_start(self, params: dict | None) -> None:
+        pass
+
+    def on_preview_stop(self) -> None:
+        pass
+
     def api_router(self) -> APIRouter | None:
         return None
 
@@ -95,6 +137,9 @@ class Plugin:
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
+
+    def web_assets(self) -> Path | None:
+        return None
 
 
 class PluginManager:
@@ -131,12 +176,45 @@ class PluginManager:
             except Exception:
                 log.exception("Plugin %s.%s failed", self._name(plugin), hook)
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict:
+        """Collect each plugin's headless-record start slice, keyed by name.
+
+        ``octacam record`` has no GUI to POST ``plugin_params``, so a plugin that
+        must act at record start (e.g. triggerbox arming the trigger board)
+        contributes its slice via :meth:`Plugin.default_start_params`. Plugins
+        returning ``None`` are omitted. The result mirrors the ``{name: params}``
+        shape the GUI sends, so it can be passed straight to ``start_recording``.
+        """
+        params: dict = {}
+        for plugin in self.plugins:
+            try:
+                slice_ = plugin.default_start_params(fps, duration_s)
+            except Exception:
+                log.exception(
+                    "Plugin %s.default_start_params failed", self._name(plugin)
+                )
+                slice_ = None
+            if slice_ is not None:
+                params[self._name(plugin)] = slice_
+        return params
+
     def status(self) -> dict:
         result: dict = {}
         for plugin in self.plugins:
+            name = self._name(plugin)
             try:
-                result[plugin.name] = {"ready": plugin.is_ready(), **plugin.status()}
+                ready = plugin.is_ready()
             except Exception:
-                log.exception("Plugin %s status failed", self._name(plugin))
-                result[self._name(plugin)] = {"ready": False}
+                log.exception("Plugin %s is_ready failed", name)
+                result[name] = {"ready": False}
+                continue
+            # Isolate the details call so its failure can't flip a known-ready
+            # plugin to not-ready, and put "ready" last so a plugin-supplied
+            # "ready" in status() can't shadow the authoritative is_ready().
+            try:
+                extra = plugin.status()
+            except Exception:
+                log.exception("Plugin %s status failed", name)
+                extra = {}
+            result[name] = {**extra, "ready": ready}
         return result

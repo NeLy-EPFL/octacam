@@ -12,6 +12,7 @@ from octacam.controller import (
     RecordingController,
     RecordingSettings,
     StartResult,
+    capture_frame_count,
     increment_trailing_number,
     normalize_save_dir,
     sanitize_camera_name,
@@ -33,27 +34,35 @@ def test_build_recording_summary():
         name="cam0",
         serial_number="S0",
         recorded_frame_size=(240, 320),
+        pixel_format="Mono8",
         mean_fps=99.97,
         frames_recorded=500,
         dropped_count=2,
         dropped_indices=[137, 411],
         start_timestamp_ns=123,
+        host_fallback_count=0,
         writer_failed=False,
         display_transform=DisplayTransform(rotation_deg=90),
     )
     settings = RecordingSettings(
-        fps=100.0, duration_s=5.0, codec="x264", record_form="display"
+        fps=100.0, duration_s=5.0, save_method="ffmpeg", record_form="display"
     )
     summary = build_recording_summary(
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
+    assert summary["schema_version"] == 3
     assert summary["fps_target"] == 100.0
+    assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
     assert "USB" in summary["dropped_frames_note"]
     assert summary["start_time"].startswith("20")
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
+    assert entry["pixel_format"] == "Mono8"
     assert entry["dropped_indices"] == [137, 411]
+    # No fallbacks -> the series is entirely the camera's hardware timestamp.
+    assert entry["timestamp_source"] == "hardware"
+    assert entry["host_fallback_count"] == 0
     assert (entry["width"], entry["height"]) == (240, 320)
     assert entry["transform"] == {"rotation_deg": 90, "flip_h": False, "flip_v": False}
     assert entry["transform_applied"] is True
@@ -64,6 +73,54 @@ def test_build_recording_summary():
     )
     assert sensor_summary["cameras"][0]["transform_applied"] is False
     assert sensor_summary["start_time"] is None
+
+
+def test_timestamp_source_derivation():
+    from octacam.controller import _timestamp_source
+
+    assert _timestamp_source(0, 0) is None  # no frames
+    assert _timestamp_source(500, 0) == "hardware"  # never fell back
+    assert _timestamp_source(500, 500) == "host"  # host-only backend
+    assert _timestamp_source(500, 3) == "mixed"  # stray zeros
+
+
+def test_build_timestamps_arrays():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from octacam.controller import build_timestamps_arrays
+
+    cams = [
+        SimpleNamespace(
+            name="cam0",
+            frame_timestamps=[10, 20, 30],
+            frame_dropped=[False, True, False],
+        ),
+        # Different length (ragged) — long format handles it naturally.
+        SimpleNamespace(
+            name="cam1",
+            frame_timestamps=[100, 200],
+            frame_dropped=[False, False],
+        ),
+        # Zero-frame camera contributes empty arrays.
+        SimpleNamespace(name="cam2", frame_timestamps=[], frame_dropped=[]),
+        # Defensive: a length skew truncates to the shared minimum, never raises.
+        SimpleNamespace(
+            name="cam3", frame_timestamps=[1, 2, 3], frame_dropped=[True]
+        ),
+    ]
+    arrays = build_timestamps_arrays(cams)
+
+    assert arrays["cam0/timestamp_ns"].dtype == np.int64
+    assert arrays["cam0/dropped"].dtype == np.bool_
+    assert list(arrays["cam0/timestamp_ns"]) == [10, 20, 30]
+    assert list(arrays["cam0/dropped"]) == [False, True, False]
+    assert list(arrays["cam1/timestamp_ns"]) == [100, 200]
+    assert len(arrays["cam2/timestamp_ns"]) == 0
+    assert len(arrays["cam2/dropped"]) == 0
+    assert list(arrays["cam3/timestamp_ns"]) == [1]  # truncated to len(dropped)
+    assert list(arrays["cam3/dropped"]) == [True]
 
 
 def dataclasses_replace(obj, **kw):
@@ -86,6 +143,36 @@ def test_normalize_save_dir():
     assert normalize_save_dir("/a/b").startswith("/a/b")
 
 
+def test_capture_frame_count():
+    # octacam-clocked triggers cap at the intended pulse count round(fps*dur)...
+    assert capture_frame_count(
+        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="software")
+    ) == 800
+    assert capture_frame_count(
+        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="managed")
+    ) == 800
+    assert capture_frame_count(
+        RecordingSettings(fps=30.0, duration_s=2.5, trigger_source="software")
+    ) == 75
+    # ...an external trigger's pulse count is unknown, so it stays uncapped.
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="external")
+        )
+        is None
+    )
+    # Defensive: never cap a recording to zero frames.
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=0.0, duration_s=10.0, trigger_source="software")
+        )
+        is None
+    )
+    assert capture_frame_count(
+        RecordingSettings(fps=1.0, duration_s=0.1, trigger_source="software")
+    ) == 1
+
+
 def test_update_settings_validation():
     controller = RecordingController.__new__(RecordingController)
     controller._settings = RecordingSettings()
@@ -105,12 +192,67 @@ def test_update_settings_validation():
         controller.update_settings(trigger_source="quantum")
     with pytest.raises(ValueError):
         controller.update_settings(no_such_field=1)
+    # writer_queue_size must be a real int >= 1 (bool/float/sub-1 rejected).
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=0)
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=True)
+    with pytest.raises(ValueError):
+        controller.update_settings(writer_queue_size=3.5)
+    assert controller.update_settings(writer_queue_size=100).writer_queue_size == 100
+    # max_nvenc_sessions: None = auto-detect (accepted); a non-negative int caps it;
+    # bool/negative are rejected.
+    assert controller.update_settings(max_nvenc_sessions=None).max_nvenc_sessions is None
+    assert controller.update_settings(max_nvenc_sessions=4).max_nvenc_sessions == 4
+    with pytest.raises(ValueError):
+        controller.update_settings(max_nvenc_sessions=-1)
+    with pytest.raises(ValueError):
+        controller.update_settings(max_nvenc_sessions=True)
+    # nvenc_params must be shlex-parseable (bad quoting rejected up front).
+    with pytest.raises(ValueError):
+        controller.update_settings(nvenc_params='-c:v h264_nvenc "oops')
+    assert (
+        controller.update_settings(nvenc_params="-c:v hevc_nvenc -cq 20").nvenc_params
+        == "-c:v hevc_nvenc -cq 20"
+    )
     controller.update_settings(fps=42.0)
     assert controller.camera_system.hz == 42.0
 
     controller._state = "recording"
     with pytest.raises(RuntimeError):
         controller.update_settings(fps=10.0)
+
+
+def test_update_settings_lone_save_dir_clears_split_halves():
+    # Setting save_dir alone (no record_directory/relative_directory in the same
+    # patch) must clear the stale split halves — otherwise _relative_directory
+    # keeps preferring the old relative_directory and the post-recording increment
+    # recomposes save_dir from it, discarding the explicitly set path.
+    import threading
+
+    controller = RecordingController.__new__(RecordingController)
+    controller._settings = RecordingSettings(
+        record_directory="/base",
+        relative_directory="240101/001",
+        save_dir="/base/240101/001",
+    )
+    controller._state = "idle"
+    controller._lock = threading.RLock()
+    controller._auto_preview = False
+
+    merged = controller.update_settings(save_dir="/other/place")
+    assert merged.save_dir.endswith("/other/place")
+    assert merged.record_directory == ""
+    assert merged.relative_directory == ""
+
+    # Editing a split half still recomposes save_dir from the halves (unchanged
+    # behaviour), taking precedence over a save_dir supplied in the same patch.
+    merged = controller.update_settings(
+        record_directory="/b", relative_directory="run/002", save_dir="/ignored"
+    )
+    assert merged.record_directory == "/b"
+    assert merged.relative_directory == "run/002"
+    assert merged.save_dir.endswith("/b/run/002")
 
 
 def test_sanitize_camera_name():
@@ -144,25 +286,26 @@ def test_browse_directory(tmp_path):
     )
 
 
-def test_video_format_carries_x264_options():
+def test_video_format_carries_ffmpeg_params():
     settings = RecordingSettings(
-        codec="x264",
-        crf=20,
-        preset="superfast",
-        pix_fmt="yuv420p",
-        x264_params="keyint=30:scenecut=0",
+        save_method="ffmpeg",
+        ffmpeg_params="-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p",
     )
     video_format = settings.video_format()
-    assert (video_format.crf, video_format.preset) == (20, "superfast")
-    assert video_format.pix_fmt == "yuv420p"
-    assert video_format.x264_params == "keyint=30:scenecut=0"
-    assert RecordingSettings(codec="raw").video_format().extension == "raw"
+    assert video_format.save_method == "ffmpeg"
+    assert (
+        video_format.ffmpeg_params
+        == "-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p"
+    )
+    assert RecordingSettings(save_method="raw").video_format().extension == "raw"
 
 
-def test_recording_settings_default_crf_is_18():
-    # The capture default tracks writer.DEFAULT_CRF (CRF 18, near visually
-    # lossless); raising it shrinks files/CPU for the same perceptual quality.
-    assert RecordingSettings().crf == 18
+def test_recording_settings_default_ffmpeg_params():
+    # The capture default tracks writer.DEFAULT_FFMPEG_PARAMS (CRF 18 ultrafast,
+    # near visually lossless); config's record.ffmpeg_params overrides it.
+    from octacam.writer import DEFAULT_FFMPEG_PARAMS
+
+    assert RecordingSettings().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
 
 
 # ------------------------------------------------- emulator integration
@@ -189,6 +332,45 @@ def collect_states(controller):
     return states
 
 
+def test_deferred_startup_ready_attach_and_fail(camera_system):
+    from octacam.camera import CameraSystem
+
+    # The GUI starts the controller against a hardware-free placeholder so the
+    # web server can serve before the cameras open.
+    pending = CameraSystem.pending()
+    assert len(pending) == 0
+    controller = RecordingController(
+        pending, RecordingSettings(), auto_preview=False, ready=False
+    )
+    assert controller.ready is False
+    snap = controller.snapshot()
+    assert snap["ready"] is False and snap["cameras"] == [] and snap["init_error"] is None
+
+    # Attaching the real system (as the init thread does) flips ready and the
+    # snapshot now reports the live cameras.
+    controller.attach_system(camera_system)
+    assert controller.ready is True
+    snap = controller.snapshot()
+    assert snap["ready"] is True
+    assert [c["serial"] for c in snap["cameras"]] == EMULATED_SERIALS
+    # Don't close(): the attached system is the fixture's, closed by its teardown.
+
+    # A failed init leaves ready False, records the reason, and logs an event.
+    broken = RecordingController(
+        CameraSystem.pending(), RecordingSettings(), auto_preview=False, ready=False
+    )
+    events = []
+    broken.add_listener(
+        lambda kind, payload: events.append(payload) if kind == "event" else None
+    )
+    broken.fail_init("Could not open the cameras: boom")
+    assert broken.ready is False
+    assert broken.init_error == "Could not open the cameras: boom"
+    assert broken.snapshot()["init_error"] == "Could not open the cameras: boom"
+    assert any("boom" in e["message"] and e["level"] == "error" for e in events)
+    broken.close()
+
+
 def test_full_recording_cycle(camera_system, tmp_path):
     save_dir = tmp_path / "rec" / "001-trial"
     settings = RecordingSettings(fps=50.0, duration_s=1.5, save_dir=str(save_dir))
@@ -209,7 +391,7 @@ def test_full_recording_cycle(camera_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-        assert not video.with_suffix(".csv").exists()  # CSV is opt-in now
+    assert not (save_dir / "timestamps.npz").exists()  # timestamps are opt-in
 
     summary = json.loads((save_dir / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
@@ -279,6 +461,60 @@ def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
     assert first_frames[0][1] == params  # plugin slice threaded through
     assert ("start", params) in calls
     assert ("stop", False) in calls  # completed, not aborted
+
+
+def test_stop_waits_for_start_hooks_before_dispatching(camera_system, tmp_path):
+    """Aborting in the window right after a recording starts must not let
+    on_recording_stop overtake a still-running on_recording_start — otherwise a
+    hardware cancel could be sent before its arm (leaving the rig armed after the
+    cameras stopped). The monitor waits for the off-lock start hooks to finish."""
+    import threading as _t
+
+    from octacam.plugins.base import Plugin, PluginManager
+
+    start_entered = _t.Event()
+    release_start = _t.Event()
+    stop_called = _t.Event()
+    order: list[str] = []
+
+    class Gate(Plugin):
+        name = "gate"
+
+        def on_recording_start(self, params):
+            order.append("start_enter")
+            start_entered.set()
+            release_start.wait(5)  # hold the start hook open
+            order.append("start_exit")
+
+        def on_recording_stop(self, aborted):
+            order.append("stop")
+            stop_called.set()
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=60.0, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        camera_system, settings, PluginManager([Gate()]), auto_preview=False
+    )
+    # start_recording dispatches on_recording_start synchronously (off-lock), so
+    # run it on its own thread while we abort from the main thread.
+    starter = _t.Thread(
+        target=lambda: controller.start_recording(plugin_params={"gate": {}})
+    )
+    starter.start()
+    assert start_entered.wait(5), "on_recording_start should have been dispatched"
+
+    controller.stop_recording(abort=True)  # abort while the start hook is held open
+    # on_recording_stop must stay blocked until the start hook completes.
+    assert not stop_called.wait(0.5), (
+        "on_recording_stop fired before start hooks finished"
+    )
+
+    release_start.set()  # let on_recording_start return
+    starter.join(timeout=10)
+    controller.join(timeout=20)
+    assert stop_called.wait(5)
+    assert order.index("stop") > order.index("start_exit"), order
 
 
 def test_needs_confirm_on_existing_dir(camera_system, tmp_path):

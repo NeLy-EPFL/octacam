@@ -12,11 +12,15 @@ from collections.abc import Callable
 
 from pypylon import genicam, pylon
 
+from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
+    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
+    FeatureInfo,
     Frame,
     NodeInfo,
+    coerce_bool,
 )
 
 log = logging.getLogger("octacam")
@@ -24,6 +28,95 @@ log = logging.getLogger("octacam")
 TRIGGER_READY_TIMEOUT_MS = 1000
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
+
+# pypylon.genicam interface-type int -> FeatureInfo widget kind. GetNode() nodes
+# come back already downcast to the typed interface (IInteger/IEnumeration/...),
+# so no CxxxPtr cast is needed; only INode-level metadata goes through .GetNode().
+_IFACE_KIND = {
+    genicam.intfIInteger: "int",
+    genicam.intfIFloat: "float",
+    genicam.intfIBoolean: "bool",
+    genicam.intfIEnumeration: "enum",
+    genicam.intfIString: "string",
+    genicam.intfICommand: "command",
+    genicam.intfICategory: "category",
+}
+# GetVisibility() int -> name; Beginner/Expert/Guru are shown in the browser.
+_VIS_NAME = {
+    genicam.Beginner: "beginner",
+    genicam.Expert: "expert",
+    genicam.Guru: "guru",
+    genicam.Invisible: "invisible",
+}
+
+
+def _typed_value_attr(node, getter: str):
+    """Best-effort ``node.<getter>()`` (e.g. GetInc on a float without one)."""
+    try:
+        return getattr(node, getter)()
+    except (AttributeError, genicam.GenericException):
+        return None
+
+
+def _basler_feature(typed) -> FeatureInfo | None:
+    """Build a FeatureInfo from a pypylon typed node (None = skip)."""
+    inode = typed.GetNode()
+    kind = _IFACE_KIND.get(inode.GetPrincipalInterfaceType())
+    if kind is None or kind == "category":
+        return None
+    name = inode.GetName()
+    readable = genicam.IsReadable(inode)
+    writable = genicam.IsWritable(inode)
+    feature = FeatureInfo(
+        name=name,
+        display_name=inode.GetDisplayName() or name,
+        type=kind,
+        readable=readable,
+        writable=writable,
+        visibility=_VIS_NAME.get(inode.GetVisibility(), "beginner"),
+        tooltip=(inode.GetToolTip() or inode.GetDescription() or None),
+    )
+    if kind in ("int", "float"):
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+        feature.min = _typed_value_attr(typed, "GetMin")
+        feature.max = _typed_value_attr(typed, "GetMax")
+        feature.inc = _typed_value_attr(typed, "GetInc")
+        feature.unit = _typed_value_attr(typed, "GetUnit") or None
+    elif kind == "bool":
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+    elif kind == "enum":
+        if readable:
+            try:
+                feature.value = typed.ToString()
+            except genicam.GenericException:
+                feature.value = None
+        feature.entries = _basler_enum_entries(typed)
+    elif kind == "string":
+        if readable:
+            feature.value = _typed_value_attr(typed, "GetValue")
+    return feature
+
+
+def _basler_enum_entries(node) -> list[dict] | None:
+    try:
+        out = []
+        for entry in node.GetEntries():
+            try:
+                symbolic = entry.GetSymbolic()
+            except genicam.GenericException:
+                continue
+            if not symbolic:
+                continue
+            try:
+                available = genicam.IsAvailable(entry.GetNode())
+            except genicam.GenericException:
+                available = True
+            out.append({"value": symbolic, "display": symbolic, "available": available})
+        return out or None
+    except genicam.GenericException:
+        return None
 
 
 def _node_attr(node, attr: str):
@@ -87,7 +180,7 @@ def _drop_empty_pfs_values(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class BaslerBackend:
+class BaslerBackend(SoftwareTriggerHandoff):
     """A single Basler camera, driven through pypylon."""
 
     extension = "pfs"
@@ -101,6 +194,11 @@ class BaslerBackend:
         # Count grabs that pylon flagged as incomplete/failed (USB bandwidth
         # gaps, packet loss) so a rig delivering partial frames can be spotted.
         self._incomplete_grabs = 0
+        # Software-trigger hand-off (shared mixin): trigger_once only bumps a
+        # counter; the device ExecuteSoftwareTrigger moves into retrieve() on the
+        # grab thread so the shared trigger timer never blocks on this camera and
+        # cannot throttle the others.
+        self._init_trigger_handoff()
 
     @property
     def serial_number(self) -> str:
@@ -141,7 +239,19 @@ class BaslerBackend:
         return self.raw is not None and self.raw.IsOpen()
 
     def is_grabbing(self) -> bool:
-        return self.raw is not None and self.raw.IsGrabbing()
+        # The hand-off flag (set under the cond by start/stop) is authoritative,
+        # not the native IsGrabbing(): stop_grab flips the flag and wakes a blocked
+        # retrieve *before* the native StopGrabbing(), so the grab loop must see
+        # "not grabbing" from the same instant, and the shared trigger timer must
+        # never make a native call on the wait path.
+        return self.raw is not None and self._grabbing
+
+    def grab_locked_features(self) -> frozenset[str]:
+        # Basler locks the whole ROI — Width/Height *and* the offsets — while
+        # grabbing (pylon sets TLParamsLocked on StartGrabbing), so IsWritable is
+        # False for all four mid-preview. The offsets join the size nodes on the
+        # grab-cycle path so the Camera tab can still edit them.
+        return GEOMETRY_FEATURES | {"OffsetX", "OffsetY"}
 
     def width(self) -> int:
         return self.raw.Width.Value
@@ -173,6 +283,115 @@ class BaslerBackend:
         except genicam.GenericException as e:
             raise BackendError(str(e)) from e
 
+    # ---------------------------------------------------- full device node map
+
+    def _walk(self, category, path: str, out: list, seen: set) -> None:
+        """Depth-first walk of the GenApi category tree, collecting features."""
+        try:
+            features = category.GetFeatures()
+        except genicam.GenericException:
+            return
+        for typed in features:
+            try:
+                inode = typed.GetNode()
+                if not inode.IsFeature() or not genicam.IsAvailable(inode):
+                    continue
+                vis = _VIS_NAME.get(inode.GetVisibility(), "beginner")
+                if vis not in ("beginner", "expert", "guru"):
+                    continue
+                iface = inode.GetPrincipalInterfaceType()
+                if iface == genicam.intfICategory:
+                    self._walk(typed, inode.GetName(), out, seen)
+                    continue
+                name = inode.GetName()
+                if name in seen:
+                    continue
+                seen.add(name)
+                feature = _basler_feature(typed)
+                if feature is not None:
+                    feature.category = path or "Other"
+                    out.append(feature)
+            except genicam.GenericException as e:
+                log.debug("Skipping node during feature walk: %s", e)
+
+    def list_features(self) -> list[FeatureInfo]:
+        if self.raw is None or not self.raw.IsOpen():
+            return []
+        nodemap = self.raw.GetNodeMap()
+        try:
+            root = nodemap.GetNode("Root")
+        except genicam.GenericException:
+            return []
+        out: list[FeatureInfo] = []
+        self._walk(root, "", out, set())
+        return out
+
+    def read_feature(self, name: str) -> FeatureInfo:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+        except genicam.GenericException as e:
+            raise BackendError(f"no such node: {name}") from e
+        if typed is None:
+            raise BackendError(f"no such node: {name}")
+        feature = _basler_feature(typed)
+        if feature is None:
+            raise BackendError(f"node {name} is not an editable feature")
+        # Category is only known from the tree walk; leave it blank on a
+        # single-node re-read (the client keeps the grouping it already has).
+        return feature
+
+    def write_feature(self, name: str, value: object) -> None:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+            kind = _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType())
+        except genicam.GenericException as e:
+            raise BackendError(f"no such node: {name}") from e
+        try:
+            if kind == "int":
+                node_min = _typed_value_attr(typed, "GetMin")
+                node_inc = _typed_value_attr(typed, "GetInc")
+                snapped = int(round(float(value)))
+                if node_inc:
+                    base = node_min if node_min is not None else 0
+                    snapped = int(base + round((snapped - base) / node_inc) * node_inc)
+                typed.SetValue(snapped)
+            elif kind == "float":
+                typed.SetValue(float(value))
+            elif kind == "bool":
+                typed.SetValue(coerce_bool(value))
+            elif kind in ("enum", "string"):
+                typed.FromString(str(value))
+            else:
+                raise BackendError(f"node {name} is not writable ({kind})")
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+    def execute_command(self, name: str) -> None:
+        try:
+            typed = self.raw.GetNodeMap().GetNode(name)
+            if _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType()) != "command":
+                raise BackendError(f"node {name} is not a command")
+            typed.Execute()
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+    def config_values(self, config_str: str) -> dict[str, str]:
+        """Parse a Basler ``.pfs`` (``Name<TAB>...<TAB>value``) into name->value.
+
+        The value is the last tab-separated field; context-qualified selector
+        lines (``TriggerMode\\t{TriggerSelector=...}\\tOff``) collapse to the base
+        node, which is good enough for the per-field reset fallback."""
+        out: dict[str, str] = {}
+        for line in config_str.splitlines():
+            if line.startswith("#") or "\t" not in line:
+                continue
+            fields = line.split("\t")
+            name = fields[0].strip()
+            value = fields[-1].strip()
+            if name and value:
+                out.setdefault(name, value)
+        return out
+
     def load_params(self, config_str: str) -> None:
         if config_str:
             try:
@@ -195,8 +414,11 @@ class BaslerBackend:
     # ----------------------------------------------------------- triggering
 
     def enable_frame_trigger(self) -> None:
-        if not self.raw.IsOpen():
+        # is_open() (not raw.IsOpen()) so a closed camera no-ops cleanly instead of
+        # raising AttributeError when self.raw is None (matches the other backends).
+        if not self.is_open():
             return
+        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
 
@@ -214,16 +436,87 @@ class BaslerBackend:
             )
 
     def begin_software_trigger_preview(self) -> None:
+        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
         self.raw.TriggerSource.Value = "Software"
 
     def trigger_once(self) -> None:
-        if self.raw.IsGrabbing():
+        # Only bump the pending counter; retrieve() fires the device trigger on
+        # the grab thread. Keeps the shared trigger timer off this device.
+        self._bump_trigger()
+
+    def _apply_freerun_cap(self, fps: float) -> None:
+        """Best-effort: cap the free-run rate at ``fps`` (SFNC nodes on the ace)."""
+        try:
+            self.raw.AcquisitionFrameRateEnable.Value = True
+            self.raw.AcquisitionFrameRate.Value = float(fps)
+        except genicam.GenericException as e:
+            log.debug(
+                "Could not cap free-run rate at %s fps on camera %s: %s",
+                fps, self._serial, e,
+            )
+
+    def _clear_freerun_cap(self) -> None:
+        """Best-effort: disable the manual frame-rate cap so it can't clip a
+        subsequent triggered recording (the enable node applies even while
+        triggered on Basler). No-op on a model without the node."""
+        raw = self.raw
+        if raw is None:
+            return
+        try:
+            raw.AcquisitionFrameRateEnable.Value = False
+        except genicam.GenericException:
+            pass
+
+    def begin_freerun(self, fps: float | None = None) -> bool:
+        """Switch to continuous free-run (TriggerMode Off).
+
+        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
+        by free-run *preview* (``fps`` set, so the rate is capped at the target and
+        the preview draws the same bandwidth as an fps-matched recording).
+        Best-effort: any failure returns False so the caller skips free-run for this
+        camera rather than aborting. A subsequent ``begin_software_trigger_preview``
+        re-arms the FrameStart trigger (and clears the cap), so no explicit restore
+        is needed.
+        """
+        raw = self.raw
+        if raw is None:
+            return False
+        try:
+            raw.TriggerMode.Value = "Off"
             try:
-                self.raw.ExecuteSoftwareTrigger()
-            except genicam.GenericException as e:
-                raise BackendError(str(e)) from e
+                raw.AcquisitionMode.Value = "Continuous"
+            except genicam.GenericException:
+                pass  # Continuous is the grabbing default; a rejected write is fine
+            if fps is not None:
+                self._apply_freerun_cap(fps)
+            return True
+        except genicam.GenericException as e:
+            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
+            return False
+
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        # Like retrieve(), but the camera free-runs so no software trigger is
+        # fired: just fetch the next frame it pushed. Never raises (mirrors
+        # retrieve): a stop-race or bad grab is one lost frame.
+        raw = self.raw
+        if raw is None or not self._grabbing:
+            return None
+        try:
+            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        except genicam.GenericException:
+            return None
+        try:
+            if not result.IsValid() or not result.GrabSucceeded():
+                return None
+            return (result.Array if wants_array() else None, result.TimeStamp)
+        except genicam.GenericException:
+            return None
+        finally:
+            result.Release()
 
     # ------------------------------------------------------------- grabbing
 
@@ -241,23 +534,67 @@ class BaslerBackend:
                 self._serial,
             )
             raise BackendError(str(e)) from e
+        self._begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start_grabbing(pylon.GrabStrategy_LatestImageOnly)
 
     def start_grab_record(self) -> bool:
         self._start_grabbing(pylon.GrabStrategy_OneByOne)
-        return self.raw.WaitForFrameTriggerReady(
-            TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
-        )
+        # One-time ready gate: covers the first software trigger. retrieve()
+        # serializes execute→RetrieveResult on the single grab thread thereafter,
+        # so at most one exposure is ever in flight and OneByOne's bounded output
+        # queue can never overflow.
+        #
+        # base.start_record does NOT call stop_grab on a False/raising return, so
+        # a failed gate must leave the camera NOT grabbing itself — otherwise the
+        # native grab (and _grabbing) stays on with no record thread, wedging the
+        # camera against the next StartGrabbing. stop_grab() is idempotent.
+        try:
+            ready = self.raw.WaitForFrameTriggerReady(
+                TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
+            )
+        except genicam.GenericException:
+            self.stop_grab()
+            raise
+        if not ready:
+            self.stop_grab()
+        return ready
 
     def stop_grab(self) -> None:
-        self.raw.StopGrabbing()
+        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
+        # stop, so the grab loop sees "not grabbing" at once (no full-timeout stall).
+        self._end_grab()
+        if self.raw is not None:
+            self.raw.StopGrabbing()
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        result = self.raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        # Wait for a pending software trigger, then fire exactly one device
+        # trigger and fetch exactly one frame on this camera's own grab thread.
+        if not self._wait_pending(timeout_ms):
+            return None
+        # The device call now lives here (not on the caught _trigger_all path), and
+        # the grab loop does not wrap retrieve() in a try/except — so a stop-race
+        # or trigger failure must return None, never raise, or the grab thread dies
+        # uncaught and the ffmpeg writer child is orphaned. A trigger lost to such
+        # an error is one lost frame, the same as a grab timeout.
+        raw = self.raw
+        if raw is None or not self._grabbing:
+            return None
+        try:
+            raw.ExecuteSoftwareTrigger()
+        except genicam.GenericException:
+            return None
+        # RetrieveResult can raise (not just time out) on a device-level error
+        # — device removed/unplugged mid-record, grab-engine/transport failure —
+        # so guard it too, returning None (one lost frame) to uphold the
+        # never-raises contract the grab loop relies on for its post-loop cleanup.
+        try:
+            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+        except genicam.GenericException:
+            return None
         try:
             # IsValid is the pypylon equivalent of C++'s `if (grab_result)`:
             # a timed-out RetrieveResult returns an empty result whose other
@@ -282,8 +619,34 @@ class BaslerBackend:
             timestamp = result.TimeStamp
             array = result.Array if wants_array() else None
             return (array, timestamp)
+        except genicam.GenericException:
+            return None
         finally:
             result.Release()
+
+
+def _describe_open_failure(serial: str, exc: Exception) -> str:
+    """An actionable, operator-facing reason a Basler camera cannot be opened.
+
+    The frequent gotcha is a USB3 camera whose SuperSpeed link fails to train and
+    falls back to USB 2.0: it is physically in a USB 3 port, yet pylon refuses it
+    with "The device cannot be operated on an USB 2.0 port." That wording reads
+    like a wrong-port mistake when the real cause is the cable/connector/port
+    link, so translate it into something the operator can act on. Any other
+    open error is passed through verbatim.
+    """
+    text = str(exc)
+    if "USB 2.0" in text or "USB 3.0 compatible port" in text:
+        return (
+            f"Camera {serial} came up on a USB 2.0 link and cannot be opened. A "
+            "USB3 camera whose SuperSpeed link fails to train drops back to USB "
+            "2.0 even in a USB 3 port, so the cause is the cable or connector, "
+            "not the port choice. Reseat both ends of its cable (or swap in a "
+            "known-good USB3 cable), or move it to another USB 3 port, then "
+            "reload. `lsusb -t` shows each camera's link speed — a healthy one "
+            "reads 5000M, this one 480M. Skipping this camera for now."
+        )
+    return f"Camera {serial} could not be opened and will be skipped: {text}"
 
 
 def enumerate_basler(requested_serials: list[str] | None = None):
@@ -291,13 +654,22 @@ def enumerate_basler(requested_serials: list[str] | None = None):
 
     With no requested serials, every detected camera is returned (sorted by
     serial); otherwise the listed serials are returned in order, warning about
-    any that are not connected. Mirrors the original CameraSystem enumeration.
+    any that are not connected. A camera that is present but cannot be brought
+    up (most often a USB3 link that trained down to USB 2.0) is reported with a
+    ``None`` handle and a loud, actionable message rather than aborting the whole
+    rig. ``CameraSystem._enumerate`` reads that ``None`` as "present but
+    unusable": it claims the serial (so the auto cascade's lower tiers don't
+    pointlessly retry the same broken device) but never opens it. Mirrors the
+    original CameraSystem enumeration otherwise.
     """
     tl_factory = pylon.TlFactory.GetInstance()
     devices = tl_factory.EnumerateDevices()
     if not devices:
         return []
-    log.info("Detected %d camera(s)", len(devices))
+    # Debug, not info: in the auto cascade every tier enumerates in turn, so
+    # per-tier info lines would print several confusing, overlapping counts.
+    # CameraSystem logs one attributed "Detected N" summary instead.
+    log.debug("basler enumerated %d camera(s)", len(devices))
 
     detected = [str(device.GetSerialNumber()) for device in devices]
     final = sorted(detected) if not requested_serials else list(requested_serials)
@@ -309,5 +681,18 @@ def enumerate_basler(requested_serials: list[str] | None = None):
         except ValueError:
             log.warning("Camera with serial number %s not found", serial)
             continue
-        out.append((serial, tl_factory.CreateDevice(devices[index])))
+        try:
+            device = tl_factory.CreateDevice(devices[index])
+        except genicam.GenericException as e:
+            # CreateDevice downloads the camera's XML over USB, so a device that
+            # enumerated but can't be operated (e.g. a SuperSpeed link that fell
+            # back to USB 2.0) throws here. One bad camera must not crash the
+            # enumeration of the whole rig. Report it with a None handle — the
+            # sentinel CameraSystem._enumerate reads as "present but unusable":
+            # the serial is claimed (so the auto cascade's lower tiers don't
+            # pointlessly retry the same broken device) but never opened.
+            log.error("%s", _describe_open_failure(serial, e))
+            out.append((serial, None))
+            continue
+        out.append((serial, device))
     return out

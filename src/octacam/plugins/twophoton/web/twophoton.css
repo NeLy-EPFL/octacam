@@ -1,0 +1,15 @@
+/* 2-photon plugin styles. Served from /plugins/twophoton/ and injected by the
+   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+
+/* 2-photon Arduino state chip */
+.twophoton-state {
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text-dim);
+}
+.twophoton-state--armed    { color: var(--amber); }
+.twophoton-state--triggered { color: var(--green); }
+.twophoton-state--done     { color: var(--text-dim); }

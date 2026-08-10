@@ -14,13 +14,20 @@ const hasSize = (l) => l.window_width > 0 && l.window_height > 0;
 
 // A pointer travel (px) below this is a click (select), not a drag.
 const DRAG_THRESHOLD = 4;
+// Deepest scroll-zoom. 1 is the tight fit (you can't zoom out smaller than
+// that); each wheel notch multiplies by ZOOM_STEP.
+const ZOOM_MAX = 8;
+const ZOOM_STEP = 1.15;
 const norm360 = (deg) => ((deg % 360) + 360) % 360;
 
 export class CameraGrid {
-  constructor(container, cameras, { onSelect, onRename } = {}) {
+  constructor(container, cameras, { onSelect, onRename, onViewChange } = {}) {
     this.container = container;
     this.onSelect = onSelect;
     this.onRename = onRename; // async (index, name) -> canonical name | null
+    // Called (debounced by the caller) whenever the resolution/crop the server
+    // should send changes: tile resized, maximized/restored, or zoomed.
+    this.onViewChange = onViewChange;
     this.tiles = [];
     this.indexBySerial = new Map();
     this.selected = -1;
@@ -64,6 +71,7 @@ export class CameraGrid {
       <div class="tile-body">
         <canvas width="0" height="0"></canvas>
         <div class="tile-cross"><div class="cross-h"></div><div class="cross-v"></div></div>
+        <div class="tile-fail hidden">⚠ SAVE FAILED</div>
       </div>
       <button type="button" class="tile-max" title="Maximize" tabindex="-1"></button>
       <div class="tile-resize n" data-dir="n"></div>
@@ -88,12 +96,34 @@ export class CameraGrid {
       nameEl,
       fpsEl: el.querySelector(".tile-fps"),
       droppedEl: el.querySelector(".tile-dropped"),
+      failEl: el.querySelector(".tile-fail"),
       maxBtn: el.querySelector(".tile-max"),
       runtime: { rot: 0, fx: 1, fy: 1 },
+      // natW/natH are the decoded JPEG's pixel size (a crop, when zoomed);
+      // sensorW/sensorH are the full sensor size used for all layout math; and
+      // crop{X,Y,W,H} is the sensor sub-rectangle the current frame covers
+      // (the whole sensor when un-cropped). They diverge once the server sends
+      // a server-side crop for a zoomed tile.
       natW: 0,
       natH: 0,
+      sensorW: cam.width || 0,
+      sensorH: cam.height || 0,
+      cropX: 0,
+      cropY: 0,
+      cropW: cam.width || 0,
+      cropH: cam.height || 0,
+      // On-screen footprint (px) of the fitted, un-zoomed full frame, and the
+      // sensor->screen fit scale k; used to clamp the pan and to invert the
+      // display transform when computing the visible crop.
+      fitW: 0,
+      fitH: 0,
+      k: 0,
+      zoom: 1,
+      panX: 0,
+      panY: 0,
       busy: false,
       pendingBlob: null,
+      pendingMeta: null,
       suppressClick: false,
       maximized: false,
     };
@@ -131,6 +161,16 @@ export class CameraGrid {
         this._onResizeStart(e, tile, h.dataset.dir)
       );
     }
+    tile.body.addEventListener("wheel", (e) => this._onWheel(e, tile), {
+      passive: false,
+    });
+    // Catch any size change to this tile (drag-resize, maximize, container
+    // reflow): re-fit the canvas, re-clamp the pan, and tell the server the
+    // resolution this tile now needs.
+    new ResizeObserver(() => {
+      this._layoutCanvas(tile);
+      this._notifyView();
+    }).observe(tile.body);
     this._applyTransform(tile);
   }
 
@@ -138,6 +178,60 @@ export class CameraGrid {
     this.selected = index;
     this.tiles.forEach((t, i) => t.el.classList.toggle("selected", i === index));
     this.onSelect?.(index);
+  }
+
+  // -------------------------------------------------- keyboard navigation
+
+  // Step the selection to the next/previous tile (wrapping), so the keyboard
+  // can walk the grid the way clicking a tile does. Fires onSelect (Camera/View
+  // tabs stay in sync). No-op with no tiles.
+  selectNext() { this._step(1); }
+  selectPrev() { this._step(-1); }
+  _step(delta) {
+    const n = this.tiles.length;
+    if (!n) return;
+    if (this.selected < 0) {
+      this.select(delta > 0 ? 0 : n - 1);
+      return;
+    }
+    this.select((this.selected + delta + n) % n);
+  }
+
+  // Maximize/restore the selected tile. The mouse path (toggleMaximize) takes a
+  // tile object; bridge from the current selection. No-op with no selection.
+  toggleMaximizeSelected() {
+    const t = this.tiles[this.selected];
+    if (t) this.toggleMaximize(t);
+  }
+
+  // Keyboard zoom of the selected tile, about its centre (the wheel path pins
+  // the point under the cursor and needs a real WheelEvent). factor > 1 zooms
+  // in; zoom is clamped to [1, ZOOM_MAX] exactly like _onWheel, and the pan is
+  // re-scaled + re-clamped so the image can't sit past its own edge.
+  zoomSelected(factor) {
+    const t = this.tiles[this.selected];
+    if (!t) return;
+    const z = clamp(t.zoom * factor, 1, ZOOM_MAX);
+    if (z === t.zoom) return;
+    // With the cursor pinned to the centre, _onWheel's pan solve reduces to a
+    // simple rescale of the existing pan.
+    t.panX *= z / t.zoom;
+    t.panY *= z / t.zoom;
+    t.zoom = z;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
+  }
+
+  resetZoomSelected() {
+    const t = this.tiles[this.selected];
+    if (!t || (t.zoom === 1 && t.panX === 0 && t.panY === 0)) return;
+    t.zoom = 1;
+    t.panX = 0;
+    t.panY = 0;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
   }
 
   setCrossVisible(visible) {
@@ -258,6 +352,11 @@ export class CameraGrid {
       this._layoutCanvas(t);
       this._pushTransform(t);
     }
+    // A rotate/flip/reset changes which sensor region a zoomed tile shows, so
+    // re-request its server-side crop for the new orientation (otherwise the
+    // server keeps sending the crop for the old one and the tile shows a stale
+    // or blank region until the next zoom/resize).
+    if (targets.length) this._notifyView();
   }
 
   // Mirror the on-screen transform to the server so a "display"-form recording
@@ -280,8 +379,21 @@ export class CameraGrid {
     this._setDropped(t, frame.dropped);
     t.el.classList.toggle("rec", frame.recording);
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
-    if (t.busy) t.pendingBlob = blob; // keep only the latest pending frame
-    else this._draw(t, blob);
+    const meta = {
+      sensorW: frame.sensorW,
+      sensorH: frame.sensorH,
+      cropX: frame.cropX,
+      cropY: frame.cropY,
+      cropW: frame.cropW,
+      cropH: frame.cropH,
+    };
+    if (t.busy) {
+      // keep only the latest pending frame + its geometry
+      t.pendingBlob = blob;
+      t.pendingMeta = meta;
+    } else {
+      this._draw(t, blob, meta);
+    }
   }
 
   updateStats(index, { fps, dropped, writerFailed }) {
@@ -294,6 +406,9 @@ export class CameraGrid {
       t.nameEl.title = writerFailed
         ? `serial ${t.cam.serial} — writer failed`
         : `serial ${t.cam.serial}`;
+      // A red name tint alone is easy to miss on a busy grid, so also flag a
+      // prominent badge over the tile body until the flag clears.
+      if (t.failEl) t.failEl.classList.toggle("hidden", !writerFailed);
     }
   }
 
@@ -301,17 +416,27 @@ export class CameraGrid {
     t.droppedEl.textContent = dropped > 0 ? `${dropped} dropped` : "";
   }
 
-  async _draw(t, blob) {
+  async _draw(t, blob, meta) {
     t.busy = true;
     try {
       const bmp = await createImageBitmap(blob);
+      if (meta && meta.sensorW && meta.sensorH) {
+        t.sensorW = meta.sensorW;
+        t.sensorH = meta.sensorH;
+        t.cropX = meta.cropX;
+        t.cropY = meta.cropY;
+        t.cropW = meta.cropW;
+        t.cropH = meta.cropH;
+      }
       if (bmp.width !== t.natW || bmp.height !== t.natH) {
         t.natW = bmp.width;
         t.natH = bmp.height;
         t.canvas.width = bmp.width;
         t.canvas.height = bmp.height;
-        this._layoutCanvas(t);
       }
+      // The crop rect (hence placement) can change while the decoded size stays
+      // the same — e.g. re-aiming a zoom — so re-layout on every frame.
+      this._layoutCanvas(t);
       t.ctx.drawImage(bmp, 0, 0);
       bmp.close();
     } catch {
@@ -320,8 +445,10 @@ export class CameraGrid {
     t.busy = false;
     if (t.pendingBlob) {
       const next = t.pendingBlob;
+      const nextMeta = t.pendingMeta;
       t.pendingBlob = null;
-      this._draw(t, next);
+      t.pendingMeta = null;
+      this._draw(t, next, nextMeta);
     }
   }
 
@@ -330,28 +457,169 @@ export class CameraGrid {
     const sx = (b.scale_x || 1) * t.runtime.fx;
     const sy = (b.scale_y || 1) * t.runtime.fy;
     const deg = (b.rotation_deg || 0) + t.runtime.rot;
-    t.canvas.style.transform = `scale(${sx}, ${sy}) rotate(${deg}deg)`;
+    // The canvas holds the current crop region (the whole sensor when
+    // un-cropped). Shift it in pre-rotation sensor space (innermost) so the
+    // crop sits at its true position and the rotate/flip still pivots about the
+    // sensor centre; then zoom and pan in screen space (CSS applies the
+    // rightmost function first). Un-cropped, the offset is 0 and this reduces
+    // to the plain zoom/pan · flip · rotate transform.
+    const k = t.k || 0;
+    const sw = t.sensorW || t.natW || 0;
+    const sh = t.sensorH || t.natH || 0;
+    const offX = (t.cropX + t.cropW / 2 - sw / 2) * k;
+    const offY = (t.cropY + t.cropH / 2 - sh / 2) * k;
+    t.canvas.style.transform =
+      `translate(${t.panX}px, ${t.panY}px) scale(${t.zoom}) ` +
+      `scale(${sx}, ${sy}) rotate(${deg}deg) translate(${offX}px, ${offY}px)`;
   }
 
-  // Size the canvas so the (possibly rotated/scaled) frame fits the tile
-  // body while keeping its aspect ratio.
+  // Fit the FULL sensor frame into the tile body (keeping aspect) to get the
+  // sensor->screen scale k, then size the canvas to the current crop at that
+  // same k (the whole sensor when un-cropped). k and the fitted footprint also
+  // drive pan clamping and the visible-region computation.
   _layoutCanvas(t) {
-    if (!t.natW || !t.natH) return;
+    const sw = t.sensorW || t.natW;
+    const sh = t.sensorH || t.natH;
+    if (!sw || !sh) return;
     const bw = t.body.clientWidth;
     const bh = t.body.clientHeight;
     if (!bw || !bh) return;
     const b = t.cam.transform;
     const theta =
       (((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180;
-    const effW = t.natW * Math.abs(b.scale_x || 1);
-    const effH = t.natH * Math.abs(b.scale_y || 1);
+    const effW = sw * Math.abs(b.scale_x || 1);
+    const effH = sh * Math.abs(b.scale_y || 1);
     const c = Math.abs(Math.cos(theta));
     const s = Math.abs(Math.sin(theta));
     const boundW = effW * c + effH * s;
     const boundH = effW * s + effH * c;
     const k = Math.min(bw / boundW, bh / boundH);
-    t.canvas.style.width = `${t.natW * k}px`;
-    t.canvas.style.height = `${t.natH * k}px`;
+    t.k = k;
+    const cw = t.cropW || sw;
+    const ch = t.cropH || sh;
+    t.canvas.style.width = `${cw * k}px`;
+    t.canvas.style.height = `${ch * k}px`;
+    // On-screen footprint of the fitted FULL frame — the box the pan is clamped
+    // against so a zoomed image can't be dragged past its own edges.
+    t.fitW = boundW * k;
+    t.fitH = boundH * k;
+    this._applyTransform(t);
+    this._clampPan(t);
+  }
+
+  // Keep the (possibly zoomed) canvas covering its tile: pan is limited to the
+  // overflow on each axis, so it snaps back to centered at the tight fit.
+  _clampPan(t) {
+    const maxX = Math.max(0, (t.zoom * t.fitW - t.body.clientWidth) / 2);
+    const maxY = Math.max(0, (t.zoom * t.fitH - t.body.clientHeight) / 2);
+    t.panX = clamp(t.panX, -maxX, maxX);
+    t.panY = clamp(t.panY, -maxY, maxY);
+  }
+
+  // Scroll to zoom toward the cursor. Zoom is clamped to [1, ZOOM_MAX]; 1 is
+  // the tight fit, so the image can never be scrolled smaller than its
+  // original size. The point under the cursor stays fixed across the zoom.
+  _onWheel(e, t) {
+    e.preventDefault();
+    const rect = t.body.getBoundingClientRect();
+    const cx = e.clientX - (rect.left + rect.width / 2);
+    const cy = e.clientY - (rect.top + rect.height / 2);
+    const z0 = t.zoom;
+    const z1 = clamp(
+      z0 * (e.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP),
+      1,
+      ZOOM_MAX
+    );
+    if (z1 === z0) return;
+    // Solve for the pan that pins the on-screen cursor point across the zoom;
+    // in screen space this is correct regardless of rotation/flip.
+    t.panX = cx - (z1 / z0) * (cx - t.panX);
+    t.panY = cy - (z1 / z0) * (cy - t.panY);
+    t.zoom = z1;
+    this._clampPan(t);
+    this._applyTransform(t);
+    this._notifyView();
+  }
+
+  _notifyView() {
+    this.onViewChange?.();
+  }
+
+  // Per-camera resolution / crop / pause request for the server. want=false for
+  // a tile hidden behind another's maximized window (the server stops sending
+  // it). For a zoomed tile, request a server-side crop of just the visible
+  // region at the tile's resolution — full detail for the cost of a small
+  // frame. Otherwise request the whole frame at the tile size × dpr × zoom, so
+  // a maximize is sharp and a not-yet-cropped zoom still has finer pixels.
+  getViewSpec() {
+    const anyMax = this.tiles.some((t) => t.maximized);
+    const dpr = window.devicePixelRatio || 1;
+    const spec = {};
+    for (const t of this.tiles) {
+      if (anyMax && !t.maximized) {
+        spec[t.index] = { want: false };
+        continue;
+      }
+      const longEdge = Math.max(t.body.clientWidth, t.body.clientHeight);
+      const crop = t.zoom > 1 ? this._visibleSensorRect(t) : null;
+      const entry = { want: true, full: t.maximized || t.zoom > 1 };
+      if (crop) {
+        entry.crop = crop;
+        entry.need = Math.max(1, Math.ceil(longEdge * dpr));
+      } else {
+        entry.need = Math.max(1, Math.ceil(longEdge * dpr * t.zoom));
+      }
+      spec[t.index] = entry;
+    }
+    return spec;
+  }
+
+  // The axis-aligned sensor rectangle currently visible in a tile, found by
+  // inverting the display transform (zoom/pan, then flip, then rotate) over the
+  // four viewport corners. This is what the server crops to. Returns null when
+  // geometry isn't known yet or the view still covers ~the whole sensor.
+  _visibleSensorRect(t) {
+    const k = t.k;
+    const sw = t.sensorW || t.natW;
+    const sh = t.sensorH || t.natH;
+    if (!k || !sw || !sh) return null;
+    const bw = t.body.clientWidth;
+    const bh = t.body.clientHeight;
+    const b = t.cam.transform;
+    const sx = (b.scale_x || 1) * t.runtime.fx;
+    const sy = (b.scale_y || 1) * t.runtime.fy;
+    const rad = -(((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180; // inverse
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const [px, py] of [
+      [-bw / 2, -bh / 2],
+      [bw / 2, -bh / 2],
+      [-bw / 2, bh / 2],
+      [bw / 2, bh / 2],
+    ]) {
+      // Undo pan/zoom (screen space), then flip (S^-1), then rotate (R^-1).
+      const dx = (px - t.panX) / t.zoom / sx;
+      const dy = (py - t.panY) / t.zoom / sy;
+      const lx = dx * cos - dy * sin;
+      const ly = dx * sin + dy * cos;
+      const i = lx / k + sw / 2;
+      const j = ly / k + sh / 2;
+      minX = Math.min(minX, i);
+      maxX = Math.max(maxX, i);
+      minY = Math.min(minY, j);
+      maxY = Math.max(maxY, j);
+    }
+    // A small margin so small re-aims stay inside the already-sent crop.
+    const mx = (maxX - minX) * 0.15;
+    const my = (maxY - minY) * 0.15;
+    const x = Math.max(0, Math.floor(minX - mx));
+    const y = Math.max(0, Math.floor(minY - my));
+    const w = Math.min(sw, Math.ceil(maxX + mx)) - x;
+    const h = Math.min(sh, Math.ceil(maxY + my)) - y;
+    if (w <= 0 || h <= 0) return null;
+    if (x <= 0 && y <= 0 && w >= sw && h >= sh) return null; // ~whole frame
+    return { x, y, w, h };
   }
 
   _applyTileBox(t) {
@@ -397,6 +665,9 @@ export class CameraGrid {
     this._setMaximized(tile, next);
     this._raise(tile);
     this._layoutCanvas(tile);
+    // Maximizing flips want=false on every other tile and lets this one request
+    // full resolution; restoring undoes both. Report the whole new view.
+    this._notifyView();
   }
 
   _setMaximized(tile, on) {
@@ -516,15 +787,28 @@ export class CameraGrid {
   // click so a drag/resize doesn't also (de)select the tile.
   _startDrag(e, tile, start, move) {
     this._raise(tile);
+    // Capture the pointer only once the gesture becomes a real drag (past the
+    // threshold). Capturing on pointerdown retargets the trailing click AND
+    // dblclick to the capture element (the tile), which swallowed the
+    // tile-name double-click that opens the rename editor (and the title-bar
+    // double-click that maximizes). No capture on a click => events keep their
+    // real target; a genuine drag still captures so it tracks outside the tile.
+    let captured = false;
+    const onMove = (ev) => {
+      move(ev);
+      if (start.moved && !captured) {
+        captured = true;
+        tile.el.setPointerCapture(e.pointerId);
+      }
+    };
     const up = () => {
-      tile.el.removeEventListener("pointermove", move);
+      tile.el.removeEventListener("pointermove", onMove);
       tile.el.removeEventListener("pointerup", up);
       tile.el.removeEventListener("pointercancel", up);
-      tile.el.releasePointerCapture?.(e.pointerId);
+      if (captured) tile.el.releasePointerCapture?.(e.pointerId);
       if (start.moved) tile.suppressClick = true;
     };
-    tile.el.setPointerCapture(e.pointerId);
-    tile.el.addEventListener("pointermove", move);
+    tile.el.addEventListener("pointermove", onMove);
     tile.el.addEventListener("pointerup", up);
     tile.el.addEventListener("pointercancel", up);
   }
@@ -548,6 +832,10 @@ export class CameraGrid {
         window_y: l.window_y,
         window_width: l.window_width,
         window_height: l.window_height,
+        // Live ROI-centering flags (updated by the Camera tab on the shared cam
+        // object) so a save persists them alongside the display transform.
+        center_x: !!t.cam.center_x,
+        center_y: !!t.cam.center_y,
       };
     });
   }

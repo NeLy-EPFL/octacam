@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "fw_build_info.h"  // TWOPHOTON_FW_BUILD — source fingerprint (auto-generated)
 
 // =============================================================================
 //  Camera trigger generator — 2-photon rig variant
@@ -17,6 +18,12 @@
 //    'A' (0x41) — armed, waiting for ThorSync rising edge
 //    'T' (0x54) — triggered, capture running
 //    'D' (0x44) — done, capture complete, back to IDLE
+//
+//  Identify (1 byte): [0x3F] '?'  -> replies "2PHOTON 1 <build>\n"
+//    The banner starts with '2' (never a status byte), so the host can tell it
+//    apart from the bare 'A'/'T'/'D' status bytes. <build> is a short hash of the
+//    sketch source (fw_build_info.h) so octacam knows whether this exact firmware
+//    is running and can offer to (re)flash it.
 //
 //  State machine:
 //    IDLE  ---(arm packet)---> ARMED
@@ -38,8 +45,10 @@ constexpr uint8_t kStatusLed    = LED_BUILTIN;
 // ---- Serial protocol constants ---------------------------------------------
 constexpr uint8_t  kArmMagic       = 0xA5;
 constexpr uint8_t  kCancelMagic    = 0xCA;
+constexpr uint8_t  kIdentifyMagic  = 0x3F;  // '?'  -> identity banner
 constexpr uint8_t  kArmPayloadSize = 6;   // uint16 fps + uint32 duration_ms
 constexpr uint32_t kPayloadWaitMs  = 10;  // max wait for payload bytes after magic
+constexpr char     kVersion[]      = "2PHOTON 1";
 
 // ---- State machine ---------------------------------------------------------
 enum class State : uint8_t { IDLE, ARMED, RUNNING };
@@ -63,15 +72,42 @@ ISR(TIMER1_COMPA_vect) {
   digitalWrite(kSyncPin,   level);
 }
 
+// Timer1 prescaler options, finest first. A fixed /8 prescaler overflowed the
+// 16-bit OCR1A below ~15.3 fps and silently ran at ~15.3 fps; selecting the
+// smallest prescaler whose CTC TOP still fits in 16 bits lets the whole
+// host-accepted 1..10000 fps range map to an accurate rate (and keeps the best
+// resolution at high fps).
+struct Timer1Prescaler { uint16_t divisor; uint8_t cs_bits; };
+static const Timer1Prescaler kTimer1Prescalers[] = {
+  {1,    _BV(CS10)},               // /1
+  {8,    _BV(CS11)},               // /8
+  {64,   _BV(CS11) | _BV(CS10)},   // /64
+  {256,  _BV(CS12)},               // /256
+  {1024, _BV(CS12) | _BV(CS10)},   // /1024
+};
+
 static void timer1_start(const uint16_t fps) {
   // ISR toggles the pin → one full output cycle = 2 interrupts → fire at 2×fps.
-  const uint32_t ocr = (F_CPU / (8UL * 2UL * static_cast<uint32_t>(fps))) - 1UL;
+  // ticks = timer counts per half-period; CTC TOP (OCR1A) = ticks - 1.
+  uint32_t ocr     = 65535UL;                 // slowest fallback (never hit for
+  uint8_t  cs_bits = _BV(CS12) | _BV(CS10);   // fps in 1..10000, see range above)
+  for (uint8_t i = 0;
+       i < sizeof(kTimer1Prescalers) / sizeof(kTimer1Prescalers[0]); ++i) {
+    const uint32_t ticks =
+        F_CPU / (static_cast<uint32_t>(kTimer1Prescalers[i].divisor) * 2UL
+                 * static_cast<uint32_t>(fps));
+    if (ticks >= 1UL && ticks <= 65536UL) {
+      ocr     = ticks - 1UL;
+      cs_bits = kTimer1Prescalers[i].cs_bits;
+      break;
+    }
+  }
   cli();
   TCCR1A = 0;
   TCCR1B = 0;
   TCNT1  = 0;
-  OCR1A  = static_cast<uint16_t>(constrain(ocr, 1UL, 65535UL));
-  TCCR1B = _BV(WGM12) | _BV(CS11);  // CTC + prescaler /8
+  OCR1A  = static_cast<uint16_t>(ocr);
+  TCCR1B = _BV(WGM12) | cs_bits;  // CTC mode + selected prescaler
   TIMSK1 = _BV(OCIE1A);
   sei();
 }
@@ -163,6 +199,12 @@ void loop() {
       if (g_state != State::IDLE) {
         enter_idle();
       }
+    } else if (b == kIdentifyMagic) {
+      Serial.read();  // consume '?'
+      Serial.print(kVersion);
+      Serial.write(' ');
+      Serial.print(TWOPHOTON_FW_BUILD);
+      Serial.write('\n');
     } else if (b == kArmMagic) {
       Serial.read();  // consume magic
       uint16_t fps;

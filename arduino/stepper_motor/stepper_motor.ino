@@ -1,5 +1,8 @@
+#include <Arduino.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "fw_build_info.h"  // FLYWHEEL_FW_BUILD — source fingerprint (auto-generated)
 
 #pragma pack(push, 1)
 struct Command {
@@ -12,6 +15,18 @@ struct Command {
 #pragma pack(pop)
 
 static_assert(sizeof(Command) == 8, "Command must stay packed to 8 bytes");
+
+// ---- Identify -------------------------------------------------------------
+// octacam sends a normal 8-byte Command as an *identify sentinel*: n_steps == 0
+// (which OLD firmware harmlessly executes as a coil release) with the otherwise-
+// meaningless step_interval_us field set to kIdentifyMarker. This firmware
+// recognises that exact combination and replies with its identity banner
+// "FLYWHEEL <ver> <build>\n" instead of moving. Because it is a valid 8-byte
+// command, the wire framing is UNCHANGED — an un-upgraded board simply ignores
+// the query (a no-op release), and octacam then sees "no identity" and offers a
+// (backward-compatible) reflash. <build> is a hash of this sketch (fw_build_info.h).
+static const char kVersion[] = "FLYWHEEL 1";
+constexpr uint16_t kIdentifyMarker = 0xFFFF;  // step_interval_us value; n_steps must be 0
 
 constexpr uint8_t in1_pin = 8;
 constexpr uint8_t in2_pin = 9;
@@ -166,11 +181,26 @@ void setup() {
   }
 }
 
+inline void send_identity() {
+  Serial.print(kVersion);
+  Serial.write(' ');
+  Serial.print(FLYWHEEL_FW_BUILD);
+  Serial.write('\n');
+}
+
 void loop() {
   if (Serial.available() >= command_size) {
     const size_t bytes_read = Serial.readBytes(command_data_ptr, command_size);
     if (bytes_read == command_size) {
-      execute_command(command_data);
+      // Identify sentinel: n_steps == 0 (harmless release on old firmware) with
+      // the marker in step_interval_us -> reply with the identity banner.
+      if (command_data.n_steps == 0 &&
+          command_data.step_interval_us == kIdentifyMarker) {
+        release_motor();
+        send_identity();
+      } else {
+        execute_command(command_data);
+      }
     }
   }
 }

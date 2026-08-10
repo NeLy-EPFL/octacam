@@ -1,0 +1,103 @@
+name: Deploy docs
+
+# Publishes VERSIONED Material for MkDocs docs to the gh-pages branch via `mike`.
+#
+#   push a tag vX.Y.Z      -> deploy the NUMBERED version X.Y.Z, (re)point the
+#                             `stable` alias at it, and make it the site default.
+#                             This is the authoritative per-release publish.
+#   push to main           -> deploy the current pyproject version as the `stable`
+#                             alias + default (main == the latest stable release),
+#                             so a docs fix landing on main between releases still
+#                             refreshes stable.
+#   push to the develop branch -> deploy the rolling "dev" version. Because it neither
+#                             touches `stable` nor moves the default, the released
+#                             versions and the root redirect are left untouched.
+#
+# So the version dropdown accumulates every tagged release (0.3.0, 0.3.1, …) plus
+# `dev`, with `stable` aliasing (and the root redirecting to) the newest release.
+# Older numbered versions are preserved across deploys (mike never drops them).
+#
+# All versions live in their own subdirectory of gh-pages; the header version
+# selector (mkdocs.yml `extra.version.provider: mike`) reads versions.json at the
+# gh-pages root, so every version shares one dropdown.
+#
+# ONE-TIME SETUP (not done here): after the first run creates gh-pages, set
+# Settings -> Pages -> "Deploy from a branch" -> gh-pages -> / (root). Via API:
+#   gh api --method POST /repos/NeLy-EPFL/octacam/pages \
+#     -f build_type=legacy -f 'source[branch]=gh-pages' -f 'source[path]=/'
+# (POST to create; PUT to update. Needs a repo-admin token, not GITHUB_TOKEN.)
+
+on:
+  push:
+    branches:
+      - main
+      - develop          # the single permanent git-flow development line -> "dev" docs
+    tags:
+      - "v*"             # every release tag -> its own numbered doc version
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write        # mike commits the built site and pushes gh-pages via GITHUB_TOKEN
+
+# Every deploy commits to the single gh-pages branch. A CONSTANT group (NOT keyed
+# by branch/ref) serializes a main deploy against a dev deploy so they can never
+# race on versions.json or fail a non-fast-forward push. Never cancel a deploy
+# mid-push.
+concurrency:
+  group: docs-gh-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history + the origin/gh-pages ref; a shallow
+                                # clone makes mike drop previously deployed versions
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Configure git identity for the mike commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # mike commits on top of the existing gh-pages tree but never runs git fetch
+      # itself. Fetch it explicitly so other versions survive (no-op on first run,
+      # when the branch does not exist yet -> mike creates it).
+      - name: Fetch existing gh-pages
+        run: git fetch origin gh-pages --depth=1 || true
+
+      # --no-project: don't build octacam + its camera deps just to render Markdown.
+      - name: Deploy with mike
+        env:
+          REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          run_mike() { uv run --no-project --with mkdocs-material --with mike mike "$@"; }
+          pyproject_version() {
+            sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml | head -1
+          }
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="${REF#v}"                          # v0.3.1 -> 0.3.1
+            echo "Deploying release docs $VERSION (alias: stable, default)"
+            run_mike deploy --push --update-aliases "$VERSION" stable
+            run_mike set-default --push stable
+          elif [ "$REF" = "main" ]; then
+            VERSION="$(pyproject_version)"
+            echo "Deploying stable docs from main: $VERSION (alias: stable, default)"
+            run_mike deploy --push --update-aliases "$VERSION" stable
+            run_mike set-default --push stable
+          else
+            echo "Deploying development docs as version 'dev' (branch: $REF)"
+            run_mike deploy --push dev
+          fi

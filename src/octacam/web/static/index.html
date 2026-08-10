@@ -18,6 +18,7 @@
 </head>
 <body>
   <div id="banner" class="hidden"></div>
+  <div id="update-banner" class="hidden"></div>
 
   <main id="grid"></main>
 
@@ -31,14 +32,20 @@
         title="Adjust per-camera sensor parameters (resolution, exposure, gain)">Camera</button>
       <button type="button" data-tab="view"
         title="Rotate, flip, and crosshair options for the live preview">View</button>
-      <button type="button" data-tab="arduino"
-        title="Drive the turntable stepper via the Arduino plugin">Arduino</button>
-      <button type="button" data-tab="twophoton"
+      <button type="button" data-tab="benchmark"
+        title="Test whether a frame rate is achievable and find the limiting step">Benchmark</button>
+      <button type="button" data-tab="flywheel" data-plugin="flywheel"
+        title="Drive the turntable stepper via the Flywheel plugin">Flywheel</button>
+      <button type="button" data-tab="twophoton" data-plugin="twophoton"
         title="2-photon rig: arm the Arduino hardware trigger (ThorSync)">2-Photon</button>
+      <button type="button" data-tab="triggerbox" data-plugin="triggerbox"
+        title="triggerbox rig: arm the Arduino camera trigger + LED strobe">triggerbox</button>
     </nav>
 
     <section id="tab-record" class="tab active">
       <fieldset id="record-fields" disabled>
+        <!-- Essentials: always visible. Everything else lives under the
+             Advanced-options switch below (see record.js). -->
         <label class="row" title="How long each recording runs before it stops automatically"><span>Duration:</span>
           <span class="duration">
             <input id="duration-value" type="number" min="0.01" step="any" value="20"
@@ -54,98 +61,176 @@
           <input id="fps" type="number" min="0.01" max="1000" step="1">
         </label>
         <div class="col">
-          <label class="col-label" for="save-dir"
-            title="Folder on the rig where the video files are written">Save directory:</label>
-          <textarea id="save-dir" rows="3" spellcheck="false"
-            title="Folder on the rig where the video files are written"></textarea>
+          <label class="col-label" for="record-dir"
+            title="Base folder on the rig that recordings are written under">Directory:</label>
+          <textarea id="record-dir" rows="2" spellcheck="false"
+            title="Base folder on the rig that recordings are written under"></textarea>
           <div class="save-dir-foot">
             <button type="button" id="browse-dir-btn" class="btn"
-              title="Browse the rig's filesystem to pick a save folder">Browse…</button>
-            <span id="disk-free" title="Free space available on the save folder's drive"></span>
+              title="Browse the rig's filesystem to pick the base folder">Browse…</button>
+            <span id="disk-free" title="Free space available on the base folder's drive"></span>
           </div>
         </div>
-        <label class="row"
-          title="software: the server starts each frame on a timer. external: every frame is driven by a hardware trigger signal."><span>Trigger source:</span>
-          <select id="trigger-source">
-            <option value="software">software</option>
-            <option value="external">external</option>
-          </select>
+        <div class="col">
+          <label class="col-label" for="relative-dir"
+            title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step">Relative directory:</label>
+          <textarea id="relative-dir" rows="2" spellcheck="false"
+            title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
+        </div>
+        <div class="col">
+          <label class="col-label" for="transfer-dir"
+            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>
+          <textarea id="transfer-dir" rows="2" spellcheck="false"
+            title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs."></textarea>
+        </div>
+
+        <!-- Binary on/off switch that reveals the less-common recording,
+             encoding, and post-processing knobs (wired in record.js). -->
+        <label class="adv-toggle" title="Show the less-common recording, encoding, and post-processing options">
+          <span>Advanced options</span>
+          <span class="switch">
+            <input id="record-advanced-toggle" type="checkbox"
+              title="Show the less-common recording, encoding, and post-processing options">
+            <span class="switch-track"><span class="switch-thumb"></span></span>
+          </span>
         </label>
-        <label class="row" title="Container and codec used for the saved video files"><span>Format:</span>
-          <select id="format"></select>
-        </label>
-        <label class="row"
-          title="display: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Saved image:</span>
-          <select id="record-form">
-            <option value="display">display (rotated/flipped)</option>
-            <option value="sensor">sensor (raw)</option>
-          </select>
-        </label>
-        <label class="row"
-          title="Also write a CSV listing the capture timestamp of every frame, per camera"><span>Per-frame timestamp CSV:</span>
-          <input id="save-frame-timestamps" type="checkbox">
-        </label>
+
+        <div id="record-advanced" hidden>
+          <div class="adv-group">
+            <div class="adv-group-head">Triggering</div>
+            <label class="row"
+              title="software: the server starts each frame on a timer. managed: octacam drives an external hardware trigger via a plugin (e.g. the triggerbox). external: every frame is driven by a hardware trigger octacam does not control."><span>Trigger source:</span>
+              <select id="trigger-source">
+                <option value="software">software</option>
+                <option value="managed" disabled>managed</option>
+                <option value="external">external</option>
+              </select>
+            </label>
+            <label class="row"
+              title="How live preview is triggered when not recording. auto: mirror the recording trigger source (software→synchronized, managed→drive the plugin/strobe as recording, external→free-run at the target fps). software: always software-synchronized. free_running: cameras free-run capped at the target fps."><span>Preview trigger:</span>
+              <select id="preview-trigger-source">
+                <option value="auto">auto (match recording)</option>
+                <option value="software">software</option>
+                <option value="free_running">free running</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="adv-group">
+            <div class="adv-group-head">Encoding &amp; output</div>
+            <label class="row"
+              title="How the saved video files are written. ffmpeg: encode now on the CPU (libx264). nvenc: encode now on an NVIDIA GPU (H.264 NVENC). raw: store Mono8 to transcode later."><span>Save method:</span>
+              <select id="format"></select>
+            </label>
+            <div class="col" id="ffmpeg-params-row">
+              <label class="col-label" for="ffmpeg-params"
+                title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg).">ffmpeg parameters (CPU):</label>
+              <textarea id="ffmpeg-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments for the CPU encoder (Save method = ffmpeg)."></textarea>
+            </div>
+            <div class="col" id="nvenc-params-row" hidden>
+              <label class="col-label" for="nvenc-params"
+                title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc.">NVENC parameters (GPU):</label>
+              <textarea id="nvenc-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments for the GPU encoder (Save method = nvenc). Should name an *_nvenc encoder, e.g. -c:v h264_nvenc."></textarea>
+            </div>
+            <div class="col" id="nvenc-sessions-row" hidden>
+              <label class="row"
+                title="Auto-detect how many concurrent NVENC sessions this GPU/driver allows and use that. Uncheck to cap it manually (e.g. to reserve GPU headroom)."><span>Auto-detect GPU sessions:</span>
+                <input id="nvenc-auto" type="checkbox">
+              </label>
+              <label class="row"
+                title="Max cameras that encode on the GPU at once; any beyond this fall back to CPU (libx264). Editable only when auto-detect is off."><span>Max NVENC sessions:</span>
+                <input id="max-nvenc-sessions" type="number" min="0" max="64" step="1">
+              </label>
+              <span id="nvenc-detected" class="hint"></span>
+            </div>
+            <label class="row"
+              title="displayed: bake the on-screen rotation/flip into the file. sensor: save the raw, un-rotated sensor image."><span>Save frames as:</span>
+              <select id="record-form">
+                <option value="display">displayed</option>
+                <option value="sensor">sensor</option>
+              </select>
+            </label>
+            <label class="row"
+              title="Also write timestamps.npz: the capture timestamp of every frame for all cameras, in one compressed file"><span>Save timestamps:</span>
+              <input id="save-frame-timestamps" type="checkbox">
+            </label>
+            <label class="row"
+              title="Per-camera frame buffer between the grab loop and its encoder, in frames. A deeper queue absorbs transient encoder stalls (a full queue is the only source of a dropped frame) at the cost of peak RAM (frame bytes × queue × cameras). Default 64."><span>Writer queue size:</span>
+              <input id="writer-queue-size" type="number" min="1" max="4096" step="1">
+            </label>
+          </div>
+
+          <div class="adv-group">
+            <div class="adv-group-head"
+              title="Post-recording pipeline, run later by `octacam process`. These values are baked into this recording's config snapshot; the rig config file is left untouched.">Post-processing</div>
+            <div class="col">
+              <label class="col-label" for="transcode-ffmpeg-params"
+                title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings">Transcode ffmpeg parameters:</label>
+              <textarea id="transcode-ffmpeg-params" rows="2" spellcheck="false"
+                title="Verbatim ffmpeg output/encoder arguments `octacam process` uses to transcode the recordings"></textarea>
+            </div>
+            <label class="row"
+              title="Content-verify each transferred file with a checksum before promoting it (safer but slower); off = size-only comparison"><span>Verify transfer (checksum):</span>
+              <input id="transfer-checksum" type="checkbox">
+            </label>
+          </div>
+        </div>
       </fieldset>
       <button type="button" id="record-button" class="start" disabled
         title="Start or stop recording on all cameras at once">Start recording</button>
+      <div id="record-writer-alert" class="writer-alert hidden" role="alert"></div>
       <div id="record-status"></div>
       <div id="record-progress" class="hidden"><div id="record-progress-bar"></div></div>
     </section>
 
     <section id="tab-camera" class="tab">
       <fieldset id="camera-fields" disabled>
-        <label class="row" title="Which camera these sensor parameters are read from and applied to"><span>Camera:</span>
+        <label class="row" title="Which camera these parameters are read from and applied to"><span>Camera:</span>
           <select id="cam-target"></select>
         </label>
-        <div class="row" title="Apply a change to just the selected camera, or to every camera at once"><span>Apply to:</span>
-          <span class="radio-group">
-            <label title="Change only the selected camera"><input type="radio" name="cam-apply-to" value="selected" checked> Selected</label>
-            <label title="Change all cameras at once"><input type="radio" name="cam-apply-to" value="all"> All</label>
+        <div class="row" title="Rename the selected camera. The name becomes its per-camera video filename, so it must be unique and contain no slashes or dots."><span>Name:</span>
+          <span class="name-edit">
+            <input id="cam-name" type="text" maxlength="64" spellcheck="false"
+              title="A safe filename stem — unique across cameras, no path separators">
+            <button id="cam-rename" type="button" class="btn">Rename</button>
           </span>
         </div>
-        <label class="row" title="Active image width in pixels (sensor region of interest)"><span>Width:</span>
-          <input id="cam-width" type="number" step="1">
-        </label>
-        <span class="node-range" id="cam-width-range"></span>
-        <label class="row" title="Active image height in pixels (sensor region of interest)"><span>Height:</span>
-          <input id="cam-height" type="number" step="1">
-        </label>
-        <span class="node-range" id="cam-height-range"></span>
-        <label class="row" title="Exposure time per frame, in microseconds"><span>Exposure:</span>
-          <span class="suffixed">
-            <input id="cam-exposure" type="number" step="any">
-            <span class="suffix">&micro;s</span>
-          </span>
-        </label>
-        <span class="node-range" id="cam-exposure-range"></span>
-        <details id="cam-advanced">
-          <summary title="Show less-common sensor controls (gain and ROI offset)">Advanced</summary>
-          <label class="row" title="Brightness gain applied to the sensor signal (in the camera's gain units)"><span>Gain:</span>
-            <input id="cam-gain" type="number" step="any">
+        <div class="cam-tools">
+          <input id="cam-filter" type="search" placeholder="Filter parameters…"
+            spellcheck="false" title="Filter the parameter list by name">
+          <label class="cam-vis" title="Show parameters up to this GenICam visibility level. Higher levels expose more advanced, rarely-changed features (e.g. Sensor Readout Mode is Guru).">
+            <span>Level:</span>
+            <select id="cam-visibility">
+              <option value="beginner">Beginner</option>
+              <option value="expert">Expert</option>
+              <option value="guru">Guru</option>
+            </select>
           </label>
-          <span class="node-range" id="cam-gain-range"></span>
-          <label class="row" title="Horizontal start of the sensor region of interest, in pixels"><span>Offset X:</span>
-            <input id="cam-offset_x" type="number" step="1">
-          </label>
-          <span class="node-range" id="cam-offset_x-range"></span>
-          <label class="row" title="Vertical start of the sensor region of interest, in pixels"><span>Offset Y:</span>
-            <input id="cam-offset_y" type="number" step="1">
-          </label>
-          <span class="node-range" id="cam-offset_y-range"></span>
-        </details>
-        <button id="cam-reset" type="button" class="btn wide"
-          title="Reset sensor parameters to the active config's saved values">Reset to config</button>
+        </div>
+        <!-- Grouped, model-dependent parameter browser rendered by camera.js -->
+        <div id="camera-params"></div>
       </fieldset>
       <div id="camera-status"></div>
     </section>
 
-    <section id="tab-arduino" class="tab">
-      <div id="arduino-status" class="plugin-status hidden">
-        <span id="arduino-status-msg"></span>
-        <button type="button" id="arduino-reconnect" class="btn"
-          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+    <section id="tab-flywheel" class="tab" data-plugin="flywheel">
+      <div id="flywheel-status" class="plugin-status hidden">
+        <span id="flywheel-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="flywheel-port" class="serial-port-select"></select>
+        </label>
+        <button type="button" id="flywheel-reconnect" class="btn"
+          title="Connect to the selected serial port">Reconnect</button>
       </div>
-      <fieldset id="arduino-fields" disabled>
+      <div id="flywheel-fw-flash" class="fw-flash hidden">
+        <span id="flywheel-fw-flash-msg"></span>
+        <button type="button" id="flywheel-fw-flash-btn" class="btn"
+          title="Compile and upload the current stepper firmware">Flash firmware</button>
+      </div>
+      <pre id="flywheel-fw-flash-log" class="fw-log hidden"></pre>
+      <fieldset id="flywheel-fields" disabled>
         <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
         <div class="row" title="Rotation direction of the first sweep"><span>Initial direction:</span>
           <span class="radio-group">
@@ -199,11 +284,14 @@
       </fieldset>
     </section>
 
-    <section id="tab-twophoton" class="tab">
+    <section id="tab-twophoton" class="tab" data-plugin="twophoton">
       <div id="twophoton-status" class="plugin-status hidden">
         <span id="twophoton-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="twophoton-port" class="serial-port-select"></select>
+        </label>
         <button type="button" id="twophoton-reconnect" class="btn"
-          title="Try to reopen the serial connection to the Arduino">Reconnect</button>
+          title="Connect to the selected serial port">Reconnect</button>
       </div>
       <div class="col">
         <div class="row" title="Current state of the Arduino trigger board">
@@ -212,6 +300,13 @@
             Idle — waiting for arm command
           </span>
         </div>
+        <div id="twophoton-fw-flash" class="fw-flash hidden">
+          <span id="twophoton-fw-flash-msg"></span>
+          <button type="button" id="twophoton-fw-flash-btn" class="btn"
+            title="Compile and upload the current 2-photon trigger firmware">
+            Flash firmware</button>
+        </div>
+        <pre id="twophoton-fw-flash-log" class="fw-log hidden"></pre>
         <p class="hint">
           FPS and duration are taken from the Record tab settings.
           When "Arm with recording" is checked, the Arduino is armed
@@ -226,17 +321,77 @@
       </div>
     </section>
 
-    <section id="tab-view" class="tab">
-      <fieldset id="view-fields" disabled>
-        <label class="row" title="Which camera the rotate/flip controls apply to when Apply to is set to Selected"><span>Camera:</span>
-          <select id="view-target"></select>
+    <section id="tab-triggerbox" class="tab" data-plugin="triggerbox">
+      <div id="triggerbox-status" class="plugin-status hidden">
+        <span id="triggerbox-status-msg"></span>
+        <label class="serial-port-row" title="Choose which serial port to connect to">Port:
+          <select id="triggerbox-port" class="serial-port-select"></select>
         </label>
-        <div class="row" title="Apply rotate/flip to just the selected camera, or to every camera at once"><span>Apply to:</span>
-          <span class="radio-group">
-            <label title="Change only the selected camera"><input type="radio" name="apply-to" value="selected"> Selected</label>
-            <label title="Change all cameras at once"><input type="radio" name="apply-to" value="all" checked> All</label>
+        <button type="button" id="triggerbox-reconnect" class="btn"
+          title="Connect to the selected serial port">Reconnect</button>
+      </div>
+      <div class="col">
+        <div class="row" title="Current state of the Arduino trigger board">
+          <span>Arduino state:</span>
+          <span id="triggerbox-state-value" class="triggerbox-state triggerbox-state--idle">
+            Idle — waiting for arm command
           </span>
         </div>
+        <div id="triggerbox-firmware" class="hint"></div>
+
+        <div id="triggerbox-fw-flash" class="triggerbox-fw-flash hidden">
+          <span id="triggerbox-fw-flash-msg"></span>
+          <button type="button" id="triggerbox-fw-flash-btn" class="btn"
+            title="Compile and upload the current triggerbox firmware to the board">
+            Flash firmware</button>
+        </div>
+        <pre id="triggerbox-fw-flash-log" class="triggerbox-fw-log hidden"></pre>
+
+        <div class="triggerbox-section">
+          <div class="row triggerbox-section-head">
+            <span>Camera trigger lines</span>
+            <button type="button" id="triggerbox-add-camera" class="btn btn-icon"
+              title="Add a camera trigger line">＋</button>
+          </div>
+          <div id="triggerbox-cameras"></div>
+        </div>
+
+        <div class="triggerbox-section">
+          <div class="row triggerbox-section-head"><span>Light channels</span></div>
+          <div id="triggerbox-lights"></div>
+        </div>
+
+        <div class="triggerbox-timing">
+          <div class="row triggerbox-timing-head">
+            <span>Frame timing</span>
+          </div>
+          <div id="triggerbox-timing-viz" class="triggerbox-timing-viz"></div>
+          <div id="triggerbox-timing-summary" class="hint"></div>
+        </div>
+
+        <p class="hint">
+          FPS and duration come from the Record tab. Each camera line pulses on
+          its pin every frame; each of the three CCS light channels is
+          independent — <strong>off</strong>, a frame-locked <strong>strobe</strong>
+          (Auto sizes the on-time to bracket the longest camera exposure, or set a
+          Manual duty), <strong>continuous</strong>, or an independent optogenetic
+          <strong>pulse train</strong>. When "Arm with recording" is checked the
+          board is armed each time a recording starts. Cameras must be set to
+          external hardware trigger.
+        </p>
+        <label class="center"
+          title="Arm the Arduino automatically when a recording starts">
+          <input type="checkbox" id="triggerbox-arm-with-recording" checked>
+          Arm with recording
+        </label>
+      </div>
+    </section>
+
+    <section id="tab-view" class="tab">
+      <fieldset id="view-fields" disabled>
+        <label class="row" title="Which camera the rotate/flip controls apply to"><span>Camera:</span>
+          <select id="view-target"></select>
+        </label>
         <div class="row"
           title="Rotate the preview 90°. Does not change the sensor; baked into recordings saved in 'display' form."><span>Rotate:</span>
           <span class="btn-pair">
@@ -252,10 +407,47 @@
           </span>
         </div>
         <button type="button" id="view-reset" class="btn wide"
-          title="Clear all rotation and flips for the targeted camera(s)">Reset</button>
+          title="Clear all rotation and flips for the selected camera">Reset</button>
         <label class="center" title="Overlay centering crosshairs on every preview tile">
           <input type="checkbox" id="display-cross"> Display cross</label>
       </fieldset>
+    </section>
+
+    <section id="tab-benchmark" class="tab">
+      <p class="hint">
+        A short dry-run drives the cameras (no video is kept) to test whether the
+        target frame rate is achievable, find the maximum, and measure each pipeline
+        stage so you can see the limiting step. Live preview pauses during the run.
+      </p>
+      <fieldset id="bench-fields" disabled>
+        <label class="row" title="Frame rate to test. Blank uses the Record tab's FPS."><span>Target FPS:</span>
+          <input id="bench-fps" type="number" min="0.01" max="1000" step="1"
+            placeholder="Record FPS">
+        </label>
+        <label class="row" title="Seconds spent measuring each scenario (longer = steadier numbers)"><span>Duration:</span>
+          <span class="suffixed">
+            <input id="bench-duration" type="number" min="0.5" max="60" step="0.5" value="5">
+            <span class="suffix">s</span>
+          </span>
+        </label>
+        <label class="row"
+          title="config: encode through the rig's real save method (measures the true encode cost). null: discard frames to isolate acquisition."><span>Encode through:</span>
+          <select id="bench-sink">
+            <option value="config">config encoder</option>
+            <option value="null">null (acquisition only)</option>
+          </select>
+        </label>
+        <label class="center" title="Also search for the maximum achievable frame rate (software trigger only)">
+          <input id="bench-find-max" type="checkbox" checked> Find max FPS</label>
+      </fieldset>
+      <button type="button" id="bench-run" class="btn wide" disabled
+        title="Run the benchmark on all cameras">Run benchmark</button>
+      <div id="bench-progress" hidden>
+        <div id="bench-progress-label"></div>
+        <div class="bench-progress-track"><div id="bench-progress-fill"></div></div>
+      </div>
+      <div id="bench-status"></div>
+      <div id="bench-results"></div>
     </section>
 
     <div id="events"></div>
@@ -266,19 +458,23 @@
         <span id="peers" class="hidden" title="Browsers connected to this server"></span>
       </div>
       <div id="footer-actions">
+        <button id="shortcuts-help-btn" type="button"
+          title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts">&#x2328;&#xfe0f;</button>
         <button id="theme-toggle" type="button" aria-pressed="false"
-          title="Switch to light theme">&#9728;</button>
-        <button id="save-config-btn" type="button" title="Save camera parameters and layout to a config">Save config…</button>
-        <button id="disconnect-btn" type="button"
-          title="Disconnect this browser (the recording keeps running on the rig)">Disconnect</button>
-        <button id="shutdown-btn" type="button" title="Stop the octacam server on the rig">Shut down</button>
+          title="Switch to light theme">&#x2600;&#xfe0f;</button>
+        <button id="save-config-btn" type="button"
+          title="Save camera parameters and layout to a config" aria-label="Save config">&#x1f4be;</button>
+        <button id="disconnect-btn" type="button" hidden
+          title="Disconnect this browser (the recording keeps running on the rig)" aria-label="Disconnect">&#x1f50c;</button>
+        <button id="shutdown-btn" type="button"
+          title="Stop the octacam server on the rig" aria-label="Shut down">&#x1f6d1;</button>
       </div>
     </div>
   </aside>
 
   <div id="save-dialog" class="modal hidden">
-    <div class="modal-card">
-      <h3>Save configuration</h3>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="save-dialog-title">
+      <h3 id="save-dialog-title">Save configuration</h3>
       <div class="row" title="Overwrite the active config, or create a new named one"><span>Target:</span>
         <span class="radio-group">
           <label title="Overwrite the currently loaded config"><input type="radio" name="save-target" value="active" checked> Active</label>
@@ -288,8 +484,8 @@
       <label class="row" id="save-name-row" title="Name for the new config folder"><span>Name:</span>
         <input id="save-name" type="text" spellcheck="false" placeholder="my_rig">
       </label>
-      <label class="check" title="Save current sensor parameters as a Pylon .pfs file">
-        <input type="checkbox" id="save-sensor" checked> Sensor parameters (.pfs)</label>
+      <label class="check" title="Save current sensor parameters in each camera's native format (Basler .pfs / FLIR .txt)">
+        <input type="checkbox" id="save-sensor" checked> Sensor parameters</label>
       <label class="check" title="Save the window layout and rotation/flip as a .toml file">
         <input type="checkbox" id="save-display" checked> Display layout (.toml)</label>
       <div id="save-error" class="modal-error"></div>
@@ -300,9 +496,21 @@
     </div>
   </div>
 
+  <div id="shutdown-dialog" class="modal hidden">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="shutdown-dialog-title">
+      <h3 id="shutdown-dialog-title">Shut down octacam</h3>
+      <p id="shutdown-dialog-msg"></p>
+      <div class="modal-actions">
+        <button type="button" id="shutdown-cancel" class="btn">Cancel</button>
+        <button type="button" id="shutdown-plain" class="btn">Shut down</button>
+        <button type="button" id="shutdown-process" class="btn" title="Shut down, then transcode/grid/transfer this session in the background">Shut down &amp; process</button>
+      </div>
+    </div>
+  </div>
+
   <div id="dir-dialog" class="modal hidden">
-    <div class="modal-card">
-      <h3>Choose save directory</h3>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dir-dialog-title">
+      <h3 id="dir-dialog-title">Choose save directory</h3>
       <div class="dir-current-row">
         <button type="button" id="dir-up" class="btn" title="Parent folder">&#8593;</button>
         <span id="dir-current" class="dir-current"></span>

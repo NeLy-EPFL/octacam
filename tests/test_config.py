@@ -1,9 +1,45 @@
+import logging
 import time
 from pathlib import Path
 
-from octacam.config import GuiConfig, load_config_dir, parse_config
+from octacam.config import (
+    GuiConfig,
+    RecordConfig,
+    duration_to_seconds,
+    load_config_dir,
+    parse_config,
+    resolve_save_dir,
+)
+from octacam.writer import DEFAULT_FFMPEG_PARAMS
 
 REPO_ROOT = Path(__file__).parent.parent
+
+
+class _LogCapture(logging.Handler):
+    """Capture ``octacam`` logger messages directly.
+
+    Attached to the logger itself rather than via ``caplog`` because another
+    test may leave ``propagate = False``, which would empty caplog's capture.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+    def __enter__(self):
+        logger = logging.getLogger("octacam")
+        self._prev = logger.level
+        logger.addHandler(self)
+        logger.setLevel(logging.WARNING)
+        return self
+
+    def __exit__(self, *exc):
+        logger = logging.getLogger("octacam")
+        logger.removeHandler(self)
+        logger.setLevel(self._prev)
 
 
 def test_missing_file_returns_defaults(tmp_path):
@@ -12,23 +48,36 @@ def test_missing_file_returns_defaults(tmp_path):
     assert config.gui == GuiConfig()
 
 
-def test_gui_recording_output_defaults():
-    gui = GuiConfig()
-    assert gui.record_form_default == "display"
-    assert gui.save_frame_timestamps_default is False
+def test_record_defaults():
+    record = RecordConfig()
+    assert record.save_transformed is True
+    assert record.save_timestamps is False
+    assert record.trigger_source == "software"
 
 
-def test_parses_emulate_8_cameras_config():
-    config = load_config_dir(REPO_ROOT / "configs" / "emulate_8_cameras")
-    assert config.gui.fps_default == 100.0
-    assert config.gui.duration_default == 5.0
+def test_writer_queue_size_default_and_floor():
+    assert RecordConfig().writer_queue_size == 64
+    assert RecordConfig(writer_queue_size=128).writer_queue_size == 128
+    # queue.Queue(maxsize=0) is *unbounded*; the validator floors at 1 so the
+    # bound is always meaningful (a slow encoder can never OOM the host).
+    assert RecordConfig(writer_queue_size=0).writer_queue_size == 1
+    assert RecordConfig(writer_queue_size=-10).writer_queue_size == 1
+
+
+def test_parses_emulate_basler_config():
+    config = load_config_dir(REPO_ROOT / "configs" / "emulate_basler")
+    assert config.record.fps == 30.0
+    assert config.record.duration == 1.0
     assert len(config.cameras) == 8
     assert config.cameras[0].serial_number == "0815-0000"
     assert config.cameras[0].name == "camera_LF"
-    assert config.cameras[7].window_height == 0.6666667
-    # save_directory_default contains strftime codes that must be expanded
-    assert "%y" not in config.gui.save_directory_default
-    assert time.strftime("%y%m%d") in config.gui.save_directory_default
+    assert config.cameras[7].window_height == 0.666667
+    # directory/relative_directory carry strftime codes that are only expanded
+    # at record time via resolve_save_dir, not at parse time.
+    assert "%y" in config.record.relative_directory
+    save_dir = resolve_save_dir(config.record, when=time.localtime(0))
+    assert "%y" not in save_dir
+    assert time.strftime("%y%m%d", time.localtime(0)) in save_dir
 
 
 def test_duplicate_serial_skipped(tmp_path):
@@ -50,6 +99,18 @@ def test_duplicate_name_skipped(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
+def test_name_clashing_with_serial_fallback_skipped(tmp_path):
+    # A blank-name camera records under its serial as the filename stem, so a
+    # later entry whose explicit name equals that serial would clobber the same
+    # video file; the clash must be rejected at parse time.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "X"\n'
+        '[[cameras]]\nserial_number = "Y"\nname = "X"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert [c.serial_number for c in config.cameras] == ["X"]
+
+
 def test_unsafe_camera_name_dropped(tmp_path):
     # A name becomes a video filename stem; a traversal/separator name must not
     # survive the load (it would write outside the save dir). The camera is
@@ -64,6 +125,27 @@ def test_unsafe_camera_name_dropped(tmp_path):
     assert config.cameras[1].name == "ok"
 
 
+def test_center_flags_parse(tmp_path):
+    # The ROI auto-centering flags default off and round-trip as booleans.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\ncenter_x = true\ncenter_y = true\n'
+        '[[cameras]]\nserial_number = "b"\n'
+    )
+    config = load_config_dir(tmp_path)
+    assert config.cameras[0].center_x is True and config.cameras[0].center_y is True
+    assert config.cameras[1].center_x is False and config.cameras[1].center_y is False
+
+
+def test_gui_theme_parse(tmp_path):
+    # [gui].theme defaults to "dark", accepts "light", and falls back to the
+    # default on an unknown value (lenient validation).
+    assert GuiConfig().theme == "dark"
+    (tmp_path / "octacam_config.toml").write_text('[gui]\ntheme = "light"\n')
+    assert load_config_dir(tmp_path).gui.theme == "light"
+    (tmp_path / "octacam_config.toml").write_text('[gui]\ntheme = "chartreuse"\n')
+    assert load_config_dir(tmp_path).gui.theme == "dark"
+
+
 def test_integer_serial_and_name_coerced_to_string(tmp_path):
     # TOML keeps types explicit, but an unquoted integer serial/name should
     # still be read as text rather than rejected.
@@ -75,13 +157,12 @@ def test_integer_serial_and_name_coerced_to_string(tmp_path):
     assert config.cameras[0].name == "7"
 
 
-def test_date_save_directory_coerced(tmp_path):
+def test_date_directory_coerced(tmp_path):
     # An unquoted date parses as a TOML date; it must be read as a string and
-    # not silently fall back to "./".
-    (tmp_path / "octacam_config.toml").write_text(
-        "[gui]\nsave_directory_default = 2024-06-11\n"
-    )
-    assert load_config_dir(tmp_path).gui.save_directory_default == "2024-06-11"
+    # not silently fall back to the default. Templating happens at record time,
+    # so the raw value round-trips verbatim (unexpanded) at parse time.
+    (tmp_path / "octacam_config.toml").write_text("[record]\ndirectory = 2024-06-11\n")
+    assert load_config_dir(tmp_path).record.directory == "2024-06-11"
 
 
 def test_non_scalar_serial_skipped(tmp_path):
@@ -96,70 +177,91 @@ def test_non_scalar_serial_skipped(tmp_path):
 
 def test_bad_types_keep_defaults(tmp_path):
     (tmp_path / "octacam_config.toml").write_text(
+        "[record]\n"
+        'fps = "not-a-number"\n'
         "[gui]\n"
-        'fps_default = "not-a-number"\n'
-        "dock_min_width = 1.5\n"
+        "display_refresh_interval_ms = 1.5\n"
         "[[cameras]]\n"
         'serial_number = "a"\n'
         'scale_x = "wat"\n'
     )
     config = load_config_dir(tmp_path)
-    assert config.gui.fps_default == 100.0
-    assert config.gui.dock_min_width == 200
+    assert config.record.fps == 100.0
+    assert config.gui.display_refresh_interval_ms == 33
     assert config.cameras[0].scale_x == 1.0
 
 
 def test_plugins_bare_name_list(tmp_path):
-    (tmp_path / "octacam_config.toml").write_text('plugins = ["arduino", "other"]\n')
+    (tmp_path / "octacam_config.toml").write_text('plugins = ["flywheel", "other"]\n')
     plugins = load_config_dir(tmp_path).plugins
-    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert [p.name for p in plugins] == ["flywheel", "other"]
     assert plugins[0].options == {}
 
 
 def test_plugins_tables_with_options_and_duplicates(tmp_path):
     (tmp_path / "octacam_config.toml").write_text(
-        '[[plugins]]\nname = "arduino"\n'
-        '[[plugins]]\nname = "arduino"\n'  # duplicate -> skipped
+        '[[plugins]]\nname = "flywheel"\n'
+        '[[plugins]]\nname = "flywheel"\n'  # duplicate -> skipped
         '[[plugins]]\nname = "other"\noptions = {device = "/dev/ttyACM0"}\n'
     )
     plugins = load_config_dir(tmp_path).plugins
-    assert [p.name for p in plugins] == ["arduino", "other"]
+    assert [p.name for p in plugins] == ["flywheel", "other"]
     assert plugins[1].options == {"device": "/dev/ttyACM0"}
 
 
 def test_toml_file_loaded(tmp_path):
-    (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 42\n")
-    assert load_config_dir(tmp_path).gui.fps_default == 42.0
+    (tmp_path / "octacam_config.toml").write_text("[record]\nfps = 42\n")
+    assert load_config_dir(tmp_path).record.fps == 42.0
 
 
 def test_encoder_defaults_parsed(tmp_path):
-    # Capture defaults to CRF 18 and can be overridden in [gui]; x264_params
-    # is a free-form ffmpeg -x264-params string.
-    assert GuiConfig().crf_default == 18
+    # The capture encoder args default to DEFAULT_FFMPEG_PARAMS and can be
+    # overridden as a verbatim ffmpeg arg string in [record].
+    assert RecordConfig().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
     (tmp_path / "octacam_config.toml").write_text(
-        "[gui]\n"
-        "crf_default = 23\n"
-        'preset_default = "veryfast"\n'
-        'pix_fmt_default = "yuv420p"\n'
-        'x264_params_default = "keyint=30:scenecut=0"\n'
+        "[record]\n"
+        'ffmpeg_params = "-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p"\n'
     )
-    gui = load_config_dir(tmp_path).gui
-    assert gui.crf_default == 23
-    assert gui.preset_default == "veryfast"
-    assert gui.pix_fmt_default == "yuv420p"
-    assert gui.x264_params_default == "keyint=30:scenecut=0"
+    record = load_config_dir(tmp_path).record
+    assert (
+        record.ffmpeg_params == "-c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p"
+    )
+    import shlex
+
+    assert shlex.split(record.ffmpeg_params) == [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+    ]
 
 
-def test_bad_crf_default_falls_back(tmp_path):
-    # A non-integer crf_default is dropped (warn) and the default applies,
-    # like the other tolerant [gui] fields.
-    (tmp_path / "octacam_config.toml").write_text('[gui]\ncrf_default = "lossless"\n')
-    assert load_config_dir(tmp_path).gui.crf_default == 18
+def test_bad_ffmpeg_params_falls_back(tmp_path):
+    # An ffmpeg_params string ffmpeg could never parse (unbalanced quote) is
+    # dropped (warn) and the default applies, like the other tolerant fields.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[record]\nffmpeg_params = "-vf \\"unterminated"\n'
+    )
+    assert load_config_dir(tmp_path).record.ffmpeg_params == DEFAULT_FFMPEG_PARAMS
 
 
-def test_backend_defaults_to_basler(tmp_path):
-    (tmp_path / "octacam_config.toml").write_text("[gui]\nfps_default = 1\n")
-    assert load_config_dir(tmp_path).backend == "basler"
+def test_duration_to_seconds():
+    assert duration_to_seconds(5.0, "seconds", 100.0) == 5.0
+    assert duration_to_seconds(2.0, "minutes", 100.0) == 120.0
+    assert duration_to_seconds(1.0, "hours", 100.0) == 3600.0
+    # "frames" is a frame count at the recording rate -> divided by fps.
+    assert duration_to_seconds(200.0, "frames", 100.0) == 2.0
+
+
+def test_backend_defaults_to_auto(tmp_path):
+    # An absent backend key means auto-detect every installed vendor, so a rig
+    # can mix Basler and FLIR and just use whatever is connected.
+    (tmp_path / "octacam_config.toml").write_text("[record]\nfps = 1\n")
+    assert load_config_dir(tmp_path).backend == "auto"
 
 
 def test_backend_parsed_when_present(tmp_path):
@@ -171,6 +273,50 @@ def test_backend_parsed_when_present(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a"]
 
 
-def test_unknown_backend_falls_back_to_basler(tmp_path):
+def test_spinnaker_backend_is_pinnable(tmp_path):
+    # The Spinnaker C-API tier must be nameable in TOML: on modern Python the
+    # PySpin "flir" tier drops out, so pinning FLIRs to "spinnaker" is the only
+    # way to force the vendor C API instead of leaving it to "auto".
+    (tmp_path / "octacam_config.toml").write_text('backend = "spinnaker"\n')
+    assert load_config_dir(tmp_path).backend == "spinnaker"
+
+
+def test_unknown_backend_falls_back_to_auto(tmp_path):
     (tmp_path / "octacam_config.toml").write_text('backend = "nikon"\n')
-    assert load_config_dir(tmp_path).backend == "basler"
+    assert load_config_dir(tmp_path).backend == "auto"
+
+
+def test_transfer_checksum_defaults_true(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\n'
+    )
+    cfg = load_config_dir(tmp_path)
+    assert cfg.transfer is not None and cfg.transfer.checksum is True
+
+
+def test_transfer_checksum_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text("[transfer]\nchecksum = false\n")
+    assert load_config_dir(tmp_path).transfer.checksum is False
+
+
+def test_visualization_layout_unknown_camera_warns(tmp_path):
+    # A layout cell naming a camera that isn't declared must be reported, not
+    # silently rendered black.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "camera_LF"\n'
+        '[[cameras]]\nserial_number = "b"\nname = "camera_RF"\n'
+        '[[visualization]]\nlayout = [["camera_LF", "camera_TYPO"]]\n'
+    )
+    with _LogCapture() as cap:
+        load_config_dir(tmp_path)
+    assert any("camera_TYPO" in m for m in cap.messages)
+
+
+def test_visualization_layout_known_cameras_no_unknown_warning(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[cameras]]\nserial_number = "a"\nname = "camera_LF"\n'
+        '[[visualization]]\nlayout = [["camera_LF", ""]]\n'
+    )
+    with _LogCapture() as cap:
+        load_config_dir(tmp_path)
+    assert not any("unknown camera" in m for m in cap.messages)

@@ -159,3 +159,105 @@ def test_save_all_params_covers_every_camera(previewing_system):
 def test_camera_at_bounds(previewing_system):
     with pytest.raises(IndexError):
         previewing_system.camera_at(99)
+
+
+# ------------------------------------------------ full device node map (Camera tab)
+
+
+def test_list_features_grouped_and_typed(previewing_system):
+    cam = previewing_system.camera_at(0)
+    features = cam.list_features()
+    assert len(features) > 10  # a real node map, not the six curated params
+    by = {f["name"]: f for f in features}
+    # Categorised, and spanning multiple widget kinds.
+    assert all(f["category"] for f in features)
+    kinds = {f["type"] for f in features}
+    assert {"int", "float", "enum"} <= kinds
+    # Width is editable while open; enums carry selectable entries.
+    assert by["Width"]["type"] == "int" and by["Width"]["writable"] is True
+    assert by["Width"]["min"] is not None and by["Width"]["max"] is not None
+    pf = by["PixelFormat"]
+    assert pf["type"] == "enum" and pf["entries"] and pf["entries"][0]["value"]
+
+
+def test_managed_features_locked(previewing_system):
+    cam = previewing_system.camera_at(0)
+    by = {f["name"]: f for f in cam.list_features()}
+    # octacam drives these; they show read-only with the managed flag.
+    for name in ("PixelFormat", "TriggerMode"):
+        assert by[name]["managed"] is True
+        assert by[name]["writable"] is False
+    with pytest.raises(ValueError):
+        cam.set_feature("PixelFormat", "Mono12")
+
+
+def test_set_feature_live_and_geometry(previewing_system):
+    cam = previewing_system.camera_at(0)
+    cam.set_feature("ExposureTime", 3210.0)
+    assert abs(cam.read_feature("ExposureTime")["value"] - 3210.0) < 2.0
+    # A Width write cycles the grab and keeps previewing.
+    cam.set_feature("Width", 512)
+    assert cam._camera.IsGrabbing()
+    assert cam.read_feature("Width")["value"] == 512
+
+
+def test_reset_feature_uses_config_then_factory(previewing_system):
+    cam = previewing_system.camera_at(0)
+    baseline = cam.read_feature("ExposureTime")["value"]  # first-seen -> factory
+    cam.set_feature("ExposureTime", baseline + 2000.0)
+    assert abs(cam.read_feature("ExposureTime")["value"] - baseline) > 1.0
+    # No config text for this node: falls back to the cached factory value.
+    cam.reset_feature("ExposureTime", "")
+    assert abs(cam.read_feature("ExposureTime")["value"] - baseline) < 2.0
+
+
+def test_centering_computes_and_locks_offset(previewing_system):
+    cam = previewing_system.camera_at(0)
+    cam.set_feature("Width", 512)
+    state = cam.set_center("x", True)
+    assert state["center_x"] is True
+    offset = cam.read_feature("OffsetX")
+    assert offset["writable"] is False  # octacam owns it now
+    # Centered: roughly (sensor_width - width) / 2.
+    full = cam.read_feature("WidthMax")["value"]
+    assert abs(offset["value"] - (full - 512) / 2) <= (offset["inc"] or 1)
+    # Cannot set it by hand while centered.
+    with pytest.raises(ValueError):
+        cam.set_feature("OffsetX", 0)
+    # Re-centers when the ROI changes.
+    cam.set_feature("Width", 1024)
+    assert abs(cam.read_feature("OffsetX")["value"] - (full - 1024) / 2) <= (
+        cam.read_feature("OffsetX")["inc"] or 1
+    )
+    # Turning it off frees the field again.
+    cam.set_center("x", False)
+    assert cam.read_feature("OffsetX")["writable"] is True
+
+
+def test_execute_command_runs(previewing_system):
+    cam = previewing_system.camera_at(0)
+    commands = [f["name"] for f in cam.list_features() if f["type"] == "command"]
+    assert commands  # the emulator exposes command nodes
+    cam.execute_command(commands[0])  # must not raise
+
+
+def test_basler_declares_offsets_grab_locked(previewing_system):
+    # Basler locks the whole ROI (size + offsets) during acquisition, so the
+    # offsets ride the grab-cycle path alongside Width/Height.
+    locked = previewing_system.camera_at(0).backend.grab_locked_features()
+    assert {"Width", "Height", "OffsetX", "OffsetY"} <= locked
+
+
+def test_offset_editable_and_written_via_grab_cycle(previewing_system):
+    cam = previewing_system.camera_at(0)
+    # Make room for a non-zero origin, then the ROI offset is presented editable
+    # in the node-map browser even while previewing (Basler locks it mid-grab).
+    cam.set_feature("Width", 512)
+    by = {f["name"]: f for f in cam.list_features()}
+    assert by["OffsetX"]["writable"] is True
+    # A write cycles the grab (like Width/Height), lands, and preview resumes —
+    # a plain mid-grab write would be rejected by the SDK.
+    cam.set_feature("OffsetX", 16)
+    assert cam._camera.IsGrabbing()
+    off = cam.read_feature("OffsetX")
+    assert abs(off["value"] - 16) <= (off["inc"] or 1)

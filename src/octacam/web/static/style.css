@@ -2,7 +2,7 @@
 
 :root {
   color-scheme: dark;
-  --bg: #0e1116;
+  --bg: #000; /* complete black page background */
   --panel: #151a21;
   --panel-2: #1d2530;
   --border: #2a323e;
@@ -14,7 +14,8 @@
   --amber: #d4a72c;
   --lime: #00ff00;
   --selected-bg: #20354e; /* tinted title bar of the selected tile */
-  --video-bg: #000; /* letterbox behind each tile's video */
+  --video-bg: #151a21; /* faint blue letterbox so an all-black frame's window
+                          shape stays visible against the black page */
   --sidebar-width: 280px;
   --resizer-width: 6px;
 }
@@ -78,6 +79,51 @@ body {
   border-bottom: 1px solid var(--border);
 }
 
+/* -------------------------------------------- update-available banner */
+
+/* Read-only "a newer octacam is available" notice (js/update.js). Accent, not
+   red — informational and dismissible. Fixed to the top edge like the
+   connection banner; sits behind it (z 99 vs 100) on the rare overlap. */
+#update-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: calc(var(--sidebar-width) + var(--resizer-width));
+  z-index: 99;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 5px 10px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel));
+  color: var(--text);
+  border-bottom: 1px solid var(--accent);
+  font-size: 12.5px;
+}
+#update-banner .update-cmd {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  user-select: all;
+}
+#update-banner .update-dismiss {
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+}
+#update-banner .update-dismiss:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
 /* ------------------------------------------------------- camera grid */
 
 #grid {
@@ -88,6 +134,42 @@ body {
   /* Contain the tiles' (unbounded, raise-counter) z-indexes in their own
      stacking context so they can never climb over the banner or modals. */
   isolation: isolate;
+}
+
+/* Shown in the grid area while the server opens the cameras on its background
+   init thread (the page is served before the hardware is ready); replaced by
+   buildCameras() when the camera list arrives, or shows the init error. */
+.grid-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+.grid-placeholder.error {
+  color: var(--red);
+  white-space: pre-line;
+}
+.grid-placeholder .grid-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.55;
+  animation: grid-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .grid-placeholder .grid-spinner { animation-duration: 2.4s; }
+}
+@keyframes grid-spin {
+  to { transform: rotate(360deg); }
 }
 
 #grid.auto-tile {
@@ -218,6 +300,25 @@ body {
   background: var(--lime);
 }
 
+/* Prominent, hard-to-miss badge over a tile whose writer failed mid-recording
+   (a subtle red name tint alone is easy to overlook on a busy multi-cam grid).
+   Persists until the flag clears on the next recording. */
+.tile-fail {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 3;
+  padding: 2px 7px;
+  background: var(--red);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border-radius: 3px;
+  pointer-events: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
 /* ----------------------------------------------------------- sidebar */
 
 /* Drag handle that resizes the sidebar by driving --sidebar-width (which both
@@ -247,26 +348,81 @@ body {
 #tabs {
   flex: none;
   display: flex;
+  align-items: stretch;
   border-bottom: 1px solid var(--border);
+  position: relative; /* anchors the overflow dropdown */
 }
 
-#tabs button {
-  flex: 1;
-  padding: 8px 4px;
+/* Tabs size to their label (not flex:1) so the overflow menu can measure them
+   and only the ones that fit stay in the row. */
+#tabs > button[data-tab] {
+  flex: 0 0 auto;
+  padding: 8px 10px;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--text-dim);
   font: inherit;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-#tabs button:hover { color: var(--text); }
+#tabs > button[data-tab]:hover { color: var(--text); }
 
-#tabs button.active {
+#tabs > button[data-tab].active {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
+
+/* "⋯" overflow button, pinned to the right end of the bar. */
+.tabs-more {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+.tabs-more:hover { color: var(--text); }
+.tabs-more[aria-expanded="true"] { color: var(--text); }
+
+/* Dropdown holding the tabs that didn't fit. */
+.tabs-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 150px;
+  margin-top: 1px;
+  padding: 4px;
+  display: none;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 0 0 6px 6px;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
+}
+.tabs-menu.open { display: flex; }
+.tabs-menu button[data-tab] {
+  flex: none;
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-dim);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tabs-menu button[data-tab]:hover { color: var(--text); background: var(--border); }
+.tabs-menu button[data-tab].active { color: var(--text); }
 
 .tab {
   display: none;
@@ -303,19 +459,41 @@ body {
 }
 
 .plugin-status button { flex: none; }
+/* Let the message take the row and push the port picker + Reconnect right. */
+.plugin-status > span:first-child { flex: 1; }
+.serial-port-row { flex: none; display: flex; align-items: center; gap: 4px; }
 
-/* 2-photon Arduino state chip */
-.twophoton-state {
-  font-weight: 500;
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 12px;
+/* Firmware "out of date — Flash firmware" banner, shared by serial-plugin tabs
+   (js/firmware-flash.js). Amber = attention, distinct from the red link-error
+   .plugin-status above. */
+.fw-flash {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  font-size: 12.5px;
+}
+.fw-flash > span { flex: 1; color: var(--text); }
+.fw-flash .btn { white-space: nowrap; }
+.fw-log {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   background: var(--panel-2);
   color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.twophoton-state--armed    { color: var(--amber); }
-.twophoton-state--triggered { color: var(--green); }
-.twophoton-state--done     { color: var(--text-dim); }
+.serial-port-select { max-width: 220px; }
 
 .hint {
   margin: 6px 0;
@@ -337,7 +515,10 @@ fieldset:disabled { opacity: 0.55; }
 
 .row {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  /* minmax(0, 1fr) (not plain 1fr) lets the value column shrink below its
+     content's min-content width, so a narrow sidebar clips/ellipsizes inside
+     the row rather than forcing the whole tab to scroll horizontally. */
+  grid-template-columns: 96px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
@@ -428,8 +609,17 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 .btn.wide { display: block; width: 100%; margin-top: 4px; }
 
-.btn-pair { display: flex; gap: 6px; }
-.btn-pair .btn { flex: 1; }
+.btn-pair { display: flex; gap: 6px; min-width: 0; }
+/* min-width:0 lets the paired buttons shrink with the sidebar (their default
+   min-width is their label's width); overflow/ellipsis keeps a long label
+   (e.g. "Horizontal") tidy inside the shrunk button instead of spilling. */
+.btn-pair .btn {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 #record-button {
   width: 100%;
@@ -449,6 +639,20 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #record-button:disabled { opacity: 0.55; color: var(--text-dim); cursor: default; }
 
 /* status + hints */
+
+/* Persistent, prominent save-failure banner (item mirrors the per-tile badge).
+   A solid red fill rather than a tint so it can't be missed during a trial;
+   no animation, so it is fine under prefers-reduced-motion. */
+.writer-alert {
+  margin-top: 8px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  background: var(--red);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+  overflow-wrap: break-word;
+}
 
 #record-status {
   margin-top: 8px;
@@ -506,14 +710,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   text-align: right;
 }
 
-#loop-info {
-  margin: 8px 0;
-  min-height: 1.2em;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
 /* event log + footer */
 
 #events {
@@ -554,6 +750,8 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #conn-state.online { color: var(--green); }
 #conn-state.offline { color: var(--red); }
+/* Calm neutral while the handshake is in flight — neither alarming nor "up". */
+#conn-state.connecting { color: var(--text-dim); }
 
 /* shown only when another browser is also connected (shared control) */
 #peers::before { content: "● "; color: var(--text-dim); }
@@ -580,8 +778,14 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
-/* Compact icon button toggling the dark/light theme (☀ / ☾). */
-#theme-toggle {
+/* Compact icon-only buttons (☀️/🌙 theme, ⌨️ shortcuts help, 💾 save config,
+   🔌/🔗/🔄 disconnect-reconnect, 🛑 shutdown) — no visible label, title= carries
+   the tooltip. */
+#theme-toggle,
+#shortcuts-help-btn,
+#save-config-btn,
+#disconnect-btn,
+#shutdown-btn {
   flex: none;
   padding: 2px 7px;
   font-size: 13px;
@@ -590,23 +794,247 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
 
+/* ---------------------------------------------- keyboard shortcuts overlay */
+
+/* Reuses .modal / .modal-card, but wider and scrollable for the binding list. */
+.shortcuts-card {
+  width: 460px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.shortcuts-head h3 { margin: 0; text-align: left; }
+.shortcuts-close { flex: none; padding: 2px 8px; }
+
+.shortcuts-group { margin-top: 12px; }
+
+.shortcuts-group-head {
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcuts-row {
+  display: grid;
+  grid-template-columns: 132px 1fr;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.shortcuts-keys { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.shortcuts-sep { color: var(--text-dim); }
+.shortcuts-desc { color: var(--text); }
+
+/* Keycap styling, shared by anything rendering a <kbd>. */
+kbd {
+  display: inline-block;
+  min-width: 12px;
+  padding: 1px 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text);
+}
+
 /* ------------------------------------------------ camera params tab */
 
-.node-range {
-  display: block;
-  margin: -3px 0 7px 104px; /* align under the input (96px label + 8px gap) */
+.name-edit { display: flex; gap: 6px; }
+.name-edit input { flex: 1; min-width: 0; }
+.name-edit .btn { flex: none; }
+
+/* Filter + visibility-level selector above the parameter browser. */
+.cam-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+#cam-filter {
+  flex: 1;
+  min-width: 0;
+}
+.cam-tools .cam-vis {
+  flex: none;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Grouped, model-dependent parameter browser. */
+#camera-params { margin-top: 4px; }
+
+.cam-empty {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px 4px;
+}
+
+.cam-group {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin-bottom: 6px;
+  background: var(--panel);
+}
+.cam-group > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 6px 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cam-group[open] > summary { border-bottom: 1px solid var(--border); }
+
+.cam-feat {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.cam-feat:last-child { border-bottom: none; }
+.cam-feat-label {
+  font-size: 12px;
+  color: var(--text);
+}
+.cam-feat.managed .cam-feat-label { color: var(--text-dim); }
+
+.cam-feat-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cam-feat-control > input[type="number"],
+.cam-feat-control > input[type="text"],
+.cam-feat-control > select {
+  flex: 1;
+  min-width: 0;
+}
+.cam-feat-control > input[type="checkbox"] { flex: none; margin-right: auto; }
+.cam-cmd { flex: none; }
+
+.cam-reset-field {
+  flex: none;
+  width: 26px;
+  padding: 4px 0;
+  cursor: pointer;
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.cam-reset-field:hover:not(:disabled) { color: var(--text); }
+.cam-reset-field:disabled { opacity: 0.4; cursor: default; }
+
+.cam-center {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.cam-center input { flex: none; }
+
+.cam-feat-hint {
   font-size: 11px;
   color: var(--text-dim);
 }
 
-#cam-reset { margin-top: 12px; }
-
-#cam-advanced { margin-top: 6px; }
-#cam-advanced summary {
-  cursor: pointer;
-  margin-bottom: 8px;
+/* Record tab — the Advanced-options switch and the grouped panels it reveals.
+   Replaces the old collapsible <details> "Advanced"/"Process" sections with a
+   single binary toggle (wired in record.js). */
+.adv-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 0 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
   color: var(--text-dim);
+  cursor: pointer;
   user-select: none;
+}
+
+#record-advanced { margin-top: 4px; }
+
+/* Logical groups within the advanced area; a hairline rule separates each. */
+.adv-group { margin: 10px 0; }
+.adv-group + .adv-group {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.adv-group-head {
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+/* Compact on/off switch (the Advanced-options toggle). The real checkbox is
+   invisible but covers the track so clicks/keyboard toggles work natively. */
+.switch {
+  position: relative;
+  flex: none;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+}
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch-track {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--border);
+  border-radius: 999px;
+  transition: background 0.15s ease;
+}
+.switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track .switch-thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 #camera-status {
@@ -844,4 +1272,157 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
   background: var(--green);
   border-color: transparent;
   color: #fff;
+}
+
+/* ---------------------------------------------------------------- Benchmark */
+
+#bench-run.stop:not(:disabled) {
+  background: var(--red);
+  border-color: transparent;
+  color: #fff;
+}
+
+#bench-status {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+#bench-progress {
+  margin-top: 10px;
+}
+#bench-progress[hidden] {
+  display: none;
+}
+#bench-progress-label {
+  font-size: 12px;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.bench-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+#bench-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+#bench-results {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bench-verdict {
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+}
+.bench-verdict.ok { color: var(--green); border-color: var(--green); }
+.bench-verdict.bad { color: var(--red); border-color: var(--red); }
+
+.bench-summary {
+  font-size: 12px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bench-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.bench-table th,
+.bench-table td {
+  padding: 3px 6px;
+  text-align: right;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.bench-table th {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.bench-table th:first-child,
+.bench-table td.bench-cam {
+  text-align: left;
+}
+
+.bench-extras {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.bench-rec {
+  font-size: 12px;
+  color: var(--amber);
+}
+
+.bench-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.bench-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+.bench-stage {
+  display: flex;
+  align-items: baseline;
+}
+
+.bench-limits {
+  color: var(--red);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------ narrow / mobile layout */
+
+/* The default layout is a fixed horizontal split (grid + a resizable sidebar),
+   which is unusable on a phone-width window. Below this breakpoint, stack the
+   grid above the sidebar and let the page scroll, hide the drag-resizer (the
+   sidebar spans the full width), and span the banner edge-to-edge. */
+@media (max-width: 640px) {
+  body {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  #grid {
+    flex: none;
+    height: 45vh;
+    min-height: 220px;
+  }
+
+  #sidebar-resizer { display: none; }
+
+  #sidebar {
+    /* Full width overrides the JS-driven --sidebar-width (and its 240px floor),
+       so a narrow viewport is not held to the desktop minimum. */
+    width: 100%;
+    flex: none;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Sidebar sits below the grid now, so the banners span the whole top edge
+     (--sidebar-width is not reset here, so both must drop their right inset). */
+  #banner,
+  #update-banner { right: 0; }
 }
