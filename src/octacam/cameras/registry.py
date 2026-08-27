@@ -59,10 +59,18 @@ class BackendUnavailable(RuntimeError):
 def select_backend(name: str) -> tuple[Callable, Callable, str]:
     """Resolve ``name`` to ``(enumerate_fn, backend_factory, extension)``.
 
-    ``enumerate_fn(requested_serials)`` returns ``[(serial, handle), ...]``;
-    ``backend_factory(handle)`` builds the per-camera backend; ``extension`` is
-    the parameter-file suffix (without the dot). Raises
-    :class:`BackendUnavailable` for an unknown backend or a missing SDK.
+    ``enumerate_fn(requested_serials, *, warn_missing=True)`` returns
+    ``[(serial, handle), ...]``; ``backend_factory(handle)`` builds the
+    per-camera backend; ``extension`` is the parameter-file suffix (without the
+    dot). Raises :class:`BackendUnavailable` for an unknown backend or a missing
+    SDK.
+
+    Both enumerate parameters are part of the contract, and a backend that omits
+    ``warn_missing`` fails only on a multi-tier rig: ``CameraSystem._enumerate``
+    passes the rig's requested serials to *every* cascade tier (enumeration is
+    not free — the Basler tier's ``CreateDevice`` is a real device access) with
+    ``warn_missing=False``, because each tier legitimately sees serials owned by
+    another and must not report them missing.
     """
     key = (name or "basler").strip().lower()
     if key == "basler":

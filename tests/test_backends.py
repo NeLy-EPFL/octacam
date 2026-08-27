@@ -6,6 +6,7 @@ contract rather than any particular camera being present.
 """
 
 import logging
+import time
 
 import pytest
 
@@ -258,13 +259,18 @@ class _FakeTlFactory:
 
     ``CreateDevice`` raises the real SDK exception for any serial in ``bad`` — as
     pylon does when a USB3 camera's SuperSpeed link trained down to USB 2.0 —
-    and returns a sentinel handle otherwise.
+    blocks for ``slow_seconds`` for any serial in ``slow`` (a camera that
+    enumerated but never answers its first register read, which held one test rig
+    for 271 s), and returns a sentinel handle otherwise.
     """
 
-    def __init__(self, serials, bad):
+    def __init__(self, serials, bad, slow=(), slow_seconds=30.0):
         self._devices = [_FakeBaslerDevice(s) for s in serials]
         self._bad = set(bad)
+        self._slow = set(slow)
+        self._slow_seconds = slow_seconds
         self.created: list[str] = []
+        self.destroyed: list[str] = []
 
     def EnumerateDevices(self):
         return self._devices
@@ -279,8 +285,13 @@ class _FakeTlFactory:
                 "device cannot be operated on an USB 2.0 port. The device "
                 "requires an USB 3.0 compatible port.'"
             )
+        if serial in self._slow:
+            time.sleep(self._slow_seconds)
         self.created.append(serial)
         return ("device-handle", serial)
+
+    def DestroyDevice(self, device):
+        self.destroyed.append(device[1])
 
 
 class _FakePylon:
@@ -292,11 +303,11 @@ class _FakePylon:
             return _FakePylon.TlFactory._instance
 
 
-def _patch_basler_factory(monkeypatch, serials, bad):
+def _patch_basler_factory(monkeypatch, serials, bad, slow=(), slow_seconds=30.0):
     pytest.importorskip("pypylon")
     from octacam.cameras import basler
 
-    factory = _FakeTlFactory(serials, bad)
+    factory = _FakeTlFactory(serials, bad, slow=slow, slow_seconds=slow_seconds)
     _FakePylon.TlFactory._instance = factory
     monkeypatch.setattr(basler, "pylon", _FakePylon)
     return factory
@@ -350,10 +361,10 @@ def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):
     from octacam.cameras import system as sysmod
     from octacam.cameras.system import CameraSystem
 
-    def top_enum(_req):  # a vendor tier: sees SN1 but declines it (None handle)
+    def top_enum(_req, *, warn_missing=True):  # a vendor tier: sees SN1 but declines it (None handle)
         return [("SN1", None), ("SN2", object())]
 
-    def floor_enum(_req):  # the pycameleon-style floor: sees everything
+    def floor_enum(_req, *, warn_missing=True):  # the pycameleon-style floor: sees everything
         return [("SN1", object()), ("SN2", object()), ("SN3", object())]
 
     monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["top", "floor"])
@@ -377,7 +388,7 @@ def test_single_backend_filters_declined_camera(monkeypatch):
     from octacam.cameras import system as sysmod
     from octacam.cameras.system import CameraSystem
 
-    def only_enum(_req):
+    def only_enum(_req, *, warn_missing=True):
         return [("SN1", None), ("SN2", object())]
 
     monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["solo"])
@@ -389,6 +400,175 @@ def test_single_backend_filters_declined_camera(monkeypatch):
     assert serials == ["SN2"]
 
 
+def _octacam_log_capture():
+    """Capture on the octacam logger directly, not via caplog.
+
+    Another test (the CLI's _setup_logging) may leave propagate=False, which
+    empties caplog's capture. Returns ``(msgs, restore)``; call ``restore()`` in a
+    finally. The logger level is forced to DEBUG for the duration — the CLI
+    normally leaves it at WARNING, which would drop the INFO progress lines these
+    tests assert on before they ever reach a handler."""
+    msgs: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: msgs.append(record.getMessage())
+    logger = logging.getLogger("octacam")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
+    def restore():
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    return msgs, restore
+
+
+def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch):
+    # Regression: a camera whose link trains at full SuperSpeed but whose control
+    # transfers time out kept pylon retrying its first register read for 271 s
+    # inside one CreateDevice, stalling the whole rig's startup. Enumeration must
+    # bound that: the sick camera comes back as the "present but unusable" None
+    # sentinel and the healthy ones are unaffected.
+    from octacam.cameras import basler as basler_mod
+    from octacam.cameras.basler import enumerate_basler
+
+    monkeypatch.setenv("OCTACAM_BASLER_CREATE_TIMEOUT", "0.6")
+    monkeypatch.setattr(basler_mod, "_CREATE_PROGRESS_INTERVAL_S", 0.05)
+    factory = _patch_basler_factory(
+        monkeypatch,
+        ["40018619", "40018631", "40018632"],
+        bad=(),
+        slow={"40018632"},
+        slow_seconds=5.0,
+    )
+    msgs, restore = _octacam_log_capture()
+    started = time.monotonic()
+    try:
+        out = enumerate_basler()
+    finally:
+        restore()
+    elapsed = time.monotonic() - started
+
+    by_serial = dict(out)
+    assert by_serial["40018632"] is None  # present but unusable
+    assert by_serial["40018619"] is not None and by_serial["40018631"] is not None
+    # Bounded by the deadline, not by the sick camera's 5 s.
+    assert elapsed < 3.0, f"enumeration took {elapsed:.1f}s; deadline was 0.6s"
+    assert any("40018632" in m and "did not respond" in m for m in msgs)
+    # The stall is no longer silent: the operator is told who we are waiting on.
+    assert any("Waiting up to" in m and "40018632" in m for m in msgs)
+
+    # The abandoned worker is still inside pylon; when it finally hands over a
+    # device nothing owns it, so it must be released rather than left for the GC
+    # to destroy after PylonTerminate() (that is the documented teardown crash).
+    deadline = time.monotonic() + 20.0
+    while "40018632" not in factory.destroyed and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert factory.destroyed == ["40018632"]
+
+
+def test_enumerate_basler_is_quiet_when_every_camera_is_healthy(monkeypatch):
+    # The progress line is time-gated: a healthy rig finishes well inside the
+    # interval and must say nothing, or every normal startup cries wolf. (The
+    # first version announced as soon as *any* camera was still outstanding,
+    # which fired on every single startup.)
+    from octacam.cameras.basler import enumerate_basler
+
+    _patch_basler_factory(monkeypatch, ["40018619", "40018631", "40023151"], bad=())
+    msgs, restore = _octacam_log_capture()
+    try:
+        out = enumerate_basler()
+    finally:
+        restore()
+    assert all(handle is not None for _serial, handle in out)
+    assert not any("Waiting up to" in m for m in msgs)
+    assert not any("did not respond" in m for m in msgs)
+
+
+def test_enumerate_basler_deduplicates_a_repeated_serial(monkeypatch):
+    # A serial listed twice in the rig config must create the device once. Two
+    # CreateDevice calls would hand back two real handles of which only one can
+    # be returned (results is keyed by serial), orphaning the other with no
+    # DestroyDevice — the pylon leak that segfaults at PylonTerminate().
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(monkeypatch, ["40018619", "40018631"], bad=())
+    out = enumerate_basler(["40018619", "40018631", "40018619"])
+    assert [serial for serial, _h in out] == ["40018619", "40018631"]
+    assert sorted(factory.created) == ["40018619", "40018631"]
+
+
+def test_enumerate_basler_create_timeout_env_override_is_validated(monkeypatch):
+    # A typo must not silently disable the guard.
+    from octacam.cameras.basler import _CREATE_DEVICE_TIMEOUT_S, _create_device_timeout
+
+    monkeypatch.setenv("OCTACAM_BASLER_CREATE_TIMEOUT", "45")
+    assert _create_device_timeout() == 45.0
+    # float() accepts inf/nan and neither is caught by a `<= 0` test: inf would
+    # restore the unbounded stall the deadline exists to prevent, and nan (which
+    # compares False against everything) would spin the deadline loop forever.
+    for bogus in ("abc", "0", "-3", "", "inf", "-inf", "nan", "1e400"):
+        monkeypatch.setenv("OCTACAM_BASLER_CREATE_TIMEOUT", bogus)
+        assert _create_device_timeout() == _CREATE_DEVICE_TIMEOUT_S
+    monkeypatch.delenv("OCTACAM_BASLER_CREATE_TIMEOUT")
+    assert _create_device_timeout() == _CREATE_DEVICE_TIMEOUT_S
+
+
+def test_enumerate_basler_warn_missing_false_is_quiet(monkeypatch):
+    # The cascade offers every tier the rig's whole serial list, so serials owned
+    # by another backend must not be reported missing by this one.
+    from octacam.cameras.basler import enumerate_basler
+
+    _patch_basler_factory(monkeypatch, ["40018619"], bad=())
+    msgs, restore = _octacam_log_capture()
+    try:
+        quiet = enumerate_basler(["40018619", "17475185"], warn_missing=False)
+        assert not any("17475185" in m for m in msgs)
+        loud = enumerate_basler(["40018619", "17475185"])
+    finally:
+        restore()
+    # Either way the absent serial is simply not returned.
+    assert [s for s, _h in quiet] == ["40018619"]
+    assert [s for s, _h in loud] == ["40018619"]
+    assert any("17475185" in m and "not found" in m for m in msgs)
+
+
+def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch):
+    # Regression: the cascade used to call every tier with None ("the whole bus"),
+    # so a 2-camera FLIR rig paid for CreateDevice on every attached Basler — and
+    # inherited the stall when one of them was sick. Each tier must be offered the
+    # rig's requested serials instead.
+    from octacam.cameras import system as sysmod
+    from octacam.cameras.system import CameraSystem
+
+    seen: list[tuple[str, object]] = []
+
+    def make_enum(name, serials):
+        def enumerate_fn(requested, *, warn_missing=True):
+            seen.append((name, requested))
+            pairs = [(s, object()) for s in serials]
+            if requested:
+                return [(s, h) for s, h in pairs if s in set(requested)]
+            return pairs
+
+        return enumerate_fn
+
+    tiers = {"vendor": ["SN1", "SN2"], "floor": ["SN1", "SN2", "SN3", "SN4"]}
+    monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: list(tiers))
+    monkeypatch.setattr(
+        sysmod,
+        "select_backend",
+        lambda name: (make_enum(name, tiers[name]), (lambda h: object()), "x"),
+    )
+    system = CameraSystem.pending()
+    entries = system._enumerate("auto", ["SN1", "SN4"])
+
+    assert [serial for serial, _h, _mk in entries] == ["SN1", "SN4"]
+    # Every tier got the requested list — not None — and was told to stay quiet
+    # about serials that belong to another tier.
+    assert seen == [("vendor", ["SN1", "SN4"]), ("floor", ["SN1", "SN4"])]
+
+
 def test_describe_open_failure_usb2_is_actionable():
     from octacam.cameras.basler import _describe_open_failure
 
@@ -398,6 +578,25 @@ def test_describe_open_failure_usb2_is_actionable():
     assert "40018619" in msg
     assert "cable" in msg.lower()
     assert "5000M" in msg and "480M" in msg
+
+
+def test_describe_open_failure_register_timeout_is_actionable():
+    # The class of failure that stalled the rig: the camera enumerated and the
+    # link trained, but it never answered its first register read. The old
+    # message passed the raw SDK text through with no hint.
+    from octacam.cameras.basler import _describe_open_failure
+
+    msg = _describe_open_failure(
+        "40018632",
+        RuntimeError(
+            "Failed to open device '2676:ba02:2:3:10' for XML file download. "
+            "Error: 'Failed to read the first register (maximum device "
+            "response time).'"
+        ),
+    )
+    assert "40018632" in msg
+    assert "cable" in msg.lower()
+    assert "dmesg" in msg
 
 
 def test_describe_open_failure_generic_passthrough():

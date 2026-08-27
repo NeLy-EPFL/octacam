@@ -1257,7 +1257,9 @@ def read_model(hcam) -> str | None:
     return _spin().read_model(hcam)
 
 
-def enumerate_spinnaker(requested_serials: list[str] | None = None):
+def enumerate_spinnaker(
+    requested_serials: list[str] | None = None, *, warn_missing: bool = True
+):
     """Return ``[(serial, spinCamera), ...]`` for the requested FLIR cameras.
 
     Holds the System singleton and camera list for the session (released in
@@ -1266,6 +1268,12 @@ def enumerate_spinnaker(requested_serials: list[str] | None = None):
     warning for any not connected. Camera handles that are *not* handed to a
     backend are released here (each spinCameraListGet is paired 1:1 with
     spinCameraRelease) so unselected cameras do not leak.
+
+    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
+    auto cascade offers the whole rig's serial list to every tier, so most of
+    those serials legitimately belong to another backend and must not be
+    reported missing here (``CameraSystem._enumerate`` warns once for a serial
+    that no tier claimed).
     """
     spin = _spin()
     global _system, _cam_list
@@ -1301,7 +1309,8 @@ def enumerate_spinnaker(requested_serials: list[str] | None = None):
     for serial in final:
         hcam = by_serial.get(serial)
         if hcam is None:
-            log.warning("Camera with serial number %s not found", serial)
+            if warn_missing:
+                log.warning("Camera with serial number %s not found", serial)
             continue
         out.append((serial, hcam))
         used.add(serial)

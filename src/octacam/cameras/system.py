@@ -111,10 +111,11 @@ class CameraSystem:
         one available tier) the requested serials are passed straight to that
         backend's enumeration, preserving its ordering and its "not found"
         warnings. With several active backends (the cascade) each is enumerated
-        in full, in priority order, and a camera is claimed by the *first*
-        backend that reports its serial — a lower tier that also sees an
-        already-claimed serial is skipped, so a camera served by a vendor SDK is
-        never double-opened by the pycameleon floor.
+        in priority order over the *requested* serials (never the whole bus —
+        see the comment below), and a camera is claimed by the *first* backend
+        that reports its serial — a lower tier that also sees an already-claimed
+        serial is skipped, so a camera served by a vendor SDK is never
+        double-opened by the pycameleon floor.
         """
         active = []  # (name, enumerate_fn, factory), in cascade priority order
         unavailable: list[BackendUnavailable] = []
@@ -151,11 +152,23 @@ class CameraSystem:
         # The cascade: enumerate every active tier in priority order and let the
         # highest one claim each serial. Lower tiers still enumerate (so a camera
         # a vendor tier missed can fall through) but skip serials already claimed.
+        #
+        # Every tier is offered the rig's *whole* requested serial list, not
+        # None. Enumeration is not free — the Basler tier's CreateDevice
+        # downloads each camera's XML over USB — so enumerating the full bus made
+        # a rig pay for cameras it would never open (a 2-camera FLIR rig paid the
+        # cost of six attached Baslers, and inherited the stall when one of them
+        # was sick). Passing the list also stops the discarded surplus handles
+        # from leaking, since they are never created. warn_missing=False because
+        # most of those serials belong to another tier; the loop below warns once
+        # for a serial that no tier claimed.
         claimed: set[str] = set()
         claimed_by: dict[str, str] = {}  # serial -> winning backend name (for logs)
         collected: list[tuple[str, object, Callable]] = []
         for name, enumerate_fn, make_backend in active:
-            for serial, handle in enumerate_fn(None):
+            for serial, handle in enumerate_fn(
+                requested_serial_numbers, warn_missing=False
+            ):
                 if serial in claimed:
                     continue  # a higher-priority tier already owns this camera
                 claimed.add(serial)

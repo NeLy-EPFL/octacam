@@ -191,6 +191,31 @@ a `DevClose` that **deadlocks while holding the GIL** (wedges the whole process)
 which is exactly why the `spinnaker` tier drives the Spinnaker **SDK C API** over
 `ctypes` instead of that producer.
 
+**Enumeration is not free, so the cascade is scoped and deadlined.** Two rules
+that are easy to undo:
+
+- Every tier is enumerated with the rig's **requested serial list**, never `None`
+  — `enumerate_fn(requested_serial_numbers, warn_missing=False)`. The Basler
+  tier's `CreateDevice` downloads each camera's XML over USB, so sweeping the
+  whole bus made a rig pay for cameras it never opens (a 2-camera FLIR rig paid
+  for six attached Baslers) and leaked the surplus handles, which are dropped
+  without `DestroyDevice`. `warn_missing=False` is required because each tier
+  legitimately sees serials owned by another; `_enumerate` warns once for a
+  serial no tier claimed. Lower tiers still enumerate the full requested set, so
+  a camera a vendor tier missed still falls through.
+- `enumerate_basler` runs its `CreateDevice` calls **concurrently under a shared
+  deadline** (`_create_device_timeout`, 15 s, `OCTACAM_BASLER_CREATE_TIMEOUT`).
+  A camera whose link trains at 5000 Mb/s but whose control transfers time out
+  held one rig for **271 s** inside a single call. A missed deadline maps onto the
+  existing `(serial, None)` "present but unusable" sentinel. Three traps: the
+  pool must **not** be a `with` block (`__exit__` is `shutdown(wait=True)` and
+  re-blocks for the full retry, silently undoing the deadline); a straggler's
+  handle must be released via `tl_factory.DestroyDevice` in a done-callback (the
+  `InstantCamera.DestroyDevice` used in `close()` is a different method); and the
+  workers are deliberately **non-daemon**, because letting the interpreter
+  finalize under a live pylon call is the teardown segfault `BaslerBackend.close`
+  documents.
+
 ### Backend contract (`cameras/base.py :: CameraBackend`)
 All backends implement: enumerate/open/close; `load_params`/`save_params`;
 frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
@@ -198,7 +223,8 @@ frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
 GenApi node-map walk (`list_features`/`read_feature`/`write_feature`/
 `execute_command`) for the Camera-tab node browser. `basler` walks via genicam;
 `flir`/`spinnaker` walk the C/PySpin node map; `pycameleon` (no introspection)
-and the base fallback use a curated node set.
+and the base fallback use a curated node set. Every `enumerate_*` takes
+`(requested_serials=None, *, warn_missing=True)` — the cascade relies on both.
 
 ## Trigger model
 

@@ -46,6 +46,27 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **One sick camera can no longer stall startup for minutes** — a USB3 camera
+  whose link trains at full SuperSpeed but whose control transfers time out
+  enumerates normally, and pylon then retries its first register read for as long
+  as it likes: on the test rig a single such camera held `octacam gui` for
+  **271 s** inside one `CreateDevice` call (a healthy camera returns in ~0.16 s),
+  with no output at all while it did. Enumeration now runs those calls
+  concurrently under a shared deadline (15 s by default, override with
+  `OCTACAM_BASLER_CREATE_TIMEOUT`); a camera that misses it is reported through
+  the existing "present but unusable" path — the rest of the rig comes up
+  normally — and its handle is released if pylon eventually hands one over, so it
+  is not left for the garbage collector to destroy after `PylonTerminate()`. The
+  wait is also no longer silent: octacam names the cameras it is still waiting on,
+  and the skip message explains that the link trained but the camera is not
+  answering (check `dmesg` for a matching `can't set config` line, then reseat the
+  cable), instead of passing the raw SDK text through.
+- **A rig no longer pays to enumerate cameras it never asked for** — the auto
+  cascade offered every tier the whole USB bus rather than the rig's configured
+  serials, so a 2-camera FLIR rig still ran `CreateDevice` on every attached
+  Basler (and inherited the stall above when one of them was sick), then dropped
+  the surplus handles without destroying them. Each tier is now given the
+  requested serial list, so those devices are never touched and the leak is gone.
 - **`octacam` now starts on Python 3.10–3.13 again** — the CLI annotated two
   helpers with `JobReporter`, a name imported only under `if TYPE_CHECKING:`, and
   without quotes. Python 3.14 evaluates annotations lazily (PEP 649) so the dev

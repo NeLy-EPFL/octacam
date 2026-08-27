@@ -642,13 +642,21 @@ def read_model(cam) -> str | None:
     return None
 
 
-def enumerate_flir(requested_serials: list[str] | None = None):
+def enumerate_flir(
+    requested_serials: list[str] | None = None, *, warn_missing: bool = True
+):
     """Return ``[(serial, CameraPtr), ...]`` for the requested FLIR cameras.
 
     Holds the System singleton and camera list for the session (released in
     :func:`teardown`). Mirrors the Basler enumeration: all detected cameras
     (sorted) when nothing is requested, else the listed serials in order with a
     warning for any not connected.
+
+    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
+    auto cascade offers the whole rig's serial list to every tier, so most of
+    those serials legitimately belong to another backend and must not be
+    reported missing here (``CameraSystem._enumerate`` warns once for a serial
+    that no tier claimed).
     """
     spin = _spin()
     global _system, _cam_list
@@ -681,7 +689,8 @@ def enumerate_flir(requested_serials: list[str] | None = None):
     for serial in final:
         cam = by_serial.get(serial)
         if cam is None:
-            log.warning("Camera with serial number %s not found", serial)
+            if warn_missing:
+                log.warning("Camera with serial number %s not found", serial)
             continue
         out.append((serial, cam))
     return out

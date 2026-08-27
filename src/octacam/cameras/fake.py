@@ -477,13 +477,21 @@ def _available_serials() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-def enumerate_fake(requested_serials: list[str] | None = None):
+def enumerate_fake(
+    requested_serials: list[str] | None = None, *, warn_missing: bool = True
+):
     """Return ``[(serial, serial), ...]`` for the configured fake cameras.
 
     Mirrors :func:`octacam.cameras.basler.enumerate_basler`: with no requested
     serials, every available fake camera is returned (sorted); otherwise the
     listed serials are returned in order, warning about any not available. The
     handle is just the serial string (the FakeBackend needs nothing more).
+
+    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
+    auto cascade offers the whole rig's serial list to every tier, so most of
+    those serials legitimately belong to another backend and must not be
+    reported missing here (``CameraSystem._enumerate`` warns once for a serial
+    that no tier claimed).
     """
     available = _available_serials()
     if not available:
@@ -495,7 +503,8 @@ def enumerate_fake(requested_serials: list[str] | None = None):
     out = []
     for serial in final:
         if serial not in available:
-            log.warning("Camera with serial number %s not found", serial)
+            if warn_missing:
+                log.warning("Camera with serial number %s not found", serial)
             continue
         out.append((serial, serial))
     return out
