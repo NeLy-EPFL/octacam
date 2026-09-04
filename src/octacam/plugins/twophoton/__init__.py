@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 import struct
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +81,10 @@ DEFAULT_DURATION_MS = 10_000
 # few ms; the wait runs off the controller lock, so it only delays the start
 # response, never telemetry.
 ACK_TIMEOUT_S = 1.0
+
+# Mega 2560 DTR-reset boot window; TwoPhotonLink.identify
+# waits this long before asking once more.
+_BOOT_SETTLE_TIMEOUT_S = 2.5
 
 _NO_PYSERIAL_MSG = (
     "pyserial is not importable (it ships with octacam by default, so the "
@@ -163,6 +168,14 @@ class TwoPhotonLink(SerialReaderLink):
 
     def send_arm(self, params: ArmParams) -> bool:
         return self._write(params.to_bytes())
+
+    def identify(self, timeout: float = 0.5) -> str | None:
+        banner = super().identify(timeout)
+        if banner is not None:
+            return banner
+        # Don't poll here — more queries just extend the bootloader's reset wait.
+        time.sleep(_BOOT_SETTLE_TIMEOUT_S)
+        return super().identify(timeout)
 
     def _read_loop(self) -> None:
         # The firmware emits bare single-byte statuses ('A'/'T'/'D') AND, in reply
