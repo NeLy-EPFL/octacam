@@ -62,9 +62,17 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   inside a method is fine). An unquoted one took out the whole CLI on every
   supported interpreter below 3.14. `tests/test_typing_hygiene.py` walks the AST
   for this and so catches it on any version; an import test cannot.
-- **Known crash:** on some setups `pytest` can SIGSEGV *at process teardown* when
-  pypylon + genicam are both loaded in one process (a multi-lib native-teardown
-  interaction, not octacam code — the tests themselves pass). Don't chase it.
+- **Root-caused (was "known crash, don't chase it"):** pypylon bundles its own
+  GenICam/GenApi native libraries; if numpy (or anything pulling it in, e.g.
+  `octacam.web.app`) loads first in the process, a later pypylon call made from
+  a worker thread segfaults *when that thread is torn down* — a glibc
+  static-TLS-exhaustion interaction between the two libraries' native `.so`s,
+  not an octacam bug, but a real crash (not limited to pytest teardown — it hit
+  production `octacam gui`/`octacam doctor` on real Basler hardware once
+  camera-open moved onto a worker thread in 900e074). Fixed by importing
+  pypylon first: `cli.py` does a best-effort `import pypylon.pylon` as its
+  first statement (before anything else gets a chance to import numpy), since
+  it's the first octacam module loaded for every subcommand.
 
 ## Versioning & releases
 

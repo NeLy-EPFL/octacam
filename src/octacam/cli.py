@@ -1,4 +1,8 @@
 import contextlib
+
+with contextlib.suppress(ImportError):
+    import pypylon.pylon  # noqa: F401
+
 import fcntl
 import hashlib
 import json

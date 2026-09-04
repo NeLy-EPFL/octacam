@@ -8,6 +8,7 @@ feature-stream files.
 
 import logging
 import re
+import sys
 from collections.abc import Callable
 
 from pypylon import genicam, pylon
@@ -24,6 +25,14 @@ from octacam.cameras.base import (
 )
 
 log = logging.getLogger("octacam")
+
+if "numpy" in sys.modules:
+    log.error(
+        "numpy was imported before pypylon in this process — opening a Basler "
+        "camera from a worker thread can now segfault at thread teardown (see "
+        "commit message for the mechanism). Import pypylon (or octacam.cli) "
+        "before numpy to avoid it."
+    )
 
 TRIGGER_READY_TIMEOUT_MS = 1000
 
