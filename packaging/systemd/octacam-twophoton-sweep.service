@@ -1,0 +1,26 @@
+# Example unit for `octacam process --twophoton-sweep` — transfers settled
+# 2-photon-only folders (no matching behavior take) on a periodic schedule.
+# See packaging/systemd/README.md and docs/guide/processing.md#2-photon-transfer.
+#
+# This is a template, not something octacam installs automatically: fill in
+# User/WorkingDirectory/ExecStart for your machine, then:
+#   sudo cp octacam-twophoton-sweep.service octacam-twophoton-sweep.timer \
+#       /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now octacam-twophoton-sweep.timer
+
+[Unit]
+Description=octacam 2-photon-only transfer sweep
+# The windows_share/upramdya_data mounts must be up before this can do anything
+# useful; adjust unit names to match your actual mount units (systemctl
+# list-units --type=mount).
+After=network-online.target mnt-windows_share.mount mnt-upramdya_data.mount
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=REPLACE_ME
+WorkingDirectory=/home/REPLACE_ME/octacam
+# Point --config at the rig config whose [transfer.twophoton] describes the
+# share to sweep (e.g. configs/2p_2).
+ExecStart=/usr/bin/env octacam process --twophoton-sweep --config configs/2p_2

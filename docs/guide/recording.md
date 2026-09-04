@@ -40,7 +40,11 @@ Each recording writes, into its own save directory:
 
 `recording_summary.json` holds what matters for checking a trial: per camera the
 recording fps, the start timestamp, and which frame indices were **dropped**,
-plus the session start wall-clock time and the recording settings.
+plus the session start wall-clock time and the recording settings. A
+`"plugins"` key carries each active plugin's own per-take metadata (e.g. the
+`twophoton` plugin's `{"armed": bool}`, reflecting whether the take was set up
+to run alongside a 2-photon acquisition) — empty when no plugin contributes
+anything.
 
 !!! note "What *dropped* does and doesn't count"
     Only frames the encoder/writer queue could not accept are counted as

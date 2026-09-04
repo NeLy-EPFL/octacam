@@ -444,6 +444,10 @@ def test_process_help_lists_options():
         "--no-transfer",
         "--delete-source",
         "--force",
+        "--twophoton-sweep",
+        "--no-twophoton-sweep",
+        "--migrate-layout",
+        "--delete-after-transfer",
     ):
         assert opt in result.output
     # Encoding is config-driven now: the old per-run encoding flags are gone.
@@ -913,35 +917,35 @@ def test_build_config_doc_includes_plugins():
 # --- process: idempotent re-runs (skip existing outputs) --------------------
 
 
-def _make_recording(folder, *, with_outputs, extra_toml=""):
+def _make_recording(folder, *, with_outputs, extra_toml="", extra_summary=None):
     """A recording folder with one camera's source .mkv and its summary.
 
     When *with_outputs*, also drop a finished ``camera_LF.mp4`` and ``grid.mp4``
     so ``octacam process``'s skip-on-exists path is exercised. *extra_toml*, if
     given, is written as the embedded ``octacam_config.toml`` snapshot.
+    *extra_summary*, if given, is merged into the written recording_summary.json
+    (e.g. ``start_time_ns``/``duration_s``/``plugins`` for 2P-transfer tests).
     """
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "camera_LF.mkv").write_bytes(b"source-bytes")
-    (folder / RECORDING_SUMMARY_FILENAME).write_text(
-        json.dumps(
+    summary = {
+        "fps_target": 100,
+        "relative_directory": folder.name,
+        "cameras": [
             {
-                "fps_target": 100,
-                "relative_directory": folder.name,
-                "cameras": [
-                    {
-                        "name": "camera_LF",
-                        "file": "camera_LF.mkv",
-                        "width": 64,
-                        "height": 48,
-                        "fps": 100,
-                        "frames": 10,
-                    }
-                ],
+                "name": "camera_LF",
+                "file": "camera_LF.mkv",
+                "width": 64,
+                "height": 48,
+                "fps": 100,
+                "frames": 10,
             }
-        )
-    )
+        ],
+    }
+    summary.update(extra_summary or {})
+    (folder / RECORDING_SUMMARY_FILENAME).write_text(json.dumps(summary))
     if extra_toml:
         (folder / "octacam_config.toml").write_text(extra_toml)
     if with_outputs:
@@ -1030,8 +1034,773 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     result = runner.invoke(app, ["process", str(folder)])
     assert result.exit_code == 0, result.output
     dest = dest_root / folder.name
-    assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
-    assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
+    assert (dest / "Behavior" / "camera_LF.mp4").read_bytes() == b"finished-transcode"
+    assert (dest / "Renderings" / "grid.mp4").read_bytes() == b"finished-grid"
+
+
+# --- process: NAS layout (root metadata / Behavior / Renderings) -----------
+
+
+def test_process_transfer_splits_root_behavior_renderings(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+    # Grid already exists on disk (with_outputs=True) — exercise the
+    # skip-existing path (like test_process_transfers_skipped_outputs) rather
+    # than --no-grid, so the pre-existing grid.mp4 still flows to Renderings/.
+    monkeypatch.setattr(
+        "octacam.grid.build_grid_video",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("grid should be skipped")),
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode"])
+    assert result.exit_code == 0, result.output
+    dest = dest_root / folder.name
+    assert (dest / "Behavior" / "camera_LF.mp4").exists()
+    assert (dest / "Renderings" / "grid.mp4").exists()
+    # --no-transcode's outputs come from a naive folder.glob("*.mp4"), which
+    # can't tell camera_LF.mp4 from grid.mp4 sitting in the same folder — grid
+    # must never also land in Behavior/ (found via a real dry-run against
+    # already-transcoded production data).
+    assert not (dest / "Behavior" / "grid.mp4").exists()
+
+
+def test_process_no_transcode_no_grid_still_excludes_grid_from_behavior(
+    tmp_path, monkeypatch
+):
+    # Same bug, --no-grid variant: grid_files stays empty (Phase 1 never
+    # runs), so only the outputs-filter guards against misrouting grid.mp4.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+    result = runner.invoke(
+        app, ["process", str(folder), "--no-transcode", "--no-grid"]
+    )
+    assert result.exit_code == 0, result.output
+    dest = dest_root / folder.name
+    assert (dest / "Behavior" / "camera_LF.mp4").exists()
+    assert not (dest / "Behavior" / "grid.mp4").exists()
+    # --no-grid means grid.mp4 isn't transferred at all this run (pre-existing
+    # behavior, unrelated to this bug) — not to Renderings/ either (Renderings/
+    # itself still exists: recording_summary.json always rides along).
+    assert not (dest / "Renderings" / "grid.mp4").exists()
+    assert (dest / "octacam_config.toml").exists()
+    assert (dest / "recording_summary.json").exists()
+    # The raw .mkv is never part of the NAS layout — only its archival .mp4.
+    assert not (dest / "Behavior" / "camera_LF.mkv").exists()
+    assert not (dest / "camera_LF.mp4").exists()  # not left flat at root either
+
+
+# --- process: 2-photon transfer ---------------------------------------------
+
+
+def _make_sync_folder_2p(root, experiment, name, mtime):
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    for fname in ("ThorRealTimeDataSettings.xml", "Episode001.h5"):
+        p = folder / fname
+        p.write_bytes(b"x")
+        os.utime(p, (mtime, mtime))
+    # discover_twophoton_folders uses the *directory's* own mtime as the sync
+    # folder's start-time proxy (true in production — nothing else ever gets
+    # added to a SyncData folder after its two files) — creating files above
+    # bumped it to "now", so reset it to line up with the synthetic mtime.
+    os.utime(folder, (mtime, mtime))
+    return folder
+
+
+def _armed_recording(folder, *, source_root, dest_root, take_start, duration_s=10.0):
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"match_window_s = 60\n"
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": duration_s,
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+
+
+def test_process_transfers_matched_twophoton_data(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    # 30s before the take starts (within match_window_s=60) — and, being an
+    # ancient synthetic epoch, trivially "settled" relative to the real
+    # wall-clock `now` is_settled compares against.
+    two_p_mtime = take_start - 30
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=two_p_mtime)
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    dest_2p = dest_root / folder.name / "2P" / "SyncData102"
+    assert (dest_2p / "Episode001.h5").exists()
+    assert (dest_2p / "ThorRealTimeDataSettings.xml").exists()
+    match_record = json.loads(
+        (dest_root / folder.name / "twophoton_match.json").read_text()
+    )
+    assert match_record["matched"][0]["path"] == "MB247_CI63/SyncData102"
+    # Episode001.h5 here is fake bytes (not real HDF5) — verification gracefully
+    # falls back to the timestamp tier rather than crashing.
+    assert match_record["matched"][0]["confidence"] == "timestamp"
+
+
+def _make_verifiable_sync_folder_2p(root, experiment, name, *, mtime, camera_frames):
+    """A real (synthetic) Episode001.h5 whose Cameras edge count matches
+    *camera_frames* exactly, inside one CaptureOn window spanning the file."""
+    h5py = pytest.importorskip("h5py")
+    import numpy as np
+
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    total = camera_frames * 2 + 100
+    capture_on = np.zeros((total, 1), dtype=np.uint32)
+    capture_on[10 : total - 10] = 1
+    cameras = np.zeros((total, 1), dtype=np.uint32)
+    for i in range(camera_frames):
+        cameras[20 + i * 2] = 1  # width-1 pulses, spaced by 2 -> stay distinct
+    frameout = np.zeros((total, 1), dtype=np.uint32)
+    episode_path = folder / "Episode001.h5"
+    with h5py.File(episode_path, "w") as f:
+        di = f.create_group("DI")
+        di.create_dataset("CaptureOn", data=capture_on)
+        di.create_dataset("Cameras", data=cameras)
+        di.create_dataset("FrameOut", data=frameout)
+    # is_settled checks the *file's* own mtime (see _folder_last_mtime), not
+    # just the directory's — both need to line up with the synthetic mtime.
+    os.utime(episode_path, (mtime, mtime))
+    os.utime(folder, (mtime, mtime))
+    return folder
+
+
+def test_process_verifies_twophoton_match_via_real_signal(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    # Far outside match_window_s=60 (but within the default verify_window_s)
+    # — a real edge-count match must still win over the timestamp heuristic.
+    _make_verifiable_sync_folder_2p(
+        source_root, "MB247_CI63", "SyncData102",
+        mtime=take_start + 500, camera_frames=42,
+    )
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"match_window_s = 60\n"
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": True}},
+            "cameras": [{"name": "camera_LF", "frames": 42}],
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    dest_2p = dest_root / folder.name / "2P" / "SyncData102"
+    assert (dest_2p / "Episode001.h5").exists()
+    match_record = json.loads(
+        (dest_root / folder.name / "twophoton_match.json").read_text()
+    )
+    assert match_record["matched"][0]["confidence"] == "verified"
+
+
+def test_process_skips_twophoton_when_explicitly_not_armed(tmp_path, monkeypatch):
+    # schema_version 4 with the checkbox recorded unchecked must skip outright
+    # — unlike a pre-feature recording (see the legacy-fallback tests below),
+    # this one had the chance to say "armed: true" and didn't.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    # Overlaps cleanly — proves the skip is because of the flag, not a
+    # missed time-window match.
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start - 30)
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "schema_version": 4,
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": False}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / folder.name / "2P").exists()
+
+
+def test_process_legacy_fallback_matches_predates_feature_recording(tmp_path, monkeypatch):
+    # A recording with no "plugins" key at all (schema_version < 4, the real
+    # shape of every recording made before this feature shipped — confirmed
+    # against actual production recordings) must still get matched, since
+    # there was never a chance for it to record "armed".
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start - 30)
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            # No "schema_version" (defaults to 0) and no "plugins" key —
+            # exactly what a real pre-feature recording_summary.json looks
+            # like.
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / folder.name / "2P" / "SyncData102" / "Episode001.h5").exists()
+
+
+def test_process_legacy_fallback_requires_twophoton_config(tmp_path, monkeypatch):
+    # The legacy fallback is still gated on [transfer.twophoton] being
+    # configured — a rig that never uses 2P at all must not suddenly start
+    # scanning a share it was never told about.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+        extra_summary={"start_time_ns": 1_000_000_000_000_000, "duration_s": 10.0},
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / folder.name / "2P").exists()
+
+
+def test_process_leaves_unsettled_twophoton_folder_for_next_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = time.time() - 5  # a few seconds ago — folder still "fresh"
+    _make_sync_folder_2p(
+        source_root, "MB247_CI63", "SyncData102", mtime=take_start
+    )
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    # Override settle_s to something the folder hasn't cleared yet.
+    (folder / "octacam_config.toml").write_text(
+        (folder / "octacam_config.toml").read_text().replace(
+            "settle_s = 60", "settle_s = 3600"
+        )
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / folder.name / "2P").exists()
+
+
+# --- process: --delete-after-transfer safety --------------------------------
+
+
+def test_process_delete_after_transfer_removes_local_once_verified(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+    result = runner.invoke(
+        app,
+        [
+            "process", str(folder), "--no-transcode", "--no-grid",
+            "--delete-after-transfer",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / folder.name / "Behavior" / "camera_LF.mp4").exists()
+    assert not folder.exists()  # the whole local take dir is gone
+
+
+def test_process_delete_after_transfer_skipped_on_transcode_failure(tmp_path, monkeypatch):
+    # A camera whose transcode failed this run must never be deleted — its raw
+    # .mkv was never archived anywhere.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=False,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+
+    def fake_transcode(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    result = runner.invoke(
+        app, ["process", str(folder), "--no-grid", "--delete-after-transfer"]
+    )
+    assert result.exit_code != 0  # transcode failure is reported
+    assert folder.exists()  # never deleted
+
+
+def test_process_config_default_delete_after_transfer(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            "delete_after_transfer = true\n"
+        ),
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not folder.exists()
+
+
+def test_process_no_delete_after_transfer_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            "delete_after_transfer = true\n"
+        ),
+    )
+    result = runner.invoke(
+        app,
+        [
+            "process", str(folder), "--no-transcode", "--no-grid",
+            "--no-delete-after-transfer",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert folder.exists()
+
+
+# --- process: --delete-source config default --------------------------------
+
+
+def _fake_transcode_success(input_path, output, **kwargs):
+    Path(output).write_bytes(b"finished-transcode")
+    return str(output)
+
+
+def test_process_config_default_delete_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("octacam.writer.transcode_file", _fake_transcode_success)
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder, with_outputs=False, extra_toml="[transcode]\ndelete_source = true\n"
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-grid", "--no-transfer"])
+    assert result.exit_code == 0, result.output
+    assert not (folder / "camera_LF.mkv").exists()
+
+
+def test_process_no_delete_source_overrides_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr("octacam.writer.transcode_file", _fake_transcode_success)
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder, with_outputs=False, extra_toml="[transcode]\ndelete_source = true\n"
+    )
+    result = runner.invoke(
+        app,
+        ["process", str(folder), "--no-grid", "--no-transfer", "--no-delete-source"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mkv").exists()
+
+
+# --- process: --twophoton-sweep (2P-only, no matching behavior take) --------
+
+
+def test_twophoton_sweep_requires_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    result = runner.invoke(app, ["process", "--twophoton-sweep"])
+    assert result.exit_code != 0
+    assert "--config" in result.output
+
+
+def test_twophoton_sweep_requires_twophoton_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{(tmp_path / "dest").as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0
+    assert "transfer.twophoton" in result.output
+
+
+def test_twophoton_sweep_transfers_unmatched_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "Tests", "SyncData001", mtime=old_enough)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 60\n"
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    dest = dest_root / "2p_only" / "Tests"
+    (date_dir,) = list(dest.iterdir())  # exactly one date-named subfolder
+    assert (date_dir / "SyncData001" / "Episode001.h5").exists()
+
+
+def test_twophoton_sweep_skips_folder_still_settling(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _make_sync_folder_2p(source_root, "Tests", "SyncData001", mtime=time.time() - 5)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 3600\n"
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "2p_only").exists()
+
+
+def test_twophoton_sweep_excludes_already_matched_folder(tmp_path, monkeypatch):
+    # A folder already paired with a behavior take (twophoton_match.json
+    # sidecar in a still-cached recording folder) must not be re-copied as
+    # if it were 2P-only.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=old_enough)
+
+    from octacam import session_cache
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+
+    matched_recording = tmp_path / "already_processed_take"
+    matched_recording.mkdir()
+    (matched_recording / TWOPHOTON_MATCH_FILENAME).write_text(
+        json.dumps({"matched": [{"path": "MB247_CI63/SyncData102", "kind": "sync"}]})
+    )
+    session_cache.record_recording(matched_recording, session_id="s1")
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 60\n"
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "2p_only").exists()
+
+
+# --- process: automatic post-processing sweep (sequential, not separate) ----
+
+
+def test_process_automatically_sweeps_unmatched_twophoton(tmp_path, monkeypatch):
+    # A normal `octacam process` run (no --twophoton-sweep) must also sweep
+    # unclaimed 2P folders under the same [transfer.twophoton].source it just
+    # used for per-take matching — sequentially, in one command, not a
+    # separate manual invocation.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    two_p_mtime = take_start - 30
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=two_p_mtime)
+    # A second, unrelated, unclaimed folder sitting on the same share.
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "Tests", "SyncData999", mtime=old_enough)
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    # matched 2P landed alongside the take, as always.
+    assert (dest_root / folder.name / "2P" / "SyncData102" / "Episode001.h5").exists()
+    # AND the unrelated, unclaimed folder was swept automatically too.
+    sweep_dest = dest_root / "2p_only" / "Tests"
+    (date_dir,) = list(sweep_dest.iterdir())
+    assert (date_dir / "SyncData999" / "Episode001.h5").exists()
+
+
+def test_process_no_twophoton_sweep_skips_automatic_sweep(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    two_p_mtime = take_start - 30
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=two_p_mtime)
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "Tests", "SyncData999", mtime=old_enough)
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(
+        app,
+        ["process", str(folder), "--no-transcode", "--no-grid", "--no-twophoton-sweep"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / folder.name / "2P" / "SyncData102" / "Episode001.h5").exists()
+    assert not (dest_root / "2p_only").exists()
+
+
+def test_process_automatic_sweep_dry_run_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    two_p_mtime = take_start - 30
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=two_p_mtime)
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "Tests", "SyncData999", mtime=old_enough)
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(
+        app, ["process", str(folder), "--no-transcode", "--no-grid", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "2p_only").exists()
+    assert "[dry-run] 2P sweep:" in result.output
+
+
+def test_sweep_also_exclude_covers_a_same_run_match_not_yet_on_disk(tmp_path, monkeypatch):
+    # Real bug: dry-run never writes twophoton_match.json to disk, so without
+    # this parameter the sweep would (wrongly) also list a folder Phase 3
+    # just matched to a take moments earlier in the very same dry-run.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    from octacam.cli import _sweep_unclaimed_twophoton
+
+    source_root = tmp_path / "windows_share" / "MD"
+    twophoton_cfg = SimpleNamespace(settle_s=60.0)
+
+    # Without also_exclude: a real sweep copies the folder.
+    matched_a = _make_sync_folder_2p(
+        source_root, "expA", "SyncData102", mtime=time.time() - 10_000
+    )
+    dest_root_a = tmp_path / "dest_a"
+    n_copied, n_failed = _sweep_unclaimed_twophoton(
+        source_root, dest_root_a, twophoton_cfg, checksum=True, dry_run=False
+    )
+    assert n_failed == 0
+    assert n_copied > 0
+    assert (dest_root_a / "2p_only").exists()
+
+    # With also_exclude naming the (otherwise identical) folder — as Phase 3
+    # would for a same-run match not yet persisted to disk — nothing is
+    # copied to a fresh destination.
+    matched_b = _make_sync_folder_2p(
+        source_root, "expB", "SyncData102", mtime=time.time() - 10_000
+    )
+    dest_root_b = tmp_path / "dest_b"
+    n_copied, n_failed = _sweep_unclaimed_twophoton(
+        source_root,
+        dest_root_b,
+        twophoton_cfg,
+        checksum=True,
+        dry_run=False,
+        also_exclude=frozenset({matched_a.resolve(), matched_b.resolve()}),
+    )
+    assert (n_copied, n_failed) == (0, 0)
+    assert not (dest_root_b / "2p_only").exists()
+
+
+# --- process: --migrate-layout (old flat NAS layout -> Behavior/Renderings) -
+
+
+def _make_flat_transferred_recording(dest_root, rel, camera_names):
+    """A destination folder shaped like the pre-Behavior/Renderings layout:
+    every camera_*.mp4 + grid.mp4 flat, no subfolders."""
+    folder = dest_root / rel
+    folder.mkdir(parents=True)
+    for name in camera_names:
+        (folder / f"{name}.mp4").write_bytes(f"{name}-bytes".encode())
+    (folder / "grid.mp4").write_bytes(b"grid-bytes")
+    (folder / "recording_summary.json").write_text(
+        json.dumps({"cameras": [{"name": n} for n in camera_names]})
+    )
+    return folder
+
+
+def test_migrate_layout_requires_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    result = runner.invoke(app, ["process", "--migrate-layout"])
+    assert result.exit_code != 0
+    assert "--config" in result.output
+
+
+def test_migrate_layout_moves_flat_files_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = _make_flat_transferred_recording(
+        dest_root, "260903_PAM7xCI63/Fly1/002", ["camera_LF", "camera_RF"]
+    )
+    flat_bytes = {p.name: p.read_bytes() for p in folder.glob("*.mp4")}
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--migrate-layout", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+
+    assert (folder / "Behavior" / "camera_LF.mp4").read_bytes() == flat_bytes["camera_LF.mp4"]
+    assert (folder / "Behavior" / "camera_RF.mp4").read_bytes() == flat_bytes["camera_RF.mp4"]
+    assert (folder / "Renderings" / "grid.mp4").read_bytes() == flat_bytes["grid.mp4"]
+    # Flat originals are gone (moved, not copied) — recording_summary.json
+    # stays put at the root, same path both layouts expect.
+    assert not (folder / "camera_LF.mp4").exists()
+    assert not (folder / "camera_RF.mp4").exists()
+    assert not (folder / "grid.mp4").exists()
+    assert (folder / "recording_summary.json").exists()
+
+
+def test_migrate_layout_dry_run_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = _make_flat_transferred_recording(
+        dest_root, "260903_PAM7xCI63/Fly1/002", ["camera_LF"]
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--migrate-layout", "--config", str(config_dir), "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (folder / "camera_LF.mp4").exists()  # untouched
+    assert not (folder / "Behavior").exists()
+
+
+def test_migrate_layout_is_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _make_flat_transferred_recording(
+        dest_root, "260903_PAM7xCI63/Fly1/002", ["camera_LF"]
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    args = ["process", "--migrate-layout", "--config", str(config_dir)]
+    assert runner.invoke(app, args).exit_code == 0
+    result = runner.invoke(app, args)  # nothing flat left — must be a no-op
+    assert result.exit_code == 0, result.output
+
+
+def test_migrate_layout_conflict_leaves_both_and_reports(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = _make_flat_transferred_recording(
+        dest_root, "260903_PAM7xCI63/Fly1/002", ["camera_LF"]
+    )
+    (folder / "Behavior").mkdir()
+    (folder / "Behavior" / "camera_LF.mp4").write_bytes(b"different-content-here")
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--migrate-layout", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0  # reported, not silently swallowed
+    # Neither copy was touched.
+    assert (folder / "camera_LF.mp4").exists()
+    assert (folder / "Behavior" / "camera_LF.mp4").read_bytes() == b"different-content-here"
 
 
 # --- config: the interactive first-run wizard -------------------------------

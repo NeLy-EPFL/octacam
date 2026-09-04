@@ -62,7 +62,12 @@ dependencies = [
 # twophoton) now get their dep from the main list, so these are documented,
 # greppable install markers rather than dependency lists.
 flywheel = []
-twophoton = []
+# h5py is for octacam.twophoton_signals (octacam process's ThorSync-verified
+# 2P<->behavior matching, reading Episode*.h5's DI/Cameras|FrameOut|CaptureOn
+# edges) — opt-in like the plugin itself; verification lazy-imports h5py and
+# falls back to timestamp-only matching when it's absent, so this is never a
+# hard requirement.
+twophoton = ["h5py>=3.10"]
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
 # PyPI (it ships with the SDK installer; Spinnaker 4.4 provides cp310-cp314
 # wheels — install the one matching your interpreter). This extra is therefore a
@@ -82,6 +87,7 @@ Changelog = "https://github.com/NeLy-EPFL/octacam/blob/main/CHANGELOG.md"
 [dependency-groups]
 dev = [
     "av>=12",
+    "h5py>=3.10",
     "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",

@@ -252,13 +252,18 @@ def build_recording_summary(
     cameras,
     start_wall_ns: int,
     aborted: bool,
+    plugin_metadata: dict | None = None,
 ) -> dict:
     """Assemble the recording_summary.json payload from finalized camera stats.
 
     Pure (no I/O) so it can be unit-tested without a recording. Each camera's
     ``transform`` is always recorded (so `octacam transcode --as-displayed` can
     apply it later); ``transform_applied`` is true only when it was baked into
-    the saved file (display form + non-identity transform)."""
+    the saved file (display form + non-identity transform). ``plugin_metadata``
+    is the ``{plugin_name: {...}}`` dict from
+    :meth:`~octacam.plugins.base.PluginManager.collect_recording_metadata`
+    (e.g. the ``twophoton`` plugin's ``{"armed": bool}``), merged verbatim
+    under the summary's ``"plugins"`` key."""
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
@@ -295,7 +300,7 @@ def build_recording_summary(
             }
         )
     summary = {
-        "schema_version": 3,
+        "schema_version": 4,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
@@ -315,6 +320,7 @@ def build_recording_summary(
         "dropped_frames_note": _DROPPED_FRAMES_NOTE,
         "timestamp_note": _TIMESTAMP_NOTE,
         "cameras": cams,
+        "plugins": plugin_metadata or {},
     }
     if settings.save_method == "nvenc":
         # Cameras beyond this many used the CPU (libx264) fallback — see the
@@ -1652,6 +1658,7 @@ class RecordingController:
                 list(self.camera_system),
                 self._recording_start_wall_ns,
                 aborted,
+                plugin_metadata=self.plugins.collect_recording_metadata(),
             )
             path.write_text(json.dumps(summary, indent=2) + "\n")
             log.info("Wrote recording summary: %s", path)

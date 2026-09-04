@@ -41,6 +41,12 @@ RECORDING_SUMMARY_FILENAME = "recording_summary.json"
 # per-frame timestamp/dropped series — replacing the old per-camera CSVs.
 TIMESTAMPS_FILENAME = "timestamps.npz"
 
+# Written by `octacam process` into a recording's save directory when its
+# `plugins.twophoton.armed` flag led to a matched ThorSync/ThorImage folder
+# (see octacam.twophoton_transfer) — a sidecar rather than a mutation of the
+# already-finalized recording_summary.json, auditing what was paired.
+TWOPHOTON_MATCH_FILENAME = "twophoton_match.json"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

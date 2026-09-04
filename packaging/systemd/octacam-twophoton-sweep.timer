@@ -1,0 +1,13 @@
+# Runs octacam-twophoton-sweep.service periodically. See that file and
+# packaging/systemd/README.md for setup.
+
+[Unit]
+Description=Periodic octacam 2-photon-only transfer sweep
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

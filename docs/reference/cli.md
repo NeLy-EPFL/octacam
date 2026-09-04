@@ -156,6 +156,8 @@ with `--last` / `--last session` / `--all`. See
 | `--last session` | Every folder from the last GUI session. |
 | `--session-id <id>` | Every folder from one exact session id. |
 | `--all` | Every recording folder still in the cache. |
+| `--twophoton-sweep` | Separate mode (ignores the selectors above and `PATHS`): transfer settled 2P-only folders with no matching behavior take. Requires `--config`. |
+| `--migrate-layout` | Separate mode (ignores the selectors above and `PATHS`): reorganize recordings transferred under the old flat layout into `Behavior`/`Renderings` subfolders, in place (a same-filesystem rename, no data copied). Requires `--config`. |
 
 **Controlling the steps:**
 
@@ -166,11 +168,17 @@ with `--last` / `--last session` / `--all`. See
 | `--no-grid` | Skip building the grid video(s). |
 | `--no-transfer` | Skip transferring to the `[transfer]` destination. |
 | `--force` | Re-transcode / rebuild grids even if outputs already exist. |
-| `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
-| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
+| `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. Also on via `[transcode].delete_source`; `--no-delete-source` overrides either way. |
+| `--delete-after-transfer` | Once a folder's transfer (behavior + any matched 2P data) is checksum-verified on the NAS, delete the local recording folder and matched 2P source folder(s). Also on via `[transfer].delete_after_transfer`; `--no-delete-after-transfer` overrides either way. |
+| `--no-twophoton-sweep` | Skip the automatic 2P-only sweep this run otherwise does, sequentially, for every `[transfer.twophoton]` source it touched (same logic as `--twophoton-sweep`, run automatically rather than as a separate command). |
+| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot (or the rig config for `--twophoton-sweep`). |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 | `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |
+
+See [Processing → 2-photon transfer](../guide/processing.md#2-photon-transfer)
+for `[transfer.twophoton]`, the NAS layout it produces, and
+`--delete-after-transfer`'s safety contract.
 
 A running job (detached or foreground) auto-pauses while an `octacam gui`/`record`
 on the same machine owns the cameras, and resumes when they are free. See

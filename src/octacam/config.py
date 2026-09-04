@@ -163,6 +163,11 @@ class TranscodeConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    # Delete each source .mkv/.raw once it transcodes successfully (local, no
+    # network involved — independent of transfer.delete_after_transfer, which
+    # gates on a NAS-verified copy instead). The CLI --delete-source/
+    # --no-delete-source flag overrides this either way.
+    delete_source: bool = False
 
     @field_validator("ffmpeg_params", mode="before")
     @classmethod
@@ -207,6 +212,53 @@ class VisualizationConfig(BaseModel):
         return _scalar_str(value)
 
 
+class TwoPhotonTransferConfig(BaseModel):
+    """The ``[transfer.twophoton]`` sub-table: pairing behavior takes with 2P data.
+
+    Presence of this table (even empty) turns the feature on for a rig;
+    ``transfer.twophoton = None`` (the default — no ``[transfer.twophoton]``
+    section at all) means "no 2P pairing for this rig." ``source`` is the root
+    to scan for ThorSync (``SyncData*``)/ThorImage folders — same strftime
+    ``%``-codes as ``record.directory``. ``match_window_s`` is the max
+    deviation allowed on *each* of a candidate's start/end from the take's
+    corresponding endpoint (not just "the two windows overlap somewhere" —
+    real data found a short, unrelated 2P snapshot nested entirely inside a
+    much longer take otherwise satisfies a plain overlap check) accepted as a
+    timestamp-only pairing. 60s comfortably covers the documented ~20-40s
+    ThorSync startup lag plus a ThorImage folder's own ~25-30s disk
+    write-out lag (it buffers frames during acquisition and flushes them to
+    `.tif` files afterward, confirmed by comparing a verified pairing's
+    `FrameOut` edge timing against its files' raw mtimes) while still
+    rejecting the ~90s+ deviations a real spurious match showed. ``settle_s``
+    is how long a 2P folder's mtime must be quiescent before it's considered
+    finished writing.
+
+    ``verify_with_signals`` attempts to confirm a ``SyncData*`` pairing by
+    reading its actual recorded DAQ signals (``octacam.twophoton_signals`` —
+    the ``Cameras``/``FrameOut`` digital-input edge counts against the take's
+    own recorded frame count / ThorImage's own timepoints) instead of trusting
+    the timestamp guess; it degrades to timestamp-only automatically when
+    ``h5py`` isn't installed or a file can't be read. ``verify_window_s`` is
+    a separate, wider time window bounding which ``SyncData*`` folders are
+    even opened for verification (looser than ``match_window_s`` is fine —
+    an exact edge-count match is decisive regardless of how loose the coarse
+    timestamp gap was).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    source: str = ""
+    match_window_s: float = 60.0
+    settle_s: float = 300.0
+    verify_with_signals: bool = True
+    verify_window_s: float = 3600.0
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _as_scalar_str(cls, value: object) -> str:
+        return _scalar_str(value)
+
+
 class TransferConfig(BaseModel):
     """The ``[transfer]`` section: where `octacam process` mirrors recordings.
 
@@ -221,6 +273,13 @@ class TransferConfig(BaseModel):
 
     directory: str = ""
     checksum: bool = True
+    # Delete the local recording folder (and any matched 2P source folder, see
+    # twophoton below) once every file is checksum-verified present on the
+    # NAS. Off by default; the CLI --delete-after-transfer/
+    # --no-delete-after-transfer flag overrides this either way. Always forces
+    # checksum verification internally when active, regardless of `checksum`.
+    delete_after_transfer: bool = False
+    twophoton: TwoPhotonTransferConfig | None = None
 
     @field_validator("directory", mode="before")
     @classmethod

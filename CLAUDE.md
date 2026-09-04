@@ -119,6 +119,7 @@ src/octacam/
   firmware.py       Arduino sketch fingerprinting + arduino-cli flashing
   serial_ports.py   serial-port detection, USB bus-reset recovery
   transfer.py       octacam process → mirror recordings to storage
+  twophoton_transfer.py  discover/settle/match ThorSync/ThorImage folders (see below)
   grid.py           octacam process → composite grid videos (ffmpeg xstack)
   session_cache.py  remembers recording folders for `process --last/--all`
   camera.py         re-exports CameraSystem/Camera/PARAM_NODES
@@ -293,6 +294,14 @@ Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
 board** — a plugin that omits this never arms on the CLI), `drives_preview_trigger`
 /`on_preview_start/stop`; `set_controller`/`set_broadcast` are duck-typed
 injections. Each plugin adds a WS topic + `/api/<name>/*` REST + a GUI tab.
+`recording_metadata()` (schema_version 4+) is queried synchronously right
+*before* `recording_summary.json` is written — earlier than `on_recording_stop`,
+which fires after the summary is already on disk — so it must read back state
+the plugin already captured (e.g. at `on_recording_start`), not compute
+anything fresh; results merge into the summary's `"plugins"` key
+(`PluginManager.collect_recording_metadata`, mirroring `default_start_params`).
+`twophoton` uses it to report `{"armed": bool}` for the twophoton-transfer
+matcher (see the 2P transfer section below).
 
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
@@ -302,6 +311,162 @@ xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, an
 asserted equal by a unit test. Server-side **auto strobe duty** sizes the LED
 on-time to the longest live camera exposure. On a wedged USB CDC link the plugin
 auto-recovers via a host `USBDEVFS_RESET` bus reset and surfaces the error loudly.
+
+## 2-photon transfer (`twophoton_transfer.py`)
+
+Pairs a behavior take with its ThorSync/ThorImage folder(s) on `octacam
+process`, replacing a legacy shell script (`move_files.sh`). Investigated
+against a real 2P rig; the durable findings:
+
+- **No shared relative path.** The legacy script assumed a sibling
+  `2p`/`behData` folder pair at an identical relative path — real ThorSync/
+  ThorImage write flat, auto-incrementing folders (`SyncData102`, `Fly1_004`,
+  …) directly under an experiment folder, completely decoupled from octacam's
+  own `<date>_/<Fly>/<take>` naming. Wall-clock time (`match_take_to_twophoton`)
+  is the *fallback* pairing signal — but real testing found a plain overlap
+  check alone isn't reliable enough to trust: 13 of 15 real matches came back
+  `ambiguous` (more than one plausible candidate), and ThorImage's own folder
+  naming doesn't even track creation order (a folder named `Fly1`, normally
+  the *first* acquisition, was created *after* `Fly1_004`–`Fly1_007` in one
+  real session). See **Verified matching** below for what actually fixed
+  ambiguity when a `SyncData` folder exists.
+- **Timestamp-only matching requires matching start, end, AND duration —
+  not just overlap.** A proper behavior/2P pair runs for essentially the
+  same length of time; a short, unrelated ThorImage snapshot (a focus check,
+  an ROI tune) nested entirely inside a much longer take satisfies a plain
+  "windows overlap" check, and can even satisfy "both endpoints individually
+  close" (a much *longer* candidate can loosely straddle a short take with
+  both ends "close enough" while its own duration is nothing alike) while
+  being a spurious match. `_gap_seconds` is the *worst* of three deviations —
+  `|candidate.start - take_start|`, `|candidate.last_mtime - take_end|`, and
+  `|candidate_duration - take_duration|` (0 only for a genuinely matched
+  pair); `match_take_to_twophoton` requires it ≤ `match_window_s`, not the
+  old "any overlap, however loose" check. Confirmed on a real rig with no
+  `SyncData` folders at all (so nothing to verify against): its ThorImage
+  folders split cleanly into two populations — several 20–33s snapshots
+  (correctly rejected) and several 147–159s sessions (correctly matched,
+  each within the expected margin of its take's 129s) — not a fluke, a real
+  structural difference the duration check picks out. `match_window_s`'s
+  default was tightened from 120s to **60s** after finding the real spurious
+  matches deviated 90s+ while genuine ones clustered at 20–33s (documented
+  ~20–40s ThorSync startup lag + a newly confirmed ~25–30s ThorImage disk
+  write-out lag — see next bullet). This check only governs the *timestamp*
+  tier — the verified tier's confidence never depends on timing shape at all.
+- **ThorImage writes files in a burst after acquisition, not in real time.**
+  Confirmed by comparing a verified pairing's actual `FrameOut` edge timing
+  (from `Episode001.h5`, i.e. ground truth) against its own files' raw
+  mtimes: the real acquisition had already ended (per the DAQ) before the
+  first `.tif` appeared on disk, with the full write-out taking a further
+  ~25–30s. Irrelevant to a `SyncData`-verified match (edge count doesn't care
+  about file timestamps) but means a purely timestamp-only `image`-kind match
+  (no `SyncData` to verify against at all) is the least certain path in this
+  feature — there's no independent signal to check it against, only a
+  generous-enough `match_window_s` as mitigation, never a guarantee.
+- **Verified matching (`twophoton_signals.py`)**: whenever a `SyncData*`
+  folder exists, its `Episode001.h5` records the Arduino's camera-trigger
+  pulse on ThorSync's own DAQ clock (`DI/Cameras`) — confirmed on real data
+  with an **exact** edge-count match to the paired take's own recorded frame
+  count (19399 == 19399), and `DI/FrameOut`'s edge count exactly matching the
+  paired ThorImage folder's own `Experiment.xml <Timelapse
+  timepoints="...">` (1500 == 1500). `DI/CaptureOn` gates each take's window
+  as N ≥ 0 rising→falling segments (a `SyncData` folder can span more than
+  one take). `match_takes_to_twophoton_batch` (the entry point `cli.py`'s
+  Phase 3 actually drives, superseding a bare `match_take_to_twophoton` call)
+  runs the whole batch of takes sharing one `[transfer.twophoton].source`
+  together, chronologically: tier 1 ranks every not-yet-claimed candidate's
+  edge-count diff and picks the best (never just the first found in iteration
+  order — real data has more than one `SyncData` folder land within
+  tolerance of a take's frame count when nearby takes ran similar durations,
+  and the *exact* one is the one actually confirmed correct), claiming
+  `(folder, segment)` rather than the whole folder so one `SyncData` can
+  verify-match several takes; tier 2 (`match_take_to_twophoton`) is the
+  timestamp fallback, now run only against the still-unclaimed pool — which
+  also fixes the double-booking that produced most of the real `ambiguous`
+  flags, using nothing but timestamps. `h5py` is lazy-imported (the
+  `twophoton` extra) and every read is best-effort — no h5py, no episode
+  file, or no signal match just falls through to tier 2, never raises.
+  Validated end-to-end against a full real experiment (5 takes): every take
+  verified, zero ambiguity, matching the pairing manual timestamp inspection
+  had already suggested.
+- **ThorSync vs. ThorImage start-time proxies differ.** A `SyncData*`
+  folder's own directory mtime is a decent start proxy (only its two files —
+  `Episode001.h5`, `ThorRealTimeDataSettings.xml` — are ever created in it, so
+  nothing bumps the directory's mtime again). A ThorImage folder's directory
+  mtime is **not** usable this way (thousands of per-frame `.tif` files keep
+  bumping it for the whole capture) — its `Experiment.xml`'s own `<Date
+  uTime="...">` attribute is used instead.
+- **ThorSync/ThorImage are not always 1:1 with each other or with one take.**
+  The operator starts each independently; a `SyncData*` folder can span, or
+  miss, a take's `Fly*` folder. `match_take_to_twophoton` returns 0–2 matches
+  (at most one per kind) and never forces a pairing that isn't there;
+  `twophoton_match.json` (written alongside `recording_summary.json`, not a
+  mutation of it — the summary is already finalized and written earlier in
+  teardown, see the plugin lifecycle note above) records what was matched and
+  flags ambiguity for audit.
+- **No definitive "acquisition complete" marker exists** in either folder
+  type — `is_settled` is a straight port of the old script's mtime-quiescence
+  idea (`find_last_file_access_time` + delay), because there's nothing better.
+- **NAS layout is not flat**: `<relative_directory>/2P/<original-folder-name>/`
+  sits alongside `Behavior/` (per-camera archival `.mp4`) and `Renderings/`
+  (grid + future composited output) — see `docs/guide/processing.md`. The raw
+  capture-time `.mkv` is deliberately **not** part of this layout: it is
+  itself already lossy (libx264 `-crf 18`, "near-visually-lossless" per
+  `writer.py`), the transcoded `.mp4` is a second-generation re-encode of it,
+  and the product has always treated the `.mp4` as the archival tier
+  (`--delete-source` already discards the `.mkv` once transcoded) — so "raw
+  per-camera data" here means each camera's own `.mp4`, not the `.mkv`. When
+  `--no-transcode` supplies `outputs` via a naive `folder.glob("*.mp4")`
+  (rather than real per-camera transcode results), it can't tell a camera file
+  from `grid.mp4` sitting in the same folder — confirmed as a real bug via a
+  dry-run against already-transcoded production data, now filtered out by
+  excluding `_visualizations_for` names from the `Behavior/` list.
+- **Recordings transferred before this layout existed sit flat** at the
+  destination (`camera_LF.mp4` directly, no subfolders) — indistinguishable
+  from "not yet transferred" to the layout-aware skip check, confirmed via a
+  real dry-run against yesterday's already-transferred recordings (it wanted
+  to recopy everything). `octacam process --migrate-layout --config <rig>`
+  reorganizes those in place with a same-filesystem rename (true for CIFS/SMB
+  too — its rename is a server-side directory-entry change, not a byte copy),
+  so it cannot put data integrity at risk; self-contained (classifies each
+  file against `recording_summary.json`'s own camera list, no local recording
+  needed) and idempotent.
+- **Recordings made before this feature existed have no `plugins` key at all**
+  (`schema_version < 4`) — confirmed against real production recordings (all
+  of yesterday's, `trigger_source: "external"` but no way to have recorded
+  `armed`). The Phase 3 gate falls back to attempting the time-window match
+  for any `schema_version < 4` take (still gated on `[transfer.twophoton]`
+  being configured) rather than silently losing every pre-upgrade recording's
+  pairing; a genuine `schema_version >= 4` take with `armed: false` is not
+  this case and is skipped as intended.
+- **2P-only recordings** (no behavior take at all) use a separate sweep
+  (`_sweep_unclaimed_twophoton`, `octacam process --twophoton-sweep` as its
+  own standalone entry point), not the per-take path — there's no `armed`
+  take to gate on. It cross-checks already-written `twophoton_match.json`
+  sidecars (via `session_cache.all_folders()`) so a folder already paired
+  with a take isn't re-copied as "2P-only". A normal `process` run does this
+  **automatically**, sequentially, right after Phase 3's per-take matching,
+  for every distinct `(source_root, dest_root)` its processed folders'
+  configs referenced (`--no-twophoton-sweep` opts out) — this is what
+  actually separates a real pair from a standalone check/tuning recording:
+  anything the duration-aware matcher correctly declines to pair lands here
+  instead. One subtlety: `--dry-run` never writes `twophoton_match.json` to
+  disk, so the sweep's on-disk "already claimed" check alone can't see a
+  match Phase 3 just decided moments earlier in the *same* run — a
+  `matched_this_run` set collected during Phase 3 (passed as
+  `_sweep_unclaimed_twophoton`'s `also_exclude`) closes that gap so the
+  dry-run preview matches what a real run actually does (which doesn't need
+  it — the sidecar is on disk before the sweep starts).
+- **`--delete-after-transfer`** is a distinct, stronger safety contract from
+  `--delete-source`: transfer-gated (only after every file — behavior *and*
+  any matched 2P folder — is checksum-verified present on the NAS, never
+  weaker than `[transfer].checksum`) rather than transcode-gated, and it never
+  deletes a folder that had a transcode failure this run even if every other
+  camera's output transferred cleanly.
+- **Still deferred**: a synced behavior+2P *preview video* (different fps,
+  same wall-clock window) is out of scope even now that `twophoton_signals.py`
+  reads `Episode001.h5`'s edges for matching *verification* — that's a
+  different consumer of the same data (per-frame alignment for a rendered
+  video, not a yes/no pairing check) and still needs its own design pass.
 
 ## Arduino firmware & auto-flash
 

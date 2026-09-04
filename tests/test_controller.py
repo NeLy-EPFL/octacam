@@ -50,12 +50,13 @@ def test_build_recording_summary():
     summary = build_recording_summary(
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["fps_target"] == 100.0
     assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
     assert "USB" in summary["dropped_frames_note"]
     assert summary["start_time"].startswith("20")
+    assert summary["plugins"] == {}
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
     assert entry["pixel_format"] == "Mono8"
@@ -66,6 +67,16 @@ def test_build_recording_summary():
     assert (entry["width"], entry["height"]) == (240, 320)
     assert entry["transform"] == {"rotation_deg": 90, "flip_h": False, "flip_v": False}
     assert entry["transform_applied"] is True
+
+    # plugin_metadata is merged verbatim under "plugins".
+    summary_with_plugins = build_recording_summary(
+        settings,
+        [cam],
+        start_wall_ns=1_700_000_000_000_000_000,
+        aborted=False,
+        plugin_metadata={"twophoton": {"armed": True}},
+    )
+    assert summary_with_plugins["plugins"] == {"twophoton": {"armed": True}}
 
     # sensor form never flags the transform as baked in, even when non-identity.
     sensor_summary = build_recording_summary(

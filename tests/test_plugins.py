@@ -133,6 +133,31 @@ def test_status_is_ready_failure_reports_not_ready():
     assert PluginManager([Broken()]).status() == {"broken": {"ready": False}}
 
 
+def test_collect_recording_metadata_omits_none():
+    class Quiet(Plugin):
+        name = "quiet"
+
+    class Chatty(Plugin):
+        name = "chatty"
+
+        def recording_metadata(self):
+            return {"armed": True}
+
+    manager = PluginManager([Quiet(), Chatty()])
+    assert manager.collect_recording_metadata() == {"chatty": {"armed": True}}
+
+
+def test_collect_recording_metadata_swallows_plugin_exceptions():
+    class Boom(Plugin):
+        name = "boom"
+
+        def recording_metadata(self):
+            raise RuntimeError("boom")
+
+    # A misbehaving plugin is skipped, not allowed to abort the summary write.
+    assert PluginManager([Boom()]).collect_recording_metadata() == {}
+
+
 def test_plugin_summary_falls_back_to_factory_module_doc():
     # A third-party entry-point plugin has no octacam.plugins.<name> module, so
     # sys.modules.get(...) is None. The summary must fall back to the factory

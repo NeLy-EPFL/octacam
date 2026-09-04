@@ -319,6 +319,13 @@ class TwoPhotonPlugin(Plugin):
         # instead of leaving the cameras waiting on a trigger that never fires.
         self._armed_event = threading.Event()
         self._ack_timeout_s = ACK_TIMEOUT_S
+        # Whether the operator's "Arm with recording" checkbox was checked for
+        # the take currently in progress (or the one that just finished) —
+        # regardless of whether the arm write/ack actually succeeded, since the
+        # operator's intent to run a synchronized 2P take is the signal the
+        # transfer pipeline needs (recording_metadata), not the handshake
+        # outcome. Read back by recording_metadata(), never recomputed there.
+        self._armed_this_take = False
         # Injected by app.py via set_broadcast() once the web app is created.
         self._broadcast: Callable[[str, dict], None] | None = None
 
@@ -501,6 +508,7 @@ class TwoPhotonPlugin(Plugin):
         that dict are optional; they fall back to the plugin's configured defaults.
         """
         spec = (params or {}).get("twophoton")
+        self._armed_this_take = spec is not None
         if spec is None:
             return
         arm = ArmParams.from_payload(spec, self._default_fps, self._default_duration_ms)
@@ -561,6 +569,15 @@ class TwoPhotonPlugin(Plugin):
         # or the GUI would keep showing 'armed'/'triggered' until the next arm.
         self._link.send_cancel()
         self._set_arduino_state("idle")
+
+    def recording_metadata(self) -> dict:
+        """Whether this take was armed, for the twophoton-transfer matcher.
+
+        ``armed`` reflects the operator's checkbox, not the handshake outcome
+        (see ``_armed_this_take``) — it tells the transfer pipeline whether to
+        bother looking for a paired 2P folder at all, not whether the arm
+        definitely reached the board."""
+        return {"armed": self._armed_this_take}
 
     # -------------------------------------------------- web contributions
 

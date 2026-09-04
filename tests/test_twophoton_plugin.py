@@ -186,6 +186,36 @@ def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty()
     assert dur == DEFAULT_DURATION_MS
 
 
+def test_recording_metadata_armed_when_checkbox_checked():
+    plugin, _link = _plugin_with_fake()
+    plugin.on_recording_start({"twophoton": {"fps": 120, "duration_ms": 5000}})
+    assert plugin.recording_metadata() == {"armed": True}
+
+
+def test_recording_metadata_not_armed_when_no_params():
+    plugin, _link = _plugin_with_fake()
+    plugin.on_recording_start(None)
+    assert plugin.recording_metadata() == {"armed": False}
+
+
+def test_recording_metadata_reflects_most_recent_take_only():
+    # A prior armed take must not leak "armed": True into a later unarmed one.
+    plugin, _link = _plugin_with_fake()
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin.recording_metadata() == {"armed": True}
+    plugin.on_recording_start(None)
+    assert plugin.recording_metadata() == {"armed": False}
+
+
+def test_recording_metadata_armed_even_when_link_closed():
+    # The checkbox reflects operator intent, not whether the handshake
+    # actually succeeded — a closed link still counts as "armed" for the
+    # transfer pipeline's purposes (it should still look for paired 2P data).
+    plugin = TwoPhotonPlugin(device="/dev/does-not-exist")
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    assert plugin.recording_metadata() == {"armed": True}
+
+
 def test_on_recording_stop_abort_sends_cancel():
     plugin, link = _plugin_with_fake()
     plugin.on_recording_stop(aborted=True)

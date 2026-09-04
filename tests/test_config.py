@@ -299,6 +299,77 @@ def test_transfer_checksum_parsed(tmp_path):
     assert load_config_dir(tmp_path).transfer.checksum is False
 
 
+def test_transfer_delete_after_transfer_defaults_false(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\n'
+    )
+    cfg = load_config_dir(tmp_path)
+    assert cfg.transfer is not None and cfg.transfer.delete_after_transfer is False
+
+
+def test_transfer_twophoton_absent_by_default(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\n'
+    )
+    cfg = load_config_dir(tmp_path)
+    assert cfg.transfer is not None and cfg.transfer.twophoton is None
+
+
+def test_transfer_twophoton_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store"\n'
+        "[transfer.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "match_window_s = 90\n"
+        "settle_s = 200\n"
+    )
+    cfg = load_config_dir(tmp_path)
+    twophoton = cfg.transfer.twophoton
+    assert twophoton is not None
+    assert twophoton.source == "/mnt/windows_share/MD"
+    assert twophoton.match_window_s == 90
+    assert twophoton.settle_s == 200
+
+
+def test_transfer_twophoton_verify_defaults(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store"\n'
+        "[transfer.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+    )
+    twophoton = load_config_dir(tmp_path).transfer.twophoton
+    assert twophoton.verify_with_signals is True
+    assert twophoton.verify_window_s == 3600.0
+
+
+def test_transfer_twophoton_verify_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store"\n'
+        "[transfer.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "verify_with_signals = false\n"
+        "verify_window_s = 7200\n"
+    )
+    twophoton = load_config_dir(tmp_path).transfer.twophoton
+    assert twophoton.verify_with_signals is False
+    assert twophoton.verify_window_s == 7200
+
+
+def test_transcode_delete_source_defaults_false(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text("")
+    assert load_config_dir(tmp_path).transcode.delete_source is False
+
+
+def test_transcode_delete_source_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transcode]\ndelete_source = true\n"
+    )
+    assert load_config_dir(tmp_path).transcode.delete_source is True
+
+
 def test_visualization_layout_unknown_camera_warns(tmp_path):
     # A layout cell naming a camera that isn't declared must be reported, not
     # silently rendered black.

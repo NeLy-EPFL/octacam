@@ -313,6 +313,70 @@ def transfer_destination(
     return dest_root / rel if rel is not None else dest_root / folder.name
 
 
+def transfer_tree(
+    src_dir: Path,
+    dest_dir: Path,
+    dry_run: bool = False,
+    verify: bool = True,
+    checksum: bool = False,
+    on_progress: TransferCallback | None = None,
+) -> TransferResult:
+    """Copy every file under *src_dir*, recursively, mirroring its subdirectory
+    structure under *dest_dir*.
+
+    Sibling to :func:`transfer_folder` for sources that are directory trees
+    rather than a flat, curated file list — e.g. a ThorImage/ThorSync folder
+    (nested ``jpeg/`` subfolder alongside its ``.tif``/``.h5``/``.xml``
+    files). Reuses the same per-file atomic-copy/verify/skip primitives
+    (:func:`_copy_one`/:func:`_should_skip`), so the reliability and resume
+    semantics are identical to :func:`transfer_folder` — just applied to a
+    recursive file listing instead of an explicit one.
+
+    Parameters mirror :func:`transfer_folder`; see there for details.
+    """
+    candidates = sorted(p for p in src_dir.rglob("*") if p.is_file())
+    result = TransferResult(dest=dest_dir)
+
+    if not candidates:
+        log.warning("Nothing to transfer from %s", src_dir)
+        return result
+
+    if dry_run:
+        for f in candidates:
+            target = dest_dir / f.relative_to(src_dir)
+            if _should_skip(f, target, checksum=checksum):
+                result.skipped.append(f.name)
+            else:
+                log.info("[dry-run] transfer: %s → %s", f, target)
+                result.copied.append(f.name)
+        return result
+
+    n = len(candidates)
+    for idx, f in enumerate(candidates, 1):
+        target = dest_dir / f.relative_to(src_dir)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            log.error("Could not create destination directory %s: %s", target.parent, e)
+            result.failed.append(f.name)
+            continue
+        try:
+            if _should_skip(f, target, checksum=checksum):
+                result.skipped.append(f.name)
+                continue
+            if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):
+                log.info("Transfer: %s → %s", f.name, target)
+                result.copied.append(f.name)
+            else:
+                log.error("Transfer: %s failed verification — not copied", f.name)
+                result.failed.append(f.name)
+        except OSError as e:
+            log.error("Failed to transfer %s: %s", f, e)
+            result.failed.append(f.name)
+
+    return result
+
+
 def transfer_folder(
     folder: Path,
     dest: Path,

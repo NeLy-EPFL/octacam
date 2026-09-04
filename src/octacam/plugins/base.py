@@ -52,6 +52,16 @@ class OctacamPlugin(Protocol):
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
 
+    # Queried synchronously on the monitor thread right BEFORE
+    # recording_summary.json is written (earlier than on_recording_stop,
+    # which fires after the summary is already on disk) so a plugin can
+    # contribute a small dict merged under the summary's "plugins" key (e.g.
+    # {"armed": True}). Must read back state the plugin already captured
+    # earlier (e.g. at on_recording_start) rather than compute anything new —
+    # None = nothing to contribute. Must not block and must not raise (see
+    # PluginManager.collect_recording_metadata).
+    def recording_metadata(self) -> dict | None: ...
+
     # Headless-record (CLI) start params. The GUI supplies each plugin's
     # start-time slice from its tab; `octacam record` has no UI, so a plugin that
     # must act at record start (e.g. arm a hardware trigger) contributes its slice
@@ -116,6 +126,9 @@ class Plugin:
 
     def on_recording_stop(self, aborted: bool) -> None:
         pass
+
+    def recording_metadata(self) -> dict | None:
+        return None
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
         return None
@@ -197,6 +210,27 @@ class PluginManager:
             if slice_ is not None:
                 params[self._name(plugin)] = slice_
         return params
+
+    def collect_recording_metadata(self) -> dict:
+        """Collect each plugin's just-finished-take metadata, keyed by name.
+
+        Mirrors :meth:`default_start_params`: called synchronously (from
+        ``RecordingController._write_recording_summary``, right before the
+        summary is written), plugins returning ``None`` are omitted, and a
+        misbehaving plugin is logged and skipped rather than aborting the
+        write."""
+        result: dict = {}
+        for plugin in self.plugins:
+            try:
+                meta = plugin.recording_metadata()
+            except Exception:
+                log.exception(
+                    "Plugin %s.recording_metadata failed", self._name(plugin)
+                )
+                meta = None
+            if meta is not None:
+                result[self._name(plugin)] = meta
+        return result
 
     def status(self) -> dict:
         result: dict = {}

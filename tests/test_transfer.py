@@ -19,6 +19,7 @@ from octacam.transfer import (
     TransferResult,
     transfer_destination,
     transfer_folder,
+    transfer_tree,
 )
 from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
 
@@ -296,6 +297,102 @@ def test_progress_phases(tmp_path):
         on_progress=events_off.append,
     )
     assert {e.phase for e in events_off} == {"copy"}
+
+
+# --- transfer_tree: recursive directory-tree copy ---------------------------
+
+
+def _make_2p_folder(folder: Path) -> Path:
+    """A ThorImage-shaped tree: nested jpeg/ subfolder + mixed file types."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Experiment.xml").write_text("<ThorImageExperiment/>")
+    (folder / "ChanA_001_001_001_001.tif").write_bytes(b"\x00tif" * 100)
+    (folder / "jpeg").mkdir()
+    (folder / "jpeg" / "preview.jpg").write_bytes(b"\xff\xd8jpg")
+    return folder
+
+
+def test_transfer_tree_mirrors_nested_structure(tmp_path):
+    src = _make_2p_folder(tmp_path / "SyncData102")
+    dest = tmp_path / "dest" / "SyncData102"
+    result = transfer_tree(src, dest)
+
+    assert result
+    assert set(result.copied) == {
+        "Experiment.xml",
+        "ChanA_001_001_001_001.tif",
+        "preview.jpg",
+    }
+    assert (dest / "Experiment.xml").read_text() == "<ThorImageExperiment/>"
+    assert (dest / "jpeg" / "preview.jpg").read_bytes() == b"\xff\xd8jpg"
+    assert _no_temps(dest)
+
+
+def test_transfer_tree_skip_on_rerun(tmp_path):
+    src = _make_2p_folder(tmp_path / "SyncData102")
+    dest = tmp_path / "dest" / "SyncData102"
+    transfer_tree(src, dest)
+    mtimes = {p.name: p.stat().st_mtime_ns for p in dest.rglob("*") if p.is_file()}
+
+    result = transfer_tree(src, dest)
+    assert set(result.skipped) == {
+        "Experiment.xml",
+        "ChanA_001_001_001_001.tif",
+        "preview.jpg",
+    }
+    assert not result.copied
+    for p in dest.rglob("*"):
+        if p.is_file():
+            assert p.stat().st_mtime_ns == mtimes[p.name]
+
+
+def test_transfer_tree_checksum_repair(tmp_path):
+    src = _make_2p_folder(tmp_path / "SyncData102")
+    dest = tmp_path / "dest" / "SyncData102"
+    dest.mkdir(parents=True)
+    (dest / "jpeg").mkdir()
+    # Same size, different content under the nested jpeg/ subdir.
+    (dest / "jpeg" / "preview.jpg").write_bytes(b"\xff\xd8XXX")
+
+    r1 = transfer_tree(src, dest, checksum=False)
+    assert "preview.jpg" in r1.skipped
+    assert (dest / "jpeg" / "preview.jpg").read_bytes() == b"\xff\xd8XXX"
+
+    r2 = transfer_tree(src, dest, checksum=True)
+    assert "preview.jpg" in r2.copied
+    assert (dest / "jpeg" / "preview.jpg").read_bytes() == b"\xff\xd8jpg"
+    assert _no_temps(dest / "jpeg")
+
+
+def test_transfer_tree_verify_mismatch_fails_and_cleans_up(tmp_path, monkeypatch):
+    src = _make_2p_folder(tmp_path / "SyncData102")
+    dest = tmp_path / "dest" / "SyncData102"
+    monkeypatch.setattr(transfer_mod, "_file_digest", lambda *a, **k: "deadbeef")
+
+    result = transfer_tree(src, dest, verify=True)
+    assert result.failed  # at least one file failed verification
+    assert not result  # falsy: something failed
+    assert _no_temps(dest / "jpeg")
+
+
+def test_transfer_tree_dry_run_touches_nothing(tmp_path):
+    src = _make_2p_folder(tmp_path / "SyncData102")
+    dest = tmp_path / "dest" / "SyncData102"
+    result = transfer_tree(src, dest, dry_run=True)
+    assert not dest.exists()
+    assert set(result.copied) == {
+        "Experiment.xml",
+        "ChanA_001_001_001_001.tif",
+        "preview.jpg",
+    }
+
+
+def test_transfer_tree_nothing_to_copy_is_falsy(tmp_path):
+    src = tmp_path / "empty_2p"
+    src.mkdir()
+    result = transfer_tree(src, tmp_path / "dest")
+    assert not result
+    assert not result.copied and not result.failed
 
 
 # --- CLI driver helpers -----------------------------------------------------

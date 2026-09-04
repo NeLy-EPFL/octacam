@@ -3928,6 +3928,221 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
     return Path(base) / rel
 
 
+def _already_matched_twophoton_paths(source_root: Path) -> set[Path]:
+    """2P folders already claimed by some behavior take's Phase-3 transfer.
+
+    Scans every recording folder octacam still has cached (deleted ones are
+    silently skipped by session_cache itself) for a twophoton_match.json
+    sidecar, and resolves each matched entry's relative path back against
+    *source_root* — so the sweep never re-copies a folder that already
+    travelled to the NAS alongside its paired behavior take. A folder from a
+    take that used a *different* [transfer.twophoton].source won't resolve
+    against this sweep's source_root and so isn't excluded — a rare
+    multi-share-per-rig edge case, not worth over-engineering here."""
+    from octacam import session_cache
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+
+    matched: set[Path] = set()
+    for folder in session_cache.all_folders():
+        match_path = folder / TWOPHOTON_MATCH_FILENAME
+        if not match_path.is_file():
+            continue
+        record = _read_summary(match_path) or {}
+        for entry in record.get("matched", []):
+            rel = entry.get("path")
+            if rel:
+                matched.add((source_root / rel).resolve())
+    return matched
+
+
+def _sweep_unclaimed_twophoton(
+    source_root: Path,
+    dest_root: Path,
+    twophoton_cfg,
+    *,
+    checksum: bool,
+    dry_run: bool,
+    also_exclude: frozenset[Path] = frozenset(),
+) -> tuple[int, int]:
+    """Transfer every settled ThorSync/ThorImage folder under *source_root*
+    that no behavior take has already claimed (see
+    :func:`_already_matched_twophoton_paths`) to
+    ``dest_root/2p_only/<experiment>/<date>/<name>`` — the replacement for
+    the legacy script's second ("2P data only") loop. Unlike the per-take
+    Phase 3 in :func:`_grid_and_transfer`, there is no behavior take to gate
+    this on; every settled, unclaimed folder found is copied.
+
+    *also_exclude* covers matches made earlier in the *same* run that aren't
+    on disk yet to be discovered by :func:`_already_matched_twophoton_paths`
+    — only actually needed for ``--dry-run`` (a real run's Phase 3 writes
+    each match's ``twophoton_match.json`` before this ever runs), but passed
+    unconditionally so the dry-run preview matches what a real run would do.
+
+    Pure: never raises, never exits — returns ``(n_copied, n_failed)`` file
+    counts (0, 0) when there's nothing to do. Shared by the standalone
+    ``--twophoton-sweep`` mode and the automatic post-processing sweep a
+    normal `process` run does for every ``[transfer.twophoton]`` source it
+    touched (see the `process` docstring / `--no-twophoton-sweep`).
+    """
+    from octacam.transfer import transfer_tree
+    from octacam.twophoton_transfer import discover_twophoton_folders, is_settled
+
+    sweep_root = dest_root / "2p_only"
+    already_matched = _already_matched_twophoton_paths(source_root) | also_exclude
+
+    candidates = discover_twophoton_folders(source_root)
+    todo = [
+        c
+        for c in candidates
+        if is_settled(c, twophoton_cfg.settle_s) and c.path.resolve() not in already_matched
+    ]
+    if not todo:
+        log.info("2P sweep: nothing new and settled under %s", source_root)
+        return (0, 0)
+
+    n_copied = n_failed = 0
+    for folder in todo:
+        experiment = folder.path.parent.name
+        date_str = time.strftime("%y%m%d", time.localtime(folder.start_time))
+        dest = sweep_root / experiment / date_str / folder.path.name
+        if dry_run:
+            log.info("[dry-run] 2P sweep: %s -> %s", folder.path, dest)
+            continue
+        result = transfer_tree(folder.path, dest, verify=checksum, checksum=checksum)
+        n_copied += len(result.copied)
+        n_failed += len(result.failed)
+        if result.failed:
+            log.error("2P sweep: failed transferring %s", folder.path)
+        else:
+            log.info("2P sweep: transferred %s -> %s", folder.path, dest)
+    if dry_run:
+        log.info("[dry-run] 2P sweep: %d folder(s) would be transferred", len(todo))
+    else:
+        log.info("2P sweep: %d file(s) copied, %d failed", n_copied, n_failed)
+    return (n_copied, n_failed)
+
+
+def _run_twophoton_sweep(cli_config_dir: Path | None, dry_run: bool) -> None:
+    """``octacam process --twophoton-sweep``: the standalone CLI entry point
+    for :func:`_sweep_unclaimed_twophoton` — resolves ``--config`` into a
+    source/destination/settings and reports failures as a nonzero exit."""
+    from octacam.config import load_config_dir, resolve_dir_template
+
+    if cli_config_dir is None:
+        sys.exit("--twophoton-sweep requires --config <rig-config-dir>")
+    cfg = load_config_dir(cli_config_dir)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(f"--twophoton-sweep: no [transfer].directory configured in {cli_config_dir}")
+    twophoton_cfg = cfg.transfer.twophoton
+    if twophoton_cfg is None or not twophoton_cfg.source:
+        sys.exit(f"--twophoton-sweep: no [transfer.twophoton] configured in {cli_config_dir}")
+
+    source_root = Path(resolve_dir_template(twophoton_cfg.source))
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    _n_copied, n_failed = _sweep_unclaimed_twophoton(
+        source_root,
+        dest_root,
+        twophoton_cfg,
+        checksum=cfg.transfer.checksum,
+        dry_run=dry_run,
+    )
+    if n_failed:
+        sys.exit(f"{n_failed} file(s) failed to transfer")
+
+
+def _run_layout_migration(cli_config_dir: Path | None, dry_run: bool) -> None:
+    """``octacam process --migrate-layout``: reorganize old flat transfers.
+
+    Recordings transferred before the Behavior/Renderings/2P split landed sit
+    flat under their destination folder (``camera_LF.mp4`` directly, not
+    ``Behavior/camera_LF.mp4``) — indistinguishable from "not yet transferred"
+    to the new layout-aware skip check, which would otherwise recopy
+    everything. This moves each flat ``*.mp4`` into its correct subfolder
+    **in place**: a rename within the same destination folder is always a
+    same-filesystem operation (true for a local disk and for CIFS/SMB, whose
+    rename is itself a server-side directory-entry change), so no bytes are
+    read, written, or re-verified — data integrity cannot be at risk the way
+    a copy could be. ``recording_summary.json``/``octacam_config.toml`` need
+    no move: the old layout already put the summary at the same root path the
+    new layout expects, and the config snapshot was never transferred by the
+    old code at all (a later `octacam process` run adds it fresh).
+
+    Classifies each flat file by comparing its stem against
+    ``recording_summary.json``'s own camera list (a "Behavior" file) vs.
+    everything else (a "Renderings" file, e.g. `grid.mp4`) — self-contained,
+    no local recording folder needed, so this still works for a recording
+    whose local copy is long gone.
+    """
+    from octacam.config import load_config_dir, resolve_dir_template
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    if cli_config_dir is None:
+        sys.exit("--migrate-layout requires --config <rig-config-dir>")
+    cfg = load_config_dir(cli_config_dir)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(f"--migrate-layout: no [transfer].directory configured in {cli_config_dir}")
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    if not dest_root.is_dir():
+        sys.exit(f"--migrate-layout: {dest_root} does not exist")
+
+    n_moved = n_already = n_conflict = 0
+    for summary_path in sorted(dest_root.rglob(RECORDING_SUMMARY_FILENAME)):
+        folder = summary_path.parent
+        flat_mp4s = sorted(folder.glob("*.mp4"))
+        if not flat_mp4s:
+            continue  # already migrated, or a fresh new-layout folder
+        summary = _read_summary(summary_path) or {}
+        camera_names = {
+            c.get("name") for c in summary.get("cameras", []) if c.get("name")
+        }
+        for mp4 in flat_mp4s:
+            subdir = "Behavior" if mp4.stem in camera_names else "Renderings"
+            target = folder / subdir / mp4.name
+            if dry_run:
+                log.info("[dry-run] migrate: %s -> %s", mp4, target)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                if target.stat().st_size == mp4.stat().st_size:
+                    mp4.unlink()
+                    n_already += 1
+                    log.info(
+                        "migrate: %s already present at %s (same size) — "
+                        "removed the now-redundant flat copy",
+                        mp4,
+                        target,
+                    )
+                else:
+                    n_conflict += 1
+                    log.warning(
+                        "migrate: %s and existing %s differ in size — left "
+                        "both; please check by hand",
+                        mp4,
+                        target,
+                    )
+                continue
+            try:
+                mp4.rename(target)
+            except OSError as e:
+                n_conflict += 1
+                log.error("migrate: failed to move %s -> %s: %s", mp4, target, e)
+                continue
+            n_moved += 1
+            log.info("migrate: %s -> %s", mp4, target)
+    if dry_run:
+        log.info("[dry-run] migrate: scan complete under %s", dest_root)
+        return
+    log.info(
+        "migrate: %d moved, %d already matched (flat copy removed), %d needing "
+        "manual attention",
+        n_moved,
+        n_already,
+        n_conflict,
+    )
+    if n_conflict:
+        sys.exit(f"{n_conflict} file(s) need manual attention — see warnings above")
+
+
 def _grid_and_transfer(
     folder_outputs: dict[Path, list[Path]],
     do_grid: bool,
@@ -3938,16 +4153,38 @@ def _grid_and_transfer(
     force: bool = False,
     reporter: "JobReporter | None" = None,
     job_dir: Path | None = None,
+    delete_after_transfer: bool = False,
+    no_delete_after_transfer: bool = False,
+    transcode_failed_folders: frozenset[Path] = frozenset(),
+    no_twophoton_sweep: bool = False,
 ) -> int:
-    """Build visualization grids and/or transfer each folder to its destination.
+    """Build visualization grids, transfer each folder (behavior + any paired
+    2-photon data), and — when requested — delete local copies once
+    everything is checksum-verified on the NAS.
 
-    Two sequential phases (grids then transfers) so each gets its own progress
-    bar. Returns the number of files that failed to transfer. When ``reporter`` is
-    set (a detached job) each phase reports progress and pauses between folders
-    while a gui/record owns the cameras."""
+    Five sequential phases, each getting its own progress bar: grids, behavior
+    transfer (root metadata / ``Behavior`` / ``Renderings`` — see
+    ``_transfer_dest``), 2-photon transfer (only for takes the ``twophoton``
+    plugin reports as armed and whose config has ``[transfer.twophoton]``
+    set), an automatic 2P-only sweep of every ``[transfer.twophoton]`` source
+    this run touched (settled folders no take claimed — see
+    ``_sweep_unclaimed_twophoton``; ``no_twophoton_sweep`` skips it), then
+    delete-after-transfer. Returns the number of files that failed to
+    transfer (behavior + 2P + sweep). When ``reporter`` is set (a detached
+    job) each phase reports progress and pauses between folders while a
+    gui/record owns the cameras."""
+    from octacam.config import resolve_dir_template
     from octacam.grid import build_grid_video
-    from octacam.transfer import transfer_folder
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
+    from octacam.transfer import transfer_folder, transfer_tree
+    from octacam.transform import RECORDING_SUMMARY_FILENAME, TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_transfer import (
+        EXPERIMENT_XML_FILENAME,
+        TakeInfo,
+        build_match_record,
+        discover_twophoton_folders,
+        is_settled,
+        match_takes_to_twophoton_batch,
+    )
 
     folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
 
@@ -4005,8 +4242,12 @@ def _grid_and_transfer(
                 grid_skipped,
             )
 
-    # --- Phase 2: transfer --------------------------------------------------
+    # --- Phase 2: behavior transfer (root metadata / Behavior / Renderings) -
     transfer_failed = 0
+    folder_dest: dict[Path, Path] = {}
+    folder_failed: dict[Path, int] = {}
+    folder_delete_after: dict[Path, bool] = {}
+    folder_2p_ok: dict[Path, list[Path]] = {}
     if do_transfer:
         n_copied = n_skipped = 0
         transfer_bar = _TransferProgressBar() if (show_bar and not dry_run) else None
@@ -4024,21 +4265,62 @@ def _grid_and_transfer(
                     if reporter is not None:
                         reporter.item_done()
                     continue
-                files = list(outputs) + grid_files.get(folder, [])
+                folder_dest[folder] = dest
+                # cfg.transfer is guaranteed non-None here: _transfer_dest
+                # already returned None (and we `continue`d above) otherwise.
+                assert cfg.transfer is not None
+                transfer_cfg = cfg.transfer
+                delete_wanted = not no_delete_after_transfer and (
+                    delete_after_transfer or transfer_cfg.delete_after_transfer
+                )
+                folder_delete_after[folder] = delete_wanted
+                # Deleting the only copy must never ride on a size-only check —
+                # force full verification when delete-after-transfer is active
+                # for this folder, on top of (never weaker than) the config's
+                # own checksum setting.
+                verify = transfer_cfg.checksum or delete_wanted
+                # Repair-mode re-verify of already-present files is separate
+                # and pricier (re-hashes every prior transfer over the network
+                # on every rerun) — only force it when a delete actually
+                # depends on it, not just because [transfer].checksum is on.
+                checksum = delete_wanted
+
+                config_snapshot = folder / "octacam_config.toml"
+                root_files = [config_snapshot] if config_snapshot.exists() else []
                 on_prog = transfer_cb
                 if transfer_bar is None and reporter is not None:
                     on_prog = reporter.transfer_progress(i, len(folder_outputs))
-                result = transfer_folder(
-                    folder,
-                    dest,
-                    files_only=files,
-                    dry_run=dry_run,
-                    verify=cfg.transfer.checksum,
-                    on_progress=on_prog,
-                )
-                n_copied += len(result.copied)
-                n_skipped += len(result.skipped)
-                transfer_failed += len(result.failed)
+
+                # `outputs` is precise per-camera transcode output when
+                # do_transcode ran, but under --no-transcode it comes from a
+                # naive `folder.glob("*.mp4")` (see the transcode `else`
+                # branch above) that can't tell a per-camera file from
+                # grid.mp4 sitting in the same folder — exclude known
+                # visualization output names so a composite never gets
+                # misrouted into Behavior/ (raw per-camera data).
+                viz_names = {name for name, _, _ in _visualizations_for(cfg, [])}
+                behavior_files = [f for f in outputs if f.name not in viz_names]
+
+                failed_here = 0
+                for call_dest, files in (
+                    (dest, root_files),
+                    (dest / "Behavior", behavior_files),
+                    (dest / "Renderings", grid_files.get(folder, [])),
+                ):
+                    result = transfer_folder(
+                        folder,
+                        call_dest,
+                        files_only=files,
+                        dry_run=dry_run,
+                        verify=verify,
+                        checksum=checksum,
+                        on_progress=on_prog,
+                    )
+                    n_copied += len(result.copied)
+                    n_skipped += len(result.skipped)
+                    failed_here += len(result.failed)
+                transfer_failed += failed_here
+                folder_failed[folder] = failed_here
                 if reporter is not None:
                     reporter.item_done()
         if dry_run:
@@ -4056,6 +4338,236 @@ def _grid_and_transfer(
             )
             if transfer_failed:
                 log.error("%d file(s) failed to transfer", transfer_failed)
+
+        # --- Phase 3: 2-photon transfer --------------------------------------
+        # 3a: gather every armed take into groups sharing one [transfer.twophoton]
+        # source, so matching runs once per group across ALL its takes together
+        # (chronological, no-double-booking — see match_takes_to_twophoton_batch)
+        # rather than independently per folder.
+        # Group key: (source_root, match_window_s, verify_window_s, settle_s, verify_with_signals)
+        groups = {}
+        group_meta = {}
+        # Every distinct (source_root, dest_root) a processed folder's config
+        # points at, for the automatic post-processing sweep below — tracked
+        # regardless of whether this particular take turned out armed/matched,
+        # since the config's mere presence means this rig does 2P work.
+        sweep_targets: dict[tuple[Path, Path], tuple[object, bool]] = {}
+        for folder in folder_dest:
+            cfg = folder_cfgs[folder]
+            # cfg.transfer is guaranteed non-None: folder_dest only holds
+            # folders _transfer_dest resolved a destination for above.
+            assert cfg.transfer is not None
+            twophoton_cfg = cfg.transfer.twophoton
+            if twophoton_cfg is None or not twophoton_cfg.source:
+                continue
+            source_root_for_sweep = Path(resolve_dir_template(twophoton_cfg.source))
+            dest_root_for_sweep = Path(resolve_dir_template(cfg.transfer.directory))
+            sweep_targets[(source_root_for_sweep, dest_root_for_sweep)] = (
+                twophoton_cfg,
+                cfg.transfer.checksum,
+            )
+            summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
+            if summary.get("schema_version", 0) < 4:
+                # Predates the recording_metadata feature entirely — there was
+                # no way for this take to record "armed" even if it genuinely
+                # ran alongside a 2P acquisition. Fall back to attempting the
+                # match anyway (still gated on [transfer.twophoton] being
+                # configured, checked above) rather than silently losing every
+                # pre-feature recording's pairing.
+                armed = True
+                log.info(
+                    "2P transfer: %s has no armed flag (schema_version %s, "
+                    "predates the feature) — attempting a legacy time-window "
+                    "match anyway",
+                    folder,
+                    summary.get("schema_version"),
+                )
+            else:
+                armed = (
+                    summary.get("plugins", {}).get("twophoton", {}).get("armed", False)
+                )
+            if not armed:
+                continue
+            take_start_ns = summary.get("start_time_ns")
+            duration_s = summary.get("duration_s")
+            if take_start_ns is None or duration_s is None:
+                log.warning(
+                    "2P transfer: %s has no start_time_ns/duration_s; skipping",
+                    folder,
+                )
+                continue
+            camera_frame_counts = [
+                c["frames"]
+                for c in summary.get("cameras", [])
+                if isinstance(c.get("frames"), int)
+            ]
+            key = (
+                source_root_for_sweep,
+                twophoton_cfg.match_window_s,
+                twophoton_cfg.verify_window_s,
+                twophoton_cfg.settle_s,
+                twophoton_cfg.verify_with_signals,
+            )
+            groups.setdefault(key, []).append(
+                TakeInfo(
+                    folder=folder,
+                    start_time=take_start_ns / 1e9,
+                    duration_s=duration_s,
+                    camera_frame_counts=camera_frame_counts,
+                )
+            )
+            group_meta[key] = twophoton_cfg
+
+        # 3b: match + transfer each group.
+        # Folders matched to a take in THIS run — tracked in memory because
+        # dry-run never writes twophoton_match.json to disk, so the sweep
+        # below (3c) can't rely on _already_matched_twophoton_paths alone to
+        # exclude a same-run match from its preview (a real run doesn't need
+        # this: the sidecar is written before 3c starts).
+        matched_this_run: set[Path] = set()
+        for key, takes in groups.items():
+            source_root, _, _, settle_s, verify_with_signals = key
+            twophoton_cfg = group_meta[key]
+            candidates = discover_twophoton_folders(source_root)
+            batch = match_takes_to_twophoton_batch(
+                takes,
+                candidates,
+                twophoton_cfg.match_window_s,
+                twophoton_cfg.verify_window_s,
+                verify_with_signals,
+            )
+            for folder, matches in batch.items():
+                dest = folder_dest[folder]
+                cfg = folder_cfgs[folder]
+                assert cfg.transfer is not None
+                if not matches:
+                    log.info("2P transfer: no matching 2P folder found for %s", folder)
+                    continue
+                for m in matches:
+                    if m.ambiguous:
+                        log.warning(
+                            "2P transfer: more than one %s candidate overlapped %s — "
+                            "picked the closest (%s, gap %.1fs)",
+                            m.folder.kind,
+                            folder,
+                            m.folder.path,
+                            m.gap_s,
+                        )
+                settled = [m for m in matches if is_settled(m.folder, settle_s)]
+                if len(settled) < len(matches):
+                    log.info(
+                        "2P transfer: %d matched folder(s) for %s not yet settled "
+                        "(still writing) — will retry on a later `octacam process` run",
+                        len(matches) - len(settled),
+                        folder,
+                    )
+                if not settled:
+                    continue
+                delete_wanted = folder_delete_after.get(folder, False)
+                verify = cfg.transfer.checksum or delete_wanted
+                checksum = delete_wanted
+                for m in settled:
+                    matched_this_run.add(m.folder.path.resolve())
+                    dest_2p = dest / "2P" / m.folder.path.name
+                    if dry_run:
+                        log.info(
+                            "[dry-run] 2P transfer (%s): %s -> %s",
+                            m.confidence,
+                            m.folder.path,
+                            dest_2p,
+                        )
+                        continue
+                    result = transfer_tree(
+                        m.folder.path, dest_2p, verify=verify, checksum=checksum
+                    )
+                    transfer_failed += len(result.failed)
+                    folder_failed[folder] = folder_failed.get(folder, 0) + len(
+                        result.failed
+                    )
+                    if result and not result.failed:
+                        folder_2p_ok.setdefault(folder, []).append(m.folder.path)
+                    else:
+                        log.error("2P transfer: failed copying %s", m.folder.path)
+                    if m.folder.kind == "image":
+                        xml_src = m.folder.path / EXPERIMENT_XML_FILENAME
+                        if xml_src.is_file():
+                            transfer_folder(
+                                m.folder.path,
+                                dest,
+                                files_only=[xml_src],
+                                verify=verify,
+                                checksum=checksum,
+                            )
+                if not dry_run:
+                    record = build_match_record(settled, source_root)
+                    match_path = folder / TWOPHOTON_MATCH_FILENAME
+                    match_path.write_text(json.dumps(record, indent=2) + "\n")
+                    transfer_folder(
+                        folder,
+                        dest,
+                        files_only=[match_path],
+                        verify=verify,
+                        checksum=checksum,
+                    )
+
+        # --- Phase 3c: automatic 2P-only sweep --------------------------------
+        # Every [transfer.twophoton] source this run touched also gets swept
+        # for settled folders no take claimed (calibration/tuning/2P-only
+        # recordings, safe to store separately) — sequentially, automatically,
+        # right after the per-take matching above, not a separate manual step.
+        if not no_twophoton_sweep:
+            for (source_root, dest_root), (twophoton_cfg, checksum) in sweep_targets.items():
+                _n_copied, n_failed = _sweep_unclaimed_twophoton(
+                    source_root,
+                    dest_root,
+                    twophoton_cfg,
+                    checksum=checksum,
+                    dry_run=dry_run,
+                    also_exclude=frozenset(matched_this_run),
+                )
+                transfer_failed += n_failed
+
+        # --- Phase 4: delete-after-transfer -----------------------------------
+        if not dry_run:
+            for folder in folder_dest:
+                if not folder_delete_after.get(folder, False):
+                    continue
+                if folder in transcode_failed_folders:
+                    log.warning(
+                        "delete-after-transfer: skipping %s — it had a transcode "
+                        "failure this run",
+                        folder,
+                    )
+                    continue
+                if folder_failed.get(folder, 0):
+                    log.warning(
+                        "delete-after-transfer: skipping %s — %d file(s) failed "
+                        "to transfer",
+                        folder,
+                        folder_failed[folder],
+                    )
+                    continue
+                try:
+                    shutil.rmtree(folder)
+                    log.info(
+                        "delete-after-transfer: removed local %s (verified on NAS)",
+                        folder,
+                    )
+                except OSError as e:
+                    log.error("delete-after-transfer: failed to remove %s: %s", folder, e)
+                for src_2p in folder_2p_ok.get(folder, []):
+                    try:
+                        shutil.rmtree(src_2p)
+                        log.info(
+                            "delete-after-transfer: removed 2P source %s "
+                            "(verified on NAS)",
+                            src_2p,
+                        )
+                    except OSError as e:
+                        log.error(
+                            "delete-after-transfer: failed to remove %s: %s", src_2p, e
+                        )
+
     return transfer_failed
 
 
@@ -4069,6 +4581,10 @@ def _rebuild_process_argv(
     force: bool,
     config_dir: Path | None,
     delete_source: bool,
+    no_delete_source: bool,
+    delete_after_transfer: bool,
+    no_delete_after_transfer: bool,
+    no_twophoton_sweep: bool,
     dry_run: bool,
 ) -> list[str]:
     """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
@@ -4091,6 +4607,14 @@ def _rebuild_process_argv(
         argv.append("--recursive")
     if delete_source:
         argv.append("--delete-source")
+    if no_delete_source:
+        argv.append("--no-delete-source")
+    if delete_after_transfer:
+        argv.append("--delete-after-transfer")
+    if no_delete_after_transfer:
+        argv.append("--no-delete-after-transfer")
+    if no_twophoton_sweep:
+        argv.append("--no-twophoton-sweep")
     if dry_run:
         argv.append("--dry-run")
     if config_dir is not None:
@@ -4205,6 +4729,29 @@ def process(
             "--all", help="Process every recording folder still in the cache."
         ),
     ] = False,
+    twophoton_sweep: Annotated[
+        bool,
+        typer.Option(
+            "--twophoton-sweep",
+            help="2P-only mode: instead of processing recording folders, sweep "
+            "[transfer.twophoton].source for settled ThorSync/ThorImage folders "
+            "with no matching behavior take, and transfer them to "
+            "<transfer.directory>/2p_only/<experiment>/<date>/<name>. Requires "
+            "--config; ignores PATHS/--last/--session-id/--all.",
+        ),
+    ] = False,
+    migrate_layout: Annotated[
+        bool,
+        typer.Option(
+            "--migrate-layout",
+            help="One-time mode: instead of processing recording folders, "
+            "reorganize already-transferred recordings under [transfer].directory "
+            "from the old flat layout into Behavior/Renderings subfolders, "
+            "in place (a same-filesystem rename — no bytes are copied or "
+            "re-verified, so this cannot corrupt data). Requires --config; "
+            "ignores PATHS/--last/--session-id/--all. Safe to re-run.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -4253,7 +4800,47 @@ def process(
             "--delete-source",
             "-d",
             help="Delete each source .mkv/.raw once it transcodes successfully. "
-            "The recording_summary.json is kept.",
+            "The recording_summary.json is kept. Also true when the recording's "
+            "[transcode].delete_source config default is set; --no-delete-source "
+            "forces it off regardless of that default.",
+        ),
+    ] = False,
+    no_delete_source: Annotated[
+        bool,
+        typer.Option(
+            "--no-delete-source",
+            help="Force --delete-source off even when [transcode].delete_source "
+            "is set in config.",
+        ),
+    ] = False,
+    delete_after_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--delete-after-transfer",
+            help="Once a folder's transfer (behavior + any matched 2P data) is "
+            "100% checksum-verified on the NAS, delete the local recording "
+            "folder and the matched 2P source folder(s) on the share. Always "
+            "forces checksum verification, regardless of [transfer].checksum. "
+            "Also true when [transfer].delete_after_transfer is set in config; "
+            "--no-delete-after-transfer forces it off regardless.",
+        ),
+    ] = False,
+    no_delete_after_transfer: Annotated[
+        bool,
+        typer.Option(
+            "--no-delete-after-transfer",
+            help="Force --delete-after-transfer off even when "
+            "[transfer].delete_after_transfer is set in config.",
+        ),
+    ] = False,
+    no_twophoton_sweep: Annotated[
+        bool,
+        typer.Option(
+            "--no-twophoton-sweep",
+            help="Skip the automatic 2P-only sweep this run otherwise does, "
+            "sequentially, right after per-take 2P matching, for every "
+            "[transfer.twophoton] source it touched (settled folders no take "
+            "claimed — see --twophoton-sweep, the same logic run standalone).",
         ),
     ] = False,
     progress_style: Annotated[
@@ -4306,9 +4893,19 @@ def process(
     recording), --last session (the last GUI session), --session-id (an exact
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
+
+    --twophoton-sweep and --migrate-layout are separate modes (ignore PATHS/
+    --last/--session-id/--all/--detach) — see their own help text.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
+
+    if twophoton_sweep:
+        _run_twophoton_sweep(config_dir, dry_run)
+        return
+    if migrate_layout:
+        _run_layout_migration(config_dir, dry_run)
+        return
 
     do_transcode = not no_transcode
     do_grid = not no_grid
@@ -4333,6 +4930,10 @@ def process(
             force=force,
             config_dir=config_dir,
             delete_source=delete_source,
+            no_delete_source=no_delete_source,
+            delete_after_transfer=delete_after_transfer,
+            no_delete_after_transfer=no_delete_after_transfer,
+            no_twophoton_sweep=no_twophoton_sweep,
             dry_run=dry_run,
         )
         status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
@@ -4365,6 +4966,11 @@ def process(
         completed = 0
         skipped = 0
         interrupted = False
+        # A folder with any failed transcode this run must never be deleted by
+        # --delete-after-transfer, even if every *other* camera's output
+        # transferred cleanly — the failed camera's raw file was never
+        # archived anywhere.
+        transcode_failed_folders: set[Path] = set()
 
         # --- Transcode phase ------------------------------------------------
         if do_transcode:
@@ -4443,15 +5049,19 @@ def process(
                                 typer.echo(result)
                             except Exception as e:  # one bad file must not abort the batch
                                 failures += 1
+                                transcode_failed_folders.add(folder)
                                 log.error("Failed to transcode %s: %s", input_path, e)
                                 continue
                             completed += 1
                             folder_outputs.setdefault(folder, []).append(output)
                             if reporter is not None:
                                 reporter.item_done()
-                            if delete_source and not dry_run:
+                            effective_delete_source = not no_delete_source and (
+                                delete_source or cfg.transcode.delete_source
+                            )
+                            if effective_delete_source and not dry_run:
                                 _delete_source_files(input_path)
-                            elif delete_source and dry_run:
+                            elif effective_delete_source and dry_run:
                                 log.info("[dry-run] would delete source: %s", input_path)
                     except KeyboardInterrupt:
                         interrupted = True
@@ -4487,6 +5097,10 @@ def process(
                 force,
                 reporter=reporter,
                 job_dir=job_dir,
+                delete_after_transfer=delete_after_transfer,
+                no_delete_after_transfer=no_delete_after_transfer,
+                transcode_failed_folders=frozenset(transcode_failed_folders),
+                no_twophoton_sweep=no_twophoton_sweep,
             )
 
         # Report outside the `with` so messages land after the live bar is gone.
