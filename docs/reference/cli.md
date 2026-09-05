@@ -223,13 +223,15 @@ octacam cache clear [--all] [--yes]
 
 Inspect and clear octacam's on-disk cache under `~/.cache/octacam` (see
 `OCTACAM_CACHE_DIR` below): the recording list backing `octacam process
---last/--all`, detached-job logs, and small activity markers.
+--last/--all`, detached-job logs, small activity markers, and the last-used
+fps/duration/profile (see [GUI → Remembering last-used
+settings](../guide/gui.md#remembering-last-used-settings)).
 
 | Command | Purpose |
 | --- | --- |
-| `info` | Show the cache location, total size, and a breakdown (recordings, jobs, live markers). |
+| `info` | Show the cache location, total size, and a breakdown (recordings, jobs, live markers, last-used settings). |
 | `path` | Print the cache directory (for scripting). |
-| `clear` | Remove the recording list and stale activity markers. |
+| `clear` | Remove the recording list, last-used settings, and stale activity markers. |
 
 `clear` **never touches** a live capture, transcode, or detached job — those are
 reported as kept. Finished detached-job logs are kept by default; add `--all` to

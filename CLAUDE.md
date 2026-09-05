@@ -121,7 +121,7 @@ src/octacam/
   transfer.py       octacam process → mirror recordings to storage
   twophoton_transfer.py  discover/settle/match ThorSync/ThorImage folders (see below)
   grid.py           octacam process → composite grid videos (ffmpeg xstack)
-  session_cache.py  remembers recording folders for `process --last/--all`
+  session_cache.py  recording folders for `process --last/--all` + last-used settings
   camera.py         re-exports CameraSystem/Camera/PARAM_NODES
   cameras/          the backend layer (see below)
   plugins/          serial-hardware plugins (triggerbox, twophoton, flywheel)
@@ -702,6 +702,22 @@ rig.
 an optional-value option (bare `--flag` vs `--flag X`, e.g. `process --last`) is
 implemented with a custom `TyperCommand.parse_args` (`_ProcessCommand` /
 `_inject_default_last` in `cli.py`), not click internals.
+
+**Last-used settings** (`session_cache.load_last_used`/`save_last_used`, a
+`last_used.json` sibling of the recording cache): `gui`/`record` remember the
+fps/duration/`--user` last actually in effect on this machine, so a multi-day
+recording campaign doesn't need re-specifying them every launch. Deliberately
+per-machine cache, not the git-tracked `octacam_config.toml` — writing
+day-to-day tweaks into a shared, version-controlled rig config would just
+produce constant uncommitted diffs. `gui` has no `--fps`/`--duration` flags of
+its own (set live in the Record tab), so the cache always seeds those; `record`
+only fills in whichever of `--fps`/`--duration`/`--user` weren't passed
+explicitly. A cached `--user` that no longer matches any configured profile is
+logged and ignored (`_load_config_for_user(..., user_from_cache=True)`) rather
+than exiting like a typo'd explicit `--user` would — the operator never typed
+it this time. Saved back on clean shutdown from the actually-resolved settings
+(so a value changed live in the GUI is what's remembered, not the launch-time
+one); `octacam cache info`/`clear` picks it up automatically.
 
 ## Benchmark / diagnostics
 

@@ -202,3 +202,49 @@ def test_capture_active_ignores_and_cleans_stale_marker(cache_dir):
     os.utime(stale, (old, old))
     assert session_cache.capture_active() is False  # not counted as live
     assert not stale.exists()  # and swept once clearly stale
+
+
+# ------------------------------------------------------- last-used settings cache
+
+
+def test_load_last_used_empty_when_no_cache(cache_dir):
+    assert session_cache.load_last_used() == {}
+
+
+def test_save_and_load_last_used(cache_dir):
+    session_cache.save_last_used(fps=30.0, duration_s=60.0, user="MD")
+    assert session_cache.load_last_used() == {
+        "fps": 30.0,
+        "duration_s": 60.0,
+        "user": "MD",
+    }
+
+
+def test_save_last_used_merges_omitted_fields(cache_dir):
+    # A `record` run with no --user shouldn't erase a previously cached one.
+    session_cache.save_last_used(fps=30.0, duration_s=60.0, user="MD")
+    session_cache.save_last_used(fps=15.0, duration_s=60.0)
+    assert session_cache.load_last_used() == {
+        "fps": 15.0,
+        "duration_s": 60.0,
+        "user": "MD",
+    }
+
+
+def test_save_last_used_all_none_is_a_noop(cache_dir):
+    session_cache.save_last_used()
+    assert not (session_cache.cache_dir() / session_cache.LAST_USED_FILENAME).exists()
+
+
+def test_load_last_used_ignores_corrupt_file(cache_dir):
+    path = session_cache.cache_dir() / session_cache.LAST_USED_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+    assert session_cache.load_last_used() == {}
+
+
+def test_clear_last_used(cache_dir):
+    session_cache.save_last_used(fps=30.0)
+    assert session_cache.clear_last_used() is True
+    assert session_cache.load_last_used() == {}
+    assert session_cache.clear_last_used() is False  # already gone

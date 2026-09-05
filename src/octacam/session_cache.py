@@ -37,6 +37,13 @@ log = logging.getLogger("octacam")
 
 CACHE_FILENAME = "recordings.jsonl"
 LOCK_FILENAME = "recordings.lock"
+# The fps/duration/--user a `gui`/`record` launch last actually used on this
+# machine, so the next launch can start from there instead of the config
+# file's un-adjusted defaults — handy for a multi-day recording campaign
+# where the operator tunes these once and keeps relaunching. Deliberately
+# separate from `octacam_config.toml` (git-tracked, shared across machines):
+# this is day-to-day, per-machine state, not rig policy.
+LAST_USED_FILENAME = "last_used.json"
 # Keep a month of history: enough to still find "the last session" after a gap,
 # while bounding the file to a few hundred tiny lines even on a busy rig.
 RETENTION_DAYS = 30
@@ -195,6 +202,73 @@ def record_recording(
         # timedelta overflow, anything) must never propagate into recording
         # teardown.
         log.warning("Could not update the recording cache: %s", e)
+
+
+def _last_used_file() -> Path:
+    return cache_dir() / LAST_USED_FILENAME
+
+
+def load_last_used() -> dict:
+    """The last-used ``{"fps", "duration_s", "user"}`` cache, or ``{}``.
+
+    Tolerant by design (missing file, unreadable, or corrupt JSON all read as
+    "nothing cached yet") — this is a convenience default, never a required
+    source of truth.
+    """
+    try:
+        text = _last_used_file().read_text()
+    except OSError:
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_last_used(
+    *,
+    fps: float | None = None,
+    duration_s: float | None = None,
+    user: str | None = None,
+) -> None:
+    """Persist whichever of fps/duration/user were actually used this run.
+
+    Only the fields passed (non-``None``) are updated; an omitted one keeps
+    whatever was already cached — so, e.g., a `record` run made with no
+    ``--user`` doesn't erase a previously cached profile selection. Best-effort:
+    a cache failure is logged but never raised, matching :func:`record_recording`.
+    """
+    updates = {
+        k: v
+        for k, v in {"fps": fps, "duration_s": duration_s, "user": user}.items()
+        if v is not None
+    }
+    if not updates:
+        return
+    try:
+        with _locked():
+            data = load_last_used()
+            data.update(updates)
+            path = _last_used_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, path)
+    except Exception as e:
+        log.warning("Could not update the last-used settings cache: %s", e)
+
+
+def clear_last_used() -> bool:
+    """Delete the last-used settings cache. Returns True if it existed."""
+    path = _last_used_file()
+    try:
+        if path.exists():
+            path.unlink()
+            return True
+    except OSError as e:
+        log.debug("Could not remove the last-used settings cache %s: %s", path, e)
+    return False
 
 
 def _existing(folders: list[Path]) -> list[Path]:

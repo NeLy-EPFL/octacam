@@ -16,6 +16,7 @@ os.environ.setdefault("PYLON_CAMEMU", "2")
 from typer.testing import CliRunner
 
 import octacam
+from octacam import session_cache
 from octacam.cli import (
     _LOCK_UNAVAILABLE,
     _acquire_instance_lock,
@@ -157,6 +158,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
     from octacam.cameras import BackendError
     from octacam.controller import RecordingSettings
 
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     real_cs = cameras_mod.CameraSystem
 
     class BusyCameraSystem:
@@ -258,6 +260,7 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
     # plugins.teardown_all() so nothing is left half-initialized.
     import octacam.cli as cli_mod
 
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     _FACADE_CALLS.clear()
     cam = SimpleNamespace(serial_number="s1", name="cam1")
     config = SimpleNamespace(
@@ -297,6 +300,7 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     # closes cameras once) — never a bare system.close() that races the monitor.
     import octacam.cli as cli_mod
 
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     _FACADE_CALLS.clear()
     cam = SimpleNamespace(serial_number="s1", name="cam1")
     config = SimpleNamespace(
@@ -358,6 +362,7 @@ def test_record_user_resolves_transfer_directory_override(tmp_path, monkeypatch)
     import octacam.cli as cli_mod
     from octacam.config import TransferConfig, TransferUserOverride
 
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     _FACADE_CALLS.clear()
     cam = SimpleNamespace(serial_number="s1", name="cam1")
     transfer = TransferConfig(
@@ -438,6 +443,146 @@ def test_record_user_unknown_exits_with_known_users_listed(tmp_path, monkeypatch
     assert result.exit_code != 0
     assert "ZZ" in result.output
     assert "MD" in result.output
+
+
+def _record_harness(monkeypatch, tmp_path, *, transfer=None):
+    """Wire up `record` with fake cameras/plugins/controller so it runs to
+    completion without touching hardware; returns the `captured` dict the
+    fake `_settings_from_record` fills in with the record config it was
+    given, so a test can assert on the resolved fps/duration/transfer."""
+    import octacam.cli as cli_mod
+
+    _FACADE_CALLS.clear()
+    cam = SimpleNamespace(serial_number="s1", name="cam1", frames_recorded=1)
+
+    class FakeRecordConfig(SimpleNamespace):
+        def model_copy(self, update=None):
+            return FakeRecordConfig(**{**vars(self), **(update or {})})
+
+    config = SimpleNamespace(
+        cameras=[cam], backend="fake", record=FakeRecordConfig(fps=1.0),
+        transcode=None, transfer=transfer,
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
+    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+
+    class FakePlugins:
+        plugins: list = []
+
+        def setup_all(self):
+            pass
+
+        def teardown_all(self):
+            pass
+
+        def default_start_params(self, *_a, **_k):
+            return {}
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+
+    captured = {}
+
+    def fake_settings_from_record(record, transcode, transfer):
+        captured["record"] = record
+        captured["transfer"] = transfer
+        settings = SimpleNamespace(
+            save_dir=str(tmp_path / "out"),
+            duration_s=1.0,
+            fps=record.fps,
+            video_format=lambda: SimpleNamespace(extension="mkv"),
+        )
+        captured["settings"] = settings
+        return settings
+
+    monkeypatch.setattr(cli_mod, "_settings_from_record", fake_settings_from_record)
+
+    class FakeController:
+        recording_active = False
+
+        def __init__(self, *a, **k):
+            pass
+
+        def start_recording(self, *a, **k):
+            return SimpleNamespace(ok=True, message="")
+
+        def join(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
+    monkeypatch.setattr(
+        "octacam.controller.normalize_save_dir", lambda s: s, raising=False
+    )
+    return captured
+
+
+def test_record_applies_cached_fps_duration_when_not_given(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    session_cache.save_last_used(fps=42.0, duration_s=99.0)
+    captured = _record_harness(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["record"].fps == 42.0
+    assert captured["settings"].duration_s == 99.0
+
+
+def test_record_explicit_fps_duration_beat_the_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    session_cache.save_last_used(fps=42.0, duration_s=99.0)
+    captured = _record_harness(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["record", str(tmp_path), "--fps", "7", "--duration", "3"])
+    assert result.exit_code == 0, result.output
+    assert captured["record"].fps == 7.0
+
+
+def test_record_saves_last_used_on_clean_completion(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    _record_harness(monkeypatch, tmp_path)
+
+    result = runner.invoke(app, ["record", str(tmp_path), "--fps", "17", "--duration", "5"])
+    assert result.exit_code == 0, result.output
+    assert session_cache.load_last_used() == {"fps": 17.0, "duration_s": 5.0}
+
+
+def test_record_applies_cached_user_when_not_given(tmp_path, monkeypatch):
+    from octacam.config import TransferConfig, TransferUserOverride
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    session_cache.save_last_used(user="MA")
+    transfer = TransferConfig(
+        directory="/mnt/store/default",
+        users={"MA": TransferUserOverride(directory="/mnt/store/MA/octacam_2P")},
+    )
+    captured = _record_harness(monkeypatch, tmp_path, transfer=transfer)
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["transfer"].directory == "/mnt/store/MA/octacam_2P"
+
+
+def test_record_ignores_stale_cached_user_instead_of_exiting(tmp_path, monkeypatch):
+    # An explicit --user "ZZ" that doesn't match any profile is a hard error
+    # (see test_record_user_unknown_exits_with_known_users_listed); a *cached*
+    # "ZZ" from a rig reconfigured since the last run must not be — the
+    # operator never typed it this time.
+    from octacam.config import TransferConfig, TransferUserOverride
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    session_cache.save_last_used(user="ZZ")
+    transfer = TransferConfig(
+        directory="/mnt/store/default",
+        users={"MD": TransferUserOverride(directory="/mnt/store/MD")},
+    )
+    captured = _record_harness(monkeypatch, tmp_path, transfer=transfer)
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert captured["transfer"].directory == "/mnt/store/default"  # no override applied
 
 
 def test_browser_skip_reason(monkeypatch):

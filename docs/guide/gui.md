@@ -73,6 +73,29 @@ this automatically when it would be pointless or land on the wrong machine:
 
 In those cases it prints the URL so you can open it yourself.
 
+## Remembering last-used settings
+
+`gui` and `record` remember the fps, duration, and
+[transfer profile](processing.md#per-user-transfer-profiles) (`--user`) last
+used on this machine, in a small per-machine cache (`octacam cache info` shows
+it; `octacam cache clear` removes it) — separate from the rig's
+`octacam_config.toml`, which stays shared and git-tracked across machines.
+This is meant to smooth out a multi-day recording campaign: set fps/duration
+once, close octacam, and the next launch on the same machine starts from
+where you left off instead of the config file's defaults.
+
+- On `gui` (which has no `--fps`/`--duration` flags of its own — those are set
+  live in the Record tab) the cached values always seed the session; an
+  explicit `--user` still overrides a cached profile.
+- On `record`, an explicit `--fps`/`--duration`/`--user` always wins; the
+  cache only fills in whichever of those you didn't pass.
+- Whatever was actually in effect when octacam shuts down cleanly is saved
+  back, so the cache tracks the fps/duration you ended up using — including
+  one you changed live in the GUI — not just what you launched with.
+- A cached profile that no longer exists in the rig's config (e.g. removed
+  since) is logged and ignored rather than failing the launch — unlike typing
+  a bad `--user` yourself, which still exits with an error.
+
 ## Remote operation over SSH
 
 Keep the default loopback bind and forward the port from your machine:

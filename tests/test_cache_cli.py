@@ -217,6 +217,24 @@ def test_cache_info_breakdown(cache_dir, tmp_path):
     assert "markers" in out
 
 
+def test_cache_info_reports_last_used(cache_dir):
+    session_cache.save_last_used(fps=30.0, duration_s=60.0, user="MD")
+    result = runner.invoke(app, ["cache", "info"])
+    assert result.exit_code == 0
+    assert "last-used" in result.output
+    assert "fps=30" in result.output
+    assert "duration=60s" in result.output
+    assert "user=MD" in result.output
+
+
+def test_cache_info_no_last_used_row_when_none_cached(cache_dir, tmp_path):
+    rec = tmp_path / "run1"
+    rec.mkdir()
+    session_cache.record_recording(rec, "sess", "gui")  # cache dir exists, but no last-used yet
+    result = runner.invoke(app, ["cache", "info"])
+    assert "last-used" not in result.output
+
+
 # ---------------------------------------------------------------- cache clear
 
 
@@ -263,6 +281,23 @@ def test_cache_clear_protects_live_job(cache_dir):
         assert result.exit_code == 0, result.output
         assert "Kept:" in result.output and "1 live job" in result.output
         assert pj.job_dir("live1").exists()
+
+
+def test_cache_clear_yes_removes_last_used(cache_dir):
+    session_cache.save_last_used(fps=30.0)
+
+    result = runner.invoke(app, ["cache", "clear", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "last-used settings" in result.output
+    assert session_cache.load_last_used() == {}
+
+
+def test_cache_clear_prompt_lists_last_used(cache_dir):
+    session_cache.save_last_used(fps=30.0)
+    result = runner.invoke(app, ["cache", "clear"], input="n\n")
+    assert result.exit_code == 1  # typer.Abort
+    assert "last-used fps/duration/profile" in result.output
+    assert session_cache.load_last_used() == {"fps": 30.0}  # nothing was cleared
 
 
 def test_cache_clear_nothing_needed(cache_dir):

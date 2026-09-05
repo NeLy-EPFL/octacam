@@ -564,14 +564,29 @@ def gui(
             f"Choose a free one with --port (e.g. --port {port + 1})."
         )
 
-    config = _load_config_for_user(config_dir, user)
+    # gui has no --fps/--duration of its own (those are set live in the GUI),
+    # so a cached value always applies; --user does exist, so it only falls
+    # back to the cache when not explicitly given.
+    last_used = session_cache.load_last_used()
+    user_from_cache = user is None and bool(last_used.get("user"))
+    if user_from_cache:
+        user = last_used["user"]
+
+    config = _load_config_for_user(config_dir, user, user_from_cache=user_from_cache)
 
     # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()
 
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
 
-    settings = _settings_from_record(config.record, config.transcode, config.transfer)
+    record_cfg = (
+        config.record.model_copy(update={"fps": last_used["fps"]})
+        if last_used.get("fps") is not None
+        else config.record
+    )
+    settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
+    if last_used.get("duration_s") is not None:
+        settings.duration_s = last_used["duration_s"]
     # One session id for this GUI run; every recording made before shutdown is
     # tagged with it in the session cache so `octacam process --last session`
     # can find the whole batch later (and we print the commands on the way out).
@@ -770,6 +785,13 @@ def gui(
         # just print the ready-to-run `octacam process` hints.
         state = getattr(getattr(app, "state", None), "app_state", None)
         process_after = bool(getattr(state, "process_after", False))
+        # Remember whatever fps/duration/profile were actually in effect, so the
+        # next launch on this machine starts from there instead of the config
+        # file's un-adjusted defaults.
+        final_settings = controller.get_settings()
+        session_cache.save_last_used(
+            fps=final_settings.fps, duration_s=final_settings.duration_s, user=user
+        )
         _finish_gui_session(session_id, config_dir, process_after)
         log.info("octacam stopped.")
 
@@ -2640,7 +2662,16 @@ def record(
     from octacam.controller import RecordingController, normalize_save_dir
     from octacam.plugins import build_plugins
 
-    config = _load_config_for_user(config_dir, user)
+    last_used = session_cache.load_last_used()
+    if fps is None and last_used.get("fps") is not None:
+        fps = last_used["fps"]
+    if duration is None and last_used.get("duration_s") is not None:
+        duration = last_used["duration_s"]
+    user_from_cache = user is None and bool(last_used.get("user"))
+    if user_from_cache:
+        user = last_used["user"]
+
+    config = _load_config_for_user(config_dir, user, user_from_cache=user_from_cache)
 
     # Apply the fps override to the [record] section before resolving the
     # templated save directory from it.
@@ -2770,6 +2801,11 @@ def record(
         controller.close()
         plugins.teardown_all()
         capture_stack.close()
+        # Remember what was actually used, so the next `record` on this machine
+        # starts from there instead of the config file's un-adjusted defaults.
+        session_cache.save_last_used(
+            fps=settings.fps, duration_s=settings.duration_s, user=user
+        )
 
     extension = settings.video_format().extension
     for camera in system:
@@ -4003,11 +4039,19 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     return result
 
 
-def _load_config_for_user(config_dir: Path, user: str | None):
+def _load_config_for_user(
+    config_dir: Path, user: str | None, *, user_from_cache: bool = False
+):
     """``load_config_dir``, plus applying ``--user``'s
     ``[transfer.users.<user>]`` override. Exits with a clear message if
     *user* doesn't match a configured profile — never silently proceeds
-    with the wrong destination."""
+    with the wrong destination.
+
+    *user_from_cache* marks a profile that came from the last-used-settings
+    cache rather than an explicit ``--user`` on this invocation: a stale
+    cached profile (e.g. removed from the config since) is only logged and
+    ignored, since the operator never actually typed it this time.
+    """
     from octacam.config import load_config_dir, resolve_transfer_for_user
 
     config = load_config_dir(config_dir)
@@ -4015,7 +4059,10 @@ def _load_config_for_user(config_dir: Path, user: str | None):
         try:
             config.transfer = resolve_transfer_for_user(config.transfer, user)
         except ValueError as e:
-            sys.exit(str(e))
+            if user_from_cache:
+                log.warning("Ignoring last-used profile %r: %s", user, e)
+            else:
+                sys.exit(str(e))
     return config
 
 
@@ -5922,6 +5969,7 @@ def cache_info() -> None:
     live_markers = session_cache.transcode_running() + session_cache.capture_running()
     rec_size = _human_size(session_cache.dir_size(root / session_cache.CACHE_FILENAME))
     jobs_size = _human_size(session_cache.dir_size(process_jobs.jobs_dir()))
+    last_used = session_cache.load_last_used()
 
     typer.echo(f"{root}  ({_human_size(session_cache.dir_size(root))})")
     typer.echo(
@@ -5932,6 +5980,15 @@ def cache_info() -> None:
         f"  jobs         {jobs_size:>8}   {live_jobs} live, {finished_jobs} finished"
     )
     typer.echo(f"  markers      {'—':>8}   {live_markers} live")
+    if last_used:
+        parts = []
+        if "fps" in last_used:
+            parts.append(f"fps={last_used['fps']:g}")
+        if "duration_s" in last_used:
+            parts.append(f"duration={last_used['duration_s']:g}s")
+        if "user" in last_used:
+            parts.append(f"user={last_used['user']}")
+        typer.echo(f"  last-used    {'—':>8}   {', '.join(parts)}")
 
 
 @cache_app.command("clear")
@@ -5962,6 +6019,9 @@ def cache_clear(
     # never both "Cleared" and "Kept: live".
     n_recordings = session_cache.recordings_count()
     rec_exists = (session_cache.cache_dir() / session_cache.CACHE_FILENAME).exists()
+    last_used_exists = (
+        session_cache.cache_dir() / session_cache.LAST_USED_FILENAME
+    ).exists()
 
     if not yes:
         _, pre_finished = process_jobs.job_dir_counts()
@@ -5971,6 +6031,8 @@ def cache_clear(
                 f"the recording list ({n_recordings} "
                 f"{_plural(n_recordings, 'entry', 'entries')})"
             )
+        if last_used_exists:
+            targets.append("the last-used fps/duration/profile")
         if all_ and pre_finished:
             targets.append(
                 f"{pre_finished} finished detached-job "
@@ -5987,6 +6049,7 @@ def cache_clear(
         typer.confirm("Proceed?", abort=True)
 
     removed_rec = session_cache.clear_recordings()
+    removed_last_used = session_cache.clear_last_used()
     swept, _live_markers = session_cache.sweep_orphan_markers()
     removed_jobs = 0
     if all_:
@@ -5995,6 +6058,8 @@ def cache_clear(
     cleared = []
     if removed_rec:
         cleared.append("recording list")
+    if removed_last_used:
+        cleared.append("last-used settings")
     if swept:
         cleared.append(f"{swept} stale {_plural(swept, 'marker', 'markers')}")
     if removed_jobs:
