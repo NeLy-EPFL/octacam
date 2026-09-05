@@ -243,6 +243,16 @@ class TwoPhotonTransferConfig(BaseModel):
     even opened for verification (looser than ``match_window_s`` is fine —
     an exact edge-count match is decisive regardless of how loose the coarse
     timestamp gap was).
+
+    ``assemble_tiff_stacks`` consolidates ThorImage's per-frame streaming-mode
+    TIFFs (one ``.tif`` per frame per channel — thousands of files on a real
+    recording) into one OME-TIFF stack per channel at transfer time, instead
+    of dumping every per-frame file onto the NAS. Degrades to a plain
+    per-file copy automatically, like ``verify_with_signals`` does without
+    ``h5py``, when the ``twophoton`` extra's ``tifffile`` dependency is
+    absent or when a channel's file set can't be safely assembled
+    (non-contiguous/duplicate frame indices, or its count matches neither
+    ``Experiment.xml``'s own ``Timelapse`` timepoints nor ``ZStage`` steps).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -252,6 +262,7 @@ class TwoPhotonTransferConfig(BaseModel):
     settle_s: float = 300.0
     verify_with_signals: bool = True
     verify_window_s: float = 3600.0
+    assemble_tiff_stacks: bool = True
 
     @field_validator("source", mode="before")
     @classmethod

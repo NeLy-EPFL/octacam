@@ -106,7 +106,7 @@ def _thorimage_start_time(experiment_xml: Path) -> float | None:
         return None
 
 
-def _thorimage_timepoints(experiment_xml: Path) -> int | None:
+def thorimage_timepoints(experiment_xml: Path) -> int | None:
     """Parse ``<Timelapse timepoints="...">`` from a ThorImage ``Experiment.xml``
     — the acquisition's own recorded frame count, for cross-checking against a
     verified segment's ``FrameOut`` edge count. None if missing/unparseable."""
@@ -385,7 +385,7 @@ def match_takes_to_twophoton_batch(
                 if c.kind != "image" or c.path in claimed_folders:
                     continue
                 if c.path not in timepoints_cache:
-                    timepoints_cache[c.path] = _thorimage_timepoints(
+                    timepoints_cache[c.path] = thorimage_timepoints(
                         c.path / EXPERIMENT_XML_FILENAME
                     )
                 timepoints = timepoints_cache[c.path]

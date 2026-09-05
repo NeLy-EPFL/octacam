@@ -462,11 +462,70 @@ against a real 2P rig; the durable findings:
   weaker than `[transfer].checksum`) rather than transcode-gated, and it never
   deletes a folder that had a transcode failure this run even if every other
   camera's output transferred cleanly.
+- **Run-ordering gap, fixed**: a behavior take can be finalized by one
+  `process` run before its true 2P counterpart has even appeared/settled on
+  the share yet (confirmed on real data — see
+  `TWOPHOTON_MATCHING_BUG_REPORT.md`); nothing used to ever revisit an
+  already-finalized take, so the pair was permanently missed even though the
+  timestamps genuinely overlapped. Fixed with a `twophoton_pending.json`
+  sidecar (written instead of `twophoton_match.json` whenever Phase 3
+  finalizes an armed take with zero settled matches) that
+  `_pending_twophoton_takes` finds via the same cache-wide
+  `session_cache.all_folders()` reach `_already_matched_twophoton_paths`
+  already uses. `_sweep_unclaimed_twophoton` now retroactively batch-matches
+  every pending take against newly-settled, still-unclaimed folders *before*
+  writing any of them off as standalone 2P-only data — in both the automatic
+  post-`process` sweep and the standalone `--twophoton-sweep` mode, since
+  either can be the first run to see a late-arriving 2P folder. Shares the
+  same accepted limitation as `_already_matched_twophoton_paths`: a take
+  whose local folder `--delete-after-transfer` already removed (or that has
+  aged out of `session_cache`'s `RETENTION_DAYS`) can no longer be found this
+  way — the pending marker lives only in the take's own local folder, not on
+  the NAS.
 - **Still deferred**: a synced behavior+2P *preview video* (different fps,
   same wall-clock window) is out of scope even now that `twophoton_signals.py`
   reads `Episode001.h5`'s edges for matching *verification* — that's a
   different consumer of the same data (per-frame alignment for a rendered
   video, not a yes/no pairing check) and still needs its own design pass.
+- **TIFF stack assembly (`twophoton_tiff.py`)**: ThorImage's streaming-mode
+  capture writes one `.tif` file **per frame per channel** — a 1500-timepoint,
+  2-channel recording is 3000 loose files. Neither `<Streaming enable>` nor
+  `<CaptureMode mode>` in `Experiment.xml` reliably says "already one file" vs
+  "needs assembly" — every real recording inspected (streaming, Z-stack, and
+  `rawData="1"` aborted test captures) writes per-frame files or none at all,
+  never a native single stack — so detection is disk-truth-driven: count each
+  channel's actual files (from `<Wavelength name>`), find which of the 4
+  underscore-separated numeric groups in the filename actually varies (never a
+  hardcoded position — streaming varies position 3, a Z-stack varies position
+  2, both confirmed on real data), then cross-check the count against
+  `Timelapse/@timepoints` (T-axis) or `ZStage/@steps` (Z-axis) — a real
+  truncated/incomplete recording (confirmed on production data: a folder
+  declaring 1000 timepoints with only 89 real files on disk) fails this check
+  and falls back to a plain per-file copy rather than assembling an
+  incomplete stack. One OME-TIFF per channel, not one combined file — a
+  structural/reference channel (motion-correction only) and a functional
+  channel (e.g. GCaMP, ROI/ΔF-F extraction) are consumed by different
+  pipeline stages that never need both loaded together, and combining them
+  would assume a per-timepoint correspondence between channels that can't be
+  verified from `Experiment.xml` alone. **`tifffile.imread()` is unsafe** for
+  reading a single source frame here — confirmed on real data that ThorImage
+  already embeds real OME-XML in a Z-stack/streaming set's first file,
+  cross-referencing every sibling file by name (`<TiffData FirstZ FirstC>
+  <UUID FileName=.../>`), and `imread()` follows that linkage, silently
+  returning a multi-file-stitched array instead of just one file's own frame
+  — always read via `TiffFile(path).pages[0].asarray()` instead. Available at
+  transfer time (`[transfer.twophoton].assemble_tiff_stacks`, default on,
+  degrades automatically without the `twophoton` extra's `tifffile` the same
+  way `verify_with_signals` degrades without `h5py`) and as a standing,
+  manually-invoked `octacam process --reassemble-tiffs` mode for
+  already-transferred NAS data or data someone saved as multiple TIFFs by
+  hand — built as a real CLI mode rather than a throwaway script since the
+  assembly library already exists for the transfer-time hook. The ad-hoc mode
+  holds a higher safety bar than the transfer-time hook (it deletes the
+  now-redundant per-frame originals): every assembled page is read back and
+  compared pixel-for-pixel against its source frame before anything is
+  removed, one file at a time, only after the assembled stack is safely
+  written.
 
 ## Arduino firmware & auto-flash
 

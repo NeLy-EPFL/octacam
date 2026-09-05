@@ -320,6 +320,7 @@ def transfer_tree(
     verify: bool = True,
     checksum: bool = False,
     on_progress: TransferCallback | None = None,
+    exclude: frozenset[Path] | None = None,
 ) -> TransferResult:
     """Copy every file under *src_dir*, recursively, mirroring its subdirectory
     structure under *dest_dir*.
@@ -332,9 +333,17 @@ def transfer_tree(
     semantics are identical to :func:`transfer_folder` — just applied to a
     recursive file listing instead of an explicit one.
 
+    *exclude*, when given, is a set of absolute paths (as yielded by this
+    same ``src_dir.rglob("*")`` walk) to skip entirely — used by the 2P
+    transfer path to omit per-frame TIFFs that are being assembled into one
+    stack elsewhere instead of copied individually.
+
     Parameters mirror :func:`transfer_folder`; see there for details.
     """
-    candidates = sorted(p for p in src_dir.rglob("*") if p.is_file())
+    candidates = sorted(
+        p for p in src_dir.rglob("*")
+        if p.is_file() and (exclude is None or p not in exclude)
+    )
     result = TransferResult(dest=dest_dir)
 
     if not candidates:

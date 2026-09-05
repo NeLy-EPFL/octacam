@@ -3955,6 +3955,250 @@ def _already_matched_twophoton_paths(source_root: Path) -> set[Path]:
     return matched
 
 
+def _write_twophoton_pending(
+    folder: Path,
+    take,
+    *,
+    dest: Path,
+    source_root: Path,
+    twophoton_cfg,
+    checksum: bool,
+    verify: bool,
+) -> None:
+    """Record an armed take that this run finalized (behavior data
+    transferred) without finding a settled 2P match, so a later, independent
+    sweep — the only thing guaranteed to eventually run again against
+    *source_root* long after this take stops being explicitly fed into any
+    `process` invocation — can retroactively pair it against a 2P folder that
+    only settles afterwards (see :func:`_pending_twophoton_takes` and the
+    run-ordering-gap note in CLAUDE.md). Best-effort: a write failure (e.g. a
+    read-only folder) is logged, not fatal — the take's own transfer already
+    succeeded, only the 2P pairing is at stake."""
+    from octacam.transform import TWOPHOTON_PENDING_FILENAME
+
+    record = {
+        "start_time": take.start_time,
+        "duration_s": take.duration_s,
+        "camera_frame_counts": take.camera_frame_counts,
+        "dest": str(dest),
+        "source_root": str(source_root.resolve()),
+        "match_window_s": twophoton_cfg.match_window_s,
+        "verify_window_s": twophoton_cfg.verify_window_s,
+        "verify_with_signals": twophoton_cfg.verify_with_signals,
+        "assemble_tiff_stacks": twophoton_cfg.assemble_tiff_stacks,
+        "checksum": checksum,
+        "verify": verify,
+    }
+    try:
+        (folder / TWOPHOTON_PENDING_FILENAME).write_text(
+            json.dumps(record, indent=2) + "\n"
+        )
+    except OSError as e:
+        log.warning("2P transfer: couldn't record pending match state for %s: %s", folder, e)
+
+
+def _clear_twophoton_pending(folder: Path) -> None:
+    """Remove a stale pending-match marker once *folder*'s take got a settled
+    match this run — best-effort, a missing marker is not an error."""
+    from octacam.transform import TWOPHOTON_PENDING_FILENAME
+
+    try:
+        (folder / TWOPHOTON_PENDING_FILENAME).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log.warning("2P transfer: couldn't clear pending marker for %s: %s", folder, e)
+
+
+def _pending_twophoton_takes(source_root: Path):
+    """Every still-cached recording folder with an unresolved
+    ``twophoton_pending.json`` whose recorded source resolves to
+    *source_root*: an armed take a normal `process` run already finalized
+    without finding a settled 2P pair, kept around so a later sweep can
+    retroactively check it against a newly-settled 2P folder rather than
+    writing that folder off as standalone (the confirmed real bug — a
+    behavior take finalized before its true 2P counterpart appears/settles on
+    the share was permanently missed; see TWOPHOTON_MATCHING_BUG_REPORT.md).
+
+    Returns a list of ``(folder, TakeInfo, raw record dict)`` — the raw dict
+    carries the transfer context (dest/checksum/verify/match settings) the
+    caller needs to actually finalize a retroactive match.
+
+    Same reach and the same limitation as
+    :func:`_already_matched_twophoton_paths`: scans
+    :func:`session_cache.all_folders` (last RETENTION_DAYS, existing folders
+    only) — a take whose local folder was removed by
+    ``--delete-after-transfer`` before its true pair ever settled can no
+    longer be found this way."""
+    from octacam import session_cache
+    from octacam.transform import TWOPHOTON_PENDING_FILENAME
+    from octacam.twophoton_transfer import TakeInfo
+
+    resolved_source = source_root.resolve()
+    pending = []
+    for folder in session_cache.all_folders():
+        pending_path = folder / TWOPHOTON_PENDING_FILENAME
+        if not pending_path.is_file():
+            continue
+        record = _read_summary(pending_path)
+        if not record:
+            continue
+        try:
+            if Path(record["source_root"]).resolve() != resolved_source:
+                continue
+        except (KeyError, OSError):
+            continue
+        take = TakeInfo(
+            folder=folder,
+            start_time=record["start_time"],
+            duration_s=record["duration_s"],
+            camera_frame_counts=record.get("camera_frame_counts", []),
+        )
+        pending.append((folder, take, record))
+    return pending
+
+
+def _log_twophoton_assembly_preview(folder: Path, assemble: bool) -> None:
+    """One dry-run log line per channel — never per-file, which would spam
+    thousands of lines for exactly the folders this feature targets. Mirrors
+    the coarse-summary style the rest of this file's dry-run branches
+    already use (deliberately avoiding ``transfer_tree(dry_run=True)``'s own
+    per-file logging)."""
+    if not assemble:
+        return
+    from octacam.twophoton_tiff import plan_assembly
+
+    plan = plan_assembly(folder)
+    for ch in plan.ready:
+        log.info(
+            "[dry-run] 2P tiff-assemble: %s %s: would assemble %d frame(s) -> %s",
+            folder, ch.channel, len(ch.source_files), ch.dest_name,
+        )
+    for ch in plan.problems:
+        log.warning(
+            "[dry-run] 2P tiff-assemble: %s %s: %s — would copy %d frame file(s) individually",
+            folder, ch.channel, ch.reason, len(ch.source_files),
+        )
+
+
+def _transfer_image_folder_with_assembly(src: Path, dest: Path, *, verify: bool, checksum: bool, assemble: bool):
+    """``transfer_tree``, but for an ``image``-kind 2P folder: any channel
+    ``plan_assembly`` finds ready is excluded from the generic recursive copy
+    and replaced by one assembled OME-TIFF stack; anything that can't be
+    safely assembled (or assembly isn't enabled/available) falls through to
+    a plain per-file copy, same as today. Guarantees every source file ends
+    up on *dest* one way or another — an assembly failure means falling back
+    to copying those frames individually, never silently dropping them."""
+    from octacam.transfer import transfer_folder, transfer_tree
+    from octacam.twophoton_tiff import (
+        assemble_channel_stack,
+        make_progress_logger,
+        plan_assembly,
+    )
+    from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME
+
+    if not assemble:
+        return transfer_tree(src, dest, verify=verify, checksum=checksum)
+    plan = plan_assembly(src)
+    ready = plan.ready
+    if not ready:
+        return transfer_tree(src, dest, verify=verify, checksum=checksum)
+
+    exclude = frozenset(f for ch in ready for f in ch.source_files)
+    result = transfer_tree(src, dest, verify=verify, checksum=checksum, exclude=exclude)
+    experiment_xml = src / EXPERIMENT_XML_FILENAME
+    for ch in ready:
+        dest_path = dest / ch.dest_name
+        assembled = assemble_channel_stack(
+            ch.source_files, dest_path,
+            axis=ch.axis or "T",
+            experiment_xml=experiment_xml if experiment_xml.is_file() else None,
+            on_progress=make_progress_logger(src, ch.channel),
+        )
+        if assembled.ok:
+            result.copied.append(dest_path.name)
+            log.info(
+                "2P tiff-assemble: %s %s: assembled %d frame(s) -> %s",
+                src, ch.channel, assembled.frame_count, dest_path,
+            )
+        else:
+            log.error(
+                "2P tiff-assemble: %s %s: %s — falling back to per-frame copy",
+                src, ch.channel, assembled.error,
+            )
+            fallback = transfer_folder(
+                src, dest, files_only=ch.source_files, verify=verify, checksum=checksum
+            )
+            result.copied.extend(fallback.copied)
+            result.failed.extend(fallback.failed)
+    return result
+
+
+def _finalize_twophoton_matches(
+    folder: Path,
+    dest: Path,
+    settled: list,
+    source_root: Path,
+    *,
+    verify: bool,
+    checksum: bool,
+    dry_run: bool,
+    assemble_tiff_stacks: bool = True,
+) -> tuple[list[Path], list[Path], int]:
+    """Transfer every settled match to ``dest/2P/<name>`` (plus, for an
+    ``image`` kind, its own ``Experiment.xml`` alongside the take), then write
+    + transfer the take's ``twophoton_match.json`` sidecar recording what was
+    matched. Shared by Phase 3b's normal per-take matching
+    (:func:`_grid_and_transfer`) and the 2P-only sweep's retroactive match
+    against an already-finalized take (:func:`_sweep_unclaimed_twophoton`) —
+    the exact transfer shape both need. Returns (every settled match's source
+    path, only the ones that transferred cleanly — safe for a caller to later
+    delete as --delete-after-transfer does, number of files that failed to
+    transfer); never raises."""
+    from octacam.transfer import transfer_folder, transfer_tree
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME, build_match_record
+
+    matched_paths: list[Path] = []
+    ok_paths: list[Path] = []
+    n_failed = 0
+    for m in settled:
+        matched_paths.append(m.folder.path)
+        dest_2p = dest / "2P" / m.folder.path.name
+        if dry_run:
+            log.info(
+                "[dry-run] 2P transfer (%s): %s -> %s", m.confidence, m.folder.path, dest_2p
+            )
+            if m.folder.kind == "image":
+                _log_twophoton_assembly_preview(m.folder.path, assemble_tiff_stacks)
+            continue
+        if m.folder.kind == "image":
+            result = _transfer_image_folder_with_assembly(
+                m.folder.path, dest_2p, verify=verify, checksum=checksum,
+                assemble=assemble_tiff_stacks,
+            )
+        else:
+            result = transfer_tree(m.folder.path, dest_2p, verify=verify, checksum=checksum)
+        n_failed += len(result.failed)
+        if result and not result.failed:
+            ok_paths.append(m.folder.path)
+            log.info("2P transfer: transferred %s -> %s", m.folder.path, dest_2p)
+        else:
+            log.error("2P transfer: failed copying %s", m.folder.path)
+        if m.folder.kind == "image":
+            xml_src = m.folder.path / EXPERIMENT_XML_FILENAME
+            if xml_src.is_file():
+                transfer_folder(
+                    m.folder.path, dest, files_only=[xml_src], verify=verify, checksum=checksum
+                )
+    if not dry_run:
+        record = build_match_record(settled, source_root)
+        match_path = folder / TWOPHOTON_MATCH_FILENAME
+        match_path.write_text(json.dumps(record, indent=2) + "\n")
+        transfer_folder(folder, dest, files_only=[match_path], verify=verify, checksum=checksum)
+    return matched_paths, ok_paths, n_failed
+
+
 def _sweep_unclaimed_twophoton(
     source_root: Path,
     dest_root: Path,
@@ -3978,6 +4222,14 @@ def _sweep_unclaimed_twophoton(
     each match's ``twophoton_match.json`` before this ever runs), but passed
     unconditionally so the dry-run preview matches what a real run would do.
 
+    Before writing off any settled, unclaimed folder as genuinely standalone,
+    also checks it against every still-pending, already-finalized take (see
+    :func:`_pending_twophoton_takes`) — the confirmed real bug this closes: a
+    behavior take can be finalized (behavior data transferred) by one
+    `process` run before its true 2P counterpart has appeared/settled on the
+    share, and without this retroactive check the pair would be permanently
+    missed (nothing else ever revisits an already-finalized take).
+
     Pure: never raises, never exits — returns ``(n_copied, n_failed)`` file
     counts (0, 0) when there's nothing to do. Shared by the standalone
     ``--twophoton-sweep`` mode and the automatic post-processing sweep a
@@ -3985,7 +4237,11 @@ def _sweep_unclaimed_twophoton(
     touched (see the `process` docstring / `--no-twophoton-sweep`).
     """
     from octacam.transfer import transfer_tree
-    from octacam.twophoton_transfer import discover_twophoton_folders, is_settled
+    from octacam.twophoton_transfer import (
+        discover_twophoton_folders,
+        is_settled,
+        match_takes_to_twophoton_batch,
+    )
 
     sweep_root = dest_root / "2p_only"
     already_matched = _already_matched_twophoton_paths(source_root) | also_exclude
@@ -3996,19 +4252,93 @@ def _sweep_unclaimed_twophoton(
         for c in candidates
         if is_settled(c, twophoton_cfg.settle_s) and c.path.resolve() not in already_matched
     ]
-    if not todo:
-        log.info("2P sweep: nothing new and settled under %s", source_root)
-        return (0, 0)
 
     n_copied = n_failed = 0
+
+    pending = _pending_twophoton_takes(source_root)
+    if pending and todo:
+        pending_groups: dict[tuple, list] = {}
+        for local_folder, take, record in pending:
+            key = (
+                record.get("match_window_s", twophoton_cfg.match_window_s),
+                record.get("verify_window_s", twophoton_cfg.verify_window_s),
+                record.get("verify_with_signals", twophoton_cfg.verify_with_signals),
+            )
+            pending_groups.setdefault(key, []).append((local_folder, take, record))
+        for (match_window_s, verify_window_s, verify_with_signals), items in (
+            pending_groups.items()
+        ):
+            if not todo:
+                break
+            takes = [take for _, take, _ in items]
+            by_folder = {take.folder: (local_folder, record) for local_folder, take, record in items}
+            batch = match_takes_to_twophoton_batch(
+                takes, todo, match_window_s, verify_window_s, verify_with_signals
+            )
+            for take_folder, matches in batch.items():
+                if not matches:
+                    continue
+                local_folder, record = by_folder[take_folder]
+                dest = Path(record["dest"])
+                _matched, ok_paths, n_failed_here = _finalize_twophoton_matches(
+                    local_folder,
+                    dest,
+                    matches,
+                    source_root,
+                    verify=record.get("verify", checksum),
+                    checksum=record.get("checksum", checksum),
+                    dry_run=dry_run,
+                    assemble_tiff_stacks=record.get(
+                        "assemble_tiff_stacks", twophoton_cfg.assemble_tiff_stacks
+                    ),
+                )
+                n_failed += n_failed_here
+                n_copied += len(ok_paths)
+                log.info(
+                    "2P sweep: retroactively paired %s with already-finalized take %s",
+                    ", ".join(str(m.folder.path) for m in matches),
+                    local_folder,
+                )
+                if not dry_run:
+                    _clear_twophoton_pending(local_folder)
+                    if record.get("checksum"):  # delete_wanted at write time
+                        for src_2p in ok_paths:
+                            try:
+                                shutil.rmtree(src_2p)
+                                log.info(
+                                    "delete-after-transfer: removed 2P source %s "
+                                    "(verified on NAS)",
+                                    src_2p,
+                                )
+                            except OSError as e:
+                                log.error(
+                                    "delete-after-transfer: failed to remove %s: %s",
+                                    src_2p,
+                                    e,
+                                )
+                claimed = {m.folder.path.resolve() for m in matches}
+                todo = [c for c in todo if c.path.resolve() not in claimed]
+
+    if not todo:
+        log.info("2P sweep: nothing new and settled under %s", source_root)
+        return (n_copied, n_failed)
+
     for folder in todo:
         experiment = folder.path.parent.name
         date_str = time.strftime("%y%m%d", time.localtime(folder.start_time))
         dest = sweep_root / experiment / date_str / folder.path.name
         if dry_run:
             log.info("[dry-run] 2P sweep: %s -> %s", folder.path, dest)
+            if folder.kind == "image":
+                _log_twophoton_assembly_preview(folder.path, twophoton_cfg.assemble_tiff_stacks)
             continue
-        result = transfer_tree(folder.path, dest, verify=checksum, checksum=checksum)
+        if folder.kind == "image":
+            result = _transfer_image_folder_with_assembly(
+                folder.path, dest, verify=checksum, checksum=checksum,
+                assemble=twophoton_cfg.assemble_tiff_stacks,
+            )
+        else:
+            result = transfer_tree(folder.path, dest, verify=checksum, checksum=checksum)
         n_copied += len(result.copied)
         n_failed += len(result.failed)
         if result.failed:
@@ -4143,6 +4473,107 @@ def _run_layout_migration(cli_config_dir: Path | None, dry_run: bool) -> None:
         sys.exit(f"{n_conflict} file(s) need manual attention — see warnings above")
 
 
+def _run_tiff_reassembly(cli_config_dir: Path | None, dry_run: bool) -> None:
+    """``octacam process --reassemble-tiffs``: ad-hoc, manually-invoked
+    reprocessing of already-transferred (or manually-copied) per-frame TIFF
+    data anywhere under ``[transfer].directory`` into one OME-TIFF stack per
+    channel — the standing home for this ability rather than a throwaway
+    script, since the assembly library already exists for the transfer-time
+    hook (:func:`_transfer_image_folder_with_assembly`) and exposing it this
+    way costs almost nothing extra while staying discoverable
+    (``octacam process --help``) for a future one-off need, e.g. a labmate
+    who manually saved 2P data as multiple TIFFs.
+
+    Unlike the transfer-time hook, this mode DELETES the now-redundant
+    per-frame originals once the assembled stack is confirmed correct — a
+    much higher bar than the transfer-time hook's cheaper page-count check:
+    every page is read back and compared pixel-for-pixel against its source
+    frame (``full_verify=True``) before anything is removed, one file at a
+    time, only after the assembled stack is safely written and verified.
+    Mirrors ``--migrate-layout``: requires ``--config``, scans the whole
+    destination tree, safe to re-run (an already-consolidated folder is a
+    pure no-op — :func:`~octacam.twophoton_tiff.plan_assembly` only reports a
+    channel with more than one file present)."""
+    from octacam.config import load_config_dir, resolve_dir_template
+    from octacam.twophoton_tiff import (
+        assemble_channel_stack,
+        make_progress_logger,
+        plan_assembly,
+        tifffile_available,
+    )
+    from octacam.twophoton_transfer import EXPERIMENT_XML_FILENAME
+
+    if cli_config_dir is None:
+        sys.exit("--reassemble-tiffs requires --config <rig-config-dir>")
+    if not tifffile_available():
+        sys.exit("--reassemble-tiffs requires tifffile (pip install 'octacam[twophoton]')")
+    cfg = load_config_dir(cli_config_dir)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(f"--reassemble-tiffs: no [transfer].directory configured in {cli_config_dir}")
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    if not dest_root.is_dir():
+        sys.exit(f"--reassemble-tiffs: {dest_root} does not exist")
+
+    n_assembled = n_problem = 0
+    for experiment_xml in sorted(dest_root.rglob(EXPERIMENT_XML_FILENAME)):
+        folder = experiment_xml.parent
+        plan = plan_assembly(folder)
+        for ch in plan.problems:
+            n_problem += 1
+            log.warning(
+                "reassemble: %s channel %s: %s — leaving per-frame files as-is",
+                folder, ch.channel, ch.reason,
+            )
+        for ch in plan.ready:
+            dest_path = folder / ch.dest_name
+            if dry_run:
+                log.info(
+                    "[dry-run] reassemble: %s %s: would assemble %d frame(s) -> %s, "
+                    "then delete the originals",
+                    folder, ch.channel, len(ch.source_files), dest_path,
+                )
+                continue
+            result = assemble_channel_stack(
+                ch.source_files, dest_path,
+                axis=ch.axis or "T",
+                experiment_xml=experiment_xml,
+                full_verify=True,
+                on_progress=make_progress_logger(folder, ch.channel),
+            )
+            if not result.ok:
+                n_problem += 1
+                log.error(
+                    "reassemble: %s channel %s: assembly failed (%s) — originals left untouched",
+                    folder, ch.channel, result.error,
+                )
+                continue
+            n_assembled += 1
+            log.info(
+                "reassemble: %s %s: assembled and verified %d frame(s) -> %s",
+                folder, ch.channel, result.frame_count, dest_path,
+            )
+            n_removed = 0
+            for src in ch.source_files:
+                try:
+                    src.unlink()
+                    n_removed += 1
+                except OSError as e:
+                    log.warning("reassemble: couldn't remove original %s: %s", src, e)
+            log.info(
+                "reassemble: %s %s: removed %d/%d original frame file(s)",
+                folder, ch.channel, n_removed, len(ch.source_files),
+            )
+    if dry_run:
+        log.info("[dry-run] reassemble: scan complete under %s", dest_root)
+        return
+    log.info(
+        "reassemble: %d channel(s) assembled, %d needing manual attention",
+        n_assembled, n_problem,
+    )
+    if n_problem:
+        sys.exit(f"{n_problem} channel(s) need manual attention — see warnings above")
+
+
 def _grid_and_transfer(
     folder_outputs: dict[Path, list[Path]],
     do_grid: bool,
@@ -4175,12 +4606,10 @@ def _grid_and_transfer(
     gui/record owns the cameras."""
     from octacam.config import resolve_dir_template
     from octacam.grid import build_grid_video
-    from octacam.transfer import transfer_folder, transfer_tree
-    from octacam.transform import RECORDING_SUMMARY_FILENAME, TWOPHOTON_MATCH_FILENAME
+    from octacam.transfer import transfer_folder
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
     from octacam.twophoton_transfer import (
-        EXPERIMENT_XML_FILENAME,
         TakeInfo,
-        build_match_record,
         discover_twophoton_folders,
         is_settled,
         match_takes_to_twophoton_batch,
@@ -4428,6 +4857,7 @@ def _grid_and_transfer(
         for key, takes in groups.items():
             source_root, _, _, settle_s, verify_with_signals = key
             twophoton_cfg = group_meta[key]
+            takes_by_folder = {t.folder: t for t in takes}
             candidates = discover_twophoton_folders(source_root)
             batch = match_takes_to_twophoton_batch(
                 takes,
@@ -4440,8 +4870,21 @@ def _grid_and_transfer(
                 dest = folder_dest[folder]
                 cfg = folder_cfgs[folder]
                 assert cfg.transfer is not None
+                delete_wanted = folder_delete_after.get(folder, False)
+                verify = cfg.transfer.checksum or delete_wanted
+                checksum = delete_wanted
                 if not matches:
                     log.info("2P transfer: no matching 2P folder found for %s", folder)
+                    if not dry_run:
+                        _write_twophoton_pending(
+                            folder,
+                            takes_by_folder[folder],
+                            dest=dest,
+                            source_root=source_root,
+                            twophoton_cfg=twophoton_cfg,
+                            checksum=checksum,
+                            verify=verify,
+                        )
                     continue
                 for m in matches:
                     if m.ambiguous:
@@ -4457,58 +4900,39 @@ def _grid_and_transfer(
                 if len(settled) < len(matches):
                     log.info(
                         "2P transfer: %d matched folder(s) for %s not yet settled "
-                        "(still writing) — will retry on a later `octacam process` run",
+                        "(still writing) — will retry on a later `octacam process` "
+                        "run, or the 2P-only sweep once it settles",
                         len(matches) - len(settled),
                         folder,
                     )
                 if not settled:
-                    continue
-                delete_wanted = folder_delete_after.get(folder, False)
-                verify = cfg.transfer.checksum or delete_wanted
-                checksum = delete_wanted
-                for m in settled:
-                    matched_this_run.add(m.folder.path.resolve())
-                    dest_2p = dest / "2P" / m.folder.path.name
-                    if dry_run:
-                        log.info(
-                            "[dry-run] 2P transfer (%s): %s -> %s",
-                            m.confidence,
-                            m.folder.path,
-                            dest_2p,
+                    if not dry_run:
+                        _write_twophoton_pending(
+                            folder,
+                            takes_by_folder[folder],
+                            dest=dest,
+                            source_root=source_root,
+                            twophoton_cfg=twophoton_cfg,
+                            checksum=checksum,
+                            verify=verify,
                         )
-                        continue
-                    result = transfer_tree(
-                        m.folder.path, dest_2p, verify=verify, checksum=checksum
-                    )
-                    transfer_failed += len(result.failed)
-                    folder_failed[folder] = folder_failed.get(folder, 0) + len(
-                        result.failed
-                    )
-                    if result and not result.failed:
-                        folder_2p_ok.setdefault(folder, []).append(m.folder.path)
-                    else:
-                        log.error("2P transfer: failed copying %s", m.folder.path)
-                    if m.folder.kind == "image":
-                        xml_src = m.folder.path / EXPERIMENT_XML_FILENAME
-                        if xml_src.is_file():
-                            transfer_folder(
-                                m.folder.path,
-                                dest,
-                                files_only=[xml_src],
-                                verify=verify,
-                                checksum=checksum,
-                            )
+                    continue
+                matched_paths, ok_paths, n_failed = _finalize_twophoton_matches(
+                    folder,
+                    dest,
+                    settled,
+                    source_root,
+                    verify=verify,
+                    checksum=checksum,
+                    dry_run=dry_run,
+                    assemble_tiff_stacks=twophoton_cfg.assemble_tiff_stacks,
+                )
+                matched_this_run.update(p.resolve() for p in matched_paths)
+                transfer_failed += n_failed
+                folder_failed[folder] = folder_failed.get(folder, 0) + n_failed
+                folder_2p_ok.setdefault(folder, []).extend(ok_paths)
                 if not dry_run:
-                    record = build_match_record(settled, source_root)
-                    match_path = folder / TWOPHOTON_MATCH_FILENAME
-                    match_path.write_text(json.dumps(record, indent=2) + "\n")
-                    transfer_folder(
-                        folder,
-                        dest,
-                        files_only=[match_path],
-                        verify=verify,
-                        checksum=checksum,
-                    )
+                    _clear_twophoton_pending(folder)
 
         # --- Phase 3c: automatic 2P-only sweep --------------------------------
         # Every [transfer.twophoton] source this run touched also gets swept
@@ -4528,25 +4952,35 @@ def _grid_and_transfer(
                 transfer_failed += n_failed
 
         # --- Phase 4: delete-after-transfer -----------------------------------
-        if not dry_run:
-            for folder in folder_dest:
-                if not folder_delete_after.get(folder, False):
-                    continue
-                if folder in transcode_failed_folders:
-                    log.warning(
-                        "delete-after-transfer: skipping %s — it had a transcode "
-                        "failure this run",
-                        folder,
-                    )
-                    continue
-                if folder_failed.get(folder, 0):
-                    log.warning(
-                        "delete-after-transfer: skipping %s — %d file(s) failed "
-                        "to transfer",
-                        folder,
-                        folder_failed[folder],
-                    )
-                    continue
+        # Evaluated (and logged) under --dry-run too — a caller deciding
+        # whether it's safe to reclaim local disk space needs to see exactly
+        # what this would remove before it actually removes anything;
+        # `shutil.rmtree` itself stays gated on `not dry_run`.
+        for folder in folder_dest:
+            if not folder_delete_after.get(folder, False):
+                continue
+            if folder in transcode_failed_folders:
+                log.warning(
+                    "delete-after-transfer: skipping %s — it had a transcode "
+                    "failure this run",
+                    folder,
+                )
+                continue
+            if folder_failed.get(folder, 0):
+                log.warning(
+                    "delete-after-transfer: skipping %s — %d file(s) failed "
+                    "to transfer",
+                    folder,
+                    folder_failed[folder],
+                )
+                continue
+            if dry_run:
+                log.info(
+                    "[dry-run] delete-after-transfer: would remove local %s "
+                    "(verified on NAS)",
+                    folder,
+                )
+            else:
                 try:
                     shutil.rmtree(folder)
                     log.info(
@@ -4555,18 +4989,25 @@ def _grid_and_transfer(
                     )
                 except OSError as e:
                     log.error("delete-after-transfer: failed to remove %s: %s", folder, e)
-                for src_2p in folder_2p_ok.get(folder, []):
-                    try:
-                        shutil.rmtree(src_2p)
-                        log.info(
-                            "delete-after-transfer: removed 2P source %s "
-                            "(verified on NAS)",
-                            src_2p,
-                        )
-                    except OSError as e:
-                        log.error(
-                            "delete-after-transfer: failed to remove %s: %s", src_2p, e
-                        )
+            for src_2p in folder_2p_ok.get(folder, []):
+                if dry_run:
+                    log.info(
+                        "[dry-run] delete-after-transfer: would remove 2P source %s "
+                        "(verified on NAS)",
+                        src_2p,
+                    )
+                    continue
+                try:
+                    shutil.rmtree(src_2p)
+                    log.info(
+                        "delete-after-transfer: removed 2P source %s "
+                        "(verified on NAS)",
+                        src_2p,
+                    )
+                except OSError as e:
+                    log.error(
+                        "delete-after-transfer: failed to remove %s: %s", src_2p, e
+                    )
 
     return transfer_failed
 
@@ -4752,6 +5193,18 @@ def process(
             "ignores PATHS/--last/--session-id/--all. Safe to re-run.",
         ),
     ] = False,
+    reassemble_tiffs: Annotated[
+        bool,
+        typer.Option(
+            "--reassemble-tiffs",
+            help="One-time/ad-hoc mode: instead of processing recording folders, "
+            "assemble any remaining per-frame ThorImage TIFFs already on the NAS "
+            "under [transfer].directory into one OME-TIFF stack per channel, "
+            "deleting the now-redundant originals only after the assembled "
+            "stack is written and pixel-verified. Requires --config; ignores "
+            "PATHS/--last/--session-id/--all. Safe to re-run.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -4894,8 +5347,9 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
 
-    --twophoton-sweep and --migrate-layout are separate modes (ignore PATHS/
-    --last/--session-id/--all/--detach) — see their own help text.
+    --twophoton-sweep, --migrate-layout, and --reassemble-tiffs are separate
+    modes (ignore PATHS/--last/--session-id/--all/--detach) — see their own
+    help text.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -4905,6 +5359,9 @@ def process(
         return
     if migrate_layout:
         _run_layout_migration(config_dir, dry_run)
+        return
+    if reassemble_tiffs:
+        _run_tiff_reassembly(config_dir, dry_run)
         return
 
     do_transcode = not no_transcode

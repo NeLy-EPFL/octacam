@@ -67,7 +67,11 @@ flywheel = []
 # edges) — opt-in like the plugin itself; verification lazy-imports h5py and
 # falls back to timestamp-only matching when it's absent, so this is never a
 # hard requirement.
-twophoton = ["h5py>=3.10"]
+# tifffile is for octacam.twophoton_tiff (consolidating ThorImage's per-frame
+# streaming-mode .tif files into one OME-TIFF stack per channel at transfer
+# time) — same opt-in shape: lazy-imported, degrades to a plain per-file copy
+# when absent.
+twophoton = ["h5py>=3.10", "tifffile>=2023.7.10"]
 # FLIR/Teledyne cameras use the Spinnaker SDK's PySpin wheel, which is NOT on
 # PyPI (it ships with the SDK installer; Spinnaker 4.4 provides cp310-cp314
 # wheels — install the one matching your interpreter). This extra is therefore a
@@ -88,6 +92,7 @@ Changelog = "https://github.com/NeLy-EPFL/octacam/blob/main/CHANGELOG.md"
 dev = [
     "av>=12",
     "h5py>=3.10",
+    "tifffile>=2023.7.10",
     "httpx>=0.28.1",
     "psutil>=5.9",
     "pytest>=8",

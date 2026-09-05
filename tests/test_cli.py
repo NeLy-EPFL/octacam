@@ -447,6 +447,7 @@ def test_process_help_lists_options():
         "--twophoton-sweep",
         "--no-twophoton-sweep",
         "--migrate-layout",
+        "--reassemble-tiffs",
         "--delete-after-transfer",
     ):
         assert opt in result.output
@@ -1343,6 +1344,287 @@ def test_process_leaves_unsettled_twophoton_folder_for_next_run(tmp_path, monkey
     result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
     assert result.exit_code == 0, result.output
     assert not (dest_root / folder.name / "2P").exists()
+    # A pending marker must be left behind — this take is done (behavior data
+    # transferred) but not yet 2P-matched, so a later sweep can retry it (see
+    # test_process_retroactively_pairs_pending_take_via_later_sweep below).
+    assert (folder / "twophoton_pending.json").exists()
+
+
+def test_process_retroactively_pairs_pending_take_via_later_sweep(tmp_path, monkeypatch):
+    # Confirmed real bug (TWOPHOTON_MATCHING_BUG_REPORT.md): a behavior take
+    # can be finalized by one `process` run before its true 2P counterpart has
+    # appeared/settled on the share at all — no candidate exists yet, so
+    # Phase 3 finds nothing and the take is fully transferred, unmatched.
+    # Nothing ever revisited an already-finalized take before this fix; the
+    # 2P-only sweep (run standalone here, in a wholly separate invocation)
+    # must now retroactively pair it once the folder finally settles, instead
+    # of writing it off as a standalone 2P-only recording.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    # A real recording (via `octacam record`/gui) registers itself in the
+    # session cache when it starts — the later, unrelated sweep invocation
+    # relies on that cache (not on the folder being named on its own command
+    # line) to ever find this take's pending marker again.
+    from octacam import session_cache
+
+    session_cache.record_recording(folder, session_id="s1")
+
+    # First run: no 2P folder exists anywhere yet -> no candidate, no match.
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / folder.name / "2P").exists()
+    assert (folder / "twophoton_pending.json").exists()
+    assert not (folder / "twophoton_match.json").exists()
+
+    # The true 2P counterpart only appears/settles well after that run.
+    _make_sync_folder_2p(
+        source_root, "MB247_CI63", "SyncData102", mtime=take_start - 30
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"match_window_s = 60\n"
+        f"settle_s = 60\n"
+    )
+    # A later, wholly separate invocation — the standalone sweep, which
+    # doesn't even know the original recording folder's path.
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+
+    dest_2p = dest_root / folder.name / "2P" / "SyncData102"
+    assert (dest_2p / "Episode001.h5").exists()
+    match_record = json.loads(
+        (dest_root / folder.name / "twophoton_match.json").read_text()
+    )
+    assert match_record["matched"][0]["path"] == "MB247_CI63/SyncData102"
+    # Resolved: no lingering pending marker, and the folder must not also be
+    # dumped into 2p_only as if it were a standalone recording.
+    assert not (folder / "twophoton_pending.json").exists()
+    assert not (dest_root / "2p_only").exists()
+
+
+# --- process: TIFF stack assembly (ThorImage streaming-mode per-frame tifs) -
+
+
+def _make_image_folder_2p(root, experiment, name, *, u_time, n_frames, channel="ChanA"):
+    """A real ThorImage-shaped "image" kind 2P folder: Experiment.xml (with
+    <Wavelengths>/<Timelapse>/<ZStage>/<LSM> so plan_assembly can operate on
+    it) plus *n_frames* real per-frame tif files written with tifffile."""
+    tifffile = pytest.importorskip("tifffile")
+    import numpy as np
+
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f"""<?xml version="1.0"?>
+<ThorImageExperiment>
+  <Date date="" uTime="{u_time}" />
+  <Wavelengths>
+    <Wavelength name="{channel}" exposureTimeMS="0" />
+  </Wavelengths>
+  <ZStage name="ThorZPiezo" steps="1" enable="0" />
+  <Timelapse timepoints="{n_frames}" intervalSec="0" triggerMode="0" />
+  <LSM pixelSizeUM="0.089" />
+</ThorImageExperiment>
+"""
+    )
+    for i in range(1, n_frames + 1):
+        tifffile.imwrite(
+            folder / f"{channel}_001_001_001_{i:03d}.tif",
+            np.full((16, 16), i, dtype=np.uint16),
+        )
+    # is_settled scans real file mtimes (_folder_last_mtime) — an ancient
+    # synthetic epoch is trivially settled relative to real wall-clock now.
+    for p in folder.iterdir():
+        os.utime(p, (u_time, u_time))
+    os.utime(folder, (u_time, u_time))
+    return folder
+
+
+def test_process_assembles_multipage_tiff_stack_on_transfer(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(
+        source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=6
+    )
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    dest_2p = dest_root / folder.name / "2P" / "Fly1"
+    assert (dest_2p / "ChanA.tif").is_file()
+    assert not list(dest_2p.glob("ChanA_*.tif"))  # per-frame originals not copied
+
+    import tifffile
+    with tifffile.TiffFile(dest_2p / "ChanA.tif") as tf:
+        assert len(tf.pages) == 6
+        assert tf.series[0].axes == "TYX"
+        for i in range(6):
+            assert (tf.pages[i].asarray() == i + 1).all()
+
+
+def test_process_assembly_disabled_falls_back_to_per_file_copy(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(
+        source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=6
+    )
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"match_window_s = 60\n"
+            f"settle_s = 60\n"
+            f"assemble_tiff_stacks = false\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    dest_2p = dest_root / folder.name / "2P" / "Fly1"
+    assert not (dest_2p / "ChanA.tif").is_file()
+    assert len(list(dest_2p.glob("ChanA_*.tif"))) == 6
+
+
+def test_process_dry_run_previews_assembly_without_writing(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(
+        source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, n_frames=6
+    )
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(
+        app, ["process", str(folder), "--no-transcode", "--no-grid", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "would assemble" in result.output
+    assert not dest_root.exists()
+
+
+# --- process: --reassemble-tiffs (ad-hoc, already-transferred NAS data) -----
+
+
+def test_reassemble_tiffs_requires_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    result = runner.invoke(app, ["process", "--reassemble-tiffs"])
+    assert result.exit_code != 0
+
+
+def test_reassemble_tiffs_assembles_and_deletes_originals(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    take_folder = dest_root / "260813_" / "Fly2" / "001"
+    _make_image_folder_2p_flat(take_folder / "2P" / "Fly1", n_frames=5)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reassemble-tiffs", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+
+    dest_2p = take_folder / "2P" / "Fly1"
+    assert (dest_2p / "ChanA.tif").is_file()
+    assert not list(dest_2p.glob("ChanA_*.tif"))
+
+    # Idempotent: a second run over an already-consolidated folder is a no-op.
+    result2 = runner.invoke(
+        app, ["process", "--reassemble-tiffs", "--config", str(config_dir)]
+    )
+    assert result2.exit_code == 0, result2.output
+
+
+def test_reassemble_tiffs_dry_run_touches_nothing(tmp_path, monkeypatch):
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    take_folder = dest_root / "260813_" / "Fly2" / "001"
+    _make_image_folder_2p_flat(take_folder / "2P" / "Fly1", n_frames=5)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reassemble-tiffs", "--config", str(config_dir), "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    dest_2p = take_folder / "2P" / "Fly1"
+    assert not (dest_2p / "ChanA.tif").is_file()
+    assert len(list(dest_2p.glob("ChanA_*.tif"))) == 5
+
+
+def _make_image_folder_2p_flat(folder, *, n_frames, channel="ChanA"):
+    """Like _make_image_folder_2p, but writes directly into *folder* (already
+    "transferred" NAS-layout shape) rather than under an experiment/name pair
+    — for --reassemble-tiffs tests, which scan an arbitrary destination tree."""
+    tifffile = pytest.importorskip("tifffile")
+    import numpy as np
+
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f"""<?xml version="1.0"?>
+<ThorImageExperiment>
+  <Wavelengths>
+    <Wavelength name="{channel}" exposureTimeMS="0" />
+  </Wavelengths>
+  <ZStage name="ThorZPiezo" steps="1" enable="0" />
+  <Timelapse timepoints="{n_frames}" intervalSec="0" triggerMode="0" />
+  <LSM pixelSizeUM="0.089" />
+</ThorImageExperiment>
+"""
+    )
+    for i in range(1, n_frames + 1):
+        tifffile.imwrite(
+            folder / f"{channel}_001_001_001_{i:03d}.tif",
+            np.full((16, 16), i, dtype=np.uint16),
+        )
+    return folder
 
 
 # --- process: --delete-after-transfer safety --------------------------------
@@ -1367,6 +1649,30 @@ def test_process_delete_after_transfer_removes_local_once_verified(tmp_path, mon
     assert result.exit_code == 0, result.output
     assert (dest_root / folder.name / "Behavior" / "camera_LF.mp4").exists()
     assert not folder.exists()  # the whole local take dir is gone
+
+
+def test_process_delete_after_transfer_dry_run_previews_without_deleting(tmp_path, monkeypatch):
+    # A caller deciding whether it's safe to reclaim local disk space needs to
+    # see what --delete-after-transfer *would* remove before committing to it.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+    result = runner.invoke(
+        app,
+        [
+            "process", str(folder), "--no-transcode", "--no-grid",
+            "--delete-after-transfer", "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "would remove local" in result.output
+    assert folder.exists()  # dry-run must never actually delete anything
+    assert not dest_root.exists()  # nor actually transfer anything
 
 
 def test_process_delete_after_transfer_skipped_on_transcode_failure(tmp_path, monkeypatch):
@@ -1602,6 +1908,58 @@ def test_process_automatically_sweeps_unmatched_twophoton(tmp_path, monkeypatch)
     sweep_dest = dest_root / "2p_only" / "Tests"
     (date_dir,) = list(sweep_dest.iterdir())
     assert (date_dir / "SyncData999" / "Episode001.h5").exists()
+
+
+def test_process_automatic_sweep_retroactively_pairs_prior_pending_take(
+    tmp_path, monkeypatch
+):
+    # The automatic post-processing sweep (not just standalone
+    # --twophoton-sweep) must also retroactively pair a pending take left
+    # behind by an earlier, unrelated `process` invocation — not just a match
+    # made moments earlier in the very same run.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+
+    folder_a = tmp_path / "rec_a"
+    _armed_recording(
+        folder_a, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    # A real recording registers itself in the session cache when it starts —
+    # that's what lets an unrelated later invocation find its pending marker.
+    from octacam import session_cache
+
+    session_cache.record_recording(folder_a, session_id="s1")
+
+    # First invocation, take A: no 2P candidate exists anywhere yet.
+    result = runner.invoke(app, ["process", str(folder_a), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (folder_a / "twophoton_pending.json").exists()
+
+    # Take A's true 2P pair only settles well after that run finished.
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start - 30)
+
+    # A second, unrelated take processed in its own separate invocation —
+    # far enough away in time that it can't itself match SyncData102.
+    folder_b = tmp_path / "rec_b"
+    _armed_recording(
+        folder_b,
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start + 10_000,
+    )
+    result = runner.invoke(app, ["process", str(folder_b), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    # Take B found no 2P pair of its own...
+    assert not (dest_root / folder_b.name / "2P").exists()
+    # ...but take A's pending pairing was retroactively resolved by the
+    # automatic sweep this (wholly unrelated) invocation ran.
+    dest_2p = dest_root / folder_a.name / "2P" / "SyncData102"
+    assert (dest_2p / "Episode001.h5").exists()
+    assert not (folder_a / "twophoton_pending.json").exists()
+    assert not (dest_root / "2p_only").exists()
 
 
 def test_process_no_twophoton_sweep_skips_automatic_sweep(tmp_path, monkeypatch):

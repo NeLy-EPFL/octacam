@@ -47,6 +47,16 @@ TIMESTAMPS_FILENAME = "timestamps.npz"
 # already-finalized recording_summary.json, auditing what was paired.
 TWOPHOTON_MATCH_FILENAME = "twophoton_match.json"
 
+# Written instead of TWOPHOTON_MATCH_FILENAME when an armed take's behavior
+# data is transferred but no settled 2P pair was found yet this run — the 2P
+# side (e.g. a ThorImage folder) can settle on the network share well after
+# the behavior take itself was finalized, and a plain `process` run only
+# reconsiders folders it was explicitly pointed at this time. Read back by
+# the 2P-only sweep (octacam.cli._pending_twophoton_takes) so a later,
+# independent sweep can still retroactively pair it instead of writing the
+# late-arriving 2P folder off as standalone.
+TWOPHOTON_PENDING_FILENAME = "twophoton_pending.json"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:
