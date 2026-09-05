@@ -161,6 +161,13 @@ class RecordingSettings:
     transcode_ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
     transfer_directory: str = ""
     transfer_checksum: bool = True
+    # The resolved [transfer.twophoton].source for this session (already
+    # --user-overridden, if any) — patched into the snapshot the same way
+    # transfer_directory is, so a per-user 2P source override actually reaches
+    # `octacam process` instead of silently falling back to the rig's shared
+    # default. Blank means "no override to apply" (no --user, or the profile/
+    # rig has no [transfer.twophoton] at all).
+    transfer_twophoton_source: str = ""
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
@@ -1637,6 +1644,7 @@ class RecordingController:
                 transcode_ffmpeg_params=s.transcode_ffmpeg_params,
                 transfer_directory=s.transfer_directory,
                 transfer_checksum=s.transfer_checksum,
+                transfer_twophoton_source=s.transfer_twophoton_source,
             )
             if raw and patched != raw:
                 config_writer.write_config(s.save_dir, patched)

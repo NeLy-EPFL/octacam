@@ -309,6 +309,13 @@ class TransferConfig(BaseModel):
     implicit default; a save destination is only ever picked by an explicit
     ``--user <initials>`` (see ``resolve_transfer_for_user``). Absent
     entirely when nobody has configured any per-user profiles yet.
+
+    ``users_root`` is the NAS root new profiles get created under (e.g. by
+    the GUI's self-service "add yourself") — ``<users_root>/<initials>/
+    octacam_2P``. Set automatically, once, the first time ``octacam config
+    --bootstrap-users <nas-root>`` runs (never overwritten after — a
+    deliberate custom value always wins); blank means self-service creation
+    must be given an explicit directory instead of auto-suggesting one.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -323,6 +330,7 @@ class TransferConfig(BaseModel):
     delete_after_transfer: bool = False
     twophoton: TwoPhotonTransferConfig | None = None
     users: dict[str, TransferUserOverride] = {}
+    users_root: str = ""
 
     @field_validator("directory", mode="before")
     @classmethod

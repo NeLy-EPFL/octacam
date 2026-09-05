@@ -388,6 +388,18 @@ def test_transfer_users_parsed(tmp_path):
     assert users["MA"].twophoton is None
 
 
+def test_transfer_users_root_absent_by_default(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    assert load_config_dir(tmp_path).transfer.users_root == ""
+
+
+def test_transfer_users_root_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\nusers_root = "/mnt/upramdya_data"\n'
+    )
+    assert load_config_dir(tmp_path).transfer.users_root == "/mnt/upramdya_data"
+
+
 def test_resolve_transfer_for_user_overrides_directory(tmp_path):
     from octacam.config import resolve_transfer_for_user
 

@@ -214,6 +214,10 @@ def test_system_and_settings_endpoints(client):
     assert system["theme"] == "dark"
     # No driving plugin loaded -> the "managed" trigger source is unavailable.
     assert system["managed_trigger_available"] is False
+    # No [transfer.users] configured -> the profile dropdown has nothing to
+    # show and no --user was passed to this session.
+    assert system["transfer_users"] == {}
+    assert system["active_user"] is None
 
     settings = client.get("/api/settings").json()
     assert settings["fps"] == 50.0
@@ -1126,7 +1130,7 @@ def test_camera_features_locked_while_recording(client):
         client.controller.stop_recording(abort=True)
 
 
-def _save_client(tmp_path, config_dir):
+def _save_client(tmp_path, config_dir, *, user=None):
     from octacam.config import parse_config
 
     system = CameraSystem(EMULATED_SERIALS)
@@ -1137,8 +1141,132 @@ def _save_client(tmp_path, config_dir):
     )
     controller = RecordingController(system, settings)
     controller.start_preview()
-    app = create_app(controller, config, None, config_dir=str(config_dir))
+    app = create_app(controller, config, None, config_dir=str(config_dir), user=user)
     return controller, app
+
+
+# --------------------------------------------- per-user transfer profiles
+
+
+def test_system_reports_transfer_users_and_active_user(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store/default"\n'
+        "[transfer.users.MD]\n"
+        'directory = "/mnt/store/MD/BallPushing_Imaging"\n'
+        "[transfer.users.MD.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "[transfer.users.MA]\n"
+        'directory = "/mnt/store/MA/octacam_2P"\n'
+    )
+    controller, app = _save_client(tmp_path, active, user="MD")
+    try:
+        with TestClient(app) as client:
+            system = client.get("/api/system").json()
+            assert system["active_user"] == "MD"
+            assert system["transfer_users"] == {
+                "MD": {
+                    "directory": "/mnt/store/MD/BallPushing_Imaging",
+                    "twophoton_source": "/mnt/windows_share/MD",
+                },
+                "MA": {"directory": "/mnt/store/MA/octacam_2P", "twophoton_source": None},
+            }
+    finally:
+        controller.close()
+
+
+def test_add_transfer_user_with_explicit_directory(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/transfer/users",
+                json={"initials": "ma", "directory": "/mnt/store/MA/custom"},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["initials"] == "MA"  # normalized to uppercase
+            assert r.json()["transfer_users"]["MA"]["directory"] == "/mnt/store/MA/custom"
+            # /api/system reflects it immediately (state.config was reloaded)
+            assert (
+                client.get("/api/system").json()["transfer_users"]["MA"]["directory"]
+                == "/mnt/store/MA/custom"
+            )
+    finally:
+        controller.close()
+
+
+def test_add_transfer_user_auto_suggests_from_users_root(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\nusers_root = "/mnt/store"\n'
+    )
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/transfer/users", json={"initials": "MA"})
+            assert r.status_code == 200, r.text
+            assert r.json()["directory"] == "/mnt/store/MA/octacam_2P"
+    finally:
+        controller.close()
+
+
+def test_add_transfer_user_requires_directory_without_users_root(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.post("/api/transfer/users", json={"initials": "MA"})
+            assert r.status_code == 422
+    finally:
+        controller.close()
+
+
+def test_add_transfer_user_rejects_existing_initials(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\n'
+        "[transfer.users.MD]\n"
+        'directory = "/mnt/store/MD/BallPushing_Imaging"\n'
+    )
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/transfer/users",
+                json={"initials": "MD", "directory": "/mnt/store/MD/other"},
+            )
+            assert r.status_code == 409
+            # the existing entry is untouched
+            assert (
+                client.get("/api/system").json()["transfer_users"]["MD"]["directory"]
+                == "/mnt/store/MD/BallPushing_Imaging"
+            )
+    finally:
+        controller.close()
+
+
+def test_add_transfer_user_rejects_bad_initials(tmp_path):
+    active = tmp_path / "rig"
+    active.mkdir()
+    (active / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/transfer/users",
+                json={"initials": "not-initials", "directory": "/mnt/store/x"},
+            )
+            assert r.status_code == 422
+    finally:
+        controller.close()
 
 
 def test_config_save_active_and_new(tmp_path):

@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import resource
 import shlex
 import shutil
@@ -284,6 +283,9 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
         transcode_ffmpeg_params=transcode.ffmpeg_params,
         transfer_directory=transfer.directory if transfer else "",
         transfer_checksum=transfer.checksum if transfer else True,
+        transfer_twophoton_source=(
+            transfer.twophoton.source if transfer and transfer.twophoton else ""
+        ),
     )
 
 
@@ -692,7 +694,9 @@ def gui(
     try:
         # Build the app first (inside the try so a failure still hits the finally,
         # though no hardware is armed yet); the init closure reads `app` lazily.
-        app = create_app(controller, config, plugins, config_dir=str(config_dir))
+        app = create_app(
+            controller, config, plugins, config_dir=str(config_dir), user=user
+        )
         # While this GUI owns the cameras, publish a capture-active marker so any
         # detached `octacam process` job on this machine pauses (it resumes when
         # we exit). Best-effort; released in the finally before we might kick off
@@ -2303,30 +2307,33 @@ def _snapshot_camera_params(
         system.close()
 
 
-_INITIALS_RE = re.compile(r"^[A-Z]{2,4}$")
-
-
 def _run_bootstrap_users(config_dir: Path, nas_root: Path, dry_run: bool) -> None:
     """``octacam config CONFIG_DIR --bootstrap-users <nas-root>``: pre-seed a
     [transfer.users.<initials>] entry for every lab member's existing NAS
     folder, so a new person can start recording without configuring
     anything (unless they want a different destination than the generic
     default). Edits CONFIG_DIR's existing octacam_config.toml **in place**
-    with tomlkit (not config_writer's from-scratch _dumps), preserving its
-    comments/formatting exactly — the one config write in this codebase
-    that isn't creating a brand-new file. Never touches an initials key
-    already present, so re-running is always safe."""
+    via config_writer's tomlkit-based helpers (not the from-scratch
+    _dumps), preserving its comments/formatting exactly — the one config
+    write in this codebase that isn't creating a brand-new file. Never
+    touches an initials key already present, so re-running is always safe.
+    Also sets [transfer].users_root to *nas_root*, but only the first time
+    (never overwrites an already-customized value) — this is what lets the
+    GUI's self-service "add yourself" auto-suggest a destination later
+    without needing its own separate setup step."""
     import tomlkit
+
+    from octacam import config_writer
 
     cfg_file = config_dir / "octacam_config.toml"
     if not cfg_file.is_file():
         sys.exit(f"--bootstrap-users: {cfg_file} does not exist")
 
     candidates = sorted(
-        p.name for p in nas_root.iterdir() if p.is_dir() and _INITIALS_RE.match(p.name)
+        p.name for p in nas_root.iterdir() if p.is_dir() and config_writer.INITIALS_RE.match(p.name)
     )
     skipped_non_initials = sorted(
-        p.name for p in nas_root.iterdir() if p.is_dir() and not _INITIALS_RE.match(p.name)
+        p.name for p in nas_root.iterdir() if p.is_dir() and not config_writer.INITIALS_RE.match(p.name)
     )
     if skipped_non_initials:
         log.info(
@@ -2335,13 +2342,8 @@ def _run_bootstrap_users(config_dir: Path, nas_root: Path, dry_run: bool) -> Non
             len(skipped_non_initials), nas_root, ", ".join(skipped_non_initials),
         )
 
-    doc = tomlkit.parse(cfg_file.read_text())
-    if "transfer" not in doc:
-        doc["transfer"] = tomlkit.table()
-    transfer = doc["transfer"]
-    if "users" not in transfer:
-        transfer["users"] = tomlkit.table(is_super_table=True)
-    users = transfer["users"]
+    doc, transfer = config_writer.load_transfer_toml_doc(config_dir)
+    users = transfer.get("users") or {}
 
     n_added = n_already = 0
     for initials in candidates:
@@ -2356,9 +2358,7 @@ def _run_bootstrap_users(config_dir: Path, nas_root: Path, dry_run: bool) -> Non
             )
             n_added += 1
             continue
-        entry = tomlkit.table()
-        entry["directory"] = directory
-        users[initials] = entry
+        config_writer.add_transfer_user_entry(transfer, initials, directory)
         log.info("bootstrap-users: added [transfer.users.%s] directory = %r", initials, directory)
         n_added += 1
 
@@ -2368,7 +2368,8 @@ def _run_bootstrap_users(config_dir: Path, nas_root: Path, dry_run: bool) -> Non
             n_added, n_already,
         )
         return
-    if n_added:
+    root_changed = config_writer.set_transfer_users_root(transfer, str(nas_root))
+    if n_added or root_changed:
         cfg_file.write_text(tomlkit.dumps(doc))
     log.info("bootstrap-users: %d added, %d already present", n_added, n_already)
 

@@ -114,19 +114,21 @@ def page(static_server, browser):
         page.close()
 
 
-def make_tab(page: Page, formats=DEFAULT_FORMATS) -> None:
+def make_tab(page: Page, formats=DEFAULT_FORMATS, transfer_users=None, active_user=None) -> None:
     """Construct the real RecordTab against the loaded DOM, exposed as
     ``window.__tab``. Uses no-op plugin/notify deps so no network is touched."""
     page.evaluate(
-        """async (formats) => {
+        """async ({formats, transferUsers, activeUser}) => {
             const m = await import('./js/record.js');
             window.__tab = new m.RecordTab({
                 formats,
                 getPluginParams: () => ({}),
                 notify: () => {},
+                transferUsers,
+                activeUser,
             });
         }""",
-        formats,
+        {"formats": formats, "transferUsers": transfer_users, "activeUser": active_user},
     )
 
 
@@ -319,6 +321,122 @@ def test_max_nvenc_sessions_change_rounds_to_int(page):
     assert body == {"max_nvenc_sessions": 4}
 
 
+# --- per-user transfer profile dropdown ------------------------------------ #
+
+
+def test_transfer_user_row_hidden_with_no_profiles(page):
+    make_tab(page)  # no transfer_users given
+    assert prop(page, "#transfer-user-row", "e => e.hidden") is True
+
+
+def test_transfer_user_row_populated_and_preselected(page):
+    make_tab(
+        page,
+        transfer_users={
+            "MD": {"directory": "/mnt/store/MD/BallPushing_Imaging", "twophoton_source": None},
+            "MA": {"directory": "/mnt/store/MA/octacam_2P", "twophoton_source": "/mnt/share/MA"},
+        },
+        active_user="MA",
+    )
+    assert prop(page, "#transfer-user-row", "e => e.hidden") is False
+    values = page.eval_on_selector_all(
+        "#transfer-user option", "els => els.map(e => e.value)"
+    )
+    # blank + sorted initials + the self-service option, in that order
+    assert values == ["", "MA", "MD", "__add__"]
+    assert prop(page, "#transfer-user", "e => e.value") == "MA"
+
+
+def test_selecting_a_profile_patches_directory_and_twophoton_source(page):
+    make_tab(
+        page,
+        transfer_users={
+            "MA": {"directory": "/mnt/store/MA/octacam_2P", "twophoton_source": "/mnt/share/MA"},
+        },
+    )
+    sent = page.evaluate(
+        """async () => {
+            let sent = null;
+            window.fetch = async (url, opts) => {
+                sent = { url, body: JSON.parse(opts.body) };
+                return {
+                    ok: true, status: 200,
+                    json: async () => ({ transfer_directory: '/mnt/store/MA/octacam_2P' }),
+                };
+            };
+            const sel = document.getElementById('transfer-user');
+            sel.value = 'MA';
+            sel.dispatchEvent(new Event('change'));
+            await new Promise((r) => setTimeout(r, 0));
+            return sent;
+        }"""
+    )
+    assert sent["url"] == "/api/settings"
+    assert sent["body"] == {
+        "transfer_directory": "/mnt/store/MA/octacam_2P",
+        "transfer_twophoton_source": "/mnt/share/MA",
+    }
+    # applySettings (via _put) updates the visible field from the response.
+    assert prop(page, "#transfer-dir", "e => e.value") == "/mnt/store/MA/octacam_2P"
+
+
+def test_add_yourself_flow_posts_and_refreshes_dropdown(page):
+    make_tab(page, transfer_users={"MD": {"directory": "/mnt/store/MD", "twophoton_source": None}})
+    result = page.evaluate(
+        """async () => {
+            const posted = [];
+            window.prompt = () => 'MA';
+            window.fetch = async (url, opts) => {
+                posted.push(JSON.parse(opts.body));
+                return {
+                    ok: true, status: 200,
+                    json: async () => ({
+                        status: 'ok', initials: 'MA', directory: '/mnt/store/MA/octacam_2P',
+                        transfer_users: {
+                            MD: { directory: '/mnt/store/MD', twophoton_source: null },
+                            MA: { directory: '/mnt/store/MA/octacam_2P', twophoton_source: null },
+                        },
+                    }),
+                };
+            };
+            const sel = document.getElementById('transfer-user');
+            sel.value = '__add__';
+            sel.dispatchEvent(new Event('change'));
+            await new Promise((r) => setTimeout(r, 0));
+            await new Promise((r) => setTimeout(r, 0));
+            return {
+                posted,
+                selected: sel.value,
+                options: Array.from(sel.options).map((o) => o.value),
+            };
+        }"""
+    )
+    # Adding also immediately applies the new profile (same _onTransferUserChange
+    # path a plain selection uses), so a settings PUT follows the users POST.
+    assert result["posted"] == [
+        {"initials": "MA"},
+        {"transfer_directory": "/mnt/store/MA/octacam_2P"},
+    ]
+    assert result["selected"] == "MA"
+    assert set(result["options"]) == {"", "MD", "MA", "__add__"}
+
+
+def test_add_yourself_cancelled_prompt_reverts_selection(page):
+    make_tab(page, transfer_users={"MD": {"directory": "/mnt/store/MD", "twophoton_source": None}})
+    selected = page.evaluate(
+        """async () => {
+            window.prompt = () => null;  // user cancelled
+            window.fetch = async () => { throw new Error('must not be called'); };
+            const sel = document.getElementById('transfer-user');
+            sel.value = '__add__';
+            sel.dispatchEvent(new Event('change'));
+            await new Promise((r) => setTimeout(r, 0));
+            return sel.value;
+        }"""
+    )
+    assert selected == ""
+
+
 # --- advanced-options toggle ----------------------------------------------- #
 
 
@@ -337,7 +455,9 @@ def _flip_advanced(page, on: bool) -> None:
 # regression that pushes an essential into the advanced block (or leaves an
 # advanced knob among the essentials) fails a named case — not just the two-field
 # spot-check the toggle test would otherwise give.
-ESSENTIAL_IDS = ["duration-value", "fps", "record-dir", "relative-dir", "transfer-dir"]
+ESSENTIAL_IDS = [
+    "duration-value", "fps", "record-dir", "relative-dir", "transfer-user", "transfer-dir",
+]
 ADVANCED_IDS = [
     "trigger-source",
     "preview-trigger-source",

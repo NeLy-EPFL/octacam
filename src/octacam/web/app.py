@@ -430,6 +430,27 @@ class SaveConfigRequest(BaseModel):
         return self
 
 
+class AddTransferUserRequest(BaseModel):
+    """POST /api/transfer/users — the GUI's self-service "add yourself" to
+    [transfer.users.<initials>] when a person isn't already in the profile
+    dropdown. *directory* is optional only when the rig has
+    [transfer].users_root configured (set automatically the first time
+    `octacam config --bootstrap-users` runs) — otherwise it's required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    initials: str
+    directory: str | None = None
+
+    @field_validator("initials")
+    @classmethod
+    def _valid_initials(cls, value: str) -> str:
+        value = value.strip().upper()
+        if not config_writer.INITIALS_RE.match(value):
+            raise ValueError("initials must be 2-4 letters")
+        return value
+
+
 class _Client:
     """Per-WebSocket send state with newest-only backpressure.
 
@@ -554,6 +575,7 @@ class _AppState:
         config: OctacamConfig,
         plugins: PluginManager,
         config_dir: str = "",
+        user: str | None = None,
     ):
         self.controller = controller
         # `config` is the live source of truth (a save replaces it); `raw_config`
@@ -561,6 +583,11 @@ class _AppState:
         # strftime save-dir template survive a save verbatim.
         self.config = config
         self.config_dir = config_dir
+        # The --user this GUI was launched with (already applied to `config`
+        # by cli.gui via _load_config_for_user) — kept separately so
+        # system_descriptor can report which profile, if any, is active,
+        # letting the frontend pre-select it in the profile dropdown.
+        self.user = user
         self.raw_config = (
             config_writer.load_raw_config(config_dir) if config_dir else {}
         )
@@ -590,6 +617,24 @@ class _AppState:
     def update_status(self) -> dict | None:
         """The update notice for /api/system, or None if not (yet) known."""
         return self._update_notice.as_dict() if self._update_notice else None
+
+    def transfer_users_payload(self) -> dict:
+        """{initials: {directory, twophoton_source}} for every configured
+        [transfer.users.<initials>] profile — {} when none are configured.
+        Shared by system_descriptor (the GUI's profile dropdown) and
+        POST /api/transfer/users' response (so the frontend can refresh its
+        dropdown from either without re-deriving this shape itself)."""
+        return {
+            initials: {
+                "directory": override.directory,
+                "twophoton_source": (
+                    override.twophoton.source if override.twophoton else None
+                ),
+            }
+            for initials, override in (
+                self.config.transfer.users if self.config.transfer else {}
+            ).items()
+        }
 
     def system_descriptor(self) -> dict:
         """The full /api/system payload: version, plugins, cameras, formats, …
@@ -669,6 +714,12 @@ class _AppState:
                 self.config.gui.display_refresh_interval_ms
             ),
             "theme": self.config.gui.theme,
+            # [transfer.users.<initials>] profiles for the GUI's profile
+            # dropdown — {} when nobody has configured any, so the frontend
+            # control simply doesn't render. active_user is the --user this
+            # GUI was launched with, if any, so the dropdown can pre-select it.
+            "transfer_users": self.transfer_users_payload(),
+            "active_user": self.user,
             "formats": [
                 {"save_method": save_method, "label": video_format.label}
                 for save_method, video_format in FORMATS.items()
@@ -875,9 +926,10 @@ def create_app(
     plugins: PluginManager | None = None,
     config_dir: str = "",
     shutdown_callback: Callable[[], None] = _default_shutdown,
+    user: str | None = None,
 ) -> FastAPI:
     plugins = plugins if plugins is not None else PluginManager([])
-    state = _AppState(controller, config, plugins, config_dir)
+    state = _AppState(controller, config, plugins, config_dir, user)
 
     # Give plugins that support real-time WS push a broadcast callback, and hand
     # a controller reference to any plugin that needs to read live device state
@@ -1255,6 +1307,43 @@ def create_app(
             "config_dir": str(target),
             "target": req.target,
             "cameras_written": sorted(pfs),
+        }
+
+    @app.post("/api/transfer/users")
+    def add_transfer_user(req: AddTransferUserRequest):
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        active = Path(config_dir)
+
+        directory = req.directory
+        if not directory:
+            transfer = state.config.transfer
+            users_root = transfer.users_root if transfer else ""
+            if not users_root:
+                raise HTTPException(
+                    422,
+                    "This rig has no [transfer].users_root configured to "
+                    "auto-suggest a destination — provide a directory.",
+                )
+            directory = str(Path(users_root) / req.initials / "octacam_2P")
+
+        try:
+            added = config_writer.add_transfer_user(active, req.initials, directory)
+        except OSError as e:
+            raise HTTPException(500, f"Failed to write config: {e}") from None
+        if not added:
+            raise HTTPException(
+                409, f"[transfer.users.{req.initials}] already exists"
+            )
+
+        # Reload so the response (and every later /api/system) reflects the
+        # new profile immediately — same pattern save_config already uses.
+        state.config = parse_config(find_config_file(active))
+        return {
+            "status": "ok",
+            "initials": req.initials,
+            "directory": directory,
+            "transfer_users": state.transfer_users_payload(),
         }
 
     @app.post("/api/save-dir/validate")

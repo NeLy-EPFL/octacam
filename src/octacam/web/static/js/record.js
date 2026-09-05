@@ -30,11 +30,16 @@ function trimNum(v) {
 }
 
 export class RecordTab {
-  constructor({ formats, getPluginParams, notify }) {
+  constructor({ formats, getPluginParams, notify, transferUsers, activeUser }) {
     // Returns {<plugin name>: <start-params slice>} for the loaded plugin tabs;
     // packed into the recording-start request below. See app.js.
     this.getPluginParams = getPluginParams;
     this.notify = notify;
+    // [transfer.users.<initials>] profiles for the dropdown below (see
+    // system_descriptor's transfer_users) — {} when nobody has configured
+    // any, in which case the whole row stays hidden. activeUser is the
+    // --user this GUI session was launched with, if any.
+    this.transferUsers = transferUsers || {};
     this.settings = null;
     this.state = "idle";
     // The countdown is driven by an absolute end time in the client's monotonic
@@ -92,8 +97,11 @@ export class RecordTab {
     this.transcodeFfmpegParams = document.getElementById(
       "transcode-ffmpeg-params"
     );
+    this.transferUserRow = document.getElementById("transfer-user-row");
+    this.transferUser = document.getElementById("transfer-user");
     this.transferDir = document.getElementById("transfer-dir");
     this.transferChecksum = document.getElementById("transfer-checksum");
+    this._renderTransferUsers(activeUser);
     this.button = document.getElementById("record-button");
     this.writerAlert = document.getElementById("record-writer-alert");
     this.status = document.getElementById("record-status");
@@ -193,6 +201,9 @@ export class RecordTab {
         { transcode_ffmpeg_params: this.transcodeFfmpegParams.value },
         [this.transcodeFfmpegParams]
       )
+    );
+    this.transferUser.addEventListener("change", () =>
+      this._onTransferUserChange()
     );
     this.transferDir.addEventListener("change", () =>
       this._put(
@@ -343,6 +354,88 @@ export class RecordTab {
     this.nvencParamsRow.hidden = method !== "nvenc";
     this.nvencSessionsRow.hidden = method !== "nvenc";
     if (method === "nvenc") this._ensureNvencCaps();
+  }
+
+  // Rebuild the profile <select> from this.transferUsers (a {directory,
+  // twophoton_source} per initials) — the whole row stays hidden when it's
+  // empty (no [transfer.users] configured for this rig), matching Phase 1's
+  // "absent entirely when nobody has configured any per-user profiles yet".
+  _renderTransferUsers(selected) {
+    const initialsList = Object.keys(this.transferUsers).sort();
+    this.transferUserRow.hidden = initialsList.length === 0;
+    if (initialsList.length === 0) return;
+    this.transferUser.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "— select —";
+    this.transferUser.appendChild(blank);
+    for (const initials of initialsList) {
+      const opt = document.createElement("option");
+      opt.value = initials;
+      opt.textContent = initials;
+      this.transferUser.appendChild(opt);
+    }
+    const addOpt = document.createElement("option");
+    addOpt.value = "__add__";
+    addOpt.textContent = "+ Add yourself…";
+    this.transferUser.appendChild(addOpt);
+    this.transferUser.value =
+      selected && this.transferUsers[selected] ? selected : "";
+  }
+
+  // Selecting a known profile just PUTs its directory/2P-source onto the
+  // existing settings-patch endpoint — applySettings (via _put) then updates
+  // the visible transfer-dir field itself, so this never duplicates that
+  // logic. "+ Add yourself…" instead starts the self-service creation flow.
+  async _onTransferUserChange() {
+    const value = this.transferUser.value;
+    if (value === "__add__") {
+      await this._addTransferUser();
+      return;
+    }
+    const profile = this.transferUsers[value];
+    if (!profile) return;
+    const patch = { transfer_directory: profile.directory };
+    if (profile.twophoton_source != null) {
+      patch.transfer_twophoton_source = profile.twophoton_source;
+    }
+    this._put(patch, [this.transferUser]);
+  }
+
+  // Prompts for initials (and, only if the rig has no [transfer].users_root
+  // to auto-suggest a destination from, a directory too — surfaced by the
+  // server as a 422 rather than guessed here), POSTs the new profile, then
+  // refreshes the dropdown and selects it.
+  async _addTransferUser() {
+    const initials = window.prompt("Your initials (2-4 letters):");
+    if (!initials) {
+      this._renderTransferUsers();
+      return;
+    }
+    const body = { initials };
+    let r = await api("POST", "/api/transfer/users", body);
+    if (r.status === 422) {
+      const directory = window.prompt(
+        "This rig has no default location configured — enter your full save directory:"
+      );
+      if (!directory) {
+        this._renderTransferUsers();
+        return;
+      }
+      body.directory = directory;
+      r = await api("POST", "/api/transfer/users", body);
+    }
+    if (!r.ok || !r.data) {
+      this.notify(
+        "error",
+        r.data?.detail || `Could not add profile (HTTP ${r.status})`
+      );
+      this._renderTransferUsers();
+      return;
+    }
+    this.transferUsers = r.data.transfer_users;
+    this._renderTransferUsers(r.data.initials);
+    this._onTransferUserChange();
   }
 
   // Fetch the detected GPU NVENC session cap once (lazily, since the server probe

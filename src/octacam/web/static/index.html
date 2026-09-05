@@ -77,6 +77,11 @@
           <textarea id="relative-dir" rows="2" spellcheck="false"
             title="Sub-path under the base directory for this recording; also mirrored onto the destination by the transfer step"></textarea>
         </div>
+        <div class="col" id="transfer-user-row" hidden>
+          <label class="col-label" for="transfer-user"
+            title="Pick your own [transfer.users.<initials>] save-destination profile — sets the transfer directory below (and the 2P source, if configured) to yours.">Profile:</label>
+          <select id="transfer-user"></select>
+        </div>
         <div class="col">
           <label class="col-label" for="transfer-dir"
             title="Destination base folder the transfer step mirrors each recording into (under its relative directory); blank disables transfer. Supports ~ and strftime %-codes, resolved when `octacam process` runs.">Transfer directory:</label>

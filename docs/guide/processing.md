@@ -298,6 +298,15 @@ already-present entry (so a person's own customization, like Matthias's
 project-specific `BallPushing_Imaging` above, is never overwritten back to
 the generic default). Safe to re-run.
 
+**From the GUI:** the [Record tab](gui.md#the-tabs) shows a **Profile**
+dropdown above the transfer directory whenever the rig has any
+`[transfer.users.*]` configured (hidden entirely otherwise) — pick yours to
+set the transfer directory (and 2P source, if you have one) in one click,
+or use its "+ Add yourself…" option if you're not listed yet. Self-service
+creation auto-suggests `<users_root>/<initials>/octacam_2P` when the rig has
+been bootstrapped from the NAS before (see above); otherwise it asks for a
+directory directly.
+
 ## Migrating recordings transferred before this layout existed
 
 Anything transferred before the `Behavior`/`Renderings`/`2P` split landed sits

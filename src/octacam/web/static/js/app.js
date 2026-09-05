@@ -290,6 +290,8 @@ async function main() {
 
   record = new RecordTab({
     formats: system.formats,
+    transferUsers: system.transfer_users,
+    activeUser: system.active_user,
     // Collect each plugin's start-params slice ({name: params}); record.js
     // packs it into POST /api/recording/start as plugin_params. No plugin names
     // are hardcoded here.

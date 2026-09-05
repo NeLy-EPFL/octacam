@@ -324,6 +324,20 @@ reports a bad `--user` as a report line (never `sys.exit`s) — unlike every
 other command, doctor's whole point is to keep running every other check
 and summarize, not abort on the first problem.
 
+**A real bug found while building the GUI dropdown (below)**: `record
+--user`'s resolved `twophoton.source` override never actually reached the
+recording's config snapshot — `RecordingSettings` had no twophoton field at
+all, and `_snapshot_config`'s `with_process_params` call only ever patched
+`transcode_ffmpeg_params`/`transfer_directory`/`transfer_checksum`. Only the
+directory override worked end-to-end; the 2P source silently fell back to
+the rig's shared default. Fixed by adding
+`RecordingSettings.transfer_twophoton_source`, populating it in
+`_settings_from_record`, and giving `with_process_params` a matching
+diff-based patch for `[transfer.twophoton].source` (confirmed via a real
+`octacam record --user <profile-with-a-2P-override>` run: the resulting
+snapshot has the profile's `source`, with `match_window_s`/`settle_s`
+untouched).
+
 **Bootstrapping from the NAS** (`octacam config CONFIG_DIR --bootstrap-users
 <nas-root>`): scans `<nas-root>`'s immediate subdirectories for
 initials-shaped folders (`^[A-Z]{2,4}$`) and adds a
@@ -341,9 +355,29 @@ reusing `config_writer.py` or stdlib `tomllib`. Never touches an
 already-present initials key (so a person's already-customized entry is
 never clobbered back to the generic default), and is safe to re-run.
 
-This is Phase 1 (config + CLI) only — a GUI dropdown for picking a profile,
-plus self-service "type your initials to create one" for someone not yet
-bootstrapped, is a deliberately deferred Phase 2.
+**Phase 2 — the GUI dropdown**: `/api/system` gains `transfer_users` (the
+same `{initials: {directory, twophoton_source}}` shape, `{}` when nothing's
+configured) and `active_user` (the `--user` the GUI was launched with, if
+any); `create_app`/`_AppState` now take `user` to report it.
+`web/static/js/record.js` renders a `<select>` right above the existing
+"Transfer directory" field from `transfer_users` (the whole row stays
+`hidden` when it's empty — zero UI change for a single-user rig),
+pre-selected to `active_user`. Selecting a profile is just one `PUT
+/api/settings` with that profile's `transfer_directory`/
+`transfer_twophoton_source` — **no new settings-patch endpoint**, it reuses
+the existing one (`update_settings` validates generically against
+`dataclasses.fields(RecordingSettings)`, so a new field there is
+automatically a legal patch key). Self-service creation ("+ Add
+yourself…", the dropdown's last option) prompts for initials, `POST
+/api/transfer/users`; if the rig has `[transfer].users_root` configured
+(set once, automatically, the first time `--bootstrap-users` runs — never
+overwritten after) the destination auto-suggests
+`<users_root>/<initials>/octacam_2P`, otherwise the endpoint 422s and the
+frontend prompts for a directory too. The single-entry tomlkit write
+(`config_writer.add_transfer_user`) shares its core mutation
+(`add_transfer_user_entry`) with the CLI's many-at-once
+`--bootstrap-users` loop, so both stay byte-for-byte the same
+comment-preserving in-place edit.
 
 ## Plugin system
 

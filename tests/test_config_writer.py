@@ -4,10 +4,11 @@ import glob
 from pathlib import Path
 
 import pytest
+import tomlkit
 
 from octacam import config_writer as cw
 from octacam._compat import tomllib
-from octacam.config import parse_config
+from octacam.config import load_config_dir, parse_config
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))
 
@@ -308,3 +309,105 @@ def test_with_process_params_adds_sections_only_when_diverging():
         "transcode": {"ffmpeg_params": "-c:v ffv1"},
         "transfer": {"directory": "~/store", "checksum": False},
     }
+
+
+def test_with_process_params_twophoton_source_noop_when_blank():
+    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+
+    # Blank means "no override to apply" — never clears an existing source.
+    raw = {"transfer": {"directory": "~/store", "twophoton": {"source": "/mnt/share/MD"}}}
+    edited = cw.with_process_params(
+        raw,
+        transcode_ffmpeg_params=DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+        transfer_directory="~/store",
+        transfer_checksum=True,
+        transfer_twophoton_source="",
+    )
+    assert edited == raw
+
+
+def test_with_process_params_twophoton_source_patched_when_diverging():
+    raw = {
+        "transfer": {
+            "directory": "~/store",
+            "twophoton": {"source": "/mnt/share/default", "match_window_s": 45},
+        }
+    }
+    edited = cw.with_process_params(
+        raw,
+        transcode_ffmpeg_params="-c:v libx264 -crf 20",
+        transfer_directory="~/store",
+        transfer_checksum=True,
+        transfer_twophoton_source="/mnt/share/MD",
+    )
+    assert edited["transfer"]["twophoton"] == {
+        "source": "/mnt/share/MD",
+        "match_window_s": 45,  # untouched sibling field
+    }
+    assert raw["transfer"]["twophoton"]["source"] == "/mnt/share/default"  # not mutated
+
+
+def test_with_process_params_twophoton_source_creates_section_when_missing():
+    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+
+    edited = cw.with_process_params(
+        {},
+        transcode_ffmpeg_params=DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+        transfer_directory="",
+        transfer_checksum=True,
+        transfer_twophoton_source="/mnt/share/MD",
+    )
+    assert edited == {"transfer": {"twophoton": {"source": "/mnt/share/MD"}}}
+
+
+# --- in-place edits: [transfer.users.<initials>] / users_root --------------
+
+
+def _write_config(tmp_path, text: str) -> Path:
+    path = tmp_path / "octacam_config.toml"
+    path.write_text(text)
+    return tmp_path
+
+
+def test_add_transfer_user_adds_entry_and_preserves_formatting(tmp_path):
+    config_dir = _write_config(
+        tmp_path,
+        "# a hand-authored comment\n"
+        '[transfer]\ndirectory = "/mnt/store/default"  # trailing\n',
+    )
+    added = cw.add_transfer_user(config_dir, "MA", "/mnt/store/MA/octacam_2P")
+    assert added is True
+
+    text = (config_dir / "octacam_config.toml").read_text()
+    assert "# a hand-authored comment" in text
+    assert "# trailing" in text
+    assert "[transfer.users.MA]" in text
+    assert load_config_dir(config_dir).transfer.users["MA"].directory == "/mnt/store/MA/octacam_2P"
+
+
+def test_add_transfer_user_never_overwrites_existing(tmp_path):
+    config_dir = _write_config(
+        tmp_path,
+        '[transfer]\ndirectory = "/mnt/store/default"\n'
+        "[transfer.users.MD]\n"
+        'directory = "/mnt/store/MD/BallPushing_Imaging"\n',
+    )
+    added = cw.add_transfer_user(config_dir, "MD", "/mnt/store/MD/octacam_2P")
+    assert added is False
+    assert (
+        load_config_dir(config_dir).transfer.users["MD"].directory
+        == "/mnt/store/MD/BallPushing_Imaging"
+    )
+
+
+def test_set_transfer_users_root_only_sets_once(tmp_path):
+    config_dir = _write_config(tmp_path, '[transfer]\ndirectory = "/mnt/store/default"\n')
+    doc, transfer = cw.load_transfer_toml_doc(config_dir)
+    assert cw.set_transfer_users_root(transfer, "/mnt/store") is True
+    (config_dir / "octacam_config.toml").write_text(tomlkit.dumps(doc))
+    assert load_config_dir(config_dir).transfer.users_root == "/mnt/store"
+
+    # A second call with a different root is a no-op — never clobbers a
+    # deliberate custom value.
+    doc2, transfer2 = cw.load_transfer_toml_doc(config_dir)
+    assert cw.set_transfer_users_root(transfer2, "/mnt/other") is False

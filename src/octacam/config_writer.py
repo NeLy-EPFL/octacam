@@ -20,6 +20,7 @@ import contextlib
 import copy
 import datetime
 import os
+import re
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -27,6 +28,11 @@ from pathlib import Path
 from octacam._compat import tomllib
 from octacam.config import find_config_file
 from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+
+# A lab-member "initials" folder name, shared by `octacam config
+# --bootstrap-users` (cli.py) and the GUI's self-service "add yourself"
+# (web/app.py) — both need the same notion of what counts as an initials.
+INITIALS_RE = re.compile(r"^[A-Z]{2,4}$")
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (
@@ -200,6 +206,7 @@ def with_process_params(
     transcode_ffmpeg_params: str,
     transfer_directory: str,
     transfer_checksum: bool,
+    transfer_twophoton_source: str = "",
 ) -> dict:
     """Return a copy of ``raw`` with the GUI's post-recording params overlaid.
 
@@ -211,32 +218,48 @@ def with_process_params(
     ``[transcode]``/``[transfer]`` section is created only when a value actually
     diverges from its config default, so a rig with no ``[transfer]`` and a blank
     transfer directory never gains an empty section.
+
+    ``transfer_twophoton_source``, when non-blank (a ``--user`` profile's own
+    ``[transfer.twophoton]`` override was resolved for this session — see
+    ``RecordingSettings.transfer_twophoton_source``), patches just
+    ``[transfer.twophoton].source`` the same diff-based way, leaving every
+    other ``[transfer.twophoton]`` field (``match_window_s``, ``settle_s``,
+    ...) untouched. Blank means "no override to apply" — never clears an
+    existing ``source`` back to empty.
     """
     doc = copy.deepcopy(raw) if raw else {}
 
-    transcode = doc.get("transcode")
-    has_transcode = isinstance(transcode, dict)
-    current_ff = (
-        transcode.get("ffmpeg_params", DEFAULT_TRANSCODE_FFMPEG_PARAMS)
-        if has_transcode
-        else DEFAULT_TRANSCODE_FFMPEG_PARAMS
-    )
+    # `transcode`/`transfer` below are always a definite dict (empty, and not
+    # yet attached to `doc`, when the section is missing/malformed) — reading
+    # defaults from an empty dict behaves identically to "the section isn't
+    # there", and the section is only ever attached to `doc` at the point a
+    # value actually diverges, preserving the "no empty section" contract
+    # without needing separate has_*/None-checked branches pyright can't
+    # narrow through a nested if.
+    transcode_val = doc.get("transcode")
+    transcode: dict = transcode_val if isinstance(transcode_val, dict) else {}
+    current_ff = transcode.get("ffmpeg_params", DEFAULT_TRANSCODE_FFMPEG_PARAMS)
     if transcode_ffmpeg_params != current_ff:
-        if not has_transcode:
-            transcode = {}
-            doc["transcode"] = transcode
         transcode["ffmpeg_params"] = transcode_ffmpeg_params
+        doc["transcode"] = transcode
 
-    transfer = doc.get("transfer")
-    has_transfer = isinstance(transfer, dict)
-    current_dir = transfer.get("directory", "") if has_transfer else ""
-    current_checksum = transfer.get("checksum", True) if has_transfer else True
+    transfer_val = doc.get("transfer")
+    transfer: dict = transfer_val if isinstance(transfer_val, dict) else {}
+    current_dir = transfer.get("directory", "")
+    current_checksum = transfer.get("checksum", True)
     if transfer_directory != current_dir or transfer_checksum != current_checksum:
-        if not has_transfer:
-            transfer = {}
-            doc["transfer"] = transfer
         transfer["directory"] = transfer_directory
         transfer["checksum"] = transfer_checksum
+        doc["transfer"] = transfer
+
+    if transfer_twophoton_source:
+        twophoton_val = transfer.get("twophoton")
+        twophoton: dict = twophoton_val if isinstance(twophoton_val, dict) else {}
+        current_source = twophoton.get("source", "")
+        if transfer_twophoton_source != current_source:
+            twophoton["source"] = transfer_twophoton_source
+            transfer["twophoton"] = twophoton
+            doc["transfer"] = transfer
 
     return doc
 
@@ -383,3 +406,76 @@ def load_raw_config(config_dir: str | Path) -> dict:
         return tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError:
         return {}
+
+
+# ------------------------------------------- in-place edits (comment-preserving)
+#
+# Everything above writes a brand-new file (a fresh rig scaffold, a recording's
+# own config snapshot) — a from-scratch re-serialize is fine there. Editing an
+# *existing*, possibly hand-authored octacam_config.toml (adding
+# [transfer.users.<initials>] entries) is different: it must preserve the
+# file's own comments/formatting, which _dumps (a from-scratch hand-serializer)
+# and plain tomllib (read-only) can't do — hence tomlkit, only here.
+
+
+def load_transfer_toml_doc(config_dir: str | Path):
+    """tomlkit-parse *config_dir*'s existing ``octacam_config.toml`` and
+    return ``(doc, transfer_table)`` — ``transfer_table`` is ``doc["transfer"]``,
+    created (as an empty table) if the file has no ``[transfer]`` section yet.
+    Round-trip-safe: ``tomlkit.dumps(doc)`` reproduces the original file's
+    comments/formatting for anything this doesn't touch."""
+    import tomlkit
+
+    cfg_file = Path(config_dir) / "octacam_config.toml"
+    doc = tomlkit.parse(cfg_file.read_text())
+    if "transfer" not in doc:
+        doc["transfer"] = tomlkit.table()
+    return doc, doc["transfer"]
+
+
+def add_transfer_user_entry(transfer_table, initials: str, directory: str) -> bool:
+    """Add one ``[transfer.users.<initials>]`` entry to an in-memory tomlkit
+    ``[transfer]`` table (from :func:`load_transfer_toml_doc`) — the shared
+    core of :func:`add_transfer_user` (one person) and ``octacam config
+    --bootstrap-users`` (many people, one parse/dump for the whole batch, so
+    each addition doesn't re-read/re-write the file). Returns ``False``
+    (no-op) if *initials* is already present — never clobbers an
+    already-customized entry."""
+    import tomlkit
+
+    if "users" not in transfer_table:
+        transfer_table["users"] = tomlkit.table(is_super_table=True)
+    users = transfer_table["users"]
+    if initials in users:
+        return False
+    entry = tomlkit.table()
+    entry["directory"] = directory
+    users[initials] = entry
+    return True
+
+
+def set_transfer_users_root(transfer_table, users_root: str) -> bool:
+    """Set ``[transfer].users_root`` on an in-memory tomlkit ``[transfer]``
+    table, only if it isn't already set to something truthy — never
+    overwrites a deliberate custom value. Returns whether it changed
+    anything."""
+    if transfer_table.get("users_root"):
+        return False
+    transfer_table["users_root"] = users_root
+    return True
+
+
+def add_transfer_user(config_dir: str | Path, initials: str, directory: str) -> bool:
+    """Add one ``[transfer.users.<initials>]`` entry to *config_dir*'s
+    existing ``octacam_config.toml``, in place — a single parse/mutate/dump
+    for a one-off addition (e.g. the GUI's self-service "add yourself").
+    Returns ``False`` (file left untouched) if *initials* is already
+    present."""
+    import tomlkit
+
+    doc, transfer = load_transfer_toml_doc(config_dir)
+    if not add_transfer_user_entry(transfer, initials, directory):
+        return False
+    cfg_file = Path(config_dir) / "octacam_config.toml"
+    cfg_file.write_text(tomlkit.dumps(doc))
+    return True

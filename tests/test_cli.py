@@ -2661,6 +2661,38 @@ def test_bootstrap_users_dry_run_touches_nothing(tmp_path):
     assert (config_dir / "octacam_config.toml").read_text() == original
 
 
+def test_bootstrap_users_sets_users_root_the_first_time(tmp_path):
+    config_dir = _rig_config(tmp_path)
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    from octacam.config import load_config_dir
+
+    assert load_config_dir(config_dir).transfer.users_root == str(nas_root)
+
+
+def test_bootstrap_users_never_overwrites_a_custom_users_root(tmp_path):
+    config_dir = _rig_config(
+        tmp_path, extra='users_root = "/mnt/custom-root"\n'
+    )
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    from octacam.config import load_config_dir
+
+    assert load_config_dir(config_dir).transfer.users_root == "/mnt/custom-root"
+
+
 def test_bootstrap_users_idempotent_second_run_adds_nothing_new(tmp_path):
     config_dir = _rig_config(tmp_path)
     nas_root = tmp_path / "nas"

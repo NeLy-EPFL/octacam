@@ -36,7 +36,11 @@ instead of a spinner, and the server stays up.
 - **Record** — set fps, duration, and the save location, then start/stop
   recording. The **Process** section here seeds the post-recording pipeline
   (transcode params, transfer destination) that gets baked into each recording's
-  config snapshot — see [Processing](processing.md).
+  config snapshot — see [Processing](processing.md). If the rig has any
+  [per-user transfer profiles](processing.md#per-user-transfer-profiles)
+  configured, a **Profile** dropdown appears above the transfer directory to
+  pick yours (or add yourself, if you're not listed yet) — hidden entirely on
+  a rig with none set up.
 - **Camera** — per-camera sensor controls (exposure, gain, ROI). Save them back
   to the per-camera sensor file from the *Save…* dialog.
 - **View** — arrange the preview layout and set each camera's rotation/flips.
