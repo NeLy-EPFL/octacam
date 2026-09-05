@@ -76,7 +76,7 @@ class _ListHandler(logging.Handler):
         self.messages.append(record.getMessage())
 
 
-def _dry_run_cmd(folder, layout, pix_fmt):
+def _dry_run_cmd(folder, layout, pix_fmt, full_range=False):
     """Return the joined ffmpeg command build_grid_video would run."""
     handler = _ListHandler()
     logger = logging.getLogger("octacam")
@@ -84,7 +84,7 @@ def _dry_run_cmd(folder, layout, pix_fmt):
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     try:
-        build_grid_video(folder, layout=layout, pix_fmt=pix_fmt, dry_run=True)
+        build_grid_video(folder, layout=layout, pix_fmt=pix_fmt, full_range=full_range, dry_run=True)
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prev_level)
@@ -93,10 +93,28 @@ def _dry_run_cmd(folder, layout, pix_fmt):
     return cmd
 
 
-def test_grid_yuv420p_forces_full_range(tmp_path):
+def test_grid_yuv420p_default_is_limited_range_for_quicktime(tmp_path):
+    # Default (full_range=False): plain limited-range yuv420p, no full-range
+    # VUI tag -- QuickTime/AVFoundation was confirmed on real playback to not
+    # reliably honor -color_range pc, which stalled grid.mp4 there even
+    # though ffmpeg-based players (VLC) handled it fine. format=yuv420p is
+    # still present (that alone is what fixes the mixed-pixel-format
+    # washed-out bug), just without the extra full-range preservation.
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
     cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    assert "-color_range" not in cmd
+    assert "out_range" not in cmd
+    assert "format=yuv420p" in cmd
+    # Also faststart by default, for the same "confirmed stalling over a NAS
+    # mount" real playback issue -- pure metadata relocation, no tradeoff.
+    assert "-movflags +faststart" in cmd
+
+
+def test_grid_yuv420p_full_range_opt_in(tmp_path):
+    _gray_mp4(tmp_path, "a")
+    _gray_mp4(tmp_path, "b")
+    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p", full_range=True)
     # Output stream is tagged full range, and the in-graph gray→yuv conversion
     # is pinned to full range so the luma is never squeezed into 16-235.
     assert "-color_range pc" in cmd
@@ -104,10 +122,11 @@ def test_grid_yuv420p_forces_full_range(tmp_path):
 
 
 def test_grid_gray_adds_no_range_flags(tmp_path):
-    # gray (4:0:0) is already full range — no -color_range / out_range churn.
+    # gray (4:0:0) is already full range — no -color_range / out_range churn,
+    # regardless of full_range (it only ever affects limited-range YUV outputs).
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "gray")
+    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "gray", full_range=True)
     assert "-color_range" not in cmd
     assert "out_range" not in cmd
 
@@ -123,6 +142,7 @@ def test_grid_yuv420p_preserves_full_range_end_to_end(tmp_path):
         layout=[["a", ""]],
         ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
         pix_fmt="yuv420p",
+        full_range=True,
     )
     assert out is not None and out.exists()
 

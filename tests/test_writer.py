@@ -13,6 +13,7 @@ from octacam.writer import (
     FfmpegVideoWriter,
     RawVideoWriter,
     _color_range_args,
+    _faststart_args,
     _merge_vf,
     build_encode_args,
     default_save_method,
@@ -283,6 +284,27 @@ def test_build_encode_args_merges_user_vf_after_transform():
         vf="transpose=1",
     )
     assert args[args.index("-vf") + 1] == "transpose=1,eq=contrast=2"
+
+
+def test_faststart_args_only_for_mp4_family():
+    # Confirmed on real recordings: without +faststart, moov lands after
+    # mdat, which stalls playback over a network mount. Pure metadata
+    # relocation, so it's unconditional for any MP4/MOV-family output.
+    assert _faststart_args("o.mp4") == ["-movflags", "+faststart"]
+    assert _faststart_args("o.MP4") == ["-movflags", "+faststart"]
+    assert _faststart_args("/a/b/o.mov") == ["-movflags", "+faststart"]
+    assert _faststart_args("o.mkv") == []
+    assert _faststart_args("o.raw") == []
+
+
+def test_build_encode_args_includes_faststart_for_mp4(tmp_path):
+    args = build_encode_args(
+        "ffmpeg", "o.mp4", 30.0, 64, 48, "-c:v libx264 -pix_fmt gray",
+    )
+    idx = args.index("-movflags")
+    assert args[idx + 1] == "+faststart"
+    # Still the very last two tokens are -y, output.
+    assert args[-2:] == ["-y", "o.mp4"]
 
 
 def test_color_range_args_only_for_limited_range_yuv():

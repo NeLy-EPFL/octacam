@@ -120,6 +120,29 @@ def _full_range_vf(pix_fmt: str, vf: str = "") -> str:
     return f"{vf},{frag}" if vf else frag
 
 
+_FASTSTART_SUFFIXES = (".mp4", ".mov", ".m4v")
+
+
+def _faststart_args(output: str) -> list[str]:
+    """``-movflags +faststart`` for an MP4/MOV-family output, else no-op.
+
+    Without it the moov atom (the file's whole frame index) lands at the
+    *end* of the file -- confirmed on real recordings: every octacam output
+    (per-camera, grid, and a downstream synced-video render) had moov after
+    mdat. A player has to read past the whole file before it can start, which
+    is merely slow on local disk but stalls badly over a network mount (NAS/
+    SMB) -- exactly the "plays a moment then freezes" symptom reported for
+    grid.mp4 and worse for larger synced-video renders. This is a pure
+    metadata relocation (one extra remux pass at encode finalization) with no
+    effect on pixel data, so there's no reason to gate it behind any quality
+    or compatibility tradeoff -- unlike the full-range-vs-limited-range
+    choice below, which does have one.
+    """
+    if str(output).lower().endswith(_FASTSTART_SUFFIXES):
+        return ["-movflags", "+faststart"]
+    return []
+
+
 @dataclass(frozen=True)
 class TranscodeProgress:
     """One progress sample parsed from ffmpeg's ``-progress pipe:1`` stream.
@@ -489,6 +512,7 @@ def build_encode_args(
         *(["-vf", merged_vf] if merged_vf else []),
         *tokens,
         *color_args,
+        *_faststart_args(output),
         "-y",
         str(output),
     ]

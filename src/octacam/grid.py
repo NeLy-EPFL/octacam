@@ -120,6 +120,7 @@ def build_grid_video(
     output: Path | None = None,
     ffmpeg_params: str = "",
     pix_fmt: str = "yuv420p",
+    full_range: bool = False,
     dry_run: bool = False,
     on_progress: ProgressCallback | None = None,
 ) -> Path | None:
@@ -133,6 +134,21 @@ def build_grid_video(
     its ``-pix_fmt``/``-vf`` are ignored — the grid always outputs *pix_fmt*
     (yuv420p) for QuickTime / Keynote compatibility and owns its own filtergraph.
     Empty falls back to the default transcode encoder args.
+
+    *full_range* (off by default): whether to preserve the source cameras'
+    full 0-255 luma via ``-color_range pc`` + a full-range scale filter,
+    trading away the QuickTime/Keynote compatibility *pix_fmt* names as this
+    function's whole reason for existing. Confirmed on real playback testing:
+    QuickTime/AVFoundation does not reliably honor that VUI full-range flag,
+    which is exactly what made grid.mp4 stall/freeze there (fine in
+    ffmpeg-based players like VLC, which do respect it) -- so the default
+    here is the plain limited-range yuv420p this function's docstring always
+    promised, accepting the ~3.6% luma squeeze (16-235) as a non-issue for a
+    presentation/viewing composite (never intended for quantitative
+    analysis -- that stays on the per-camera archival files, whose own
+    full-range gray encoding is untouched by this). Pass ``full_range=True``
+    only if you specifically need luma fidelity back and can accept QuickTime
+    incompatibility as the cost.
 
     Missing cameras (name set but mp4 not found) are replaced with black frames
     so the grid is always produced even with a partial set.  Returns the output
@@ -219,6 +235,7 @@ def build_grid_video(
         DEFAULT_TRANSCODE_FFMPEG_PARAMS,
         _atomic_output,
         _color_range_args,
+        _faststart_args,
         _run_ffmpeg,
         _strip_opts,
         find_ffmpeg,
@@ -245,19 +262,27 @@ def build_grid_video(
     # colour range, producing a washed-out image in VLC and a stalling bitstream
     # in QuickTime / Apple decoders.
     #
-    # For limited-range YUV outputs we also pin the scale to full range
-    # (out_range=full) so the gray→yuv conversion keeps the 0-255 luma instead
-    # of squeezing it into 16-235; the matching -color_range pc on the output
-    # (below) tags the stream so players expand it back.  See
-    # writer._color_range_args.
+    # For limited-range YUV outputs, *full_range* additionally pins the scale
+    # to full range (out_range=full) so the gray→yuv conversion keeps the
+    # 0-255 luma instead of squeezing it into 16-235; the matching
+    # -color_range pc on the output (below) tags the stream so players expand
+    # it back. See writer._color_range_args. Left off by default: this VUI
+    # full-range flag is exactly what QuickTime/AVFoundation was confirmed to
+    # mishandle (stalling playback), so the default path here takes the
+    # ordinary limited-range squeeze instead — still gets the explicit
+    # format=pix_fmt step below, which is what actually fixes the washed-out
+    # mixed-pixel-format bug in VLC; out_range=full was only ever about luma
+    # fidelity on top of that, a separate, optional concern.
     #
     # Cells whose native resolution / aspect ratio differs from the reference
     # W×H are letterboxed, not stretched: force_original_aspect_ratio=decrease
     # fits the frame inside the cell, force_divisible_by=2 keeps the fitted
     # dimensions even (required by chroma-subsampled outputs like yuv420p), and
-    # pad centres it with black bars.  The pad respects the full-range tagging,
-    # so the bars come out true black (luma 0) rather than washed-out 16.
-    scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
+    # pad centres it with black bars. The pad respects the full-range tagging
+    # when *full_range* is set, so the bars come out true black (luma 0)
+    # rather than washed-out 16 -- inert otherwise (pad value is already
+    # relative to whichever range the preceding scale produced).
+    scale_range = ":out_range=full" if full_range and _color_range_args(pix_fmt) else ""
     filter_parts: list[str] = []
     labels: list[str] = []
     for i in range(n_cells):
@@ -294,7 +319,8 @@ def build_grid_video(
         *encoder,
         "-pix_fmt",
         pix_fmt,
-        *_color_range_args(pix_fmt),
+        *(_color_range_args(pix_fmt) if full_range else []),
+        *_faststart_args(output),
         str(output),
     ]
 
