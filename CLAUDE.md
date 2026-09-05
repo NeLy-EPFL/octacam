@@ -244,6 +244,37 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
   frames/s total per bus. Distribute cameras across host controllers; the
   benchmark flags this as the TRANSFER/HOST bottleneck.
 
+## Known limitation: archival per-camera mp4 doesn't play in QuickTime
+
+Confirmed on real playback (2026-09-05): the per-camera archival mp4
+(`DEFAULT_PIX_FMT = "gray"` in `writer.py`, true monochrome 4:0:0 H.264) shows
+green banding and stutters in QuickTime/Keynote, even though it decodes fine
+in any ffmpeg-based player (VLC) and in ffmpeg's own `-f null` decode check
+(no errors). This is a **different bug class** from the one already fixed in
+`grid.py`/`build_grid_video`'s `full_range` parameter (that one was
+`-color_range pc` full-range *tagging* on a real 4:2:0 `yuv420p` stream,
+which QuickTime doesn't reliably honor). This one is presumed to be
+QuickTime/AVFoundation's much shakier support for the monochrome 4:0:0
+*profile itself* (a rare profile; green banding is the classic symptom of a
+decoder reading garbage/uninitialized data where it expects chroma planes
+that a 4:0:0 stream doesn't have) — not independently confirmed, just the
+best-fitting explanation given the symptom and that it's a separate failure
+mode from the grid one.
+
+Deliberately not fixed yet — the per-camera file's whole reason for using
+`gray` full-range (not `yuv420p`) is to preserve the *exact* 0-255 luma for
+downstream analysis without the limited-range 3.6% squeeze (see
+`_is_limited_range_yuv`'s docstring), and QuickTime compatibility has never
+been a requirement for this file (only for `grid.mp4`/synced-video renders,
+which are presentation-only). If this ever needs revisiting: a genuine
+4:2:0 `yuv420p` stream (not `gray`) at **higher bit depth**
+(`yuv420p10le`/High10 profile) might thread the needle — 10-bit limited
+range spans roughly 64-940, more than double the 8-bit dynamic range, so an
+8-bit 0-255 signal should fit losslessly without needing the problematic
+full-range tag *or* the problematic monochrome profile. Unverified: not
+tested for real QuickTime playback, decode-side analysis-tool compatibility
+with 10-bit input, or file-size impact.
+
 ## Config system
 
 Per-rig **`octacam_config.toml`** (parsed tolerantly in `config.py` —
