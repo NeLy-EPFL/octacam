@@ -237,6 +237,67 @@ standalone mode — useful run by hand or on a periodic systemd timer (see the
 packaging example) when there's no behavior recording to process at all; it
 ignores `PATHS`/`--last`/`--all`/`--detach`.
 
+## Per-user transfer profiles
+
+A rig's hardware is shared, but several people can use it and each want their
+own save destination — e.g. a NAS organized by lab-member initials
+(`/mnt/store/MD/...`, `/mnt/store/MA/...`). A `[transfer.users.<initials>]`
+table lets each person override just the save-destination fields
+(`directory`, and the 2P `source` path) on top of the shared `[transfer]`
+block — everything else (`checksum`, `delete_after_transfer`,
+`match_window_s`, `settle_s`, ...) stays shared, rig-wide policy. Nobody,
+including the rig's usual owner, is an implicit default — every person is a
+named entry:
+
+```toml
+[transfer]
+directory = "/mnt/store/default"
+
+[transfer.users.MD]
+directory = "/mnt/store/MD/BallPushing_Imaging"
+[transfer.users.MD.twophoton]
+source = "/mnt/windows_share/MD"
+
+[transfer.users.MA]
+directory = "/mnt/store/MA/octacam_2P"
+```
+
+Select a profile with `--user`/`-u` on `gui`, `record`, and `process`:
+
+```bash
+octacam record --user MD
+octacam process --reassemble-tiffs --config configs/2p_2 --user MD
+```
+
+`record --user` resolves the destination **once, at record time**, and it's
+baked into that recording's own config snapshot — so `process` later needs
+no `--user` for it. `--user` on `process` itself only matters for a
+recording with no embedded snapshot (falling back to `--config`) and for the
+standalone modes (`--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`),
+which resolve `[transfer].directory` fresh from `--config` on every run.
+A `--user` that doesn't match any configured profile exits with a clear
+error naming the profiles that do exist — it never silently falls back to
+the wrong destination.
+
+**Bootstrapping profiles from the NAS:** rather than hand-writing an entry
+for every lab member, scan the NAS for their existing folders and pre-seed
+one automatically:
+
+```bash
+octacam config configs/2p_2 --bootstrap-users /mnt/store --dry-run  # preview first
+octacam config configs/2p_2 --bootstrap-users /mnt/store
+```
+
+This adds a `[transfer.users.<initials>]` entry (default directory
+`<nas-root>/<initials>/octacam_2P`) for every initials-shaped folder
+(`^[A-Z]{2,4}$`) under `/mnt/store` that doesn't already have one — so a new
+person can start recording without configuring anything, unless they want
+something other than the generic default. It edits the existing config file
+in place, preserving its comments and formatting, and never touches an
+already-present entry (so a person's own customization, like Matthias's
+project-specific `BallPushing_Imaging` above, is never overwritten back to
+the generic default). Safe to re-run.
+
 ## Migrating recordings transferred before this layout existed
 
 Anything transferred before the `Behavior`/`Renderings`/`2P` split landed sits

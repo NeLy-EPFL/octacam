@@ -31,6 +31,7 @@ directory). See the [Web GUI guide](../guide/gui.md).
 | `--no-browser` | off | Don't auto-open a browser (also auto-skipped over SSH / headless). |
 | `--plugin <name>` | — | Enable a [plugin](../guide/plugins.md) (repeatable). |
 | `--no-plugins` | off | Disable all plugins for this launch. |
+| `--user`, `-u` | — | Apply this person's `[transfer.users.<user>]` save-destination override for the whole session — see [Processing → per-user transfer profiles](../guide/processing.md#per-user-transfer-profiles). |
 
 ## `doctor`
 
@@ -50,6 +51,7 @@ opens a camera, so it is safe to run while a session is live.
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
 | `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
+| `--user`, `-u` | Also validate this person's `[transfer.users.<user>]` override resolves correctly. Reported as a warning line, never aborts the rest of the checks. |
 
 Exits `0` when no errors are found, so it works as a pre-flight check in scripts.
 
@@ -69,6 +71,8 @@ gui`). If `CONFIG_DIR` is omitted you are prompted for one.
 | `--backend <name>` | Pin the rig to one backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: auto-detect through the cascade. |
 | `--force` | Overwrite an existing `octacam_config.toml` without asking. |
 | `--snapshot-params` / `--no-snapshot-params` | Open each detected camera once to save its current sensor parameters (`.pfs`/`.txt`); busy cameras are skipped. On by default. |
+| `--bootstrap-users <nas-root>` | Separate mode: scan `<nas-root>`'s immediate subdirectories for initials-style lab-member folders and add a `[transfer.users.<initials>]` entry to `CONFIG_DIR`'s existing config for each one not already present — see [Processing → per-user transfer profiles](../guide/processing.md#per-user-transfer-profiles). Requires `CONFIG_DIR`. Safe to re-run. |
+| `--dry-run` | With `--bootstrap-users`: log what would be added without writing anything. |
 
 ## `record`
 
@@ -88,6 +92,7 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--yes`, `-y` | Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash). |
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
+| `--user`, `-u` | Apply this person's `[transfer.users.<user>]` save-destination override — resolved once and baked into this recording's own config snapshot, so `process` needs no `--user` for it later. See [Processing → per-user transfer profiles](../guide/processing.md#per-user-transfer-profiles). |
 
 ## `flash`
 
@@ -171,14 +176,17 @@ with `--last` / `--last session` / `--all`. See
 | `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. Also on via `[transcode].delete_source`; `--no-delete-source` overrides either way. |
 | `--delete-after-transfer` | Once a folder's transfer (behavior + any matched 2P data) is checksum-verified on the NAS, delete the local recording folder and matched 2P source folder(s). Also on via `[transfer].delete_after_transfer`; `--no-delete-after-transfer` overrides either way. |
 | `--no-twophoton-sweep` | Skip the automatic 2P-only sweep this run otherwise does, sequentially, for every `[transfer.twophoton]` source it touched (same logic as `--twophoton-sweep`, run automatically rather than as a separate command). |
-| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot (or the rig config for `--twophoton-sweep`). |
+| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot (or the rig config for `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`). |
+| `--user`, `-u` | Apply this person's `[transfer.users.<user>]` save-destination override. Only affects recordings with no embedded config (falling back to `--config`) and the `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs` modes — a recording with its own embedded snapshot already has its destination baked in from record time. Exits with an error listing known users on a typo. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 | `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |
 
 See [Processing → 2-photon transfer](../guide/processing.md#2-photon-transfer)
 for `[transfer.twophoton]`, the NAS layout it produces, and
-`--delete-after-transfer`'s safety contract.
+`--delete-after-transfer`'s safety contract; see
+[Processing → per-user transfer profiles](../guide/processing.md#per-user-transfer-profiles)
+for `[transfer.users.<initials>]` and `--user`.
 
 A running job (detached or foreground) auto-pauses while an `octacam gui`/`record`
 on the same machine owns the cameras, and resumes when they are free. See

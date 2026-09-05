@@ -351,6 +351,95 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     assert "system.close" not in _FACADE_CALLS  # no bare system teardown race
 
 
+def test_record_user_resolves_transfer_directory_override(tmp_path, monkeypatch):
+    # --user's [transfer.users.<user>] override must reach _settings_from_record
+    # (and so get baked into the recording's own config snapshot) — resolved
+    # once, at record time, via the real resolve_transfer_for_user.
+    import octacam.cli as cli_mod
+    from octacam.config import TransferConfig, TransferUserOverride
+
+    _FACADE_CALLS.clear()
+    cam = SimpleNamespace(serial_number="s1", name="cam1")
+    transfer = TransferConfig(
+        directory="/mnt/store/default",
+        users={"MA": TransferUserOverride(directory="/mnt/store/MA/octacam_2P")},
+    )
+    config = SimpleNamespace(
+        cameras=[cam], backend="fake", record=SimpleNamespace(),
+        transcode=None, transfer=transfer,
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
+    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+
+    class FakePlugins:
+        plugins: list = []
+
+        def setup_all(self):
+            _FACADE_CALLS.append("setup_all")
+
+        def teardown_all(self):
+            _FACADE_CALLS.append("teardown_all")
+
+        def default_start_params(self, *_a, **_k):
+            return {}
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+
+    captured = {}
+    settings = SimpleNamespace(save_dir=str(tmp_path / "out"), duration_s=1.0, fps=10.0)
+
+    def fake_settings_from_record(record, transcode, transfer):
+        captured["transfer"] = transfer
+        return settings
+
+    monkeypatch.setattr(cli_mod, "_settings_from_record", fake_settings_from_record)
+
+    class FakeController:
+        recording_active = False
+
+        def __init__(self, *a, **k):
+            pass
+
+        def start_recording(self, *a, **k):
+            return SimpleNamespace(ok=True, message="")
+
+        def join(self):
+            pass
+
+        def close(self):
+            _FACADE_CALLS.append("controller.close")
+
+    monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
+    monkeypatch.setattr(
+        "octacam.controller.normalize_save_dir", lambda s: s, raising=False
+    )
+
+    runner.invoke(app, ["record", str(tmp_path), "--user", "MA"])
+    # The config-resolution step is what's under test here — not the full
+    # (heavily-mocked) record flow past it, which other tests already cover.
+    assert captured["transfer"].directory == "/mnt/store/MA/octacam_2P"
+
+
+def test_record_user_unknown_exits_with_known_users_listed(tmp_path, monkeypatch):
+    from octacam.config import TransferConfig, TransferUserOverride
+
+    transfer = TransferConfig(
+        directory="/mnt/store/default",
+        users={"MD": TransferUserOverride(directory="/mnt/store/MD")},
+    )
+    config = SimpleNamespace(
+        cameras=[], backend="fake", record=SimpleNamespace(),
+        transcode=None, transfer=transfer,
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+
+    result = runner.invoke(app, ["record", str(tmp_path), "--user", "ZZ"])
+    assert result.exit_code != 0
+    assert "ZZ" in result.output
+    assert "MD" in result.output
+
+
 def test_browser_skip_reason(monkeypatch):
     for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)
@@ -449,6 +538,7 @@ def test_process_help_lists_options():
         "--migrate-layout",
         "--reassemble-tiffs",
         "--delete-after-transfer",
+        "--user",
     ):
         assert opt in result.output
     # Encoding is config-driven now: the old per-run encoding flags are gone.
@@ -1599,6 +1689,51 @@ def test_reassemble_tiffs_dry_run_touches_nothing(tmp_path, monkeypatch):
     assert len(list(dest_2p.glob("ChanA_*.tif"))) == 5
 
 
+def test_reassemble_tiffs_user_resolves_destination(tmp_path, monkeypatch):
+    # A standalone mode like --reassemble-tiffs resolves [transfer].directory
+    # fresh from --config on every run — --user must apply here, unlike a
+    # recording with its own already-baked-in snapshot.
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    default_root = tmp_path / "dest-default"
+    ma_root = tmp_path / "dest-MA"
+    take_folder = ma_root / "260813_" / "Fly2" / "001"
+    _make_image_folder_2p_flat(take_folder / "2P" / "Fly1", n_frames=5)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{default_root.as_posix()}"\n'
+        f"[transfer.users.MA]\n"
+        f'directory = "{ma_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--reassemble-tiffs", "--config", str(config_dir), "--user", "MA"],
+    )
+    assert result.exit_code == 0, result.output
+    dest_2p = take_folder / "2P" / "Fly1"
+    assert (dest_2p / "ChanA.tif").is_file()
+
+
+def test_reassemble_tiffs_user_unknown_exits_with_known_users_listed(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{(tmp_path / "dest").as_posix()}"\n'
+        "[transfer.users.MD]\n"
+        f'directory = "{(tmp_path / "dest-md").as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--reassemble-tiffs", "--config", str(config_dir), "--user", "ZZ"],
+    )
+    assert result.exit_code != 0
+    assert "ZZ" in result.output
+    assert "MD" in result.output
+
+
 def _make_image_folder_2p_flat(folder, *, n_frames, channel="ChanA"):
     """Like _make_image_folder_2p, but writes directly into *folder* (already
     "transferred" NAS-layout shape) rather than under an experiment/name pair
@@ -2170,6 +2305,7 @@ def test_config_help_documents_scaffolding():
     assert "Usage" in result.output
     assert "CONFIG_DIR" in result.output
     assert "--backend" in result.output
+    assert "--bootstrap-users" in result.output
 
 
 def _quiet_console():
@@ -2402,6 +2538,142 @@ def test_config_rejects_unknown_backend(tmp_path):
     assert result.exit_code == 2
     assert "unknown backend" in result.output
     assert not (tmp_path / "rig").exists()
+
+
+# --- config --bootstrap-users: pre-seed [transfer.users.*] from the NAS -----
+
+
+def _rig_config(tmp_path, extra: str = "") -> Path:
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store/default"\n' + extra
+    )
+    return config_dir
+
+
+def test_bootstrap_users_requires_config_dir(tmp_path):
+    nas_root = tmp_path / "nas"
+    nas_root.mkdir()
+    result = runner.invoke(app, ["config", "--bootstrap-users", str(nas_root)])
+    assert result.exit_code != 0
+    assert "--bootstrap-users" in result.output
+
+
+def test_bootstrap_users_adds_entry_per_initials_folder(tmp_path):
+    config_dir = _rig_config(tmp_path)
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+    (nas_root / "MA").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    from octacam.config import load_config_dir
+
+    users = load_config_dir(config_dir).transfer.users
+    assert set(users) == {"MD", "MA"}
+    assert users["MD"].directory == str(nas_root / "MD" / "octacam_2P")
+    assert users["MA"].directory == str(nas_root / "MA" / "octacam_2P")
+
+
+def test_bootstrap_users_skips_non_initials_folders(tmp_path):
+    config_dir = _rig_config(tmp_path)
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+    (nas_root / "2p_only").mkdir(parents=True)  # not initials-shaped — skip
+    (nas_root / "not-a-user-folder").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    from octacam.config import load_config_dir
+
+    assert set(load_config_dir(config_dir).transfer.users) == {"MD"}
+
+
+def test_bootstrap_users_never_touches_an_existing_entry(tmp_path):
+    config_dir = _rig_config(
+        tmp_path,
+        extra='[transfer.users.MD]\ndirectory = "/mnt/store/MD/BallPushing_Imaging"\n',
+    )
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    from octacam.config import load_config_dir
+
+    # Matthias's already-customized entry survives untouched, not overwritten
+    # with the generic default.
+    assert (
+        load_config_dir(config_dir).transfer.users["MD"].directory
+        == "/mnt/store/MD/BallPushing_Imaging"
+    )
+
+
+def test_bootstrap_users_preserves_existing_comments_and_formatting(tmp_path):
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    original = (
+        "# hand-authored rig config — please keep this comment\n"
+        "[transfer]\n"
+        'directory = "/mnt/store/default"  # trailing comment\n'
+    )
+    (config_dir / "octacam_config.toml").write_text(original)
+    nas_root = tmp_path / "nas"
+    (nas_root / "MA").mkdir(parents=True)
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+
+    new_text = (config_dir / "octacam_config.toml").read_text()
+    assert "# hand-authored rig config — please keep this comment" in new_text
+    assert "# trailing comment" in new_text
+    assert "[transfer.users.MA]" in new_text
+
+
+def test_bootstrap_users_dry_run_touches_nothing(tmp_path):
+    config_dir = _rig_config(tmp_path)
+    original = (config_dir / "octacam_config.toml").read_text()
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+
+    result = runner.invoke(
+        app,
+        [
+            "config", str(config_dir),
+            "--bootstrap-users", str(nas_root),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "would add" in result.output
+    assert (config_dir / "octacam_config.toml").read_text() == original
+
+
+def test_bootstrap_users_idempotent_second_run_adds_nothing_new(tmp_path):
+    config_dir = _rig_config(tmp_path)
+    nas_root = tmp_path / "nas"
+    (nas_root / "MD").mkdir(parents=True)
+
+    runner.invoke(app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)])
+    after_first = (config_dir / "octacam_config.toml").read_text()
+
+    result = runner.invoke(
+        app, ["config", str(config_dir), "--bootstrap-users", str(nas_root)]
+    )
+    assert result.exit_code == 0, result.output
+    assert (config_dir / "octacam_config.toml").read_text() == after_first
 
 
 # --------------------------------------------------------------------------- #

@@ -270,6 +270,31 @@ class TwoPhotonTransferConfig(BaseModel):
         return _scalar_str(value)
 
 
+class TwoPhotonUserOverride(BaseModel):
+    """``[transfer.users.<initials>.twophoton]``: the one 2P field that
+    genuinely differs per person — their own ThorSync/ThorImage working
+    folder on the share. Everything else (``match_window_s``, ``settle_s``,
+    ``verify_with_signals``, ...) is rig-timing-tuned and stays shared,
+    inherited from the rig's own ``[transfer.twophoton]`` block."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    source: str = ""
+
+
+class TransferUserOverride(BaseModel):
+    """``[transfer.users.<initials>]``: overrides only the save-destination
+    fields of the shared ``[transfer]`` block for one named lab member —
+    everything else (``checksum``, ``delete_after_transfer``, ...) stays
+    rig-wide policy, since those are hardware/timing-tuned and have no
+    reason to differ per person. See ``resolve_transfer_for_user``."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    directory: str = ""
+    twophoton: TwoPhotonUserOverride | None = None
+
+
 class TransferConfig(BaseModel):
     """The ``[transfer]`` section: where `octacam process` mirrors recordings.
 
@@ -278,6 +303,12 @@ class TransferConfig(BaseModel):
     the local tree is mirrored on the destination. ``directory`` supports the
     same strftime ``%``-codes as ``record.directory``. ``checksum``
     content-verifies each copy before promoting it (false = size-only).
+
+    ``users`` holds one ``[transfer.users.<initials>]`` entry per lab member
+    sharing this rig — nobody, including the rig's usual owner, is an
+    implicit default; a save destination is only ever picked by an explicit
+    ``--user <initials>`` (see ``resolve_transfer_for_user``). Absent
+    entirely when nobody has configured any per-user profiles yet.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -291,6 +322,7 @@ class TransferConfig(BaseModel):
     # checksum verification internally when active, regardless of `checksum`.
     delete_after_transfer: bool = False
     twophoton: TwoPhotonTransferConfig | None = None
+    users: dict[str, TransferUserOverride] = {}
 
     @field_validator("directory", mode="before")
     @classmethod
@@ -398,6 +430,31 @@ def resolve_record_directory(
 ) -> str:
     """Resolve just ``record.directory`` (the base the save dir sits under)."""
     return resolve_dir_template(record.directory, when)
+
+
+def resolve_transfer_for_user(transfer: TransferConfig | None, user: str) -> TransferConfig:
+    """Apply a ``--user`` override on top of the shared ``[transfer]`` block.
+
+    Unlike the rest of this module's tolerant, warn-and-default parsing, this
+    raises ``ValueError`` (never silently falls back) when *user* has no
+    ``[transfer.users.<user>]`` entry — a ``--user`` typo is a CLI
+    input-validation error, categorically different from "a config file has
+    a malformed value", and must never quietly transfer to the wrong
+    destination. Callers (cli.py) turn this into a clear ``sys.exit``.
+    """
+    if transfer is None or user not in transfer.users:
+        known = sorted(transfer.users) if transfer else []
+        raise ValueError(
+            f'--user "{user}" has no [transfer.users.{user}] entry in this config'
+            + (f" (known: {', '.join(known)})" if known else " (no [transfer.users.*] configured)")
+        )
+    override = transfer.users[user]
+    result = transfer.model_copy(deep=True)
+    if override.directory:
+        result.directory = override.directory
+    if override.twophoton and override.twophoton.source and result.twophoton:
+        result.twophoton = result.twophoton.model_copy(update={"source": override.twophoton.source})
+    return result
 
 
 def resolve_relative_directory(

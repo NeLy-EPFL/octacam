@@ -282,6 +282,69 @@ default on read, so an "auto" field like `record.max_nvenc_sessions = None` must
 never be written as a literal — the `octacam config` scaffold `model_dump()`s the
 whole `RecordConfig`, so any None-defaulting field would otherwise crash the dump.
 
+### Per-user transfer profiles (`[transfer.users.<initials>]`)
+
+A NAS shared by a whole lab (organized by member initials as top-level
+folders, e.g. `MD`, `MA`) means several people can share one rig's hardware
+config while each wanting their own save destination — there was previously
+**zero** per-user concept anywhere in this codebase. Deliberately narrow
+scope: only the save-destination fields are overridable (`directory`, and
+the 2P `source` path) — everything else in `[transfer]`/`[transfer.twophoton]`
+(`checksum`, `delete_after_transfer`, `match_window_s`, `settle_s`, ...) stays
+shared, rig-wide policy, since those are hardware/timing-tuned and have no
+reason to differ per person. Nobody, including a rig's usual owner, is an
+implicit default — every person is a symmetric named entry:
+
+```toml
+[transfer]
+directory = "/mnt/store/default"
+[transfer.users.MD]
+directory = "/mnt/store/MD/BallPushing_Imaging"
+[transfer.users.MD.twophoton]
+source = "/mnt/windows_share/MD"
+```
+
+`resolve_transfer_for_user` (config.py) applies the override — deliberately
+**raises** `ValueError` on an unknown user (unlike the rest of config.py's
+tolerant warn-and-default parsing) because a `--user` typo is a CLI
+input-validation error, not a malformed config value, and must never
+silently transfer to the wrong destination; `cli.py`'s `_load_config_for_user`
+turns that into a clear `sys.exit`. Overriding just `twophoton.source` is a
+field-level overlay, not a full re-specification — it doesn't reset the
+rig's own tuned `match_window_s`/`settle_s` back to class defaults.
+
+`--user`/`-u` is threaded through every command that touches `[transfer]`:
+`gui`/`record` (a whole-session/one-time resolution — `record` bakes the
+resolved directory into that recording's own config snapshot at record
+time, so `process` needs no `--user` for it later), and `process`'s
+fallback-to-`--config` path plus its three standalone modes
+(`--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`, which resolve
+`[transfer].directory` fresh from `--config` on every run). `doctor --user`
+reports a bad `--user` as a report line (never `sys.exit`s) — unlike every
+other command, doctor's whole point is to keep running every other check
+and summarize, not abort on the first problem.
+
+**Bootstrapping from the NAS** (`octacam config CONFIG_DIR --bootstrap-users
+<nas-root>`): scans `<nas-root>`'s immediate subdirectories for
+initials-shaped folders (`^[A-Z]{2,4}$`) and adds a
+`[transfer.users.<initials>]` entry (default `<nas-root>/<initials>/octacam_2P`)
+for each one not already present — so a new lab member can start recording
+without configuring anything, unless they want something other than the
+generic default (like Matthias's own project-specific `BallPushing_Imaging`).
+This is the **one config write in this codebase that edits an existing,
+possibly hand-authored file in place** rather than creating a brand-new one
+— every other write here (`config_writer.py`'s `_dumps`, the record-time
+snapshot embed) is a from-scratch re-serialize that would silently drop an
+existing file's comments/formatting. That's specifically why this needed a
+new dependency, **`tomlkit`** (round-trip-safe parse/dump), rather than
+reusing `config_writer.py` or stdlib `tomllib`. Never touches an
+already-present initials key (so a person's already-customized entry is
+never clobbered back to the generic default), and is safe to re-run.
+
+This is Phase 1 (config + CLI) only — a GUI dropdown for picking a profile,
+plus self-service "type your initials to create one" for someone not yet
+bootstrapped, is a deliberately deferred Phase 2.
+
 ## Plugin system
 
 Serial-hardware plugins under `plugins/<name>/`, registered in

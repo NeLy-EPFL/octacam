@@ -358,6 +358,108 @@ def test_transfer_twophoton_verify_parsed(tmp_path):
     assert twophoton.verify_window_s == 7200
 
 
+# --- [transfer.users.<initials>] per-user save-destination overrides -------
+
+
+def test_transfer_users_absent_by_default(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    cfg = load_config_dir(tmp_path)
+    assert cfg.transfer.users == {}
+
+
+def test_transfer_users_parsed(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store"\n'
+        "[transfer.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "[transfer.users.MD]\n"
+        'directory = "/mnt/store/MD/BallPushing_Imaging"\n'
+        "[transfer.users.MD.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "[transfer.users.MA]\n"
+        'directory = "/mnt/store/MA/octacam_2P"\n'
+    )
+    users = load_config_dir(tmp_path).transfer.users
+    assert set(users) == {"MD", "MA"}
+    assert users["MD"].directory == "/mnt/store/MD/BallPushing_Imaging"
+    assert users["MD"].twophoton.source == "/mnt/windows_share/MD"
+    assert users["MA"].directory == "/mnt/store/MA/octacam_2P"
+    assert users["MA"].twophoton is None
+
+
+def test_resolve_transfer_for_user_overrides_directory(tmp_path):
+    from octacam.config import resolve_transfer_for_user
+
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store/default"\n'
+        "checksum = true\n"
+        "[transfer.users.MA]\n"
+        'directory = "/mnt/store/MA/octacam_2P"\n'
+    )
+    transfer = load_config_dir(tmp_path).transfer
+    resolved = resolve_transfer_for_user(transfer, "MA")
+    assert resolved.directory == "/mnt/store/MA/octacam_2P"
+    # Shared policy fields are untouched by the override.
+    assert resolved.checksum is True
+
+
+def test_resolve_transfer_for_user_overrides_only_twophoton_source(tmp_path):
+    """The footgun this design avoids: overriding just `source` must not
+    reset the rig's own tuned match_window_s/settle_s back to class
+    defaults."""
+    from octacam.config import resolve_transfer_for_user
+
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store/default"\n'
+        "[transfer.twophoton]\n"
+        'source = "/mnt/windows_share/MD"\n'
+        "match_window_s = 45\n"
+        "settle_s = 500\n"
+        "[transfer.users.MA]\n"
+        'directory = "/mnt/store/MA/octacam_2P"\n'
+        "[transfer.users.MA.twophoton]\n"
+        'source = "/mnt/windows_share/MA"\n'
+    )
+    transfer = load_config_dir(tmp_path).transfer
+    resolved = resolve_transfer_for_user(transfer, "MA")
+    assert resolved.twophoton.source == "/mnt/windows_share/MA"
+    assert resolved.twophoton.match_window_s == 45
+    assert resolved.twophoton.settle_s == 500
+
+
+def test_resolve_transfer_for_user_unknown_user_raises(tmp_path):
+    from octacam.config import resolve_transfer_for_user
+
+    (tmp_path / "octacam_config.toml").write_text(
+        "[transfer]\n"
+        'directory = "/mnt/store/default"\n'
+        "[transfer.users.MD]\n"
+        'directory = "/mnt/store/MD"\n'
+    )
+    transfer = load_config_dir(tmp_path).transfer
+    try:
+        resolve_transfer_for_user(transfer, "ZZ")
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "ZZ" in str(e)
+        assert "MD" in str(e)  # names the known profiles
+
+
+def test_resolve_transfer_for_user_raises_with_no_users_configured(tmp_path):
+    from octacam.config import resolve_transfer_for_user
+
+    (tmp_path / "octacam_config.toml").write_text('[transfer]\ndirectory = "/mnt/store"\n')
+    transfer = load_config_dir(tmp_path).transfer
+    try:
+        resolve_transfer_for_user(transfer, "MD")
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "no [transfer.users.*] configured" in str(e)
+
+
 def test_transcode_delete_source_defaults_false(tmp_path):
     (tmp_path / "octacam_config.toml").write_text("")
     assert load_config_dir(tmp_path).transcode.delete_source is False

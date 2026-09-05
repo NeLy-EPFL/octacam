@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import resource
 import shlex
 import shutil
@@ -515,13 +516,22 @@ def gui(
     ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
+    user: Annotated[
+        str | None,
+        typer.Option(
+            "--user",
+            "-u",
+            help=r"Apply this person's \[transfer.users.<user>] save-destination "
+            "override for the whole session. Exits with an error listing known "
+            "users if it doesn't match any configured profile.",
+        ),
+    ] = None,
 ) -> None:
     """Launch the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
 
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import load_config_dir
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
@@ -552,7 +562,7 @@ def gui(
             f"Choose a free one with --port (e.g. --port {port + 1})."
         )
 
-    config = load_config_dir(config_dir)
+    config = _load_config_for_user(config_dir, user)
 
     # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()
@@ -1399,13 +1409,14 @@ def _doctor_gpu_encoding(report: _Report) -> None:
     report.add("info", f"NVENC record params: {NVENC_H264_PARAMS}")
 
 
-def _doctor_config(report: _Report, config_dir: Path):
+def _doctor_config(report: _Report, config_dir: Path, user: str | None = None):
     from octacam._compat import tomllib
     from octacam.config import (
         find_config_file,
         load_config_dir,
         resolve_dir_template,
         resolve_save_dir,
+        resolve_transfer_for_user,
     )
 
     report.section(f"Config ({config_dir})")
@@ -1422,6 +1433,14 @@ def _doctor_config(report: _Report, config_dir: Path):
         report.add("error", f"{cfg_file.name} could not be parsed: {e}")
         return None
     cfg = load_config_dir(config_dir)
+    if user is not None:
+        # Unlike other CLI commands, doctor never aborts early on one bad
+        # setting — it reports the problem and keeps running every other
+        # check, so a --user typo becomes a report line, not a sys.exit.
+        try:
+            cfg.transfer = resolve_transfer_for_user(cfg.transfer, user)
+        except ValueError as e:
+            report.add("error", str(e))
     report.add(
         "ok",
         f"{cfg_file.name} loaded (backend={cfg.backend}, "
@@ -1864,6 +1883,15 @@ def doctor(
             "this if a board may be armed.",
         ),
     ] = False,
+    user: Annotated[
+        str | None,
+        typer.Option(
+            "--user",
+            "-u",
+            help=r"Also validate this person's \[transfer.users.<user>] "
+            "save-destination override resolves correctly.",
+        ),
+    ] = None,
 ) -> None:
     """Diagnose the octacam install and, optionally, a rig config.
 
@@ -1884,7 +1912,7 @@ def doctor(
     _doctor_system(report)
     _doctor_backends(report, backend, scan)
     _doctor_encoding(report)
-    cfg = _doctor_config(report, config_dir) if config_dir is not None else None
+    cfg = _doctor_config(report, config_dir, user) if config_dir is not None else None
     if cfg is not None:
         _doctor_cameras_vs_config(report, cfg, backend, scan)
         _doctor_storage(report, cfg)
@@ -2275,6 +2303,76 @@ def _snapshot_camera_params(
         system.close()
 
 
+_INITIALS_RE = re.compile(r"^[A-Z]{2,4}$")
+
+
+def _run_bootstrap_users(config_dir: Path, nas_root: Path, dry_run: bool) -> None:
+    """``octacam config CONFIG_DIR --bootstrap-users <nas-root>``: pre-seed a
+    [transfer.users.<initials>] entry for every lab member's existing NAS
+    folder, so a new person can start recording without configuring
+    anything (unless they want a different destination than the generic
+    default). Edits CONFIG_DIR's existing octacam_config.toml **in place**
+    with tomlkit (not config_writer's from-scratch _dumps), preserving its
+    comments/formatting exactly — the one config write in this codebase
+    that isn't creating a brand-new file. Never touches an initials key
+    already present, so re-running is always safe."""
+    import tomlkit
+
+    cfg_file = config_dir / "octacam_config.toml"
+    if not cfg_file.is_file():
+        sys.exit(f"--bootstrap-users: {cfg_file} does not exist")
+
+    candidates = sorted(
+        p.name for p in nas_root.iterdir() if p.is_dir() and _INITIALS_RE.match(p.name)
+    )
+    skipped_non_initials = sorted(
+        p.name for p in nas_root.iterdir() if p.is_dir() and not _INITIALS_RE.match(p.name)
+    )
+    if skipped_non_initials:
+        log.info(
+            "bootstrap-users: %d folder(s) under %s don't look like initials "
+            "(2-4 uppercase letters) — skipped: %s",
+            len(skipped_non_initials), nas_root, ", ".join(skipped_non_initials),
+        )
+
+    doc = tomlkit.parse(cfg_file.read_text())
+    if "transfer" not in doc:
+        doc["transfer"] = tomlkit.table()
+    transfer = doc["transfer"]
+    if "users" not in transfer:
+        transfer["users"] = tomlkit.table(is_super_table=True)
+    users = transfer["users"]
+
+    n_added = n_already = 0
+    for initials in candidates:
+        if initials in users:
+            n_already += 1
+            continue
+        directory = str(nas_root / initials / "octacam_2P")
+        if dry_run:
+            log.info(
+                "[dry-run] bootstrap-users: would add [transfer.users.%s] directory = %r",
+                initials, directory,
+            )
+            n_added += 1
+            continue
+        entry = tomlkit.table()
+        entry["directory"] = directory
+        users[initials] = entry
+        log.info("bootstrap-users: added [transfer.users.%s] directory = %r", initials, directory)
+        n_added += 1
+
+    if dry_run:
+        log.info(
+            "[dry-run] bootstrap-users: %d would be added, %d already present",
+            n_added, n_already,
+        )
+        return
+    if n_added:
+        cfg_file.write_text(tomlkit.dumps(doc))
+    log.info("bootstrap-users: %d added, %d already present", n_added, n_already)
+
+
 @app.command()
 def config(
     config_dir: Annotated[
@@ -2309,6 +2407,31 @@ def config(
             "parameters (.pfs/.txt). Skipped when a camera is busy. On by default.",
         ),
     ] = True,
+    bootstrap_users: Annotated[
+        Path | None,
+        typer.Option(
+            "--bootstrap-users",
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help=r"Separate mode: instead of scaffolding a new rig, scan this "
+            "NAS root's immediate subdirectories for initials-style lab-member "
+            r"folders and add a \[transfer.users.<initials>] entry (default "
+            "directory '<nas-root>/<initials>/octacam_2P') to CONFIG_DIR's "
+            "existing octacam_config.toml for each one not already present. "
+            "Preserves the file's existing comments/formatting and never "
+            "touches an already-present entry. Requires CONFIG_DIR (the "
+            "existing rig config to edit). Safe to re-run.",
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="With --bootstrap-users: log what would be added without "
+            "writing anything. Has no effect on the normal interactive scaffold.",
+        ),
+    ] = False,
 ) -> None:
     """Interactively scaffold a new rig config directory.
 
@@ -2321,7 +2444,15 @@ def config(
     By default it also opens each detected camera once to snapshot its current
     sensor parameters into a per-camera file; a busy camera is skipped with a
     warning. Pass --no-snapshot-params to skip that and never open a camera.
+
+    --bootstrap-users is a separate mode — see its own help text.
     """
+    if bootstrap_users is not None:
+        if config_dir is None:
+            sys.exit("--bootstrap-users requires CONFIG_DIR (the existing rig config to edit)")
+        _run_bootstrap_users(config_dir, bootstrap_users, dry_run)
+        return
+
     from rich.console import Console
     from rich.prompt import Confirm, Prompt
 
@@ -2484,6 +2615,18 @@ def record(
     ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
+    user: Annotated[
+        str | None,
+        typer.Option(
+            "--user",
+            "-u",
+            help=r"Apply this person's \[transfer.users.<user>] save-destination "
+            "override — resolved once, now, and baked into this recording's "
+            "own config snapshot, so a later `octacam process` needs no "
+            "--user for it. Exits with an error listing known users if it "
+            "doesn't match any configured profile.",
+        ),
+    ] = None,
 ) -> None:
     r"""Record videos headlessly from the cameras in CONFIG_DIR.
 
@@ -2493,11 +2636,10 @@ def record(
     """
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import load_config_dir
     from octacam.controller import RecordingController, normalize_save_dir
     from octacam.plugins import build_plugins
 
-    config = load_config_dir(config_dir)
+    config = _load_config_for_user(config_dir, user)
 
     # Apply the fps override to the [record] section before resolving the
     # templated save directory from it.
@@ -3860,13 +4002,36 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     return result
 
 
-def _config_for_recording(folder: Path, cli_config_dir: Path | None):
+def _load_config_for_user(config_dir: Path, user: str | None):
+    """``load_config_dir``, plus applying ``--user``'s
+    ``[transfer.users.<user>]`` override. Exits with a clear message if
+    *user* doesn't match a configured profile — never silently proceeds
+    with the wrong destination."""
+    from octacam.config import load_config_dir, resolve_transfer_for_user
+
+    config = load_config_dir(config_dir)
+    if user is not None:
+        try:
+            config.transfer = resolve_transfer_for_user(config.transfer, user)
+        except ValueError as e:
+            sys.exit(str(e))
+    return config
+
+
+def _config_for_recording(folder: Path, cli_config_dir: Path | None, user: str | None = None):
     """Resolve the config governing one recording folder.
 
     Precedence: the octacam_config.toml snapshot saved into the folder at record
     time > a --config dir passed on the command line > built-in defaults. This is
     what lets `octacam process` run with no --config for anything recorded after
     the snapshot feature landed.
+
+    *user* (a ``--user`` selection) only applies on the --config/defaults
+    fallback paths — a recording with its own embedded snapshot already has
+    its destination directory baked in from record time (see
+    ``resolve_transfer_for_user``'s docstring / the record command), so
+    re-applying a profile override here would second-guess a decision
+    already made and recorded.
     """
     from octacam.config import OctacamConfig, load_config_dir
 
@@ -3878,7 +4043,7 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
             folder,
             cli_config_dir,
         )
-        return load_config_dir(cli_config_dir)
+        return _load_config_for_user(cli_config_dir, user)
     log.warning(
         "%s has no embedded config and no --config given; using built-in defaults",
         folder,
@@ -4352,15 +4517,17 @@ def _sweep_unclaimed_twophoton(
     return (n_copied, n_failed)
 
 
-def _run_twophoton_sweep(cli_config_dir: Path | None, dry_run: bool) -> None:
+def _run_twophoton_sweep(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
     """``octacam process --twophoton-sweep``: the standalone CLI entry point
     for :func:`_sweep_unclaimed_twophoton` — resolves ``--config`` into a
     source/destination/settings and reports failures as a nonzero exit."""
-    from octacam.config import load_config_dir, resolve_dir_template
+    from octacam.config import resolve_dir_template
 
     if cli_config_dir is None:
         sys.exit("--twophoton-sweep requires --config <rig-config-dir>")
-    cfg = load_config_dir(cli_config_dir)
+    cfg = _load_config_for_user(cli_config_dir, user)
     if cfg.transfer is None or not cfg.transfer.directory:
         sys.exit(f"--twophoton-sweep: no [transfer].directory configured in {cli_config_dir}")
     twophoton_cfg = cfg.transfer.twophoton
@@ -4380,7 +4547,9 @@ def _run_twophoton_sweep(cli_config_dir: Path | None, dry_run: bool) -> None:
         sys.exit(f"{n_failed} file(s) failed to transfer")
 
 
-def _run_layout_migration(cli_config_dir: Path | None, dry_run: bool) -> None:
+def _run_layout_migration(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
     """``octacam process --migrate-layout``: reorganize old flat transfers.
 
     Recordings transferred before the Behavior/Renderings/2P split landed sit
@@ -4403,12 +4572,12 @@ def _run_layout_migration(cli_config_dir: Path | None, dry_run: bool) -> None:
     no local recording folder needed, so this still works for a recording
     whose local copy is long gone.
     """
-    from octacam.config import load_config_dir, resolve_dir_template
+    from octacam.config import resolve_dir_template
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     if cli_config_dir is None:
         sys.exit("--migrate-layout requires --config <rig-config-dir>")
-    cfg = load_config_dir(cli_config_dir)
+    cfg = _load_config_for_user(cli_config_dir, user)
     if cfg.transfer is None or not cfg.transfer.directory:
         sys.exit(f"--migrate-layout: no [transfer].directory configured in {cli_config_dir}")
     dest_root = Path(resolve_dir_template(cfg.transfer.directory))
@@ -4473,7 +4642,9 @@ def _run_layout_migration(cli_config_dir: Path | None, dry_run: bool) -> None:
         sys.exit(f"{n_conflict} file(s) need manual attention — see warnings above")
 
 
-def _run_tiff_reassembly(cli_config_dir: Path | None, dry_run: bool) -> None:
+def _run_tiff_reassembly(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
     """``octacam process --reassemble-tiffs``: ad-hoc, manually-invoked
     reprocessing of already-transferred (or manually-copied) per-frame TIFF
     data anywhere under ``[transfer].directory`` into one OME-TIFF stack per
@@ -4494,7 +4665,7 @@ def _run_tiff_reassembly(cli_config_dir: Path | None, dry_run: bool) -> None:
     destination tree, safe to re-run (an already-consolidated folder is a
     pure no-op — :func:`~octacam.twophoton_tiff.plan_assembly` only reports a
     channel with more than one file present)."""
-    from octacam.config import load_config_dir, resolve_dir_template
+    from octacam.config import resolve_dir_template
     from octacam.twophoton_tiff import (
         assemble_channel_stack,
         make_progress_logger,
@@ -4507,7 +4678,7 @@ def _run_tiff_reassembly(cli_config_dir: Path | None, dry_run: bool) -> None:
         sys.exit("--reassemble-tiffs requires --config <rig-config-dir>")
     if not tifffile_available():
         sys.exit("--reassemble-tiffs requires tifffile (pip install 'octacam[twophoton]')")
-    cfg = load_config_dir(cli_config_dir)
+    cfg = _load_config_for_user(cli_config_dir, user)
     if cfg.transfer is None or not cfg.transfer.directory:
         sys.exit(f"--reassemble-tiffs: no [transfer].directory configured in {cli_config_dir}")
     dest_root = Path(resolve_dir_template(cfg.transfer.directory))
@@ -4588,6 +4759,7 @@ def _grid_and_transfer(
     no_delete_after_transfer: bool = False,
     transcode_failed_folders: frozenset[Path] = frozenset(),
     no_twophoton_sweep: bool = False,
+    user: str | None = None,
 ) -> int:
     """Build visualization grids, transfer each folder (behavior + any paired
     2-photon data), and — when requested — delete local copies once
@@ -4615,7 +4787,9 @@ def _grid_and_transfer(
         match_takes_to_twophoton_batch,
     )
 
-    folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
+    folder_cfgs = {
+        f: _config_for_recording(f, cli_config_dir, user) for f in folder_outputs
+    }
 
     # --- Phase 1: visualization grids ---------------------------------------
     grid_files: dict[Path, list[Path]] = {}
@@ -5247,6 +5421,21 @@ def process(
             "octacam_config.toml (older recordings). Normally not needed.",
         ),
     ] = None,
+    user: Annotated[
+        str | None,
+        typer.Option(
+            "--user",
+            "-u",
+            help=r"Apply this person's \[transfer.users.<user>] save-destination "
+            r"override (see the config's \[transfer.users] table). Only affects "
+            "recordings with no embedded config (falling back to --config) and "
+            "the --twophoton-sweep/--migrate-layout/--reassemble-tiffs modes — "
+            "a recording with its own embedded snapshot already has its "
+            "destination baked in from record time. Exits with an error "
+            "listing known users if --user doesn't match any configured "
+            "profile.",
+        ),
+    ] = None,
     delete_source: Annotated[
         bool,
         typer.Option(
@@ -5355,13 +5544,13 @@ def process(
     from octacam.writer import is_partial_transcode, transcode_file
 
     if twophoton_sweep:
-        _run_twophoton_sweep(config_dir, dry_run)
+        _run_twophoton_sweep(config_dir, dry_run, user)
         return
     if migrate_layout:
-        _run_layout_migration(config_dir, dry_run)
+        _run_layout_migration(config_dir, dry_run, user)
         return
     if reassemble_tiffs:
-        _run_tiff_reassembly(config_dir, dry_run)
+        _run_tiff_reassembly(config_dir, dry_run, user)
         return
 
     do_transcode = not no_transcode
@@ -5558,6 +5747,7 @@ def process(
                 no_delete_after_transfer=no_delete_after_transfer,
                 transcode_failed_folders=frozenset(transcode_failed_folders),
                 no_twophoton_sweep=no_twophoton_sweep,
+                user=user,
             )
 
         # Report outside the `with` so messages land after the live bar is gone.

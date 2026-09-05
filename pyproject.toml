@@ -55,6 +55,12 @@ dependencies = [
     "pyserial>=3.5",
     # Python 3.10 has no stdlib tomllib (the TOML reader); tomli is the drop-in.
     "tomli>=2.0; python_version < '3.11'",
+    # Round-trip-safe TOML editing (preserves comments/formatting) for `octacam
+    # config --bootstrap-users`, which edits an existing, hand-authored
+    # octacam_config.toml in place — every other config write in this codebase
+    # targets a brand-new file, where tomllib's read-only / config_writer's
+    # from-scratch re-serialize is fine; this one specifically isn't.
+    "tomlkit>=0.13",
 ]
 
 [project.optional-dependencies]
