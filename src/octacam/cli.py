@@ -4429,6 +4429,14 @@ def _sweep_unclaimed_twophoton(
     Phase 3 in :func:`_grid_and_transfer`, there is no behavior take to gate
     this on; every settled, unclaimed folder found is copied.
 
+    When ``twophoton_cfg.attribute_unclaimed_to_fly`` (default on), a folder
+    that's still unclaimed by any *take* but plausibly belongs to a fly that
+    *does* have claimed data (e.g. a Z-stack done before the paired behavior
+    recordings — real workflow) is instead filed at
+    ``<fly-dest-dir>/2P_only/<name>``, next to that fly's own takes — see
+    :func:`_attribute_unclaimed_folder`. Ambiguous or unattributable folders
+    still fall back to the generic bucket above.
+
     *also_exclude* covers matches made earlier in the *same* run that aren't
     on disk yet to be discovered by :func:`_already_matched_twophoton_paths`
     — only actually needed for ``--dry-run`` (a real run's Phase 3 writes
@@ -4465,6 +4473,11 @@ def _sweep_unclaimed_twophoton(
         for c in candidates
         if is_settled(c, twophoton_cfg.settle_s) and c.path.resolve() not in already_matched
     ]
+    fly_basenames = (
+        _gather_fly_image_basenames(dest_root)
+        if getattr(twophoton_cfg, "attribute_unclaimed_to_fly", True)
+        else {}
+    )
 
     n_copied = n_failed = 0
 
@@ -4538,8 +4551,21 @@ def _sweep_unclaimed_twophoton(
 
     for folder in todo:
         experiment = folder.path.parent.name
-        date_str = time.strftime("%y%m%d", time.localtime(folder.start_time))
-        dest = sweep_root / experiment / date_str / folder.path.name
+        fly_dir = (
+            _attribute_unclaimed_folder(
+                folder,
+                experiment,
+                fly_basenames,
+                [c for c in candidates if c.kind == "image" and c.path.parent.name == experiment],
+            )
+            if fly_basenames
+            else None
+        )
+        if fly_dir is not None:
+            dest = fly_dir / "2P_only" / folder.path.name
+        else:
+            date_str = time.strftime("%y%m%d", time.localtime(folder.start_time))
+            dest = sweep_root / experiment / date_str / folder.path.name
         if dry_run:
             log.info("[dry-run] 2P sweep: %s -> %s", folder.path, dest)
             if folder.kind == "image":
@@ -4637,6 +4663,83 @@ def _already_matched_twophoton_paths_on_nas(dest_root: Path, source_root: Path) 
     return matched
 
 
+def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Path]]:
+    """Every already-claimed ``image``-kind match under *dest_root*, keyed by
+    ``(experiment, thorimage_base_name)`` -> the set of fly-dest-dirs
+    (``dest_root/<day>/<fly>``) whose takes claimed a match with that base
+    name — ThorImage's own folder naming is consistent per fly-session
+    (``Fly1``, ``Fly1_001``, ``Fly1_Zstack``, ...) even when its numbering
+    doesn't match octacam's own Fly numbers (confirmed on real data), so this
+    is the signal :func:`_attribute_unclaimed_folder` uses to file an
+    unclaimed 2P folder under the fly it actually belongs to instead of a
+    disconnected generic bucket. More than one fly-dir for the same key is
+    the ambiguous case — never guessed between, left for the caller to skip.
+    """
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_transfer import _thorimage_base_name
+
+    by_key: dict[tuple[str, str], set[Path]] = {}
+    for match_path in dest_root.rglob(TWOPHOTON_MATCH_FILENAME):
+        take_folder = match_path.parent
+        try:
+            rel = take_folder.relative_to(dest_root)
+        except ValueError:
+            continue
+        if len(rel.parts) < 2:
+            continue
+        fly_dir = dest_root / rel.parts[0] / rel.parts[1]
+        record = _read_summary(match_path) or {}
+        for entry in record.get("matched", []):
+            if entry.get("kind") != "image":
+                continue
+            rel_path = entry.get("path")
+            if not rel_path:
+                continue
+            p = Path(rel_path)
+            key = (p.parent.name, _thorimage_base_name(p.name))
+            by_key.setdefault(key, set()).add(fly_dir)
+    return by_key
+
+
+def _attribute_unclaimed_folder(
+    folder,
+    experiment: str,
+    fly_basenames: dict[tuple[str, str], set[Path]],
+    image_candidates: list,
+) -> Path | None:
+    """Which fly-dest-dir (if any) *folder* — a settled, unclaimed 2P folder
+    — should be filed under instead of the generic ``2p_only/`` bucket.
+
+    ``image``-kind: direct prefix check (``name == base or name.startswith(base
+    + "_")``) against every known ``(experiment, base)`` from
+    :func:`_gather_fly_image_basenames`; returns the fly-dir only when exactly
+    one ``(experiment, base)`` matches and it names exactly one fly (more than
+    one is the ambiguous case — never guessed). ``sync``-kind carries no
+    fly-identifying name at all, so it's first correlated to its own
+    ThorImage folder via the actual recorded signal
+    (:func:`~octacam.twophoton_transfer.correlate_sync_folder_to_image`,
+    among every discovered image folder in *image_candidates* — claimed or
+    not), then the same prefix check runs against that correlated folder's
+    name. Returns ``None`` (stay in the generic bucket) whenever nothing
+    confidently applies — never raises."""
+    from octacam.twophoton_transfer import correlate_sync_folder_to_image
+
+    name = folder.path.name
+    if folder.kind != "image":
+        image_match = correlate_sync_folder_to_image(folder, image_candidates)
+        if image_match is None:
+            return None
+        name = image_match.path.name
+
+    candidates = {
+        fly_dir
+        for (exp, base), fly_dirs in fly_basenames.items()
+        if exp == experiment and (name == base or name.startswith(base + "_"))
+        for fly_dir in fly_dirs
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 # Margin added to a day's own [earliest take start, latest take end] window
 # when deciding whether a live 2P folder counts as "unclaimed for this day"
 # vs. belonging to a different experiment recorded the same date under the
@@ -4648,7 +4751,11 @@ _UNCLAIMED_WINDOW_MARGIN_S = 1800.0
 
 
 def _rebuild_twophoton_manifests(
-    source_root: Path, dest_root: Path, *, dry_run: bool
+    source_root: Path,
+    dest_root: Path,
+    *,
+    dry_run: bool,
+    attribute_unclaimed_to_fly: bool = True,
 ) -> int:
     """Regenerate ``2p_reconciliation.md`` for every day/session folder under
     *dest_root* that has at least one transferred take — always a full
@@ -4684,6 +4791,32 @@ def _rebuild_twophoton_manifests(
         else set()
     )
     unclaimed_live = [f for f in live_folders if f.path.resolve() not in already_claimed]
+    fly_basenames = (
+        _gather_fly_image_basenames(dest_root) if attribute_unclaimed_to_fly else {}
+    )
+    # Computed once for every unclaimed folder, independent of any day's own
+    # time window — name-based attribution isn't time-bounded (a Z-stack can
+    # sit well outside _UNCLAIMED_WINDOW_MARGIN_S of its fly's own takes and
+    # still be the real sweep's decision), so the manifest must not silently
+    # omit something the sweep actually files under a fly.
+    attribution_all: dict[Path, Path] = {
+        f.path: fly_dir
+        for f in unclaimed_live
+        if fly_basenames
+        and (
+            fly_dir := _attribute_unclaimed_folder(
+                f,
+                f.path.parent.name,
+                fly_basenames,
+                [
+                    c
+                    for c in live_folders
+                    if c.kind == "image" and c.path.parent.name == f.path.parent.name
+                ],
+            )
+        )
+        is not None
+    }
 
     n_written = 0
     for day_dir, takes in by_day.items():
@@ -4693,17 +4826,26 @@ def _rebuild_twophoton_manifests(
         # under the same share) — bucketing "unclaimed" purely by calendar
         # date leaked one experiment's folders into another's manifest.
         # Bound to this day's own take window (+ a margin comfortably
-        # covering ThorSync/ThorImage startup/write-out lag) instead.
+        # covering ThorSync/ThorImage startup/write-out lag) — union'd with
+        # anything name-attributed to one of this day's own flies (see above).
         window_start = min(t["start_time"] for t in takes) - _UNCLAIMED_WINDOW_MARGIN_S
         window_end = (
             max(t["start_time"] + t["duration_s"] for t in takes)
             + _UNCLAIMED_WINDOW_MARGIN_S
         )
         unclaimed = [
-            f for f in unclaimed_live if window_start <= f.start_time <= window_end
+            f
+            for f in unclaimed_live
+            if window_start <= f.start_time <= window_end
+            or attribution_all.get(f.path, Path()).parent == day_dir
         ]
+        attributed = {
+            f.path: attribution_all[f.path].name
+            for f in unclaimed
+            if f.path in attribution_all
+        }
         manifest = render_twophoton_manifest(
-            day_dir.name, takes, unclaimed, source_reachable
+            day_dir.name, takes, unclaimed, source_reachable, attributed
         )
         manifest_path = day_dir / TWOPHOTON_MANIFEST_FILENAME
         if dry_run:
@@ -4738,7 +4880,12 @@ def _run_twophoton_manifest(
 
     source_root = Path(resolve_dir_template(twophoton_cfg.source))
     dest_root = Path(resolve_dir_template(cfg.transfer.directory))
-    n_written = _rebuild_twophoton_manifests(source_root, dest_root, dry_run=dry_run)
+    n_written = _rebuild_twophoton_manifests(
+        source_root,
+        dest_root,
+        dry_run=dry_run,
+        attribute_unclaimed_to_fly=twophoton_cfg.attribute_unclaimed_to_fly,
+    )
     log.info(
         "%s2P manifest: %d file(s) %s",
         "[dry-run] " if dry_run else "",
@@ -5372,7 +5519,14 @@ def _grid_and_transfer(
         if not no_twophoton_manifest:
             for (source_root, dest_root), (twophoton_cfg, _checksum) in sweep_targets.items():
                 if getattr(twophoton_cfg, "write_manifest", True):
-                    _rebuild_twophoton_manifests(source_root, dest_root, dry_run=dry_run)
+                    _rebuild_twophoton_manifests(
+                        source_root,
+                        dest_root,
+                        dry_run=dry_run,
+                        attribute_unclaimed_to_fly=getattr(
+                            twophoton_cfg, "attribute_unclaimed_to_fly", True
+                        ),
+                    )
 
         # --- Phase 4: delete-after-transfer -----------------------------------
         # Evaluated (and logged) under --dry-run too — a caller deciding

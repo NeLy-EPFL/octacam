@@ -260,11 +260,9 @@ upgrade. A **schema_version 4+** take with the checkbox left unchecked
 an `armed` take to pair with. A normal `octacam process` run **automatically**
 sweeps every `[transfer.twophoton]` source it touched for settled folders no
 take claimed — sequentially, right after per-take matching, in the same
-command — and transfers each one to
-`<transfer.directory>/2p_only/<experiment>/<date>/<name>/`. This is what
-tells apart a real behavior/2P pair from a standalone check/tuning recording:
-anything the duration-aware matcher above correctly didn't pair up lands here
-instead, safely, rather than being silently dropped. Pass
+command. This is what tells apart a real behavior/2P pair from a standalone
+check/tuning recording: anything the matcher above correctly didn't pair up
+lands here instead, safely, rather than being silently dropped. Pass
 `--no-twophoton-sweep` to skip it for a given run. `octacam process
 --twophoton-sweep --config <rig-config>` is the same logic as its own
 standalone mode — useful run by hand or on a periodic systemd timer (see the
@@ -272,6 +270,23 @@ packaging example) when there's no behavior recording to process at all; it
 ignores `PATHS`/`--last`/`--all`/`--detach`. Right after, `process` also
 rebuilds `2p_reconciliation.md` for every day/session folder those sources
 touched — see [Reconciliation manifest](#reconciliation-manifest).
+
+Where an unclaimed folder actually lands depends on whether it can be tied to
+a specific fly. The real protocol often runs a Z-stack (or other 2P-only
+acquisition) for a fly *before* its paired behavior takes — that data has no
+behavior counterpart, but still belongs with that fly. Since ThorImage's own
+folder naming is consistent per fly-session (`Fly1`, `Fly1_001`,
+`Fly1_Zstack`, ...) even when its numbering doesn't match octacam's own Fly
+numbers, an unclaimed folder whose name shares the same prefix as a fly's
+*already-claimed* match is filed at `<fly's own destination>/2P_only/<name>`
+instead — a `SyncData*` folder (no fly-identifying name) is first correlated
+to its own ThorImage folder via the recorded DAQ signal, then attributed the
+same way. A folder whose prefix matches more than one fly (or none) falls
+back to the generic
+`<transfer.directory>/2p_only/<experiment>/<date>/<name>/` bucket — never
+guessed. Turn this off with `[transfer.twophoton].attribute_unclaimed_to_fly
+= false`; the reconciliation manifest's unclaimed-folder table shows a
+preview of the same decision.
 
 ## Per-user transfer profiles
 

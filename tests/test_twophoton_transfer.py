@@ -11,7 +11,9 @@ import pytest
 from octacam.twophoton_transfer import (
     TakeInfo,
     TwoPhotonFolder,
+    _thorimage_base_name,
     build_match_record,
+    correlate_sync_folder_to_image,
     discover_twophoton_folders,
     is_settled,
     match_take_to_twophoton,
@@ -559,3 +561,63 @@ def test_render_twophoton_manifest_notes_when_source_unreachable():
 def test_render_twophoton_manifest_says_none_when_nothing_unclaimed():
     text = render_twophoton_manifest("day", [_take("Fly1/001", 1000.0, 10.0)], [], source_reachable=True)
     assert "None." in text
+
+
+# --- _thorimage_base_name / correlate_sync_folder_to_image -------------------
+
+
+def test_thorimage_base_name_strips_trailing_recording_number():
+    assert _thorimage_base_name("Fly1_004") == "Fly1"
+    assert _thorimage_base_name("Fly1") == "Fly1"
+    assert _thorimage_base_name("Fly1_Zstack_000") == "Fly1_Zstack"
+    assert _thorimage_base_name("Fly1_Zstack") == "Fly1_Zstack"
+    assert _thorimage_base_name("Test1_018") == "Test1"
+
+
+def test_correlate_sync_folder_to_image_finds_matching_candidate(tmp_path):
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData001",
+        mtime=1000.0,
+        capture_ranges=[(100, 1900)],
+        cameras_per_segment=[500],
+        frameout_per_segment=[50],
+    )
+    right = _make_image_folder_with_timepoints(
+        tmp_path, "exp", "Fly1_Zstack", u_time=2000.0, timepoints=50
+    )
+    wrong = _make_image_folder_with_timepoints(
+        tmp_path, "exp", "Fly1_001", u_time=3000.0, timepoints=999
+    )
+    found = correlate_sync_folder_to_image(sync, [right, wrong])
+    assert found is right
+
+
+def test_correlate_sync_folder_to_image_returns_none_without_match(tmp_path):
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData001",
+        mtime=1000.0,
+        capture_ranges=[(100, 1900)],
+        cameras_per_segment=[500],
+        frameout_per_segment=[50],
+    )
+    unrelated = _make_image_folder_with_timepoints(
+        tmp_path, "exp", "Fly1_001", u_time=2000.0, timepoints=999
+    )
+    assert correlate_sync_folder_to_image(sync, [unrelated]) is None
+
+
+def test_correlate_sync_folder_to_image_returns_none_with_no_candidates(tmp_path):
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData001",
+        mtime=1000.0,
+        capture_ranges=[(100, 1900)],
+        cameras_per_segment=[500],
+        frameout_per_segment=[50],
+    )
+    assert correlate_sync_folder_to_image(sync, []) is None

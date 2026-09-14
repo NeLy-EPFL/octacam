@@ -587,8 +587,10 @@ against a real 2P rig; the durable findings:
   for every distinct `(source_root, dest_root)` its processed folders'
   configs referenced (`--no-twophoton-sweep` opts out) — this is what
   actually separates a real pair from a standalone check/tuning recording:
-  anything the duration-aware matcher correctly declines to pair lands here
-  instead. One subtlety: `--dry-run` never writes `twophoton_match.json` to
+  anything the matcher correctly declines to pair lands here instead — see
+  below for where it actually lands (a fly's own `2P_only/` when
+  attributable, the generic bucket otherwise). One subtlety: `--dry-run`
+  never writes `twophoton_match.json` to
   disk, so the sweep's on-disk "already claimed" check alone can't see a
   match Phase 3 just decided moments earlier in the *same* run — a
   `matched_this_run` set collected during Phase 3 (passed as
@@ -708,6 +710,50 @@ against a real 2P rig; the durable findings:
   from the rig's config template at real startup (never restored from a prior
   session), the baseline coincides with "still the rig default" in practice —
   purely informational, never blocks Start.
+- **Unclaimed 2P data is filed under its own fly, not a disconnected bucket
+  (`cli._attribute_unclaimed_folder`, `_gather_fly_image_basenames`,
+  `twophoton_transfer.correlate_sync_folder_to_image`)**: the real 2P
+  protocol runs a Z-stack (or other 2P-only acquisition) for a fly *before*
+  the paired behavior recordings, so a fly's session routinely includes 2P
+  data with no behavior counterpart at all — previously dumped into a flat
+  `2p_only/<experiment>/<date>/` bucket, disconnected from the fly it
+  actually belongs to. A timing-window heuristic (like the manifest's own
+  day-bucketing) was considered and rejected: real data
+  (`260813_MB247`) showed an unclaimed folder can sit only 15-25s from an
+  unrelated fly's own take while being a completely different named
+  acquisition (base name `Test1` vs. the fly's own claimed `Fly1` prefix) —
+  proximity alone is not reliable. **Name-prefix matching is the real
+  signal**: ThorImage's own folder naming is consistent per fly-session
+  (`Fly1`, `Fly1_001`, `Fly1_Zstack`, `Fly1_Zstack_000`, ...) even though its
+  own numbering doesn't track octacam's Fly numbers (confirmed: `260813_MB247`
+  Fly2 matched ThorImage folders base-named `Fly1`) — `_thorimage_base_name`
+  strips only a trailing `_<digits>` recording-number suffix from each fly's
+  *already-claimed* matches to get its known prefix(es), and an unclaimed
+  `image`-kind folder is attributed by direct `startswith` check, scoped to
+  the same 2P source experiment subfolder (so an unrelated folder from a
+  different subfolder, like `Tests/` sitting near `MB247_CI63`'s own flies in
+  time, is never even a candidate). A `sync`-kind folder (`SyncData<N>`)
+  carries no fly-identifying name at all — it's first correlated to its own
+  ThorImage folder via the same edge-count DAQ signal verification already
+  used for behavior-take matching (`twophoton_signals.py`'s `FrameOut` edge
+  count vs. a candidate's `Experiment.xml` timepoints), just with no take in
+  the loop, then attributed transitively via that image folder's name. A
+  prefix matching more than one fly within the same experiment (or nothing)
+  stays in the generic bucket — never guessed, per the project's existing
+  philosophy (`--twophoton-sweep`'s own docstring). Lands at
+  `<fly-dest-dir>/2P_only/<name>`; gated by
+  `[transfer.twophoton].attribute_unclaimed_to_fly` (default on); the
+  reconciliation manifest's "Unclaimed" table shows the same decision as a
+  "Filed under" preview column, reusing the identical function so it can
+  never drift from what the sweep actually does. Validated on real data: all
+  6 of `260903_PAM7xCI63`'s unclaimed `Fly1_004`-`Fly1_007`/`Fly1_Zstack*`
+  correctly attribute to `Fly1`; all 14 of `260813_MB247`'s unclaimed items
+  (really under a different experiment subfolder, `Tests/`, not `MB247_CI63`)
+  correctly stay generic. **Known limitation**: attribution is decided fresh
+  each sweep run from whatever's already on the NAS — if a fly's own claim
+  lands on disk *after* an unclaimed folder was already swept (e.g. two
+  flies sharing a ThorImage prefix processed in separate `process` runs),
+  the earlier run's placement isn't retroactively revisited.
 
 ## Arduino firmware & auto-flash
 

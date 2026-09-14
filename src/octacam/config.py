@@ -265,6 +265,21 @@ class TwoPhotonTransferConfig(BaseModel):
     ``octacam.twophoton_transfer.render_twophoton_manifest``). Only gates the
     automatic regeneration a normal `process` run does; the standalone
     `process --twophoton-manifest` mode always runs when invoked explicitly.
+
+    ``attribute_unclaimed_to_fly`` files a settled, unclaimed 2P folder under
+    the fly it actually belongs to (``<fly-dest-dir>/2P_only/<name>``) rather
+    than the disconnected generic ``2p_only/<experiment>/<date>/`` bucket, for
+    the real workflow of a Z-stack (or other 2P-only acquisition) done for a
+    fly with no behavior counterpart at all. ThorImage's own folder naming is
+    consistent per fly-session (``Fly1``, ``Fly1_001``, ``Fly1_Zstack``, ...)
+    even when its own numbering doesn't match octacam's Fly numbers —
+    confirmed on real data — so an unclaimed ``image``-kind folder is
+    attributed by that name prefix against every fly's already-claimed
+    matches; a ``sync``-kind folder (no fly-identifying name at all) is first
+    correlated to its own ThorImage folder via the recorded DAQ signal (no
+    take needed), then attributed the same way. A folder whose prefix matches
+    more than one fly (or nothing) stays in the generic bucket — never
+    guessed.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -276,6 +291,7 @@ class TwoPhotonTransferConfig(BaseModel):
     verify_window_s: float = 3600.0
     assemble_tiff_stacks: bool = True
     write_manifest: bool = True
+    attribute_unclaimed_to_fly: bool = True
 
     @field_validator("source", mode="before")
     @classmethod

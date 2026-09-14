@@ -1427,21 +1427,27 @@ def test_process_transfers_matched_twophoton_data(tmp_path, monkeypatch):
     assert match_record["matched"][0]["confidence"] == "timestamp"
 
 
-def _make_verifiable_sync_folder_2p(root, experiment, name, *, mtime, camera_frames):
+def _make_verifiable_sync_folder_2p(
+    root, experiment, name, *, mtime, camera_frames, frameout_edges=0
+):
     """A real (synthetic) Episode001.h5 whose Cameras edge count matches
-    *camera_frames* exactly, inside one CaptureOn window spanning the file."""
+    *camera_frames* exactly, inside one CaptureOn window spanning the file.
+    *frameout_edges*, when given, seeds the FrameOut channel too (for
+    correlate_sync_folder_to_image tests — no take is involved there)."""
     h5py = pytest.importorskip("h5py")
     import numpy as np
 
     folder = root / experiment / name
     folder.mkdir(parents=True)
-    total = camera_frames * 2 + 100
+    total = max(camera_frames, frameout_edges) * 2 + 100
     capture_on = np.zeros((total, 1), dtype=np.uint32)
     capture_on[10 : total - 10] = 1
     cameras = np.zeros((total, 1), dtype=np.uint32)
     for i in range(camera_frames):
         cameras[20 + i * 2] = 1  # width-1 pulses, spaced by 2 -> stay distinct
     frameout = np.zeros((total, 1), dtype=np.uint32)
+    for i in range(frameout_edges):
+        frameout[20 + i * 2] = 1
     episode_path = folder / "Episode001.h5"
     with h5py.File(episode_path, "w") as f:
         di = f.create_group("DI")
@@ -2179,6 +2185,235 @@ def test_twophoton_sweep_excludes_already_matched_folder(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert not (dest_root / "2p_only").exists()
+
+
+# --- 2P sweep: attribute unclaimed folders to their fly by ThorImage prefix -
+
+
+def test_sweep_attributes_unclaimed_image_folder_to_matching_fly(tmp_path, monkeypatch):
+    # Real workflow: a Z-stack done for a fly with no behavior counterpart at
+    # all must still land next to that fly's claimed takes, not a
+    # disconnected generic bucket — found via its ThorImage name sharing the
+    # same "Fly1" prefix as an already-claimed take.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2)
+    # Unclaimed: same "Fly1" prefix, far outside any take's match window.
+    _make_image_folder_2p(source_root, "exp", "Fly1_Zstack", u_time=take_start - 5000, n_frames=2)
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "relative_directory": "day1/Fly1/001",
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_001").exists()
+    assert (dest_root / "day1" / "Fly1" / "2P_only" / "Fly1_Zstack").exists()
+    assert not (dest_root / "2p_only").exists()
+
+
+def test_sweep_attributes_unclaimed_sync_folder_via_frameout_correlation(
+    tmp_path, monkeypatch
+):
+    # A SyncData folder has no fly-identifying name at all — it must be
+    # correlated to its own ThorImage folder first (FrameOut edge count vs.
+    # that folder's own timepoints, no take involved), then attributed via
+    # that image folder's name.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2)
+    # Unclaimed SyncData: FrameOut edge count matches Fly1_001's 2 timepoints
+    # exactly, but its own timing is far outside any take's match window.
+    _make_verifiable_sync_folder_2p(
+        source_root, "exp", "SyncData999",
+        mtime=take_start - 5000, camera_frames=0, frameout_edges=2,
+    )
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "relative_directory": "day1/Fly1/001",
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "2P_only" / "SyncData999" / "Episode001.h5").exists()
+    assert not (dest_root / "2p_only").exists()
+
+
+def test_sweep_ambiguous_prefix_stays_in_generic_bucket(tmp_path, monkeypatch):
+    # Two different flies both claim a "Fly1"-prefixed match within the same
+    # experiment (ThorImage's own numbering, offset from octacam's — real
+    # data confirmed this happens) — an unclaimed "Fly1"-prefixed folder must
+    # not be guessed between them.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_a_start = 1_000_000.0
+    take_b_start = 2_000_000.0
+    _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_a_start + 2, n_frames=2)
+    _make_image_folder_2p(source_root, "exp", "Fly1_002", u_time=take_b_start + 2, n_frames=2)
+    # Unclaimed, shares the "Fly1" prefix both flies claimed under.
+    _make_image_folder_2p(source_root, "exp", "Fly1_Zstack", u_time=take_a_start - 5000, n_frames=2)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 60\n"
+    )
+    # Both flies' own claims must exist *before* the sweep runs, or the
+    # ambiguity (day1 AND day2 both claiming "Fly1") doesn't exist yet from
+    # a single run's point of view — process each with the automatic sweep
+    # off, then sweep once both claims are on disk.
+    for day, take_start in (("day1", take_a_start), ("day2", take_b_start)):
+        folder = tmp_path / f"rec_{day}"
+        _make_recording(
+            folder,
+            with_outputs=True,
+            extra_toml=(
+                f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+                f"[transfer.twophoton]\n"
+                f'source = "{source_root.as_posix()}"\n'
+                f"settle_s = 60\n"
+            ),
+            extra_summary={
+                "start_time_ns": int(take_start * 1e9),
+                "duration_s": 10.0,
+                "relative_directory": f"{day}/Fly1/001",
+                "plugins": {"twophoton": {"armed": True}},
+            },
+        )
+        result = runner.invoke(
+            app,
+            ["process", str(folder), "--no-transcode", "--no-grid", "--no-twophoton-sweep"],
+        )
+        assert result.exit_code == 0, result.output
+
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+
+    assert not (dest_root / "day1" / "Fly1" / "2P_only").exists()
+    assert not (dest_root / "day2" / "Fly1" / "2P_only").exists()
+    assert (dest_root / "2p_only" / "exp").exists()
+
+
+def test_sweep_attribution_disabled_by_config_stays_generic(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2)
+    _make_image_folder_2p(source_root, "exp", "Fly1_Zstack", u_time=take_start - 5000, n_frames=2)
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+            f"attribute_unclaimed_to_fly = false\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "relative_directory": "day1/Fly1/001",
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "day1" / "Fly1" / "2P_only").exists()
+    assert (dest_root / "2p_only" / "exp").exists()
+
+
+def test_gather_fly_image_basenames_groups_by_experiment_and_base(tmp_path):
+    from octacam.cli import _gather_fly_image_basenames
+
+    dest_root = tmp_path / "dest"
+    fly1 = dest_root / "day1" / "Fly1"
+    fly2 = dest_root / "day2" / "Fly2"
+    for fly_dir, take, matched_path in (
+        (fly1, "001", "exp/Fly1_004"),
+        (fly2, "001", "exp/Fly7_002"),
+    ):
+        take_dir = fly_dir / take
+        take_dir.mkdir(parents=True)
+        (take_dir / "twophoton_match.json").write_text(
+            json.dumps(
+                {"matched": [{"path": matched_path, "kind": "image", "gap_s": 1.0}]}
+            )
+        )
+    by_key = _gather_fly_image_basenames(dest_root)
+    assert by_key[("exp", "Fly1")] == {fly1}
+    assert by_key[("exp", "Fly7")] == {fly2}
+
+
+def test_manifest_shows_fly_attribution_preview_for_unclaimed_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2)
+    _make_image_folder_2p(source_root, "exp", "Fly1_Zstack", u_time=take_start - 5000, n_frames=2)
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "relative_directory": "day1/Fly1/001",
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    manifest = (dest_root / "day1" / "2p_reconciliation.md").read_text()
+    assert "Fly1_Zstack" in manifest
+    assert "Fly1/2P_only" in manifest
 
 
 # --- process: automatic post-processing sweep (sequential, not separate) ----

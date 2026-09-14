@@ -35,6 +35,7 @@ calling in), and does not perform any file transfer itself — see
 
 from __future__ import annotations
 
+import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -49,6 +50,11 @@ from octacam.twophoton_signals import (
 
 EXPERIMENT_XML_FILENAME = "Experiment.xml"
 SYNC_FOLDER_PREFIX = "SyncData"
+
+# Edge-count tolerance for a signal-verified match (camera/frameout edges vs.
+# the take's own recorded frame count / ThorImage's own timepoints) — shared
+# by match_takes_to_twophoton_batch and correlate_sync_folder_to_image.
+_VERIFY_TOLERANCE = 1
 
 
 @dataclass(frozen=True)
@@ -341,8 +347,6 @@ def match_takes_to_twophoton_batch(
     timepoints_cache: dict[Path, int | None] = {}
     result: dict[Path, list[TwoPhotonMatch]] = {}
 
-    _VERIFY_TOLERANCE = 1
-
     for take in ordered:
         take_end = take.start_time + take.duration_s
         matches: list[TwoPhotonMatch] = []
@@ -450,6 +454,7 @@ def render_twophoton_manifest(
     takes: list[dict],
     unclaimed: list[TwoPhotonFolder],
     source_reachable: bool,
+    attributed: dict[Path, str] | None = None,
 ) -> str:
     """Render a human-readable ``2p_reconciliation.md`` for one day/session
     destination folder: every behavior take transferred that day against its
@@ -467,7 +472,12 @@ def render_twophoton_manifest(
     ``twophoton_match.json`` references. *source_reachable* — False when the
     live rescan of ``[transfer.twophoton].source`` couldn't happen (share
     unmounted), in which case the unclaimed-folder section is replaced by a
-    note instead of silently claiming there's nothing unclaimed.
+    note instead of silently claiming there's nothing unclaimed. *attributed*
+    — ``{folder.path: fly_folder_name}`` for whichever unclaimed folders the
+    caller has decided belong to a specific fly (same decision the sweep
+    itself makes, shown here purely as a preview — see
+    ``cli._attribute_unclaimed_folder``); absent entries default to the
+    generic bucket.
     """
 
     def fmt_time(t: float) -> str:
@@ -525,17 +535,24 @@ def render_twophoton_manifest(
     elif not unclaimed:
         lines += ["", "None."]
     else:
+        attributed = attributed or {}
         lines += [
             "",
-            "Not referenced by any take's `twophoton_match.json` above — may "
-            "be a discarded/test recording, or already archived separately "
-            "under `2p_only/`.",
+            "Not referenced by any take's `twophoton_match.json` above. "
+            "\"Filed under\" is a preview of where `process` will actually "
+            "put it: a specific fly's own `2P_only/` when its name matches "
+            "that fly's already-claimed ThorImage prefix (e.g. a Z-stack done "
+            "before the paired behavior takes), otherwise the generic "
+            "`2p_only/<experiment>/<date>/` bucket — may be a discarded/test "
+            "recording either way.",
             "",
-            "| Folder | Kind | Start |",
-            "|---|---|---|",
+            "| Folder | Kind | Start | Filed under |",
+            "|---|---|---|---|",
         ]
         for f in sorted(unclaimed, key=lambda f: f.start_time):
-            lines.append(f"| {f.path.name} | {f.kind} | {fmt_time(f.start_time)} |")
+            filed_under = attributed.get(f.path)
+            filed = f"{filed_under}/2P_only" if filed_under else "2p_only/ (generic)"
+            lines.append(f"| {f.path.name} | {f.kind} | {fmt_time(f.start_time)} | {filed} |")
 
     return "\n".join(lines) + "\n"
 
@@ -563,3 +580,57 @@ def build_match_record(
             for m in matches
         ]
     }
+
+
+_RECORDING_NUMBER_SUFFIX_RE = re.compile(r"_\d+$")
+
+
+def _thorimage_base_name(name: str) -> str:
+    """Strip a trailing ``_<digits>`` recording-number suffix, e.g.
+    ``"Fly1_004"`` -> ``"Fly1"``; ``"Fly1"`` (no ``_<digits>`` at the end,
+    just a bare trailing digit that's part of the fly label itself) is
+    unchanged, as is ``"Fly1_Zstack"`` (no digit suffix at all).
+
+    Used only to derive a fly's *known* ThorImage prefix from its already-
+    claimed matches — an unclaimed candidate is compared against that prefix
+    with a direct ``startswith`` check (see ``cli._attribute_unclaimed_folder``),
+    not by computing its own base name, so a same-session folder like
+    ``Fly1_Zstack_000`` still correctly matches a known ``Fly1`` prefix even
+    though its own base name would be ``Fly1_Zstack``."""
+    return _RECORDING_NUMBER_SUFFIX_RE.sub("", name)
+
+
+def correlate_sync_folder_to_image(
+    sync_folder: TwoPhotonFolder,
+    image_candidates: list[TwoPhotonFolder],
+    tolerance: int = _VERIFY_TOLERANCE,
+) -> TwoPhotonFolder | None:
+    """Find which discovered ThorImage folder *sync_folder* actually paired
+    with, purely from the recorded DAQ signal — no octacam take involved.
+
+    A ``SyncData*`` folder's ``FrameOut`` edge count (per ``CaptureOn``
+    segment) is checked against every candidate's own ``Experiment.xml
+    <Timelapse timepoints="...">`` (:func:`thorimage_timepoints`); an
+    exact/near match is decisive, the same signal already used to confirm a
+    behavior-take pairing transitively (see ``match_takes_to_twophoton_batch``)
+    — this is that same check with no take in the loop, for a ``SyncData``
+    folder that never matched any take at all (e.g. a same-fly Z-stack ThorSync
+    happened to be running for). Returns the best (lowest edge-count diff)
+    candidate within *tolerance*, or ``None`` (no h5py, no segments, or
+    nothing within tolerance) — never raises."""
+    segments = read_capture_segments(sync_folder.path)
+    if not segments:
+        return None
+    ranked: list[tuple[int, TwoPhotonFolder]] = []
+    for candidate in image_candidates:
+        timepoints = thorimage_timepoints(candidate.path / EXPERIMENT_XML_FILENAME)
+        if timepoints is None:
+            continue
+        for segment in segments:
+            diff = frameout_edge_diff(segment, timepoints)
+            if diff <= tolerance:
+                ranked.append((diff, candidate))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda r: r[0])
+    return ranked[0][1]
