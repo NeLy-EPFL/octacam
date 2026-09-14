@@ -16,6 +16,7 @@ from octacam.twophoton_transfer import (
     is_settled,
     match_take_to_twophoton,
     match_takes_to_twophoton_batch,
+    render_twophoton_manifest,
 )
 
 
@@ -472,3 +473,84 @@ def test_batch_transitive_image_match_via_frameout(tmp_path):
     assert set(kinds) == {"sync", "image"}
     assert kinds["image"].folder is image
     assert kinds["image"].confidence == "verified"
+
+
+# --- render_twophoton_manifest ----------------------------------------------
+
+
+def _take(name, start_time, duration_s, armed=False, matches=None):
+    return {
+        "name": name,
+        "start_time": start_time,
+        "duration_s": duration_s,
+        "armed": armed,
+        "matches": matches or [],
+    }
+
+
+def test_render_twophoton_manifest_lists_matched_and_unmatched_takes():
+    takes = [
+        _take("Fly1/001", 1000.0, 25.0),
+        _take(
+            "Fly1/002",
+            1100.0,
+            129.0,
+            matches=[
+                {
+                    "path": "PAM7xCI63/Fly1_007",
+                    "kind": "image",
+                    "gap_s": 31.7,
+                    "ambiguous": False,
+                    "confidence": "timestamp",
+                }
+            ],
+        ),
+    ]
+    text = render_twophoton_manifest("260903_PAM7xCI63", takes, [], source_reachable=True)
+    assert "# 2P reconciliation — 260903_PAM7xCI63" in text
+    assert "Fly1/001" in text
+    assert "**unmatched**" in text
+    assert "PAM7xCI63/Fly1_007" in text
+    assert "timestamp" in text
+    assert "31.7s" in text
+
+
+def test_render_twophoton_manifest_flags_ambiguous_match():
+    takes = [
+        _take(
+            "Fly1/001",
+            1000.0,
+            10.0,
+            matches=[
+                {
+                    "path": "exp/SyncData1",
+                    "kind": "sync",
+                    "gap_s": 5.0,
+                    "ambiguous": True,
+                    "confidence": "timestamp",
+                }
+            ],
+        )
+    ]
+    text = render_twophoton_manifest("day", takes, [], source_reachable=True)
+    assert "(ambiguous)" in text
+
+
+def test_render_twophoton_manifest_lists_unclaimed_folders():
+    unclaimed = [
+        TwoPhotonFolder(Path("/share/exp/Fly1_004"), "image", start_time=1000.0, last_mtime=1005.0),
+    ]
+    text = render_twophoton_manifest("day", [], unclaimed, source_reachable=True)
+    assert "Unclaimed 2P folders" in text
+    assert "Fly1_004" in text
+    assert "None." not in text
+
+
+def test_render_twophoton_manifest_notes_when_source_unreachable():
+    text = render_twophoton_manifest("day", [], [], source_reachable=False)
+    assert "wasn't reachable" in text
+
+
+def test_render_twophoton_manifest_says_none_when_nothing_unclaimed():
+    text = render_twophoton_manifest("day", [_take("Fly1/001", 1000.0, 10.0)], [], source_reachable=True)
+    assert "None." in text

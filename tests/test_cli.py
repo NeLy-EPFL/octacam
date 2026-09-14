@@ -2328,6 +2328,175 @@ def test_sweep_also_exclude_covers_a_same_run_match_not_yet_on_disk(tmp_path, mo
     assert not (dest_root_b / "2p_only").exists()
 
 
+# --- process: --twophoton-manifest / automatic reconciliation-manifest rebuild -
+
+
+def test_twophoton_manifest_requires_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    result = runner.invoke(app, ["process", "--twophoton-manifest"])
+    assert result.exit_code != 0
+    assert "--config" in result.output
+
+
+def test_twophoton_manifest_requires_twophoton_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{(tmp_path / "dest").as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-manifest", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0
+    assert "transfer.twophoton" in result.output
+
+
+def test_twophoton_manifest_reports_matched_and_unmatched_takes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    two_p_mtime = take_start - 30
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=two_p_mtime)
+
+    matched_folder = tmp_path / "rec_matched"
+    _armed_recording(
+        matched_folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    unmatched_folder = tmp_path / "rec_unmatched"
+    _armed_recording(
+        unmatched_folder,
+        source_root=source_root,
+        dest_root=dest_root,
+        take_start=take_start + 10_000,  # far outside match_window_s
+    )
+
+    result = runner.invoke(app, ["process", str(matched_folder), str(unmatched_folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    manifest = (dest_root / "rec_matched" / "2p_reconciliation.md").read_text()
+    assert "SyncData102" in manifest
+    manifest_unmatched = (dest_root / "rec_unmatched" / "2p_reconciliation.md").read_text()
+    assert "**unmatched**" in manifest_unmatched
+
+
+def test_twophoton_manifest_excludes_folder_outside_days_take_window(tmp_path, monkeypatch):
+    # Real-data regression: [transfer.twophoton].source is commonly shared by
+    # more than one experiment/day; bucketing "unclaimed" folders by mere
+    # calendar date leaked an unrelated same-day experiment's ThorImage
+    # folders (hours away) into a different day's manifest.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    from octacam.cli import _rebuild_twophoton_manifests
+
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _armed_recording(
+        tmp_path / "rec", source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(app, ["process", str(tmp_path / "rec"), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    # An unrelated folder on the same share, same calendar date, but ~5h away.
+    _make_sync_folder_2p(
+        source_root, "OtherExperiment", "SyncData001", mtime=take_start + 18_000
+    )
+    n_written = _rebuild_twophoton_manifests(source_root, dest_root, dry_run=False)
+    assert n_written == 1
+    manifest = (dest_root / "rec" / "2p_reconciliation.md").read_text()
+    assert "SyncData001" not in manifest
+    assert "None." in manifest  # nothing unclaimed within this take's own window
+
+
+def test_twophoton_manifest_dry_run_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _armed_recording(
+        tmp_path / "rec", source_root=source_root, dest_root=dest_root, take_start=1_000_000.0
+    )
+    result = runner.invoke(
+        app, ["process", str(tmp_path / "rec"), "--no-transcode", "--no-grid", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "rec" / "2p_reconciliation.md").exists()
+
+
+def test_process_no_twophoton_manifest_skips_automatic_rebuild(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _armed_recording(
+        tmp_path / "rec", source_root=source_root, dest_root=dest_root, take_start=1_000_000.0
+    )
+    result = runner.invoke(
+        app,
+        ["process", str(tmp_path / "rec"), "--no-transcode", "--no-grid", "--no-twophoton-manifest"],
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "rec" / "2p_reconciliation.md").exists()
+
+
+def test_twophoton_manifest_config_toggle_skips_automatic_rebuild(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"write_manifest = false\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(1_000_000.0 * 1e9),
+            "duration_s": 10.0,
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "rec" / "2p_reconciliation.md").exists()
+
+
+def test_twophoton_manifest_standalone_rebuilds_from_already_transferred_data(
+    tmp_path, monkeypatch
+):
+    # The standalone mode is self-contained (no local recording folder
+    # needed) — works purely from what's already on the NAS, like
+    # --migrate-layout.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_sync_folder_2p(source_root, "exp", "SyncData001", mtime=take_start - 30)
+    _armed_recording(
+        tmp_path / "rec", source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(app, ["process", str(tmp_path / "rec"), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    manifest_path = dest_root / "rec" / "2p_reconciliation.md"
+    manifest_path.unlink()  # simulate an older transfer that predates this feature
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-manifest", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert manifest_path.exists()
+    assert "SyncData001" in manifest_path.read_text()
+
+
 # --- process: --migrate-layout (old flat NAS layout -> Behavior/Renderings) -
 
 

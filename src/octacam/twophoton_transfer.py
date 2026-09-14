@@ -426,6 +426,94 @@ def match_takes_to_twophoton_batch(
     return result
 
 
+def render_twophoton_manifest(
+    day_label: str,
+    takes: list[dict],
+    unclaimed: list[TwoPhotonFolder],
+    source_reachable: bool,
+) -> str:
+    """Render a human-readable ``2p_reconciliation.md`` for one day/session
+    destination folder: every behavior take transferred that day against its
+    matched 2P folder(s) (or "unmatched"), plus every 2P folder discovered on
+    the share that day no take claimed — the single legible file this feature
+    replaces per-take ``twophoton_match.json`` digging with. Pure/deterministic
+    (no filesystem access) so it's cheap to unit test in isolation from the
+    disk-scanning caller.
+
+    *takes* — one dict per take: ``{"name": str, "start_time": float,
+    "duration_s": float, "armed": bool, "matches": list[dict]}``, where each
+    match dict has :func:`build_match_record`'s per-entry shape (``path``,
+    ``kind``, ``gap_s``, ``ambiguous``, ``confidence``). *unclaimed* is every
+    still-live 2P folder that day no take's ``twophoton_match.json``
+    references. *source_reachable* — False when the live rescan of
+    ``[transfer.twophoton].source`` couldn't happen (share unmounted), in
+    which case the unclaimed-folder section is replaced by a note instead of
+    silently claiming there's nothing unclaimed.
+    """
+
+    def fmt_time(t: float) -> str:
+        return time.strftime("%H:%M:%S", time.localtime(t))
+
+    lines = [
+        f"# 2P reconciliation — {day_label}",
+        "",
+        f"Generated {time.strftime('%Y-%m-%d %H:%M:%S')} — this file is "
+        "fully regenerated on every `octacam process` run; hand edits will "
+        "be overwritten.",
+        "",
+        "## Behavior takes",
+        "",
+        "| Take | Start | Duration | Armed | 2P match | Kind | Confidence | Gap |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for take in sorted(takes, key=lambda t: t["start_time"]):
+        start = fmt_time(take["start_time"])
+        duration = f"{take['duration_s']:.1f}s"
+        armed = "yes" if take["armed"] else "no"
+        matches = take["matches"]
+        if not matches:
+            lines.append(
+                f"| {take['name']} | {start} | {duration} | {armed} | "
+                "**unmatched** | | | |"
+            )
+            continue
+        for i, m in enumerate(matches):
+            prefix = (
+                f"{take['name']} | {start} | {duration} | {armed}"
+                if i == 0
+                else " |  |  | "
+            )
+            flag = " (ambiguous)" if m.get("ambiguous") else ""
+            lines.append(
+                f"| {prefix} | {m['path']}{flag} | {m['kind']} | "
+                f"{m['confidence']} | {m['gap_s']}s |"
+            )
+
+    lines += ["", "## Unclaimed 2P folders on the share"]
+    if not source_reachable:
+        lines += [
+            "",
+            "`[transfer.twophoton].source` wasn't reachable when this file "
+            "was generated — this section couldn't be checked.",
+        ]
+    elif not unclaimed:
+        lines += ["", "None."]
+    else:
+        lines += [
+            "",
+            "Not referenced by any take's `twophoton_match.json` above — may "
+            "be a discarded/test recording, or already archived separately "
+            "under `2p_only/`.",
+            "",
+            "| Folder | Kind | Start |",
+            "|---|---|---|",
+        ]
+        for f in sorted(unclaimed, key=lambda f: f.start_time):
+            lines.append(f"| {f.path.name} | {f.kind} | {fmt_time(f.start_time)} |")
+
+    return "\n".join(lines) + "\n"
+
+
 def build_match_record(
     matches: list[TwoPhotonMatch], source_root: Path
 ) -> dict:

@@ -74,6 +74,18 @@ def increment_trailing_number(text: str) -> str:
     return text[: last.start()] + incremented + text[last.end() :]
 
 
+def _strip_trailing_number(text: str) -> str:
+    """Drop the same trailing 3-digit group :func:`increment_trailing_number`
+    bumps, so a same-session auto-incremented take (``.../001`` ->
+    ``.../002``) still compares equal — only a genuine manual edit of the
+    rest of the name should register as one."""
+    matches = list(_TRAILING_NUMBER_RE.finditer(text))
+    if not matches:
+        return text
+    last = matches[-1]
+    return text[: last.start()] + text[last.end() :]
+
+
 def normalize_save_dir(text: str) -> str:
     """Mirror DirectoryEdit's normalization: strip, expand ~, absolute, /."""
     path = Path(text.strip()).expanduser()
@@ -417,6 +429,12 @@ class RecordingController:
         self._init_error: str | None = None
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
+        # This session's starting relative_directory — never updated again
+        # after construction. name_needs_review compares against it (modulo
+        # the auto-incrementing trailing take number) so a soft GUI hint can
+        # nudge an operator who never touched the experiment name at all
+        # this session, without re-triggering on every normal per-take bump.
+        self._name_baseline = settings.relative_directory
         self._auto_preview = auto_preview
         # Back-compat: a rig that predates the "managed" trigger source declares
         # trigger_source="external" plus a trigger-driving plugin (the shipped
@@ -564,6 +582,16 @@ class RecordingController:
     def diagnosing(self) -> bool:
         """True while a benchmark (octacam.diagnostics) is running."""
         return self._state == "diagnosing"
+
+    @property
+    def name_needs_review(self) -> bool:
+        """True while ``relative_directory`` still looks like this session's
+        untouched starting value (see ``_name_baseline``) — a soft signal for
+        a non-blocking GUI hint nudging the operator to write an informative
+        experiment name, never something that blocks recording."""
+        return _strip_trailing_number(
+            self._settings.relative_directory
+        ) == _strip_trailing_number(self._name_baseline)
 
     @property
     def _camera_locked(self) -> bool:
@@ -1741,7 +1769,10 @@ class RecordingController:
             "recordings_made": self._recordings_made,
             "save_dir": settings.save_dir,
             "disk_free_bytes": free_bytes,
-            "settings": dataclasses.asdict(settings),
+            "settings": {
+                **dataclasses.asdict(settings),
+                "name_needs_review": self.name_needs_review,
+            },
             "cameras": [
                 {
                     "name": camera.name,

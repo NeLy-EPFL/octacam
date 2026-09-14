@@ -4565,6 +4565,188 @@ def _sweep_unclaimed_twophoton(
     return (n_copied, n_failed)
 
 
+_TWOPHOTON_SUBFOLDER_NAMES = frozenset({"Behavior", "Renderings", "2P"})
+
+
+def _gather_twophoton_manifest_data(dest_root: Path) -> dict[Path, list[dict]]:
+    """Every transferred take under *dest_root*, grouped by day/session folder
+    (the first path segment under *dest_root*) — read straight from each
+    take's root ``recording_summary.json`` (+ any sibling
+    ``twophoton_match.json``) already on the NAS, so this works for
+    historical data with no local recording folder left. ``transfer_folder``
+    (see ``transfer.py``) redundantly copies ``recording_summary.json``
+    alongside every subfolder it's called for (``Behavior``/``Renderings``),
+    so ``dest_root.rglob`` sees more than one copy per take — only the take
+    root's own copy is used here.
+
+    Shared by the automatic post-process manifest rebuild and the standalone
+    ``--twophoton-manifest`` mode."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME, TWOPHOTON_MATCH_FILENAME
+
+    by_day: dict[Path, list[dict]] = {}
+    for summary_path in sorted(dest_root.rglob(RECORDING_SUMMARY_FILENAME)):
+        folder = summary_path.parent
+        if folder.name in _TWOPHOTON_SUBFOLDER_NAMES:
+            continue
+        try:
+            rel = folder.relative_to(dest_root)
+        except ValueError:
+            continue
+        if not rel.parts:
+            continue
+        day_dir = dest_root / rel.parts[0]
+        summary = _read_summary(summary_path) or {}
+        start_time_ns = summary.get("start_time_ns")
+        duration_s = summary.get("duration_s")
+        if start_time_ns is None or duration_s is None:
+            continue
+        # No twophoton_match.json is the common, expected case for an
+        # unmatched take — check existence first so _read_summary's "could
+        # not read" warning (tailored for recording_summary.json, which
+        # should always exist) doesn't fire on every one of them.
+        match_path = folder / TWOPHOTON_MATCH_FILENAME
+        match_record = (_read_summary(match_path) or {}) if match_path.is_file() else {}
+        by_day.setdefault(day_dir, []).append(
+            {
+                "name": str(rel),
+                "start_time": start_time_ns / 1e9,
+                "duration_s": duration_s,
+                "armed": bool(
+                    summary.get("plugins", {}).get("twophoton", {}).get("armed", False)
+                ),
+                "matches": match_record.get("matched", []),
+            }
+        )
+    return by_day
+
+
+def _already_matched_twophoton_paths_on_nas(dest_root: Path, source_root: Path) -> set[Path]:
+    """Like :func:`_already_matched_twophoton_paths`, but sourced from every
+    ``twophoton_match.json`` already transferred under *dest_root* instead of
+    ``session_cache`` — so the manifest rebuild works for historical data
+    whose local recording folder (and cache entry) is long gone."""
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+
+    matched: set[Path] = set()
+    for match_path in dest_root.rglob(TWOPHOTON_MATCH_FILENAME):
+        record = _read_summary(match_path) or {}
+        for entry in record.get("matched", []):
+            rel = entry.get("path")
+            if rel:
+                matched.add((source_root / rel).resolve())
+    return matched
+
+
+# Margin added to a day's own [earliest take start, latest take end] window
+# when deciding whether a live 2P folder counts as "unclaimed for this day"
+# vs. belonging to a different experiment recorded the same date under the
+# same shared source root — generous enough for ThorSync/ThorImage's
+# documented startup/write-out lag (tens of seconds) while still well short
+# of the hours-apart gap between two distinct same-day sessions confirmed on
+# real data.
+_UNCLAIMED_WINDOW_MARGIN_S = 1800.0
+
+
+def _rebuild_twophoton_manifests(
+    source_root: Path, dest_root: Path, *, dry_run: bool
+) -> int:
+    """Regenerate ``2p_reconciliation.md`` for every day/session folder under
+    *dest_root* that has at least one transferred take — always a full
+    rebuild from scratch (never incrementally patched), so this one function
+    serves both the automatic post-process call and the standalone
+    ``--twophoton-manifest`` historical backfill with no drift between them.
+
+    Best-effort: a *source_root* that isn't reachable (share unmounted) is
+    logged and the unclaimed-folder section is marked as unchecked rather
+    than raising. Never raises. Returns the number of manifest files written
+    (or, under ``dry_run``, that would be written)."""
+    from octacam.transform import TWOPHOTON_MANIFEST_FILENAME
+    from octacam.twophoton_transfer import (
+        discover_twophoton_folders,
+        render_twophoton_manifest,
+    )
+
+    by_day = _gather_twophoton_manifest_data(dest_root)
+    if not by_day:
+        return 0
+
+    source_reachable = source_root.is_dir()
+    live_folders = []
+    if source_reachable:
+        try:
+            live_folders = discover_twophoton_folders(source_root)
+        except OSError as e:
+            log.warning("2P manifest: couldn't rescan %s: %s", source_root, e)
+            source_reachable = False
+    already_claimed = (
+        _already_matched_twophoton_paths_on_nas(dest_root, source_root)
+        if source_reachable
+        else set()
+    )
+    unclaimed_live = [f for f in live_folders if f.path.resolve() not in already_claimed]
+
+    n_written = 0
+    for day_dir, takes in by_day.items():
+        # A shared [transfer.twophoton].source root commonly holds more than
+        # one experiment's ThorImage folders (real data: two different
+        # experiments both recorded on the same calendar date, hours apart,
+        # under the same share) — bucketing "unclaimed" purely by calendar
+        # date leaked one experiment's folders into another's manifest.
+        # Bound to this day's own take window (+ a margin comfortably
+        # covering ThorSync/ThorImage startup/write-out lag) instead.
+        window_start = min(t["start_time"] for t in takes) - _UNCLAIMED_WINDOW_MARGIN_S
+        window_end = (
+            max(t["start_time"] + t["duration_s"] for t in takes)
+            + _UNCLAIMED_WINDOW_MARGIN_S
+        )
+        unclaimed = [
+            f for f in unclaimed_live if window_start <= f.start_time <= window_end
+        ]
+        manifest = render_twophoton_manifest(
+            day_dir.name, takes, unclaimed, source_reachable
+        )
+        manifest_path = day_dir / TWOPHOTON_MANIFEST_FILENAME
+        if dry_run:
+            log.info("[dry-run] 2P manifest: would write %s", manifest_path)
+        else:
+            try:
+                manifest_path.write_text(manifest)
+            except OSError as e:
+                log.warning("2P manifest: couldn't write %s: %s", manifest_path, e)
+                continue
+        n_written += 1
+    return n_written
+
+
+def _run_twophoton_manifest(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
+    """``octacam process --twophoton-manifest``: the standalone CLI entry
+    point for :func:`_rebuild_twophoton_manifests` — resolves ``--config``
+    into a source/destination and rebuilds every day's manifest under it,
+    for already-transferred (including historical) data."""
+    from octacam.config import resolve_dir_template
+
+    if cli_config_dir is None:
+        sys.exit("--twophoton-manifest requires --config <rig-config-dir>")
+    cfg = _load_config_for_user(cli_config_dir, user)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(f"--twophoton-manifest: no [transfer].directory configured in {cli_config_dir}")
+    twophoton_cfg = cfg.transfer.twophoton
+    if twophoton_cfg is None or not twophoton_cfg.source:
+        sys.exit(f"--twophoton-manifest: no [transfer.twophoton] configured in {cli_config_dir}")
+
+    source_root = Path(resolve_dir_template(twophoton_cfg.source))
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    n_written = _rebuild_twophoton_manifests(source_root, dest_root, dry_run=dry_run)
+    log.info(
+        "%s2P manifest: %d file(s) %s",
+        "[dry-run] " if dry_run else "",
+        n_written,
+        "would be written" if dry_run else "written",
+    )
+
+
 def _run_twophoton_sweep(
     cli_config_dir: Path | None, dry_run: bool, user: str | None = None
 ) -> None:
@@ -4807,23 +4989,26 @@ def _grid_and_transfer(
     no_delete_after_transfer: bool = False,
     transcode_failed_folders: frozenset[Path] = frozenset(),
     no_twophoton_sweep: bool = False,
+    no_twophoton_manifest: bool = False,
     user: str | None = None,
 ) -> int:
     """Build visualization grids, transfer each folder (behavior + any paired
     2-photon data), and — when requested — delete local copies once
     everything is checksum-verified on the NAS.
 
-    Five sequential phases, each getting its own progress bar: grids, behavior
+    Sequential phases, each getting its own progress bar: grids, behavior
     transfer (root metadata / ``Behavior`` / ``Renderings`` — see
     ``_transfer_dest``), 2-photon transfer (only for takes the ``twophoton``
     plugin reports as armed and whose config has ``[transfer.twophoton]``
     set), an automatic 2P-only sweep of every ``[transfer.twophoton]`` source
     this run touched (settled folders no take claimed — see
-    ``_sweep_unclaimed_twophoton``; ``no_twophoton_sweep`` skips it), then
-    delete-after-transfer. Returns the number of files that failed to
-    transfer (behavior + 2P + sweep). When ``reporter`` is set (a detached
-    job) each phase reports progress and pauses between folders while a
-    gui/record owns the cameras."""
+    ``_sweep_unclaimed_twophoton``; ``no_twophoton_sweep`` skips it), a
+    reconciliation-manifest rebuild for every day/session folder those
+    sources touched (see ``_rebuild_twophoton_manifests``;
+    ``no_twophoton_manifest`` skips it), then delete-after-transfer. Returns
+    the number of files that failed to transfer (behavior + 2P + sweep).
+    When ``reporter`` is set (a detached job) each phase reports progress and
+    pauses between folders while a gui/record owns the cameras."""
     from octacam.config import resolve_dir_template
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
@@ -5173,6 +5358,17 @@ def _grid_and_transfer(
                 )
                 transfer_failed += n_failed
 
+        # --- Phase 3d: 2P reconciliation manifest ------------------------------
+        # Regenerate 2p_reconciliation.md for every day/session folder under
+        # each [transfer.twophoton] source this run touched — run last so it
+        # reflects everything 3b/3c just wrote (a folder 3c just swept into
+        # 2p_only/ still shows "unclaimed" here, deliberately — see
+        # render_twophoton_manifest's docstring).
+        if not no_twophoton_manifest:
+            for (source_root, dest_root), (twophoton_cfg, _checksum) in sweep_targets.items():
+                if getattr(twophoton_cfg, "write_manifest", True):
+                    _rebuild_twophoton_manifests(source_root, dest_root, dry_run=dry_run)
+
         # --- Phase 4: delete-after-transfer -----------------------------------
         # Evaluated (and logged) under --dry-run too — a caller deciding
         # whether it's safe to reclaim local disk space needs to see exactly
@@ -5248,6 +5444,7 @@ def _rebuild_process_argv(
     delete_after_transfer: bool,
     no_delete_after_transfer: bool,
     no_twophoton_sweep: bool,
+    no_twophoton_manifest: bool,
     dry_run: bool,
 ) -> list[str]:
     """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
@@ -5278,6 +5475,8 @@ def _rebuild_process_argv(
         argv.append("--no-delete-after-transfer")
     if no_twophoton_sweep:
         argv.append("--no-twophoton-sweep")
+    if no_twophoton_manifest:
+        argv.append("--no-twophoton-manifest")
     if dry_run:
         argv.append("--dry-run")
     if config_dir is not None:
@@ -5427,6 +5626,18 @@ def process(
             "PATHS/--last/--session-id/--all. Safe to re-run.",
         ),
     ] = False,
+    twophoton_manifest: Annotated[
+        bool,
+        typer.Option(
+            "--twophoton-manifest",
+            help="One-time/ad-hoc mode: instead of processing recording folders, "
+            "rebuild 2p_reconciliation.md for every day/session folder already "
+            "on the NAS under [transfer].directory — every transferred take's "
+            "match status plus any unclaimed 2P folder still on "
+            "[transfer.twophoton].source, from scratch. Requires --config; "
+            "ignores PATHS/--last/--session-id/--all. Safe to re-run.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -5533,6 +5744,16 @@ def process(
             "claimed — see --twophoton-sweep, the same logic run standalone).",
         ),
     ] = False,
+    no_twophoton_manifest: Annotated[
+        bool,
+        typer.Option(
+            "--no-twophoton-manifest",
+            help="Skip the automatic 2p_reconciliation.md rebuild this run "
+            "otherwise does for every day/session folder under each "
+            "[transfer.twophoton] source it touched — see --twophoton-manifest, "
+            "the same logic run standalone.",
+        ),
+    ] = False,
     progress_style: Annotated[
         ProgressStyle,
         typer.Option(
@@ -5584,9 +5805,9 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
 
-    --twophoton-sweep, --migrate-layout, and --reassemble-tiffs are separate
-    modes (ignore PATHS/--last/--session-id/--all/--detach) — see their own
-    help text.
+    --twophoton-sweep, --migrate-layout, --reassemble-tiffs, and
+    --twophoton-manifest are separate modes (ignore
+    PATHS/--last/--session-id/--all/--detach) — see their own help text.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -5599,6 +5820,9 @@ def process(
         return
     if reassemble_tiffs:
         _run_tiff_reassembly(config_dir, dry_run, user)
+        return
+    if twophoton_manifest:
+        _run_twophoton_manifest(config_dir, dry_run, user)
         return
 
     do_transcode = not no_transcode
@@ -5628,6 +5852,7 @@ def process(
             delete_after_transfer=delete_after_transfer,
             no_delete_after_transfer=no_delete_after_transfer,
             no_twophoton_sweep=no_twophoton_sweep,
+            no_twophoton_manifest=no_twophoton_manifest,
             dry_run=dry_run,
         )
         status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
@@ -5795,6 +6020,7 @@ def process(
                 no_delete_after_transfer=no_delete_after_transfer,
                 transcode_failed_folders=frozenset(transcode_failed_folders),
                 no_twophoton_sweep=no_twophoton_sweep,
+                no_twophoton_manifest=no_twophoton_manifest,
                 user=user,
             )
 

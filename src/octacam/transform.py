@@ -57,6 +57,15 @@ TWOPHOTON_MATCH_FILENAME = "twophoton_match.json"
 # late-arriving 2P folder off as standalone.
 TWOPHOTON_PENDING_FILENAME = "twophoton_pending.json"
 
+# One per day/session destination folder (e.g. <transfer.directory>/260914_/),
+# fully regenerated on every `octacam process` run (and by the standalone
+# `--twophoton-manifest` mode) from recording_summary.json/twophoton_match.json
+# already on the NAS plus a live rescan of [transfer.twophoton].source — a
+# human-readable correspondence between every behavior take that day and its
+# matched (or unmatched) 2P folder, and every 2P folder on the share that
+# day no take claimed. Never hand-edited; see octacam.twophoton_transfer.
+TWOPHOTON_MANIFEST_FILENAME = "2p_reconciliation.md"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

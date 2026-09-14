@@ -157,6 +157,14 @@ def test_ffmpeg_params_shown_for_ffmpeg_hidden_for_raw(page):
     assert prop(page, "#ffmpeg-params-row", "e => e.hidden") is True
 
 
+def test_name_review_hint_toggles_from_settings(page):
+    make_tab(page)
+    page.evaluate("() => window.__tab.applySettings({ name_needs_review: true })")
+    assert prop(page, "#name-review-hint", "e => e.hidden") is False
+    page.evaluate("() => window.__tab.applySettings({ name_needs_review: false })")
+    assert prop(page, "#name-review-hint", "e => e.hidden") is True
+
+
 def test_writer_queue_size_round_trips_from_settings(page):
     make_tab(page)
     page.evaluate("() => window.__tab.applySettings({ writer_queue_size: 128 })")

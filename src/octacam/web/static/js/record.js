@@ -66,6 +66,7 @@ export class RecordTab {
     // relative sub-path (relative_directory); the server recomposes save_dir.
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
+    this.nameReviewHint = document.getElementById("name-review-hint");
     this.diskFree = document.getElementById("disk-free");
     // The Advanced-options switch and the block of less-common knobs it reveals.
     this.advancedToggle = document.getElementById("record-advanced-toggle");
@@ -281,6 +282,10 @@ export class RecordTab {
     }
     if (typeof s.relative_directory === "string" && canSet(this.relativeDir)) {
       this.relativeDir.value = s.relative_directory;
+    }
+    if (typeof s.name_needs_review === "boolean") {
+      // Purely informational — never gates the Start button.
+      this.nameReviewHint.hidden = !s.name_needs_review;
     }
     if (s.trigger_source && canSet(this.trigger)) {
       // The server promotes external+driving-plugin to "managed", so the option

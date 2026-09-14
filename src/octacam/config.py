@@ -253,6 +253,13 @@ class TwoPhotonTransferConfig(BaseModel):
     absent or when a channel's file set can't be safely assembled
     (non-contiguous/duplicate frame indices, or its count matches neither
     ``Experiment.xml``'s own ``Timelapse`` timepoints nor ``ZStage`` steps).
+
+    ``write_manifest`` regenerates a ``2p_reconciliation.md`` per day/session
+    destination folder after matching — every take's match status and every
+    unclaimed 2P folder that day, in one legible file (see
+    ``octacam.twophoton_transfer.render_twophoton_manifest``). Only gates the
+    automatic regeneration a normal `process` run does; the standalone
+    `process --twophoton-manifest` mode always runs when invoked explicitly.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -263,6 +270,7 @@ class TwoPhotonTransferConfig(BaseModel):
     verify_with_signals: bool = True
     verify_window_s: float = 3600.0
     assemble_tiff_stacks: bool = True
+    write_manifest: bool = True
 
     @field_validator("source", mode="before")
     @classmethod

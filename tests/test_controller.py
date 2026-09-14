@@ -184,6 +184,48 @@ def test_capture_frame_count():
     ) == 1
 
 
+def test_name_needs_review_true_until_relative_directory_is_edited():
+    from octacam.camera import CameraSystem
+
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(relative_directory="260914_/Fly1/001"),
+        auto_preview=False,
+        ready=False,
+    )
+    assert controller.name_needs_review is True
+
+    # A same-session auto-increment (the trailing take number only) must not
+    # itself clear the hint — only a genuine edit to the rest of the name.
+    controller.update_settings(relative_directory="260914_/Fly1/002")
+    assert controller.name_needs_review is True
+
+    controller.update_settings(relative_directory="260914_PAM7xCI63/Fly1/002")
+    assert controller.name_needs_review is False
+    controller.close()
+
+
+def test_name_needs_review_starts_true_regardless_of_initial_value():
+    # The baseline is captured at construction time from whatever
+    # relative_directory the controller was built with — in the real app
+    # this is always the rig's freshly-resolved config template (gui/record
+    # never persist a customized relative_directory across launches), so
+    # this coincides with "still the rig default" in practice. A directly
+    # constructed controller (as here) starts with the hint on either way —
+    # nothing has been edited yet *this session*, however good the initial
+    # value looks.
+    from octacam.camera import CameraSystem
+
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(relative_directory="260914_PAM7xCI63/Fly1/001"),
+        auto_preview=False,
+        ready=False,
+    )
+    assert controller.name_needs_review is True
+    controller.close()
+
+
 def test_update_settings_validation():
     controller = RecordingController.__new__(RecordingController)
     controller._settings = RecordingSettings()

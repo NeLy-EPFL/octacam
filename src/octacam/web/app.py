@@ -1034,7 +1034,10 @@ def create_app(
 
     @app.get("/api/settings")
     def get_settings():
-        return dataclasses.asdict(controller.get_settings())
+        return {
+            **dataclasses.asdict(controller.get_settings()),
+            "name_needs_review": controller.name_needs_review,
+        }
 
     @app.put("/api/settings")
     def put_settings(patch: SettingsPatch):
@@ -1044,7 +1047,10 @@ def create_app(
             raise HTTPException(409, str(e)) from None
         except (ValueError, TypeError) as e:
             raise HTTPException(422, str(e)) from None
-        settings = dataclasses.asdict(updated)
+        settings = {
+            **dataclasses.asdict(updated),
+            "name_needs_review": controller.name_needs_review,
+        }
         state.broadcast_threadsafe("settings", settings)
         return settings
 
@@ -1445,6 +1451,7 @@ def create_app(
                     {
                         "type": "settings",
                         **dataclasses.asdict(controller.get_settings()),
+                        "name_needs_review": controller.name_needs_review,
                     }
                 ),
             )

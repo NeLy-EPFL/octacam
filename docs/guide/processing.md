@@ -36,7 +36,8 @@ Other options:
 | `--delete-after-transfer` | Once a folder's *entire* transfer (behavior + any matched 2P data) is checksum-verified on the NAS, delete the local recording folder and matched 2P source folder(s). Also on when `[transfer].delete_after_transfer` is set; `--no-delete-after-transfer` forces it off regardless. See [2-photon transfer](#2-photon-transfer). |
 | `--twophoton-sweep` | Separate mode: transfer settled 2P-only folders with no matching behavior take instead of processing recording folders. Requires `--config`. |
 | `--migrate-layout` | Separate mode: reorganize recordings already transferred under the old flat layout into `Behavior`/`Renderings` subfolders, in place. Requires `--config`. |
-| `--config`, `-c` | Fallback config dir for recordings that lack an embedded snapshot (or the rig config for `--twophoton-sweep`). |
+| `--twophoton-manifest` | Separate mode: rebuild `2p_reconciliation.md` for every day/session folder already on the NAS instead of processing recording folders. Requires `--config`. See [Reconciliation manifest](#reconciliation-manifest). |
+| `--config`, `-c` | Fallback config dir for recordings that lack an embedded snapshot (or the rig config for `--twophoton-sweep`/`--twophoton-manifest`). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (stream ffmpeg's native output). |
 
@@ -202,6 +203,34 @@ spans more than one take (ThorSync left running across several behavior
 takes) can still verify-match each one individually, via a different segment
 of the same file.
 
+### Reconciliation manifest
+
+Both the octacam take name and the matched ThorSync/ThorImage folder's own
+name are visible on the NAS, but at different depths — the take name at the
+top, the 2P folder name one level down inside `2P/` — so at a glance it's
+easy to miss whether a take matched at all, or whether a 2P folder on the
+share never got claimed by anything. Every `process` run (and the standalone
+`octacam process --twophoton-manifest` mode, for already-transferred data)
+writes one `2p_reconciliation.md` per **day/session folder** — the first path
+segment under `transfer.directory`, e.g. `<transfer.directory>/260914_/`:
+
+```
+<transfer.directory>/260914_/
+  2p_reconciliation.md   # this day's whole 2P picture, at a glance
+  Fly1/001/...
+  Fly1/002/...
+```
+
+It lists every take transferred that day against its matched 2P folder (name,
+kind, confidence, time gap) or "unmatched", plus every 2P folder discovered on
+`[transfer.twophoton].source` that day no take claimed — the case worth
+double-checking: a discarded test acquisition, a Z-stack/calibration scan, or
+a genuine pairing the matcher missed. It's always **regenerated from scratch**
+(hand edits are lost) purely from what's already on the NAS plus a live rescan
+of the share, so it's safe to re-run and works for historical data too. Turn
+off the automatic rebuild with `--no-twophoton-manifest` or
+`[transfer.twophoton].write_manifest = false`.
+
 ThorImage's own files are **not** written in real time — it buffers frames
 during acquisition and flushes them to `.tif` on disk afterward (confirmed by
 comparing a verified pairing's `FrameOut` edge timing, from the DAQ, against
@@ -235,7 +264,9 @@ instead, safely, rather than being silently dropped. Pass
 --twophoton-sweep --config <rig-config>` is the same logic as its own
 standalone mode — useful run by hand or on a periodic systemd timer (see the
 packaging example) when there's no behavior recording to process at all; it
-ignores `PATHS`/`--last`/`--all`/`--detach`.
+ignores `PATHS`/`--last`/`--all`/`--detach`. Right after, `process` also
+rebuilds `2p_reconciliation.md` for every day/session folder those sources
+touched — see [Reconciliation manifest](#reconciliation-manifest).
 
 ## Per-user transfer profiles
 

@@ -654,6 +654,49 @@ against a real 2P rig; the durable findings:
   compared pixel-for-pixel against its source frame before anything is
   removed, one file at a time, only after the assembled stack is safely
   written.
+- **Naming/discoverability (`render_twophoton_manifest`, `cli._rebuild_twophoton_manifests`)**:
+  investigated as a real ergonomics problem — the octacam-chosen take name is
+  the only thing visible at the top of the NAS tree, the matched 2P folder's
+  name sits one level down inside `2P/`, and cross-referencing one from the
+  other meant opening `twophoton_match.json` by hand. A rename-on-match (baking
+  the 2P folder's name into the destination folder name) was considered and
+  rejected: real transferred data (`260903_PAM7xCI63`, 8 takes) showed a
+  matched pair is already nested correctly, so a rename would only be
+  cosmetic — and ThorImage's own numbering is real-world scrambled (confirmed:
+  `Fly1_004` created *before* `Fly1` in one session), so baking it into a name
+  just imports that confusion. Chose a **reconciliation manifest** instead: one
+  `2p_reconciliation.md` per day/session destination folder (the first path
+  segment under `transfer.directory`), listing every take that day against its
+  matched 2P folder (or "unmatched") plus every 2P folder on the share that day
+  no take claimed — always a **full rebuild from scratch** (never incrementally
+  patched) purely from `recording_summary.json`/`twophoton_match.json` already
+  on the NAS + a live rescan of `[transfer.twophoton].source`, so one code path
+  (`_rebuild_twophoton_manifests`) serves both the automatic post-`process` call
+  and the standalone `octacam process --twophoton-manifest` historical-backfill
+  mode (`--no-twophoton-manifest` opts the automatic call out;
+  `[transfer.twophoton].write_manifest = false` disables it per-rig). A real
+  bug found via the same `260903_PAM7xCI63` dry run: bucketing "unclaimed" 2P
+  folders by mere calendar date leaked a *different* same-day experiment's
+  ThorImage folders (hours away, sharing the same `[transfer.twophoton].source`)
+  into the wrong day's manifest — fixed by bounding to that day's own
+  [earliest take start, latest take end] window plus a
+  `_UNCLAIMED_WINDOW_MARGIN_S` (1800s) margin instead. Known limitation: the
+  unclaimed-folder check needs the share reachable at generation time, and (like
+  the rest of this feature) can't reconstruct a 2P folder someone already
+  deleted — it can only flag drift still visible on disk. Paired with a
+  **non-blocking** GUI hint (`RecordingController.name_needs_review`,
+  `record.js`'s `#name-review-hint`): server-computed by comparing the live
+  `relative_directory` against this session's own starting value (captured
+  once at controller construction) with the auto-incrementing trailing take
+  number stripped from both sides first (`_strip_trailing_number`, mirroring
+  `increment_trailing_number`'s own regex) — so a normal per-take `001`->`002`
+  bump never itself clears the hint, only a genuine edit to the rest of the
+  name does. Deliberately server-truth, not client-side dirty-tracking (avoids
+  the hint flipping back on from the server's own settings-echo after the
+  operator's own edit). Since `relative_directory` is always freshly resolved
+  from the rig's config template at real startup (never restored from a prior
+  session), the baseline coincides with "still the rig default" in practice —
+  purely informational, never blocks Start.
 
 ## Arduino firmware & auto-flash
 
