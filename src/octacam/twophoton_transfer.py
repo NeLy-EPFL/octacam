@@ -66,7 +66,7 @@ class TwoPhotonMatch:
     """One folder matched to a take, with enough context to audit the pairing."""
 
     folder: TwoPhotonFolder
-    gap_s: float  # time gap between the take's and the folder's windows
+    gap_s: float  # start-time gap (see _start_gap_seconds) — the sole gating/ranking criterion
     ambiguous: bool  # more than one same-kind candidate also overlapped
     # "verified": confirmed by reading the actual DAQ signal (edge count
     # matches the take's own recorded frame count / ThorImage's own
@@ -75,6 +75,10 @@ class TwoPhotonMatch:
     # verification wasn't attempted, wasn't possible (no h5py, no SyncData
     # folder for this session), or found no matching edge count.
     confidence: str = "timestamp"
+    # Informational only (see _end_gap_seconds) — never gates a match. Signed;
+    # positive means the 2P folder's last write landed after the take ended,
+    # expected today since nothing stops octacam when the 2P side finishes.
+    end_gap_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -191,29 +195,32 @@ def is_settled(folder: TwoPhotonFolder, settle_s: float, now: float | None = Non
     return (now - folder.last_mtime) >= settle_s
 
 
-def _gap_seconds(take_start: float, take_end: float, candidate: TwoPhotonFolder) -> float:
-    """How far *candidate* is from being a genuinely-paired acquisition: the
-    worst of (a) how far its start drifted from the take's start, (b) how far
-    its end drifted from the take's end, and (c) how much its own total
-    duration differs from the take's. A proper behavior/2P pair runs for
-    essentially the same length of time — anything that doesn't is far more
-    likely a standalone check/tuning/2P-only recording (safe to leave for the
-    2P-only sweep, see --twophoton-sweep) than a real pair. (a)+(b) alone
-    isn't enough: a much *longer* candidate can loosely straddle a short take
-    with both endpoints individually "close enough" while being nowhere near
-    the same duration. Deliberately not "0 whenever the two windows merely
-    overlap" — real data found a short, unrelated 2P snapshot nested entirely
-    inside a much longer behavior take (ThorImage-only sessions running
-    17-33s of a 129s take, confirmed on a real rig with no ThorSync data to
-    verify against) satisfies a plain overlap check while being a spurious
-    match."""
-    take_duration = take_end - take_start
-    candidate_duration = candidate.last_mtime - candidate.start_time
-    return max(
-        abs(candidate.start_time - take_start),
-        abs(candidate.last_mtime - take_end),
-        abs(candidate_duration - take_duration),
-    )
+def _start_gap_seconds(take_start: float, candidate: TwoPhotonFolder) -> float:
+    """The sole timestamp-tier acceptance/ranking criterion: how far
+    *candidate*'s start drifted from the take's own start.
+
+    On this trigger architecture, octacam is armed and then the 2P
+    acquisition's own start signals octacam to start recording (via
+    ThorSync) — so a genuinely paired take and 2P folder should start within
+    a couple of seconds of each other, not tens of seconds. Confirmed on
+    real data: real matched pairs across two independent experiments showed
+    start diffs of 0.5-9.6s (one 36s outlier on a session's very first
+    pairing), regardless of `end`/duration, which routinely differ by tens of
+    seconds today — there is no signal that stops octacam when the 2P
+    acquisition finishes, so the two ends drift independently (a separate,
+    not-yet-implemented fix). See :func:`_end_gap_seconds` for that
+    (informational-only) side."""
+    return abs(candidate.start_time - take_start)
+
+
+def _end_gap_seconds(take_end: float, candidate: TwoPhotonFolder) -> float:
+    """How far *candidate*'s last write landed from the take's own computed
+    end — signed (positive: the 2P folder finished writing after the take
+    ended, the expected direction today). Purely informational: octacam and
+    the 2P acquisition currently stop independently (no stop signal yet), so
+    this is expected to differ and must never gate a match — see
+    :func:`_start_gap_seconds` for the one criterion that does."""
+    return candidate.last_mtime - take_end
 
 
 def _overlaps(
@@ -225,7 +232,8 @@ def _overlaps(
     ``SyncData`` folders get opened for signal verification (deliberately
     generous: verification itself, not timing shape, is what confirms or
     rejects the candidate — see match_takes_to_twophoton_batch). Not used for
-    the timestamp-only decision itself; see :func:`_gap_seconds` for that."""
+    the timestamp-only decision itself; see :func:`_start_gap_seconds` for
+    that."""
     return not (
         candidate.start_time > take_end + window_s
         or candidate.last_mtime < take_start - window_s
@@ -240,20 +248,24 @@ def match_take_to_twophoton(
 ) -> list[TwoPhotonMatch]:
     """Match a behavior take's time window against discovered 2P folders.
 
-    A candidate matches only when its start, its end, AND its own overall
-    duration each land within *match_window_s* of the take's corresponding
-    value (see :func:`_gap_seconds`) — not merely "the two windows touch
-    somewhere". ThorSync/ThorImage are started independently by the operator,
-    so a few seconds to tens of seconds of drift is normal and allowed; what
-    this rules out is a short, unrelated acquisition (a focus check, an ROI
-    tune, a calibration snapshot) that just happens to fall within a much
-    longer take's window without actually running for anything like the same
-    length of time — a proper behavior/2P pair should have matching overall
-    durations, not just overlapping windows.
+    A candidate matches only when its **start** lands within *match_window_s*
+    of the take's own start (see :func:`_start_gap_seconds`) — octacam is
+    triggered directly by the 2P acquisition's own start (via ThorSync), so a
+    genuine pair's start should differ by at most a couple of seconds, not
+    "somewhere within a loose window". This is *more* selective than the old
+    duration-aware check against the false positive it was built to catch (a
+    short, unrelated acquisition nested inside a much longer take): such a
+    snapshot's own start essentially never coincidentally lands within a few
+    seconds of the take's start, so the tight start window excludes it
+    without needing to compare duration at all. End time and duration are
+    **not** part of this decision — octacam and the 2P acquisition currently
+    stop independently (no stop signal yet, a separate not-yet-implemented
+    fix), so they're expected to differ and are only carried informationally
+    (:func:`_end_gap_seconds`, ``TwoPhotonMatch.end_gap_s``).
 
     Returns 0-2 matches — at most one per kind (``sync``/``image``); never
     forces a pairing that isn't there. When more than one same-kind candidate
-    matches, the best-aligned (smallest `_gap_seconds`) wins and the match is
+    matches, the best-aligned (smallest start gap) wins and the match is
     flagged ``ambiguous=True`` so the caller can log/audit rather than
     silently trust it (real 2P sessions were found where ThorSync/ThorImage
     are *not* always started 1:1 with each other or with a single take).
@@ -265,7 +277,7 @@ def match_take_to_twophoton(
 
     by_kind: dict[str, list[tuple[float, TwoPhotonFolder]]] = {}
     for c in candidates:
-        gap = _gap_seconds(take_start, take_end, c)
+        gap = _start_gap_seconds(take_start, c)
         if gap > match_window_s:
             continue
         by_kind.setdefault(c.kind, []).append((gap, c))
@@ -276,7 +288,10 @@ def match_take_to_twophoton(
         best_gap, best_folder = kind_matches[0]
         matches.append(
             TwoPhotonMatch(
-                folder=best_folder, gap_s=best_gap, ambiguous=len(kind_matches) > 1
+                folder=best_folder,
+                gap_s=best_gap,
+                ambiguous=len(kind_matches) > 1,
+                end_gap_s=_end_gap_seconds(take_end, best_folder),
             )
         )
     return matches
@@ -351,7 +366,9 @@ def match_takes_to_twophoton_batch(
                 segments = segment_cache[c.path]
                 if not segments:
                     continue
-                gap = _gap_seconds(take.start_time, take_end, c)
+                # gap only breaks ties among edge-count-tied candidates below
+                # — verified confidence never depends on timing shape.
+                gap = _start_gap_seconds(take.start_time, c)
                 for idx, seg in enumerate(segments):
                     if (c.path, idx) in claimed_segments:
                         continue
@@ -370,6 +387,7 @@ def match_takes_to_twophoton_batch(
                         gap_s=best_gap,
                         ambiguous=tied > 1,
                         confidence="verified",
+                        end_gap_s=_end_gap_seconds(take_end, best_folder),
                     )
                 )
                 verified_segment_key = (best_folder.path, best_idx)
@@ -394,7 +412,7 @@ def match_takes_to_twophoton_batch(
                 diff = frameout_edge_diff(segment, timepoints)
                 if diff <= _VERIFY_TOLERANCE:
                     image_ranked.append(
-                        (diff, _gap_seconds(take.start_time, take_end, c), c)
+                        (diff, _start_gap_seconds(take.start_time, c), c)
                     )
             if image_ranked:
                 image_ranked.sort(key=lambda r: (r[0], r[1]))
@@ -406,6 +424,7 @@ def match_takes_to_twophoton_batch(
                         gap_s=best_gap,
                         ambiguous=tied > 1,
                         confidence="verified",
+                        end_gap_s=_end_gap_seconds(take_end, best_folder),
                     )
                 )
                 claimed_folders.add(best_folder.path)
@@ -443,12 +462,12 @@ def render_twophoton_manifest(
     *takes* — one dict per take: ``{"name": str, "start_time": float,
     "duration_s": float, "armed": bool, "matches": list[dict]}``, where each
     match dict has :func:`build_match_record`'s per-entry shape (``path``,
-    ``kind``, ``gap_s``, ``ambiguous``, ``confidence``). *unclaimed* is every
-    still-live 2P folder that day no take's ``twophoton_match.json``
-    references. *source_reachable* — False when the live rescan of
-    ``[transfer.twophoton].source`` couldn't happen (share unmounted), in
-    which case the unclaimed-folder section is replaced by a note instead of
-    silently claiming there's nothing unclaimed.
+    ``kind``, ``gap_s``, ``end_gap_s``, ``ambiguous``, ``confidence``).
+    *unclaimed* is every still-live 2P folder that day no take's
+    ``twophoton_match.json`` references. *source_reachable* — False when the
+    live rescan of ``[transfer.twophoton].source`` couldn't happen (share
+    unmounted), in which case the unclaimed-folder section is replaced by a
+    note instead of silently claiming there's nothing unclaimed.
     """
 
     def fmt_time(t: float) -> str:
@@ -463,8 +482,14 @@ def render_twophoton_manifest(
         "",
         "## Behavior takes",
         "",
-        "| Take | Start | Duration | Armed | 2P match | Kind | Confidence | Gap |",
-        "|---|---|---|---|---|---|---|---|",
+        "Start Δ is what decided the match (octacam is triggered directly by "
+        "the 2P acquisition's own start, so a real pair's start should agree "
+        "to within a couple of seconds). End Δ is informational only, never "
+        "used to accept or reject a match — octacam and the 2P side "
+        "currently stop independently, so it's expected to differ.",
+        "",
+        "| Take | Start | Duration | Armed | 2P match | Kind | Confidence | Start Δ | End Δ (info) |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for take in sorted(takes, key=lambda t: t["start_time"]):
         start = fmt_time(take["start_time"])
@@ -474,7 +499,7 @@ def render_twophoton_manifest(
         if not matches:
             lines.append(
                 f"| {take['name']} | {start} | {duration} | {armed} | "
-                "**unmatched** | | | |"
+                "**unmatched** | | | | |"
             )
             continue
         for i, m in enumerate(matches):
@@ -484,9 +509,10 @@ def render_twophoton_manifest(
                 else " |  |  | "
             )
             flag = " (ambiguous)" if m.get("ambiguous") else ""
+            end_gap = m.get("end_gap_s", 0.0)
             lines.append(
                 f"| {prefix} | {m['path']}{flag} | {m['kind']} | "
-                f"{m['confidence']} | {m['gap_s']}s |"
+                f"{m['confidence']} | {m['gap_s']}s | {end_gap:+.1f}s |"
             )
 
     lines += ["", "## Unclaimed 2P folders on the share"]
@@ -520,13 +546,17 @@ def build_match_record(
     """A JSON-able record of what was matched, for auditability.
 
     Paths are recorded relative to *source_root* (not absolute) so the record
-    stays portable and doesn't leak the share's local mount point."""
+    stays portable and doesn't leak the share's local mount point. ``gap_s``
+    is the start-time gap that decided the match (or ranked it, for a
+    verified match); ``end_gap_s`` is informational only — see
+    ``TwoPhotonMatch``."""
     return {
         "matched": [
             {
                 "path": str(m.folder.path.relative_to(source_root)),
                 "kind": m.folder.kind,
                 "gap_s": round(m.gap_s, 1),
+                "end_gap_s": round(m.end_gap_s, 1),
                 "ambiguous": m.ambiguous,
                 "confidence": m.confidence,
             }

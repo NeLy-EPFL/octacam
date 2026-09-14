@@ -220,18 +220,23 @@ class TwoPhotonTransferConfig(BaseModel):
     section at all) means "no 2P pairing for this rig." ``source`` is the root
     to scan for ThorSync (``SyncData*``)/ThorImage folders — same strftime
     ``%``-codes as ``record.directory``. ``match_window_s`` is the max
-    deviation allowed on *each* of a candidate's start/end from the take's
-    corresponding endpoint (not just "the two windows overlap somewhere" —
-    real data found a short, unrelated 2P snapshot nested entirely inside a
-    much longer take otherwise satisfies a plain overlap check) accepted as a
-    timestamp-only pairing. 60s comfortably covers the documented ~20-40s
-    ThorSync startup lag plus a ThorImage folder's own ~25-30s disk
-    write-out lag (it buffers frames during acquisition and flushes them to
-    `.tif` files afterward, confirmed by comparing a verified pairing's
-    `FrameOut` edge timing against its files' raw mtimes) while still
-    rejecting the ~90s+ deviations a real spurious match showed. ``settle_s``
-    is how long a 2P folder's mtime must be quiescent before it's considered
-    finished writing.
+    deviation allowed on a candidate's *start* from the take's own start,
+    accepted as a timestamp-only pairing — octacam is armed and then
+    triggered directly by the 2P acquisition's own start (via ThorSync), so a
+    genuine pair's start should agree to within a couple of seconds, not tens
+    of seconds; confirmed on real data across two independent experiments
+    (start diffs of 0.5-9.6s). 5s leaves a small margin for the filesystem/XML
+    timestamps used as start proxies. This is deliberately *more* selective
+    than a looser window against the false positive it needs to rule out (a
+    short, unrelated 2P snapshot nested inside a much longer take): such a
+    snapshot's own start essentially never coincidentally lands within a few
+    seconds of the take's start. A candidate's *end*/duration is **not**
+    part of this decision — octacam and the 2P acquisition currently stop
+    independently (no stop signal exists yet), so end times routinely differ
+    by tens of seconds even for a genuine pair; that deviation is still
+    recorded (``twophoton_match.json``'s ``end_gap_s``) for context, never
+    used to accept or reject a match. ``settle_s`` is how long a 2P folder's
+    mtime must be quiescent before it's considered finished writing.
 
     ``verify_with_signals`` attempts to confirm a ``SyncData*`` pairing by
     reading its actual recorded DAQ signals (``octacam.twophoton_signals`` —
@@ -265,7 +270,7 @@ class TwoPhotonTransferConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     source: str = ""
-    match_window_s: float = 60.0
+    match_window_s: float = 5.0
     settle_s: float = 300.0
     verify_with_signals: bool = True
     verify_window_s: float = 3600.0

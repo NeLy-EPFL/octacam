@@ -458,38 +458,49 @@ against a real 2P rig; the durable findings:
   the *first* acquisition, was created *after* `Fly1_004`–`Fly1_007` in one
   real session). See **Verified matching** below for what actually fixed
   ambiguity when a `SyncData` folder exists.
-- **Timestamp-only matching requires matching start, end, AND duration —
-  not just overlap.** A proper behavior/2P pair runs for essentially the
-  same length of time; a short, unrelated ThorImage snapshot (a focus check,
-  an ROI tune) nested entirely inside a much longer take satisfies a plain
-  "windows overlap" check, and can even satisfy "both endpoints individually
-  close" (a much *longer* candidate can loosely straddle a short take with
-  both ends "close enough" while its own duration is nothing alike) while
-  being a spurious match. `_gap_seconds` is the *worst* of three deviations —
-  `|candidate.start - take_start|`, `|candidate.last_mtime - take_end|`, and
-  `|candidate_duration - take_duration|` (0 only for a genuinely matched
-  pair); `match_take_to_twophoton` requires it ≤ `match_window_s`, not the
-  old "any overlap, however loose" check. Confirmed on a real rig with no
-  `SyncData` folders at all (so nothing to verify against): its ThorImage
-  folders split cleanly into two populations — several 20–33s snapshots
-  (correctly rejected) and several 147–159s sessions (correctly matched,
-  each within the expected margin of its take's 129s) — not a fluke, a real
-  structural difference the duration check picks out. `match_window_s`'s
-  default was tightened from 120s to **60s** after finding the real spurious
-  matches deviated 90s+ while genuine ones clustered at 20–33s (documented
-  ~20–40s ThorSync startup lag + a newly confirmed ~25–30s ThorImage disk
-  write-out lag — see next bullet). This check only governs the *timestamp*
+- **Timestamp-only matching's one gating criterion is start time — not
+  end/duration, and not "any overlap, however loose."** This was wrong in an
+  earlier version of this doc (and repeated by an earlier agent session,
+  corrected by Matthias 2026-09-14): the real trigger architecture is octacam
+  armed → the 2P acquisition's own start signals octacam to start recording
+  too, via ThorSync — so a genuine pair's **start** should agree to within a
+  couple of seconds, not tens of seconds. `_start_gap_seconds` (was
+  `_gap_seconds`, a worst-of-three-deviations formula) is now just
+  `|candidate.start - take_start|`; `match_take_to_twophoton` requires it ≤
+  `match_window_s`, default **5s** (was 120s, then 60s — both defaults were
+  calibrated around the wrong "tens of seconds of drift is normal" premise).
+  Confirmed by hand against real matched takes across two independent
+  experiments (`260903_PAM7xCI63`, `260903_PAM07xCI80`): every genuine
+  timestamp-tier match had a start diff of 0.5–9.6s (one 36s outlier on a
+  session's very first pairing) — the old worst-of-three "gap" numbers
+  (12–54s) were entirely inflated by end/duration mismatch, not start drift.
+  This is *more* selective than the old duration-aware check against the
+  false positive it needs to rule out (a short, unrelated ThorImage snapshot
+  — a focus check, an ROI tune — nested inside a much longer take): such a
+  snapshot's own start essentially never coincidentally lands within a few
+  seconds of the take's start, so the tight start window excludes it without
+  reasoning about duration at all. This check only governs the *timestamp*
   tier — the verified tier's confidence never depends on timing shape at all.
-- **ThorImage writes files in a burst after acquisition, not in real time.**
-  Confirmed by comparing a verified pairing's actual `FrameOut` edge timing
-  (from `Episode001.h5`, i.e. ground truth) against its own files' raw
-  mtimes: the real acquisition had already ended (per the DAQ) before the
-  first `.tif` appeared on disk, with the full write-out taking a further
-  ~25–30s. Irrelevant to a `SyncData`-verified match (edge count doesn't care
-  about file timestamps) but means a purely timestamp-only `image`-kind match
-  (no `SyncData` to verify against at all) is the least certain path in this
-  feature — there's no independent signal to check it against, only a
-  generous-enough `match_window_s` as mitigation, never a guarantee.
+- **End time and duration are not synced today, and that's expected — not a
+  matching signal.** There is currently no signal that stops octacam when the
+  2P acquisition finishes (octacam and ThorImage/ThorSync each end
+  independently), so a genuine pair's end/duration routinely differs by tens
+  of seconds even when the start matched almost exactly — confirmed on real
+  data (`_end_gap_seconds`, `TwoPhotonMatch.end_gap_s`, `20–80s` on real
+  genuine pairs). This is carried in `twophoton_match.json`/the
+  reconciliation manifest purely for context (e.g. to validate a future fix),
+  **never** used to accept or reject a match. Fixing this — a signal that
+  stops octacam when ThorImage finishes — is a real, not-yet-implemented
+  follow-up (tracked in agent memory, not queued work). Separately: ThorImage
+  itself writes files in a burst after acquisition, not in real time —
+  confirmed by comparing a verified pairing's actual `FrameOut` edge timing
+  (from `Episode001.h5`, ground truth) against its own files' raw mtimes: the
+  real acquisition had already ended (per the DAQ) before the first `.tif`
+  appeared on disk, with the full write-out taking a further ~25–30s.
+  Irrelevant to a `SyncData`-verified match (edge count doesn't care about
+  file timestamps) and, now that `match_window_s` only looks at start, no
+  longer affects a timestamp-only `image`-kind match either — it just shows
+  up as a large, harmless `end_gap_s`.
 - **Verified matching (`twophoton_signals.py`)**: whenever a `SyncData*`
   folder exists, its `Episode001.h5` records the Arduino's camera-trigger
   pulse on ThorSync's own DAQ clock (`DI/Cameras`) — confirmed on real data

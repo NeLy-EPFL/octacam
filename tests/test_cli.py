@@ -1538,7 +1538,7 @@ def test_process_legacy_fallback_matches_predates_feature_recording(tmp_path, mo
     dest_root = tmp_path / "dest"
     source_root = tmp_path / "windows_share" / "MD"
     take_start = 1_000_000.0
-    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start - 30)
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=take_start - 2)
 
     folder = tmp_path / "rec"
     _make_recording(

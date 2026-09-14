@@ -125,10 +125,10 @@ def test_is_settled_defaults_now_to_current_time():
 
 
 def test_match_finds_sync_and_image_within_window():
-    # take = [1000, 1180]. sync's worse endpoint deviation: max(|1036-1000|=36,
-    # |1250-1180|=70) = 70. image's: max(|1000-1000|=0, |1240-1180|=60) = 60.
-    # Both within match_window_s=120, so both match — gap_s reports the
-    # (nonzero) endpoint drift, not just "0 because it overlaps somewhere".
+    # take = [1000, 1180]. gap_s is start-only now: sync |1036-1000|=36,
+    # image |1000-1000|=0 — both within match_window_s=120, so both match.
+    # end_gap_s is informational only (signed: candidate.last_mtime -
+    # take_end): sync 1250-1180=+70, image 1240-1180=+60 — neither gates.
     sync = TwoPhotonFolder(Path("s"), "sync", start_time=1036.0, last_mtime=1250.0)
     image = TwoPhotonFolder(Path("i"), "image", start_time=1000.0, last_mtime=1240.0)
     matches = match_take_to_twophoton(
@@ -138,8 +138,10 @@ def test_match_finds_sync_and_image_within_window():
     by_kind = {m.folder.kind: m for m in matches}
     assert set(by_kind) == {"sync", "image"}
     assert all(m.ambiguous is False for m in matches)
-    assert by_kind["sync"].gap_s == 70.0
-    assert by_kind["image"].gap_s == 60.0
+    assert by_kind["sync"].gap_s == 36.0
+    assert by_kind["image"].gap_s == 0.0
+    assert by_kind["sync"].end_gap_s == 70.0
+    assert by_kind["image"].end_gap_s == 60.0
 
 
 def test_match_respects_window_and_excludes_far_folders():
@@ -155,12 +157,9 @@ def test_match_returns_nothing_when_no_candidates_overlap():
 
 
 def test_match_picks_closest_and_flags_ambiguous():
-    # Both candidates have the take's own 10s duration (isolating start/end
-    # proximity as the only thing to disambiguate) and both land within
-    # match_window_s=120 — a genuine tie; "far" in the old, loose-overlap
-    # sense (its own window barely touches the take's padded window) is
-    # excluded entirely by the stricter checks, so it isn't a useful
-    # ambiguity case any more.
+    # Both candidates start within match_window_s=120 of the take's own
+    # start (5s and 10s away respectively) — not a tie, so the closer one
+    # wins outright rather than being flagged ambiguous.
     take_start, take_duration = 1000.0, 10.0
     closer = TwoPhotonFolder(Path("closer"), "sync", start_time=995.0, last_mtime=1005.0)
     farther = TwoPhotonFolder(Path("farther"), "sync", start_time=1010.0, last_mtime=1020.0)
@@ -171,35 +170,39 @@ def test_match_picks_closest_and_flags_ambiguous():
     assert matches[0].folder is closer
 
 
-def test_match_excludes_much_longer_candidate_straddling_a_short_take():
-    # A pathological case start/end-closeness alone can miss: a candidate
-    # much LONGER than the take, positioned so both its start and its end are
-    # each individually "close enough", while its own duration is nothing
-    # like the take's — e.g. a candidate padded 40s before and 40s after a
-    # 10s take (both endpoint deviations = 40, comfortably under a 60s
-    # window) but running 90s total, 9x the take's length.
+def test_match_accepts_candidate_with_close_start_despite_different_duration():
+    # Deliberate behavior change: duration/end no longer gate a match at
+    # all — octacam and the 2P side currently stop independently (no stop
+    # signal yet), so a genuine pair's duration is expected to differ. A
+    # candidate starting only 2s after the take, but running nearly 9x
+    # longer (informational end_gap_s reflects that), must still match —
+    # the close start is what matters.
     take_start, take_duration = 1000.0, 10.0  # take = [1000, 1010]
     much_longer = TwoPhotonFolder(
-        Path("long"), "sync", start_time=960.0, last_mtime=1050.0  # 90s duration
+        Path("long"), "sync", start_time=1002.0, last_mtime=1090.0  # 88s duration
     )
-    matches = match_take_to_twophoton(
-        take_start, take_duration, [much_longer], match_window_s=60.0
+    (match,) = match_take_to_twophoton(
+        take_start, take_duration, [much_longer], match_window_s=5.0
     )
-    assert matches == []
+    assert match.folder is much_longer
+    assert match.gap_s == 2.0
+    assert match.end_gap_s == 80.0
 
 
 def test_match_excludes_short_unrelated_acquisition_inside_a_long_take():
     # Real bug found via production data: a short, unrelated 2P snapshot
     # nested entirely inside a much longer behavior take (ThorImage-only
     # sessions running 17-33s of a 129s take, no ThorSync to verify against)
-    # satisfied a plain overlap check. Both endpoints must be close, not just
-    # "somewhere inside".
+    # satisfied a plain overlap check. Under the current start-only,
+    # tight-window (5s) criterion this is excluded even more directly: such
+    # a snapshot's own start essentially never coincidentally lands within a
+    # few seconds of the take's start.
     take_start, take_duration = 1000.0, 129.0  # take = [1000, 1129]
     short_snapshot = TwoPhotonFolder(
-        Path("snap"), "image", start_time=1010.0, last_mtime=1030.0  # 20s, well inside
+        Path("snap"), "image", start_time=1020.0, last_mtime=1040.0  # 20s in, 20s long
     )
     matches = match_take_to_twophoton(
-        take_start, take_duration, [short_snapshot], match_window_s=60.0
+        take_start, take_duration, [short_snapshot], match_window_s=5.0
     )
     assert matches == []
 
@@ -226,7 +229,8 @@ def test_build_match_record_uses_relative_paths():
     from octacam.twophoton_transfer import TwoPhotonMatch
 
     record = build_match_record(
-        [TwoPhotonMatch(folder, gap_s=3.456, ambiguous=False)], source_root
+        [TwoPhotonMatch(folder, gap_s=3.456, ambiguous=False, end_gap_s=12.34)],
+        source_root,
     )
     assert record == {
         "matched": [
@@ -234,6 +238,7 @@ def test_build_match_record_uses_relative_paths():
                 "path": "MB247_CI63/SyncData102",
                 "kind": "sync",
                 "gap_s": 3.5,
+                "end_gap_s": 12.3,
                 "ambiguous": False,
                 "confidence": "timestamp",
             }

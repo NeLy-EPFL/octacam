@@ -136,27 +136,29 @@ replacing a separate manual copy step:
 ```toml
 [transfer.twophoton]
 source = "/mnt/windows_share/MD"   # root to scan for ThorSync/ThorImage folders
-match_window_s = 60                 # max deviation on EACH endpoint (start and end) for a timestamp-only pairing
+match_window_s = 5                  # max deviation on the START only, for a timestamp-only pairing
 settle_s = 300                      # quiescence delay before a 2P folder is "done"
 verify_with_signals = true          # confirm a pairing by reading its actual DAQ signal (default on)
 verify_window_s = 3600              # wider window bounding which SyncData folders get opened to check
 ```
 
-`match_window_s` requires a candidate's start, its end, *and* its own overall
-duration to each land within that many seconds of the take's own — not just
-"the two windows overlap somewhere". A proper behavior/2P pair runs for
-essentially the same length of time; a short, unrelated 2-photon snapshot (a
-focus check, an ROI tune) nested entirely inside a much longer take satisfies
-a plain overlap check, and can even satisfy "both endpoints individually
-close" (a much *longer* candidate can loosely straddle a short take with both
-ends close while its own duration is nothing alike), while being a spurious
-match. Confirmed on a real rig with no ThorSync to verify against: its
-ThorImage folders split cleanly into two populations — several 20–33s
-snapshots (rejected) and several 147–159s sessions (matched, each within the
-expected margin of its take's 129s duration). 60s comfortably covers the
-documented ~20–40s ThorSync startup lag plus a further ~25–30s ThorImage disk
-write-out lag (see **Verified matching** below) while still rejecting
-deviations of 90s or more, which the real spurious snapshots showed.
+`match_window_s` requires a candidate's **start** — and only its start — to
+land within that many seconds of the take's own start. octacam is armed and
+then triggered directly by the 2P acquisition's own start (via ThorSync), so
+a genuine pair's start should agree to within a couple of seconds; confirmed
+on real data across two independent experiments (start diffs of 0.5–9.6s,
+one 36s outlier on a session's very first pairing). A candidate's *end* and
+overall duration are **not** part of this decision — there is currently no
+signal that stops octacam when the 2P acquisition finishes, so the two ends
+drift apart independently (end diffs of 20–80s were observed on the same real
+data, even for genuine pairs); that deviation is still recorded
+(`twophoton_match.json`'s `end_gap_s`) for context, never used to accept or
+reject a match. This is deliberately *more* selective than a looser window
+against the false positive it needs to rule out — a short, unrelated
+2-photon snapshot (a focus check, an ROI tune) nested inside a much longer
+take: such a snapshot's own start essentially never coincidentally lands
+within a few seconds of the take's start, so the tight start window excludes
+it without needing to reason about duration at all.
 
 When a take's `recording_summary.json` reports `plugins.twophoton.armed` (the
 "arm with recording" checkbox was checked), `process` scans `source` for
@@ -237,11 +239,14 @@ comparing a verified pairing's `FrameOut` edge timing, from the DAQ, against
 its files' raw mtimes: the real acquisition had already ended by the time the
 first file appeared, with the whole write-out taking a further ~25–30s). This
 matters for a `SyncData`-verified pairing not at all — the edge count is
-authoritative regardless — but it's why a purely timestamp-only `image`-kind
-match (no `SyncData` folder available to verify against at all) is
-inherently the least certain part of this feature: there's no independent
-signal to check it against, so `match_window_s` accommodating that write-out
-lag is the best available mitigation, not a guarantee.
+authoritative regardless — and it no longer affects a timestamp-only
+`image`-kind match either, since `match_window_s` only ever looks at the
+*start* now (see above); the write-out lag just shows up as a large,
+harmless `end_gap_s` in the match record. What remains true is that a purely
+timestamp-only `image`-kind match (no `SyncData` folder to verify against at
+all) is inherently the least certain part of this feature: there's no
+independent signal to confirm it, only the tight start window as mitigation,
+not a guarantee.
 
 **Recordings made before this feature existed** have no `plugins` key at all
 (`recording_summary.json`'s `schema_version < 4`) — there was never a chance

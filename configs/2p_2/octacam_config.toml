@@ -109,5 +109,4 @@ checksum = true
 
 [transfer.twophoton]
 source = "/mnt/windows_share/MD"
-match_window_s = 60
 settle_s = 300
