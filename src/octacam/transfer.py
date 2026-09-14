@@ -394,6 +394,7 @@ def transfer_folder(
     verify: bool = True,
     checksum: bool = False,
     on_progress: TransferCallback | None = None,
+    include_summary: bool = True,
 ) -> TransferResult:
     """Copy mp4s (plus recording_summary.json and, when present, timestamps.npz)
     from *folder* to *dest*.
@@ -407,8 +408,8 @@ def transfer_folder(
         e.g. ``transfer.directory / relative_directory``).
     files_only:
         Explicit list of files to copy; overrides the default (all *.mp4 in
-        *folder*).  ``recording_summary.json`` and ``timestamps.npz`` are always
-        appended if present.
+        *folder*).  ``recording_summary.json`` and ``timestamps.npz`` are
+        appended if present and *include_summary* is set.
     dry_run:
         Log intended operations without touching the filesystem.
     verify:
@@ -420,6 +421,13 @@ def transfer_folder(
         full content digests rather than just size (repair mode).
     on_progress:
         Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
+    include_summary:
+        Auto-append recording_summary.json/timestamps.npz when present
+        (default). A caller invoked more than once per recording for
+        different *dest* subfolders (e.g. Behavior/, Renderings/) should pass
+        False for every call but the one meant to carry the take's root
+        metadata, so the same small file doesn't land duplicated in each
+        subfolder.
 
     Returns a :class:`TransferResult` (truthy on success, falsy on hard failure
     or nothing to copy).
@@ -430,13 +438,14 @@ def transfer_folder(
     else:
         candidates = sorted(folder.glob("*.mp4"))
 
-    summary = folder / RECORDING_SUMMARY_FILENAME
-    if summary.exists() and summary not in candidates:
-        candidates.append(summary)
+    if include_summary:
+        summary = folder / RECORDING_SUMMARY_FILENAME
+        if summary.exists() and summary not in candidates:
+            candidates.append(summary)
 
-    timestamps = folder / TIMESTAMPS_FILENAME
-    if timestamps.exists() and timestamps not in candidates:
-        candidates.append(timestamps)
+        timestamps = folder / TIMESTAMPS_FILENAME
+        if timestamps.exists() and timestamps not in candidates:
+            candidates.append(timestamps)
 
     result = TransferResult(dest=dest)
 

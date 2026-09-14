@@ -103,6 +103,23 @@ def test_copy_without_timestamps_is_fine(tmp_path):
     assert not (dest / TIMESTAMPS_FILENAME).exists()
 
 
+def test_copy_include_summary_false_omits_summary_and_timestamps(tmp_path):
+    # A caller transferring the same recording into more than one destination
+    # subfolder (e.g. Behavior/, Renderings/) must be able to opt out of the
+    # auto-append for every call but one, or the small summary/timestamps
+    # files end up duplicated in each subfolder.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
+    (src / TIMESTAMPS_FILENAME).write_bytes(b"\x00npz-bytes")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path) / "Behavior"
+    result = transfer_folder(
+        src, dest=dest, files_only=[src / "camera_LF.mp4"], include_summary=False
+    )
+
+    assert set(result.copied) == {"camera_LF.mp4"}
+    assert not (dest / RECORDING_SUMMARY_FILENAME).exists()
+    assert not (dest / TIMESTAMPS_FILENAME).exists()
+
+
 def test_copy_bare_name_without_base(tmp_path):
     src = _make_recording(tmp_path / "deep" / "001", {"camera_LF.mp4": b"x" * 10})
     dest_root = tmp_path / "dest"

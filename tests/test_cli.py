@@ -1305,6 +1305,30 @@ def test_process_transfer_splits_root_behavior_renderings(tmp_path, monkeypatch)
     assert not (dest / "Behavior" / "grid.mp4").exists()
 
 
+def test_process_transfer_does_not_duplicate_summary_into_subfolders(
+    tmp_path, monkeypatch
+):
+    # transfer_folder auto-appends recording_summary.json when present; called
+    # once per destination subfolder (root/Behavior/Renderings) for the same
+    # take, it must only actually land at the take's root, not duplicated
+    # into Behavior/ and Renderings/ too (found via a real dry-run against
+    # already-transferred production data on the NAS).
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n',
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode"])
+    assert result.exit_code == 0, result.output
+    dest = dest_root / folder.name
+    assert (dest / "recording_summary.json").exists()
+    assert not (dest / "Behavior" / "recording_summary.json").exists()
+    assert not (dest / "Renderings" / "recording_summary.json").exists()
+
+
 def test_process_no_transcode_no_grid_still_excludes_grid_from_behavior(
     tmp_path, monkeypatch
 ):

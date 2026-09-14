@@ -5138,10 +5138,14 @@ def _grid_and_transfer(
                 behavior_files = [f for f in outputs if f.name not in viz_names]
 
                 failed_here = 0
-                for call_dest, files in (
-                    (dest, root_files),
-                    (dest / "Behavior", behavior_files),
-                    (dest / "Renderings", grid_files.get(folder, [])),
+                # recording_summary.json/timestamps.npz belong once, at the
+                # take's root (dest) — every other consumer (transfer_dest,
+                # the 2P manifest, --migrate-layout, ...) already reads them
+                # only from there, never from Behavior/ or Renderings/.
+                for call_dest, files, include_summary in (
+                    (dest, root_files, True),
+                    (dest / "Behavior", behavior_files, False),
+                    (dest / "Renderings", grid_files.get(folder, []), False),
                 ):
                     result = transfer_folder(
                         folder,
@@ -5151,6 +5155,7 @@ def _grid_and_transfer(
                         verify=verify,
                         checksum=checksum,
                         on_progress=on_prog,
+                        include_summary=include_summary,
                     )
                     n_copied += len(result.copied)
                     n_skipped += len(result.skipped)
