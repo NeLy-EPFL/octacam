@@ -288,6 +288,50 @@ guessed. Turn this off with `[transfer.twophoton].attribute_unclaimed_to_fly
 = false`; the reconciliation manifest's unclaimed-folder table shows a
 preview of the same decision.
 
+### Unified per-fly recording layout
+
+octacam's own take numbers and the fly-attributed `2P_only/` bucket above
+are two separate numbering schemes within one fly's folder. `octacam process
+--reconcile-recordings` unifies them into one chronological sequence per
+fly — `Recording1`, `Recording2`, ... — suffixed by what's actually inside:
+
+```
+<transfer.directory>/260914_/Fly1/
+  Recording1_Beh/       # behavior only
+  Recording2_2P/2P/...  # 2P only (a Z-stack, a calibration scan, ...)
+  Recording3_Synced/    # Behavior/, Renderings/, and 2P/ together
+```
+
+This is a **separate, explicit, on-demand mode** — a normal `process` run
+never renumbers anything automatically; it keeps writing takes and
+`2P_only/<name>` exactly as described above. Run
+`--reconcile-recordings --config <rig-config>` by hand whenever a day or
+experiment is considered done. Like `--migrate-layout`, it's a
+same-filesystem rename (no data copied), self-contained (works entirely from
+what's already on the NAS, no live 2P source needed), and safe to re-run —
+a fly whose session count hasn't changed since the last pass is left
+untouched. If it *has* changed (a new take, a newly-attributed 2P-only
+entry, or a newly promoted 2P-only fly — see below), that fly is fully
+renumbered from scratch: numbers can shift, by design, since this is only
+ever run deliberately, never mid-session.
+
+It also promotes the fuzzier case: 2P data still sitting in the generic
+`2p_only/<experiment>/<date>/` bucket (nothing could attribute it to an
+existing fly) is grouped by the same ThorImage name-prefix logic and
+promoted into a **brand-new Fly folder** — the next unused `FlyN` for that
+experiment. Unlike the automatic attribution above, no existing behavior
+take anchors this decision, so it's the least certain part of this feature —
+nothing is destroyed if a promotion turns out to be a standalone test
+recording rather than a real fly (it's a rename, always previewable with
+`--dry-run` first), but it's worth reviewing the dry-run output before
+running it for real.
+
+Every real move is also recorded to that fly's own
+`reconciliation_log.md` — unlike `2p_reconciliation.md`, this file is
+**append-only** (never regenerated or overwritten), so a folder's original
+name/location is still there even after a later run renumbers things again;
+the record a revert would need.
+
 ## Per-user transfer profiles
 
 A rig's hardware is shared, but several people can use it and each want their

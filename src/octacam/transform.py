@@ -66,6 +66,13 @@ TWOPHOTON_PENDING_FILENAME = "twophoton_pending.json"
 # day no take claimed. Never hand-edited; see octacam.twophoton_transfer.
 TWOPHOTON_MANIFEST_FILENAME = "2p_reconciliation.md"
 
+# One per fly folder, written by `octacam process --reconcile-recordings`.
+# Unlike TWOPHOTON_MANIFEST_FILENAME, this is **append-only** — never
+# regenerated or overwritten — so a rename's original name/location is
+# still here even after a later reconciliation run renumbers things again;
+# the record a revert would need. See cli._append_reconciliation_log.
+RECONCILIATION_LOG_FILENAME = "reconciliation_log.md"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

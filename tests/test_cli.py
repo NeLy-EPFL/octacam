@@ -2187,6 +2187,44 @@ def test_twophoton_sweep_excludes_already_matched_folder(tmp_path, monkeypatch):
     assert not (dest_root / "2p_only").exists()
 
 
+def test_twophoton_sweep_excludes_already_matched_folder_with_no_local_cache(
+    tmp_path, monkeypatch
+):
+    # Real gap found before sweeping historical data for real: a take whose
+    # local folder is long gone (already cleaned up, or aged out of
+    # session_cache) drops out of the session_cache-based already-matched
+    # check entirely — without also checking the NAS side directly, an
+    # already-legitimately-matched 2P folder looks "unclaimed" again and
+    # gets duplicate-copied to a second destination.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    old_enough = time.time() - 10_000
+    _make_sync_folder_2p(source_root, "MB247_CI63", "SyncData102", mtime=old_enough)
+
+    # The match sidecar lives only on the NAS (already-transferred take) —
+    # no session_cache entry at all, mirroring real cleaned-up local data.
+    take_dir = dest_root / "day1" / "Fly1" / "001"
+    take_dir.mkdir(parents=True)
+    (take_dir / "twophoton_match.json").write_text(
+        json.dumps({"matched": [{"path": "MB247_CI63/SyncData102", "kind": "sync"}]})
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 60\n"
+    )
+    result = runner.invoke(
+        app, ["process", "--twophoton-sweep", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "2p_only").exists()
+
+
 # --- 2P sweep: attribute unclaimed folders to their fly by ThorImage prefix -
 
 
@@ -2867,6 +2905,269 @@ def test_migrate_layout_conflict_leaves_both_and_reports(tmp_path, monkeypatch):
     # Neither copy was touched.
     assert (folder / "camera_LF.mp4").exists()
     assert (folder / "Behavior" / "camera_LF.mp4").read_bytes() == b"different-content-here"
+
+
+# --- process: --reconcile-recordings (unified per-fly RecordingN layout) ---
+
+
+def _write_take(dest_root, rel, *, start_time_ns, duration_s, matched_paths=None):
+    """A minimal already-transferred take, directly at *dest_root* — mirrors
+    how --migrate-layout's own tests set up already-on-the-NAS data, since
+    --reconcile-recordings is equally self-contained (dest_root only)."""
+    folder = dest_root / rel
+    folder.mkdir(parents=True)
+    (folder / "recording_summary.json").write_text(
+        json.dumps({"start_time_ns": start_time_ns, "duration_s": duration_s})
+    )
+    if matched_paths is not None:
+        (folder / "twophoton_match.json").write_text(
+            json.dumps({"matched": [{"path": p, "kind": "image"} for p in matched_paths]})
+        )
+    return folder
+
+
+def test_reconcile_recordings_requires_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    result = runner.invoke(app, ["process", "--reconcile-recordings"])
+    assert result.exit_code != 0
+    assert "--config" in result.output
+
+
+def test_reconcile_recordings_renumbers_chronologically(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    # Out of take-number order on purpose: take "002" started before "001"'s
+    # own... no — keep take numbers matching chronology but not yet in
+    # RecordingN form, to isolate the renumber+suffix behavior.
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    _write_take(
+        dest_root, "day1/Fly1/002", start_time_ns=2_000_000_000_000, duration_s=10.0,
+        matched_paths=["exp/Fly1_001"],
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    fly_dir = dest_root / "day1" / "Fly1"
+    assert (fly_dir / "Recording1_Beh" / "recording_summary.json").exists()
+    assert (fly_dir / "Recording2_Synced" / "recording_summary.json").exists()
+    assert not (fly_dir / "001").exists()
+    assert not (fly_dir / "002").exists()
+
+
+def test_reconcile_recordings_folds_2p_only_into_sequence(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    fly_dir = dest_root / "day1" / "Fly1"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=3_000_000_000_000, duration_s=10.0)
+    # A fly-attributed 2P-only entry (from the automatic sweep), chronologically first.
+    two_p = fly_dir / "2P_only" / "Fly1_Zstack"
+    two_p.mkdir(parents=True)
+    (two_p / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="1000" /></ThorImageExperiment>'
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert (fly_dir / "Recording1_2P" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
+    assert (fly_dir / "Recording2_Beh" / "recording_summary.json").exists()
+    assert not (fly_dir / "2P_only").exists()
+
+
+def test_reconcile_recordings_rerun_with_no_changes_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    runner.invoke(app, ["process", "--reconcile-recordings", "--config", str(config_dir)])
+    fly_dir = dest_root / "day1" / "Fly1"
+    mtime_before = (fly_dir / "Recording1_Beh").stat().st_mtime_ns
+
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert (fly_dir / "Recording1_Beh").stat().st_mtime_ns == mtime_before
+
+
+def test_reconcile_recordings_dry_run_touches_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "001").exists()
+    assert not (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+
+
+def test_reconcile_recordings_promotes_generic_bucket_to_new_fly(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    # A day/fly that already exists, so the "known" fly-basenames map isn't empty.
+    _write_take(
+        dest_root, "260903_PAM7xCI63/Fly1/001", start_time_ns=1_000_000_000_000,
+        duration_s=10.0, matched_paths=["PAM7xCI63/Fly1_001"],
+    )
+    # Generic-bucket data under a DIFFERENT prefix ("Fly9") — nothing claims it.
+    orphan = dest_root / "2p_only" / "PAM7xCI63" / "260904" / "Fly9_Zstack"
+    orphan.mkdir(parents=True)
+    (orphan / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="2000" /></ThorImageExperiment>'
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    new_fly = dest_root / "260903_PAM7xCI63" / "Fly2"
+    assert (new_fly / "Recording1_2P" / "2P" / "Fly9_Zstack" / "Experiment.xml").exists()
+    assert not orphan.exists()
+
+
+def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, monkeypatch):
+    # Real bug found via a real dry run: "Fly1_Zstack" doesn't equal the
+    # known base "Fly1" a claimed match already established for this fly,
+    # but shares its prefix — it must attribute to that existing fly (Part
+    # A's own rule), not get promoted into a brand-new one (Part B).
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    # Z-stack first (start 500), matching the real workflow — chronologically
+    # ahead of take 001 (start 1000), so it should land as Recording1.
+    _write_take(
+        dest_root, "260903_PAM7xCI63/Fly1/001", start_time_ns=1_000_000_000_000,
+        duration_s=10.0, matched_paths=["PAM7xCI63/Fly1_001"],
+    )
+    orphan = dest_root / "2p_only" / "PAM7xCI63" / "260903" / "Fly1_Zstack"
+    orphan.mkdir(parents=True)
+    (orphan / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="500" /></ThorImageExperiment>'
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    fly1 = dest_root / "260903_PAM7xCI63" / "Fly1"
+    assert (fly1 / "Recording1_2P" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
+    assert (fly1 / "Recording2_Synced" / "recording_summary.json").exists()
+    assert not (dest_root / "260903_PAM7xCI63" / "Fly2").exists()
+
+
+def test_reconcile_recordings_reuses_day_folder_despite_digit_mismatch(tmp_path, monkeypatch):
+    # Real bug found via a real dry run: the 2P source's own experiment name
+    # ("PAM7xCI80") doesn't always exactly match octacam's own day-folder
+    # naming for the same rig session (a real day folder was
+    # "260903_PAM07xCI80" — an extra leading zero) — a plain substring check
+    # misses this and creates a confusing near-duplicate day folder.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    existing_take = _write_take(
+        dest_root, "260903_PAM07xCI80/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0
+    )
+    orphan = dest_root / "2p_only" / "PAM7xCI80" / "260903" / "Fly2_Zstack"
+    orphan.mkdir(parents=True)
+    (orphan / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="2000" /></ThorImageExperiment>'
+    )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert existing_take.parent.is_dir()  # 260903_PAM07xCI80/Fly1 still exists
+    new_fly = dest_root / "260903_PAM07xCI80" / "Fly2"
+    assert (new_fly / "Recording1_2P" / "2P" / "Fly2_Zstack" / "Experiment.xml").exists()
+    # No spurious near-duplicate day folder ("260903_PAM7xCI80") created.
+    assert not (dest_root / "260903_PAM7xCI80").exists()
+
+
+def test_reconcile_recordings_writes_append_only_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    log_path = dest_root / "day1" / "Fly1" / "reconciliation_log.md"
+    first_text = log_path.read_text()
+    assert "Recording1_Beh" in first_text
+    assert "day1/Fly1/001" in first_text
+
+    # A second run with new data appends a new entry rather than
+    # overwriting/erasing the first one.
+    _write_take(
+        dest_root, "day1/Fly1/002", start_time_ns=500_000_000_000, duration_s=10.0
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    second_text = log_path.read_text()
+    assert second_text.startswith(first_text.split("\n\n", 1)[0])  # header preserved
+    assert second_text.count("# Reconciliation log") == 1  # header written once
+    assert "day1/Fly1/001" in second_text  # original history retained
+    assert "day1/Fly1/002" in second_text or "Recording1_Beh" in second_text
+
+
+def test_reconcile_recordings_dry_run_writes_no_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (dest_root / "day1" / "Fly1" / "reconciliation_log.md").exists()
 
 
 # --- config: the interactive first-run wizard -------------------------------

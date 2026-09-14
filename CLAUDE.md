@@ -754,6 +754,75 @@ against a real 2P rig; the durable findings:
   lands on disk *after* an unclaimed folder was already swept (e.g. two
   flies sharing a ThorImage prefix processed in separate `process` runs),
   the earlier run's placement isn't retroactively revisited.
+- **Unified per-fly `RecordingN` layout (`octacam process
+  --reconcile-recordings`, `cli._run_reconcile_recordings`)**: octacam's own
+  take numbers and the fly-attributed `2P_only/<name>` bucket are two
+  separate numbering schemes within one fly's folder. Matthias wants one
+  chronological sequence instead — `Recording1`, `Recording2`, ... suffixed
+  by content (`_Beh`/`_2P`/`_Synced`) — so a fly's folder reads as one
+  timeline regardless of whether a session was behavior-only, 2P-only, or
+  synced. Deliberately a **separate, explicit, on-demand mode** — never
+  fused into the automatic `process` pipeline, which keeps writing takes and
+  `2P_only/<name>` exactly as before; renumbering only happens when this is
+  run by hand, mirroring `--migrate-layout`'s own safety model (same-
+  filesystem rename, dry-run first, self-contained — no live
+  `[transfer.twophoton].source` needed, since every 2P folder involved is
+  already on the NAS). `classify_twophoton_folder` (pulled out of
+  `discover_twophoton_folders`'s inner loop) classifies one already-known
+  folder directly — a real bug found building this: calling
+  `discover_twophoton_folders` itself on `2P_only`'s or a date-bucket's own
+  parent silently found nothing, because that scanner expects an extra
+  "experiment" directory level between the root passed in and the actual
+  candidates, one level deeper than a caller who already knows the exact
+  folder to classify is working at.
+
+  Also promotes the fuzzier case: data still sitting in the fully generic
+  `2p_only/<experiment>/<date>/` bucket (nothing could attribute it to an
+  existing fly) is grouped by the same `(experiment, thorimage_base_name)`
+  prefix logic `_attribute_unclaimed_folder` already uses, and each distinct
+  group becomes a **brand-new Fly folder** — the next unused `FlyN` under an
+  existing day-folder for that experiment, or a freshly created
+  `<date>_<experiment>` one. No existing behavior take anchors this
+  decision, unlike the automatic sweep's own attribution — Matthias
+  confirmed this is acceptable (chosen over keeping ThorImage's own label)
+  specifically because today's real data is the hardest case there is
+  (recorded messily, transferred once fully done rather than per-take); his
+  real future workflow (matching names/numbers across both halves
+  deliberately, transferring once per day) makes this fuzzier promotion path
+  rare in practice — it exists to make the tool robust for a less careful
+  future user, not because it's expected to fire often. Nothing is destroyed
+  if a promotion turns out to be a standalone test recording rather than a
+  real fly — it's a same-filesystem rename, always previewable with
+  `--dry-run`, easy to fix by hand. Every real move is also recorded to that
+  fly's own `reconciliation_log.md` (`cli._append_reconciliation_log`,
+  filename in `transform.py`) — **append-only**, unlike
+  `2p_reconciliation.md` (fully regenerated from scratch by every
+  `process`/`--twophoton-manifest` run), so the original name/location
+  survives even after a later renumber, giving a revert something to work
+  from. Two real bugs a real dry run against the whole NAS found before
+  anything was run for real: (1) Part B's "does this already belong to a
+  known fly" check compared exact base names instead of reusing Part A's own
+  prefix logic, so `Fly1_Zstack` (shares the `Fly1` prefix but isn't equal to
+  it) was wrongly promoted into a brand-new fly instead of folding into the
+  existing one — fixed by calling `_attribute_unclaimed_folder` directly and,
+  when it returns an existing fly, folding the entry into that fly's session
+  list rather than just skipping it (historical `2p_only/` data predating
+  this feature's automatic sweep was never physically moved into
+  `<fly>/2P_only/`, so `_gather_fly_sessions` alone could never have found
+  it). (2) The day-folder-reuse check used a plain substring test, which
+  missed a real digit-formatting mismatch between the 2P source's own
+  experiment name and octacam's day-folder naming (`PAM7xCI80` vs.
+  `260903_PAM07xCI80` — an extra leading zero) and created a confusing
+  near-duplicate day folder — fixed by stripping digits from both sides
+  before comparing.
+
+**No standing background daemon.** octacam does not, and per Matthias should
+not, run `--twophoton-sweep`/`process` on an automatic recurring schedule
+(a systemd timer or similar) — deliberately decided against, not merely
+unbuilt. The GUI's existing "shut down & process" offer (a detached job
+started on the way out, see `process_jobs`) is the intended trigger for
+transfer; every 2P mode here is meant to be invoked deliberately (by hand,
+or via that GUI offer), never run unattended in the background.
 
 ## Arduino firmware & auto-flash
 

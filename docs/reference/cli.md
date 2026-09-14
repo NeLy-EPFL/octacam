@@ -164,6 +164,7 @@ with `--last` / `--last session` / `--all`. See
 | `--twophoton-sweep` | Separate mode (ignores the selectors above and `PATHS`): transfer settled 2P-only folders with no matching behavior take. Requires `--config`. |
 | `--migrate-layout` | Separate mode (ignores the selectors above and `PATHS`): reorganize recordings transferred under the old flat layout into `Behavior`/`Renderings` subfolders, in place (a same-filesystem rename, no data copied). Requires `--config`. |
 | `--twophoton-manifest` | Separate mode (ignores the selectors above and `PATHS`): rebuild `2p_reconciliation.md` for every day/session folder already on the NAS. Requires `--config`. |
+| `--reconcile-recordings` | Separate mode (ignores the selectors above and `PATHS`): unify each fly's takes and fly-attributed 2P-only data already on the NAS into one chronological `RecordingN_Beh`/`2P`/`Synced` sequence, renaming in place (same-filesystem, no data copied); also promotes unclaimed 2P-only data into a new Fly folder where its name groups distinctly. A deliberate, explicit pass — never run automatically. Requires `--config`. |
 
 **Controlling the steps:**
 
@@ -178,8 +179,8 @@ with `--last` / `--last session` / `--all`. See
 | `--delete-after-transfer` | Once a folder's transfer (behavior + any matched 2P data) is checksum-verified on the NAS, delete the local recording folder and matched 2P source folder(s). Also on via `[transfer].delete_after_transfer`; `--no-delete-after-transfer` overrides either way. |
 | `--no-twophoton-sweep` | Skip the automatic 2P-only sweep this run otherwise does, sequentially, for every `[transfer.twophoton]` source it touched (same logic as `--twophoton-sweep`, run automatically rather than as a separate command). |
 | `--no-twophoton-manifest` | Skip the automatic `2p_reconciliation.md` rebuild this run otherwise does for every day/session folder under each `[transfer.twophoton]` source it touched (same logic as `--twophoton-manifest`, run automatically). |
-| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot (or the rig config for `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`/`--twophoton-manifest`). |
-| `--user`, `-u` | Apply this person's `[transfer.users.<user>]` save-destination override. Only affects recordings with no embedded config (falling back to `--config`) and the `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`/`--twophoton-manifest` modes — a recording with its own embedded snapshot already has its destination baked in from record time. Exits with an error listing known users on a typo. |
+| `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot (or the rig config for `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`/`--twophoton-manifest`/`--reconcile-recordings`). |
+| `--user`, `-u` | Apply this person's `[transfer.users.<user>]` save-destination override. Only affects recordings with no embedded config (falling back to `--config`) and the `--twophoton-sweep`/`--migrate-layout`/`--reassemble-tiffs`/`--twophoton-manifest`/`--reconcile-recordings` modes — a recording with its own embedded snapshot already has its destination baked in from record time. Exits with an error listing known users on a typo. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
 | `--dry-run` | Log the intended grid/transfer work without writing anything. |
 | `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |

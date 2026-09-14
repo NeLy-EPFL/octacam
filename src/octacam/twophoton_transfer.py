@@ -159,6 +159,27 @@ def _folder_last_mtime(folder: Path) -> float:
     return latest if latest is not None else folder.stat().st_mtime
 
 
+def classify_twophoton_folder(candidate: Path) -> TwoPhotonFolder | None:
+    """Classify exactly one folder as a ThorSync/ThorImage take, or ``None``
+    if it's neither shape. The per-candidate half of
+    :func:`discover_twophoton_folders`'s scan, pulled out so a caller that
+    already knows the exact folder to classify (e.g. `cli.py`'s
+    reconciliation pass, working directly on an already-transferred
+    ``2P_only/<name>`` or ``2p_only/<experiment>/<date>/<name>`` entry) can
+    classify it directly instead of re-deriving it from a two-level scan of
+    some ancestor directory."""
+    experiment_xml = candidate / EXPERIMENT_XML_FILENAME
+    if experiment_xml.is_file():
+        start = _thorimage_start_time(experiment_xml)
+        if start is None:
+            start = candidate.stat().st_mtime
+        return TwoPhotonFolder(candidate, "image", start, _folder_last_mtime(candidate))
+    if candidate.name.startswith(SYNC_FOLDER_PREFIX):
+        start = candidate.stat().st_mtime
+        return TwoPhotonFolder(candidate, "sync", start, _folder_last_mtime(candidate))
+    return None
+
+
 def discover_twophoton_folders(source_root: Path) -> list[TwoPhotonFolder]:
     """Find ThorSync/ThorImage take folders one level under each experiment
     folder in *source_root* (e.g. ``source_root/MB247_CI63/SyncData102``).
@@ -174,20 +195,9 @@ def discover_twophoton_folders(source_root: Path) -> list[TwoPhotonFolder]:
         except OSError:
             continue
         for candidate in candidates:
-            experiment_xml = candidate / EXPERIMENT_XML_FILENAME
-            if experiment_xml.is_file():
-                kind = "image"
-                start = _thorimage_start_time(experiment_xml)
-                if start is None:
-                    start = candidate.stat().st_mtime
-            elif candidate.name.startswith(SYNC_FOLDER_PREFIX):
-                kind = "sync"
-                start = candidate.stat().st_mtime
-            else:
-                continue
-            found.append(
-                TwoPhotonFolder(candidate, kind, start, _folder_last_mtime(candidate))
-            )
+            classified = classify_twophoton_folder(candidate)
+            if classified is not None:
+                found.append(classified)
     return found
 
 

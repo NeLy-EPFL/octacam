@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import resource
 import shlex
 import shutil
@@ -4456,6 +4457,16 @@ def _sweep_unclaimed_twophoton(
     ``--twophoton-sweep`` mode and the automatic post-processing sweep a
     normal `process` run does for every ``[transfer.twophoton]`` source it
     touched (see the `process` docstring / `--no-twophoton-sweep`).
+
+    "Already claimed" is the union of the local ``session_cache``-based check
+    (:func:`_already_matched_twophoton_paths`) and a live NAS-side one
+    (:func:`_already_matched_twophoton_paths_on_nas`) — a real gap found
+    while preparing to sweep historical data for real: a take whose local
+    folder has since been cleaned up (deleted, or aged out of
+    ``session_cache``'s retention window) drops out of the local check
+    entirely, so without the NAS-side check too, an already-legitimately-
+    matched 2P folder would look "unclaimed" again and get duplicate-copied
+    to a second destination.
     """
     from octacam.transfer import transfer_tree
     from octacam.twophoton_transfer import (
@@ -4465,7 +4476,11 @@ def _sweep_unclaimed_twophoton(
     )
 
     sweep_root = dest_root / "2p_only"
-    already_matched = _already_matched_twophoton_paths(source_root) | also_exclude
+    already_matched = (
+        _already_matched_twophoton_paths(source_root)
+        | _already_matched_twophoton_paths_on_nas(dest_root, source_root)
+        | also_exclude
+    )
 
     candidates = discover_twophoton_folders(source_root)
     todo = [
@@ -4738,6 +4753,366 @@ def _attribute_unclaimed_folder(
         for fly_dir in fly_dirs
     }
     return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _recording_content(folder: Path) -> tuple[str, float] | None:
+    """Classify one destination-tree folder for ``--reconcile-recordings``
+    into ``(kind, start_time)`` — self-contained (*dest_root*-only, no live
+    2P source needed, same as ``--migrate-layout``).
+
+    A raw or already-reconciled take (``recording_summary.json`` present) is
+    ``"Synced"`` (a non-empty ``twophoton_match.json``) or ``"Beh"``. A
+    2P-only entry — either ``2P_only/<name>`` (pre-reconciliation) or an
+    already-reconciled ``RecordingN_2P/2P/<name>`` — is ``"2P"``, classified
+    directly via :func:`~octacam.twophoton_transfer.classify_twophoton_folder`
+    (no re-parsing of ``Experiment.xml``/``Episode*.h5`` needed here — that
+    function already does it). Returns ``None`` for anything unrecognized."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME, TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_transfer import classify_twophoton_folder
+
+    summary_path = folder / RECORDING_SUMMARY_FILENAME
+    if summary_path.is_file():
+        summary = _read_summary(summary_path) or {}
+        start_time_ns = summary.get("start_time_ns")
+        if start_time_ns is None:
+            return None
+        match_path = folder / TWOPHOTON_MATCH_FILENAME
+        matched = (
+            bool((_read_summary(match_path) or {}).get("matched"))
+            if match_path.is_file()
+            else False
+        )
+        return ("Synced" if matched else "Beh", start_time_ns / 1e9)
+
+    classified = classify_twophoton_folder(folder)
+    return ("2P", classified.start_time) if classified is not None else None
+
+
+def _prune_empty_dirs(folder: Path, stop_at: Path) -> None:
+    """Remove *folder* and any now-empty ancestor, stopping at (never
+    removing) *stop_at* itself — best-effort cleanup after
+    ``--reconcile-recordings`` moves a folder's only remaining content out
+    of a now-vacated ``2P_only/`` or ``2p_only/<experiment>/<date>/``
+    directory, so nothing but empty husks are left behind."""
+    try:
+        stop_at = stop_at.resolve()
+        current = folder.resolve()
+    except OSError:
+        return
+    while current != stop_at and stop_at in current.parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
+def _append_reconciliation_log(
+    fly_dir: Path, dest_root: Path, moves: list[tuple[Path, Path]]
+) -> None:
+    """Append a durable, human-readable record of what
+    ``--reconcile-recordings`` just moved for *fly_dir* to
+    ``<fly_dir>/reconciliation_log.md`` — **append-only**, unlike
+    ``2p_reconciliation.md`` (which is fully regenerated from scratch by
+    every `process`/`--twophoton-manifest` run), so a folder's original name
+    and location is never lost even after a later reconciliation renumbers
+    things again — the record a revert would need. Best-effort: a write
+    failure is logged, not fatal (the moves themselves already succeeded).
+    No-op when *moves* is empty."""
+    from octacam.transform import RECONCILIATION_LOG_FILENAME
+
+    if not moves:
+        return
+    log_path = fly_dir / RECONCILIATION_LOG_FILENAME
+    lines: list[str] = []
+    if not log_path.is_file():
+        lines += [
+            "# Reconciliation log",
+            "",
+            "Append-only record of every rename `--reconcile-recordings` has "
+            "made for this fly — never regenerated or overwritten, so the "
+            "original name/location is still here even after a later run "
+            "renumbers things again. Useful to revert a move by hand.",
+            "",
+        ]
+    lines += [
+        f"## {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "| Recorded as | Original path |",
+        "|---|---|",
+    ]
+    for current_path, target in moves:
+        try:
+            original_rel = current_path.relative_to(dest_root)
+        except ValueError:
+            original_rel = current_path
+        lines.append(f"| {target.relative_to(dest_root)} | {original_rel} |")
+    lines.append("")
+    try:
+        with log_path.open("a") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError as e:
+        log.warning("reconcile: couldn't write %s: %s", log_path, e)
+
+
+_RECONCILED_2P_DIR_RE = re.compile(r"^Recording\d+_2P$")
+
+
+def _gather_fly_sessions(dest_root: Path) -> dict[Path, list[tuple[float, str, Path]]]:
+    """Every session under each existing ``<day>/<fly>`` in *dest_root* —
+    raw/reconciled take folders and 2P-only entries (``2P_only/<name>``
+    pre-reconciliation, ``RecordingN_2P/2P/<name>`` post) — as
+    ``(start_time, kind, current_path)``, unsorted. Self-contained (see
+    :func:`_recording_content`). Finding *both* pre- and post-reconciliation
+    shapes is what lets a re-run fully renumber a fly whose session count
+    changed since the last pass, not just whatever's still sitting raw."""
+    from octacam.transform import RECORDING_SUMMARY_FILENAME
+
+    sessions: dict[Path, list[tuple[float, str, Path]]] = {}
+    fly_dirs: set[Path] = set()
+    for summary_path in dest_root.rglob(RECORDING_SUMMARY_FILENAME):
+        take_folder = summary_path.parent
+        if take_folder.name in _TWOPHOTON_SUBFOLDER_NAMES:
+            continue
+        try:
+            rel = take_folder.relative_to(dest_root)
+        except ValueError:
+            continue
+        if len(rel.parts) < 2:
+            continue
+        fly_dir = dest_root / rel.parts[0] / rel.parts[1]
+        fly_dirs.add(fly_dir)
+        content = _recording_content(take_folder)
+        if content is not None:
+            kind, start = content
+            sessions.setdefault(fly_dir, []).append((start, kind, take_folder))
+
+    for fly_dir in fly_dirs:
+        if not fly_dir.is_dir():
+            continue
+        for child in fly_dir.iterdir():
+            if child.name == "2P_only":
+                two_p_dir = child
+            elif child.is_dir() and _RECONCILED_2P_DIR_RE.match(child.name):
+                two_p_dir = child / "2P"
+            else:
+                continue
+            if not two_p_dir.is_dir():
+                continue
+            for entry in two_p_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                content = _recording_content(entry)
+                if content is not None:
+                    kind, start = content
+                    sessions.setdefault(fly_dir, []).append((start, kind, entry))
+    return sessions
+
+
+def _promote_generic_2p_only_flies(
+    dest_root: Path, fly_basenames: dict[tuple[str, str], set[Path]]
+) -> dict[Path, list[tuple[float, str, Path]]]:
+    """Group whatever's left in the generic
+    ``dest_root/2p_only/<experiment>/<date>/`` bucket by ``(experiment,
+    thorimage_base_name)`` — the same prefix logic
+    :func:`_attribute_unclaimed_folder` already uses — and promote each
+    distinct group into a brand-new Fly folder: the next unused ``FlyN``
+    under an existing day-folder for that experiment (reused if one already
+    exists under *dest_root*, else a freshly created ``<date>_<experiment>``).
+
+    No existing behavior take anchors this decision (unlike the automatic
+    sweep's own fly-attribution) — it's the fuzzier half of reconciliation,
+    grouped by name alone. Nothing is destroyed if a promotion turns out to
+    be a standalone test recording rather than a real fly: it's a
+    same-filesystem rename, always previewable with ``--dry-run`` first.
+
+    Returns the same ``{fly_dir: [(start, kind, current_path), ...]}`` shape
+    :func:`_gather_fly_sessions` does, ready to fold into the same
+    renumbering pass."""
+    from octacam.twophoton_transfer import (
+        _thorimage_base_name,
+        classify_twophoton_folder,
+        correlate_sync_folder_to_image,
+    )
+
+    generic_root = dest_root / "2p_only"
+    if not generic_root.is_dir():
+        return {}
+
+    groups: dict[tuple[str, str], list[Path]] = {}
+    sessions: dict[Path, list[tuple[float, str, Path]]] = {}
+    for experiment_dir in generic_root.iterdir():
+        if not experiment_dir.is_dir():
+            continue
+        for date_dir in experiment_dir.iterdir():
+            if not date_dir.is_dir():
+                continue
+            # date_dir's own children are the candidates directly (2p_only/
+            # <experiment>/<date>/<name>) — classify each one, not a
+            # two-level discover_twophoton_folders scan.
+            found = [
+                classified
+                for entry in date_dir.iterdir()
+                if entry.is_dir() and (classified := classify_twophoton_folder(entry))
+            ]
+            image_siblings = [f for f in found if f.kind == "image"]
+            for candidate in found:
+                # Reuse the exact same prefix-attribution decision Part A
+                # makes (not just an exact base-name check) — a real bug
+                # found via a real dry run: "Fly1_Zstack" doesn't equal the
+                # known base "Fly1", but does share its prefix, and belongs
+                # to that already-existing fly, not a new one.
+                existing_fly = _attribute_unclaimed_folder(
+                    candidate, experiment_dir.name, fly_basenames, image_siblings
+                )
+                if existing_fly is not None:
+                    # Historical data predating the automatic sweep's own
+                    # fly-attribution (or a sweep that hasn't re-run since) —
+                    # fold it into that fly's session list directly, same as
+                    # if it were already sitting in <fly>/2P_only/.
+                    content = _recording_content(candidate.path)
+                    if content is not None:
+                        kind, start = content
+                        sessions.setdefault(existing_fly, []).append(
+                            (start, kind, candidate.path)
+                        )
+                    continue
+                if candidate.kind == "image":
+                    base = _thorimage_base_name(candidate.path.name)
+                else:
+                    correlated = correlate_sync_folder_to_image(candidate, image_siblings)
+                    if correlated is None:
+                        continue
+                    base = _thorimage_base_name(correlated.path.name)
+                key = (experiment_dir.name, base)
+                groups.setdefault(key, []).append(candidate.path)
+
+    day_fly_counters: dict[Path, int] = {}
+    for (experiment, _base), paths in sorted(groups.items()):
+        # Real data found the 2P source's own experiment-folder name doesn't
+        # always exactly match octacam's own day-folder naming for the same
+        # rig session (e.g. the 2P side's "PAM7xCI80" vs. the day folder
+        # "260903_PAM07xCI80" — a leading-zero difference) — a plain
+        # substring check misses that, so digits are stripped from both
+        # sides before comparing (still specific enough not to collide with
+        # an unrelated experiment sharing only letters).
+        normalized_experiment = re.sub(r"\d", "", experiment)
+        day_dir = next(
+            (
+                d
+                for d in dest_root.iterdir()
+                if d.is_dir() and normalized_experiment in re.sub(r"\d", "", d.name)
+            ),
+            None,
+        )
+        if day_dir is None:
+            first = _recording_content(paths[0])
+            date_str = (
+                time.strftime("%y%m%d", time.localtime(first[1])) if first else "unknown"
+            )
+            day_dir = dest_root / f"{date_str}_{experiment}"
+        if day_dir not in day_fly_counters:
+            existing = [
+                int(m.group(1))
+                for d in (day_dir.glob("Fly*") if day_dir.is_dir() else [])
+                if (m := re.match(r"^Fly(\d+)$", d.name))
+            ]
+            day_fly_counters[day_dir] = max(existing, default=0)
+        day_fly_counters[day_dir] += 1
+        fly_dir = day_dir / f"Fly{day_fly_counters[day_dir]}"
+        for path in paths:
+            content = _recording_content(path)
+            if content is not None:
+                kind, start = content
+                sessions.setdefault(fly_dir, []).append((start, kind, path))
+    return sessions
+
+
+def _run_reconcile_recordings(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
+    """``octacam process --reconcile-recordings``: unify each fly's
+    behavior/2P-only sessions into one chronological ``RecordingN_<kind>``
+    sequence (``Beh``/``2P``/``Synced``) — a deliberate, on-demand pass,
+    never run automatically by a normal `process` invocation (which keeps
+    writing takes at their own octacam names and fly-attributed 2P-only data
+    at ``2P_only/<name>``, completely unchanged). Renames only, same-
+    filesystem (like ``--migrate-layout``) — safe to re-run: a fly whose
+    session count hasn't changed since the last pass is left untouched; one
+    whose picture has changed (a new take, a newly-attributed 2P-only entry,
+    or a newly promoted 2P-only fly) is fully renumbered from scratch. Every
+    real move is also recorded to that fly's own append-only
+    ``reconciliation_log.md`` (see :func:`_append_reconciliation_log`) — the
+    original name/location, kept durably in case a move ever needs
+    reverting by hand.
+    Self-contained — no live ``[transfer.twophoton].source`` needed, every
+    2P folder involved is already on the NAS. Never raises."""
+    from octacam.config import resolve_dir_template
+
+    if cli_config_dir is None:
+        sys.exit("--reconcile-recordings requires --config <rig-config-dir>")
+    cfg = _load_config_for_user(cli_config_dir, user)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(
+            f"--reconcile-recordings: no [transfer].directory configured in {cli_config_dir}"
+        )
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    if not dest_root.is_dir():
+        sys.exit(f"--reconcile-recordings: {dest_root} does not exist")
+
+    fly_basenames = _gather_fly_image_basenames(dest_root)
+    sessions = _gather_fly_sessions(dest_root)
+    promoted = _promote_generic_2p_only_flies(dest_root, fly_basenames)
+    for fly_dir, entries in promoted.items():
+        sessions.setdefault(fly_dir, []).extend(entries)
+
+    n_moved = n_unchanged = n_conflict = 0
+    for fly_dir, entries in sorted(sessions.items()):
+        if not entries:
+            continue
+        entries.sort(key=lambda e: e[0])
+        fly_moves: list[tuple[Path, Path]] = []
+        for i, (_start, kind, current_path) in enumerate(entries, 1):
+            target = (
+                fly_dir / f"Recording{i}_2P" / "2P" / current_path.name
+                if kind == "2P"
+                else fly_dir / f"Recording{i}_{kind}"
+            )
+            if current_path == target:
+                n_unchanged += 1
+                continue
+            if dry_run:
+                log.info("[dry-run] reconcile: %s -> %s", current_path, target)
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                current_path.rename(target)
+            except OSError as e:
+                n_conflict += 1
+                log.error("reconcile: failed to move %s -> %s: %s", current_path, target, e)
+                continue
+            n_moved += 1
+            log.info("reconcile: %s -> %s", current_path, target)
+            fly_moves.append((current_path, target))
+            _prune_empty_dirs(current_path.parent, dest_root)
+        if not dry_run:
+            _append_reconciliation_log(fly_dir, dest_root, fly_moves)
+
+    if dry_run:
+        log.info(
+            "[dry-run] reconcile: scan complete under %s (%d new fly folder(s) would be created)",
+            dest_root,
+            len(promoted),
+        )
+        return
+    log.info(
+        "reconcile: %d moved, %d already correct, %d needing manual attention, "
+        "%d new fly folder(s)",
+        n_moved,
+        n_unchanged,
+        n_conflict,
+        len(promoted),
+    )
 
 
 # Margin added to a day's own [earliest take start, latest take end] window
@@ -5797,6 +6172,21 @@ def process(
             "ignores PATHS/--last/--session-id/--all. Safe to re-run.",
         ),
     ] = False,
+    reconcile_recordings: Annotated[
+        bool,
+        typer.Option(
+            "--reconcile-recordings",
+            help="One-time/ad-hoc mode: instead of processing recording folders, "
+            "unify each fly's behavior takes and fly-attributed 2P-only data "
+            "already on the NAS into one chronological RecordingN_Beh/2P/Synced "
+            "sequence, renaming in place (same-filesystem, no data copied). Also "
+            "promotes unclaimed 2P-only data in the generic 2p_only/ bucket into "
+            "a brand-new Fly folder when its name groups distinctly by "
+            "experiment. A deliberate, explicit pass — never run automatically "
+            "by a normal process invocation. Requires --config; ignores "
+            "PATHS/--last/--session-id/--all. Safe to re-run.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -5964,9 +6354,10 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
 
-    --twophoton-sweep, --migrate-layout, --reassemble-tiffs, and
-    --twophoton-manifest are separate modes (ignore
-    PATHS/--last/--session-id/--all/--detach) — see their own help text.
+    --twophoton-sweep, --migrate-layout, --reassemble-tiffs,
+    --twophoton-manifest, and --reconcile-recordings are separate modes
+    (ignore PATHS/--last/--session-id/--all/--detach) — see their own help
+    text.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -5982,6 +6373,9 @@ def process(
         return
     if twophoton_manifest:
         _run_twophoton_manifest(config_dir, dry_run, user)
+        return
+    if reconcile_recordings:
+        _run_reconcile_recordings(config_dir, dry_run, user)
         return
 
     do_transcode = not no_transcode
