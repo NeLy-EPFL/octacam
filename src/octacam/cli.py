@@ -4466,7 +4466,10 @@ def _sweep_unclaimed_twophoton(
     ``session_cache``'s retention window) drops out of the local check
     entirely, so without the NAS-side check too, an already-legitimately-
     matched 2P folder would look "unclaimed" again and get duplicate-copied
-    to a second destination.
+    to a second destination. Separately, a folder already sitting *anywhere*
+    on the NAS by name (:func:`_already_present_2p_names`) — claimed by a
+    take or not — is also excluded, closing the same class of duplicate for
+    genuinely unclaimed data an older sweep already copied once.
     """
     from octacam.transfer import transfer_tree
     from octacam.twophoton_transfer import (
@@ -4481,12 +4484,15 @@ def _sweep_unclaimed_twophoton(
         | _already_matched_twophoton_paths_on_nas(dest_root, source_root)
         | also_exclude
     )
+    already_present_names = _already_present_2p_names(dest_root)
 
     candidates = discover_twophoton_folders(source_root)
     todo = [
         c
         for c in candidates
-        if is_settled(c, twophoton_cfg.settle_s) and c.path.resolve() not in already_matched
+        if is_settled(c, twophoton_cfg.settle_s)
+        and c.path.resolve() not in already_matched
+        and c.path.name not in already_present_names
     ]
     fly_basenames = (
         _gather_fly_image_basenames(dest_root)
@@ -4676,6 +4682,40 @@ def _already_matched_twophoton_paths_on_nas(dest_root: Path, source_root: Path) 
             if rel:
                 matched.add((source_root / rel).resolve())
     return matched
+
+
+def _already_present_2p_names(dest_root: Path) -> set[str]:
+    """Every 2P folder *name* already present anywhere under *dest_root* —
+    the generic ``2p_only/<experiment>/<date>/`` bucket, any fly's
+    ``2P_only/``, or any fly's already-reconciled ``RecordingN_2P/2P/`` —
+    regardless of which take (if any) claims it.
+
+    A real gap found via real data, distinct from
+    :func:`_already_matched_twophoton_paths_on_nas` (which only knows about
+    folders referenced by a *take's* ``twophoton_match.json``): a folder
+    that settled and was unclaimed on the live share can already have been
+    copied by an *older* sweep run — before the fly-attribution feature
+    existed, everything unclaimed landed in the flat generic bucket — and
+    still be genuinely unclaimed by any take today. Without this check, a
+    newer sweep re-copies that same live-share folder into the new
+    fly-attributed location too, creating an exact duplicate (confirmed on
+    real data: byte-identical pixel content, ~10.8 GB across 10 folders)."""
+    names: set[str] = set()
+    generic_root = dest_root / "2p_only"
+    if generic_root.is_dir():
+        for experiment_dir in generic_root.iterdir():
+            if not experiment_dir.is_dir():
+                continue
+            for date_dir in experiment_dir.iterdir():
+                if date_dir.is_dir():
+                    names.update(p.name for p in date_dir.iterdir() if p.is_dir())
+    for two_p_only in dest_root.glob("*/*/2P_only"):
+        if two_p_only.is_dir():
+            names.update(p.name for p in two_p_only.iterdir() if p.is_dir())
+    for two_p in dest_root.glob("*/*/Recording*_2P/2P"):
+        if two_p.is_dir():
+            names.update(p.name for p in two_p.iterdir() if p.is_dir())
+    return names
 
 
 def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Path]]:

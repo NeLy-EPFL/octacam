@@ -2625,6 +2625,41 @@ def test_sweep_also_exclude_covers_a_same_run_match_not_yet_on_disk(tmp_path, mo
     assert not (dest_root_b / "2p_only").exists()
 
 
+def test_sweep_skips_folder_already_present_in_generic_bucket_by_name(tmp_path, monkeypatch):
+    # Real bug found against production data: an older sweep run (predating
+    # the fly-attribution feature, or simply an earlier invocation) already
+    # copied a folder into dest_root/2p_only/<experiment>/<date>/<name>. The
+    # source folder is still sitting on the live share, untouched — nothing
+    # in `already_matched` (session_cache- or NAS-match-based) names it,
+    # because it was never claimed by a take at all. Without a name-based
+    # check too, a later sweep re-discovers it as "unclaimed" and duplicate-
+    # copies it to a second destination (confirmed for real: 10 duplicate
+    # pairs, ~10.8GB, on the shared NAS).
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    from octacam.cli import _sweep_unclaimed_twophoton
+
+    source_root = tmp_path / "windows_share" / "MD"
+    dest_root = tmp_path / "dest"
+    twophoton_cfg = SimpleNamespace(settle_s=60.0)
+
+    two_p_mtime = time.time() - 10_000
+    folder = _make_sync_folder_2p(source_root, "expA", "SyncData102", mtime=two_p_mtime)
+    date_str = time.strftime("%y%m%d", time.localtime(two_p_mtime))
+
+    # Simulate the pre-existing copy an older run already made.
+    already_there = dest_root / "2p_only" / "expA" / date_str / folder.name
+    already_there.mkdir(parents=True)
+    (already_there / "Episode001.h5").write_bytes(b"x")
+
+    n_copied, n_failed = _sweep_unclaimed_twophoton(
+        source_root, dest_root, twophoton_cfg, checksum=True, dry_run=False
+    )
+    assert (n_copied, n_failed) == (0, 0)
+    # No second copy anywhere else under the generic bucket.
+    all_copies = list(dest_root.glob("2p_only/*/*/SyncData102"))
+    assert all_copies == [already_there]
+
+
 # --- process: --twophoton-manifest / automatic reconciliation-manifest rebuild -
 
 
