@@ -48,8 +48,11 @@ was already baked in at record time (see
 [transformed vs raw](recording.md#transformed-vs-raw-frames)).
 
 `process` accepts any mix of recording folders. Already-transcoded outputs are
-skipped unless you pass `--force`. Pass `--delete-source`/`-d` to delete each
-source `.mkv`/`.raw` once it transcodes successfully.
+skipped unless you pass `--force` — except one left over from an earlier take in
+the same folder (it is older than the video it was made from), which is redone
+with a warning instead of being transferred as this recording's. Pass
+`--delete-source`/`-d` to delete each source `.mkv`/`.raw` once it transcodes
+successfully.
 
 Progress is shown as an octacam-style bar (`[i/N] name`, percent, fps, speed,
 elapsed) reformatted live from ffmpeg's output. Use `--progress-style ffmpeg` to
@@ -98,9 +101,13 @@ octacam process /data/octacam/260620-wt -r --no-transcode --no-transfer
 
 ## Transfer
 
-`process` copies all transcoded mp4s, grid videos, and `recording_summary.json`
-to the transfer destination (a network share or any writable path), mirroring
-the recording's directory tree.
+`process` copies all transcoded mp4s and grid videos to the transfer destination
+(a network share or any writable path), mirroring the recording's directory
+tree. The recording's metadata goes with them: `recording_summary.json`,
+`timestamps.npz`, and its config (the `octacam_config.toml` snapshot and the
+camera parameter files), so the copy can
+[relaunch the same setup](recording.md#the-embedded-config-snapshot). The raw
+capture files (`.mkv` / `.raw`) stay local.
 
 ```toml
 [transfer]
@@ -118,8 +125,9 @@ name never collide.
 swapped onto its final name once it is whole and content-verified (a blake2b
 checksum of the source is compared against the written copy), so an interrupted
 copy never leaves a truncated file masquerading as complete. Re-running skips
-files already present (by size), so a killed copy simply resumes — at most the
-one in-progress file is redone. Set `checksum = false` for a faster size-only
+files already present (videos by size; the small metadata files by content,
+since an edited config is often the same size), so a killed copy simply
+resumes — at most the one in-progress file is redone. Set `checksum = false` for a faster size-only
 verify on trusted, fast links.
 
 ## Selecting recordings from the cache

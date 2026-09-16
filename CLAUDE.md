@@ -267,11 +267,33 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
 Per-rig **`octacam_config.toml`** (parsed tolerantly in `config.py` —
 warn-and-default, never raise) plus **one per-camera sensor file**:
 - **Basler** → native `.pfs`.
-- **Every other GenICam backend** (flir, spinnaker, pycameleon, fake) → the
+- **Every other GenICam backend** (flir, spinnaker, pycameleon) → the
   native **GenApi persistence TSV** (`.txt`) via
   `cameras/_genicam_config.py` (`apply_config`/`dump_config`/`parse_config`). The
   unified `.txt` format lets a rig switch flir↔spinnaker (PySpin ↔ ctypes)
-  sharing the same param files.
+  sharing the same param files. `fake` writes the same TSV but as `.fake`.
+  `transform.PARAM_FILE_EXTENSIONS` lists every suffix (so the transfer step
+  needs no SDK import); `tests/test_backends.py` keeps it in step.
+
+**The recording's config snapshot** (`controller._snapshot_config`) makes each
+recording folder a relaunchable config dir, and `octacam process` transfers it
+with the videos. Its rules:
+- The rig TOML is re-emitted with the **live** values patched in: the Record tab
+  (`config_writer.with_record_settings` ← `controller.record_config_values`, the
+  inverse of `cli._settings_from_record`), plugin tabs (`with_plugin_options` ←
+  the `snapshot_options` hook), and the Process section (`with_process_params`).
+  Each patch writes a key only when its value differs from what the config
+  already *loads as*, so an untouched recording stays a byte-verbatim copy.
+- `directory`/`relative_directory` are **never** patched. The live values are
+  resolved (and auto-incremented) paths, and a relaunch must resolve a fresh
+  dated folder. The path actually used is in the summary.
+- Camera params are exported in `start_recording` **before** `start_record`.
+  The cameras are still previewing then; a node-map read would contend with the
+  record grab loops once they run. Measured: ~60 ms per Basler, a few ms per
+  FLIR, in parallel. Unsaved Camera-tab edits are therefore included.
+- 19 of 24 real pre-fix snapshots had a `[record]` that disagreed with their
+  own summary. GUI Save never writes `[record]`/`[[plugins]]`, so a raw copy of
+  the rig file is not a record of what ran.
 
 **Trigger normalization on save:** a GUI "Save" taken while previewing with a
 software trigger must not bake `TriggerSource=Software` into the file (it would
@@ -310,8 +332,11 @@ launch loads none; enable via `[[plugins]]` or `--plugin`.
 Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
 `on_first_frame`, `default_start_params` (so **headless `octacam record` arms the
 board** — a plugin that omits this never arms on the CLI), `drives_preview_trigger`
-/`on_preview_start/stop`; `set_controller`/`set_broadcast` are duck-typed
-injections. Each plugin adds a WS topic + `/api/<name>/*` REST + a GUI tab.
+/`on_preview_start/stop`, `snapshot_options` (the live settings a recording's
+config snapshot must carry; a plugin whose tab edits settings the config also
+holds must implement it, or a relaunch from the recording behaves differently);
+`set_controller`/`set_broadcast` are duck-typed injections. Each plugin adds a
+WS topic + `/api/<name>/*` REST + a GUI tab.
 
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
@@ -400,6 +425,14 @@ Seven commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
 `record`, `flash`, `benchmark`, `process`. `doctor` never opens a camera (safe
 during a live session). A rig **instance-lock** prevents two octacams owning one
 rig.
+
+**`process` never trusts an output that predates its source** (`cli._is_stale`).
+A folder recorded into twice keeps the previous take's `*.mp4`/`grid.mp4` (the
+overwrite confirmation only replaces what the new take writes), and those used to
+pass as finished work and get transferred as the new take's. mtime is the signal:
+an output made from this source was written after it. The same check rebuilds a
+grid older than the videos it composites, and a dry run reports both (the
+transcode step records them in `rewritten` so the grid preview plans around them).
 
 **typer gotcha:** typer 0.26 vendors a *forked* click that drops `flag_value`, so
 an optional-value option (bare `--flag` vs `--flag X`, e.g. `process --last`) is

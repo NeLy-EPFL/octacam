@@ -20,6 +20,32 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Shut down & process** — the GUI shut-down button now offers to start a
   detached processing job for the session's recordings on the way out; reattach
   from a terminal with `octacam jobs attach`.
+- **Recordings are relaunchable configs** — each recording folder's
+  `octacam_config.toml` snapshot now holds the settings the recording actually
+  ran with, not just the rig file's values. Settings changed live in the GUI are
+  written in: the Record tab (fps, duration, trigger source, save method and
+  encoder args, …) and each plugin's tab (the triggerbox camera lines and
+  lights). Each camera's sensor parameters are read just before it starts
+  recording and saved beside the snapshot as `<serial>.pfs`/`<serial>.txt`, so
+  unsaved Camera-tab edits (exposure, gain, ROI) are kept too. The folder is
+  then a complete config directory for rerunning the same setup; the path
+  templates stay unexpanded, so a relaunch still records into a fresh dated
+  folder. Previously 19 of 24 snapshots on the test rig disagreed with their own
+  summary (e.g. `duration = 300` for a 3600 s take), and exposure/gain were
+  recorded nowhere. A snapshot with no live changes is still an exact copy of
+  the rig file. Plugins can contribute through a new `snapshot_options` hook.
+- **A flywheel rig's loop program is configurable** — the turntable's motor
+  pattern (`n_steps`, `step_interval_us`, `rest_duration_ms`, `n_repeats`,
+  `init_wait_duration_s`) lived only in the GUI tab, so it could not be set per
+  rig and a recording had no record of the motion it ran. `[[plugins]]` now takes
+  an `options.command` table that seeds the tab, and whatever was armed is
+  written into the recording's config snapshot.
+- **The transfer step carries the config** — `octacam process` now copies the
+  config snapshot and the camera parameter files to the destination with the
+  videos, summary and timestamps, so the archived copy can relaunch the
+  recording's setup. These small metadata files are compared by content when
+  deciding whether a copy is already there: an edited config is often exactly
+  the same size.
 - **Cache management** — a new `octacam cache` command inspects and clears
   octacam's on-disk cache under `~/.cache/octacam` (the recording list, detached-
   job logs, and activity markers): `cache info` shows the location, size, and a
@@ -62,6 +88,22 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   crash-safe (a crashed gui/record auto-clears the pause).
 
 ### Fixed
+
+- **A leftover video from an earlier take is no longer transferred as this
+  recording's** — recording into a folder again (confirming the overwrite)
+  replaces only the files the new take writes, so the previous take's
+  `*.mp4`/`grid.mp4` stayed behind. They looked like finished outputs, so
+  `octacam process` skipped transcoding, left them in place and copied them to
+  the destination, where they sat next to the new take's summary describing a
+  different recording (a real case on the test rig: 1000-frame mp4s beside a
+  100-frame take). An output older than the file it was made from is now redone,
+  with a warning naming it; the grid is rebuilt when any video it composites is
+  newer, and `--dry-run` lists both as work to do.
+
+- **A config rewrite no longer drops a bare-name plugin list** — the loader
+  accepts `plugins = ["flywheel"]`, but writing the config back (a GUI layout
+  save, or a patched recording snapshot) emitted only `[[plugins]]` tables and
+  silently lost the list. Bare names are now written as tables.
 
 - **`octacam process --dry-run` no longer transcodes** — the flag only simulated
   the grid and transfer steps. The transcode step still ran ffmpeg on every

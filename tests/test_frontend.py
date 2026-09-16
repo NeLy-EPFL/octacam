@@ -52,6 +52,15 @@ TRIGGERBOX_JS = (
     / "web"
     / "triggerbox.js"
 )
+FLYWHEEL_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "flywheel"
+    / "web"
+    / "flywheel.js"
+)
 
 # The save-method dropdown is populated from these (mirrors writer.FORMATS as the
 # server serializes it). NVENC_FORMATS adds the GPU method for the nvenc tests.
@@ -976,5 +985,93 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
         )
         # The reads are debounced: a page load must not turn into a fetch storm.
         assert 2 <= exposure_reads["n"] <= 4, exposure_reads["n"]
+    finally:
+        page.close()
+
+
+def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
+    static_server, browser
+):
+    """A rig's configured loop program shows up in the tab.
+
+    The loop command used to live only in these fields, so it could not be
+    configured per rig and a recording's config snapshot had nothing to restore.
+    The plugin now publishes it in its status; the tab must seed the fields from
+    it (the sign of n_steps being the initial direction), or a snapshot-restored
+    program would silently run with the markup's defaults instead."""
+    page = browser.new_page()
+    status = {
+        "ready": True,
+        "device": "/dev/ttyACM0",
+        "firmware": "FLYWHEEL 1 abc1234",
+        "firmware_ok": True,
+        "firmware_state": "current",
+        "needs_flash": False,
+        "error": None,
+        "command": {
+            "n_steps": -2048,  # negative: starts counter-clockwise
+            "step_interval_us": 1200,
+            "rest_duration_ms": 500,
+            "n_repeats": 5,
+            "init_wait_duration_s": 2,
+        },
+        "web": {"module": "/plugins/flywheel/flywheel.js"},
+    }
+    plugins = {"flywheel": status}
+    page.route("**/api/**", lambda route: route.fulfill(
+        status=200, content_type="application/json", body="{}"
+    ))
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_system_payload(ready=True, plugins=plugins)),
+        ),
+    )
+    page.route(
+        "**/api/state",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state_payload(ready=True)),
+        ),
+    )
+    page.route(
+        "**/plugins/flywheel/flywheel.js",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/javascript",
+            body=FLYWHEEL_JS.read_text(),
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.getElementById('loop-steps')?.value === '2048'",
+            timeout=5000,
+        )
+        values = page.evaluate(
+            """() => ({
+                steps: document.getElementById('loop-steps').value,
+                interval: document.getElementById('loop-interval').value,
+                rest: document.getElementById('loop-rest').value,
+                repeats: document.getElementById('loop-repeats').value,
+                wait: document.getElementById('loop-wait').value,
+                ccw: document.getElementById('loop-dir-ccw').checked,
+                cw: document.getElementById('loop-dir-cw').checked,
+            })"""
+        )
+        assert values == {
+            "steps": "2048",  # the field is unsigned; the sign picked the direction
+            "interval": "1200",
+            "rest": "500",
+            "repeats": "5",
+            "wait": "2",
+            "ccw": True,
+            "cw": False,
+        }
     finally:
         page.close()

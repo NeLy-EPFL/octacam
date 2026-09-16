@@ -7,7 +7,7 @@ import pytest
 
 from octacam import config_writer as cw
 from octacam._compat import tomllib
-from octacam.config import parse_config
+from octacam.config import parse_config, parse_record_section
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))
 
@@ -308,3 +308,155 @@ def test_with_process_params_adds_sections_only_when_diverging():
         "transcode": {"ffmpeg_params": "-c:v ffv1"},
         "transfer": {"directory": "~/store", "checksum": False},
     }
+
+
+def test_bare_name_plugins_survive_a_rewrite(tmp_path):
+    # The loader accepts `plugins = ["flywheel"]`; a rewrite used to drop the list
+    # entirely because only [[plugins]] tables were emitted.
+    raw = tomllib.loads('plugins = ["flywheel"]\n[record]\nfps = 10.0\n')
+    cw.write_config(tmp_path, raw)
+    plugins = parse_config(tmp_path / "octacam_config.toml").plugins
+    assert [(p.name, p.options) for p in plugins] == [("flywheel", {})]
+
+
+# --- with_record_settings ----------------------------------------------------
+
+# The live values of a recording whose settings all equal the RecordConfig defaults.
+_DEFAULTS = parse_record_section({})
+_DEFAULT_LIVE = {
+    "fps": _DEFAULTS.fps,
+    "duration_s": _DEFAULTS.duration,  # the default unit is seconds
+    "trigger_source": _DEFAULTS.trigger_source,
+    "preview_trigger_source": _DEFAULTS.preview_trigger_source,
+    "save_method": _DEFAULTS.save_method,
+    "ffmpeg_params": _DEFAULTS.ffmpeg_params,
+    "nvenc_params": _DEFAULTS.nvenc_params,
+    "max_nvenc_sessions": _DEFAULTS.max_nvenc_sessions,
+    "writer_queue_size": _DEFAULTS.writer_queue_size,
+    "save_transformed": _DEFAULTS.save_transformed,
+    "save_timestamps": _DEFAULTS.save_timestamps,
+}
+
+
+def test_with_record_settings_noop_when_nothing_changed():
+    # A config that omits every [record] key loads as the defaults, so a
+    # recording made with them leaves the snapshot verbatim (no section added)...
+    assert cw.with_record_settings({}, _DEFAULT_LIVE) == {}
+    # ...and so does one that states the same length in another unit.
+    raw = {"record": {"duration": 2.0, "duration_unit": "minutes"}}
+    assert cw.with_record_settings(raw, {**_DEFAULT_LIVE, "duration_s": 120.0}) == raw
+
+
+def test_with_record_settings_patches_only_what_changed():
+    raw = {
+        "record": {
+            "fps": 80.0,
+            "directory": "~/data/%y%m%d",
+            "relative_directory": "Fly1/001",
+            "max_nvenc_sessions": 2,
+        },
+        "transfer": {"directory": "~/store"},
+    }
+    live = {**_DEFAULT_LIVE, "fps": 125.0, "save_timestamps": True}
+    edited = cw.with_record_settings(raw, live)
+    # The changed values are written; max_nvenc_sessions went back to auto
+    # (None), which TOML can only express by omitting the key; the unchanged
+    # duration and the path templates stay as they were.
+    assert edited["record"] == {
+        "fps": 125.0,
+        "directory": "~/data/%y%m%d",
+        "relative_directory": "Fly1/001",
+        "save_timestamps": True,
+    }
+    assert edited["transfer"] == raw["transfer"]
+    assert raw["record"]["fps"] == 80.0  # the input is not mutated
+
+
+@pytest.mark.parametrize(
+    ("unit", "fps", "duration_s", "expected"),
+    [
+        # Exact and readable in the config's unit: kept.
+        ("minutes", 100.0, 3600.0, (60.0, "minutes")),
+        ("hours", 100.0, 1800.0, (0.5, "hours")),
+        # A frame count follows the fps: 10 s at 125 fps is 1250 frames.
+        ("frames", 125.0, 10.0, (1250.0, "frames")),
+        # Unreadable in the unit (1.6666666666666667 min, 0.0019444 h): seconds.
+        ("minutes", 100.0, 100.0, (100.0, "seconds")),
+        ("hours", 100.0, 7.0, (7.0, "seconds")),
+        # Not exact in the unit (0.1 s * 3 fps / 3 fps != 0.1 s): seconds.
+        ("frames", 3.0, 0.1, (0.1, "seconds")),
+    ],
+)
+def test_with_record_settings_duration_units(unit, fps, duration_s, expected):
+    from octacam.config import duration_to_seconds
+
+    raw = {"record": {"fps": fps, "duration": 1.0, "duration_unit": unit}}
+    edited = cw.with_record_settings(
+        raw, {**_DEFAULT_LIVE, "fps": fps, "duration_s": duration_s}
+    )
+    record = edited["record"]
+    assert (record["duration"], record["duration_unit"]) == expected
+    # Whatever the unit, the snapshot loads back as the recorded length.
+    reloaded = parse_record_section(edited)
+    assert duration_to_seconds(reloaded.duration, reloaded.duration_unit, fps) == duration_s
+
+
+def test_with_record_settings_rescales_frames_when_only_fps_changed():
+    # 800 frames at 80 fps is 10 s. A 10 s recording at 125 fps must not keep
+    # "800 frames", which would now load as 6.4 s.
+    raw = {"record": {"fps": 80.0, "duration": 800.0, "duration_unit": "frames"}}
+    edited = cw.with_record_settings(
+        raw, {**_DEFAULT_LIVE, "fps": 125.0, "duration_s": 10.0}
+    )
+    assert edited["record"] == {
+        "fps": 125.0,
+        "duration": 1250.0,
+        "duration_unit": "frames",
+    }
+
+
+# --- with_plugin_options -----------------------------------------------------
+
+
+def test_with_plugin_options_merges_into_the_configured_entry():
+    raw = {
+        "plugins": [
+            {"name": "triggerbox", "options": {"device": "/dev/ttyACM0", "lights": []}},
+        ]
+    }
+    edited = cw.with_plugin_options(
+        raw, {"triggerbox": {"lights": [{"channel": 1, "mode": "continuous"}]}}
+    )
+    assert edited["plugins"] == [
+        {
+            "name": "triggerbox",
+            "options": {
+                "device": "/dev/ttyACM0",
+                "lights": [{"channel": 1, "mode": "continuous"}],
+            },
+        }
+    ]
+    assert raw["plugins"][0]["options"]["lights"] == []  # not mutated
+
+
+def test_with_plugin_options_matches_aliases_and_bare_names():
+    raw = {"plugins": ["arduino", {"name": "twophoton"}]}
+    edited = cw.with_plugin_options(raw, {"flywheel": {"x": 1}, "twophoton": {}})
+    # The legacy name is matched (not appended again) and the bare entry becomes
+    # a table to hold its options; a plugin with nothing to add is untouched.
+    assert edited["plugins"] == [
+        {"name": "arduino", "options": {"x": 1}},
+        {"name": "twophoton"},
+    ]
+
+
+def test_with_plugin_options_appends_plugins_the_config_does_not_list():
+    # A plugin enabled only with --plugin must be listed for a relaunch to load it.
+    edited = cw.with_plugin_options({"record": {}}, {"triggerbox": {}})
+    assert edited["plugins"] == [{"name": "triggerbox", "options": {}}]
+
+
+def test_with_plugin_options_noop_when_nothing_to_add():
+    raw = {"plugins": [{"name": "triggerbox", "options": {"device": "x"}}]}
+    assert cw.with_plugin_options(raw, {"triggerbox": {}}) == raw
+    assert cw.with_plugin_options({}, {}) == {}

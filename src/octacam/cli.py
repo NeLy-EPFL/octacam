@@ -3383,6 +3383,23 @@ class TranscodeJob:
     pixel_format: str = "Mono8"
 
 
+def _is_stale(output: Path, source: Path) -> bool:
+    """Whether a derived file predates the file it was made from.
+
+    A recording folder can be recorded into twice: confirming the overwrite
+    (GUI, or `octacam record`) replaces only the files the new take writes, so
+    the previous take's ``.mp4``/``grid.mp4`` stay behind. They look finished,
+    so the transcode and grid steps would skip them and `octacam process` would
+    transfer a video belonging to a different recording. Comparing mtimes
+    catches it: an output made from this source was written after it. Equal
+    mtimes count as current, and a stat error as not stale — never redo work
+    because a file could not be read."""
+    try:
+        return output.stat().st_mtime_ns < source.stat().st_mtime_ns
+    except OSError:
+        return False
+
+
 def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     """Resolve folders/files to a deduped list of :class:`TranscodeJob`.
 
@@ -3927,6 +3944,7 @@ def _grid_and_transfer(
     force: bool = False,
     reporter: "JobReporter | None" = None,
     job_dir: Path | None = None,
+    rewritten: set[Path] | None = None,
 ) -> int:
     """Build visualization grids and/or transfer each folder to its destination.
 
@@ -3938,7 +3956,10 @@ def _grid_and_transfer(
 
     On a dry run, ``folder_outputs`` may name outputs the transcode step only
     planned. They aren't on disk to probe, so a grid built from any of them is
-    listed instead of having its ffmpeg call previewed."""
+    listed instead of having its ffmpeg call previewed. ``rewritten`` names the
+    outputs that run will (re)write — the planned ones plus any left over from
+    an earlier take — so the preview treats a grid built from them as work to
+    do, exactly as the real run will once their bytes are new."""
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
 
@@ -3975,14 +3996,28 @@ def _grid_and_transfer(
                     reporter.item_started(i, len(grid_targets), folder)
                 cfg = folder_cfgs[folder]
                 planned = (
-                    [p for p in folder_outputs[folder] if not p.exists()]
+                    [
+                        p
+                        for p in folder_outputs[folder]
+                        if not p.exists() or p in (rewritten or set())
+                    ]
                     if dry_run
                     else []
                 )
                 built: list[Path] = []
                 for name, layout, ff in folder_grids[folder]:
                     out_path = folder / name
-                    if out_path.exists() and not force:
+                    inputs = [p for p in folder_outputs[folder] if p.exists()]
+                    grid_stale = out_path.exists() and any(
+                        _is_stale(out_path, p) for p in inputs
+                    )
+                    if grid_stale:
+                        log.warning(
+                            "%s is older than the videos it composites — "
+                            "rebuilding",
+                            out_path.name,
+                        )
+                    if out_path.exists() and not force and not grid_stale:
                         # Idempotent re-run: the grid is already built. Grid
                         # generation is atomic (temp + rename), so a present file
                         # is complete — skip rebuilding, but still hand it to the
@@ -4398,6 +4433,10 @@ def process(
         # the transcode would write), so grid/transfer run once per folder after
         # its files are done. Insertion-ordered (3.7+).
         folder_outputs: dict[Path, list[Path]] = {}
+        # Outputs this run will (re)write: not yet on disk, or left over from an
+        # earlier take. The grid step plans around them on a dry run, where they
+        # are still the old bytes (a real run rebuilds from their new mtime).
+        rewritten: set[Path] = set()
         cfg_cache: dict[Path, object] = {}
         failures = 0
         completed = 0
@@ -4449,7 +4488,19 @@ def process(
                                     reporter.item_done()
                                 continue
                             folder = input_path.parent
-                            if output.exists() and not force:
+                            stale = output.exists() and _is_stale(output, input_path)
+                            if stale:
+                                # Loud: the folder holds a video from an earlier
+                                # take, which a plain re-run would have kept (and
+                                # transferred) as if it were this recording's.
+                                log.warning(
+                                    "%s is older than %s — it is left over from an "
+                                    "earlier recording in this folder; re-transcoding",
+                                    output.name,
+                                    input_path.name,
+                                )
+                                rewritten.add(output)
+                            if output.exists() and not force and not stale:
                                 # Idempotent re-run: a finished .mp4 already sits at
                                 # the target. Transcoding is atomic (temp + rename),
                                 # so its presence means a complete encode — skip
@@ -4475,6 +4526,7 @@ def process(
                                         "[dry-run] would delete source: %s", input_path
                                     )
                                 planned += 1
+                                rewritten.add(output)
                                 folder_outputs.setdefault(folder, []).append(output)
                                 if reporter is not None:
                                     reporter.item_done()
@@ -4554,6 +4606,7 @@ def process(
                 force,
                 reporter=reporter,
                 job_dir=job_dir,
+                rewritten=rewritten,
             )
 
         # Report outside the `with` so messages land after the live bar is gone.

@@ -582,6 +582,10 @@ class TriggerboxPlugin(Plugin):
         self._default_cam_pulse_us = default_cam_pulse_us
         self._cameras: list[CameraLine] = cameras or [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
         self._lights: list[LightChannel] = lights or []
+        # The config's own lines/channels. Tab edits replace _cameras/_lights
+        # (on_ws_message), so snapshot_options compares against these instead.
+        self._configured_cameras = [replace(c) for c in self._cameras]
+        self._configured_lights = [replace(lt) for lt in self._lights]
         # True while an indefinite *preview* arm is live (vs a finite recording
         # arm). A live GUI spec edit re-arms the board only in this state, so the
         # managed preview strobes exactly as the edited recording will.
@@ -1004,6 +1008,29 @@ class TriggerboxPlugin(Plugin):
         params = params or {}
         spec = params.get("triggerbox")
         return spec if isinstance(spec, dict) else None
+
+    def snapshot_options(self, params: dict | None) -> dict | None:
+        """The camera lines and light channels a recording armed, as config options.
+
+        The tab edits both after the config is loaded and the board is armed
+        from the tab's values, so the recording's config snapshot must carry
+        them for a relaunch to trigger and light the rig the same way. None when
+        the recording did not arm the board or armed exactly what the config
+        says. Off channels are left out on both sides: the tab never sends them
+        and they drive nothing, and an empty ``lights`` list reloads as all-off.
+        """
+        spec = self._spec_from_params(params)
+        if spec is None:
+            return None
+        cameras = self._cameras_from_spec(spec)
+        lights = [lt for lt in self._lights_from_spec(spec) if lt.mode != "off"]
+        configured = [lt for lt in self._configured_lights if lt.mode != "off"]
+        if cameras == self._configured_cameras and lights == configured:
+            return None
+        return {
+            "cameras": [c.to_dict() for c in cameras],
+            "lights": [lt.to_dict() for lt in lights],
+        }
 
     def on_recording_start(self, params: dict | None) -> None:
         """Arm the Arduino when a triggerbox arm slice is present in params."""

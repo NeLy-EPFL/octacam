@@ -592,6 +592,86 @@ def test_default_start_params_shape():
     assert _last_arm(plugin._link)["fps"] == 80
 
 
+def _tab_spec(plugin: TriggerboxPlugin, **light_changes) -> dict:
+    """A start slice shaped like the tab's getStartParams(): full-key camera and
+    light dicts seeded from status(), off channels left out, per-channel edits
+    applied from ``light_changes`` ({"ch1": {...}})."""
+    status = plugin.status()
+    by_channel = {lt["channel"]: dict(lt) for lt in status["lights"]}
+    for key, change in light_changes.items():
+        channel = int(key.removeprefix("ch"))
+        base = by_channel.get(channel, LightChannel(channel=channel).to_dict())
+        by_channel[channel] = {**base, **change}
+    lights = [by_channel[ch] for ch in sorted(by_channel) if by_channel[ch]["mode"] != "off"]
+    return {"fps": 80, "duration_ms": 5000, "cameras": status["cameras"], "lights": lights}
+
+
+_SNAPSHOT_RIG = {
+    "cameras": [{"pin": "D13", "pulse_us": 500}],
+    "lights": [
+        {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25.0},
+        {"channel": 2, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25.0},
+        {"channel": 3, "mode": "off"},
+    ],
+}
+
+
+def test_snapshot_options_none_when_the_config_already_matches():
+    plugin = _build(_SNAPSHOT_RIG)
+    # Not armed with the recording: nothing to record.
+    assert plugin.snapshot_options(None) is None
+    assert plugin.snapshot_options({"twophoton": {}}) is None
+    # An untouched tab (which never sends the off channel 3) and the headless
+    # CLI slice (which does) both match the config, so the snapshot stays verbatim.
+    assert plugin.snapshot_options({"triggerbox": _tab_spec(plugin)}) is None
+    headless = plugin.default_start_params(80.0, 5.0)
+    assert plugin.snapshot_options({"triggerbox": headless}) is None
+
+
+def test_snapshot_options_carry_the_armed_lights_and_cameras():
+    plugin = _build(_SNAPSHOT_RIG)
+    spec = _tab_spec(
+        plugin,
+        ch1={"duty_percent": 60.0},
+        ch2={"mode": "off"},
+        ch3={"mode": "continuous"},
+    )
+    spec["cameras"] = [{"pin": "D13", "pulse_us": 700, "delay_us": 0}]
+    # The tab pushes each edit to the plugin as it happens, well before the
+    # recording starts; that must not hide the edit from the snapshot.
+    assert plugin.on_ws_message({"type": "triggerbox_spec", "spec": spec}, 1)
+    options = plugin.snapshot_options({"triggerbox": spec})
+    assert options is not None
+    assert options["cameras"] == [{"pin": "D13", "pulse_us": 700, "delay_us": 0}]
+    assert [(lt["channel"], lt["mode"]) for lt in options["lights"]] == [
+        (1, "strobe"),
+        (3, "continuous"),
+    ]
+    # Reloading those options arms the board exactly as this recording did.
+    relaunched = _build({**_SNAPSHOT_RIG, **options})
+    assert relaunched._cameras == plugin._cameras_from_spec(spec)
+    assert relaunched._lights == plugin._lights_from_spec(spec)
+
+
+def test_snapshot_options_none_after_edits_are_reverted():
+    plugin = _build(_SNAPSHOT_RIG)
+    edited = _tab_spec(plugin, ch1={"duty_percent": 60.0})
+    original = _tab_spec(plugin)
+    plugin.on_ws_message({"type": "triggerbox_spec", "spec": edited}, 1)
+    plugin.on_ws_message({"type": "triggerbox_spec", "spec": original}, 1)
+    assert plugin.snapshot_options({"triggerbox": original}) is None
+
+
+def test_snapshot_options_all_lights_off_reloads_as_off():
+    plugin = _build(_SNAPSHOT_RIG)
+    spec = _tab_spec(plugin, ch1={"mode": "off"}, ch2={"mode": "off"})
+    options = plugin.snapshot_options({"triggerbox": spec})
+    assert options is not None and options["lights"] == []
+    # An explicit empty list means "all off", unlike an absent key (which
+    # defaults to the classic two strobes).
+    assert _build({"lights": options["lights"]})._lights == []
+
+
 # ===========================================================================
 # Arm acknowledgement + reject
 # ===========================================================================

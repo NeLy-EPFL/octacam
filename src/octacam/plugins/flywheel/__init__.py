@@ -37,7 +37,7 @@ import logging
 import struct
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from octacam import firmware as fw
@@ -134,6 +134,30 @@ class Command:
         that to the appropriate error (HTTP 422, a warning, ...).
         """
         return cls(**{field: int(payload[field]) for field in COMMAND_FIELDS})
+
+
+def _command_from_options(options: dict) -> Command | None:
+    """The rig's configured loop command, or None when it names none.
+
+    Lets a rig persist its loop program (and a recording's config snapshot
+    restore it) instead of it living only in the GUI tab. Tolerant like the rest
+    of the config layer: a malformed or out-of-range table is warned about and
+    ignored, never raised. Fields left out keep their Command default, and a
+    negative ``n_steps`` starts the sweep counter-clockwise.
+    """
+    raw = options.get("command")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        log.warning("Flywheel plugin: 'command' must be a table; ignoring %r", raw)
+        return None
+    try:
+        command = Command.from_payload({**asdict(Command()), **raw})
+        command.to_bytes()  # reject an out-of-range field here, not at arm time
+    except (KeyError, TypeError, ValueError, struct.error):
+        log.warning("Flywheel plugin: ignoring invalid command %r", raw)
+        return None
+    return command
 
 
 class SerialLink:
@@ -374,7 +398,13 @@ def _build(options: dict) -> FlywheelPlugin:
     auto_flash = options.get("auto_flash", False)
     if isinstance(auto_flash, str):
         auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
-    return FlywheelPlugin(device=device, baud=baud, fqbn=fqbn, auto_flash=bool(auto_flash))
+    return FlywheelPlugin(
+        device=device,
+        baud=baud,
+        fqbn=fqbn,
+        auto_flash=bool(auto_flash),
+        command=_command_from_options(options),
+    )
 
 
 class FlywheelPlugin(Plugin):
@@ -386,6 +416,7 @@ class FlywheelPlugin(Plugin):
         baud: int = DEFAULT_BAUD,
         fqbn: str = _DEFAULT_FQBN,
         auto_flash: bool = False,
+        command: Command | None = None,
     ):
         # _configured_device is what the config asked for (a path, or "auto");
         # self.device is the currently-active/display device, resolved on open.
@@ -393,6 +424,9 @@ class FlywheelPlugin(Plugin):
         self.device = device
         self.baud = baud
         self._auto_flash = bool(auto_flash)
+        # The config's loop command (None = the tab keeps its own defaults). Only
+        # read: the tab edits its copy client-side, so this stays the config's.
+        self._command = command
         self._firmware: str | None = None
         self._firmware_ok = True
         self._last_error: str | None = None
@@ -524,7 +558,7 @@ class FlywheelPlugin(Plugin):
 
     def status(self) -> dict:
         check = self._fw.check
-        return {
+        status = {
             "device": self.device,
             "firmware": self._firmware,
             "firmware_ok": self._firmware_ok,
@@ -532,8 +566,26 @@ class FlywheelPlugin(Plugin):
             "needs_flash": bool(check and check.needs_flash),
             "error": self._last_error,
         }
+        if self._command is not None:
+            # Seeds the tab's loop fields, so a configured (or snapshot-restored)
+            # loop program is what the operator sees on load.
+            status["command"] = asdict(self._command)
+        return status
 
     # -------------------------------------------------- recording lifecycle
+
+    def snapshot_options(self, params: dict | None) -> dict | None:
+        """The loop command a recording armed, as config options.
+
+        The tab's loop program is set in the GUI and fired at the first frame, so
+        the recording's config snapshot must carry it to reproduce the motion.
+        None when the recording armed none ("with recording" unchecked) or armed
+        exactly what the config already says.
+        """
+        command = self._command_from(params)
+        if command is None or command == self._command:
+            return None
+        return {"command": asdict(command)}
 
     def on_first_frame(self, params: dict | None) -> None:
         command = self._command_from(params)

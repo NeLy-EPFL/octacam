@@ -129,6 +129,23 @@ def dataclasses_replace(obj, **kw):
     return dataclasses.replace(obj, **kw)
 
 
+def test_record_config_values_covers_every_record_setting():
+    # Each recording's config snapshot is written from record_config_values, so a
+    # new [record] key must either be reproduced there or be deliberately left
+    # out — otherwise a recording made with it would relaunch with the rig
+    # file's value instead of its own.
+    from octacam.config import RecordConfig
+    from octacam.controller import record_config_values
+
+    reproduced = set(record_config_values(RecordingSettings()))
+    # duration_s stands in for the duration/unit pair (config_writer picks a unit).
+    reproduced = (reproduced - {"duration_s"}) | {"duration", "duration_unit"}
+    # The save path templates are kept as written, so a relaunch resolves a fresh
+    # dated folder; the path a recording used is in its summary.
+    excluded = {"directory", "relative_directory"}
+    assert set(RecordConfig.model_fields) == reproduced | excluded
+
+
 def test_increment_trailing_number():
     assert increment_trailing_number("/data/001-bhv") == "/data/002-bhv"
     assert increment_trailing_number("/d/240101_/Fly1/009") == "/d/240101_/Fly1/010"

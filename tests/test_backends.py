@@ -21,6 +21,38 @@ from octacam.cameras.registry import (
 )
 
 
+def test_param_file_extensions_cover_every_backend():
+    # The transfer step lists the backends' parameter-file suffixes itself so it
+    # never imports a vendor SDK. Read each backend class's `extension = "..."`
+    # from the source (an SDK-free check), so a new suffix can't go missing.
+    import ast
+    from pathlib import Path
+
+    import octacam.cameras
+    from octacam.transform import PARAM_FILE_EXTENSIONS
+
+    found = set()
+    for source in Path(octacam.cameras.__file__).parent.glob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for stmt in node.body:
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    target = stmt.targets[0]
+                elif isinstance(stmt, ast.AnnAssign):
+                    target = stmt.target
+                else:
+                    continue
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == "extension"
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, str)
+                ):
+                    found.add(stmt.value.value)
+    assert found == set(PARAM_FILE_EXTENSIONS)
+
+
 def test_backends_and_cascade_membership():
     # The cascade is the auto-selected tiers, in preference order; fake is listed
     # in BACKENDS but never part of the auto cascade.

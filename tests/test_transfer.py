@@ -20,7 +20,11 @@ from octacam.transfer import (
     transfer_destination,
     transfer_folder,
 )
-from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
+from octacam.transform import (
+    CONFIG_SNAPSHOT_FILENAME,
+    RECORDING_SUMMARY_FILENAME,
+    TIMESTAMPS_FILENAME,
+)
 
 TEMP_GLOB = f".*{transfer_mod._TEMP_INFIX}*"
 
@@ -100,6 +104,56 @@ def test_copy_without_timestamps_is_fine(tmp_path):
 
     assert TIMESTAMPS_FILENAME not in set(result.copied)
     assert not (dest / TIMESTAMPS_FILENAME).exists()
+
+
+def test_copy_carries_the_config_snapshot_and_camera_files(tmp_path):
+    # With each camera's parameter file beside it, the config snapshot makes the
+    # copy a config dir a new session can launch from, so all of it travels.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 100})
+    (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 80.0\n")
+    (src / "40018631.pfs").write_text("basler")
+    (src / "17475185.txt").write_text("flir")
+    (src / "FAKE-0.fake").write_text("fake")
+    # Not metadata: an untranscoded source, and a hidden macOS fork.
+    (src / "camera_LF.mkv").write_bytes(b"raw")
+    (src / "._17475185.txt").write_text("fork")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+
+    result = transfer_folder(src, dest=dest)
+
+    assert result
+    assert sorted(p.name for p in dest.iterdir()) == sorted(
+        [
+            "camera_LF.mp4",
+            RECORDING_SUMMARY_FILENAME,
+            CONFIG_SNAPSHOT_FILENAME,
+            "40018631.pfs",
+            "17475185.txt",
+            "FAKE-0.fake",
+        ]
+    )
+    assert (dest / "17475185.txt").read_text() == "flir"
+
+
+def test_metadata_changed_at_the_same_size_is_recopied(tmp_path):
+    # An edited config is often exactly as long as the copy already there
+    # (fps = 80.0 -> 90.0), so metadata is compared by content; a video keeps
+    # the cheap size-only check unless checksum=True.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 100})
+    (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 80.0\n")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    transfer_folder(src, dest=dest)
+    (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 90.0\n")
+    (src / "camera_LF.mp4").write_bytes(b"B" * 100)
+
+    planned = transfer_folder(src, dest=dest, dry_run=True)
+    result = transfer_folder(src, dest=dest)
+
+    assert planned.copied == [CONFIG_SNAPSHOT_FILENAME]
+    assert result.copied == [CONFIG_SNAPSHOT_FILENAME]
+    assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
+    assert (dest / CONFIG_SNAPSHOT_FILENAME).read_text() == "[record]\nfps = 90.0\n"
+    assert (dest / "camera_LF.mp4").read_bytes() == b"A" * 100
 
 
 def test_copy_bare_name_without_base(tmp_path):

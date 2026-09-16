@@ -652,6 +652,12 @@ def _parse_section(data: dict, key: str, model_cls: type[_ModelT], default: _Mod
     return _lenient_validate(model_cls, src, key, default)
 
 
+def parse_record_section(data: dict) -> RecordConfig:
+    """The ``[record]`` section of a raw parsed config, as :func:`parse_config`
+    reads it (invalid fields fall back to their defaults)."""
+    return _parse_section(data, "record", RecordConfig, RecordConfig())
+
+
 def parse_config(file_path: str | Path) -> OctacamConfig:
     config = OctacamConfig()
     file_path = Path(file_path)
@@ -668,7 +674,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
         return config
 
     config.backend = _parse_backend(data.get("backend"))
-    config.record = _parse_section(data, "record", RecordConfig, RecordConfig())
+    config.record = parse_record_section(data)
     config.transcode = _parse_section(
         data, "transcode", TranscodeConfig, TranscodeConfig()
     )

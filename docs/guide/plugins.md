@@ -36,6 +36,22 @@ Drives an Arduino stepper-motor controller over serial. Adds the web GUI's
 **Flywheel** tab (a loop program plus hold-to-jog manual control), and fires an
 armed loop command at the first captured frame so motion is synced to capture.
 
+The loop program can be set per rig, so it is on screen at launch instead of
+being retyped in the tab, and a recording's config snapshot can restore it:
+
+```toml
+[[plugins]]
+name = "flywheel"
+options = { device = "/dev/ttyACM0" }
+# One sweep: 2048 steps (negative starts counter-clockwise) at 1200 µs per step,
+# resting 500 ms between sweeps, 5 sweeps, starting 2 s after the first frame.
+options.command = { n_steps = -2048, step_interval_us = 1200, rest_duration_ms = 500, n_repeats = 5, init_wait_duration_s = 2 }
+```
+
+Omit `command` to keep the tab's own defaults. Whatever the tab is armed with at
+record time is written into that recording's config snapshot, so the motion can
+be reproduced later.
+
 The matching firmware is in
 [arduino/stepper_motor/](https://github.com/NeLy-EPFL/octacam/tree/main/arduino/stepper_motor).
 

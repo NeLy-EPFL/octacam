@@ -990,6 +990,66 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
     assert (folder / "grid.mp4").read_bytes() == before_grid
 
 
+def _age(path, seconds):
+    """Backdate a file by *seconds* (the outputs of an earlier take)."""
+    stamp = path.stat().st_mtime - seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_process_redoes_outputs_left_over_from_an_earlier_take(
+    tmp_path, monkeypatch, process_log
+):
+    # Recording into a folder again (confirming the overwrite) replaces only the
+    # files the new take writes, so the previous take's mp4/grid stay behind.
+    # They must not pass as this recording's finished outputs — that is how a
+    # video from a different take ended up transferred as if it were this one's.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    _age(folder / "camera_LF.mp4", 10)  # older than the new take's source...
+    _age(folder / "grid.mp4", 20)  # ...and the grid older still
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"transcode": 1, "grid": 1}
+    assert any("left over from an earlier recording" in m for m in process_log)
+    assert any("older than the videos it composites" in m for m in process_log)
+
+
+def test_process_dry_run_lists_leftover_outputs_as_work(
+    tmp_path, monkeypatch, process_log
+):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    _age(folder / "camera_LF.mp4", 10)
+    _age(folder / "grid.mp4", 20)
+    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    # The leftovers are work to redo, not work already done — and the grid is
+    # listed as waiting for the video that will be re-transcoded.
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+    assert any("waits for: camera_LF.mp4" in m for m in process_log)
+
+
 def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
@@ -1225,7 +1285,8 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     assert not [m for m in process_log if m.startswith(tuple(f"[dry-run] {s}" for s in steps))]
     assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
     assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log
-    assert "[dry-run] Transfer: 0 to copy, 3 already up to date" in process_log
+    # The mp4, the grid, the summary and the config snapshot.
+    assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log
 
 
 # --- config: the interactive first-run wizard -------------------------------

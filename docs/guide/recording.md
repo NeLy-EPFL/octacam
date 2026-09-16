@@ -33,7 +33,8 @@ Each recording writes, into its own save directory:
 
 - one video file per camera,
 - one `recording_summary.json`,
-- a copy of the rig's `octacam_config.toml`,
+- the recording's config: a snapshot of `octacam_config.toml` plus each camera's
+  sensor parameter file (`<serial>.pfs` / `<serial>.txt`),
 - one `timestamps.npz` (only when `record.save_timestamps` is on).
 
 ### The recording summary
@@ -72,12 +73,50 @@ not wall-clock and not aligned across cameras.
 
 ### The embedded config snapshot
 
-Each recording also saves a copy of the rig's `octacam_config.toml` into its own
-folder. That snapshot is what lets `octacam process` transcode, build grids, and
+Each recording also saves its config into its own folder: a copy of the rig's
+`octacam_config.toml` updated with everything changed live in the GUI, plus each
+camera's sensor parameter file. That makes the folder a complete
+[config directory](configuration.md) for the setup the recording actually used:
+
+- **`[record]`** holds the settings the recording ran with (fps, duration,
+  trigger source, save method and encoder args, …), even when they were changed
+  in the **Record** tab and never saved to the rig config.
+- **`[[plugins]]`** holds each plugin's live settings, e.g. the triggerbox camera
+  lines and light channels as set in its tab.
+- **`<serial>.pfs` / `<serial>.txt`** are read from each camera just before it
+  starts recording, so they include **Camera**-tab edits (exposure, gain, ROI, …)
+  that were never saved. The rig's other parameter files are copied too.
+
+If nothing was changed live, the snapshot is an exact copy of the rig's file,
+comments included. The `directory` / `relative_directory` templates are always
+kept as written; the path this recording used is stored in its summary.
+
+To record again with the same setup, copy those files into a new config
+directory and launch from it. The copy on your storage works too, since
+`octacam process` transfers the config along with the videos:
+
+```bash
+mkdir -p configs/wt-rerun
+rsync -a --include='octacam_config.toml' --include='*.pfs' --include='*.txt' \
+  --exclude='*' /mnt/store/matthias/260620-wt/Fly1/001-bhv/ configs/wt-rerun/
+octacam gui configs/wt-rerun
+```
+
+New recordings go to the templated save directory, with today's date and a fresh
+trial number. You can also run `octacam gui <recording folder>` directly, but a
+GUI *Save…* would then write into that folder.
+
+The snapshot is also what lets `octacam process` transcode, build grids, and
 transfer with no `--config` flag: it reads the encoder args
 (`[transcode].ffmpeg_params`), grid layouts (`[[visualization]]`), and transfer
 destination (`[transfer]`) straight from the embedded copy. See
 [Processing](processing.md).
+
+!!! note "Recording into a folder twice"
+    Confirming the "directory already exists" prompt overwrites the files the
+    new take writes, but the previous take's transcoded `.mp4`/`grid.mp4` stay
+    behind. `octacam process` notices they are older than the recording they sit
+    with and redoes them, rather than transferring a video from the earlier take.
 
 ## Transformed vs raw frames
 

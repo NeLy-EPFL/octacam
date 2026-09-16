@@ -59,6 +59,13 @@ class OctacamPlugin(Protocol):
     # See PluginManager.default_start_params.
     def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
 
+    # Config snapshot. The [[plugins]] options that reproduce this plugin's live
+    # state for a recording, given the same {name: slice} params its start hook
+    # receives; None = the configured options already do. Written into the
+    # recording folder's octacam_config.toml so a relaunch from it behaves the
+    # same. Called under the controller lock: build a dict, no I/O.
+    def snapshot_options(self, params: dict | None) -> dict | None: ...
+
     # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
     # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
     # idle preview too, so the preview approximates the recording. It advertises
@@ -118,6 +125,9 @@ class Plugin:
         pass
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        return None
+
+    def snapshot_options(self, params: dict | None) -> dict | None:
         return None
 
     def drives_preview_trigger(self) -> bool:
@@ -197,6 +207,27 @@ class PluginManager:
             if slice_ is not None:
                 params[self._name(plugin)] = slice_
         return params
+
+    def snapshot_options(self, params: dict | None) -> dict[str, dict]:
+        """Each loaded plugin's live options for a recording's config snapshot.
+
+        Keyed by name for *every* plugin (empty when its configured options
+        already reproduce it), so the snapshot also lists a plugin that was
+        enabled only with ``--plugin``. A plugin whose hook fails contributes no
+        options rather than failing the recording.
+        """
+        result: dict[str, dict] = {}
+        for plugin in self.plugins:
+            name = self._name(plugin)
+            # Optional: a plugin written before this hook existed may lack it.
+            hook = getattr(plugin, "snapshot_options", None)
+            try:
+                options = hook(params) if hook is not None else None
+            except Exception:
+                log.exception("Plugin %s.snapshot_options failed", name)
+                options = None
+            result[name] = dict(options or {})
+        return result
 
     def status(self) -> dict:
         result: dict = {}

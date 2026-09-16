@@ -8,6 +8,10 @@ A **config directory** describes one rig. It holds:
   `<serial>.txt` (the native GenApi feature-persistence TSV) for FLIR/GenICam,
   written by the GUI's *Save…* dialog.
 
+Every recording folder is also a config directory: it holds a snapshot of the
+setup it was recorded with (see
+[Recording](recording.md#the-embedded-config-snapshot)).
+
 Everything below is optional and has a sensible default — an empty or missing
 `octacam_config.toml` uses all detected cameras with defaults. octacam parses the
 file **leniently**: a malformed value is warned about and falls back to its
