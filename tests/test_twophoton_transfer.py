@@ -11,6 +11,7 @@ import pytest
 from octacam.twophoton_transfer import (
     TakeInfo,
     TwoPhotonFolder,
+    _fly_prefix,
     _thorimage_base_name,
     build_match_record,
     correlate_sync_folder_to_image,
@@ -572,6 +573,20 @@ def test_thorimage_base_name_strips_trailing_recording_number():
     assert _thorimage_base_name("Fly1_Zstack_000") == "Fly1_Zstack"
     assert _thorimage_base_name("Fly1_Zstack") == "Fly1_Zstack"
     assert _thorimage_base_name("Test1_018") == "Test1"
+
+
+def test_fly_prefix_extracts_leading_fly_token():
+    # Real data (2026-09-16): a fly-session's own folders can carry an
+    # open-ended set of modality words with no digit to strip at all
+    # (Streaming, Zstack, FastZ_Test, ZT_Test) — _thorimage_base_name can't
+    # unify these, so _fly_prefix extracts the fly identity itself instead.
+    assert _fly_prefix("Fly1_Streaming_000") == "Fly1"
+    assert _fly_prefix("Fly1_Zstack") == "Fly1"
+    assert _fly_prefix("Fly1_FastZ_Test") == "Fly1"
+    assert _fly_prefix("Fly1") == "Fly1"
+    assert _fly_prefix("Fly12_ZT_Test") == "Fly12"
+    assert _fly_prefix("Test1_018") is None
+    assert _fly_prefix("SyncData125") is None
 
 
 def test_correlate_sync_folder_to_image_finds_matching_candidate(tmp_path):

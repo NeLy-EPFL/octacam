@@ -610,6 +610,27 @@ def _thorimage_base_name(name: str) -> str:
     return _RECORDING_NUMBER_SUFFIX_RE.sub("", name)
 
 
+_FLY_PREFIX_RE = re.compile(r"^(Fly\d+)(?:_|$)")
+
+
+def _fly_prefix(name: str) -> str | None:
+    """The leading ``Fly<N>`` token in *name*, or ``None`` if it doesn't start
+    with one.
+
+    ``_thorimage_base_name`` only strips a trailing ``_<digits>`` suffix, so
+    it can't unify two folders for the same fly-session when the modality
+    word is appended directly to the fly name itself with no digit to strip
+    at all (confirmed on real data: a fly-session's own folders can be
+    ``Fly1_Streaming``, ``Fly1_Streaming_000``, ``Fly1_Zstack``,
+    ``Fly1_FastZ_Test``, ``Fly1_ZT_Test`` — an open-ended, unenumerable set of
+    modality vocabulary, not a suffix pattern). This extracts the fly
+    identity itself instead of trying to strip every possible modality word,
+    for use as a coarser fallback signal alongside ``_thorimage_base_name``'s
+    more precise (modality-preserving) prefix check."""
+    m = _FLY_PREFIX_RE.match(name)
+    return m.group(1) if m else None
+
+
 def correlate_sync_folder_to_image(
     sync_folder: TwoPhotonFolder,
     image_candidates: list[TwoPhotonFolder],

@@ -2307,6 +2307,53 @@ def test_sweep_attributes_unclaimed_sync_folder_via_frameout_correlation(
     assert not (dest_root / "2p_only").exists()
 
 
+def test_sweep_attributes_unclaimed_folder_with_different_modality_word(
+    tmp_path, monkeypatch
+):
+    # Real gap found on real data (2026-09-16, "AllPAM_G151xCI80"): a fly's
+    # claimed anchor take can pair with a modality-suffixed ThorImage folder
+    # (e.g. "Fly1_Streaming_000") that shares no string prefix at all with
+    # that same fly's other, differently-named 2P-only folders (e.g.
+    # "Fly1_Zstack") — the modality-preserving _thorimage_base_name check
+    # alone can't unify "Fly1_Streaming" and "Fly1_Zstack", so this must fall
+    # back to the coarser leading-"Fly1"-token match.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_image_folder_2p(
+        source_root, "exp", "Fly1_Streaming_000", u_time=take_start + 2, n_frames=2
+    )
+    # Unclaimed: a different modality word for the same fly, far outside any
+    # take's match window.
+    _make_image_folder_2p(
+        source_root, "exp", "Fly1_Zstack", u_time=take_start - 5000, n_frames=2
+    )
+
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"settle_s = 60\n"
+        ),
+        extra_summary={
+            "start_time_ns": int(take_start * 1e9),
+            "duration_s": 10.0,
+            "relative_directory": "day1/Fly1/001",
+            "plugins": {"twophoton": {"armed": True}},
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming_000").exists()
+    assert (dest_root / "day1" / "Fly1" / "2P_only" / "Fly1_Zstack").exists()
+    assert not (dest_root / "2p_only").exists()
+
+
 def test_sweep_ambiguous_prefix_stays_in_generic_bucket(tmp_path, monkeypatch):
     # Two different flies both claim a "Fly1"-prefixed match within the same
     # experiment (ThorImage's own numbering, offset from octacam's — real
@@ -2420,6 +2467,9 @@ def test_gather_fly_image_basenames_groups_by_experiment_and_base(tmp_path):
     by_key = _gather_fly_image_basenames(dest_root)
     assert by_key[("exp", "Fly1")] == {fly1}
     assert by_key[("exp", "Fly7")] == {fly2}
+    # Coarser fallback key, keyed off the leading Fly<N> token alone.
+    assert by_key[("exp", "fly:Fly1")] == {fly1}
+    assert by_key[("exp", "fly:Fly7")] == {fly2}
 
 
 def test_manifest_shows_fly_attribution_preview_for_unclaimed_folder(tmp_path, monkeypatch):

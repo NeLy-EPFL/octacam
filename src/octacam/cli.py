@@ -4729,9 +4729,14 @@ def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Pa
     unclaimed 2P folder under the fly it actually belongs to instead of a
     disconnected generic bucket. More than one fly-dir for the same key is
     the ambiguous case — never guessed between, left for the caller to skip.
-    """
+
+    Also records a coarser ``(experiment, "fly:<FlyN>")`` key from the same
+    claimed match's leading ``Fly<N>`` token (see :func:`_fly_prefix`) — a
+    fallback signal for a modality word that isn't a shared string prefix at
+    all (``Fly1_Streaming`` claimed doesn't help match an unclaimed
+    ``Fly1_Zstack`` by string prefix, but both start with ``Fly1``)."""
     from octacam.transform import TWOPHOTON_MATCH_FILENAME
-    from octacam.twophoton_transfer import _thorimage_base_name
+    from octacam.twophoton_transfer import _fly_prefix, _thorimage_base_name
 
     by_key: dict[tuple[str, str], set[Path]] = {}
     for match_path in dest_root.rglob(TWOPHOTON_MATCH_FILENAME):
@@ -4753,6 +4758,11 @@ def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Pa
             p = Path(rel_path)
             key = (p.parent.name, _thorimage_base_name(p.name))
             by_key.setdefault(key, set()).add(fly_dir)
+            fly_token = _fly_prefix(p.name)
+            if fly_token is not None:
+                by_key.setdefault((p.parent.name, f"fly:{fly_token}"), set()).add(
+                    fly_dir
+                )
     return by_key
 
 
@@ -4775,9 +4785,14 @@ def _attribute_unclaimed_folder(
     (:func:`~octacam.twophoton_transfer.correlate_sync_folder_to_image`,
     among every discovered image folder in *image_candidates* — claimed or
     not), then the same prefix check runs against that correlated folder's
-    name. Returns ``None`` (stay in the generic bucket) whenever nothing
-    confidently applies — never raises."""
-    from octacam.twophoton_transfer import correlate_sync_folder_to_image
+    name. Falls back to a coarser leading-``Fly<N>``-token match (see
+    :func:`~octacam.twophoton_transfer._fly_prefix`) when the precise
+    modality-preserving check finds nothing — covers a fly whose claimed
+    anchor used a *different* modality word than *folder* (e.g. anchored via
+    a ``Streaming`` take, but *folder* is that same fly's ``Zstack``), which
+    share no string prefix at all. Returns ``None`` (stay in the generic
+    bucket) whenever nothing confidently applies — never raises."""
+    from octacam.twophoton_transfer import _fly_prefix, correlate_sync_folder_to_image
 
     name = folder.path.name
     if folder.kind != "image":
@@ -4792,6 +4807,10 @@ def _attribute_unclaimed_folder(
         if exp == experiment and (name == base or name.startswith(base + "_"))
         for fly_dir in fly_dirs
     }
+    if not candidates:
+        fly_token = _fly_prefix(name)
+        if fly_token is not None:
+            candidates = fly_basenames.get((experiment, f"fly:{fly_token}"), set())
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
