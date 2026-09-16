@@ -913,12 +913,22 @@ def test_build_config_doc_includes_plugins():
 # --- process: idempotent re-runs (skip existing outputs) --------------------
 
 
-def _make_recording(folder, *, with_outputs, extra_toml=""):
+# Grids are opt-in, so a recording whose grid path should run needs this in its
+# embedded config snapshot; `visualization=False` gives the bare default rig.
+_VIZ_TOML = '''[[visualization]]
+name = "grid.mp4"
+layout = [["camera_LF", ""]]
+'''
+
+
+def _make_recording(folder, *, with_outputs, extra_toml="", visualization=True):
     """A recording folder with one camera's source .mkv and its summary.
 
     When *with_outputs*, also drop a finished ``camera_LF.mp4`` and ``grid.mp4``
     so ``octacam process``'s skip-on-exists path is exercised. *extra_toml*, if
-    given, is written as the embedded ``octacam_config.toml`` snapshot.
+    given, is written as the embedded ``octacam_config.toml`` snapshot; unless
+    *visualization* is off, a ``[[visualization]]`` entry is appended to it so the
+    grid step has something to build.
     """
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
@@ -942,8 +952,9 @@ def _make_recording(folder, *, with_outputs, extra_toml=""):
             }
         )
     )
-    if extra_toml:
-        (folder / "octacam_config.toml").write_text(extra_toml)
+    toml = extra_toml + (_VIZ_TOML if visualization else "")
+    if toml:
+        (folder / "octacam_config.toml").write_text(toml)
     if with_outputs:
         (folder / "camera_LF.mp4").write_bytes(b"finished-transcode")
         (folder / "grid.mp4").write_bytes(b"finished-grid")
@@ -1004,6 +1015,41 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     assert calls == {"transcode": 1, "grid": 1}
 
 
+def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypatch):
+    # Grids are opt-in: a rig whose config has no [[visualization]] entry gets
+    # no composite at all (octacam used to derive one from the camera names and
+    # spend minutes of ffmpeg on a video the rig never asked for). The transcode
+    # step still runs.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False, visualization=False)
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        Path(output).write_bytes(b"encoded")
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
+    assert result.exit_code == 0, result.output
+    assert calls == {"transcode": 1, "grid": 0}
+    assert not (folder / "grid.mp4").exists()
+
+    # ...and --force doesn't conjure one either: there is nothing configured to
+    # rebuild.
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--force"])
+    assert result.exit_code == 0, result.output
+    assert calls["grid"] == 0
+
+
 def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     # A skipped transcode/grid must still flow to the transfer step, so a
     # re-run finishes the pipeline for a partially-transferred recording.
@@ -1032,6 +1078,154 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     dest = dest_root / folder.name
     assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
     assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
+
+
+# --- process --dry-run: a plan, never a partial run --------------------------
+
+
+@pytest.fixture
+def process_log(monkeypatch):
+    """The plain messages the octacam logger emits during a CLI invocation.
+
+    The CLI callback swaps the logger's handlers for a rich one that wraps lines
+    to the terminal width, so a plain list handler stands in for it."""
+    handler = _MsgHandler()
+    logger = logging.getLogger("octacam")
+
+    def setup_logging(level):
+        logger.handlers.clear()
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+    monkeypatch.setattr("octacam.cli._setup_logging", setup_logging)
+    yield handler.messages
+    logger.removeHandler(handler)
+
+
+def _forbid(monkeypatch, *targets):
+    """Make each dotted target raise if a dry run reaches it."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a dry run must not do real work")
+
+    for target in targets:
+        monkeypatch.setattr(target, boom)
+
+
+def _transfer_toml(dest_root):
+    return f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+
+
+def test_process_dry_run_plans_every_step_without_running_any(
+    tmp_path, monkeypatch, process_log
+):
+    # Nothing is encoded, composited, copied or deleted, yet every step lists
+    # what a real run would do, including the grid and the transfer of outputs
+    # the transcode step has only planned.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False, extra_toml=_transfer_toml(dest_root))
+    _forbid(
+        monkeypatch,
+        "octacam.writer.transcode_file",
+        # Its input isn't transcoded yet, so there is nothing to probe.
+        "octacam.grid.build_grid_video",
+        "octacam.cli._delete_source_files",
+    )
+    before = sorted(p.name for p in folder.iterdir())
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run", "-d"])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in folder.iterdir()) == before
+    assert not dest_root.exists()
+    source = folder / "camera_LF.mkv"
+    dest = dest_root / folder.name
+    assert f"[dry-run] transcode: {source} → camera_LF.mp4" in process_log
+    assert f"[dry-run] would delete source: {source}" in process_log
+    assert any(
+        m.startswith(f"[dry-run] grid: {folder / 'grid.mp4'}") for m in process_log
+    )
+    for name in ("camera_LF.mp4", "grid.mp4"):
+        assert f"[dry-run] transfer: {folder / name} → {dest / name}" in process_log
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+
+
+def test_process_dry_run_previews_a_grid_whose_inputs_exist(
+    tmp_path, monkeypatch, process_log
+):
+    # With its inputs on disk the grid's exact ffmpeg call can be previewed, so
+    # the dry run hands the grid to the builder, in dry-run mode.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    (folder / "grid.mp4").unlink()
+    _forbid(monkeypatch, "octacam.writer.transcode_file")
+    dry_runs = []
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        dry_runs.append(kwargs.get("dry_run"))
+        return output
+
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run", "--no-transfer"])
+
+    assert result.exit_code == 0, result.output
+    assert dry_runs == [True]
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+
+
+def test_process_dry_run_never_waits_on_a_live_capture(
+    tmp_path, monkeypatch, process_log
+):
+    # The plan is often wanted mid-session. A dry run does no heavy work, so it
+    # must not park behind a live capture the way a real run does, nor tell a
+    # gui launch that a transcode is competing for the CPU.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder, with_outputs=False, extra_toml=_transfer_toml(tmp_path / "dest")
+    )
+    _forbid(
+        monkeypatch,
+        "octacam.cli._pause_gate",
+        "octacam.session_cache.mark_transcode_active",
+        "octacam.writer.transcode_file",
+        "octacam.grid.build_grid_video",
+    )
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+
+
+def test_process_dry_run_lists_no_work_for_a_finished_recording(
+    tmp_path, monkeypatch, process_log
+):
+    # `process --all --dry-run` doubles as "what is left to process?", so a
+    # recording that is fully processed lists no work, only the counts.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
+    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+    finish = runner.invoke(app, ["process", str(folder)])
+    assert finish.exit_code == 0, finish.output
+    process_log.clear()
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    steps = ("transcode:", "would delete", "grid:", "transfer:")
+    assert not [m for m in process_log if m.startswith(tuple(f"[dry-run] {s}" for s in steps))]
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
+    assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log
+    assert "[dry-run] Transfer: 0 to copy, 3 already up to date" in process_log
 
 
 # --- config: the interactive first-run wizard -------------------------------

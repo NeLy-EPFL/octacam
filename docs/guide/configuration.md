@@ -150,8 +150,9 @@ window_height = 0.25
 
 ## `[[visualization]]`
 
-Defines the composite **grid** video(s) `octacam process` builds. List several
-entries to produce several grids. See
+Defines the composite **grid** video(s) `octacam process` builds. Grids are
+**opt-in**: with no `[[visualization]]` entry no composite is built at all. List
+several entries to produce several grids. See
 [Processing → Grid video](processing.md#grid-video).
 
 ```toml
@@ -166,8 +167,8 @@ layout = [
 ```
 
 Each cell is a camera `name`; `""` is a black fill. All rows must have the same
-number of columns. With no `[[visualization]]`, a near-square layout is derived
-from the rig's cameras.
+number of columns. `octacam config` offers to write a near-square layout of the
+rig's cameras for you.
 
 ## `[[plugins]]`
 

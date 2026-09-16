@@ -271,6 +271,23 @@ def test_dry_run_reports_already_transferred_as_skipped(tmp_path):
     assert not result.copied
 
 
+def test_dry_run_plans_a_file_an_earlier_step_has_not_produced(tmp_path):
+    # `octacam process --dry-run` passes along outputs its transcode step only
+    # planned. There is no source to compare against a same-named file already
+    # at the destination, so the copy is planned instead of crashing on the stat.
+    src = _make_recording(tmp_path / "rec", {})
+    dest = tmp_path / "dest" / "rec"
+    dest.mkdir(parents=True)
+    (dest / "camera_LF.mp4").write_bytes(b"older")
+    planned = src / "camera_LF.mp4"
+
+    result = transfer_folder(src, dest=dest, files_only=[planned], dry_run=True)
+
+    assert result.copied == ["camera_LF.mp4", RECORDING_SUMMARY_FILENAME]
+    assert not planned.exists()
+    assert (dest / "camera_LF.mp4").read_bytes() == b"older"
+
+
 def test_nothing_to_copy_is_falsy(tmp_path):
     folder = tmp_path / "empty"
     folder.mkdir()

@@ -1,7 +1,8 @@
 # Processing recordings
 
-Everything after recording — transcoding to archival video, tiling cameras into
-composite **grid** videos, and copying to shared storage — is a single command:
+Everything after recording — transcoding to archival video, optionally tiling
+cameras into composite **grid** videos, and copying to shared storage — is a
+single command:
 
 ```bash
 octacam process <paths…>
@@ -20,11 +21,12 @@ and it does the rest.
 | Step | Skip flag | What it does |
 | --- | --- | --- |
 | Transcode | `--no-transcode` | Re-encode each recording to mp4 per its `recording_summary.json`. |
-| Grid | `--no-grid` | Build one composite tiled video per recording folder. |
+| Grid | `--no-grid` | Build one composite tiled video per `[[visualization]]` entry — **opt-in**, see below. |
 | Transfer | `--no-transfer` | Copy the outputs to the `[transfer]` destination. |
 
-So `--no-transcode --no-transfer` regenerates just the grids after a layout
-change, and `--no-grid` skips the composite step.
+Transcode and transfer run by default. The grid step only does something for a
+rig whose config asks for one, so `--no-transcode --no-transfer` regenerates just
+the grids after a layout change, and `--no-grid` skips even the configured ones.
 
 Other options:
 
@@ -34,7 +36,7 @@ Other options:
 | `--force` | Re-transcode / rebuild grids even when the output already exists. |
 | `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully (the summary is always kept). |
 | `--config`, `-c` | Fallback config dir for recordings that lack an embedded snapshot. |
-| `--dry-run` | Log the intended grid/transfer work without writing anything. |
+| `--dry-run` | List what each step would do (files to transcode, grids to build, files to transfer) without writing, copying, or deleting anything. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (stream ffmpeg's native output). |
 
 ## Transcoding
@@ -55,10 +57,14 @@ stream ffmpeg's own output verbatim instead.
 
 ## Grid video
 
-`process` generates one composite video per recording folder that tiles all
+`process` can generate one composite video per recording folder that tiles the
 cameras in a configurable grid, right after the individual files are transcoded.
-Each grid comes from a `[[visualization]]` entry in the rig's config; list
-several to produce several composites.
+
+This is **off by default**: each grid comes from a `[[visualization]]` entry in
+the rig's config, and a config without one builds no composite (compositing is
+minutes of extra ffmpeg per folder, which only the rigs that actually watch a
+grid should pay). Add an entry to turn it on; list several to produce several
+composites.
 
 ```toml
 [[visualization]]
@@ -73,8 +79,9 @@ layout = [
 Each cell is a camera name (as declared in `[[cameras]]`); an empty string `""`
 places a black fill. All rows must have the same number of columns.
 
-- If a config lists `[[cameras]]` but no `[[visualization]]`, a near-square
-  layout is derived from that rig's own cameras.
+- With no `[[visualization]]` entry, no grid is built (the step logs that it
+  skipped and moves on). `octacam config` offers to write a near-square layout of
+  your cameras when scaffolding a rig.
 - A cell naming a camera that isn't in `[[cameras]]` is reported (and renders
   black) rather than failing silently.
 
@@ -147,9 +154,23 @@ octacam process --all
 ```
 
 Each step shows a live progress bar (frame/fps/speed for transcode and grid;
-MB/s per file for transfer, then a verify pass). `--dry-run` logs the intended
-grid ffmpeg call and transfer plan without writing anything — handy for
-validating paths on a new workstation.
+MB/s per file for transfer, then a verify pass).
+
+### Seeing what is left to process
+
+Add `--dry-run` to list the work a run *would* do, without doing any of it:
+
+```bash
+octacam process --all --dry-run
+```
+
+It names each file still to transcode (and, with `-d`, each source it would
+delete), each grid still to build, and each file not yet at the transfer
+destination, then counts what is already done. A fully processed recording
+lists no work, only counts. Nothing is encoded, copied, or deleted, and a dry
+run never pauses for a live capture, so it is safe to run mid-session. It is
+also a quick way to check transfer paths on a new workstation. A grid whose
+input videos already exist is shown as its exact ffmpeg command.
 
 ## Running in the background (detached)
 

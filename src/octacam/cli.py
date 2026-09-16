@@ -390,7 +390,7 @@ def _print_transcode_hints(session_id: str) -> None:
     if not folders:
         return
     log.info(
-        "Recorded %d folder(s) this session. Transcode, grid, and transfer them with:\n"
+        "Recorded %d folder(s) this session. Transcode and transfer them with:\n"
         "  last session:  octacam process --last session\n"
         "  all sessions:  octacam process --all",
         len(folders),
@@ -2037,7 +2037,9 @@ def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
     """Offer a single auto-arranged ``grid.mp4`` visualization from named cameras.
 
     Only offered when at least two cameras are named (a grid of one is pointless);
-    the near-square layout reuses :func:`octacam.grid.auto_layout`."""
+    the near-square layout reuses :func:`octacam.grid.auto_layout`. Declining is
+    the default: `octacam process` builds a composite only for a rig that wrote a
+    ``[[visualization]]`` entry, so the answer here is the whole opt-in."""
     from rich.prompt import Confirm
 
     from octacam.grid import auto_layout
@@ -2046,8 +2048,9 @@ def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
     if len(names) < 2:
         return []
     if not Confirm.ask(
-        f"Add a visualization grid from the {len(names)} named camera(s)?",
-        default=True,
+        f"Also build a composite grid video of the {len(names)} named camera(s) "
+        "when processing recordings?",
+        default=False,
         console=console,
     ):
         return []
@@ -3882,25 +3885,15 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
     return OctacamConfig()
 
 
-def _visualizations_for(
-    cfg, summary_cameras: list[str]
-) -> list[tuple[str, list[list[str]] | None, str]]:
+def _visualizations_for(cfg) -> list[tuple[str, list[list[str]], str]]:
     """The (name, layout, ffmpeg_params) grids to build for one folder.
 
-    Uses the explicit ``[[visualization]]`` entries when present; otherwise
-    derives a single default ``grid.mp4`` from the rig's cameras (config, else
-    the summary's recorded camera names) so a grid is still produced. ``--no-grid``
-    skips grid generation entirely upstream of this.
+    Grids are **opt-in**: only the rig's explicit ``[[visualization]]`` entries
+    are built. A config without one produces no composite (octacam used to derive
+    a near-square layout from the rig's cameras, which spent minutes of ffmpeg on
+    a video most rigs never opened). ``--no-grid`` skips even the configured ones.
     """
-    if cfg.visualization:
-        return [(v.name, v.layout, v.ffmpeg_params) for v in cfg.visualization]
-    names = [c.name for c in cfg.cameras if c.name] or summary_cameras
-    if names:
-        from octacam.grid import auto_layout
-
-        return [("grid.mp4", auto_layout(names), "")]
-    # No camera names anywhere: let build_grid_video use its built-in default.
-    return [("grid.mp4", None, "")]
+    return [(v.name, v.layout, v.ffmpeg_params) for v in cfg.visualization]
 
 
 def _transfer_dest(cfg, folder: Path) -> Path | None:
@@ -3939,37 +3932,55 @@ def _grid_and_transfer(
 
     Two sequential phases (grids then transfers) so each gets its own progress
     bar. Returns the number of files that failed to transfer. When ``reporter`` is
-    set (a detached job) each phase reports progress and pauses between folders
-    while a gui/record owns the cameras."""
+    set (a detached job) each phase reports progress. Both phases pause between
+    folders while a gui/record owns the cameras, except on a dry run, which does
+    no heavy work.
+
+    On a dry run, ``folder_outputs`` may name outputs the transcode step only
+    planned. They aren't on disk to probe, so a grid built from any of them is
+    listed instead of having its ffmpeg call previewed."""
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
 
     # --- Phase 1: visualization grids ---------------------------------------
+    # Only folders whose config asks for a grid ([[visualization]]) take part, so
+    # on a rig that configured none the phase vanishes instead of running an empty
+    # pass (no progress bar, no job phase) over every folder.
     grid_files: dict[Path, list[Path]] = {}
-    if do_grid:
-        grid_bar = (
-            _GridProgressBar(len(folder_outputs))
-            if (show_bar and not dry_run)
-            else None
+    folder_grids = (
+        {f: _visualizations_for(folder_cfgs[f]) for f in folder_outputs}
+        if do_grid
+        else {}
+    )
+    grid_targets = [f for f in folder_outputs if folder_grids.get(f)]
+    if do_grid and not grid_targets:
+        log.info(
+            "Grid: no [[visualization]] entry in the config — skipping grid "
+            "generation (add one to the rig config to build a composite)"
         )
-        grid_skipped = 0
+    if grid_targets:
+        grid_bar = (
+            _GridProgressBar(len(grid_targets)) if (show_bar and not dry_run) else None
+        )
+        grid_skipped = grid_todo = 0
         if reporter is not None:
-            reporter.begin_phase("grid", len(folder_outputs))
+            reporter.begin_phase("grid", len(grid_targets))
         with grid_bar or contextlib.nullcontext():
-            for i, folder in enumerate(folder_outputs, 1):
-                _pause_gate(reporter, job_dir, unit="folder")
+            for i, folder in enumerate(grid_targets, 1):
+                if not dry_run:
+                    _pause_gate(reporter, job_dir, unit="folder")
                 if reporter is not None:
-                    reporter.item_started(i, len(folder_outputs), folder)
+                    reporter.item_started(i, len(grid_targets), folder)
                 cfg = folder_cfgs[folder]
-                summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
-                summary_cams = [
-                    c.get("name") for c in summary.get("cameras", []) if c.get("name")
-                ]
+                planned = (
+                    [p for p in folder_outputs[folder] if not p.exists()]
+                    if dry_run
+                    else []
+                )
                 built: list[Path] = []
-                for name, layout, ff in _visualizations_for(cfg, summary_cams):
+                for name, layout, ff in folder_grids[folder]:
                     out_path = folder / name
                     if out_path.exists() and not force:
                         # Idempotent re-run: the grid is already built. Grid
@@ -3978,6 +3989,17 @@ def _grid_and_transfer(
                         # transfer phase (which skips it if already copied).
                         # Counted for the summary rather than logged per grid.
                         grid_skipped += 1
+                        built.append(out_path)
+                        continue
+                    cells = {cell for row in layout for cell in row if cell}
+                    waiting = [p.name for p in planned if p.stem in cells]
+                    if waiting:
+                        log.info(
+                            "[dry-run] grid: %s (waits for: %s)",
+                            out_path,
+                            ", ".join(waiting),
+                        )
+                        grid_todo += 1
                         built.append(out_path)
                         continue
                     on_prog = grid_bar.folder(i, folder) if grid_bar else None
@@ -3990,14 +4012,20 @@ def _grid_and_transfer(
                         on_progress=on_prog,
                     )
                     if out is not None:
+                        grid_todo += 1
                         built.append(out)
                 grid_files[folder] = built
                 if reporter is not None:
                     reporter.item_done()
-        if grid_skipped:
+        if dry_run:
             log.info(
-                "%sGrid: %d already exist — skipping (use --force to rebuild)",
-                "[dry-run] " if dry_run else "",
+                "[dry-run] Grid: %d to build, %d already exist",
+                grid_todo,
+                grid_skipped,
+            )
+        elif grid_skipped:
+            log.info(
+                "Grid: %d already exist — skipping (use --force to rebuild)",
                 grid_skipped,
             )
 
@@ -4011,7 +4039,8 @@ def _grid_and_transfer(
         with transfer_bar or contextlib.nullcontext():
             transfer_cb = transfer_bar.make_callback() if transfer_bar else None
             for i, (folder, outputs) in enumerate(folder_outputs.items(), 1):
-                _pause_gate(reporter, job_dir, unit="folder")
+                if not dry_run:
+                    _pause_gate(reporter, job_dir, unit="folder")
                 if reporter is not None:
                     reporter.item_started(i, len(folder_outputs), folder)
                 cfg = folder_cfgs[folder]
@@ -4214,7 +4243,9 @@ def process(
     ] = False,
     no_grid: Annotated[
         bool,
-        typer.Option("--no-grid", help="Skip building the visualization grid(s)."),
+        typer.Option(
+            "--no-grid", help="Skip building the configured visualization grid(s)."
+        ),
     ] = False,
     no_transfer: Annotated[
         bool,
@@ -4264,9 +4295,9 @@ def process(
         bool,
         typer.Option(
             "--dry-run",
-            help="For grid/transfer: log what would be done without running ffmpeg "
-            "or copying files. Transcoding still runs normally; --delete-source is "
-            "suppressed (logged, not applied).",
+            help="List what each step would do (files to transcode, grids to build, "
+            "files to transfer) without running ffmpeg, copying, or deleting "
+            "anything. Work that is already done is only counted.",
         ),
     ] = False,
     detach: Annotated[
@@ -4289,14 +4320,18 @@ def process(
 
     Every setting — encoder args, grid layouts, transfer destination — is read
     from each recording's own octacam_config.toml (copied in at record time), so
-    no --config is needed. All three steps run by default; disable any with
-    --no-transcode / --no-grid / --no-transfer.
+    no --config is needed. Transcode and transfer run by default (disable with
+    --no-transcode / --no-transfer); the composite grid is opt-in — it is built
+    only for a rig whose config carries a [[visualization]] entry, and --no-grid
+    skips even those.
 
     Re-running is safe and resumes where it left off: each step skips outputs
     that already exist — a finished transcode .mp4, a built grid, or a file
     already at the transfer destination — so only missing work is redone. Pass
     --force to rebuild existing transcodes and grids anyway (e.g. after changing
-    the encoder params or grid layout).
+    the encoder params or grid layout). --dry-run lists that missing work without
+    doing any of it, so `octacam process --all --dry-run` shows what is left to
+    process.
 
     Instead of PATHS, pass --last (the most recent recording; same as --last
     recording), --last session (the last GUI session), --session-id (an exact
@@ -4349,17 +4384,25 @@ def process(
     # the stderr console report is_terminal — but its animated bar would then
     # pollute the log with cursor-control codes and, worse, bypass the reporter's
     # status.json percent that `octacam jobs attach` renders. Keep the live bar to
-    # real foreground runs; the worker's progress rides status.json instead.
-    show_bar = not raw_output and worker is None and _stderr_console().is_terminal
+    # real foreground runs; the worker's progress rides status.json instead. A dry
+    # run has no progress to show.
+    show_bar = (
+        not raw_output
+        and not dry_run
+        and worker is None
+        and _stderr_console().is_terminal
+    )
 
     def _run() -> None:
-        # Which output mp4s exist per source folder, so grid/transfer run once per
-        # folder after its files are done. Insertion-ordered (3.7+).
+        # Which output mp4s exist per source folder (on a dry run, also the ones
+        # the transcode would write), so grid/transfer run once per folder after
+        # its files are done. Insertion-ordered (3.7+).
         folder_outputs: dict[Path, list[Path]] = {}
         cfg_cache: dict[Path, object] = {}
         failures = 0
         completed = 0
         skipped = 0
+        planned = 0
         interrupted = False
 
         # --- Transcode phase ------------------------------------------------
@@ -4372,7 +4415,11 @@ def process(
                 if reporter is not None:
                     reporter.begin_phase("transcode", len(jobs))
                 with (
-                    session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
+                    # A dry run encodes nothing, so it must not tell a gui/record
+                    # launch that a transcode is competing for the CPU.
+                    contextlib.nullcontext()
+                    if dry_run
+                    else session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
                     bar or contextlib.nullcontext(),
                 ):
                     # A Ctrl-C stops the batch where it stands: transcode_file kills
@@ -4381,8 +4428,11 @@ def process(
                         for index, job in enumerate(jobs, 1):
                             # Pause between files while a gui/record owns the
                             # cameras (or a manual pause is set); a queued cancel
-                            # (SIGINT) breaks the gate and wins.
-                            _pause_gate(reporter, job_dir, unit="file")
+                            # (SIGINT) breaks the gate and wins. A dry run is often
+                            # wanted mid-session and does no heavy work, so it
+                            # never waits.
+                            if not dry_run:
+                                _pause_gate(reporter, job_dir, unit="file")
                             input_path = job.input_path
                             output = input_path.with_suffix(".mp4")
                             if reporter is not None:
@@ -4408,6 +4458,23 @@ def process(
                                 # file so a full re-run doesn't spam one line per
                                 # output.
                                 skipped += 1
+                                folder_outputs.setdefault(folder, []).append(output)
+                                if reporter is not None:
+                                    reporter.item_done()
+                                continue
+                            if dry_run:
+                                # List the encode, and pass its not-yet-written
+                                # output on so grid/transfer plan around it too.
+                                log.info(
+                                    "[dry-run] transcode: %s → %s",
+                                    input_path,
+                                    output.name,
+                                )
+                                if delete_source:
+                                    log.info(
+                                        "[dry-run] would delete source: %s", input_path
+                                    )
+                                planned += 1
                                 folder_outputs.setdefault(folder, []).append(output)
                                 if reporter is not None:
                                     reporter.item_done()
@@ -4445,13 +4512,17 @@ def process(
                             folder_outputs.setdefault(folder, []).append(output)
                             if reporter is not None:
                                 reporter.item_done()
-                            if delete_source and not dry_run:
+                            if delete_source:
                                 _delete_source_files(input_path)
-                            elif delete_source and dry_run:
-                                log.info("[dry-run] would delete source: %s", input_path)
                     except KeyboardInterrupt:
                         interrupted = True
-                if not interrupted:
+                if dry_run and not interrupted:
+                    log.info(
+                        "[dry-run] Transcode: %d to transcode, %d already done",
+                        planned,
+                        skipped,
+                    )
+                elif not interrupted:
                     log.info(
                         "Transcode: %d done, %d skipped, %d failed%s",
                         completed,

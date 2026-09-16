@@ -111,7 +111,8 @@ src/octacam/
   firmware.py       Arduino sketch fingerprinting + arduino-cli flashing
   serial_ports.py   serial-port detection, USB bus-reset recovery
   transfer.py       octacam process → mirror recordings to storage
-  grid.py           octacam process → composite grid videos (ffmpeg xstack)
+  grid.py           octacam process → composite grid videos (ffmpeg xstack;
+                    opt-in per rig via [[visualization]], no built-in layout)
   session_cache.py  remembers recording folders for `process --last/--all`
   camera.py         re-exports CameraSystem/Camera/PARAM_NODES
   cameras/          the backend layer (see below)
@@ -363,7 +364,12 @@ the now-running server. On shutdown the finally sets a `stopping` event and
 teardown. The **adaptive preview** protocol sends a per-client
 per-camera "view spec"; the server encodes each distinct on-screen resolution
 once and shares it (cost tracks resolutions, not clients), with server-side crop
-of a zoomed region (frame header v2). The **Camera tab** is a full GenApi
+of a zoomed region (frame header v2). Each **camera** encodes on its own executor
+task (`_encode_camera`, one `run_in_executor` per camera per tick) — `cv2.imencode`
+releases the GIL, so a tick costs the slowest camera, not the sum; serializing it
+again silently reintroduces a cost linear in rig size that overruns the 33 ms
+refresh (8× 2048² focused: 85 ms serial vs 14 ms parallel). Everything the encode
+needs is passed in by value, so the workers touch no shared state. The **Camera tab** is a full GenApi
 node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writable
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.

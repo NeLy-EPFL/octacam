@@ -771,15 +771,39 @@ class _AppState:
                 frame = camera.frame_for_display.pop()
                 if frame is None:
                     continue
-                jobs.append((index, camera, frame, groups))
+                # One monotonic frame number and one telemetry snapshot per
+                # camera per tick, shared across that camera's variants. Taken
+                # here, on the event-loop thread, so the counter is never
+                # mutated from the encode workers below.
+                count = self._frame_counters.get(index, 0) + 1
+                self._frame_counters[index] = count
+                jobs.append((
+                    index,
+                    frame,
+                    groups,
+                    count,
+                    time.time_ns(),
+                    camera.resulting_fps,
+                    camera.dropped_count,
+                ))
             if not jobs:
                 continue
-            messages = await loop.run_in_executor(
-                None, self._encode_jobs, jobs, recording
-            )
-            for camera_index, message, group in messages:
-                for client in group:
-                    client.queue_frame(camera_index, message)
+            # One executor task per camera rather than one task encoding every
+            # camera in sequence: cv2.imencode releases the GIL, so the cameras
+            # encode concurrently and the tick costs the slowest single camera
+            # instead of the sum. At the 33 ms default refresh this is the
+            # difference between fitting in the budget and not — eight 2048²
+            # cameras on a focused (1:1) tile measure ~85 ms serially vs ~14 ms
+            # in parallel, and the serial cost grows linearly with the rig size.
+            flags = 1 if recording else 0
+            batches = await asyncio.gather(*[
+                loop.run_in_executor(None, self._encode_camera, job, flags)
+                for job in jobs
+            ])
+            for messages in batches:
+                for camera_index, message, group in messages:
+                    for client in group:
+                        client.queue_frame(camera_index, message)
 
     @staticmethod
     def _cap_variants(
@@ -811,42 +835,40 @@ class _AppState:
                 continue
             bucket.extend(groups.pop(key))
 
-    def _encode_jobs(
-        self, jobs, recording: bool
-    ) -> list[tuple[int, bytes, list["_Client"]]]:
+    @staticmethod
+    def _encode_camera(job, flags: int) -> list[tuple[int, bytes, list["_Client"]]]:
+        """Encode every on-screen variant of ONE camera's frame.
+
+        Runs on an executor thread, one call per camera per tick (see
+        :meth:`preview_loop`). Everything it needs is passed in — it touches no
+        shared state and no camera object — so the cameras encode concurrently
+        while cv2 has the GIL released.
+        """
         import cv2
 
-        flags = 1 if recording else 0
+        index, frame, groups, count, timestamp, fps, dropped = job
+        frame_h, frame_w = frame.shape
         messages = []
-        for index, camera, frame, groups in jobs:
-            # One monotonic frame number and one telemetry snapshot per camera
-            # per tick, shared across that camera's variants.
-            frame_h, frame_w = frame.shape
-            count = self._frame_counters.get(index, 0) + 1
-            self._frame_counters[index] = count
-            timestamp = time.time_ns()
-            fps = camera.resulting_fps
-            dropped = camera.dropped_count
-            for (region, factor), group in groups.items():
-                # Re-clamp against the frame actually popped (it may differ from
-                # camera.width/height for one frame across a live geometry
-                # change); numpy would silently clip otherwise.
-                x, y, w, h = _clamp_crop(region, frame_w, frame_h)
-                whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
-                if factor > 1 or not whole:
-                    sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
-                else:
-                    sub = np.ascontiguousarray(frame)
-                ok, jpeg = cv2.imencode(
-                    ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-                )
-                if not ok:
-                    continue
-                header = FRAME_HEADER.pack(
-                    FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
-                    x, y, w, h, frame_w, frame_h,
-                )
-                messages.append((index, header + jpeg.tobytes(), group))
+        for (region, factor), group in groups.items():
+            # Re-clamp against the frame actually popped (it may differ from
+            # camera.width/height for one frame across a live geometry
+            # change); numpy would silently clip otherwise.
+            x, y, w, h = _clamp_crop(region, frame_w, frame_h)
+            whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
+            if factor > 1 or not whole:
+                sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
+            else:
+                sub = np.ascontiguousarray(frame)
+            ok, jpeg = cv2.imencode(
+                ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            )
+            if not ok:
+                continue
+            header = FRAME_HEADER.pack(
+                FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
+                x, y, w, h, frame_w, frame_h,
+            )
+            messages.append((index, header + jpeg.tobytes(), group))
         return messages
 
     async def telemetry_loop(self) -> None:

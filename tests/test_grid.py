@@ -325,3 +325,112 @@ def test_auto_layout_shapes():
     flat = [cell for row in seven for cell in row]
     assert flat[:7] == [f"c{i}" for i in range(7)]
     assert flat[7:] == ["", ""]  # last row padded with black cells
+
+
+# --- ffprobe discovery -------------------------------------------------------
+# ffprobe is a *separate* binary from ffmpeg and imageio-ffmpeg bundles ffmpeg
+# only, so "we found an ffmpeg" never implies "we have an ffprobe". A missing one
+# used to raise FileNotFoundError out of _probe_video, past every per-cell guard,
+# and abort the whole `octacam process` run after the transcodes but before the
+# transfer.
+
+
+def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch):
+    from octacam import grid as grid_mod
+
+    def _no_ffprobe():
+        raise RuntimeError("No ffprobe executable found: ...")
+
+    monkeypatch.setattr("octacam.writer.find_ffprobe", _no_ffprobe)
+    _gray_mp4(tmp_path, "a")
+    # A direct handler, not caplog: another test (the CLI's _setup_logging) may
+    # leave propagate=False on the octacam logger, which empties caplog.
+    handler = _ListHandler()
+    logger = logging.getLogger("octacam")
+    prev_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
+    try:
+        out = grid_mod.build_grid_video(tmp_path, layout=[["a", ""]], dry_run=True)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prev_level)
+    assert out is None  # skipped, not raised
+    # ...and the operator is told the real reason, not "no probeable mp4 files".
+    assert any("ffprobe" in m for m in handler.messages), handler.messages
+
+
+def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch):
+    # A per-file OSError (e.g. the probe binary vanishing mid-run) must degrade
+    # that one cell to black, not abort the grid.
+    from octacam import grid as grid_mod
+
+    real = grid_mod._probe_video
+
+    def flaky(path, ffprobe):
+        if path.name == "b.mp4":
+            raise OSError("probe blew up on this file")
+        return real(path, ffprobe)
+
+    _gray_mp4(tmp_path, "a")
+    _gray_mp4(tmp_path, "b")
+    monkeypatch.setattr(grid_mod, "_probe_video", flaky)
+    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    assert "b.mp4" not in cmd
+    assert f"color=black:size={W}x{H}" in cmd
+
+
+def test_probe_runs_off_the_tty_and_is_bounded(tmp_path, monkeypatch):
+    # Every ffmpeg-family launch in octacam keeps stdin off the controlling tty
+    # (a kill mid-probe must not leave the terminal in no-echo mode) and is
+    # bounded, so a hung probe can't wedge the run.
+    from octacam import grid as grid_mod
+
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        seen["argv0"] = cmd[0]
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(grid_mod.subprocess, "run", fake_run)
+    _gray_mp4(tmp_path, "a")
+    grid_mod.build_grid_video(tmp_path, layout=[["a", ""]], dry_run=True)
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["timeout"] == grid_mod.PROBE_TIMEOUT_S
+    # ...and it is a resolved path, never the bare name off $PATH.
+    assert os.path.isabs(seen["argv0"]), seen["argv0"]
+
+
+def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
+    # A rig pinning OCTACAM_FFMPEG must probe with that build's own ffprobe, not
+    # whatever older ffprobe happens to come first on $PATH.
+    import stat
+
+    from octacam.writer import find_ffprobe
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        exe = bindir / name
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.delenv("OCTACAM_FFPROBE", raising=False)
+    monkeypatch.setenv("OCTACAM_FFMPEG", str(bindir / "ffmpeg"))
+    assert find_ffprobe() == str(bindir / "ffprobe")
+
+    # No sibling next to the chosen ffmpeg -> fall back to $PATH...
+    (bindir / "ffprobe").unlink()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    path_probe = other / "ffprobe"
+    path_probe.write_text("#!/bin/sh\nexit 0\n")
+    path_probe.chmod(path_probe.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(other))
+    assert find_ffprobe() == str(path_probe)
+
+    # ...and with neither, a clean RuntimeError the caller can degrade on —
+    # never a bare FileNotFoundError from deep inside the probe.
+    path_probe.unlink()
+    with pytest.raises(RuntimeError, match="No ffprobe"):
+        find_ffprobe()

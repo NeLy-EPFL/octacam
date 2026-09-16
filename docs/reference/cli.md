@@ -141,8 +141,9 @@ available from the GUI's **Benchmark** tab.
 octacam process [PATHS…]
 ```
 
-Transcode recordings to mp4, build composite grid videos, and transfer to
-storage — all driven by each recording's embedded config snapshot. Pass
+Transcode recordings to mp4, build the configured composite grid videos, and
+transfer to storage — all driven by each recording's embedded config snapshot.
+Grids are built only for a rig whose config has a `[[visualization]]` entry. Pass
 recording folders (or parent directories with `-r`), or select from the cache
 with `--last` / `--last session` / `--all`. See
 [Processing](../guide/processing.md).
@@ -163,17 +164,18 @@ with `--last` / `--last session` / `--all`. See
 | --- | --- |
 | `-r`, `--recursive` | Recurse into the given folders. |
 | `--no-transcode` | Skip transcoding; grid/transfer act on existing mp4s. |
-| `--no-grid` | Skip building the grid video(s). |
+| `--no-grid` | Skip building the configured grid video(s). |
 | `--no-transfer` | Skip transferring to the `[transfer]` destination. |
 | `--force` | Re-transcode / rebuild grids even if outputs already exist. |
 | `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
 | `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
-| `--dry-run` | Log the intended grid/transfer work without writing anything. |
+| `--dry-run` | List what each step would do (files to transcode, grids to build, files to transfer) without writing, copying, or deleting anything. |
 | `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |
 
 A running job (detached or foreground) auto-pauses while an `octacam gui`/`record`
-on the same machine owns the cameras, and resumes when they are free. See
+on the same machine owns the cameras, and resumes when they are free. A
+`--dry-run` does no heavy work and never pauses. See
 [Processing](../guide/processing.md#running-in-the-background-detached).
 
 ## `jobs`

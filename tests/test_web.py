@@ -1542,3 +1542,82 @@ def test_system_surfaces_injected_update_notice(client):
     assert data["update"]["available"] is True
     assert data["update"]["latest"] == "0.9.0"
     assert data["update"]["command"] == "uv tool upgrade octacam"
+
+
+def test_encode_camera_is_pure_and_shares_one_header_per_camera():
+    """_encode_camera takes everything it needs by value.
+
+    It runs on an executor thread (one call per camera per tick), so it must
+    touch no shared state and no camera object — that is what lets the cameras
+    encode concurrently while cv2 has the GIL released.
+    """
+    from octacam.web.app import FRAME_VERSION, _AppState
+
+    frame = (np.random.rand(64, 64) * 255).astype(np.uint8)
+    groups = {
+        ((0, 0, 64, 64), 1): ["client-a"],
+        ((0, 0, 32, 32), 1): ["client-b"],  # a distinct crop -> its own encode
+    }
+    job = (1, frame, groups, 7, 123456789, 42.5, 3)
+    messages = _AppState._encode_camera(job, 1)
+
+    assert len(messages) == 2  # one encode per distinct variant
+    for camera_index, message, group in messages:
+        assert camera_index == 1
+        fields = FRAME_HEADER.unpack(message[: FRAME_HEADER.size])
+        version, kind, cam, flags, count, ts, fps, dropped = fields[:8]
+        assert (version, kind, cam, flags) == (FRAME_VERSION, 1, 1, 1)
+        # The per-camera telemetry is shared verbatim across that camera's
+        # variants — computed once on the event loop, not re-read per variant.
+        assert (count, ts, dropped) == (7, 123456789, 3)
+        assert abs(fps - 42.5) < 1e-3
+        assert group and group[0] in ("client-a", "client-b")
+    # The two variants carry different crop rects (never cross-merged).
+    rects = {FRAME_HEADER.unpack(m[: FRAME_HEADER.size])[8:12] for _, m, _ in messages}
+    assert rects == {(0, 0, 64, 64), (0, 0, 32, 32)}
+
+
+def test_preview_tick_encodes_cameras_concurrently(client):
+    """One executor task per camera, not one task encoding them in sequence.
+
+    cv2.imencode releases the GIL, so per-camera dispatch makes a tick cost the
+    slowest single camera instead of the sum. Re-serializing this (a single
+    run_in_executor over all cameras) silently reintroduces a cost that grows
+    linearly with the rig size — at 2048x2048 it overruns the 33 ms tick outright.
+    The encodes here are padded with a sleep so the overlap is observable:
+    serialized, peak concurrency can never exceed 1.
+    """
+    import threading
+
+    from octacam.web.app import _AppState
+
+    live = 0
+    peak = 0
+    seen_cameras = set()
+    lock = threading.Lock()
+    real = _AppState._encode_camera
+
+    def instrumented(job, flags):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+            seen_cameras.add(job[0])
+        try:
+            time.sleep(0.03)  # wide enough for a concurrent partner to overlap
+            return real(job, flags)
+        finally:
+            with lock:
+                live -= 1
+
+    _AppState._encode_camera = staticmethod(instrumented)
+    try:
+        with client.websocket_connect("/api/ws") as ws:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and (peak < 2 or len(seen_cameras) < 2):
+                ws.receive()
+    finally:
+        _AppState._encode_camera = staticmethod(real)
+
+    assert seen_cameras == {0, 1}, seen_cameras
+    assert peak == 2, f"cameras were encoded serially (peak concurrency {peak})"

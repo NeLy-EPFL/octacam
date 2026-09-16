@@ -76,8 +76,9 @@ snapshot of the rig config into its own folder. See [Recording](guide/recording.
 
 ## 5. Archive everything
 
-Turn the day's recordings into transcoded videos, composite grid videos, and
-copies on shared storage — one command, no paths to type:
+Turn the day's recordings into transcoded videos (plus any composite grid videos
+the rig config asks for) and copies on shared storage — one command, no paths to
+type:
 
 ```bash
 octacam process --all

@@ -337,7 +337,9 @@ def transfer_folder(
         *folder*).  ``recording_summary.json`` and ``timestamps.npz`` are always
         appended if present.
     dry_run:
-        Log intended operations without touching the filesystem.
+        Log intended operations without touching the filesystem.  A file in
+        *files_only* that doesn't exist yet (an output an earlier dry-run step
+        only planned) is reported as a copy.
     verify:
         Content-verify each freshly-copied file (blake2b of the source vs. the
         written temp) before promoting it to its final name.  Disable for a
@@ -375,7 +377,9 @@ def transfer_folder(
     if dry_run:
         for f in candidates:
             target = dest / f.name
-            if _should_skip(f, target, checksum=checksum):
+            # A planned output has no bytes to compare yet; a real run would
+            # produce it first and then copy it.
+            if f.exists() and _should_skip(f, target, checksum=checksum):
                 # Already present (size/checksum match): a real run would skip
                 # it, so the preview must report a skip — not a phantom copy.
                 result.skipped.append(f.name)

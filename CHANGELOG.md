@@ -29,6 +29,23 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- **Composite grid videos are now opt-in** — `octacam process` used to build a
+  `grid.mp4` for every recording, falling back to a layout derived from the rig's
+  cameras (or a built-in 7-camera one) when the config named none. It now
+  composites only what the config asks for: a rig with no `[[visualization]]`
+  entry gets no grid, and pays none of the extra ffmpeg time per folder. Add an
+  entry to keep the old behavior — `octacam config` offers to write a near-square
+  one for your cameras — and `--no-grid` still skips the configured grids.
+- **Preview encodes the cameras in parallel** — one tick used to encode every
+  camera's JPEG in sequence on a single worker, so preview cost grew linearly
+  with the rig. `cv2.imencode` releases the GIL, so each camera now encodes on
+  its own executor task and a tick costs the slowest single camera instead of the
+  sum: measured on the test box, eight 2048² cameras on a focused (1:1) tile drop
+  from **85 ms to 14 ms**, and a maximized tile while recording from 26 ms to
+  4.4 ms — the difference between overrunning the 33 ms refresh interval and
+  fitting inside it. Per-camera frame counters are now stamped on the event loop
+  rather than in the worker, so nothing shared is touched from the encode threads.
+
 - **Instant GUI startup** — `octacam gui` now binds the web server and serves the
   page *before* opening the cameras. The browser shows the full UI immediately
   (with a "connecting to cameras" placeholder in the preview area); the cameras
@@ -45,6 +62,48 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   crash-safe (a crashed gui/record auto-clears the pause).
 
 ### Fixed
+
+- **`octacam process --dry-run` no longer transcodes** — the flag only simulated
+  the grid and transfer steps. The transcode step still ran ffmpeg on every
+  pending file, so previewing `--all` could spend hours encoding, and a dry run
+  started while the GUI owned the cameras paused until the capture ended. A dry
+  run now does no work at all: it lists each file it would transcode (and, with
+  `-d`, each source it would delete), each grid it would build, and each file it
+  would transfer, and only counts what is already done. That makes
+  `octacam process --all --dry-run` the way to see what is left to process. The
+  grid and transfer plans include the outputs the transcode step would write,
+  and a dry run never waits on a live capture.
+
+- **Two `octacam process` runs over one folder no longer destroy each other's
+  work** — an in-progress transcode wrote to a temp whose name was derived only
+  from the output (`.<stem>.octacam-part<ext>`), and `_atomic_output` deleted
+  that name on entry to clear orphans. So a second run (trivially: `--last` in
+  two terminals) unlinked the first run's live temp and then renamed a file it
+  had not written onto the output; the loser failed with a bare
+  `FileNotFoundError` from `os.replace`. Temps are now unique per process and
+  call (pid + uuid), matching what `octacam.transfer` already did for copies.
+  Orphan reclamation is unchanged in practice and more precise: `_atomic_output`
+  holds an advisory `flock` on its temp, so a re-run after a hard kill still
+  frees the previous attempt's (possibly multi-GB) disk immediately, while a
+  concurrent run's live temp is never touched — no timing heuristic. Temps left
+  by an older octacam are still recognised and reclaimed, and the temp keeps the
+  output's real extension last so ffmpeg still infers the muxer.
+
+- **A missing `ffprobe` no longer aborts `octacam process`** — the grid
+  compositor probed each cell with a bare `ffprobe` off `$PATH`, but `ffprobe` is
+  a *separate* binary from `ffmpeg` and imageio-ffmpeg bundles ffmpeg only. On a
+  host with no system ffmpeg the probe raised `FileNotFoundError`, which is not
+  one of the errors the per-cell guard catches, so it escaped
+  `build_grid_video` and killed the whole run — *after* the transcodes had
+  finished but *before* the transfer, leaving the recordings un-mirrored. octacam
+  now resolves ffprobe next to the ffmpeg it actually uses (so a rig pinning
+  `OCTACAM_FFMPEG` probes with that same build rather than an unrelated older
+  ffprobe first on `$PATH`; `OCTACAM_FFPROBE` overrides), reports a missing one
+  as a skipped grid with the real reason, and treats a per-file probe error as a
+  black cell as documented. The probe also now runs with `stdin=DEVNULL` — the
+  rule every other ffmpeg-family launch here already followed, so a kill
+  mid-probe cannot leave the terminal in no-echo mode — and is bounded by a
+  30 s timeout instead of hanging the run on a corrupt or network-backed file.
 
 - **One sick camera can no longer stall startup for minutes** — a USB3 camera
   whose link trains at full SuperSpeed but whose control transfers time out

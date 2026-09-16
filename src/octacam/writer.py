@@ -18,6 +18,8 @@ full (or once the sink has failed). Available sinks:
 # pyright: reportOptionalMemberAccess=false
 
 import contextlib
+import errno
+import glob
 import logging
 import os
 import queue
@@ -26,10 +28,16 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - POSIX only; see _partial_is_live
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger("octacam")
 
@@ -369,6 +377,41 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
         f"no ffmpeg with a working {require_encoder} encoder was found "
         f"(install a system ffmpeg built with {require_encoder} and a matching "
         "NVIDIA driver, or set OCTACAM_FFMPEG to one)."
+    )
+
+
+def find_ffprobe() -> str:
+    """Locate an ffprobe executable, preferring the one beside our ffmpeg.
+
+    ``$OCTACAM_FFPROBE`` wins; otherwise the sibling of :func:`find_ffmpeg`'s
+    choice is tried first so the probe and the encode come from the *same*
+    build (a rig pinning ``$OCTACAM_FFMPEG=/opt/ffmpeg/bin/ffmpeg`` gets
+    ``/opt/ffmpeg/bin/ffprobe``, not whatever older ffprobe happens to be first
+    on $PATH), then $PATH.
+
+    Note that imageio-ffmpeg bundles ``ffmpeg`` only — there is no ffprobe
+    beside it — so on a pip install with no system ffmpeg this legitimately
+    finds nothing and raises. Callers that can degrade (the grid compositor)
+    must catch RuntimeError rather than let it abort the run.
+    """
+    exe = os.environ.get("OCTACAM_FFPROBE")
+    if exe:
+        return exe
+    try:
+        sibling = Path(find_ffmpeg()).with_name(
+            "ffprobe.exe" if os.name == "nt" else "ffprobe"
+        )
+    except RuntimeError:
+        sibling = None
+    if sibling is not None and os.path.isfile(sibling) and os.access(sibling, os.X_OK):
+        return str(sibling)
+    exe = shutil.which("ffprobe")
+    if exe:
+        return exe
+    raise RuntimeError(
+        "No ffprobe executable found: install a system ffmpeg (the bundled "
+        "imageio-ffmpeg binary ships ffmpeg only, without ffprobe), or set "
+        "OCTACAM_FFPROBE."
     )
 
 
@@ -964,14 +1007,47 @@ def default_save_method(record_config) -> str:
 PARTIAL_INFIX = ".octacam-part"
 
 
+# Only used where flock is unavailable (see _partial_is_live): a temp nobody has
+# touched for this long is treated as an orphan. Generous, because the fallback
+# cannot tell a live writer from a dead one and deleting a live temp is worse
+# than leaving a dead one — a live ffmpeg keeps its temp's mtime within seconds.
+_PARTIAL_IDLE_S = 6 * 3600
+
+
 def _partial_path(output: Path) -> Path:
-    """Sibling temp path an in-progress encode of ``output`` writes to.
+    """A unique sibling temp path an in-progress encode of ``output`` writes to.
 
     Lives in ``output``'s own directory (so the final rename is an atomic,
     same-filesystem ``os.replace``) and is hidden + tagged with
-    :data:`PARTIAL_INFIX`, yet keeps ``output``'s real extension last so ffmpeg
-    still infers the container muxer from the filename."""
-    return output.with_name(f".{output.stem}{PARTIAL_INFIX}{output.suffix}")
+    :data:`PARTIAL_INFIX`, yet keeps ``output``'s real extension **last** so
+    ffmpeg still infers the container muxer from the filename.
+
+    Unique per process + call (pid + uuid), like :func:`octacam.transfer.
+    _temp_path`: this name used to be deterministic, so two ``octacam process``
+    runs over one folder (trivially: ``--last`` in two terminals) each cleared
+    the other's in-flight temp on entry and then renamed a file they had not
+    written onto the output. :func:`_sweep_orphan_partials` reclaims the ones a
+    hard kill leaves behind.
+    """
+    return output.with_name(
+        f".{output.stem}{PARTIAL_INFIX}.{os.getpid()}.{uuid.uuid4().hex}"
+        f"{output.suffix}"
+    )
+
+
+def _partial_glob(output: Path) -> str:
+    """Glob matching every temp for ``output``.
+
+    Deliberately loose around the infix so it also matches the older
+    deterministic ``.<stem>.octacam-part<ext>`` name — an orphan left by a
+    previous octacam version is still reclaimed.
+
+    The stem and suffix are ``glob.escape``-d: a camera name is only required to
+    be a single path segment, so ``cam[1]`` is a legal name — and unescaped, its
+    pattern is a character class that matches ``cam1``'s temp instead, letting
+    the sweep delete a *different* camera's file.
+    """
+    return f".{glob.escape(output.stem)}{PARTIAL_INFIX}*{glob.escape(output.suffix)}"
 
 
 def is_partial_transcode(path: Path) -> bool:
@@ -980,6 +1056,67 @@ def is_partial_transcode(path: Path) -> bool:
     Lets a folder scan skip a partial output a crash/SIGKILL orphaned before
     its cleanup could run — a Ctrl-C or any caught failure removes it itself."""
     return PARTIAL_INFIX in path.name
+
+
+def _partial_is_live(path: Path) -> bool:
+    """Whether some process is still writing *path*.
+
+    :func:`_atomic_output` holds an advisory ``flock`` on its temp for exactly
+    as long as it owns it, so a temp we *can* lock is one whose writer is gone.
+    That makes reclamation precise and immediate — re-running after a hard kill
+    frees the previous attempt's (potentially multi-GB) disk at once — with no
+    timing heuristic that could delete a concurrent run's live temp.
+
+    Where locking is unsupported (some network mounts) we fall back to an
+    idle-mtime test. Anything we cannot inspect is reported live, so the
+    sweep's failure mode is always "leave it alone".
+    """
+    if fcntl is None:  # pragma: no cover - POSIX only
+        return _partial_is_recent(path)
+    try:
+        handle = open(path, "r+")
+    except OSError:
+        return True
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                return True  # a live _atomic_output holds it
+            # flock not supported here — fall back to the mtime heuristic.
+            return _partial_is_recent(path)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            handle.close()
+
+
+def _partial_is_recent(path: Path) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime < _PARTIAL_IDLE_S
+    except OSError:
+        return True
+
+
+def _sweep_orphan_partials(output: Path, keep: Path) -> None:
+    """Delete temps for *output* whose writer is gone; never a live one.
+
+    Replaces the old unconditional ``unlink`` of the one deterministic temp
+    name, which was also what made two concurrent runs destroy each other's
+    work."""
+    try:
+        stale_paths = list(output.parent.glob(_partial_glob(output)))
+    except OSError:
+        return
+    for stale in stale_paths:
+        if stale == keep:
+            continue
+        try:
+            if not _partial_is_live(stale):
+                stale.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 @contextlib.contextmanager
@@ -992,17 +1129,39 @@ def _atomic_output(output: Path):
     or a Ctrl-C (KeyboardInterrupt) / kill that propagates out mid-encode. So a
     partial encode never appears at ``output``, and an interrupted run never
     clobbers an existing ``output`` (the rename happens only once the new file
-    is whole)."""
+    is whole).
+
+    The temp is created and ``flock``-ed here, before ffmpeg runs, so a
+    concurrent run can tell a live temp from an orphan (see
+    :func:`_partial_is_live`). Pre-creating it is safe because every caller
+    passes ``-y``, and the advisory lock does not impede ffmpeg's own writes.
+    """
     tmp = _partial_path(output)
-    tmp.unlink(missing_ok=True)  # clear any orphan a prior hard kill left
     try:
-        yield tmp
-        # Swap in only once the encode is whole. Inside the try so a failed
-        # rename cleans up too, never stranding the temp.
-        os.replace(tmp, output)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        lock = open(tmp, "w")
+    except OSError:
+        # Cannot even create the temp (read-only dir, ENOSPC): let the encode
+        # below fail with the real error rather than masking it here.
+        lock = None
+    if lock is not None and fcntl is not None:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        # Reclaim orphans a prior hard kill left, now that our own temp is
+        # locked and excluded — never a temp another run is still writing.
+        _sweep_orphan_partials(output, keep=tmp)
+        try:
+            yield tmp
+            # Swap in only once the encode is whole. Inside the try so a failed
+            # rename cleans up too, never stranding the temp.
+            os.replace(tmp, output)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    finally:
+        if lock is not None:
+            with contextlib.suppress(OSError):
+                lock.close()
 
 
 def transcode_raw(

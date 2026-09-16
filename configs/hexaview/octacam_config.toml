@@ -1,8 +1,8 @@
 backend = "auto"
 
 [record]
-fps = 80.0
-duration = 10.0
+fps = 125.0
+duration = 300.0
 duration_unit = "seconds"
 trigger_source = "managed"
 preview_trigger_source = "auto"
@@ -14,7 +14,7 @@ save_transformed = true
 save_timestamps = true
 
 [transcode]
-ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 18 -pix_fmt gray"
 
 [[cameras]]
 serial_number = "17475187"
@@ -47,9 +47,9 @@ name = "triggerbox"
 [plugins.options]
 device = "/dev/ttyACM0"
 cameras = [{pin = "D13", pulse_us = 500}]
-lights = [{channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 3, mode = "off"}]
+lights = [{channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 25.0}, {channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 25.0}, {channel = 3, mode = "off"}]
 strobe_guard_us = 100
 
 [transfer]
-directory = "~/octacam/server/hexaview"
+directory = "/mnt/upramdya/data/TL"
 checksum = true

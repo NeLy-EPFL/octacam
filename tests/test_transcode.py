@@ -876,3 +876,129 @@ def test_process_cli_rejects_unknown_progress_style(tmp_path):
     _summary(tmp_path, [_camera_entry("cam0.raw", frame)])
     result = _run(str(tmp_path), "--progress-style", "bogus")
     assert result.exit_code != 0
+
+
+# --- concurrent transcodes of one output -------------------------------------
+# The transcode temp name used to be deterministic (".<stem>.octacam-part<ext>")
+# and _atomic_output unlinked it on entry, so two `octacam process` runs over one
+# folder — trivially, `--last` in two terminals — each destroyed the other's
+# in-flight temp and then renamed a file it had not written onto the output.
+# octacam.transfer._temp_path had already solved exactly this with pid+uuid.
+
+
+def test_partial_path_is_unique_but_still_muxer_inferable(tmp_path):
+    from octacam.writer import PARTIAL_INFIX, _partial_path
+
+    out = tmp_path / "cam.mp4"
+    a, b = _partial_path(out), _partial_path(out)
+    assert a != b, "two runs must not share one temp name"
+    for p in (a, b):
+        assert p.parent == out.parent  # same filesystem -> os.replace is atomic
+        assert p.name.startswith(".")  # hidden
+        assert PARTIAL_INFIX in p.name  # still recognised by the folder scan
+        assert is_partial_transcode(p)
+        assert p.suffix == ".mp4", "ffmpeg infers the muxer from the extension"
+
+
+def test_concurrent_atomic_outputs_do_not_clobber_each_other(tmp_path):
+    from octacam.writer import _atomic_output
+
+    out = tmp_path / "cam.mp4"
+    with _atomic_output(out) as first:
+        first.write_bytes(b"AAAA")
+        # A second run starting while the first is still encoding.
+        with _atomic_output(out) as second:
+            assert second != first
+            assert first.exists(), "the second run deleted the first's live temp"
+            assert first.read_bytes() == b"AAAA"
+            second.write_bytes(b"BBBB")
+        assert out.read_bytes() == b"BBBB"
+        assert first.exists(), "promoting the second run's file removed the first's"
+    # Both completed; the later finisher wins, and neither is left behind.
+    assert out.read_bytes() == b"AAAA"
+    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+
+
+def test_orphaned_partials_are_still_reclaimed(tmp_path):
+    # Uniqueness must not turn every hard kill into permanently leaked disk:
+    # a temp nobody holds open is an orphan and is reclaimed on the next run,
+    # including one left by the older deterministic-name octacam.
+    from octacam.writer import PARTIAL_INFIX, _atomic_output, _partial_path
+
+    out = tmp_path / "cam.mp4"
+    orphan = _partial_path(out)
+    orphan.write_bytes(b"x" * 64)
+    legacy = out.with_name(f".{out.stem}{PARTIAL_INFIX}{out.suffix}")
+    legacy.write_bytes(b"y" * 64)
+    other = tmp_path / "second.mp4"  # a different output's temp is not ours
+    other_orphan = _partial_path(other)
+    other_orphan.write_bytes(b"z" * 64)
+
+    with _atomic_output(out) as tmp:
+        assert not orphan.exists(), "orphan not reclaimed"
+        assert not legacy.exists(), "legacy-format orphan not reclaimed"
+        assert other_orphan.exists(), "swept a different output's temp"
+        tmp.write_bytes(b"ok")
+    assert out.read_bytes() == b"ok"
+
+
+def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
+    # End to end through the real transcode path: two runs racing on one output
+    # must both finish, leave no temp behind, and leave a playable file.
+    import threading
+
+    frame = _frame(32, 24)
+    _write_raw(tmp_path / "cam.raw", frame)
+    out = tmp_path / "cam.mkv"
+    errors = []
+    barrier = threading.Barrier(2, timeout=30)
+
+    def run():
+        try:
+            barrier.wait()
+            transcode_raw(
+                tmp_path / "cam.raw",
+                output=out,
+                width=frame.shape[1],
+                height=frame.shape[0],
+                fps=10.0,
+            )
+        except BaseException as e:  # noqa: BLE001 - surfaced via `errors`
+            errors.append(e)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert not errors, errors
+    assert out.exists() and out.stat().st_size > 0
+    leftovers = [p.name for p in tmp_path.iterdir() if is_partial_transcode(p)]
+    assert not leftovers, leftovers
+
+
+def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
+    # A camera name only has to be a single path segment, so "cam[1]" is legal.
+    # Unescaped, its sweep pattern is a character class matching "cam1" — which
+    # would delete a *different* camera's in-flight temp.
+    from octacam.writer import _atomic_output, _partial_path
+
+    bracket = tmp_path / "cam[1].mp4"
+    plain = tmp_path / "cam1.mp4"
+    victim = _partial_path(plain)
+    victim.write_bytes(b"another camera's work")
+
+    with _atomic_output(bracket) as tmp:
+        assert victim.exists(), "sweep matched the wrong camera's temp"
+        tmp.write_bytes(b"ok")
+    assert bracket.read_bytes() == b"ok"
+    assert victim.read_bytes() == b"another camera's work"
+
+    # ...and its own orphans are still reclaimed.
+    own = _partial_path(bracket)
+    own.write_bytes(b"orphan")
+    with _atomic_output(bracket) as tmp:
+        assert not own.exists()
+        tmp.write_bytes(b"ok2")
+    assert bracket.read_bytes() == b"ok2"
