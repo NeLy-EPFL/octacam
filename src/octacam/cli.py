@@ -6557,6 +6557,30 @@ def process(
                             if cfg is None:
                                 cfg = _config_for_recording(folder, config_dir)
                                 cfg_cache[folder] = cfg
+                            effective_delete_source = not no_delete_source and (
+                                delete_source or cfg.transcode.delete_source
+                            )
+                            if dry_run:
+                                # Unlike the grid/transfer phases (which already
+                                # early-out here), this branch was previously
+                                # missing entirely — a real ffmpeg encode ran for
+                                # every not-yet-transcoded file even under
+                                # --dry-run. Preview only: no ffmpeg subprocess.
+                                log.info(
+                                    "[dry-run] transcode: %s → %s",
+                                    input_path,
+                                    output,
+                                )
+                                if effective_delete_source:
+                                    log.info(
+                                        "[dry-run] would delete source: %s",
+                                        input_path,
+                                    )
+                                folder_outputs.setdefault(folder, []).append(output)
+                                completed += 1
+                                if reporter is not None:
+                                    reporter.item_done()
+                                continue
                             if bar is not None:
                                 on_progress = bar.file(index, input_path)
                             elif reporter is not None:
@@ -6587,13 +6611,8 @@ def process(
                             folder_outputs.setdefault(folder, []).append(output)
                             if reporter is not None:
                                 reporter.item_done()
-                            effective_delete_source = not no_delete_source and (
-                                delete_source or cfg.transcode.delete_source
-                            )
-                            if effective_delete_source and not dry_run:
+                            if effective_delete_source:
                                 _delete_source_files(input_path)
-                            elif effective_delete_source and dry_run:
-                                log.info("[dry-run] would delete source: %s", input_path)
                     except KeyboardInterrupt:
                         interrupted = True
                 if not interrupted:

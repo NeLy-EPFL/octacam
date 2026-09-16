@@ -1219,6 +1219,32 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
     assert (folder / "grid.mp4").read_bytes() == before_grid
 
 
+def test_process_dry_run_does_not_transcode(tmp_path, monkeypatch):
+    # A real bug: --dry-run had no early-out before the actual transcode_file
+    # call (unlike the grid/transfer phases), so it ran a real ffmpeg encode
+    # for every not-yet-transcoded file — found via a real dry run against
+    # production data that kept a live ffmpeg process running.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False)
+
+    calls = {"transcode": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+
+    result = runner.invoke(
+        app, ["process", str(folder), "--no-grid", "--no-transfer", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == {"transcode": 0}
+    assert "[dry-run] transcode:" in result.output
+    assert not (folder / "camera_LF.mp4").exists()
+
+
 def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
