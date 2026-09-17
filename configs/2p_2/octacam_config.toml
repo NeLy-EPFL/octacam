@@ -106,6 +106,7 @@ layout = [
 [transfer]
 directory = "/mnt/upramdya_data/MD/BallPushing_Imaging"
 checksum = true
+delete_after_transfer = true
 
 [transfer.twophoton]
 source = "/mnt/windows_share/MD"
