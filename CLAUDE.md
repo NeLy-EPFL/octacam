@@ -681,6 +681,30 @@ against a real 2P rig; the durable findings:
   compared pixel-for-pixel against its source frame before anything is
   removed, one file at a time, only after the assembled stack is safely
   written.
+
+  **"FastZ" (simultaneous multi-plane) acquisitions** — recording several Z
+  planes fast enough to sample a transient (e.g. seeing both a cell body and
+  its axon at once) — vary *two* of the 4 filename numeric groups at once
+  (one per Z-plane, one per timepoint), confirmed on a real
+  `Fly1_FastZ_Test`: `ZStage steps="4"` + `Timelapse timepoints="50"`, 200
+  real files, every Z-plane's own 50-file T-sequence contiguous. `plan_assembly`
+  handles this (`_plan_fastz_channel`) by matching each varying position's
+  distinct-value *count* against `zsteps`/`timepoints` to tell Z from T (never
+  guessed — falls back to a "problem" entry when the counts don't
+  unambiguously resolve, e.g. `zsteps == timepoints`), then partitions the
+  file set by Z and reuses the *exact* single-axis assembly logic per plane.
+  Output is one TIFF per (channel, Z-plane) — every timepoint for that plane
+  in one stack (`{channel}_Z{01,02,...}.tif`), not a single combined 4-D
+  file — Matthias's own preference (2026-09-17) over guessing an
+  interleaving order for a true 4-D file. A real, easy-to-miss trap:
+  `_thorimage_zstage_steps` must accept **two** distinct ways real data
+  signals active Z motion — a traditional step-and-shoot Z-stack sets
+  `ZStage enable="1"` directly, but a genuine FastZ acquisition instead
+  leaves `ZStage enable="0"` (it isn't that kind of Z-stack) and signals Z
+  motion via `<Streaming enable="1" zFastEnable="1">` instead — confirmed on
+  real `Fly1_FastZ_Test` data, where checking only `ZStage`'s own `enable`
+  missed real, active Z motion entirely and left it as 200 loose per-frame
+  files under the "ambiguous" fallback.
 - **Naming/discoverability (`render_twophoton_manifest`, `cli._rebuild_twophoton_manifests`)**:
   investigated as a real ergonomics problem — the octacam-chosen take name is
   the only thing visible at the top of the NAS tree, the matched 2P folder's

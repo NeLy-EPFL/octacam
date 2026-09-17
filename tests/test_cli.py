@@ -1748,6 +1748,75 @@ def test_process_assembles_multipage_tiff_stack_on_transfer(tmp_path, monkeypatc
             assert (tf.pages[i].asarray() == i + 1).all()
 
 
+def _make_fastz_folder_2p(root, experiment, name, *, u_time, zsteps, timepoints, channel="ChanA"):
+    """A real "FastZ" (simultaneous multi-plane) ThorImage folder — matches
+    real data exactly: ZStage itself reports enable="0" (Z motion is
+    signaled by Streaming's own zFastEnable="1" instead), one file per
+    (Z-plane, timepoint) pair."""
+    tifffile = pytest.importorskip("tifffile")
+    import numpy as np
+
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f"""<?xml version="1.0"?>
+<ThorImageExperiment>
+  <Date date="" uTime="{u_time}" />
+  <Wavelengths>
+    <Wavelength name="{channel}" exposureTimeMS="0" />
+  </Wavelengths>
+  <ZStage name="ThorZPiezo" steps="{zsteps}" enable="0" />
+  <Streaming enable="1" frames="0" zFastEnable="1" />
+  <Timelapse timepoints="{timepoints}" intervalSec="0" triggerMode="0" />
+  <LSM pixelSizeUM="0.089" />
+</ThorImageExperiment>
+"""
+    )
+    for z in range(1, zsteps + 1):
+        for t in range(1, timepoints + 1):
+            tifffile.imwrite(
+                folder / f"{channel}_001_001_{z:03d}_{t:03d}.tif",
+                np.full((16, 16), z * 1000 + t, dtype=np.uint16),
+            )
+    for p in folder.iterdir():
+        os.utime(p, (u_time, u_time))
+    os.utime(folder, (u_time, u_time))
+    return folder
+
+
+def test_process_assembles_fastz_one_stack_per_z_plane_on_transfer(tmp_path, monkeypatch):
+    # Real gap found on real data (2026-09-16/17, "Fly1_FastZ_Test"): a
+    # simultaneous multi-plane acquisition must land as one TIFF per
+    # (channel, Z-plane) — not left as loose per-frame files, and not
+    # confused with the single-axis case.
+    pytest.importorskip("tifffile")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    take_start = 1_000_000.0
+    _make_fastz_folder_2p(
+        source_root, "MB247_CI63", "Fly1", u_time=take_start - 5, zsteps=3, timepoints=5
+    )
+
+    folder = tmp_path / "rec"
+    _armed_recording(
+        folder, source_root=source_root, dest_root=dest_root, take_start=take_start
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+
+    dest_2p = dest_root / folder.name / "2P" / "Fly1"
+    for z in ("Z01", "Z02", "Z03"):
+        assert (dest_2p / f"ChanA_{z}.tif").is_file()
+    assert not list(dest_2p.glob("ChanA_*_*.tif"))  # no loose per-frame originals
+
+    import tifffile
+    with tifffile.TiffFile(dest_2p / "ChanA_Z02.tif") as tf:
+        assert len(tf.pages) == 5
+        for t in range(5):
+            assert (tf.pages[t].asarray() == 2000 + t + 1).all()
+
+
 def test_process_assembly_disabled_falls_back_to_per_file_copy(tmp_path, monkeypatch):
     pytest.importorskip("tifffile")
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))

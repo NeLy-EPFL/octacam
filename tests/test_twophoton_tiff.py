@@ -32,16 +32,28 @@ EXPERIMENT_XML_TEMPLATE = """<?xml version="1.0"?>
     <Wavelength name="ChanB" exposureTimeMS="0" />
   </Wavelengths>
   <ZStage name="ThorZPiezo" steps="{zsteps}" enable="{zenable}" />
+  <Streaming enable="{streaming_enable}" frames="0" zFastEnable="{zfast}" />
   <Timelapse timepoints="{timepoints}" intervalSec="0" triggerMode="0" />
   <LSM pixelSizeUM="0.089" />
 </ThorImageExperiment>
 """
 
 
-def _write_experiment_xml(folder: Path, *, timepoints: int, zsteps: int = 1, zenable: str = "0") -> Path:
+def _write_experiment_xml(
+    folder: Path,
+    *,
+    timepoints: int,
+    zsteps: int = 1,
+    zenable: str = "0",
+    streaming_enable: str = "0",
+    zfast: str = "0",
+) -> Path:
     xml = folder / "Experiment.xml"
     xml.write_text(
-        EXPERIMENT_XML_TEMPLATE.format(timepoints=timepoints, zsteps=zsteps, zenable=zenable)
+        EXPERIMENT_XML_TEMPLATE.format(
+            timepoints=timepoints, zsteps=zsteps, zenable=zenable,
+            streaming_enable=streaming_enable, zfast=zfast,
+        )
     )
     return xml
 
@@ -61,6 +73,48 @@ def _write_streaming_channel(folder: Path, channel: str, n: int) -> None:
 def _write_zstack_channel(folder: Path, channel: str, n: int) -> None:
     for z in range(1, n + 1):
         _write_frame(folder, channel, (1, 1, z, 1), value=z)
+
+
+def _write_fastz_channel(folder: Path, channel: str, zsteps: int, timepoints: int) -> None:
+    """A simultaneous multi-plane ("FastZ") channel — matches real data
+    (a real Fly1_FastZ_Test: ZStage steps=4, Timelapse timepoints=50, 200
+    files, every Z-plane's own T-sequence contiguous 1..50)."""
+    for z in range(1, zsteps + 1):
+        for t in range(1, timepoints + 1):
+            _write_frame(folder, channel, (1, 1, z, t), value=z * 1000 + t)
+
+
+# ------------------------------------------------------- _thorimage_zstage_steps
+
+
+def test_thorimage_zstage_steps_traditional_zstack_enable(tmp_path):
+    xml = _write_experiment_xml(tmp_path, timepoints=1, zsteps=4, zenable="1")
+    assert ttiff._thorimage_zstage_steps(xml) == 4
+
+
+def test_thorimage_zstage_steps_fastz_streaming_enable(tmp_path):
+    # Real shape: ZStage itself is enable="0" — Z motion is signaled by
+    # Streaming's own zFastEnable="1" instead (confirmed on real data).
+    xml = _write_experiment_xml(
+        tmp_path, timepoints=1, zsteps=4, zenable="0",
+        streaming_enable="1", zfast="1",
+    )
+    assert ttiff._thorimage_zstage_steps(xml) == 4
+
+
+def test_thorimage_zstage_steps_none_when_neither_enabled(tmp_path):
+    xml = _write_experiment_xml(tmp_path, timepoints=1, zsteps=4, zenable="0")
+    assert ttiff._thorimage_zstage_steps(xml) is None
+
+
+def test_thorimage_zstage_steps_none_when_streaming_enabled_without_zfast(tmp_path):
+    # Streaming enabled but zFastEnable="0" — a plain streaming acquisition,
+    # not FastZ, must not be mistaken for one.
+    xml = _write_experiment_xml(
+        tmp_path, timepoints=1, zsteps=4, zenable="0",
+        streaming_enable="1", zfast="0",
+    )
+    assert ttiff._thorimage_zstage_steps(xml) is None
 
 
 # --------------------------------------------------------------- plan_assembly
@@ -104,6 +158,51 @@ def test_plan_assembly_ambiguous_varying_position_is_a_problem(tmp_path):
     _write_frame(tmp_path, "ChanA", (1, 1, 1, 1), value=0)
     _write_frame(tmp_path, "ChanA", (1, 1, 2, 2), value=0)
     _write_frame(tmp_path, "ChanA", (1, 1, 3, 3), value=0)
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+    assert "ambiguous" in ch.reason
+
+
+def test_plan_assembly_fastz_produces_one_file_per_z_plane(tmp_path):
+    # Matches the real Fly1_FastZ_Test shape exactly: ZStage itself reports
+    # enable="0" (it's not a traditional step-and-shoot Z-stack) — Z motion
+    # is instead signaled by Streaming's own zFastEnable="1".
+    _write_experiment_xml(
+        tmp_path, timepoints=50, zsteps=4, zenable="0",
+        streaming_enable="1", zfast="1",
+    )
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=50)
+    plan = plan_assembly(tmp_path)
+    assert len(plan.channels) == 4
+    assert all(ch.status == "ready" for ch in plan.channels)
+    assert all(ch.axis == "T" for ch in plan.channels)
+    assert all(ch.frame_count == 50 for ch in plan.channels)
+    assert {ch.dest_name for ch in plan.channels} == {
+        "ChanA_Z01.tif", "ChanA_Z02.tif", "ChanA_Z03.tif", "ChanA_Z04.tif",
+    }
+    # Each plane's own 50 files, ordered by timepoint.
+    z1 = next(ch for ch in plan.channels if ch.dest_name == "ChanA_Z01.tif")
+    ordered_t = [int(p.name.rsplit("_", 1)[1].split(".")[0]) for p in z1.source_files]
+    assert ordered_t == list(range(1, 51))
+
+
+def test_plan_assembly_fastz_with_gap_in_one_plane_is_a_problem(tmp_path):
+    # Every plane must independently be contiguous — a gap in just one plane
+    # must not silently assemble the other, otherwise-clean planes.
+    _write_experiment_xml(tmp_path, timepoints=5, zsteps=3, zenable="1")
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=3, timepoints=5)
+    (tmp_path / "ChanA_001_001_002_003.tif").unlink()  # drop Z=2, T=3
+    plan = plan_assembly(tmp_path)
+    (ch,) = plan.channels
+    assert ch.status == "problem"
+
+
+def test_plan_assembly_fastz_unresolvable_when_axis_counts_collide(tmp_path):
+    # zsteps == timepoints: which of the two varying positions is Z and
+    # which is T can't be told apart from counts alone — never guessed.
+    _write_experiment_xml(tmp_path, timepoints=4, zsteps=4, zenable="1")
+    _write_fastz_channel(tmp_path, "ChanA", zsteps=4, timepoints=4)
     plan = plan_assembly(tmp_path)
     (ch,) = plan.channels
     assert ch.status == "problem"

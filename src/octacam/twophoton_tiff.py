@@ -24,6 +24,16 @@ need both loaded together, so combining them buys nothing and would require
 assuming per-timepoint correspondence between channels that can't be
 verified from ``Experiment.xml`` alone.
 
+A "FastZ" acquisition (ThorImage's own ``zFastEnable`` — recording several Z
+planes fast enough to sample a transient, e.g. seeing both a cell body and
+its axon at once) varies *two* of the 4 filename numeric groups
+simultaneously — one per Z-plane, one per timepoint — confirmed on real data
+(``ZStage steps="4"`` + ``Timelapse timepoints="50"``, 200 real files, every
+Z-plane's own timepoint sequence contiguous). This still produces one file
+per (channel, Z-plane) — every timepoint for that plane in one stack, not a
+single combined 4-D file — rather than guess at an interleaving order for a
+true 4-D file; see :func:`_plan_fastz_channel`.
+
 Everything here is best-effort and never raises (mirrors
 ``twophoton_signals.py``'s shape): ``tifffile`` is an optional dependency
 (the ``twophoton`` extra), so a rig without it — or a file set that can't be
@@ -81,15 +91,35 @@ def _thorimage_channel_names(experiment_xml: Path) -> list[str]:
 
 
 def _thorimage_zstage_steps(experiment_xml: Path) -> int | None:
-    """``<ZStage steps="..." enable="1">`` — the Z-axis frame count for a
-    Z-stack acquisition, or None if missing/unparseable/disabled."""
+    """``<ZStage steps="...">`` — the Z-axis frame count for a Z-stack *or* a
+    simultaneous multi-plane ("FastZ") acquisition, or None if
+    missing/unparseable/neither is actually active.
+
+    Two distinct ways real ThorImage data enables Z motion, both confirmed
+    on real data: a traditional step-and-shoot Z-stack sets ``ZStage
+    enable="1"`` directly; a FastZ acquisition (the piezo moves *during* one
+    continuous streaming acquisition, not between discrete stops) instead
+    leaves ``ZStage enable="0"`` and signals Z motion via
+    ``<Streaming enable="1" zFastEnable="1">`` — confirmed on a real
+    ``Fly1_FastZ_Test``, where checking only ``ZStage``'s own ``enable``
+    would have missed real, active Z motion entirely."""
     try:
         root = ET.parse(experiment_xml).getroot()
     except (ET.ParseError, OSError):
         return None
     zstage_el = root.find("ZStage")
-    if zstage_el is None or zstage_el.get("enable") != "1":
+    if zstage_el is None:
         return None
+    zstage_enabled = zstage_el.get("enable") == "1"
+    if not zstage_enabled:
+        streaming_el = root.find("Streaming")
+        fastz = (
+            streaming_el is not None
+            and streaming_el.get("enable") == "1"
+            and streaming_el.get("zFastEnable") == "1"
+        )
+        if not fastz:
+            return None
     steps = zstage_el.get("steps")
     if steps is None:
         return None
@@ -134,14 +164,88 @@ def _matching_frame_files(folder: Path, channel: str) -> list[tuple[Path, tuple[
     return found
 
 
+def _varying_positions(groups: list[tuple[int, int, int, int]]) -> list[int]:
+    """Every one of the 4 numeric positions that varies across *groups*."""
+    return [i for i in range(4) if len({g[i] for g in groups}) > 1]
+
+
 def _varying_position(groups: list[tuple[int, int, int, int]]) -> int | None:
     """Which single one of the 4 numeric positions actually varies across
     *groups* — generic over streaming (position 3 varies, confirmed real
     data) vs. Z-stack (position 2 varies, confirmed real data) file layouts,
     never a hardcoded position. None when zero or more than one position
     varies (ambiguous file set — never guessed)."""
-    varying = [i for i in range(4) if len({g[i] for g in groups}) > 1]
+    varying = _varying_positions(groups)
     return varying[0] if len(varying) == 1 else None
+
+
+def _plan_fastz_channel(
+    channel: str,
+    found: list[tuple[Path, tuple[int, int, int, int]]],
+    varying: list[int],
+    timepoints: int | None,
+    zsteps: int | None,
+) -> list[ChannelPlan] | None:
+    """Plan a simultaneous multi-plane ("FastZ") channel — exactly two of the
+    4 filename numeric groups vary at once, one per Z-plane and one per
+    timepoint, rather than the single-axis streaming/Z-stack case
+    :func:`plan_assembly` otherwise handles. Confirmed on real data
+    (ThorImage's own ``zFastEnable`` acquisitions, e.g. a real
+    ``Fly1_FastZ_Test``: ``ZStage steps="4"`` + ``Timelapse timepoints="50"``
+    + ``Streaming enable="1"``, real files with Z values 1-4 crossed with T
+    values 1-50, 200 files total, every Z-plane's own T-sequence contiguous
+    1..50).
+
+    Output shape (Matthias's own preference, 2026-09-17): one TIFF per
+    (channel, Z-plane) — every timepoint for that plane, not one combined
+    4-D file — which is exactly the existing single-axis assembly case,
+    just partitioned by Z first: split ``found`` into one group per distinct
+    Z value, then apply the same ordering/contiguity check
+    :func:`plan_assembly` already does for a single varying axis to each
+    group independently.
+
+    Returns one ``"ready"`` :class:`ChannelPlan` per Z-plane when both
+    varying positions unambiguously match ``zsteps``/``timepoints`` (by
+    distinct-value count — the same count-based axis discrimination the
+    single-axis case uses) and every Z-plane's own timepoint sequence is
+    contiguous. Returns ``None`` — never a partial/guessed result — when
+    either axis can't be configured, both counts could plausibly be either
+    axis (e.g. ``zsteps == timepoints``, genuinely unresolvable from counts
+    alone), or any single Z-plane's own file set doesn't cleanly resolve;
+    the caller falls back to one "problem" entry for the whole channel."""
+    if timepoints is None or zsteps is None or timepoints == zsteps:
+        return None
+    counts = {i: len({g[i] for _, g in found}) for i in varying}
+    if counts[varying[0]] == zsteps and counts[varying[1]] == timepoints:
+        z_pos, t_pos = varying[0], varying[1]
+    elif counts[varying[1]] == zsteps and counts[varying[0]] == timepoints:
+        z_pos, t_pos = varying[1], varying[0]
+    else:
+        return None
+
+    by_z: dict[int, list[tuple[Path, tuple[int, int, int, int]]]] = {}
+    for item in found:
+        by_z.setdefault(item[1][z_pos], []).append(item)
+
+    plans: list[ChannelPlan] = []
+    for z in sorted(by_z):
+        z_items = sorted(by_z[z], key=lambda item: item[1][t_pos])
+        t_values = [item[1][t_pos] for item in z_items]
+        if len(z_items) != timepoints or t_values != list(
+            range(t_values[0], t_values[0] + len(t_values))
+        ):
+            return None  # one bad Z-plane invalidates the whole channel
+        plans.append(
+            ChannelPlan(
+                channel,
+                "ready",
+                [p for p, _ in z_items],
+                f"{channel}_Z{z:02d}.tif",
+                axis="T",
+                frame_count=timepoints,
+            )
+        )
+    return plans
 
 
 @dataclass(frozen=True)
@@ -198,7 +302,21 @@ def plan_assembly(folder: Path) -> AssemblyPlan:
         if len(found) <= 1:
             continue  # nothing to assemble either way
         dest_name = f"{channel}.tif"
-        pos = _varying_position([g for _, g in found])
+        varying = _varying_positions([g for _, g in found])
+        if len(varying) == 2:
+            fastz_plans = _plan_fastz_channel(channel, found, varying, timepoints, zsteps)
+            if fastz_plans is not None:
+                plans.extend(fastz_plans)
+            else:
+                plans.append(ChannelPlan(
+                    channel, "problem", [p for p, _ in found], dest_name,
+                    reason=f"ambiguous multi-axis frame naming: two numeric "
+                           f"groups vary (positions {varying}) but couldn't be "
+                           f"matched to Experiment.xml's ZStage steps={zsteps} "
+                           f"/ Timelapse timepoints={timepoints}",
+                ))
+            continue
+        pos = varying[0] if len(varying) == 1 else None
         if pos is None:
             plans.append(ChannelPlan(
                 channel, "problem", [p for p, _ in found], dest_name,
