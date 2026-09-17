@@ -61,6 +61,7 @@ def test_rebuild_process_argv_is_absolute_and_drops_selectors(tmp_path):
         no_delete_after_transfer=False,
         no_twophoton_sweep=False,
         no_twophoton_manifest=False,
+        no_auto_reconcile_recordings=False,
         dry_run=False,
     )
     assert argv == ["--no-grid", "--force", str(folder.resolve())]
@@ -83,6 +84,7 @@ def test_rebuild_process_argv_forwards_new_delete_flags(tmp_path):
         no_delete_after_transfer=False,
         no_twophoton_sweep=False,
         no_twophoton_manifest=False,
+        no_auto_reconcile_recordings=False,
         dry_run=False,
     )
     assert "--no-delete-source" in argv
@@ -107,6 +109,7 @@ def test_rebuild_process_argv_forwards_no_twophoton_sweep(tmp_path):
         no_delete_after_transfer=False,
         no_twophoton_sweep=True,
         no_twophoton_manifest=False,
+        no_auto_reconcile_recordings=False,
         dry_run=False,
     )
     assert "--no-twophoton-sweep" in argv
@@ -129,9 +132,33 @@ def test_rebuild_process_argv_forwards_no_twophoton_manifest(tmp_path):
         no_delete_after_transfer=False,
         no_twophoton_sweep=False,
         no_twophoton_manifest=True,
+        no_auto_reconcile_recordings=False,
         dry_run=False,
     )
     assert "--no-twophoton-manifest" in argv
+
+
+def test_rebuild_process_argv_forwards_no_auto_reconcile_recordings(tmp_path):
+    folder = tmp_path / "r"
+    folder.mkdir()
+    argv = cli._rebuild_process_argv(
+        [folder],
+        recursive=False,
+        no_transcode=False,
+        no_grid=False,
+        no_transfer=False,
+        force=False,
+        config_dir=None,
+        delete_source=False,
+        no_delete_source=False,
+        delete_after_transfer=False,
+        no_delete_after_transfer=False,
+        no_twophoton_sweep=False,
+        no_twophoton_manifest=False,
+        no_auto_reconcile_recordings=True,
+        dry_run=False,
+    )
+    assert "--no-auto-reconcile-recordings" in argv
 
 
 # ------------------------------------------------------------- octacam jobs
