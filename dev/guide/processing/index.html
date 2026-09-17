@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -582,6 +582,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The one-command end-of-day workflow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#seeing-what-is-left-to-process" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Seeing what is left to process
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -900,6 +917,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="The one-command end-of-day workflow">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#seeing-what-is-left-to-process" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Seeing what is left to process
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -934,8 +968,9 @@
 
 
 <h1 id="processing-recordings">Processing recordings<a class="headerlink" href="#processing-recordings" title="Permanent link">&para;</a></h1>
-<p>Everything after recording — transcoding to archival video, tiling cameras into
-composite <strong>grid</strong> videos, and copying to shared storage — is a single command:</p>
+<p>Everything after recording — transcoding to archival video, optionally tiling
+cameras into composite <strong>grid</strong> videos, and copying to shared storage — is a
+single command:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>&lt;paths…&gt;
 </code></pre></div>
 <p>There is no <code>--config</code> to pass. Each recording carries an embedded snapshot of
@@ -962,7 +997,7 @@ and it does the rest.</p>
 <tr>
 <td>Grid</td>
 <td><code>--no-grid</code></td>
-<td>Build one composite tiled video per recording folder.</td>
+<td>Build one composite tiled video per <code>[[visualization]]</code> entry — <strong>opt-in</strong>, see below.</td>
 </tr>
 <tr>
 <td>Transfer</td>
@@ -971,8 +1006,9 @@ and it does the rest.</p>
 </tr>
 </tbody>
 </table>
-<p>So <code>--no-transcode --no-transfer</code> regenerates just the grids after a layout
-change, and <code>--no-grid</code> skips the composite step.</p>
+<p>Transcode and transfer run by default. The grid step only does something for a
+rig whose config asks for one, so <code>--no-transcode --no-transfer</code> regenerates just
+the grids after a layout change, and <code>--no-grid</code> skips even the configured ones.</p>
 <p>Other options:</p>
 <table>
 <thead>
@@ -1000,7 +1036,7 @@ change, and <code>--no-grid</code> skips the composite step.</p>
 </tr>
 <tr>
 <td><code>--dry-run</code></td>
-<td>Log the intended grid/transfer work without writing anything.</td>
+<td>List what each step would do (files to transcode, grids to build, files to transfer) without writing, copying, or deleting anything.</td>
 </tr>
 <tr>
 <td><code>--progress-style</code></td>
@@ -1015,29 +1051,36 @@ not the command line. Recordings are reproduced as saved — any display transfo
 was already baked in at record time (see
 <a href="../recording/#transformed-vs-raw-frames">transformed vs raw</a>).</p>
 <p><code>process</code> accepts any mix of recording folders. Already-transcoded outputs are
-skipped unless you pass <code>--force</code>. Pass <code>--delete-source</code>/<code>-d</code> to delete each
-source <code>.mkv</code>/<code>.raw</code> once it transcodes successfully.</p>
+skipped unless you pass <code>--force</code> — except one left over from an earlier take in
+the same folder (it is older than the video it was made from), which is redone
+with a warning instead of being transferred as this recording's. Pass
+<code>--delete-source</code>/<code>-d</code> to delete each source <code>.mkv</code>/<code>.raw</code> once it transcodes
+successfully.</p>
 <p>Progress is shown as an octacam-style bar (<code>[i/N] name</code>, percent, fps, speed,
 elapsed) reformatted live from ffmpeg's output. Use <code>--progress-style ffmpeg</code> to
 stream ffmpeg's own output verbatim instead.</p>
 <h2 id="grid-video">Grid video<a class="headerlink" href="#grid-video" title="Permanent link">&para;</a></h2>
-<p><code>process</code> generates one composite video per recording folder that tiles all
-cameras in a configurable grid, right after the individual files are transcoded.
-Each grid comes from a <code>[[visualization]]</code> entry in the rig's config; list
-several to produce several composites.</p>
+<p><code>process</code> can generate one composite video per recording folder that tiles the
+cameras in a configurable grid, right after the individual files are transcoded.</p>
+<p>This is <strong>off by default</strong>: each grid comes from a <code>[[visualization]]</code> entry in
+the rig's config, and a config without one builds no composite (compositing is
+minutes of extra ffmpeg per folder, which only the rigs that actually watch a
+grid should pay). Add an entry to turn it on; list several to produce several
+composites.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">[[visualization]]</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;grid.mp4&quot;</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"grid.mp4"</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LF&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RF&quot;</span><span class="p">],</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LM&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;camera_F&quot;</span><span class="p">,</span><span class="w">  </span><span class="s2">&quot;camera_RM&quot;</span><span class="p">],</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LH&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RH&quot;</span><span class="p">],</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LF"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RF"</span><span class="p">],</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LM"</span><span class="p">,</span><span class="w"> </span><span class="s2">"camera_F"</span><span class="p">,</span><span class="w">  </span><span class="s2">"camera_RM"</span><span class="p">],</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LH"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RH"</span><span class="p">],</span>
 <a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="p">]</span>
 </code></pre></div>
 <p>Each cell is a camera name (as declared in <code>[[cameras]]</code>); an empty string <code>""</code>
 places a black fill. All rows must have the same number of columns.</p>
 <ul>
-<li>If a config lists <code>[[cameras]]</code> but no <code>[[visualization]]</code>, a near-square
-  layout is derived from that rig's own cameras.</li>
+<li>With no <code>[[visualization]]</code> entry, no grid is built (the step logs that it
+  skipped and moves on). <code>octacam config</code> offers to write a near-square layout of
+  your cameras when scaffolding a rig.</li>
 <li>A cell naming a camera that isn't in <code>[[cameras]]</code> is reported (and renders
   black) rather than failing silently.</li>
 </ul>
@@ -1050,11 +1093,15 @@ transcode:</p>
 <a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>octacam<span class="w"> </span>process<span class="w"> </span>/data/octacam/260620-wt<span class="w"> </span>-r<span class="w"> </span>--no-transcode<span class="w"> </span>--no-transfer
 </code></pre></div>
 <h2 id="transfer">Transfer<a class="headerlink" href="#transfer" title="Permanent link">&para;</a></h2>
-<p><code>process</code> copies all transcoded mp4s, grid videos, and <code>recording_summary.json</code>
-to the transfer destination (a network share or any writable path), mirroring
-the recording's directory tree.</p>
+<p><code>process</code> copies all transcoded mp4s and grid videos to the transfer destination
+(a network share or any writable path), mirroring the recording's directory
+tree. The recording's metadata goes with them: <code>recording_summary.json</code>,
+<code>timestamps.npz</code>, and its config (the <code>octacam_config.toml</code> snapshot and the
+camera parameter files), so the copy can
+<a href="../recording/#the-embedded-config-snapshot">relaunch the same setup</a>. The raw
+capture files (<code>.mkv</code> / <code>.raw</code>) stay local.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[transfer]</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/mnt/store/matthias&quot;</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/store/matthias"</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">                      </span><span class="c1"># content-verify each copy (default)</span>
 </code></pre></div>
 <p>The destination is <code>transfer.directory</code> joined with the recording's
@@ -1066,8 +1113,9 @@ name never collide.</p>
 swapped onto its final name once it is whole and content-verified (a blake2b
 checksum of the source is compared against the written copy), so an interrupted
 copy never leaves a truncated file masquerading as complete. Re-running skips
-files already present (by size), so a killed copy simply resumes — at most the
-one in-progress file is redone. Set <code>checksum = false</code> for a faster size-only
+files already present (videos by size; the small metadata files by content,
+since an edited config is often the same size), so a killed copy simply
+resumes — at most the one in-progress file is redone. Set <code>checksum = false</code> for a faster size-only
 verify on trusted, fast links.</p>
 <h2 id="selecting-recordings-from-the-cache">Selecting recordings from the cache<a class="headerlink" href="#selecting-recordings-from-the-cache" title="Permanent link">&para;</a></h2>
 <p>Instead of typing paths, let octacam remember where it recorded. Every finished
@@ -1094,22 +1142,31 @@ grid → transfer — is one command:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
 </code></pre></div>
 <p>Each step shows a live progress bar (frame/fps/speed for transcode and grid;
-MB/s per file for transfer, then a verify pass). <code>--dry-run</code> logs the intended
-grid ffmpeg call and transfer plan without writing anything — handy for
-validating paths on a new workstation.</p>
+MB/s per file for transfer, then a verify pass).</p>
+<h3 id="seeing-what-is-left-to-process">Seeing what is left to process<a class="headerlink" href="#seeing-what-is-left-to-process" title="Permanent link">&para;</a></h3>
+<p>Add <code>--dry-run</code> to list the work a run <em>would</em> do, without doing any of it:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all<span class="w"> </span>--dry-run
+</code></pre></div>
+<p>It names each file still to transcode (and, with <code>-d</code>, each source it would
+delete), each grid still to build, and each file not yet at the transfer
+destination, then counts what is already done. A fully processed recording
+lists no work, only counts. Nothing is encoded, copied, or deleted, and a dry
+run never pauses for a live capture, so it is safe to run mid-session. It is
+also a quick way to check transfer paths on a new workstation. A grid whose
+input videos already exist is shown as its exact ffmpeg command.</p>
 <h2 id="running-in-the-background-detached">Running in the background (detached)<a class="headerlink" href="#running-in-the-background-detached" title="Permanent link">&para;</a></h2>
 <p>Processing a full experiment can take a while, and over SSH a foreground
 <code>octacam process</code> dies when the connection drops. Add <code>--detach</code> to run the same
 pipeline as a background job that survives disconnect (no <code>tmux</code> needed):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all<span class="w"> </span>--detach<span class="w">      </span><span class="c1"># prints a job id, returns immediately</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all<span class="w"> </span>--detach<span class="w">      </span><span class="c1"># prints a job id, returns immediately</span>
 </code></pre></div>
 <p>Manage detached jobs with <code>octacam jobs</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list<span class="w">                   </span><span class="c1"># id, state, phase, progress, age</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w">                 </span><span class="c1"># follow the most recent job&#39;s live log + bar</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span>&lt;job-id&gt;<span class="w">        </span><span class="c1"># …or a specific one</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">                  </span><span class="c1"># park it at the next file/folder boundary</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w">                 </span><span class="c1"># clear a manual pause</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w">                 </span><span class="c1"># stop it cleanly (finished work is kept)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list<span class="w">                   </span><span class="c1"># id, state, phase, progress, age</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w">                 </span><span class="c1"># follow the most recent job's live log + bar</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span>&lt;job-id&gt;<span class="w">        </span><span class="c1"># …or a specific one</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">                  </span><span class="c1"># park it at the next file/folder boundary</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w">                 </span><span class="c1"># clear a manual pause</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w">                 </span><span class="c1"># stop it cleanly (finished work is kept)</span>
 </code></pre></div>
 <p><code>attach</code> is tmux-like: it streams the job's log and progress, and <strong>Ctrl-C only
 detaches the viewer</strong> — the job keeps running, and you can reattach any time.
@@ -1243,7 +1300,7 @@ gui</code>/<code>record</code> also print a one-line note at startup when a job 
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>

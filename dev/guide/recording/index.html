@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -996,7 +996,8 @@ options override only the day-to-day values:</p>
 <ul>
 <li>one video file per camera,</li>
 <li>one <code>recording_summary.json</code>,</li>
-<li>a copy of the rig's <code>octacam_config.toml</code>,</li>
+<li>the recording's config: a snapshot of <code>octacam_config.toml</code> plus each camera's
+  sensor parameter file (<code>&lt;serial&gt;.pfs</code> / <code>&lt;serial&gt;.txt</code>),</li>
 <li>one <code>timestamps.npz</code> (only when <code>record.save_timestamps</code> is on).</li>
 </ul>
 <h3 id="the-recording-summary">The recording summary<a class="headerlink" href="#the-recording-summary" title="Permanent link">&para;</a></h3>
@@ -1018,8 +1019,8 @@ the old per-camera CSVs). Per camera it stores two arrays keyed by camera name �
 <code>"&lt;name&gt;/timestamp_ns"</code> (int64, <code>frame_index</code> is the array position) and
 <code>"&lt;name&gt;/dropped"</code> (bool):</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">&quot;timestamps.npz&quot;</span><span class="p">)</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">ts</span> <span class="o">=</span> <span class="n">d</span><span class="p">[</span><span class="s2">&quot;cam0/timestamp_ns&quot;</span><span class="p">]</span>          <span class="c1"># nanoseconds</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"timestamps.npz"</span><span class="p">)</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">ts</span> <span class="o">=</span> <span class="n">d</span><span class="p">[</span><span class="s2">"cam0/timestamp_ns"</span><span class="p">]</span>          <span class="c1"># nanoseconds</span>
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">gaps_ms</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">ts</span><span class="p">)</span> <span class="o">/</span> <span class="mf">1e6</span>          <span class="c1"># inter-frame gaps</span>
 </code></pre></div>
 <p>Where each camera's timestamps came from — hardware (the camera/SDK clock) or
@@ -1028,12 +1029,46 @@ host wall-clock fallback — is recorded per camera as <code>timestamp_source</c
 free-running per-camera counters: precise for one camera's relative timing, but
 not wall-clock and not aligned across cameras.</p>
 <h3 id="the-embedded-config-snapshot">The embedded config snapshot<a class="headerlink" href="#the-embedded-config-snapshot" title="Permanent link">&para;</a></h3>
-<p>Each recording also saves a copy of the rig's <code>octacam_config.toml</code> into its own
-folder. That snapshot is what lets <code>octacam process</code> transcode, build grids, and
+<p>Each recording also saves its config into its own folder: a copy of the rig's
+<code>octacam_config.toml</code> updated with everything changed live in the GUI, plus each
+camera's sensor parameter file. That makes the folder a complete
+<a href="../configuration/">config directory</a> for the setup the recording actually used:</p>
+<ul>
+<li><strong><code>[record]</code></strong> holds the settings the recording ran with (fps, duration,
+  trigger source, save method and encoder args, …), even when they were changed
+  in the <strong>Record</strong> tab and never saved to the rig config.</li>
+<li><strong><code>[[plugins]]</code></strong> holds each plugin's live settings, e.g. the triggerbox camera
+  lines and light channels as set in its tab.</li>
+<li><strong><code>&lt;serial&gt;.pfs</code> / <code>&lt;serial&gt;.txt</code></strong> are read from each camera just before it
+  starts recording, so they include <strong>Camera</strong>-tab edits (exposure, gain, ROI, …)
+  that were never saved. The rig's other parameter files are copied too.</li>
+</ul>
+<p>If nothing was changed live, the snapshot is an exact copy of the rig's file,
+comments included. The <code>directory</code> / <code>relative_directory</code> templates are always
+kept as written; the path this recording used is stored in its summary.</p>
+<p>To record again with the same setup, copy those files into a new config
+directory and launch from it. The copy on your storage works too, since
+<code>octacam process</code> transfers the config along with the videos:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>configs/wt-rerun
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>rsync<span class="w"> </span>-a<span class="w"> </span>--include<span class="o">=</span><span class="s1">'octacam_config.toml'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.pfs'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.txt'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--exclude<span class="o">=</span><span class="s1">'*'</span><span class="w"> </span>/mnt/store/matthias/260620-wt/Fly1/001-bhv/<span class="w"> </span>configs/wt-rerun/
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>octacam<span class="w"> </span>gui<span class="w"> </span>configs/wt-rerun
+</code></pre></div>
+<p>New recordings go to the templated save directory, with today's date and a fresh
+trial number. You can also run <code>octacam gui &lt;recording folder&gt;</code> directly, but a
+GUI <em>Save…</em> would then write into that folder.</p>
+<p>The snapshot is also what lets <code>octacam process</code> transcode, build grids, and
 transfer with no <code>--config</code> flag: it reads the encoder args
 (<code>[transcode].ffmpeg_params</code>), grid layouts (<code>[[visualization]]</code>), and transfer
 destination (<code>[transfer]</code>) straight from the embedded copy. See
 <a href="../processing/">Processing</a>.</p>
+<div class="admonition note">
+<p class="admonition-title">Recording into a folder twice</p>
+<p>Confirming the "directory already exists" prompt overwrites the files the
+new take writes, but the previous take's transcoded <code>.mp4</code>/<code>grid.mp4</code> stay
+behind. <code>octacam process</code> notices they are older than the recording they sit
+with and redoes them, rather than transferring a video from the earlier take.</p>
+</div>
 <h2 id="transformed-vs-raw-frames">Transformed vs raw frames<a class="headerlink" href="#transformed-vs-raw-frames" title="Permanent link">&para;</a></h2>
 <p>By default frames are saved <strong>transformed</strong>: each camera's rotation/flips (as set
 in the GUI's <strong>View</strong> tab) are baked into the video, so the file matches what you
@@ -1168,7 +1203,7 @@ you never have to retype paths when processing — <code>octacam process --last<
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>

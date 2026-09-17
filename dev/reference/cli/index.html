@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -1293,8 +1293,9 @@ available from the GUI's <strong>Benchmark</strong> tab.</p>
 <h2 id="process"><code>process</code><a class="headerlink" href="#process" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>process<span class="w"> </span><span class="o">[</span>PATHS…<span class="o">]</span>
 </code></pre></div>
-<p>Transcode recordings to mp4, build composite grid videos, and transfer to
-storage — all driven by each recording's embedded config snapshot. Pass
+<p>Transcode recordings to mp4, build the configured composite grid videos, and
+transfer to storage — all driven by each recording's embedded config snapshot.
+Grids are built only for a rig whose config has a <code>[[visualization]]</code> entry. Pass
 recording folders (or parent directories with <code>-r</code>), or select from the cache
 with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 <a href="../../guide/processing/">Processing</a>.</p>
@@ -1345,7 +1346,7 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 </tr>
 <tr>
 <td><code>--no-grid</code></td>
-<td>Skip building the grid video(s).</td>
+<td>Skip building the configured grid video(s).</td>
 </tr>
 <tr>
 <td><code>--no-transfer</code></td>
@@ -1369,7 +1370,7 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 </tr>
 <tr>
 <td><code>--dry-run</code></td>
-<td>Log the intended grid/transfer work without writing anything.</td>
+<td>List what each step would do (files to transcode, grids to build, files to transfer) without writing, copying, or deleting anything.</td>
 </tr>
 <tr>
 <td><code>--detach</code></td>
@@ -1378,7 +1379,8 @@ with <code>--last</code> / <code>--last session</code> / <code>--all</code>. See
 </tbody>
 </table>
 <p>A running job (detached or foreground) auto-pauses while an <code>octacam gui</code>/<code>record</code>
-on the same machine owns the cameras, and resumes when they are free. See
+on the same machine owns the cameras, and resumes when they are free. A
+<code>--dry-run</code> does no heavy work and never pauses. See
 <a href="../../guide/processing/#running-in-the-background-detached">Processing</a>.</p>
 <h2 id="jobs"><code>jobs</code><a class="headerlink" href="#jobs" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list
@@ -1472,6 +1474,10 @@ remove them too. <code>--yes</code> (<code>-y</code>) skips the confirmation pro
 <tr>
 <td><code>OCTACAM_FFMPEG</code></td>
 <td>Path to an ffmpeg binary to use instead of the bundled one.</td>
+</tr>
+<tr>
+<td><code>OCTACAM_BASLER_CREATE_TIMEOUT</code></td>
+<td>Seconds to wait for a Basler camera to answer during enumeration (default <code>15</code>). A camera that misses the deadline is skipped with an explanation and the rest of the rig still comes up; raise this only for a rig with a genuinely slow camera.</td>
 </tr>
 </tbody>
 </table>
@@ -1589,7 +1595,7 @@ remove them too. <code>--yes</code> (<code>-y</code>) skips the confirmation pro
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>

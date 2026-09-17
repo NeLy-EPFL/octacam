@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -1008,6 +1008,9 @@
   <code>&lt;serial&gt;.txt</code> (the native GenApi feature-persistence TSV) for FLIR/GenICam,
   written by the GUI's <em>Save…</em> dialog.</li>
 </ul>
+<p>Every recording folder is also a config directory: it holds a snapshot of the
+setup it was recorded with (see
+<a href="../recording/#the-embedded-config-snapshot">Recording</a>).</p>
 <p>Everything below is optional and has a sensible default — an empty or missing
 <code>octacam_config.toml</code> uses all detected cameras with defaults. octacam parses the
 file <strong>leniently</strong>: a malformed value is warned about and falls back to its
@@ -1035,7 +1038,7 @@ settings — per-camera window placement, rotation, and the grid — to <code>oc
 gui</code>, which tunes them against a live preview; run it next on the new directory.
 Everything the wizard writes stays hand-editable afterward.</p>
 <h2 id="top-level">Top level<a class="headerlink" href="#top-level" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># backend = &quot;auto&quot;   # &quot;auto&quot; (default) | &quot;basler&quot; | &quot;flir&quot; | &quot;spinnaker&quot; | &quot;pycameleon&quot; | &quot;fake&quot;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># backend = "auto"   # "auto" (default) | "basler" | "flir" | "spinnaker" | "pycameleon" | "fake"</span>
 </code></pre></div>
 <p><code>backend</code> is optional. Omit it (or set <code>"auto"</code>) and the rig runs the preference
 cascade: each camera is claimed by the best available driver that sees it (vendor
@@ -1048,14 +1051,14 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">[record]</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">fps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">100.0</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">duration</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">5.0</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">duration_unit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;seconds&quot;</span><span class="w">      </span><span class="c1"># frames | seconds | minutes | hours</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">trigger_source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;software&quot;</span><span class="w">    </span><span class="c1"># software | managed | external</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">duration_unit</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"seconds"</span><span class="w">      </span><span class="c1"># frames | seconds | minutes | hours</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">trigger_source</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"software"</span><span class="w">    </span><span class="c1"># software | managed | external</span>
 <a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/data/octacam&quot;</span>
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="n">relative_directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;%y%m%d-genotype/Fly1/001-bhv&quot;</span><span class="w">   </span><span class="c1"># strftime template</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/data/octacam"</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="n">relative_directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"%y%m%d-genotype/Fly1/001-bhv"</span><span class="w">   </span><span class="c1"># strftime template</span>
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>
-<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="n">save_method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;ffmpeg&quot;</span><span class="w">         </span><span class="c1"># ffmpeg | raw</span>
-<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray&quot;</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="n">save_method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"ffmpeg"</span><span class="w">         </span><span class="c1"># ffmpeg | raw</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"</span>
 <a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="n">save_transformed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="n">save_timestamps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
 </code></pre></div>
@@ -1129,13 +1132,13 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <p>Encoder args <code>octacam process</code> uses to re-encode recordings to archival mp4.
 Usually a slower, higher-quality preset than the record-time params.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[transcode]</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray&quot;</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"</span>
 </code></pre></div>
 <h2 id="transfer"><code>[transfer]</code><a class="headerlink" href="#transfer" title="Permanent link">&para;</a></h2>
 <p>Where <code>octacam process</code> copies finished outputs. Omit the whole section to
 disable transfer.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">[transfer]</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;/mnt/store/matthias&quot;</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/store/matthias"</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
 <a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="n">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">                      </span><span class="c1"># content-verify each copy (default)</span>
 </code></pre></div>
 <table>
@@ -1165,8 +1168,8 @@ disable transfer.</p>
 place in the preview/grid layout. With no <code>[[cameras]]</code> entries, every detected
 camera is used with auto-assigned names and a default layout.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">[[cameras]]</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">serial_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;40001978&quot;</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;camera_LF&quot;</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">serial_number</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"40001978"</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"camera_LF"</span>
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">scale_x</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
 <a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">scale_y</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
 <a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="n">rotation_deg</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
@@ -1222,32 +1225,33 @@ camera is used with auto-assigned names and a default layout.</p>
 them back, rather than editing the TOML by hand.</p>
 </div>
 <h2 id="visualization"><code>[[visualization]]</code><a class="headerlink" href="#visualization" title="Permanent link">&para;</a></h2>
-<p>Defines the composite <strong>grid</strong> video(s) <code>octacam process</code> builds. List several
-entries to produce several grids. See
+<p>Defines the composite <strong>grid</strong> video(s) <code>octacam process</code> builds. Grids are
+<strong>opt-in</strong>: with no <code>[[visualization]]</code> entry no composite is built at all. List
+several entries to produce several grids. See
 <a href="../processing/#grid-video">Processing → Grid video</a>.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">[[visualization]]</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;grid.mp4&quot;</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"grid.mp4"</span><span class="w">            </span><span class="c1"># output filename inside each recording folder</span>
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">layout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LF&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RF&quot;</span><span class="p">],</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LM&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;camera_F&quot;</span><span class="p">,</span><span class="w">  </span><span class="s2">&quot;camera_RM&quot;</span><span class="p">],</span>
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">&quot;camera_LH&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;&quot;</span><span class="p">,</span><span class="w">          </span><span class="s2">&quot;camera_RH&quot;</span><span class="p">],</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LF"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RF"</span><span class="p">],</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LM"</span><span class="p">,</span><span class="w"> </span><span class="s2">"camera_F"</span><span class="p">,</span><span class="w">  </span><span class="s2">"camera_RM"</span><span class="p">],</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="p">[</span><span class="s2">"camera_LH"</span><span class="p">,</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span><span class="w">          </span><span class="s2">"camera_RH"</span><span class="p">],</span>
 <a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="p">]</span>
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="c1"># ffmpeg_params = &quot;&quot;         # optional per-grid encoder override</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="c1"># ffmpeg_params = ""         # optional per-grid encoder override</span>
 </code></pre></div>
 <p>Each cell is a camera <code>name</code>; <code>""</code> is a black fill. All rows must have the same
-number of columns. With no <code>[[visualization]]</code>, a near-square layout is derived
-from the rig's cameras.</p>
+number of columns. <code>octacam config</code> offers to write a near-square layout of the
+rig's cameras for you.</p>
 <h2 id="plugins"><code>[[plugins]]</code><a class="headerlink" href="#plugins" title="Permanent link">&para;</a></h2>
 <p>Enables opt-in <a href="../plugins/">plugins</a>. The default launch loads none.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Bare names work too: plugins = [&quot;flywheel&quot;]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Bare names work too: plugins = ["flywheel"]</span>
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">[[plugins]]</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;flywheel&quot;</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">&quot;/dev/ttyACM0&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">baud</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">115200</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"flywheel"</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"/dev/ttyACM0"</span><span class="p">,</span><span class="w"> </span><span class="n">baud</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">115200</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <h2 id="gui"><code>[gui]</code><a class="headerlink" href="#gui" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">[gui]</span>
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">display_refresh_interval_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">33</span><span class="w">     </span><span class="c1"># preview refresh cadence (~30 Hz)</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">theme</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;dark&quot;</span><span class="w">                       </span><span class="c1"># &quot;dark&quot; | &quot;light&quot; rig default; the per-browser toggle overrides it</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">theme</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"dark"</span><span class="w">                       </span><span class="c1"># "dark" | "light" rig default; the per-browser toggle overrides it</span>
 </code></pre></div>
 <h2 id="validate-a-config">Validate a config<a class="headerlink" href="#validate-a-config" title="Permanent link">&para;</a></h2>
 <p>Check a directory before recording — this cross-checks declared vs detected
@@ -1369,7 +1373,7 @@ cameras and resolves the save/transfer paths:</p>
       <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>

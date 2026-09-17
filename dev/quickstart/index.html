@@ -25,7 +25,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
     
     
       
@@ -33,7 +33,7 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -960,10 +960,12 @@ are written to video as you record. See the <a href="../guide/gui/">Web GUI guid
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>record<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--duration<span class="w"> </span><span class="m">10</span><span class="w"> </span>--fps<span class="w"> </span><span class="m">100</span>
 </code></pre></div>
 <p>Either way, each recording writes its videos, a <code>recording_summary.json</code>, and a
-snapshot of the rig config into its own folder. See <a href="../guide/recording/">Recording</a>.</p>
+snapshot of its config (with each camera's parameters) into its own folder, so
+the same setup can be relaunched later. See <a href="../guide/recording/">Recording</a>.</p>
 <h2 id="5-archive-everything">5. Archive everything<a class="headerlink" href="#5-archive-everything" title="Permanent link">&para;</a></h2>
-<p>Turn the day's recordings into transcoded videos, composite grid videos, and
-copies on shared storage — one command, no paths to type:</p>
+<p>Turn the day's recordings into transcoded videos (plus any composite grid videos
+the rig config asks for) and copies on shared storage — one command, no paths to
+type:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>process<span class="w"> </span>--all
 </code></pre></div>
 <p>octacam remembers where it recorded, so <code>--all</code> processes every recent recording.
@@ -1089,7 +1091,7 @@ You can also pass explicit folders, or use <code>--last</code> / <code>--last se
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.tracking", "navigation.sections", "navigation.top", "navigation.footer", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"default": "stable", "provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
       
     
   </body>
