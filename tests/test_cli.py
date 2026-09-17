@@ -2364,7 +2364,7 @@ def test_sweep_attributes_unclaimed_image_folder_to_matching_fly(tmp_path, monke
             "plugins": {"twophoton": {"armed": True}},
         },
     )
-    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid", "--no-auto-reconcile-recordings"])
     assert result.exit_code == 0, result.output
     assert (dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_001").exists()
     assert (dest_root / "day1" / "Fly1" / "2P_only" / "Fly1_Zstack").exists()
@@ -2407,7 +2407,7 @@ def test_sweep_attributes_unclaimed_sync_folder_via_frameout_correlation(
             "plugins": {"twophoton": {"armed": True}},
         },
     )
-    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid", "--no-auto-reconcile-recordings"])
     assert result.exit_code == 0, result.output
     assert (dest_root / "day1" / "Fly1" / "2P_only" / "SyncData999" / "Episode001.h5").exists()
     assert not (dest_root / "2p_only").exists()
@@ -2453,7 +2453,7 @@ def test_sweep_attributes_unclaimed_folder_with_different_modality_word(
             "plugins": {"twophoton": {"armed": True}},
         },
     )
-    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid", "--no-auto-reconcile-recordings"])
     assert result.exit_code == 0, result.output
     assert (dest_root / "day1" / "Fly1" / "001" / "2P" / "Fly1_Streaming_000").exists()
     assert (dest_root / "day1" / "Fly1" / "2P_only" / "Fly1_Zstack").exists()
@@ -3096,6 +3096,130 @@ def test_migrate_layout_conflict_leaves_both_and_reports(tmp_path, monkeypatch):
     # Neither copy was touched.
     assert (folder / "camera_LF.mp4").exists()
     assert (folder / "Behavior" / "camera_LF.mp4").read_bytes() == b"different-content-here"
+
+
+# --- process: automatic fly-scoped reconcile (default since 2026-09-17) ----
+
+
+def test_process_auto_reconciles_touched_fly_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"  # no 2P data — a plain Beh take
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+        ),
+        extra_summary={
+            "start_time_ns": 1_000_000_000,
+            "relative_directory": "day1/Fly1/001",
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+    assert not (dest_root / "day1" / "Fly1" / "001").exists()
+
+
+def test_process_auto_reconcile_disabled_by_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+        ),
+        extra_summary={
+            "start_time_ns": 1_000_000_000,
+            "relative_directory": "day1/Fly1/001",
+        },
+    )
+    result = runner.invoke(
+        app,
+        ["process", str(folder), "--no-transcode", "--no-grid",
+         "--no-auto-reconcile-recordings"],
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "001").exists()
+    assert not (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+
+
+def test_process_auto_reconcile_disabled_by_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder,
+        with_outputs=True,
+        extra_toml=(
+            f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+            f"[transfer.twophoton]\n"
+            f'source = "{source_root.as_posix()}"\n'
+            f"reconcile_recordings = false\n"
+        ),
+        extra_summary={
+            "start_time_ns": 1_000_000_000,
+            "relative_directory": "day1/Fly1/001",
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "001").exists()
+    assert not (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+
+
+def test_process_auto_reconcile_renumbers_second_take_without_disturbing_first(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    extra_toml = (
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+    )
+
+    folder1 = tmp_path / "rec1"
+    _make_recording(
+        folder1,
+        with_outputs=True,
+        extra_toml=extra_toml,
+        extra_summary={
+            "start_time_ns": 1_000_000_000,
+            "relative_directory": "day1/Fly1/001",
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder1), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+
+    folder2 = tmp_path / "rec2"
+    _make_recording(
+        folder2,
+        with_outputs=True,
+        extra_toml=extra_toml,
+        extra_summary={
+            "start_time_ns": 2_000_000_000,
+            "relative_directory": "day1/Fly1/002",
+        },
+    )
+    result = runner.invoke(app, ["process", str(folder2), "--no-transcode", "--no-grid"])
+    assert result.exit_code == 0, result.output
+    # The first take, already correctly numbered, is left untouched; the
+    # second is folded in right after it.
+    assert (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+    assert (dest_root / "day1" / "Fly1" / "Recording2_Beh").exists()
 
 
 # --- process: --reconcile-recordings (unified per-fly RecordingN layout) ---

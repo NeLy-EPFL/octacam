@@ -280,6 +280,19 @@ class TwoPhotonTransferConfig(BaseModel):
     take needed), then attributed the same way. A folder whose prefix matches
     more than one fly (or nothing) stays in the generic bucket — never
     guessed.
+
+    ``reconcile_recordings`` renumbers each *touched* fly's own sessions into
+    the unified ``RecordingN_Beh/2P/Synced`` layout after every normal
+    `process` run — the default going forward (Matthias's own preference,
+    2026-09-17), so a fly's folder always reads as one chronological
+    timeline regardless of whether a session was behavior-only, 2P-only, or
+    synced. Deliberately narrower than the standalone `process
+    --reconcile-recordings` mode: it only renumbers the fly directories this
+    run's own folders belong to (cheap — no full-tree rescan), and it never
+    runs the fuzzy, no-take-anchor generic-bucket promotion into brand-new
+    flies, which needs a human to actually look at the result and stays
+    exclusive to the explicit standalone mode. Only gates the automatic
+    per-run step; the standalone mode always runs when invoked explicitly.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -292,6 +305,7 @@ class TwoPhotonTransferConfig(BaseModel):
     assemble_tiff_stacks: bool = True
     write_manifest: bool = True
     attribute_unclaimed_to_fly: bool = True
+    reconcile_recordings: bool = True
 
     @field_validator("source", mode="before")
     @classmethod

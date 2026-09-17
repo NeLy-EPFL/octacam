@@ -4917,36 +4917,50 @@ def _append_reconciliation_log(
 _RECONCILED_2P_DIR_RE = re.compile(r"^Recording\d+_2P$")
 
 
-def _gather_fly_sessions(dest_root: Path) -> dict[Path, list[tuple[float, str, Path]]]:
+def _gather_fly_sessions(
+    dest_root: Path, *, fly_dirs: set[Path] | None = None
+) -> dict[Path, list[tuple[float, str, Path]]]:
     """Every session under each existing ``<day>/<fly>`` in *dest_root* —
     raw/reconciled take folders and 2P-only entries (``2P_only/<name>``
     pre-reconciliation, ``RecordingN_2P/2P/<name>`` post) — as
     ``(start_time, kind, current_path)``, unsorted. Self-contained (see
     :func:`_recording_content`). Finding *both* pre- and post-reconciliation
     shapes is what lets a re-run fully renumber a fly whose session count
-    changed since the last pass, not just whatever's still sitting raw."""
+    changed since the last pass, not just whatever's still sitting raw.
+
+    *fly_dirs*, when given, restricts both the take scan and the 2P-only scan
+    to exactly those fly directories instead of rescanning the whole
+    *dest_root* — used by the automatic per-process reconcile step, which
+    only ever needs to touch the flies this run's own folders belong to, not
+    a full-tree rglob over a potentially years-old NAS root."""
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     sessions: dict[Path, list[tuple[float, str, Path]]] = {}
-    fly_dirs: set[Path] = set()
-    for summary_path in dest_root.rglob(RECORDING_SUMMARY_FILENAME):
-        take_folder = summary_path.parent
-        if take_folder.name in _TWOPHOTON_SUBFOLDER_NAMES:
-            continue
-        try:
-            rel = take_folder.relative_to(dest_root)
-        except ValueError:
-            continue
-        if len(rel.parts) < 2:
-            continue
-        fly_dir = dest_root / rel.parts[0] / rel.parts[1]
-        fly_dirs.add(fly_dir)
-        content = _recording_content(take_folder)
-        if content is not None:
-            kind, start = content
-            sessions.setdefault(fly_dir, []).append((start, kind, take_folder))
+    scan_roots = (
+        [dest_root] if fly_dirs is None else [d for d in fly_dirs if d.is_dir()]
+    )
+    found_fly_dirs: set[Path] = set()
+    for scan_root in scan_roots:
+        for summary_path in scan_root.rglob(RECORDING_SUMMARY_FILENAME):
+            take_folder = summary_path.parent
+            if take_folder.name in _TWOPHOTON_SUBFOLDER_NAMES:
+                continue
+            try:
+                rel = take_folder.relative_to(dest_root)
+            except ValueError:
+                continue
+            if len(rel.parts) < 2:
+                continue
+            fly_dir = dest_root / rel.parts[0] / rel.parts[1]
+            if fly_dirs is not None and fly_dir not in fly_dirs:
+                continue
+            found_fly_dirs.add(fly_dir)
+            content = _recording_content(take_folder)
+            if content is not None:
+                kind, start = content
+                sessions.setdefault(fly_dir, []).append((start, kind, take_folder))
 
-    for fly_dir in fly_dirs:
+    for fly_dir in (found_fly_dirs if fly_dirs is None else fly_dirs):
         if not fly_dir.is_dir():
             continue
         for child in fly_dir.iterdir():
@@ -5087,44 +5101,19 @@ def _promote_generic_2p_only_flies(
     return sessions
 
 
-def _run_reconcile_recordings(
-    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
-) -> None:
-    """``octacam process --reconcile-recordings``: unify each fly's
-    behavior/2P-only sessions into one chronological ``RecordingN_<kind>``
-    sequence (``Beh``/``2P``/``Synced``) — a deliberate, on-demand pass,
-    never run automatically by a normal `process` invocation (which keeps
-    writing takes at their own octacam names and fly-attributed 2P-only data
-    at ``2P_only/<name>``, completely unchanged). Renames only, same-
-    filesystem (like ``--migrate-layout``) — safe to re-run: a fly whose
-    session count hasn't changed since the last pass is left untouched; one
-    whose picture has changed (a new take, a newly-attributed 2P-only entry,
-    or a newly promoted 2P-only fly) is fully renumbered from scratch. Every
-    real move is also recorded to that fly's own append-only
-    ``reconciliation_log.md`` (see :func:`_append_reconciliation_log`) — the
-    original name/location, kept durably in case a move ever needs
-    reverting by hand.
-    Self-contained — no live ``[transfer.twophoton].source`` needed, every
-    2P folder involved is already on the NAS. Never raises."""
-    from octacam.config import resolve_dir_template
-
-    if cli_config_dir is None:
-        sys.exit("--reconcile-recordings requires --config <rig-config-dir>")
-    cfg = _load_config_for_user(cli_config_dir, user)
-    if cfg.transfer is None or not cfg.transfer.directory:
-        sys.exit(
-            f"--reconcile-recordings: no [transfer].directory configured in {cli_config_dir}"
-        )
-    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
-    if not dest_root.is_dir():
-        sys.exit(f"--reconcile-recordings: {dest_root} does not exist")
-
-    fly_basenames = _gather_fly_image_basenames(dest_root)
-    sessions = _gather_fly_sessions(dest_root)
-    promoted = _promote_generic_2p_only_flies(dest_root, fly_basenames)
-    for fly_dir, entries in promoted.items():
-        sessions.setdefault(fly_dir, []).extend(entries)
-
+def _reconcile_sessions(
+    sessions: dict[Path, list[tuple[float, str, Path]]],
+    dest_root: Path,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    """Renumber each fly's sessions into a chronological ``RecordingN_<kind>``
+    sequence in place (same-filesystem rename) — the shared core of both
+    ``--reconcile-recordings`` (whole-tree, plus generic-bucket promotion) and
+    the automatic per-process fly-scoped reconcile step. Returns ``(n_moved,
+    n_unchanged, n_conflict)``. Never raises — a rename collision (a fly
+    whose session count shifted so a target is already occupied) is logged
+    and counted as a conflict, not fatal to the rest of the fly or other
+    flies."""
     n_moved = n_unchanged = n_conflict = 0
     for fly_dir, entries in sorted(sessions.items()):
         if not entries:
@@ -5156,6 +5145,80 @@ def _run_reconcile_recordings(
             _prune_empty_dirs(current_path.parent, dest_root)
         if not dry_run:
             _append_reconciliation_log(fly_dir, dest_root, fly_moves)
+    return n_moved, n_unchanged, n_conflict
+
+
+def _auto_reconcile_fly_dirs(
+    dest_root: Path, fly_dirs: set[Path], dry_run: bool
+) -> None:
+    """The automatic, per-process counterpart to ``--reconcile-recordings``:
+    renumbers just the fly directories this run's own folders belong to
+    into ``RecordingN_Beh/2P/Synced``, using the same :func:`_reconcile_sessions`
+    core. Deliberately narrower than the standalone mode in one way: it never
+    runs :func:`_promote_generic_2p_only_flies` (the fuzzy, no-take-anchor
+    whole-bucket promotion into brand-new flies) — that stays exclusive to
+    the explicit, human-run mode. Cheap: :func:`_gather_fly_sessions` is
+    scoped to *fly_dirs* instead of rescanning the whole (potentially
+    years-old) *dest_root*."""
+    sessions = _gather_fly_sessions(dest_root, fly_dirs=fly_dirs)
+    n_moved, n_unchanged, n_conflict = _reconcile_sessions(sessions, dest_root, dry_run)
+    if n_moved or n_conflict:
+        log.info(
+            "%sauto-reconcile: %d moved, %d already correct, %d needing manual attention",
+            "[dry-run] " if dry_run else "",
+            n_moved,
+            n_unchanged,
+            n_conflict,
+        )
+
+
+def _run_reconcile_recordings(
+    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+) -> None:
+    """``octacam process --reconcile-recordings``: unify each fly's
+    behavior/2P-only sessions into one chronological ``RecordingN_<kind>``
+    sequence (``Beh``/``2P``/``Synced``) — whole-tree, plus the fuzzy
+    generic-bucket-to-new-fly promotion (see
+    :func:`_promote_generic_2p_only_flies`) a normal `process` run never does
+    on its own. The renumbering-only half of this (no promotion, fly-scoped
+    to whatever a run just touched) *does* run automatically after every
+    normal `process` invocation by default — see :func:`_auto_reconcile_fly_dirs`
+    and ``[transfer.twophoton].reconcile_recordings``/
+    ``--no-auto-reconcile-recordings``. This standalone mode stays useful on
+    top of that for: the whole-tree fuzzy promotion, backfilling flies that
+    predate this feature, and a fly whose sessions span more than one
+    process run (each run only auto-reconciles the fly dirs it itself
+    touched). Renames only, same-filesystem (like ``--migrate-layout``) —
+    safe to re-run: a fly whose
+    session count hasn't changed since the last pass is left untouched; one
+    whose picture has changed (a new take, a newly-attributed 2P-only entry,
+    or a newly promoted 2P-only fly) is fully renumbered from scratch. Every
+    real move is also recorded to that fly's own append-only
+    ``reconciliation_log.md`` (see :func:`_append_reconciliation_log`) — the
+    original name/location, kept durably in case a move ever needs
+    reverting by hand.
+    Self-contained — no live ``[transfer.twophoton].source`` needed, every
+    2P folder involved is already on the NAS. Never raises."""
+    from octacam.config import resolve_dir_template
+
+    if cli_config_dir is None:
+        sys.exit("--reconcile-recordings requires --config <rig-config-dir>")
+    cfg = _load_config_for_user(cli_config_dir, user)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(
+            f"--reconcile-recordings: no [transfer].directory configured in {cli_config_dir}"
+        )
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    if not dest_root.is_dir():
+        sys.exit(f"--reconcile-recordings: {dest_root} does not exist")
+
+    fly_basenames = _gather_fly_image_basenames(dest_root)
+    sessions = _gather_fly_sessions(dest_root)
+    promoted = _promote_generic_2p_only_flies(dest_root, fly_basenames)
+    for fly_dir, entries in promoted.items():
+        sessions.setdefault(fly_dir, []).extend(entries)
+
+    n_moved, n_unchanged, n_conflict = _reconcile_sessions(sessions, dest_root, dry_run)
 
     if dry_run:
         log.info(
@@ -5687,6 +5750,7 @@ def _grid_and_transfer(
     transcode_failed_folders: frozenset[Path] = frozenset(),
     no_twophoton_sweep: bool = False,
     no_twophoton_manifest: bool = False,
+    no_auto_reconcile_recordings: bool = False,
     user: str | None = None,
 ) -> int:
     """Build visualization grids, transfer each folder (behavior + any paired
@@ -5702,10 +5766,16 @@ def _grid_and_transfer(
     ``_sweep_unclaimed_twophoton``; ``no_twophoton_sweep`` skips it), a
     reconciliation-manifest rebuild for every day/session folder those
     sources touched (see ``_rebuild_twophoton_manifests``;
-    ``no_twophoton_manifest`` skips it), then delete-after-transfer. Returns
-    the number of files that failed to transfer (behavior + 2P + sweep).
-    When ``reporter`` is set (a detached job) each phase reports progress and
-    pauses between folders while a gui/record owns the cameras."""
+    ``no_twophoton_manifest`` skips it), delete-after-transfer, then an
+    automatic fly-scoped reconcile (see ``_auto_reconcile_fly_dirs``;
+    ``no_auto_reconcile_recordings`` or a rig's own
+    ``[transfer.twophoton].reconcile_recordings = false`` skips it) — run
+    last, after deletion, so a rig using ``--delete-after-transfer`` never
+    renumbers a fly whose local take folder could still be re-processed
+    later. Returns the number of files that failed to transfer (behavior +
+    2P + sweep). When ``reporter`` is set (a detached job) each phase reports
+    progress and pauses between folders while a gui/record owns the
+    cameras."""
     from octacam.config import resolve_dir_template
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
@@ -6136,6 +6206,28 @@ def _grid_and_transfer(
                         "delete-after-transfer: failed to remove %s: %s", src_2p, e
                     )
 
+        # --- Phase 5: automatic fly-scoped reconcile ------------------------
+        # Deliberately after delete-after-transfer, not before: a rename only
+        # ever touches the NAS tree, never the local recording folder, so a
+        # local folder that outlives a rename could get re-processed later
+        # and re-created at its pre-rename path (not destructive — same-
+        # filesystem rename never overwrites an existing target, so at worst
+        # a re-processed duplicate gets its own next RecordingN — but running
+        # this last, after local folders are already gone, closes the gap
+        # for the common case of a rig that also uses --delete-after-transfer.
+        if not no_auto_reconcile_recordings:
+            reconcile_targets: dict[Path, set[Path]] = {}
+            for folder, dest in folder_dest.items():
+                cfg = folder_cfgs[folder]
+                assert cfg.transfer is not None
+                twophoton_cfg = cfg.transfer.twophoton
+                if twophoton_cfg is None or not twophoton_cfg.reconcile_recordings:
+                    continue
+                reconcile_dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+                reconcile_targets.setdefault(reconcile_dest_root, set()).add(dest.parent)
+            for reconcile_dest_root, fly_dirs in reconcile_targets.items():
+                _auto_reconcile_fly_dirs(reconcile_dest_root, fly_dirs, dry_run)
+
     return transfer_failed
 
 
@@ -6154,6 +6246,7 @@ def _rebuild_process_argv(
     no_delete_after_transfer: bool,
     no_twophoton_sweep: bool,
     no_twophoton_manifest: bool,
+    no_auto_reconcile_recordings: bool,
     dry_run: bool,
 ) -> list[str]:
     """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
@@ -6186,6 +6279,8 @@ def _rebuild_process_argv(
         argv.append("--no-twophoton-sweep")
     if no_twophoton_manifest:
         argv.append("--no-twophoton-manifest")
+    if no_auto_reconcile_recordings:
+        argv.append("--no-auto-reconcile-recordings")
     if dry_run:
         argv.append("--dry-run")
     if config_dir is not None:
@@ -6357,8 +6452,12 @@ def process(
             "sequence, renaming in place (same-filesystem, no data copied). Also "
             "promotes unclaimed 2P-only data in the generic 2p_only/ bucket into "
             "a brand-new Fly folder when its name groups distinctly by "
-            "experiment. A deliberate, explicit pass — never run automatically "
-            "by a normal process invocation. Requires --config; ignores "
+            "experiment — a normal process run never does that fuzzy, "
+            "no-take-anchor promotion on its own (see "
+            "--no-auto-reconcile-recordings for the renumbering-only half a "
+            "normal run does do automatically). This whole-tree standalone "
+            "pass also catches a fly whose sessions span more than one "
+            "process run. Requires --config; ignores "
             "PATHS/--last/--session-id/--all. Safe to re-run.",
         ),
     ] = False,
@@ -6491,6 +6590,19 @@ def process(
             "the same logic run standalone.",
         ),
     ] = False,
+    no_auto_reconcile_recordings: Annotated[
+        bool,
+        typer.Option(
+            "--no-auto-reconcile-recordings",
+            help="Skip the automatic RecordingN_Beh/2P/Synced renumbering this "
+            "run otherwise does, after delete-after-transfer, for every fly "
+            "directory it touched (rigs with [transfer.twophoton] configured "
+            "and reconcile_recordings not set to false) — see "
+            "--reconcile-recordings, the broader standalone mode (whole-tree, "
+            "plus generic-bucket fly promotion) this reuses the same renaming "
+            "logic from.",
+        ),
+    ] = False,
     progress_style: Annotated[
         ProgressStyle,
         typer.Option(
@@ -6597,6 +6709,7 @@ def process(
             no_delete_after_transfer=no_delete_after_transfer,
             no_twophoton_sweep=no_twophoton_sweep,
             no_twophoton_manifest=no_twophoton_manifest,
+            no_auto_reconcile_recordings=no_auto_reconcile_recordings,
             dry_run=dry_run,
         )
         status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
@@ -6765,6 +6878,7 @@ def process(
                 transcode_failed_folders=frozenset(transcode_failed_folders),
                 no_twophoton_sweep=no_twophoton_sweep,
                 no_twophoton_manifest=no_twophoton_manifest,
+                no_auto_reconcile_recordings=no_auto_reconcile_recordings,
                 user=user,
             )
 

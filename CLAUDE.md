@@ -775,13 +775,32 @@ against a real 2P rig; the durable findings:
   chronological sequence instead — `Recording1`, `Recording2`, ... suffixed
   by content (`_Beh`/`_2P`/`_Synced`) — so a fly's folder reads as one
   timeline regardless of whether a session was behavior-only, 2P-only, or
-  synced. Deliberately a **separate, explicit, on-demand mode** — never
-  fused into the automatic `process` pipeline, which keeps writing takes and
-  `2P_only/<name>` exactly as before; renumbering only happens when this is
-  run by hand, mirroring `--migrate-layout`'s own safety model (same-
-  filesystem rename, dry-run first, self-contained — no live
+  synced. Originally a separate, explicit, on-demand-only mode; **the
+  renumbering half (no promotion) is now the default**, run automatically
+  by every normal `process` invocation (`[transfer.twophoton]` configured
+  and its `reconcile_recordings` not set to `false`; `--no-auto-reconcile-
+  recordings` opts a single run out) — Matthias's own preference,
+  2026-09-17, once the pipeline had proven itself on real data. Split for
+  safety into two pieces: `cli._auto_reconcile_fly_dirs` (the automatic
+  half — fly-scoped to just the directories a run's own folders belong to,
+  cheap, no full-tree rescan, and deliberately never runs the fuzzy
+  no-anchor generic-bucket promotion below) and the shared renaming core
+  `cli._reconcile_sessions` both it and the standalone `--reconcile-
+  recordings` mode call. The standalone mode still exists for: the fuzzy
+  promotion, backfilling flies from before this feature, and a fly whose
+  sessions span more than one `process` run (each run's automatic pass only
+  ever touches the fly dirs *it* touched). Run **after** delete-after-
+  transfer, not before: a rename only ever touches the NAS tree, never the
+  local recording folder, so a local folder that outlives a rename (a rig
+  not using `--delete-after-transfer`) could get re-processed later and
+  re-created at its pre-rename path — not destructive (a same-filesystem
+  rename never overwrites an existing target; a re-processed duplicate just
+  gets its own next `RecordingN`), but a known, accepted edge case rather
+  than one solved with extra state-tracking, consistent with this
+  codebase's other documented `session_cache`-adjacent limitations.
+  Same-filesystem rename, dry-run first, self-contained — no live
   `[transfer.twophoton].source` needed, since every 2P folder involved is
-  already on the NAS). `classify_twophoton_folder` (pulled out of
+  already on the NAS. `classify_twophoton_folder` (pulled out of
   `discover_twophoton_folders`'s inner loop) classifies one already-known
   folder directly — a real bug found building this: calling
   `discover_twophoton_folders` itself on `2P_only`'s or a date-bucket's own
