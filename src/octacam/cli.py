@@ -5358,6 +5358,122 @@ def _run_twophoton_sweep(
         sys.exit(f"{n_failed} file(s) failed to transfer")
 
 
+def _find_twophoton_dest_folder(dest_root: Path, name: str) -> Path | None:
+    """Where a 2P folder named *name* already landed under *dest_root*, if
+    anywhere — checked across every shape a 2P folder can end up in: a take's
+    own ``<day>/<fly>/<take>/2P/``, a fly-attributed ``<day>/<fly>/2P_only/``,
+    an already-reconciled ``<day>/<fly>/RecordingN_2P/2P/``, or the generic
+    ``2p_only/<experiment>/<date>/`` bucket. The latter three mirror the same
+    locations :func:`_already_present_2p_names` already checks (by name only,
+    for dedup); the take-own ``2P/`` shape is one level deeper (a take
+    between fly and ``2P/``), which that function has no need to check since
+    matched-take copies are deduped via :func:`_already_matched_twophoton_paths`
+    instead. This returns the actual path, for :func:`_run_twophoton_verify`
+    to read back and verify. Returns ``None`` if *name* isn't found anywhere."""
+    for pattern in (
+        f"*/*/*/2P/{name}",
+        f"*/*/2P_only/{name}",
+        f"*/*/Recording*_2P/2P/{name}",
+        f"2p_only/*/*/{name}",
+    ):
+        for candidate in dest_root.glob(pattern):
+            if candidate.is_dir():
+                return candidate
+    return None
+
+
+def _verify_twophoton_folder_on_nas(source_folder: Path, dest_folder: Path) -> list[str]:
+    """Byte-for-byte compare every file under *source_folder* against its
+    counterpart under *dest_folder*.
+
+    Returns a list of problem descriptions (missing file, size/content
+    mismatch) — empty means *source_folder* is fully, verifiably present at
+    *dest_folder* and safe to delete from the source. Deliberately re-hashes
+    both sides live rather than trusting a ``twophoton_match.json`` sidecar's
+    mere existence: the sidecar records that a copy was *attempted*, not that
+    it was ever checksum-verified — the original transfer's ``verify``/
+    ``checksum`` flags aren't persisted in it, and an unmatched-sweep copy
+    made without ``[transfer].checksum`` set skips verification entirely."""
+    from octacam.transfer import _file_digest
+
+    problems: list[str] = []
+    for src_file in sorted(p for p in source_folder.rglob("*") if p.is_file()):
+        rel = src_file.relative_to(source_folder)
+        dest_file = dest_folder / rel
+        if not dest_file.is_file():
+            problems.append(f"missing at NAS: {rel}")
+            continue
+        if src_file.stat().st_size != dest_file.stat().st_size:
+            problems.append(f"size mismatch: {rel}")
+            continue
+        if _file_digest(src_file) != _file_digest(dest_file):
+            problems.append(f"content mismatch: {rel}")
+    return problems
+
+
+def _run_twophoton_verify(cli_config_dir: Path | None, user: str | None = None) -> None:
+    """``octacam process --twophoton-verify``: read-only report of which 2P
+    source folders on ``[transfer.twophoton].source`` are already fully,
+    live-checksum-verified on the NAS and therefore safe to delete by hand
+    from the share — for a rig (like a ``noperm`` CIFS mount) where octacam
+    itself has no delete permission there. Never deletes or modifies
+    anything, on either side."""
+    from octacam.config import resolve_dir_template
+    from octacam.twophoton_transfer import discover_twophoton_folders, is_settled
+
+    if cli_config_dir is None:
+        sys.exit("--twophoton-verify requires --config <rig-config-dir>")
+    cfg = _load_config_for_user(cli_config_dir, user)
+    if cfg.transfer is None or not cfg.transfer.directory:
+        sys.exit(f"--twophoton-verify: no [transfer].directory configured in {cli_config_dir}")
+    twophoton_cfg = cfg.transfer.twophoton
+    if twophoton_cfg is None or not twophoton_cfg.source:
+        sys.exit(f"--twophoton-verify: no [transfer.twophoton] configured in {cli_config_dir}")
+
+    source_root = Path(resolve_dir_template(twophoton_cfg.source))
+    dest_root = Path(resolve_dir_template(cfg.transfer.directory))
+    candidates = discover_twophoton_folders(source_root)
+    if not candidates:
+        log.info("2P verify: nothing found under %s", source_root)
+        return
+
+    n_safe = n_pending = n_unsettled = n_problem = 0
+    for folder in sorted(candidates, key=lambda f: f.path.name):
+        if not is_settled(folder, twophoton_cfg.settle_s):
+            log.info("2P verify: %s still writing — skipped", folder.path)
+            n_unsettled += 1
+            continue
+        dest = _find_twophoton_dest_folder(dest_root, folder.path.name)
+        if dest is None:
+            log.info("2P verify: %s not yet transferred — leave it", folder.path)
+            n_pending += 1
+            continue
+        problems = _verify_twophoton_folder_on_nas(folder.path, dest)
+        if problems:
+            n_problem += 1
+            log.error(
+                "2P verify: %s -> %s MISMATCH — do NOT delete (%d problem(s)): %s",
+                folder.path,
+                dest,
+                len(problems),
+                "; ".join(problems[:5]) + ("; ..." if len(problems) > 5 else ""),
+            )
+        else:
+            n_safe += 1
+            log.info("2P verify: %s -> %s verified — safe to delete", folder.path, dest)
+
+    log.info(
+        "2P verify: %d safe to delete, %d not yet transferred, %d still writing, "
+        "%d MISMATCH",
+        n_safe,
+        n_pending,
+        n_unsettled,
+        n_problem,
+    )
+    if n_problem:
+        sys.exit(f"{n_problem} folder(s) failed verification — see errors above")
+
+
 def _run_layout_migration(
     cli_config_dir: Path | None, dry_run: bool, user: str | None = None
 ) -> None:
@@ -6246,6 +6362,19 @@ def process(
             "PATHS/--last/--session-id/--all. Safe to re-run.",
         ),
     ] = False,
+    twophoton_verify: Annotated[
+        bool,
+        typer.Option(
+            "--twophoton-verify",
+            help="One-time/ad-hoc mode: instead of processing recording folders, "
+            "report which 2P folders on [transfer.twophoton].source are already "
+            "fully, live-checksum-verified on the NAS — safe to delete by hand "
+            "from the share (for a mount, like a noperm CIFS share, where "
+            "octacam itself has no delete permission there). Read-only: never "
+            "deletes or modifies anything. Requires --config; ignores "
+            "PATHS/--last/--session-id/--all.",
+        ),
+    ] = False,
     recursive: Annotated[
         bool,
         typer.Option("-r", "--recursive", help="Recurse into the given folders."),
@@ -6414,9 +6543,9 @@ def process(
     skipped.
 
     --twophoton-sweep, --migrate-layout, --reassemble-tiffs,
-    --twophoton-manifest, and --reconcile-recordings are separate modes
-    (ignore PATHS/--last/--session-id/--all/--detach) — see their own help
-    text.
+    --twophoton-manifest, --reconcile-recordings, and --twophoton-verify are
+    separate modes (ignore PATHS/--last/--session-id/--all/--detach) — see
+    their own help text.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -6435,6 +6564,9 @@ def process(
         return
     if reconcile_recordings:
         _run_reconcile_recordings(config_dir, dry_run, user)
+        return
+    if twophoton_verify:
+        _run_twophoton_verify(config_dir, user)
         return
 
     do_transcode = not no_transcode

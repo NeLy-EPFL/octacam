@@ -2225,6 +2225,112 @@ def test_twophoton_sweep_excludes_already_matched_folder_with_no_local_cache(
     assert not (dest_root / "2p_only").exists()
 
 
+# --- --twophoton-verify: read-only safe-to-delete report -------------------
+
+
+def _write_verify_rig_config(config_dir, dest_root, source_root, settle_s=60):
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = {settle_s}\n"
+    )
+
+
+def test_twophoton_verify_requires_config():
+    result = runner.invoke(app, ["process", "--twophoton-verify"])
+    assert result.exit_code != 0
+
+
+def test_twophoton_verify_reports_safe_to_delete_for_verified_folder(
+    tmp_path, monkeypatch
+):
+    # A folder already byte-identical on the NAS (in the shape a take's own
+    # 2P/ transfer produces) must be reported safe to delete from the share
+    # — re-verified live, not just trusted because a sidecar exists.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        source_root, "exp", "SyncData102", mtime=time.time() - 10_000
+    )
+    dest_2p = dest_root / "day1" / "Fly1" / "001" / "2P" / "SyncData102"
+    dest_2p.mkdir(parents=True)
+    for f in folder.iterdir():
+        (dest_2p / f.name).write_bytes(f.read_bytes())
+
+    config_dir = tmp_path / "rig"
+    _write_verify_rig_config(config_dir, dest_root, source_root)
+    result = runner.invoke(
+        app, ["process", "--twophoton-verify", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "safe to delete" in result.output
+    assert "1 safe to delete" in " ".join(result.output.split())
+    # Read-only: nothing on either side is touched.
+    assert folder.exists()
+    assert dest_2p.exists()
+
+
+def test_twophoton_verify_flags_content_mismatch(tmp_path, monkeypatch):
+    # A NAS copy that doesn't byte-match the source must be flagged loudly —
+    # this is the one case that should never happen, and must never be
+    # reported as safe to delete.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    folder = _make_sync_folder_2p(
+        source_root, "exp", "SyncData102", mtime=time.time() - 10_000
+    )
+    dest_2p = dest_root / "day1" / "Fly1" / "001" / "2P" / "SyncData102"
+    dest_2p.mkdir(parents=True)
+    for f in folder.iterdir():
+        data = f.read_bytes()
+        if f.suffix == ".h5":
+            data += b"corrupted"
+        (dest_2p / f.name).write_bytes(data)
+
+    config_dir = tmp_path / "rig"
+    _write_verify_rig_config(config_dir, dest_root, source_root)
+    result = runner.invoke(
+        app, ["process", "--twophoton-verify", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0
+    assert "MISMATCH" in result.output
+    assert "verified — safe to delete" not in " ".join(result.output.split())
+
+
+def test_twophoton_verify_reports_not_yet_transferred(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _make_sync_folder_2p(source_root, "exp", "SyncData102", mtime=time.time() - 10_000)
+
+    config_dir = tmp_path / "rig"
+    _write_verify_rig_config(config_dir, dest_root, source_root)
+    result = runner.invoke(
+        app, ["process", "--twophoton-verify", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "not yet transferred" in result.output
+
+
+def test_twophoton_verify_skips_unsettled_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _make_sync_folder_2p(source_root, "exp", "SyncData102", mtime=time.time())
+
+    config_dir = tmp_path / "rig"
+    _write_verify_rig_config(config_dir, dest_root, source_root, settle_s=3600)
+    result = runner.invoke(
+        app, ["process", "--twophoton-verify", "--config", str(config_dir)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "still writing" in result.output
+
+
 # --- 2P sweep: attribute unclaimed folders to their fly by ThorImage prefix -
 
 

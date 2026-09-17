@@ -603,6 +603,20 @@ against a real 2P rig; the durable findings:
   weaker than `[transfer].checksum`) rather than transcode-gated, and it never
   deletes a folder that had a transcode failure this run even if every other
   camera's output transferred cleanly.
+- **It can't delete the 2P *source* on a `noperm` CIFS mount** — confirmed on
+  the real rig (2026-09-17): `//host/share` mounted with the `noperm` option
+  defers *all* permission enforcement to the Windows server, so a Linux-side
+  remount can't fix a `smb_share_user` account that lacks delete rights there;
+  `shutil.rmtree` on the matched 2P source just raises `PermissionError`,
+  logged and swallowed per-folder (never aborts the run). `octacam process
+  --twophoton-verify` (`_run_twophoton_verify`) is the safe alternative for
+  this case: a read-only report of which 2P source folders are already fully,
+  **live**-checksum-verified on the NAS (re-hashes both sides itself — a
+  `twophoton_match.json` sidecar's mere existence only proves a copy was
+  *attempted*, not that it was ever checksum-verified, since the original
+  transfer's `verify`/`checksum` flags aren't persisted in it) and therefore
+  safe for a human to delete by hand from the share. Never deletes or
+  modifies anything on either side.
 - **Run-ordering gap, fixed**: a behavior take can be finalized by one
   `process` run before its true 2P counterpart has even appeared/settled on
   the share yet (confirmed on real data — see
