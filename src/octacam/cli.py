@@ -5172,23 +5172,57 @@ def _auto_reconcile_fly_dirs(
         )
 
 
+def _resolve_reconcile_fly_dirs(dest_root: Path, paths: list[Path]) -> set[Path]:
+    """Expand explicit day/experiment-folder or fly-folder *paths* into the
+    set of fly directories under *dest_root* they refer to. A day/experiment
+    folder (one path segment under *dest_root*, e.g.
+    ``<dest_root>/260916_AllPAM_G151xCI80``) expands to every ``Fly*`` child
+    it has; a path that's already a specific fly folder (or deeper) is
+    reduced to its own ``<day>/<fly>`` prefix. Silently ignores any path
+    that doesn't resolve under *dest_root* at all — never touches anything
+    outside it."""
+    fly_dirs: set[Path] = set()
+    dest_root = dest_root.resolve()
+    for raw in paths:
+        p = raw.resolve()
+        try:
+            rel = p.relative_to(dest_root)
+        except ValueError:
+            continue
+        if len(rel.parts) == 1:
+            fly_dirs.update(d for d in p.glob("Fly*") if d.is_dir())
+        else:
+            fly_dirs.add(dest_root / rel.parts[0] / rel.parts[1])
+    return fly_dirs
+
+
 def _run_reconcile_recordings(
-    cli_config_dir: Path | None, dry_run: bool, user: str | None = None
+    cli_config_dir: Path | None,
+    dry_run: bool,
+    user: str | None = None,
+    paths: list[Path] | None = None,
+    scan_all: bool = False,
 ) -> None:
     """``octacam process --reconcile-recordings``: unify each fly's
     behavior/2P-only sessions into one chronological ``RecordingN_<kind>``
-    sequence (``Beh``/``2P``/``Synced``) — whole-tree, plus the fuzzy
+    sequence (``Beh``/``2P``/``Synced``).
+
+    Scoped by default to *paths* (one or more day/experiment folders, or
+    specific fly folders, under ``[transfer].directory`` — resolved by
+    :func:`_resolve_reconcile_fly_dirs`) via the exact same fly-scoped
+    renumbering :func:`_auto_reconcile_fly_dirs` runs automatically after
+    every normal `process` invocation — this is that same, already-tested
+    logic, just invoked by hand for data that predates the automatic feature
+    or whose sessions span more than one `process` run. Deliberately does
+    **not** implicitly scan the whole NAS tree: this pipeline only ever
+    concerns some experiments in some cases, and a multi-year
+    ``[transfer].directory`` can be large enough over NFS/SMB that an
+    unscoped scan is a real, surprising cost — pass ``scan_all`` (``--all``)
+    to explicitly opt into a full-tree pass, which also runs the fuzzy
     generic-bucket-to-new-fly promotion (see
-    :func:`_promote_generic_2p_only_flies`) a normal `process` run never does
-    on its own. The renumbering-only half of this (no promotion, fly-scoped
-    to whatever a run just touched) *does* run automatically after every
-    normal `process` invocation by default — see :func:`_auto_reconcile_fly_dirs`
-    and ``[transfer.twophoton].reconcile_recordings``/
-    ``--no-auto-reconcile-recordings``. This standalone mode stays useful on
-    top of that for: the whole-tree fuzzy promotion, backfilling flies that
-    predate this feature, and a fly whose sessions span more than one
-    process run (each run only auto-reconciles the fly dirs it itself
-    touched). Renames only, same-filesystem (like ``--migrate-layout``) —
+    :func:`_promote_generic_2p_only_flies`) that a scoped run skips (no
+    existing-fly anchor to attribute unowned data to without looking at
+    everything). Renames only, same-filesystem (like ``--migrate-layout``) —
     safe to re-run: a fly whose
     session count hasn't changed since the last pass is left untouched; one
     whose picture has changed (a new take, a newly-attributed 2P-only entry,
@@ -5211,6 +5245,30 @@ def _run_reconcile_recordings(
     dest_root = Path(resolve_dir_template(cfg.transfer.directory))
     if not dest_root.is_dir():
         sys.exit(f"--reconcile-recordings: {dest_root} does not exist")
+
+    paths = paths or []
+    if not paths and not scan_all:
+        sys.exit(
+            "--reconcile-recordings: pass one or more day/experiment (or fly) "
+            "folders as PATHS to scope this, or --all to scan the entire "
+            f"{dest_root} tree (slow over a network share — walks every "
+            "recording ever transferred; also runs the fuzzy generic-bucket "
+            "promotion a scoped run skips)"
+        )
+    if paths and not scan_all:
+        fly_dirs = _resolve_reconcile_fly_dirs(dest_root, paths)
+        if not fly_dirs:
+            sys.exit(f"--reconcile-recordings: no Fly*/ folder found under {paths}")
+        _auto_reconcile_fly_dirs(dest_root, fly_dirs, dry_run)
+        log.info(
+            "%sreconcile: scoped to %d fly folder(s) under %s — pass --all for "
+            "a full-tree pass (also promotes unclaimed generic-bucket data "
+            "into new flies)",
+            "[dry-run] " if dry_run else "",
+            len(fly_dirs),
+            dest_root,
+        )
+        return
 
     fly_basenames = _gather_fly_image_basenames(dest_root)
     sessions = _gather_fly_sessions(dest_root)
@@ -6369,7 +6427,9 @@ def process(
         typer.Argument(
             exists=True,
             help="Recording folders (or parent directories with -r). Omit when "
-            "using --last/--session-id/--all.",
+            "using --last/--session-id/--all. With --reconcile-recordings: one "
+            "or more day/experiment (or fly) folders on the NAS to scope to "
+            "instead.",
         ),
     ] = None,
     last: Annotated[
@@ -6449,16 +6509,17 @@ def process(
             help="One-time/ad-hoc mode: instead of processing recording folders, "
             "unify each fly's behavior takes and fly-attributed 2P-only data "
             "already on the NAS into one chronological RecordingN_Beh/2P/Synced "
-            "sequence, renaming in place (same-filesystem, no data copied). Also "
-            "promotes unclaimed 2P-only data in the generic 2p_only/ bucket into "
-            "a brand-new Fly folder when its name groups distinctly by "
-            "experiment — a normal process run never does that fuzzy, "
-            "no-take-anchor promotion on its own (see "
-            "--no-auto-reconcile-recordings for the renumbering-only half a "
-            "normal run does do automatically). This whole-tree standalone "
-            "pass also catches a fly whose sessions span more than one "
-            "process run. Requires --config; ignores "
-            "PATHS/--last/--session-id/--all. Safe to re-run.",
+            "sequence, renaming in place (same-filesystem, no data copied). "
+            "Requires --config, plus one of: PATHS (one or more day/experiment "
+            "or fly folders — scopes to just those, the common case, and never "
+            "scans the rest of the NAS) or --all (a full-tree pass — also "
+            "promotes unclaimed 2P-only data in the generic 2p_only/ bucket "
+            "into a brand-new Fly folder when its name groups distinctly by "
+            "experiment, which a scoped run skips). A normal process run "
+            "already does the PATHS-scoped renumbering automatically for "
+            "whatever it just touched (see --no-auto-reconcile-recordings) — "
+            "this is for data that predates that, or a fly whose sessions "
+            "span more than one process run. Safe to re-run.",
         ),
     ] = False,
     twophoton_verify: Annotated[
@@ -6655,9 +6716,11 @@ def process(
     skipped.
 
     --twophoton-sweep, --migrate-layout, --reassemble-tiffs,
-    --twophoton-manifest, --reconcile-recordings, and --twophoton-verify are
-    separate modes (ignore PATHS/--last/--session-id/--all/--detach) — see
-    their own help text.
+    --twophoton-manifest, and --twophoton-verify are separate modes (ignore
+    PATHS/--last/--session-id/--all/--detach) — see their own help text.
+    --reconcile-recordings is also a separate mode, but is the one exception
+    that *does* read PATHS/--all: PATHS scope it to specific day/experiment
+    (or fly) folders (the common case), --all opts into a full-tree pass.
     """
     from octacam import process_jobs, session_cache
     from octacam.writer import is_partial_transcode, transcode_file
@@ -6675,7 +6738,7 @@ def process(
         _run_twophoton_manifest(config_dir, dry_run, user)
         return
     if reconcile_recordings:
-        _run_reconcile_recordings(config_dir, dry_run, user)
+        _run_reconcile_recordings(config_dir, dry_run, user, paths=list(paths or []), scan_all=all_)
         return
     if twophoton_verify:
         _run_twophoton_verify(config_dir, user)

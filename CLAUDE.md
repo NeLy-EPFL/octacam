@@ -824,7 +824,18 @@ against a real 2P rig; the durable findings:
   codebase's other documented `session_cache`-adjacent limitations.
   Same-filesystem rename, dry-run first, self-contained — no live
   `[transfer.twophoton].source` needed, since every 2P folder involved is
-  already on the NAS. `classify_twophoton_folder` (pulled out of
+  already on the NAS. **The standalone mode requires either PATHS (one or
+  more day/experiment or fly folders) or `--all`** (2026-09-17, Matthias's
+  own request) — it never implicitly scans the whole `[transfer].directory`
+  tree, since this pipeline only ever concerns some experiments in some
+  cases and an unscoped scan over a multi-year NAS root is a real, surprising
+  cost (confirmed live: a `--dry-run` against the full tree ran long enough
+  to be worth stopping and re-running scoped instead). PATHS-scoped mode
+  reuses `_auto_reconcile_fly_dirs` directly (`_resolve_reconcile_fly_dirs`
+  expands a day/experiment folder to its `Fly*` children) and skips the
+  fuzzy generic-bucket promotion below — that stays exclusive to `--all`,
+  since it has no existing-fly anchor to attribute unowned data against
+  without looking at everything. `classify_twophoton_folder` (pulled out of
   `discover_twophoton_folders`'s inner loop) classifies one already-known
   folder directly — a real bug found building this: calling
   `discover_twophoton_folders` itself on `2P_only`'s or a date-bucket's own

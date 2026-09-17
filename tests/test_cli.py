@@ -3317,6 +3317,98 @@ def test_reconcile_recordings_requires_config(tmp_path, monkeypatch):
     assert "--config" in result.output
 
 
+def test_reconcile_recordings_requires_paths_or_all(tmp_path, monkeypatch):
+    # Real request (2026-09-17): never implicitly scan the whole NAS tree —
+    # this pipeline only concerns some experiments in some cases.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+    )
+    assert result.exit_code != 0
+    assert "--all" in result.output
+    assert not (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+
+
+def test_reconcile_recordings_scoped_to_day_folder_path(tmp_path, monkeypatch):
+    # PATHS scoping (the common case): only the given day folder's flies are
+    # touched — a sibling day folder elsewhere in the tree must be left
+    # completely alone (never even scanned).
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    other_day_take = _write_take(
+        dest_root, "day2/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--reconcile-recordings", "--config", str(config_dir),
+         str(dest_root / "day1")],
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+    # Untouched — the scoped scan never looked at day2 at all.
+    assert other_day_take.exists()
+    assert not (dest_root / "day2" / "Fly1" / "Recording1_Beh").exists()
+
+
+def test_reconcile_recordings_scoped_to_fly_folder_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    other_fly_take = _write_take(
+        dest_root, "day1/Fly2/001", start_time_ns=1_000_000_000_000, duration_s=10.0
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--reconcile-recordings", "--config", str(config_dir),
+         str(dest_root / "day1" / "Fly1")],
+    )
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "day1" / "Fly1" / "Recording1_Beh").exists()
+    assert other_fly_take.exists()
+    assert not (dest_root / "day1" / "Fly2" / "Recording1_Beh").exists()
+
+
+def test_reconcile_recordings_scoped_skips_generic_bucket_promotion(tmp_path, monkeypatch):
+    # A scoped run has no anchor to attribute the fuzzy generic bucket
+    # against without looking at everything — that stays exclusive to --all.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0)
+    generic_bucket = dest_root / "2p_only" / "exp" / "260101"
+    generic_bucket.mkdir(parents=True)
+    (generic_bucket / "SomeFly").mkdir()
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app,
+        ["process", "--reconcile-recordings", "--config", str(config_dir),
+         str(dest_root / "day1")],
+    )
+    assert result.exit_code == 0, result.output
+    assert (generic_bucket / "SomeFly").exists()  # untouched by a scoped run
+
+
 def test_reconcile_recordings_renumbers_chronologically(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
@@ -3335,7 +3427,7 @@ def test_reconcile_recordings_renumbers_chronologically(tmp_path, monkeypatch):
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     fly_dir = dest_root / "day1" / "Fly1"
@@ -3363,7 +3455,7 @@ def test_reconcile_recordings_folds_2p_only_into_sequence(tmp_path, monkeypatch)
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     assert (fly_dir / "Recording1_2P" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
@@ -3380,12 +3472,12 @@ def test_reconcile_recordings_rerun_with_no_changes_is_noop(tmp_path, monkeypatc
     (config_dir / "octacam_config.toml").write_text(
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
-    runner.invoke(app, ["process", "--reconcile-recordings", "--config", str(config_dir)])
+    runner.invoke(app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"])
     fly_dir = dest_root / "day1" / "Fly1"
     mtime_before = (fly_dir / "Recording1_Beh").stat().st_mtime_ns
 
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     assert (fly_dir / "Recording1_Beh").stat().st_mtime_ns == mtime_before
@@ -3401,7 +3493,7 @@ def test_reconcile_recordings_dry_run_touches_nothing(tmp_path, monkeypatch):
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run"]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run", "--all"]
     )
     assert result.exit_code == 0, result.output
     assert (dest_root / "day1" / "Fly1" / "001").exists()
@@ -3429,7 +3521,7 @@ def test_reconcile_recordings_promotes_generic_bucket_to_new_fly(tmp_path, monke
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     new_fly = dest_root / "260903_PAM7xCI63" / "Fly2"
@@ -3462,7 +3554,7 @@ def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, mo
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     fly1 = dest_root / "260903_PAM7xCI63" / "Fly1"
@@ -3494,7 +3586,7 @@ def test_reconcile_recordings_reuses_day_folder_despite_digit_mismatch(tmp_path,
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     assert existing_take.parent.is_dir()  # 260903_PAM07xCI80/Fly1 still exists
@@ -3514,7 +3606,7 @@ def test_reconcile_recordings_writes_append_only_log(tmp_path, monkeypatch):
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     log_path = dest_root / "day1" / "Fly1" / "reconciliation_log.md"
@@ -3528,7 +3620,7 @@ def test_reconcile_recordings_writes_append_only_log(tmp_path, monkeypatch):
         dest_root, "day1/Fly1/002", start_time_ns=500_000_000_000, duration_s=10.0
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir)]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
     second_text = log_path.read_text()
@@ -3548,7 +3640,7 @@ def test_reconcile_recordings_dry_run_writes_no_log(tmp_path, monkeypatch):
         f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
     )
     result = runner.invoke(
-        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run"]
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--dry-run", "--all"]
     )
     assert result.exit_code == 0, result.output
     assert not (dest_root / "day1" / "Fly1" / "reconciliation_log.md").exists()
