@@ -48,6 +48,11 @@ _BUILTINS = ("flywheel", "twophoton", "triggerbox")
 _ALIASES = {"arduino": "flywheel"}
 
 
+def canonical_name(name: str) -> str:
+    """The current name for a configured plugin name (``arduino`` -> ``flywheel``)."""
+    return _ALIASES.get(name, name)
+
+
 def _discover_entry_points() -> None:
     """Load third-party plugins registered under the ``octacam.plugins`` group.
 

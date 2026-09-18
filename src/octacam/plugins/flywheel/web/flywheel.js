@@ -47,6 +47,7 @@ export default class FlywheelTab {
     this.fw.setReady(this.ready);
 
     this.dirCw = document.getElementById("loop-dir-cw");
+    this.dirCcw = document.getElementById("loop-dir-ccw");
     this.steps = document.getElementById("loop-steps");
     this.interval = document.getElementById("loop-interval");
     this.rest = document.getElementById("loop-rest");
@@ -76,10 +77,39 @@ export default class FlywheelTab {
     this._setupJog(document.getElementById("jog-ccw"), -1);
     this._setupJog(document.getElementById("jog-cw"), 1);
 
+    this._seedCommand(status?.command);
     this.updateInfo();
     this._loadPorts();
     this._refresh();
     this.fw.load();
+  }
+
+  // Seed the loop program from the rig's configured command
+  // ([[plugins]] options.command), so a configured loop — or one restored from a
+  // recording's config snapshot — is what the operator sees on load. Absent, the
+  // fields keep the markup's defaults. Only at construction: a later status push
+  // (a reconnect) must never overwrite what the operator is editing.
+  _seedCommand(command) {
+    if (!command) return;
+    const steps = Number(command.n_steps);
+    if (Number.isFinite(steps)) {
+      // The sign is the initial direction; the field itself is unsigned.
+      this.dirCw.checked = steps >= 0;
+      this.dirCcw.checked = steps < 0;
+      this.steps.value = String(Math.abs(steps));
+    }
+    const fields = [
+      [this.interval, command.step_interval_us],
+      [this.rest, command.rest_duration_ms],
+      [this.repeats, command.n_repeats],
+      [this.wait, command.init_wait_duration_s],
+    ];
+    for (const [input, value] of fields) {
+      if (Number.isFinite(Number(value))) input.value = String(Number(value));
+    }
+    for (const input of [this.steps, this.interval, this.rest, this.repeats, this.wait]) {
+      this.clampInput(input);
+    }
   }
 
   // Populate the port dropdown with the currently detected serial ports,
@@ -93,6 +123,17 @@ export default class FlywheelTab {
   setConnected(connected) {
     this.connected = connected;
     if (!connected) this.stopJog();
+    this._refresh();
+  }
+
+  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
+  // server's background init finishes opening the serial port after the page
+  // loaded, or on a reconnect), so the controls flip from "not open" to ready
+  // without the operator clicking Reconnect.
+  applyStatus(info) {
+    if (!info) return;
+    this.ready = Boolean(info.ready);
+    if (info.device) this.device = info.device;
     this._refresh();
   }
 

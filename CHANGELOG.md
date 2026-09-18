@@ -7,6 +7,209 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
+## [0.3.2] - 2026-09-18
+
+### Added
+
+- **Detachable processing** — `octacam process --detach` runs the
+  transcode → grid → transfer pipeline as a background job that survives an SSH
+  disconnect (no `tmux` needed), printing a job id. Manage jobs with the new
+  `octacam jobs` command: `list`, `attach` (a tmux-like live view of the log and
+  progress — Ctrl-C detaches without cancelling, reattach anytime), `pause`,
+  `resume`, and `cancel`. Job state lives under `~/.cache/octacam/jobs/`.
+- **Shut down & process** — the GUI shut-down button now offers to start a
+  detached processing job for the session's recordings on the way out; reattach
+  from a terminal with `octacam jobs attach`.
+- **Recordings are relaunchable configs** — each recording folder's
+  `octacam_config.toml` snapshot now holds the settings the recording actually
+  ran with, not just the rig file's values. Settings changed live in the GUI are
+  written in: the Record tab (fps, duration, trigger source, save method and
+  encoder args, …) and each plugin's tab (the triggerbox camera lines and
+  lights). Each camera's sensor parameters are read just before it starts
+  recording and saved beside the snapshot as `<serial>.pfs`/`<serial>.txt`, so
+  unsaved Camera-tab edits (exposure, gain, ROI) are kept too. The folder is
+  then a complete config directory for rerunning the same setup; the path
+  templates stay unexpanded, so a relaunch still records into a fresh dated
+  folder. Previously 19 of 24 snapshots on the test rig disagreed with their own
+  summary (e.g. `duration = 300` for a 3600 s take), and exposure/gain were
+  recorded nowhere. A snapshot with no live changes is still an exact copy of
+  the rig file. Plugins can contribute through a new `snapshot_options` hook.
+- **A flywheel rig's loop program is configurable** — the turntable's motor
+  pattern (`n_steps`, `step_interval_us`, `rest_duration_ms`, `n_repeats`,
+  `init_wait_duration_s`) lived only in the GUI tab, so it could not be set per
+  rig and a recording had no record of the motion it ran. `[[plugins]]` now takes
+  an `options.command` table that seeds the tab, and whatever was armed is
+  written into the recording's config snapshot.
+- **The transfer step carries the config** — `octacam process` now copies the
+  config snapshot and the camera parameter files to the destination with the
+  videos, summary and timestamps, so the archived copy can relaunch the
+  recording's setup. These small metadata files are compared by content when
+  deciding whether a copy is already there: an edited config is often exactly
+  the same size.
+- **Cache management** — a new `octacam cache` command inspects and clears
+  octacam's on-disk cache under `~/.cache/octacam` (the recording list, detached-
+  job logs, and activity markers): `cache info` shows the location, size, and a
+  breakdown; `cache path` prints the directory; `cache clear [--all] [--yes]`
+  removes the recording list and stale markers (add `--all` to also drop finished
+  job logs). Clearing never touches a live capture, transcode, or job.
+
+### Changed
+
+- **Composite grid videos are now opt-in** — `octacam process` used to build a
+  `grid.mp4` for every recording, falling back to a layout derived from the rig's
+  cameras (or a built-in 7-camera one) when the config named none. It now
+  composites only what the config asks for: a rig with no `[[visualization]]`
+  entry gets no grid, and pays none of the extra ffmpeg time per folder. Add an
+  entry to keep the old behavior — `octacam config` offers to write a near-square
+  one for your cameras — and `--no-grid` still skips the configured grids.
+- **Preview encodes the cameras in parallel** — one tick used to encode every
+  camera's JPEG in sequence on a single worker, so preview cost grew linearly
+  with the rig. `cv2.imencode` releases the GIL, so each camera now encodes on
+  its own executor task and a tick costs the slowest single camera instead of the
+  sum: measured on the test box, eight 2048² cameras on a focused (1:1) tile drop
+  from **85 ms to 14 ms**, and a maximized tile while recording from 26 ms to
+  4.4 ms — the difference between overrunning the 33 ms refresh interval and
+  fitting inside it. Per-camera frame counters are now stamped on the event loop
+  rather than in the worker, so nothing shared is touched from the encode threads.
+
+- **Instant GUI startup** — `octacam gui` now binds the web server and serves the
+  page *before* opening the cameras. The browser shows the full UI immediately
+  (with a "connecting to cameras" placeholder in the preview area); the cameras
+  and serial plugins are opened in parallel on a background thread and the grid
+  fills in over the WebSocket once they are ready — so time-to-first-paint no
+  longer waits on vendor-SDK camera enumeration or a trigger-board handshake. A
+  camera-open failure is now surfaced in the GUI instead of aborting the process.
+- **Processing auto-pauses during capture** — a running `octacam process`
+  (detached or foreground) now pauses between files/folders while an
+  `octacam gui`/`octacam record` on the same machine owns the cameras, and
+  resumes automatically when they are free — so a background transcode no longer
+  competes with a live recording for CPU/GPU/disk. The pause releases the
+  encoder between units (it holds no NVENC session while paused), and is
+  crash-safe (a crashed gui/record auto-clears the pause).
+
+### Fixed
+
+- **A leftover video from an earlier take is no longer transferred as this
+  recording's** — recording into a folder again (confirming the overwrite)
+  replaces only the files the new take writes, so the previous take's
+  `*.mp4`/`grid.mp4` stayed behind. They looked like finished outputs, so
+  `octacam process` skipped transcoding, left them in place and copied them to
+  the destination, where they sat next to the new take's summary describing a
+  different recording (a real case on the test rig: 1000-frame mp4s beside a
+  100-frame take). An output older than the file it was made from is now redone,
+  with a warning naming it; the grid is rebuilt when any video it composites is
+  newer, and `--dry-run` lists both as work to do.
+
+- **A config rewrite no longer drops a bare-name plugin list** — the loader
+  accepts `plugins = ["flywheel"]`, but writing the config back (a GUI layout
+  save, or a patched recording snapshot) emitted only `[[plugins]]` tables and
+  silently lost the list. Bare names are now written as tables.
+
+- **`octacam process --dry-run` no longer transcodes** — the flag only simulated
+  the grid and transfer steps. The transcode step still ran ffmpeg on every
+  pending file, so previewing `--all` could spend hours encoding, and a dry run
+  started while the GUI owned the cameras paused until the capture ended. A dry
+  run now does no work at all: it lists each file it would transcode (and, with
+  `-d`, each source it would delete), each grid it would build, and each file it
+  would transfer, and only counts what is already done. That makes
+  `octacam process --all --dry-run` the way to see what is left to process. The
+  grid and transfer plans include the outputs the transcode step would write,
+  and a dry run never waits on a live capture.
+
+- **Two `octacam process` runs over one folder no longer destroy each other's
+  work** — an in-progress transcode wrote to a temp whose name was derived only
+  from the output (`.<stem>.octacam-part<ext>`), and `_atomic_output` deleted
+  that name on entry to clear orphans. So a second run (trivially: `--last` in
+  two terminals) unlinked the first run's live temp and then renamed a file it
+  had not written onto the output; the loser failed with a bare
+  `FileNotFoundError` from `os.replace`. Temps are now unique per process and
+  call (pid + uuid), matching what `octacam.transfer` already did for copies.
+  Orphan reclamation is unchanged in practice and more precise: `_atomic_output`
+  holds an advisory `flock` on its temp, so a re-run after a hard kill still
+  frees the previous attempt's (possibly multi-GB) disk immediately, while a
+  concurrent run's live temp is never touched — no timing heuristic. Temps left
+  by an older octacam are still recognised and reclaimed, and the temp keeps the
+  output's real extension last so ffmpeg still infers the muxer.
+
+- **A missing `ffprobe` no longer aborts `octacam process`** — the grid
+  compositor probed each cell with a bare `ffprobe` off `$PATH`, but `ffprobe` is
+  a *separate* binary from `ffmpeg` and imageio-ffmpeg bundles ffmpeg only. On a
+  host with no system ffmpeg the probe raised `FileNotFoundError`, which is not
+  one of the errors the per-cell guard catches, so it escaped
+  `build_grid_video` and killed the whole run — *after* the transcodes had
+  finished but *before* the transfer, leaving the recordings un-mirrored. octacam
+  now resolves ffprobe next to the ffmpeg it actually uses (so a rig pinning
+  `OCTACAM_FFMPEG` probes with that same build rather than an unrelated older
+  ffprobe first on `$PATH`; `OCTACAM_FFPROBE` overrides), reports a missing one
+  as a skipped grid with the real reason, and treats a per-file probe error as a
+  black cell as documented. The probe also now runs with `stdin=DEVNULL` — the
+  rule every other ffmpeg-family launch here already followed, so a kill
+  mid-probe cannot leave the terminal in no-echo mode — and is bounded by a
+  30 s timeout instead of hanging the run on a corrupt or network-backed file.
+
+- **One sick camera can no longer stall startup for minutes** — a USB3 camera
+  whose link trains at full SuperSpeed but whose control transfers time out
+  enumerates normally, and pylon then retries its first register read for as long
+  as it likes: on the test rig a single such camera held `octacam gui` for
+  **271 s** inside one `CreateDevice` call (a healthy camera returns in ~0.16 s),
+  with no output at all while it did. Enumeration now runs those calls
+  concurrently under a shared deadline (15 s by default, override with
+  `OCTACAM_BASLER_CREATE_TIMEOUT`); a camera that misses it is reported through
+  the existing "present but unusable" path — the rest of the rig comes up
+  normally — and its handle is released if pylon eventually hands one over, so it
+  is not left for the garbage collector to destroy after `PylonTerminate()`. The
+  wait is also no longer silent: octacam names the cameras it is still waiting on,
+  and the skip message explains that the link trained but the camera is not
+  answering (check `dmesg` for a matching `can't set config` line, then reseat the
+  cable), instead of passing the raw SDK text through.
+- **A rig no longer pays to enumerate cameras it never asked for** — the auto
+  cascade offered every tier the whole USB bus rather than the rig's configured
+  serials, so a 2-camera FLIR rig still ran `CreateDevice` on every attached
+  Basler (and inherited the stall above when one of them was sick), then dropped
+  the surplus handles without destroying them. Each tier is now given the
+  requested serial list, so those devices are never touched and the leak is gone.
+- **`octacam` now starts on Python 3.10–3.13 again** — the CLI annotated two
+  helpers with `JobReporter`, a name imported only under `if TYPE_CHECKING:`, and
+  without quotes. Python 3.14 evaluates annotations lazily (PEP 649) so the dev
+  machine never saw it, but every older supported interpreter evaluates them when
+  the `def` runs: importing `octacam.cli` raised `NameError: name 'JobReporter' is
+  not defined`, so **no** command worked (`requires-python` is `>= 3.10`). Both
+  annotations are quoted now, matching how the rest of the module already refers
+  to type-checking-only names, and a new AST test (`tests/test_typing_hygiene.py`)
+  fails on any `TYPE_CHECKING`-only name used in an annotation Python evaluates —
+  a check that works on every version, since an import test cannot catch this on
+  3.14.
+- **Auto strobe duty now shows up in the triggerbox timing plot** — with instant
+  (serve-first) GUI startup the triggerbox tab read the camera exposures before
+  the cameras were open, and the WebSocket push that fills the rest of the UI in
+  never made it re-read them, so a light channel set to "Auto (cover exposure)"
+  stayed drawn at its manual duty percent — with the note "no camera exposures
+  yet" — for the rest of the session. Only the plot was wrong: an actual arm
+  recomputes the on-time server-side, so the board still strobed over the real
+  exposure. The tab now re-reads the exposures when that push arrives.
+- **Switching rigs no longer fails to open the cameras** — a camera keeps its ROI
+  until it is power-cycled, and a GenICam camera's `Width`/`Height` maximum is
+  `sensor - offset`, so launching a rig whose config wants the full sensor right
+  after one whose config cropped and offset the ROI made the parameter load write
+  an out-of-range size (`Height = 2048 must be equal or smaller than Max = 1770`)
+  and abort camera initialization for the whole rig. The applier now clears the
+  ROI origin before programming the size, then restores the origin the config
+  asks for. Affects the flir / spinnaker / pycameleon backends (Basler `.pfs`
+  files are applied by pylon, which already ordered this correctly).
+- **One unsettable camera parameter no longer takes down the rig** — the FLIR
+  (PySpin) backend's typed setters let a raw `SpinnakerException` escape, which
+  defeated the parameter applier's deliberate best-effort, skip-and-continue
+  guard: any single value the device refused (out of range, bad increment) failed
+  the entire startup instead of being logged and skipped.
+- **`octacam doctor` no longer breaks the terminal** — the GPU/NVENC probes ran
+  ffmpeg encodes with the controlling terminal on stdin, so ffmpeg switched the
+  tty to no-echo mode (to watch for keypresses) and left it that way (the
+  concurrent session-count probe reliably raced echo off; a timeout-killed probe
+  never restored it), making typed input invisible after doctor exited. Every
+  ffmpeg probe/transcode/remux launch now runs with `-nostdin` and a redirected
+  stdin, so ffmpeg never touches the terminal. The same hardening covers a
+  Ctrl-C'd `octacam process` transcode.
+
 ## [0.3.1] - 2026-07-11
 
 ### Added
@@ -91,5 +294,6 @@ one-command post-processing, and a much richer web GUI.
   libusb `pycameleon` floor covers the general GenICam-USB3 camera without a
   vendor producer or EULA.
 
+[0.3.2]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.2
 [0.3.1]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.1
 [0.3.0]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.0

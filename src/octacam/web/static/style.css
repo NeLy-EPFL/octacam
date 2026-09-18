@@ -136,6 +136,42 @@ body {
   isolation: isolate;
 }
 
+/* Shown in the grid area while the server opens the cameras on its background
+   init thread (the page is served before the hardware is ready); replaced by
+   buildCameras() when the camera list arrives, or shows the init error. */
+.grid-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.95rem;
+}
+.grid-placeholder.error {
+  color: var(--red);
+  white-space: pre-line;
+}
+.grid-placeholder .grid-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.55;
+  animation: grid-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .grid-placeholder .grid-spinner { animation-duration: 2.4s; }
+}
+@keyframes grid-spin {
+  to { transform: rotate(360deg); }
+}
+
 #grid.auto-tile {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -742,8 +778,14 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
-/* Compact icon button toggling the dark/light theme (☀ / ☾). */
-#theme-toggle {
+/* Compact icon-only buttons (☀️/🌙 theme, ⌨️ shortcuts help, 💾 save config,
+   🔌/🔗/🔄 disconnect-reconnect, 🛑 shutdown) — no visible label, title= carries
+   the tooltip. */
+#theme-toggle,
+#shortcuts-help-btn,
+#save-config-btn,
+#disconnect-btn,
+#shutdown-btn {
   flex: none;
   padding: 2px 7px;
   font-size: 13px;
@@ -751,14 +793,6 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 #shutdown-btn:hover:not(:disabled) { color: var(--red); border-color: var(--red); }
-
-/* Compact glyph button (⌨) that opens the keyboard-shortcut overlay. */
-#shortcuts-help-btn {
-  flex: none;
-  padding: 2px 7px;
-  font-size: 13px;
-  line-height: 1;
-}
 
 /* ---------------------------------------------- keyboard shortcuts overlay */
 

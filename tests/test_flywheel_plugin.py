@@ -167,6 +167,57 @@ def _released(link):
     return _wait(lambda: link.snapshot()[-1:] == [RELEASE])
 
 
+# --- the configured loop command (config <-> snapshot) -----------------------
+
+
+def _configured(**command):
+    from octacam.plugins.flywheel import _build
+
+    return _build({"device": "/dev/null", "command": command} if command else {})
+
+
+_RIG_COMMAND = {
+    "n_steps": -2048,
+    "step_interval_us": 1200,
+    "rest_duration_ms": 500,
+    "n_repeats": 5,
+    "init_wait_duration_s": 2,
+}
+
+
+def test_configured_command_is_parsed_and_published_to_the_tab():
+    plugin = _configured(**_RIG_COMMAND)
+    assert plugin._command == Command(**_RIG_COMMAND)
+    # The tab seeds its loop fields from this, so a rig's program is on screen.
+    assert plugin.status()["command"] == _RIG_COMMAND
+    # A rig that configures none leaves the tab's own defaults alone.
+    assert "command" not in _configured().status()
+
+
+def test_configured_command_tolerates_a_partial_or_bad_table():
+    # Missing fields keep their defaults...
+    assert _configured(n_steps=64)._command == Command(n_steps=64)
+    # ...and an out-of-range or malformed one is ignored, not raised.
+    assert _configured(n_steps=999_999)._command is None
+    assert _configured(n_steps="spin")._command is None
+
+    from octacam.plugins.flywheel import _build
+
+    assert _build({"command": ["not", "a", "table"]})._command is None
+
+
+def test_snapshot_options_carry_the_armed_loop_command():
+    plugin = _configured(**_RIG_COMMAND)
+    # Armed with what the config says, or not armed at all: nothing to record.
+    assert plugin.snapshot_options({"flywheel": dict(_RIG_COMMAND)}) is None
+    assert plugin.snapshot_options(None) is None
+    # Edited in the tab: the snapshot carries what this recording actually ran.
+    edited = {**_RIG_COMMAND, "n_repeats": 9}
+    assert plugin.snapshot_options({"flywheel": edited}) == {"command": edited}
+    # A rig with no configured command records the armed one too.
+    assert _configured().snapshot_options({"flywheel": edited}) == {"command": edited}
+
+
 def test_clamp_jog_interval():
     assert _clamp_jog_interval_us(JOG_MIN_INTERVAL_US - 1) == JOG_MIN_INTERVAL_US
     assert _clamp_jog_interval_us(JOG_MAX_INTERVAL_US + 1) == JOG_MAX_INTERVAL_US

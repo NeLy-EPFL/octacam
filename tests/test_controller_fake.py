@@ -54,6 +54,9 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert all(c["frames"] >= 20 for c in summary["cameras"])
 
     assert controller.get_settings().save_dir.endswith("002-trial")
+    # No config dir (a bare controller): no config snapshot, no camera files.
+    assert not (save_dir / "octacam_config.toml").exists()
+    assert not list(save_dir.glob("*.fake"))
     snapshot = controller.snapshot()
     assert all(c["frames"] > 0 for c in snapshot["cameras"])
 
@@ -137,6 +140,114 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
         {"name": "grid.mp4", "layout": [["FAKE-0", "FAKE-1"]]}
     ]
     assert snap["record"]["directory"] == "~/data/%y%m%d"
+
+
+def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path):
+    from octacam.cli import _settings_from_record
+    from octacam.config import load_config_dir
+    from octacam.config_writer import read_pfs_files, write_config
+    from octacam.controller import record_config_values
+    from octacam.plugins import PluginManager
+    from octacam.plugins.base import Plugin
+
+    # The rig config as loaded. The operator then changes the Record tab, a
+    # plugin setting and a camera's exposure live, and saves none of it.
+    config_dir = tmp_path / "cfg"
+    write_config(
+        config_dir,
+        {
+            "record": {
+                "fps": 80.0,
+                "duration": 5.0,
+                "duration_unit": "minutes",
+                "directory": "~/data/%y%m%d",
+                "relative_directory": "Fly1/001",
+            },
+            "plugins": [{"name": "lamp", "options": {"device": "/dev/null", "level": 1}}],
+        },
+    )
+    (config_dir / "AUX.fake").write_text("helper\n")  # e.g. a tracking camera's file
+
+    class Lamp(Plugin):
+        name = "lamp"
+
+        def snapshot_options(self, params):
+            return {"level": params["lamp"]["level"]}
+
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(
+        fps=50.0,
+        duration_s=1.0,
+        save_dir=str(save_dir),
+        record_form="sensor",
+        save_frame_timestamps=True,
+        writer_queue_size=12,
+    )
+    controller = RecordingController(
+        fake_system,
+        settings,
+        PluginManager([Lamp()]),
+        auto_preview=False,
+        config_dir=config_dir,
+    )
+    controller.set_camera_feature(0, "ExposureTime", 1234.0)
+    assert controller.start_recording(plugin_params={"lamp": {"level": 7}}).ok
+    controller.join(timeout=20)
+
+    # The recording folder loads back as the setup that was recorded, not the
+    # rig file's values, and keeps the path templates for a fresh folder...
+    config = load_config_dir(save_dir)
+    reloaded = _settings_from_record(config.record, config.transcode, config.transfer)
+    assert record_config_values(reloaded) == record_config_values(settings)
+    assert config.record.directory == "~/data/%y%m%d"
+    assert config.record.relative_directory == "Fly1/001"
+    assert [(p.name, p.options) for p in config.plugins] == [
+        ("lamp", {"device": "/dev/null", "level": 7})
+    ]
+    # ...with each camera's live parameters beside it, plus the rig's other files.
+    params = read_pfs_files(save_dir, "fake")
+    assert set(params) == {"FAKE-0", "FAKE-1", "AUX"}
+    assert "ExposureTime\t1234\n" in params["FAKE-0"]
+    assert "ExposureTime\t1234\n" not in params["FAKE-1"]
+    # The rig's own config is untouched.
+    assert load_config_dir(config_dir).record.fps == 80.0
+
+
+def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, tmp_path):
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    text = "# rig notes survive\n[record]\nfps = 50.0\nduration = 1.0\n"
+    (config_dir / "octacam_config.toml").write_text(text)
+
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    assert (save_dir / "octacam_config.toml").read_text() == text
+    # The camera files are the live camera state, so they are always written.
+    assert {p.name for p in save_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
+
+
+def test_recording_into_the_config_dir_leaves_the_rig_files_alone(fake_system, tmp_path):
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text("[record]\nfps = 10.0\n")
+    (config_dir / "FAKE-0.fake").write_text("rig\n")
+
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(config_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording(confirm_overwrite=True).ok
+    controller.join(timeout=20)
+
+    assert (config_dir / "octacam_config.toml").read_text() == "[record]\nfps = 10.0\n"
+    assert (config_dir / "FAKE-0.fake").read_text() == "rig\n"
+    assert not (config_dir / "FAKE-1.fake").exists()
 
 
 def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):

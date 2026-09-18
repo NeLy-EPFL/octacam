@@ -56,8 +56,8 @@ git checkout main   && uv tool install --force .   # back to the latest stable
 
 Releases are tagged `vX.Y.Z` — see the
 [releases page](https://github.com/NeLy-EPFL/octacam/releases) and the repository
-root's `CHANGELOG.md`. To follow active development instead, check out the current
-`dev-*` branch before installing.
+root's `CHANGELOG.md`. To follow active development instead, check out the
+`develop` branch before installing.
 
 ## Cameras
 

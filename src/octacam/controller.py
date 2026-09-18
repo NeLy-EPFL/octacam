@@ -34,6 +34,7 @@ from octacam import config_writer
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.transform import (
+    CONFIG_SNAPSHOT_FILENAME,
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
     DisplayTransform,
@@ -197,6 +198,29 @@ def capture_frame_count(settings: RecordingSettings) -> int | None:
     if settings.fps <= 0 or settings.duration_s <= 0:
         return None
     return max(1, round(settings.fps * settings.duration_s))
+
+
+def record_config_values(settings: RecordingSettings) -> dict:
+    """The recording settings as ``[record]`` config keys, for the config snapshot.
+
+    The inverse of ``cli._settings_from_record``, with ``duration_s`` standing in
+    for ``duration``/``duration_unit`` (see config_writer.with_record_settings).
+    The save path is not included: the snapshot keeps the config's
+    directory/relative_directory templates so a relaunch resolves a fresh
+    folder, and the path this recording used is in its summary."""
+    return {
+        "fps": settings.fps,
+        "duration_s": settings.duration_s,
+        "trigger_source": settings.trigger_source,
+        "preview_trigger_source": settings.preview_trigger_source,
+        "save_method": settings.save_method,
+        "ffmpeg_params": settings.ffmpeg_params,
+        "nvenc_params": settings.nvenc_params,
+        "max_nvenc_sessions": settings.max_nvenc_sessions,
+        "writer_queue_size": settings.writer_queue_size,
+        "save_transformed": settings.record_form == "display",
+        "save_timestamps": settings.save_frame_timestamps,
+    }
 
 
 class StartResult:
@@ -389,8 +413,19 @@ class RecordingController:
         session_id: str | None = None,
         record_kind: str = "gui",
         config_dir: str | Path | None = None,
+        ready: bool = True,
     ):
         self.camera_system = camera_system
+        # False while the GUI's background init thread is still opening the
+        # cameras (the controller was handed a hardware-free placeholder system;
+        # see :meth:`attach_system`). Surfaced in :meth:`snapshot` so the web UI
+        # can render a "connecting to cameras" placeholder and gate camera-only
+        # controls until the real system is swapped in. Headless `octacam record`
+        # and unit tests build the real system up front and stay ready.
+        self._ready = ready
+        # Set (via fail_init) if the GUI's background init could not open the
+        # cameras, so the web UI shows the reason instead of an endless spinner.
+        self._init_error: str | None = None
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
@@ -419,6 +454,9 @@ class RecordingController:
         # (e.g. in unit tests that construct a controller directly).
         self._session_id = session_id
         self._record_kind = record_kind
+        # How many recordings this session has finished — surfaced in snapshot()
+        # so the GUI can offer "shut down & process" only when there is work.
+        self._recordings_made = 0
         self._lock = threading.RLock()
         self._state = "idle"
         # True while a camera's geometry is being changed (preview stopped and
@@ -484,6 +522,50 @@ class RecordingController:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def ready(self) -> bool:
+        """False while the GUI's background init is still opening the cameras."""
+        return self._ready
+
+    @property
+    def init_error(self) -> str | None:
+        """Why the GUI's background camera init failed, or None."""
+        return self._init_error
+
+    def attach_system(self, camera_system: CameraSystem) -> None:
+        """Swap the hardware-free placeholder for the real, opened system.
+
+        Called once by the GUI's background init thread after the cameras are
+        open and their parameters loaded. The reference swap is atomic under the
+        GIL and the loops that read ``camera_system`` (preview/telemetry) re-read
+        it every tick, so a concurrent reader sees either the empty placeholder
+        (no cameras -> no work) or the real system, never a torn state. Flips
+        ``ready`` so the next snapshot/broadcast reports the live rig.
+        """
+        with self._lock:
+            self.camera_system = camera_system
+            self._ready = True
+            self._init_error = None
+
+    def fail_init(self, message: str) -> None:
+        """Record that the GUI's background camera init failed.
+
+        Leaves ``ready`` False (no cameras were attached) but sets
+        :attr:`init_error` so the web UI can show *why* instead of spinning
+        forever, and emits an error event so it lands in the log panel too."""
+        with self._lock:
+            self._init_error = message
+        self._event("error", message)
+
+    def notify_state(self) -> None:
+        """Broadcast the current snapshot to listeners.
+
+        Used by the GUI's background init thread to push a fresh ``state`` (with
+        ``ready`` now true) after the real system is attached and preview armed,
+        so an already-connected browser fills in without waiting for the next
+        telemetry tick."""
+        self._notify("state", self.snapshot())
 
     @property
     def recording_active(self) -> bool:
@@ -1069,6 +1151,10 @@ class RecordingController:
                 )
 
             use_software_trigger = settings.trigger_source == "software"
+            # Read each camera's parameters for the config snapshot now, while the
+            # cameras are still previewing: once the record grab loops run, a full
+            # node-map read would contend with them.
+            camera_params = self._export_camera_params()
             start_error: str | None = None
             try:
                 self.camera_system.stop_software_trigger()
@@ -1137,7 +1223,7 @@ class RecordingController:
                 # recording keeps its geometry — and stays transcodable — even if
                 # the process is hard-killed before the final summary is written at
                 # teardown. Both are overwritten with final data when recording ends.
-                self._snapshot_config()
+                self._snapshot_config(plugin_params, camera_params)
                 self._write_recording_summary(aborted=True)
 
                 self._aborted = False
@@ -1547,35 +1633,85 @@ class RecordingController:
             with self._lock:
                 self._tearing_down = False
 
-    def _snapshot_config(self) -> None:
-        """Copy the rig config into the recording folder for `octacam process`.
-
-        The snapshot carries the GUI's live [transcode]/[transfer] values (the
-        Process section), patched into the folder's octacam_config.toml so the
-        post-recording step transcodes and transfers with exactly what the
-        operator set — no --config, no touching the rig's own config file. When
-        those fields are untouched the copy is byte-verbatim (comments and the
-        unexpanded directory/relative_directory templates preserved); only a
-        real edit triggers a re-emit. Best-effort: any failure falls back to the
-        verbatim copy and never disturbs recording; no-ops without a config dir
-        (tests)."""
+    def _snapshot_source(self) -> Path | None:
+        """The rig config file each recording's snapshot is made from, or None
+        when recordings get no snapshot (no config dir, as in tests, or no config
+        file in it)."""
         if self._config_dir is None:
+            return None
+        src = self._config_dir / CONFIG_SNAPSHOT_FILENAME
+        dst = Path(self._settings.save_dir) / CONFIG_SNAPSHOT_FILENAME
+        # Recording into the config dir itself must never rewrite the rig's files.
+        if not src.exists() or src.resolve() == dst.resolve():
+            return None
+        return src
+
+    def _export_camera_params(self) -> dict[str, str]:
+        """Each camera's current parameter text, for the recording's snapshot.
+
+        Called just before the cameras start recording, so the files hold what
+        the recording used, including Camera-tab edits that were never saved.
+        Cheap: the cameras are read in parallel (a Basler takes ~60 ms, a FLIR a
+        few ms). Best-effort: a camera that cannot be read is logged and left
+        out; it never stops the recording from starting."""
+        if self._snapshot_source() is None:
+            return {}
+        try:
+            params = self.camera_system.save_all_params()
+        except Exception:
+            log.exception("Could not read the camera parameters for the config snapshot")
+            return {}
+        missing = [c.name for c in self.camera_system if c.serial_number not in params]
+        if missing:
+            log.warning(
+                "Could not read the parameters of camera(s) %s; their settings "
+                "are not saved with the recording",
+                ", ".join(missing),
+            )
+        return params
+
+    def _snapshot_config(
+        self, plugin_params: dict | None, camera_params: dict[str, str]
+    ) -> None:
+        """Save the recording's full config into its folder.
+
+        The rig's octacam_config.toml is copied with every live change patched
+        in: the Record-tab settings, each plugin's live options (e.g. the
+        triggerbox lights), and the Process section's [transcode]/[transfer],
+        which `octacam process` reads. Each camera's parameter file
+        (``camera_params``, read just before the cameras started) is written
+        beside it, with the rig's other parameter files (auxiliary configs,
+        cameras that did not open). The folder is then itself a config
+        directory, so `octacam gui <folder>` sets the rig up the same way again.
+
+        When nothing changed live the TOML is a byte-verbatim copy, comments
+        included. The directory/relative_directory templates are never patched,
+        so a relaunch still resolves a fresh dated folder. Best-effort: a failed
+        re-emit falls back to the verbatim copy and nothing here disturbs the
+        recording; no-op when :meth:`_snapshot_source` finds no config."""
+        src = self._snapshot_source()
+        if src is None:
             return
-        src = self._config_dir / "octacam_config.toml"
-        dst = Path(self._settings.save_dir) / "octacam_config.toml"
-        if not src.exists():
-            return
+        config_dir = src.parent
+        save_dir = Path(self._settings.save_dir)
+        dst = save_dir / CONFIG_SNAPSHOT_FILENAME
         s = self._settings
         try:
-            raw = config_writer.load_raw_config(self._config_dir)
+            raw = config_writer.load_raw_config(config_dir)
             patched = config_writer.with_process_params(
                 raw,
                 transcode_ffmpeg_params=s.transcode_ffmpeg_params,
                 transfer_directory=s.transfer_directory,
                 transfer_checksum=s.transfer_checksum,
             )
+            patched = config_writer.with_record_settings(
+                patched, record_config_values(s)
+            )
+            patched = config_writer.with_plugin_options(
+                patched, self.plugins.snapshot_options(plugin_params)
+            )
             if raw and patched != raw:
-                config_writer.write_config(s.save_dir, patched)
+                config_writer.write_config(save_dir, patched)
             else:
                 shutil.copyfile(src, dst)
         except Exception:
@@ -1584,6 +1720,18 @@ class RecordingController:
             log.exception("Failed to write patched config snapshot to %s", dst)
             with contextlib.suppress(Exception):
                 shutil.copyfile(src, dst)
+        try:
+            config_writer.write_pfs_files(
+                save_dir, camera_params, self.camera_system.extension_by_serial()
+            )
+            config_writer.copy_auxiliary_pfs(
+                config_dir,
+                save_dir,
+                set(camera_params),
+                self.camera_system.extensions,
+            )
+        except Exception:
+            log.exception("Failed to save the camera parameter files to %s", save_dir)
 
     def _write_recording_summary(self, aborted: bool) -> None:
         """Write recording_summary.json into the recording's save directory."""
@@ -1623,6 +1771,9 @@ class RecordingController:
         best-effort, so a cache failure never disturbs recording teardown. Runs
         before save_dir is incremented, so it captures the just-written folder.
         """
+        # Count every finished recording (even without a session id) so the GUI's
+        # "shut down & process" offer reflects real work made this run.
+        self._recordings_made += 1
         if not self._session_id:
             return
         folder = Path(self._settings.save_dir)
@@ -1658,8 +1809,11 @@ class RecordingController:
             free_bytes = 0
         return {
             "state": self._state,
+            "ready": self._ready,
+            "init_error": self._init_error,
             "remaining_ms": remaining_ms,
             "recording_id": recording_id,
+            "recordings_made": self._recordings_made,
             "save_dir": settings.save_dir,
             "disk_free_bytes": free_bytes,
             "settings": dataclasses.asdict(settings),

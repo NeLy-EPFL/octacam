@@ -10,9 +10,10 @@ FastAPI web GUI and a headless CLI, plus Arduino-driven trigger/strobe hardware
 and one-command post-processing. It targets neuroscience rigs and is the
 successor to SeptaCam.
 
-> Active development is on branch `feat/harvesters-backend` (migrating the camera
-> layer off pypylon/PySpin toward a multi-tier GenICam cascade that runs on
-> Python 3.10–3.14). `requires-python >= 3.10`.
+> Active development is on the `develop` branch (git-flow: `main` tracks the
+> latest stable release, `develop` is the next). The camera layer is a multi-tier
+> GenICam cascade (basler / flir / spinnaker / pycameleon; see below) running on
+> Python 3.10–3.14; `requires-python >= 3.10`.
 
 ## Dev workflow
 
@@ -46,6 +47,21 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   a GUI control, so "shipped a knob with no widget" gets caught.
 - **Full-suite runtime is ~8 min.** Run the relevant `tests/test_*.py` file(s)
   during development; run the whole suite before committing.
+- **Don't run the frontend group inside a full-suite run.** playwright's *sync*
+  API leaves a running event loop in the process, so any later test calling
+  `asyncio.run` dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
+  retrieve cases — one browser test anywhere earlier is enough). That is what the
+  opt-in group buys: keep them two commands, as above. If a venv has playwright
+  installed, `uv run pytest` collects them and shows those failures.
+- **The dev rig runs Python 3.14, but `requires-python` is `>= 3.10`.** 3.14
+  evaluates annotations lazily (PEP 649), so a bug that a 3.10–3.13 user hits at
+  *import* is invisible here. Concretely: a name imported only under
+  `if TYPE_CHECKING:` must be **quoted** where it appears in an annotation Python
+  evaluates (function signatures; module/class-level variable annotations —
+  function-*local* annotations are never evaluated, so `self._task: TaskID | None`
+  inside a method is fine). An unquoted one took out the whole CLI on every
+  supported interpreter below 3.14. `tests/test_typing_hygiene.py` walks the AST
+  for this and so catches it on any version; an import test cannot.
 - **Known crash:** on some setups `pytest` can SIGSEGV *at process teardown* when
   pypylon + genicam are both loaded in one process (a multi-lib native-teardown
   interaction, not octacam code — the tests themselves pass). Don't chase it.
@@ -65,7 +81,7 @@ To cut release `X.Y.Z`:
 2. Set `pyproject.toml` version to `X.Y.Z` (drop `.devN`); commit `release: vX.Y.Z`.
 3. Tag it: `git tag -a vX.Y.Z -m "octacam X.Y.Z"`.
 4. Land it on `main`: merge (or fast-forward) `main` up to the tagged commit and push, so **`main` is always the latest stable release**; publish the tag too (`git push origin vX.Y.Z`). A fresh `git clone` checks out `main`, so this is what makes cloning install stable octacam — the install docs rely on it. Pushing the tag also deploys the numbered doc version `X.Y.Z` and repoints the `stable` docs alias at it (`.github/workflows/docs.yml`).
-5. Back on the `dev-*` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
+5. Back on the `develop` branch, bump to `X.Y.(Z+1).dev0`; commit `chore: open X.Y.(Z+1) development`; add a fresh `[Unreleased]` block.
 
 An **update notice** (`updates.py`, surfaced in `octacam doctor` and a dismissible
 GUI banner via `/api/system`'s `update` field) compares the installed version
@@ -74,10 +90,12 @@ command (pip / uv tool / pipx / conda). It is read-only and fail-silent —
 **octacam never updates itself** (a library must not mutate its own install, and
 octacam is also sometimes a `uv add` dependency or lives in a conda env) — honors
 `OCTACAM_NO_UPDATE_CHECK` / `DO_NOT_TRACK`, and stays dormant until octacam is on
-PyPI (the Simple API 404s → no signal). Branch model: `main` is stable; `dev-*`
-are the development line. mike publishes versioned docs to `gh-pages`: each
-release tag becomes a numbered version, the `stable` alias (and the site root)
-follows the newest release, and `dev-*` pushes refresh the rolling `dev` version.
+PyPI (the Simple API 404s → no signal). Branch model (git-flow): `main` is stable;
+`develop` is the single permanent development line (feature work branches off it;
+a maintenance line for an older release, if ever needed, is named by series like
+`0.3.x` — never a versioned `dev-*`). mike publishes versioned docs to `gh-pages`:
+each release tag becomes a numbered version, the `stable` alias (and the site root)
+follows the newest release, and `develop` pushes refresh the rolling `dev` version.
 
 ## Repo layout
 
@@ -93,7 +111,8 @@ src/octacam/
   firmware.py       Arduino sketch fingerprinting + arduino-cli flashing
   serial_ports.py   serial-port detection, USB bus-reset recovery
   transfer.py       octacam process → mirror recordings to storage
-  grid.py           octacam process → composite grid videos (ffmpeg xstack)
+  grid.py           octacam process → composite grid videos (ffmpeg xstack;
+                    opt-in per rig via [[visualization]], no built-in layout)
   session_cache.py  remembers recording folders for `process --last/--all`
   camera.py         re-exports CameraSystem/Camera/PARAM_NODES
   cameras/          the backend layer (see below)
@@ -173,6 +192,31 @@ a `DevClose` that **deadlocks while holding the GIL** (wedges the whole process)
 which is exactly why the `spinnaker` tier drives the Spinnaker **SDK C API** over
 `ctypes` instead of that producer.
 
+**Enumeration is not free, so the cascade is scoped and deadlined.** Two rules
+that are easy to undo:
+
+- Every tier is enumerated with the rig's **requested serial list**, never `None`
+  — `enumerate_fn(requested_serial_numbers, warn_missing=False)`. The Basler
+  tier's `CreateDevice` downloads each camera's XML over USB, so sweeping the
+  whole bus made a rig pay for cameras it never opens (a 2-camera FLIR rig paid
+  for six attached Baslers) and leaked the surplus handles, which are dropped
+  without `DestroyDevice`. `warn_missing=False` is required because each tier
+  legitimately sees serials owned by another; `_enumerate` warns once for a
+  serial no tier claimed. Lower tiers still enumerate the full requested set, so
+  a camera a vendor tier missed still falls through.
+- `enumerate_basler` runs its `CreateDevice` calls **concurrently under a shared
+  deadline** (`_create_device_timeout`, 15 s, `OCTACAM_BASLER_CREATE_TIMEOUT`).
+  A camera whose link trains at 5000 Mb/s but whose control transfers time out
+  held one rig for **271 s** inside a single call. A missed deadline maps onto the
+  existing `(serial, None)` "present but unusable" sentinel. Three traps: the
+  pool must **not** be a `with` block (`__exit__` is `shutdown(wait=True)` and
+  re-blocks for the full retry, silently undoing the deadline); a straggler's
+  handle must be released via `tl_factory.DestroyDevice` in a done-callback (the
+  `InstantCamera.DestroyDevice` used in `close()` is a different method); and the
+  workers are deliberately **non-daemon**, because letting the interpreter
+  finalize under a live pylon call is the teardown segfault `BaslerBackend.close`
+  documents.
+
 ### Backend contract (`cameras/base.py :: CameraBackend`)
 All backends implement: enumerate/open/close; `load_params`/`save_params`;
 frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
@@ -180,7 +224,8 @@ frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
 GenApi node-map walk (`list_features`/`read_feature`/`write_feature`/
 `execute_command`) for the Camera-tab node browser. `basler` walks via genicam;
 `flir`/`spinnaker` walk the C/PySpin node map; `pycameleon` (no introspection)
-and the base fallback use a curated node set.
+and the base fallback use a curated node set. Every `enumerate_*` takes
+`(requested_serials=None, *, warn_missing=True)` — the cascade relies on both.
 
 ## Trigger model
 
@@ -222,17 +267,52 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
 Per-rig **`octacam_config.toml`** (parsed tolerantly in `config.py` —
 warn-and-default, never raise) plus **one per-camera sensor file**:
 - **Basler** → native `.pfs`.
-- **Every other GenICam backend** (flir, spinnaker, pycameleon, fake) → the
+- **Every other GenICam backend** (flir, spinnaker, pycameleon) → the
   native **GenApi persistence TSV** (`.txt`) via
   `cameras/_genicam_config.py` (`apply_config`/`dump_config`/`parse_config`). The
   unified `.txt` format lets a rig switch flir↔spinnaker (PySpin ↔ ctypes)
-  sharing the same param files.
+  sharing the same param files. `fake` writes the same TSV but as `.fake`.
+  `transform.PARAM_FILE_EXTENSIONS` lists every suffix (so the transfer step
+  needs no SDK import); `tests/test_backends.py` keeps it in step.
+
+**The recording's config snapshot** (`controller._snapshot_config`) makes each
+recording folder a relaunchable config dir, and `octacam process` transfers it
+with the videos. Its rules:
+- The rig TOML is re-emitted with the **live** values patched in: the Record tab
+  (`config_writer.with_record_settings` ← `controller.record_config_values`, the
+  inverse of `cli._settings_from_record`), plugin tabs (`with_plugin_options` ←
+  the `snapshot_options` hook), and the Process section (`with_process_params`).
+  Each patch writes a key only when its value differs from what the config
+  already *loads as*, so an untouched recording stays a byte-verbatim copy.
+- `directory`/`relative_directory` are **never** patched. The live values are
+  resolved (and auto-incremented) paths, and a relaunch must resolve a fresh
+  dated folder. The path actually used is in the summary.
+- Camera params are exported in `start_recording` **before** `start_record`.
+  The cameras are still previewing then; a node-map read would contend with the
+  record grab loops once they run. Measured: ~60 ms per Basler, a few ms per
+  FLIR, in parallel. Unsaved Camera-tab edits are therefore included.
+- 19 of 24 real pre-fix snapshots had a `[record]` that disagreed with their
+  own summary. GUI Save never writes `[record]`/`[[plugins]]`, so a raw copy of
+  the rig file is not a record of what ran.
 
 **Trigger normalization on save:** a GUI "Save" taken while previewing with a
 software trigger must not bake `TriggerSource=Software` into the file (it would
 make a later external-trigger recording silently never start). Every backend's
 `save_params`/`dump_config` restores the camera's original (config) trigger
 source via `normalize_trigger_source` — keep this parity when adding a backend.
+
+**ROI apply order:** a camera **keeps its ROI until power-cycled**, and SFNC makes
+a size node's max `sensor - origin`, so the *previous* session's cropped/offset
+ROI clamps the *next* config's `Width`/`Height` (hexaview's `OffsetY=278` made
+triggerbox's `Height=2048` out of range at max 1770 — it failed the whole rig
+init). `apply_config` therefore zeroes the origin whose size node the file sets
+(`_clear_roi_offsets`) **before** the file-order loop; the file's own
+`OffsetX`/`OffsetY` lines follow and restore it. Two invariants this rests on:
+every backend's typed setters (`_set_enum`/`_set_bool`/`_set_number`) must raise
+`BackendError` and **never leak a raw SDK exception** — that is what makes
+`apply_config`'s skip-and-continue best-effort real, and a leak turns one refused
+value into a dead rig — and the `fake` backend models the ROI coupling in both
+directions so wrong-order programming is caught without hardware.
 
 `config_writer._toml_value` must serialize every scalar the loader can produce —
 including inline tables (triggerbox's nested `cameras`/`lights` arrays) and
@@ -252,8 +332,11 @@ launch loads none; enable via `[[plugins]]` or `--plugin`.
 Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
 `on_first_frame`, `default_start_params` (so **headless `octacam record` arms the
 board** — a plugin that omits this never arms on the CLI), `drives_preview_trigger`
-/`on_preview_start/stop`; `set_controller`/`set_broadcast` are duck-typed
-injections. Each plugin adds a WS topic + `/api/<name>/*` REST + a GUI tab.
+/`on_preview_start/stop`, `snapshot_options` (the live settings a recording's
+config snapshot must carry; a plugin whose tab edits settings the config also
+holds must implement it, or a relaunch from the recording behaves differently);
+`set_controller`/`set_broadcast` are duck-typed injections. Each plugin adds a
+WS topic + `/api/<name>/*` REST + a GUI tab.
 
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
@@ -278,10 +361,40 @@ flash time (the repo tree is never dirtied). `firmware.py` +
 ## Web GUI
 
 FastAPI + a vanilla-JS static frontend (`web/static/`). Preview/telemetry/control
-share one WebSocket. The **adaptive preview** protocol sends a per-client
+share one WebSocket.
+
+**Deferred startup (serve-first).** `octacam gui` binds uvicorn and serves the
+page *before* touching hardware, so time-to-first-paint never waits on vendor-SDK
+camera enumeration or a trigger-board handshake. The controller is constructed
+`ready=False` against a hardware-free `CameraSystem.pending()` placeholder (0
+cameras — every consumer, snapshot/preview-loop/`/api/system`, reports an
+"initializing" system safely). A daemon init thread then opens the cameras and
+arms the serial plugins **in parallel** (independent USB vs serial hardware),
+loads params, calls `controller.attach_system(real)` (atomic reference swap
+under the GIL — the preview/telemetry loops re-read `camera_system` each tick, so
+a reader sees the empty placeholder or the real system, never a torn state),
+starts preview, then pushes a fresh `system` WS message. The
+frontend renders the whole shell up front with a grid placeholder and builds the
+grid/View+Camera tabs/Save dialog lazily in `buildCameras()` when the camera list
+arrives (from the initial `/api/system`, the WS-connect handshake — which sends
+`system` too, closing the connect-vs-init race — or the init broadcast). Plugin
+readiness fills in via each tab's `applyStatus(info)` — which is also a plugin
+tab's **only** signal that the cameras are now open, so a tab that reads camera
+state at construction (e.g. triggerbox's timing plot pulling
+`/api/triggerbox/exposures` for its auto strobe duty) must re-read it there or it
+shows placeholder-era data for the whole session. Camera-open failure calls
+`controller.fail_init(msg)` (surfaced in the GUI + logged) instead of aborting
+the now-running server. On shutdown the finally sets a `stopping` event and
+`join()`s the init thread before `controller.close()`, so arming can't race
+teardown. The **adaptive preview** protocol sends a per-client
 per-camera "view spec"; the server encodes each distinct on-screen resolution
 once and shares it (cost tracks resolutions, not clients), with server-side crop
-of a zoomed region (frame header v2). The **Camera tab** is a full GenApi
+of a zoomed region (frame header v2). Each **camera** encodes on its own executor
+task (`_encode_camera`, one `run_in_executor` per camera per tick) — `cv2.imencode`
+releases the GIL, so a tick costs the slowest camera, not the sum; serializing it
+again silently reintroduces a cost linear in rig size that overruns the 33 ms
+refresh (8× 2048² focused: 85 ms serial vs 14 ms parallel). Everything the encode
+needs is passed in by value, so the workers touch no shared state. The **Camera tab** is a full GenApi
 node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writable
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.
@@ -312,6 +425,14 @@ Seven commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
 `record`, `flash`, `benchmark`, `process`. `doctor` never opens a camera (safe
 during a live session). A rig **instance-lock** prevents two octacams owning one
 rig.
+
+**`process` never trusts an output that predates its source** (`cli._is_stale`).
+A folder recorded into twice keeps the previous take's `*.mp4`/`grid.mp4` (the
+overwrite confirmation only replaces what the new take writes), and those used to
+pass as finished work and get transferred as the new take's. mtime is the signal:
+an output made from this source was written after it. The same check rebuilds a
+grid older than the videos it composites, and a dry run reports both (the
+transcode step records them in `rewritten` so the grid preview plans around them).
 
 **typer gotcha:** typer 0.26 vendors a *forked* click that drops `flag_value`, so
 an optional-value option (bare `--flag` vs `--flag X`, e.g. `process --last`) is

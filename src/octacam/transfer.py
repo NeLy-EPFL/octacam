@@ -23,7 +23,12 @@ directory and only ``os.replace``-d onto its final name once whole and (by
 default) content-verified, mirroring :func:`octacam.writer._atomic_output`.  So
 an interrupted copy never leaves a complete-looking partial at the final name,
 and re-running skips files already present (size match, or full checksum with
-``checksum=True``) — resume is at file granularity.
+``checksum=True``; the small metadata files always by checksum) — resume is at
+file granularity.
+
+Besides the videos, every transfer carries the recording's metadata: the
+summary, the timestamps, and the config snapshot with the camera parameter
+files beside it, so the destination copy can relaunch the same recording setup.
 """
 
 from __future__ import annotations
@@ -38,7 +43,12 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
+from octacam.transform import (
+    CONFIG_SNAPSHOT_FILENAME,
+    PARAM_FILE_EXTENSIONS,
+    RECORDING_SUMMARY_FILENAME,
+    TIMESTAMPS_FILENAME,
+)
 
 log = logging.getLogger("octacam")
 
@@ -291,6 +301,23 @@ def _should_skip(src: Path, final: Path, *, checksum: bool) -> bool:
     return True
 
 
+def _metadata_files(folder: Path) -> list[Path]:
+    """The recording's metadata files present in *folder*, always transferred.
+
+    The summary and per-frame timestamps, plus the config snapshot and the
+    camera parameter files written beside it: together they make the folder a
+    config directory, so the copy at the destination can relaunch the same
+    recording setup (``octacam gui <folder>``).
+    """
+    names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]
+    files = [folder / name for name in names]
+    for ext in PARAM_FILE_EXTENSIONS:
+        files.extend(sorted(folder.glob(f"*.{ext}")))
+    # Hidden files (e.g. the macOS "._name" forks a Mac leaves on a share) are
+    # not recording metadata.
+    return [f for f in files if f.is_file() and not f.name.startswith(".")]
+
+
 def transfer_destination(
     folder: Path, dest_root: Path, local_base: Path | None = None
 ) -> Path:
@@ -322,8 +349,11 @@ def transfer_folder(
     checksum: bool = False,
     on_progress: TransferCallback | None = None,
 ) -> TransferResult:
-    """Copy mp4s (plus recording_summary.json and, when present, timestamps.npz)
-    from *folder* to *dest*.
+    """Copy mp4s plus the recording's metadata from *folder* to *dest*.
+
+    The metadata (see :func:`_metadata_files`) is recording_summary.json,
+    timestamps.npz, the octacam_config.toml snapshot and the camera parameter
+    files beside it, each when present.
 
     Parameters
     ----------
@@ -334,17 +364,20 @@ def transfer_folder(
         e.g. ``transfer.directory / relative_directory``).
     files_only:
         Explicit list of files to copy; overrides the default (all *.mp4 in
-        *folder*).  ``recording_summary.json`` and ``timestamps.npz`` are always
-        appended if present.
+        *folder*).  The metadata files are always appended.
     dry_run:
-        Log intended operations without touching the filesystem.
+        Log intended operations without touching the filesystem.  A file in
+        *files_only* that doesn't exist yet (an output an earlier dry-run step
+        only planned) is reported as a copy.
     verify:
         Content-verify each freshly-copied file (blake2b of the source vs. the
         written temp) before promoting it to its final name.  Disable for a
         faster size-only check on trusted links.
     checksum:
         When deciding whether an already-present file can be skipped, compare
-        full content digests rather than just size (repair mode).
+        full content digests rather than just size (repair mode).  The small
+        metadata files are always compared by content: an edited config or
+        summary is often exactly as long as the copy already there.
     on_progress:
         Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
 
@@ -357,13 +390,9 @@ def transfer_folder(
     else:
         candidates = sorted(folder.glob("*.mp4"))
 
-    summary = folder / RECORDING_SUMMARY_FILENAME
-    if summary.exists() and summary not in candidates:
-        candidates.append(summary)
-
-    timestamps = folder / TIMESTAMPS_FILENAME
-    if timestamps.exists() and timestamps not in candidates:
-        candidates.append(timestamps)
+    metadata = _metadata_files(folder)
+    candidates += [f for f in metadata if f not in candidates]
+    by_content = set(metadata)
 
     result = TransferResult(dest=dest)
 
@@ -375,7 +404,10 @@ def transfer_folder(
     if dry_run:
         for f in candidates:
             target = dest / f.name
-            if _should_skip(f, target, checksum=checksum):
+            exact = checksum or f in by_content
+            # A planned output has no bytes to compare yet; a real run would
+            # produce it first and then copy it.
+            if f.exists() and _should_skip(f, target, checksum=exact):
                 # Already present (size/checksum match): a real run would skip
                 # it, so the preview must report a skip — not a phantom copy.
                 result.skipped.append(f.name)
@@ -396,7 +428,7 @@ def transfer_folder(
     for idx, f in enumerate(candidates, 1):
         target = dest / f.name
         try:
-            if _should_skip(f, target, checksum=checksum):
+            if _should_skip(f, target, checksum=checksum or f in by_content):
                 # Present and matching — counted in the run summary rather than
                 # logged per file, so a full re-run doesn't spam one line for
                 # every already-copied output.

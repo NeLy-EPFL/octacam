@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import socketserver
 import threading
 from pathlib import Path
@@ -39,6 +40,27 @@ from playwright.sync_api import (
 )
 
 STATIC = Path(__file__).resolve().parents[1] / "src" / "octacam" / "web" / "static"
+# Plugin UI bundles live in each plugin's own folder, served at /plugins/<name>/;
+# the static server above only covers web/static, so a test that loads one routes
+# it in from here (see the triggerbox timing-plot test).
+TRIGGERBOX_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "triggerbox"
+    / "web"
+    / "triggerbox.js"
+)
+FLYWHEEL_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "flywheel"
+    / "web"
+    / "flywheel.js"
+)
 
 # The save-method dropdown is populated from these (mirrors writer.FORMATS as the
 # server serializes it). NVENC_FORMATS adds the GPU method for the nvenc tests.
@@ -625,3 +647,431 @@ def test_update_banner_dismiss_persists_until_newer(page):
     # Same version stays dismissed; a newer release re-shows the banner.
     assert _init_banner(page, UPDATE_AVAILABLE) is False
     assert _init_banner(page, {**UPDATE_AVAILABLE, "latest": "1.0.0"}) is True
+
+
+# --- shutdown dialog (shut down & process) --------------------------------- #
+
+
+def _make_shutdown(page: Page) -> None:
+    """Construct the real ShutdownDialog against the loaded DOM as window.__sd."""
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/shutdown.js');
+            window.__sd = new m.ShutdownDialog();
+        }"""
+    )
+
+
+def test_shutdown_offers_three_way_choice_when_work_exists(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            const visible = !document.getElementById('shutdown-dialog').classList.contains('hidden');
+            const btns = ['shutdown-cancel', 'shutdown-plain', 'shutdown-process']
+                .every(id => document.getElementById(id) !== null);
+            document.getElementById('shutdown-process').click();
+            return { visible, btns, choice: await p };
+        }"""
+    )
+    assert result == {"visible": True, "btns": True, "choice": "process"}
+
+
+def test_shutdown_plain_button_resolves_shutdown(page):
+    _make_shutdown(page)
+    choice = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            document.getElementById('shutdown-plain').click();
+            return await p;
+        }"""
+    )
+    assert choice == "shutdown"
+
+
+def test_shutdown_no_modal_when_nothing_recorded(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            const choice = await window.__sd.confirm({ recordingActive: false, hasWork: false });
+            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            return { choice, hidden };
+        }"""
+    )
+    assert result == {"choice": "shutdown", "hidden": True}
+
+
+def test_shutdown_while_recording_uses_binary_confirm(page):
+    _make_shutdown(page)
+    result = page.evaluate(
+        """async () => {
+            window.confirm = () => true;  // operator accepts the speed-bump
+            const modalShown = [];
+            const choice = await window.__sd.confirm({ recordingActive: true, hasWork: false, peerCount: 2 });
+            const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
+            return { choice, hidden };  // no 3-way modal while recording
+        }"""
+    )
+    assert result == {"choice": "shutdown", "hidden": True}
+
+
+def test_shutdown_cancel_button_resolves_cancel(page):
+    _make_shutdown(page)
+    choice = page.evaluate(
+        """async () => {
+            const p = window.__sd.confirm({ recordingActive: false, hasWork: true, peerCount: 1 });
+            document.getElementById('shutdown-cancel').click();
+            return await p;
+        }"""
+    )
+    assert choice == "cancel"
+
+
+# --- deferred startup: shell renders first, grid fills in later ------------- #
+
+# Replaces window.WebSocket before app.js boots so main()'s socket never hits a
+# real server; window.__pushWs(obj) delivers a JSON message to the live socket.
+_WS_STUB = """
+window.__wsSockets = [];
+class FakeWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.readyState = 1;
+    this.binaryType = "blob";
+    window.__wsSockets.push(this);
+    setTimeout(() => this.onopen && this.onopen({}), 0);
+  }
+  send() {}
+  close() { this.readyState = 3; this.onclose && this.onclose({}); }
+}
+FakeWebSocket.CONNECTING = 0;
+FakeWebSocket.OPEN = 1;
+FakeWebSocket.CLOSING = 2;
+FakeWebSocket.CLOSED = 3;
+window.WebSocket = FakeWebSocket;
+window.__pushWs = (obj) => {
+  const ws = window.__wsSockets[window.__wsSockets.length - 1];
+  if (ws && ws.onmessage) ws.onmessage({ data: JSON.stringify(obj) });
+};
+"""
+
+
+def _system_payload(*, ready, plugins=None):
+    payload = {
+        "version": "test",
+        "update": None,
+        "ready": ready,
+        "init_error": None,
+        "config_dir": "/x",
+        "plugins": plugins or {},
+        "managed_trigger_available": False,
+        "display_refresh_interval_ms": 100,
+        "theme": "dark",
+        "formats": [
+            {"save_method": "ffmpeg", "label": "H.264"},
+            {"save_method": "raw", "label": "Raw"},
+        ],
+        "cameras": [],
+    }
+    if ready:
+        payload["cameras"] = [
+            {
+                "index": 0,
+                "serial": "S0",
+                "name": "cam0",
+                "width": 640,
+                "height": 480,
+                "params": {},
+                "layout": {
+                    "window_x": -1.0,
+                    "window_y": -1.0,
+                    "window_width": -1.0,
+                    "window_height": -1.0,
+                },
+                "transform": {"scale_x": 1.0, "scale_y": 1.0, "rotation_deg": 0.0},
+                "center_x": False,
+                "center_y": False,
+            }
+        ]
+    return payload
+
+
+def _state_payload(*, ready):
+    return {
+        "state": "idle",
+        "ready": ready,
+        "init_error": None,
+        "remaining_ms": None,
+        "recording_id": None,
+        "recordings_made": 0,
+        "save_dir": "/x",
+        "disk_free_bytes": 0,
+        "settings": {"fps": 50.0, "duration_s": 20.0, "save_dir": "/x"},
+        "cameras": [],
+    }
+
+
+def test_grid_placeholder_shows_then_fills_on_system_push(static_server, browser):
+    """The real main() serves the shell immediately against a not-ready system
+    (loading placeholder, no tiles), then builds the grid when a ready `system`
+    message arrives over the socket — the whole point of deferred startup."""
+    page = browser.new_page()
+    ready = {"v": False}
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    # Catch-all first so specific routes (registered after) win; anything else
+    # the SPA fetches at load (e.g. nvenc capabilities) just gets {}.
+    page.route("**/api/**", json_route(dict))
+    page.route("**/api/system", json_route(lambda: _system_payload(ready=ready["v"])))
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=ready["v"])))
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+
+        # Shell served against the not-ready system: a placeholder, zero tiles.
+        page.wait_for_selector(".grid-placeholder", timeout=5000)
+        assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 0
+        assert "Connecting" in page.eval_on_selector(
+            ".grid-placeholder", "el => el.textContent"
+        )
+
+        # Cameras finished opening on the server: push the ready `system` message.
+        ready["v"] = True
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {"type": "system", **_system_payload(ready=True)},
+        )
+
+        # The grid fills in and the placeholder is gone — no reload.
+        page.wait_for_selector("#grid .tile", timeout=5000)
+        assert page.eval_on_selector_all("#grid .tile", "els => els.length") == 1
+        assert page.eval_on_selector_all(".grid-placeholder", "els => els.length") == 0
+    finally:
+        page.close()
+
+
+# The triggerbox tab's status slice: one Auto (cover exposure) strobe on ch1, so
+# the timing plot has a light row whose on-time comes from the live exposures.
+_TRIGGERBOX_STATUS = {
+    "ready": True,
+    "device": "/dev/ttyACM0",
+    "arduino_state": "idle",
+    "firmware": "TRIGGERBOX 2 abc1234",
+    "firmware_ok": True,
+    "firmware_state": "current",
+    "needs_flash": False,
+    "error": None,
+    "guard_us": 100,
+    "cameras": [{"pin": "D13", "pulse_us": 500, "delay_us": 0}],
+    "lights": [
+        {
+            "channel": 1,
+            "pin": "D5",
+            "mode": "strobe",
+            "duty_mode": "auto",
+            "duty_percent": 20,
+            "delay_us": 0,
+        }
+    ],
+    "web": {"module": "/plugins/triggerbox/triggerbox.js"},
+}
+
+
+def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
+    static_server, browser
+):
+    """An Auto strobe's on-time reaches the timing plot after deferred startup.
+
+    Serve-first startup means the triggerbox tab is constructed — and reads
+    /api/triggerbox/exposures — while the server still holds the hardware-free
+    placeholder camera system, so it sees zero exposures and every Auto (cover
+    exposure) strobe falls back to its manual duty percent. The `system` push
+    that fills the grid in must also make the tab re-read the exposures, or the
+    plot disagrees with the on-time the board is actually armed with for the
+    whole session."""
+    page = browser.new_page()
+    ready = {"v": False}
+    exposure_reads = {"n": 0}
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    def exposures():
+        exposure_reads["n"] += 1
+        # Before the cameras open the endpoint reports no cameras at all (it
+        # iterates controller.camera_system, which is CameraSystem.pending()).
+        cameras = (
+            [{"index": 0, "name": "cam0", "exposure_us": 5000.0,
+              "trigger_delay_us": 0.0}]
+            if ready["v"]
+            else []
+        )
+        return {"guard_us": 100, "duty_auto_default": False, "cameras": cameras}
+
+    plugins = {"triggerbox": _TRIGGERBOX_STATUS}
+    # Catch-all first so the specific routes registered after it win.
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system",
+        json_route(lambda: _system_payload(ready=ready["v"], plugins=plugins)),
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=ready["v"])))
+    page.route("**/api/triggerbox/exposures", json_route(exposures))
+    # The plugin's UI bundle lives outside web/static; serve the real file.
+    page.route(
+        "**/plugins/triggerbox/triggerbox.js",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/javascript",
+            body=TRIGGERBOX_JS.read_text(),
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+
+        # No exposures yet: the Auto strobe is drawn at its manual duty (20% of
+        # the 20 ms period = 4 ms) and the summary says so.
+        page.wait_for_function(
+            """() => document.getElementById('triggerbox-timing-summary')
+                     ?.textContent.includes('no camera exposures yet')""",
+            timeout=5000,
+        )
+        assert (
+            page.eval_on_selector(
+                "#triggerbox-timing-viz rect.tb-led title", "el => el.textContent"
+            )
+            == "on 4.00 ms"
+        )
+
+        # Cameras finished opening on the server: push the ready `system`, which
+        # carries each plugin's status slice through to its tab.
+        ready["v"] = True
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {"type": "system", **_system_payload(ready=True, plugins=plugins)},
+        )
+
+        # The Auto strobe now brackets the longest exposure + the guard band.
+        page.wait_for_function(
+            """() => document.getElementById('triggerbox-timing-summary')
+                     ?.textContent.includes('longest exposure 5.00 ms + 100 µs guard')""",
+            timeout=5000,
+        )
+        assert (
+            page.eval_on_selector(
+                "#triggerbox-timing-viz rect.tb-led title", "el => el.textContent"
+            )
+            == "on 5.10 ms"  # 5 ms exposure + 100 µs guard
+        )
+        # …and the guard band is drawn past the exposure it covers.
+        assert (
+            page.eval_on_selector_all(
+                "#triggerbox-timing-viz rect.tb-guard", "els => els.length"
+            )
+            == 1
+        )
+        # The reads are debounced: a page load must not turn into a fetch storm.
+        assert 2 <= exposure_reads["n"] <= 4, exposure_reads["n"]
+    finally:
+        page.close()
+
+
+def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
+    static_server, browser
+):
+    """A rig's configured loop program shows up in the tab.
+
+    The loop command used to live only in these fields, so it could not be
+    configured per rig and a recording's config snapshot had nothing to restore.
+    The plugin now publishes it in its status; the tab must seed the fields from
+    it (the sign of n_steps being the initial direction), or a snapshot-restored
+    program would silently run with the markup's defaults instead."""
+    page = browser.new_page()
+    status = {
+        "ready": True,
+        "device": "/dev/ttyACM0",
+        "firmware": "FLYWHEEL 1 abc1234",
+        "firmware_ok": True,
+        "firmware_state": "current",
+        "needs_flash": False,
+        "error": None,
+        "command": {
+            "n_steps": -2048,  # negative: starts counter-clockwise
+            "step_interval_us": 1200,
+            "rest_duration_ms": 500,
+            "n_repeats": 5,
+            "init_wait_duration_s": 2,
+        },
+        "web": {"module": "/plugins/flywheel/flywheel.js"},
+    }
+    plugins = {"flywheel": status}
+    page.route("**/api/**", lambda route: route.fulfill(
+        status=200, content_type="application/json", body="{}"
+    ))
+    page.route(
+        "**/api/system",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_system_payload(ready=True, plugins=plugins)),
+        ),
+    )
+    page.route(
+        "**/api/state",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(_state_payload(ready=True)),
+        ),
+    )
+    page.route(
+        "**/plugins/flywheel/flywheel.js",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/javascript",
+            body=FLYWHEEL_JS.read_text(),
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => document.getElementById('loop-steps')?.value === '2048'",
+            timeout=5000,
+        )
+        values = page.evaluate(
+            """() => ({
+                steps: document.getElementById('loop-steps').value,
+                interval: document.getElementById('loop-interval').value,
+                rest: document.getElementById('loop-rest').value,
+                repeats: document.getElementById('loop-repeats').value,
+                wait: document.getElementById('loop-wait').value,
+                ccw: document.getElementById('loop-dir-ccw').checked,
+                cw: document.getElementById('loop-dir-cw').checked,
+            })"""
+        )
+        assert values == {
+            "steps": "2048",  # the field is unsigned; the sign picked the direction
+            "interval": "1200",
+            "rest": "500",
+            "repeats": "5",
+            "wait": "2",
+            "ccw": True,
+            "cw": False,
+        }
+    finally:
+        page.close()

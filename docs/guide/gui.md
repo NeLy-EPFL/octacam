@@ -20,6 +20,17 @@ By default it binds to `http://127.0.0.1:8765` and opens your default browser.
 
 If the config directory is omitted it defaults to the current directory (`.`).
 
+## Instant startup
+
+The GUI serves the page **before** it opens the cameras, so it appears
+immediately — time-to-first-paint no longer waits on vendor-SDK camera
+enumeration or a trigger-board handshake. The preview area shows a *"Connecting
+to cameras…"* placeholder while the cameras and serial plugins are opened in
+parallel on a background thread; the grid fills in on its own once they are
+ready, with no reload. If the cameras cannot be opened (for example another
+octacam already holds them — see below), the reason is shown in the preview area
+instead of a spinner, and the server stays up.
+
 ## The tabs
 
 - **Record** — set fps, duration, and the save location, then start/stop

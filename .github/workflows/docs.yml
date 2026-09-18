@@ -9,7 +9,7 @@ name: Deploy docs
 #                             alias + default (main == the latest stable release),
 #                             so a docs fix landing on main between releases still
 #                             refreshes stable.
-#   push to a dev-* branch -> deploy the rolling "dev" version. Because it neither
+#   push to the develop branch -> deploy the rolling "dev" version. Because it neither
 #                             touches `stable` nor moves the default, the released
 #                             versions and the root redirect are left untouched.
 #
@@ -31,7 +31,7 @@ on:
   push:
     branches:
       - main
-      - "dev-*"          # dev-0.3.0 and future dev branches
+      - develop          # the single permanent git-flow development line -> "dev" docs
     tags:
       - "v*"             # every release tag -> its own numbered doc version
     paths:

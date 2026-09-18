@@ -37,6 +37,8 @@ class CameraSystem:
         self,
         requested_serial_numbers: list[str] | None = None,
         backend: str = "auto",
+        *,
+        _defer_open: bool = False,
     ):
         self.cameras: list[Camera] = []
         self._trigger_timer = PreciseTimer(self._trigger_all)
@@ -48,6 +50,14 @@ class CameraSystem:
         self.backend = backend
         self._backends_used: set[str] = set()
 
+        # ``_defer_open`` builds an empty shell that touches no hardware — the GUI
+        # uses it as a placeholder so the web server can bind and serve the page
+        # before the (slow) camera enumeration/open runs on a background thread.
+        # The real system is built with a normal constructor and swapped in via
+        # ``RecordingController.attach_system``. See :meth:`pending`.
+        if _defer_open:
+            return
+
         entries = self._enumerate(backend, requested_serial_numbers)
         if not entries:
             return
@@ -56,18 +66,41 @@ class CameraSystem:
 
         # Open in parallel: each open() blocks on USB round-trips with the GIL
         # released, so 8 cameras open in roughly the time one used to take.
+        # A single camera that fails to open is dropped with a loud message
+        # rather than aborting the whole rig — the others still come up, exactly
+        # as a not-connected serial is skipped during enumeration and a failed
+        # camera is skipped in start_record. This also catches a camera the auto
+        # cascade's pycameleon floor claimed after a vendor tier declined it (a
+        # USB3 link that fell back to USB 2.0 opens on no backend). Only a total
+        # failure (nothing opened) is fatal; it re-raises the first error so the
+        # caller can explain it.
         failures = [
             (camera, exc)
             for camera, _result, exc in self._run_parallel(lambda c: c.open())
             if exc is not None
         ]
         if failures:
-            for camera in self.cameras:
-                camera.close()  # close() no-ops on cameras that never opened
+            failed = {id(camera) for camera, _exc in failures}
+            for camera, exc in failures:
+                camera.close()  # close() no-ops on a camera that never opened
+                log.error("Failed to open camera %s: %s", camera.serial_number, exc)
+            self.cameras = [c for c in self.cameras if id(c) not in failed]
+        if not self.cameras:
             self._teardown_backends()
-            camera, exc = failures[0]
-            log.error("Failed to open camera %s", camera.serial_number)
-            raise exc
+            raise failures[0][1]
+
+    @classmethod
+    def pending(cls, backend: str = "auto") -> "CameraSystem":
+        """An empty, hardware-free placeholder for deferred startup.
+
+        Opens no devices and enumerates nothing; ``len()`` is 0 and iterating it
+        yields no cameras, so every consumer (snapshot, the preview loop, the
+        ``/api/system`` descriptor) reports an "initializing" system safely. The
+        GUI holds one of these while it binds the web server, then builds the
+        real :class:`CameraSystem` on a background thread and swaps it in via
+        :meth:`RecordingController.attach_system`.
+        """
+        return cls(backend=backend, _defer_open=True)
 
     def _enumerate(
         self, backend: str, requested_serial_numbers: list[str] | None
@@ -78,10 +111,11 @@ class CameraSystem:
         one available tier) the requested serials are passed straight to that
         backend's enumeration, preserving its ordering and its "not found"
         warnings. With several active backends (the cascade) each is enumerated
-        in full, in priority order, and a camera is claimed by the *first*
-        backend that reports its serial — a lower tier that also sees an
-        already-claimed serial is skipped, so a camera served by a vendor SDK is
-        never double-opened by the pycameleon floor.
+        in priority order over the *requested* serials (never the whole bus —
+        see the comment below), and a camera is claimed by the *first* backend
+        that reports its serial — a lower tier that also sees an already-claimed
+        serial is skipped, so a camera served by a vendor SDK is never
+        double-opened by the pycameleon floor.
         """
         active = []  # (name, enumerate_fn, factory), in cascade priority order
         unavailable: list[BackendUnavailable] = []
@@ -109,6 +143,7 @@ class CameraSystem:
             entries = [
                 (serial, handle, make_backend)
                 for serial, handle in enumerate_fn(requested_serial_numbers)
+                if handle is not None  # None = present but unusable (already logged)
             ]
             if entries:
                 log.info("Detected %d camera(s) via %s", len(entries), name)
@@ -117,14 +152,32 @@ class CameraSystem:
         # The cascade: enumerate every active tier in priority order and let the
         # highest one claim each serial. Lower tiers still enumerate (so a camera
         # a vendor tier missed can fall through) but skip serials already claimed.
+        #
+        # Every tier is offered the rig's *whole* requested serial list, not
+        # None. Enumeration is not free — the Basler tier's CreateDevice
+        # downloads each camera's XML over USB — so enumerating the full bus made
+        # a rig pay for cameras it would never open (a 2-camera FLIR rig paid the
+        # cost of six attached Baslers, and inherited the stall when one of them
+        # was sick). Passing the list also stops the discarded surplus handles
+        # from leaking, since they are never created. warn_missing=False because
+        # most of those serials belong to another tier; the loop below warns once
+        # for a serial that no tier claimed.
         claimed: set[str] = set()
         claimed_by: dict[str, str] = {}  # serial -> winning backend name (for logs)
         collected: list[tuple[str, object, Callable]] = []
         for name, enumerate_fn, make_backend in active:
-            for serial, handle in enumerate_fn(None):
+            for serial, handle in enumerate_fn(
+                requested_serial_numbers, warn_missing=False
+            ):
                 if serial in claimed:
                     continue  # a higher-priority tier already owns this camera
                 claimed.add(serial)
+                if handle is None:
+                    # Present but unusable (e.g. a USB3 link that fell back to USB
+                    # 2.0); the backend already logged why. Claim the serial so no
+                    # lower tier pointlessly retries the same broken device, but
+                    # don't collect it for opening.
+                    continue
                 claimed_by[serial] = name
                 collected.append((serial, handle, make_backend))
         if not requested_serial_numbers:
@@ -135,7 +188,10 @@ class CameraSystem:
         for serial in requested_serial_numbers:
             entry = by_serial.get(serial)
             if entry is None:
-                log.warning("Camera with serial number %s not found", serial)
+                # A claimed-but-unusable serial already logged its real reason;
+                # only warn for one that no tier detected at all.
+                if serial not in claimed:
+                    log.warning("Camera with serial number %s not found", serial)
                 continue
             ordered.append(entry)
         self._log_detected(ordered, claimed_by)

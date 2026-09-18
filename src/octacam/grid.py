@@ -2,18 +2,11 @@
 
 The layout is a 2D list of camera names (as defined in the config's
 ``[[cameras]]`` entries), where an empty string ``""`` means a black fill cell.
-``octacam process`` reads it from each ``[[visualization]]`` entry of the
-recording's config; otherwise the built-in default below is used.
+``octacam process`` builds one grid per ``[[visualization]]`` entry of the
+recording's config, and none at all when the config has no such entry — the
+composite is opt-in per rig, there is no built-in fallback layout.
 
-Default layout for the 7-camera 2p rig:
-
-      col → 0 (left)    1 (centre)   2 (right)
-  row ↓
-    0        camera_LF    [black]      camera_RF
-    1        camera_LM    camera_F     camera_RM
-    2        camera_LH    [black]      camera_RH
-
-Define a custom layout in your ``octacam_config.toml``:
+Ask for one in your ``octacam_config.toml``:
 
     [[visualization]]
     name = "grid.mp4"
@@ -40,22 +33,19 @@ log = logging.getLogger("octacam")
 
 GRID_FILENAME = "grid.mp4"
 
-# Built-in default: 3×3 grid for the standard 7-camera rig.
-# Each cell is either a full camera name (stem of the mp4 file) or "" (black).
-DEFAULT_LAYOUT: list[list[str]] = [
-    ["camera_LF", "", "camera_RF"],
-    ["camera_LM", "camera_F", "camera_RM"],
-    ["camera_LH", "", "camera_RH"],
-]
+# Bound on one ffprobe call. Probing reads only the container header, so a
+# healthy file answers in milliseconds; a corrupt or network-backed one that
+# hangs must not wedge `octacam process` with no diagnostic.
+PROBE_TIMEOUT_S = 30.0
 
 
 def auto_layout(camera_names: list[str]) -> list[list[str]]:
     """A near-square row-major layout for *camera_names*.
 
-    Used when a config has cameras but no usable ``[grid] layout``, so the grid
-    reflects this rig's actual cameras instead of the built-in 7-camera 2-photon
-    :data:`DEFAULT_LAYOUT`.  The last row is padded with ``""`` (black) cells to
-    keep every row the same length (required by ``xstack``).
+    Used by the ``octacam config`` scaffold to propose a starting layout from a
+    rig's own cameras, which it then writes out as an explicit
+    ``[[visualization]]`` entry.  The last row is padded with ``""`` (black)
+    cells to keep every row the same length (required by ``xstack``).
     """
     names = [n for n in camera_names if n]
     if not names:
@@ -85,11 +75,17 @@ def _find_mp4(folder: Path, camera_name: str) -> Path | None:
     return p if p.exists() else None
 
 
-def _probe_video(path: Path) -> tuple[int, int, str, float]:
-    """Return (width, height, fps_fraction, duration_s) via ffprobe."""
+def _probe_video(path: Path, ffprobe: str) -> tuple[int, int, str, float]:
+    """Return (width, height, fps_fraction, duration_s) via ffprobe.
+
+    ``stdin=DEVNULL`` keeps the probe off the controlling tty (the same rule
+    every other ffmpeg-family launch here follows — a kill mid-probe must never
+    leave the terminal in no-echo mode), and the timeout bounds a probe that
+    hangs on a corrupt or network-backed file instead of wedging the run.
+    """
     result = subprocess.run(
         [
-            "ffprobe",
+            ffprobe,
             "-v",
             "error",
             "-select_streams",
@@ -102,9 +98,11 @@ def _probe_video(path: Path) -> tuple[int, int, str, float]:
             "json",
             str(path),
         ],
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=True,
+        timeout=PROBE_TIMEOUT_S,
     )
     data = json.loads(result.stdout)
     s = data["streams"][0]
@@ -116,7 +114,7 @@ def _probe_video(path: Path) -> tuple[int, int, str, float]:
 
 def build_grid_video(
     folder: Path,
-    layout: list[list[str]] | None = None,
+    layout: list[list[str]],
     output: Path | None = None,
     ffmpeg_params: str = "",
     pix_fmt: str = "yuv420p",
@@ -126,8 +124,8 @@ def build_grid_video(
     """Write a composite grid video to *output* (default: ``folder/grid.mp4``).
 
     *layout* is a 2D list of camera names / empty strings matching a
-    ``[[visualization]]`` ``layout`` from the octacam config.  Omit to use the
-    built-in 7-camera default.
+    ``[[visualization]]`` ``layout`` from the octacam config.  There is no
+    default: an empty layout builds nothing (grids are opt-in per rig).
 
     *ffmpeg_params* supplies the encoder choice (``-c:v``/``-preset``/``-crf``);
     its ``-pix_fmt``/``-vf`` are ignored — the grid always outputs *pix_fmt*
@@ -147,8 +145,6 @@ def build_grid_video(
     On *dry_run* the ffmpeg command is logged but not executed; the intended
     output path is still returned so callers can include it in transfers.
     """
-    if layout is None:
-        layout = DEFAULT_LAYOUT
     if not layout or not layout[0]:
         log.warning("Grid layout is empty — skipping grid")
         return None
@@ -158,6 +154,22 @@ def build_grid_video(
     rows = len(layout)
     cols = len(layout[0])
     n_cells = rows * cols
+
+    # Resolve ffprobe once, before touching any file. It is a separate binary
+    # from ffmpeg and is NOT bundled by imageio-ffmpeg, so a pip install with no
+    # system ffmpeg has an ffmpeg but no ffprobe — which used to surface as a raw
+    # FileNotFoundError escaping every per-cell guard below and aborting the whole
+    # `octacam process` run *after* the transcodes, before the transfer. Skip the
+    # grid with the real reason instead (the transcodes and the transfer still
+    # run), rather than probing every cell only to report the misleading
+    # "no probeable mp4 files found".
+    from octacam.writer import find_ffprobe
+
+    try:
+        ffprobe = find_ffprobe()
+    except RuntimeError as e:
+        log.error("Cannot build the grid: %s", e)
+        return None
 
     # Resolve each grid slot to a source mp4 (None → black/missing).
     # Row-major order (left→right, top→bottom) matches xstack input order.
@@ -177,9 +189,11 @@ def build_grid_video(
                 slot_files.append(None)
                 continue
             try:
-                probe = _probe_video(p)
+                probe = _probe_video(p, ffprobe)
             except (
                 subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                OSError,
                 KeyError,
                 IndexError,
                 ValueError,

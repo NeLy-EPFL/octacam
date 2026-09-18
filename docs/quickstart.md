@@ -72,12 +72,14 @@ octacam record <config_dir> --duration 10 --fps 100
 ```
 
 Either way, each recording writes its videos, a `recording_summary.json`, and a
-snapshot of the rig config into its own folder. See [Recording](guide/recording.md).
+snapshot of its config (with each camera's parameters) into its own folder, so
+the same setup can be relaunched later. See [Recording](guide/recording.md).
 
 ## 5. Archive everything
 
-Turn the day's recordings into transcoded videos, composite grid videos, and
-copies on shared storage — one command, no paths to type:
+Turn the day's recordings into transcoded videos (plus any composite grid videos
+the rig config asks for) and copies on shared storage — one command, no paths to
+type:
 
 ```bash
 octacam process --all

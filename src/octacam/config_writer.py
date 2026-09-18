@@ -23,9 +23,11 @@ import os
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
 from octacam._compat import tomllib
-from octacam.config import find_config_file
+from octacam.config import duration_to_seconds, find_config_file, parse_record_section
+from octacam.plugins import canonical_name
 from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
@@ -143,6 +145,10 @@ def _dumps(data: dict) -> str:
         if isinstance(camera, dict):
             block("cameras", camera, array=True)
     for plugin in data.get("plugins", []) or []:
+        # The loader also accepts a bare name (plugins = ["flywheel"]); write it
+        # as a table, since this emits [[plugins]] headers.
+        if isinstance(plugin, str):
+            plugin = {"name": plugin}
         if isinstance(plugin, dict):
             block("plugins", plugin, array=True)
     # [[visualization]] is an array of tables (multiple named grids).
@@ -238,6 +244,96 @@ def with_process_params(
         transfer["directory"] = transfer_directory
         transfer["checksum"] = transfer_checksum
 
+    return doc
+
+
+def with_record_settings(raw: dict, live: Mapping[str, Any]) -> dict:
+    """Return a copy of ``raw`` whose ``[record]`` reproduces a recording's settings.
+
+    ``live`` maps ``[record]`` keys to the values the recording ran with, with
+    ``duration_s`` (seconds) in place of ``duration``/``duration_unit``. A key is
+    written only when its value differs from what the config already loads as,
+    so a recording made with the config's own settings keeps a byte-verbatim
+    snapshot. A changed duration keeps the config's unit when the value there is
+    exact and readable (5 minutes -> 60 minutes), else it is written in seconds
+    (100 s, not 1.6666666666666667 minutes). A ``None``
+    (``max_nvenc_sessions`` left at auto) removes the key; TOML has no null.
+    """
+    doc = copy.deepcopy(raw) if raw else {}
+    current = parse_record_section(doc)
+    values = dict(live)
+    duration_s = values.pop("duration_s")
+    changes = {k: v for k, v in values.items() if getattr(current, k) != v}
+    # A frame-count duration depends on fps, so compare at the recording's fps.
+    fps = values.get("fps", current.fps)
+    if duration_to_seconds(current.duration, current.duration_unit, fps) != duration_s:
+        duration, unit = _duration_in(duration_s, current.duration_unit, fps)
+        changes["duration"] = duration
+        if unit != current.duration_unit:
+            changes["duration_unit"] = unit
+    if not changes:
+        return doc
+    section = doc.get("record")
+    if not isinstance(section, dict):
+        section = {}
+        doc["record"] = section
+    for key, value in changes.items():
+        if value is None:
+            section.pop(key, None)
+        else:
+            section[key] = value
+    return doc
+
+
+def _duration_in(duration_s: float, unit: str, fps: float) -> tuple[float, str]:
+    """``(duration, unit)`` that loads back as exactly ``duration_s``: in ``unit``
+    when the value there has at most 3 decimals and converts back exactly, else
+    in seconds, which always does."""
+    if unit == "frames":
+        value = duration_s * fps
+    else:
+        value = duration_s / duration_to_seconds(1.0, unit, fps)
+    if round(value, 3) == value and duration_to_seconds(value, unit, fps) == duration_s:
+        return value, unit
+    return duration_s, "seconds"
+
+
+def with_plugin_options(raw: dict, options_by_name: Mapping[str, dict]) -> dict:
+    """Return a copy of ``raw`` whose ``[[plugins]]`` reproduce a session's plugins.
+
+    ``options_by_name`` has an entry for every plugin the session loaded: its
+    current name -> the options its live state differs in (often empty). Those
+    options are merged into the plugin's entry, matched through legacy aliases;
+    a loaded plugin the config does not list (enabled with ``--plugin``) is
+    appended so a relaunch loads it too. With nothing to merge or append the copy
+    compares equal to ``raw``.
+    """
+    doc = copy.deepcopy(raw) if raw else {}
+    found = doc.get("plugins")
+    # Absent, or malformed (which the loader ignores too): start a new list.
+    entries: list[str | dict] = found if isinstance(found, list) else []
+    listed: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        name = entry.get("name") if isinstance(entry, dict) else entry
+        if isinstance(name, str):
+            listed.setdefault(canonical_name(name), index)
+    for name, options in options_by_name.items():
+        index = listed.get(name)
+        if index is None:
+            entries.append({"name": name, "options": dict(options)})
+            doc["plugins"] = entries
+            listed[name] = len(entries) - 1
+            continue
+        if not options:
+            continue
+        entry = entries[index]
+        # A bare-name entry becomes a table to hold its options.
+        table: dict[str, Any] = entry if isinstance(entry, dict) else {"name": entry}
+        entries[index] = table
+        current = table.get("options")
+        table["options"] = (
+            {**current, **options} if isinstance(current, dict) else dict(options)
+        )
     return doc
 
 

@@ -1,138 +1,133 @@
-# triggerbox rig — 2048² FLIR + Basler, 80 fps, 20% strobe duty.
-#
-# Parameterized by TIMING (fps) + STROBE DUTY CYCLE instead of raw µs windows:
-#
-#   fps = 80        -> 12500 µs frame period
-#   duty = 20 %     -> 2500 µs light-on window (covers the 2 ms exposure)
-#   exposure = 2000 µs (per-camera, in the .pfs / .txt)
-#
-# Cameras run in EXTERNAL hardware-trigger mode; the Arduino Nano ESP32 running
-# the triggerbox firmware drives the shared trigger line (D13 -> each camera's
-# Line1) and strobes the two CCS LED ring lights (CCS ch1/ch2) in sync. The
-# triggerbox plugin arms the board with the fps/duration below + the light spec.
-
-backend = "auto"   # cascade: Basler->pypylon, FLIR Grasshopper3->Spinnaker C
+backend = "auto"
 
 [record]
 fps = 80.0
 duration = 10.0
-duration_unit = "seconds"     # frames | seconds | minutes | hours
-trigger_source = "managed"    # octacam drives the Arduino triggerbox (plugin below)
-# preview_trigger_source (default "auto") mirrors the recording trigger: for a
-# "managed" rig, preview drives the triggerbox live, so the live preview is
-# hardware-triggered, cross-camera synchronized and strobe-lit exactly like the
-# recording. Override with "software" or "free_running" to preview without the
-# LEDs (e.g. "free_running" free-runs the cameras capped at fps).
+duration_unit = "seconds"
+trigger_source = "managed"
 preview_trigger_source = "auto"
-
 directory = "~/octacam/data/triggerbox"
 relative_directory = "%y%m%d/Fly1/001"
-
-save_method = "ffmpeg"        # ffmpeg | raw
+save_method = "ffmpeg"
 ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
 save_transformed = true
-save_timestamps = true        # per-frame timestamp CSV (handy to verify 80 fps)
+save_timestamps = true
 
 [transcode]
 ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
 
-[transfer]
-directory = "~/octacam/server/triggerbox"
-checksum = true
-
-# --- Cameras -----------------------------------------------------------------
-# 4× Basler acA1920-150um (1920×1200). Sensor params — 2 ms exposure, gain 0,
-# hardware trigger on Line1/RisingEdge — are stored in each <serial>.pfs here.
-
 [[cameras]]
-serial_number = "40018619"
-name = "basler_1"
+serial_number = "40022761"
+name = "0_basler"
 scale_x = 1.0
 scale_y = 1.0
 rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
-
-[[cameras]]
-serial_number = "40018631"
-name = "basler_2"
-scale_x = 1.0
-scale_y = 1.0
-rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
+window_x = 0.333
+window_y = 0.333
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
 
 [[cameras]]
 serial_number = "40018632"
-name = "basler_3"
+name = "2_basler"
 scale_x = 1.0
 scale_y = 1.0
 rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
+window_x = 0.333
+window_y = 0.0
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
 
 [[cameras]]
-serial_number = "40022761"
-name = "basler_4"
+serial_number = "40254867"
+name = "3_basler"
 scale_x = 1.0
 scale_y = 1.0
 rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
-
-# 2× FLIR Grasshopper3 GS3-U3-41C6NIR (2048×2048) — the "2048" cameras.
-# Sensor params (2048² ROI, 2 ms exposure, hardware trigger line) persist as
-# <serial>.txt (the camera's native GenApi feature-persistence TSV), set from
-# the GUI "Save…" dialog. Under backend = "auto" the FLIRs open through the
-# Spinnaker C-API tier (PySpin is unavailable on modern Python); it records and
-# tears down cleanly (verified 4 Basler + 2 FLIR headless record, clean exit).
+window_x = 0.0
+window_y = 0.0
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
 
 [[cameras]]
-serial_number = "17475185"
-name = "flir_1"
+serial_number = "40018619"
+name = "4_basler"
 scale_x = 1.0
 scale_y = 1.0
 rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
+window_x = 0.0
+window_y = 0.333
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
+
+[[cameras]]
+serial_number = "40018631"
+name = "6_basler"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = 0.0
+window_y = 0.667
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
+
+[[cameras]]
+serial_number = "40023151"
+name = "7_basler"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = 0.333
+window_y = 0.667
+window_width = 0.333
+window_height = 0.333
+center_x = false
+center_y = false
 
 [[cameras]]
 serial_number = "17475187"
-name = "flir_2"
+name = "8_flir"
 scale_x = 1.0
 scale_y = 1.0
 rotation_deg = 0.0
-window_x = -1.0
-window_y = -1.0
-window_width = -1.0
-window_height = -1.0
+window_x = 0.667
+window_y = 0.0
+window_width = 0.333
+window_height = 0.5
+center_x = false
+center_y = false
 
-# --- triggerbox trigger + light plugin ---------------------------------------
-# fps and duration come from [record] above. The plugin arms the Arduino on
-# record start with the camera line(s) and light channel(s) below. One camera
-# line (D13 -> all 6 cameras); CCS ch1 (D5) + ch2 (D6) strobe in sync at 20%
-# duty; ch3 (D7) is off. A "strobe" channel with duty_mode = "auto" would size
-# its on-time to bracket the longest live camera exposure instead.
+[[cameras]]
+serial_number = "17475185"
+name = "9_flir"
+scale_x = 1.0
+scale_y = 1.0
+rotation_deg = 0.0
+window_x = 0.667
+window_y = 0.5
+window_width = 0.333
+window_height = 0.5
+center_x = false
+center_y = false
 
 [[plugins]]
 name = "triggerbox"
-
 [plugins.options]
-device = "/dev/ttyACM0"   # Arduino Nano ESP32 (triggerbox firmware); a udev symlink is nicer
-cameras = [ { pin = "D13", pulse_us = 500 } ]
-lights = [
-  { channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 20.0 },
-  { channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20.0 },
-  { channel = 3, mode = "off" },
-]
+device = "/dev/ttyACM0"
+cameras = [{pin = "D13", pulse_us = 500}]
+lights = [{channel = 1, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 2, mode = "strobe", duty_mode = "manual", duty_percent = 20.0}, {channel = 3, mode = "off"}]
 strobe_guard_us = 100
+
+[transfer]
+directory = "~/octacam/server/triggerbox"
+checksum = true

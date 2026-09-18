@@ -83,6 +83,36 @@ def test_dispatch_swallows_plugin_exceptions():
     PluginManager([Boom()]).dispatch("on_first_frame", None)  # must not raise
 
 
+def test_snapshot_options_lists_every_plugin():
+    class Live(Plugin):
+        name = "live"
+
+        def snapshot_options(self, params):
+            return {"lights": params["live"]}
+
+    class Unchanged(Plugin):
+        name = "unchanged"  # the base hook: nothing differs from the config
+
+    class Legacy:
+        name = "legacy"  # predates the hook and doesn't subclass Plugin
+
+    class Boom(Plugin):
+        name = "boom"
+
+        def snapshot_options(self, params):
+            raise RuntimeError("boom")
+
+    manager = PluginManager([Live(), Unchanged(), Legacy(), Boom()])
+    # Every loaded plugin is keyed (so the snapshot lists it); only a plugin with
+    # live changes contributes options, and a failing hook never raises.
+    assert manager.snapshot_options({"live": [1]}) == {
+        "live": {"lights": [1]},
+        "unchanged": {},
+        "legacy": {},
+        "boom": {},
+    }
+
+
 def test_status_shape():
     class Demo(Plugin):
         name = "demo"

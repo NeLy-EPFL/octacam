@@ -269,6 +269,12 @@ class RecordingStartRequest(BaseModel):
     plugin_params: dict | None = None
 
 
+class ShutdownRequest(BaseModel):
+    # True asks cli.gui to start a detached processing job for this session on the
+    # way out (the "Shut down & process" choice).
+    process_after: bool = False
+
+
 class DiagnosticRunRequest(BaseModel):
     """Parameters for a Benchmark run (octacam.diagnostics)."""
 
@@ -559,6 +565,13 @@ class _AppState:
             config_writer.load_raw_config(config_dir) if config_dir else {}
         )
         self.plugins = plugins
+        # Which loaded plugins ship a web UI bundle, {name: assets_dir}. Filled by
+        # create_app once (from web_assets()); read by system_descriptor so the
+        # /api/system payload and its WS re-broadcast agree on the plugin UI list.
+        self.plugin_web: dict[str, Path] = {}
+        # Set by POST /api/shutdown {process_after: true}; read by cli.gui's
+        # teardown to kick off a detached processing job for this session.
+        self.process_after = False
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self._frame_counters: dict[int, int] = {}
@@ -577,6 +590,108 @@ class _AppState:
     def update_status(self) -> dict | None:
         """The update notice for /api/system, or None if not (yet) known."""
         return self._update_notice.as_dict() if self._update_notice else None
+
+    def system_descriptor(self) -> dict:
+        """The full /api/system payload: version, plugins, cameras, formats, …
+
+        Shared by the GET /api/system handler and the WS ``system`` message so a
+        browser gets the same shape whether it fetched at load or received the
+        push. ``ready`` is False (with ``cameras: []``) while the GUI's
+        background init is still opening the cameras; the frontend renders a
+        loading placeholder and re-reads this on the ``system`` push that the
+        init broadcasts once the real system is attached.
+        """
+        controller = self.controller
+        config_by_serial = {c.serial_number: c for c in self.config.cameras}
+        cameras = []
+        for index, camera in enumerate(controller.camera_system):
+            camera_config = config_by_serial.get(camera.serial_number)
+            cameras.append(
+                {
+                    "index": index,
+                    "serial": camera.serial_number,
+                    "name": camera.name,
+                    "width": camera.width,
+                    "height": camera.height,
+                    "params": camera.read_params(),
+                    "layout": {
+                        key: getattr(camera_config, key) if camera_config else -1.0
+                        for key in (
+                            "window_x",
+                            "window_y",
+                            "window_width",
+                            "window_height",
+                        )
+                    },
+                    "transform": {
+                        key: getattr(camera_config, key) if camera_config else default
+                        for key, default in (
+                            ("scale_x", 1.0),
+                            ("scale_y", 1.0),
+                            ("rotation_deg", 0.0),
+                        )
+                    },
+                    # Live ROI-centering state, so the save dialog can persist it
+                    # for a camera whose Camera tab was never opened this session.
+                    "center_x": camera.center_x,
+                    "center_y": camera.center_y,
+                }
+            )
+        # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
+        # dynamically import each plugin's <name>.js from its own folder instead
+        # of statically importing every plugin by name. Nested under the
+        # existing per-plugin object, so the top-level shape is unchanged.
+        plugins_status = self.plugins.status()
+        for name, adir in self.plugin_web.items():
+            entry = plugins_status.get(name)
+            if entry is None:
+                continue
+            web = {"module": f"/plugins/{name}/{name}.js"}
+            if (adir / f"{name}.css").is_file():
+                web["css"] = f"/plugins/{name}/{name}.css"
+            entry["web"] = web
+        return {
+            "version": octacam.__version__,
+            # Newer-release advice for the dismissible GUI banner (None until the
+            # background check runs, or if skipped). octacam never self-updates.
+            "update": self.update_status(),
+            # False while the cameras are still opening on the init thread.
+            "ready": controller.ready,
+            # Set if that background init failed to open any camera, so the SPA
+            # shows the reason instead of an endless "connecting" placeholder.
+            "init_error": controller.init_error,
+            "config_dir": self.config_dir,
+            "plugins": plugins_status,
+            # Enables the "managed" trigger-source option in the GUI: true when a
+            # loaded plugin can drive the trigger (e.g. the triggerbox).
+            "managed_trigger_available": controller.managed_trigger_available,
+            "display_refresh_interval_ms": (
+                self.config.gui.display_refresh_interval_ms
+            ),
+            "theme": self.config.gui.theme,
+            "formats": [
+                {"save_method": save_method, "label": video_format.label}
+                for save_method, video_format in FORMATS.items()
+            ],
+            "cameras": cameras,
+        }
+
+    def broadcast_system(self) -> None:
+        """Push a fresh /api/system descriptor to every connected browser.
+
+        Called (from the GUI's init thread) once the real camera system is
+        attached, so a page that loaded against the empty placeholder fills in
+        its grid and plugin readiness without a reload. No-ops when there are no
+        clients / the loop is down (a browser connecting later gets the current
+        descriptor from the WS-connect handshake instead)."""
+        # Skip building the descriptor at all when nobody is listening — it reads
+        # every camera's params over USB, so it is not free. A client that
+        # connects later gets the current descriptor from the WS-connect
+        # handshake, so nothing is lost.
+        loop = self.loop
+        if loop is None or loop.is_closed() or not self.clients:
+            return
+        self.broadcast_threadsafe("system", self.system_descriptor())
 
     # ------------------------------------------------------- broadcasting
 
@@ -656,15 +771,39 @@ class _AppState:
                 frame = camera.frame_for_display.pop()
                 if frame is None:
                     continue
-                jobs.append((index, camera, frame, groups))
+                # One monotonic frame number and one telemetry snapshot per
+                # camera per tick, shared across that camera's variants. Taken
+                # here, on the event-loop thread, so the counter is never
+                # mutated from the encode workers below.
+                count = self._frame_counters.get(index, 0) + 1
+                self._frame_counters[index] = count
+                jobs.append((
+                    index,
+                    frame,
+                    groups,
+                    count,
+                    time.time_ns(),
+                    camera.resulting_fps,
+                    camera.dropped_count,
+                ))
             if not jobs:
                 continue
-            messages = await loop.run_in_executor(
-                None, self._encode_jobs, jobs, recording
-            )
-            for camera_index, message, group in messages:
-                for client in group:
-                    client.queue_frame(camera_index, message)
+            # One executor task per camera rather than one task encoding every
+            # camera in sequence: cv2.imencode releases the GIL, so the cameras
+            # encode concurrently and the tick costs the slowest single camera
+            # instead of the sum. At the 33 ms default refresh this is the
+            # difference between fitting in the budget and not — eight 2048²
+            # cameras on a focused (1:1) tile measure ~85 ms serially vs ~14 ms
+            # in parallel, and the serial cost grows linearly with the rig size.
+            flags = 1 if recording else 0
+            batches = await asyncio.gather(*[
+                loop.run_in_executor(None, self._encode_camera, job, flags)
+                for job in jobs
+            ])
+            for messages in batches:
+                for camera_index, message, group in messages:
+                    for client in group:
+                        client.queue_frame(camera_index, message)
 
     @staticmethod
     def _cap_variants(
@@ -696,42 +835,40 @@ class _AppState:
                 continue
             bucket.extend(groups.pop(key))
 
-    def _encode_jobs(
-        self, jobs, recording: bool
-    ) -> list[tuple[int, bytes, list["_Client"]]]:
+    @staticmethod
+    def _encode_camera(job, flags: int) -> list[tuple[int, bytes, list["_Client"]]]:
+        """Encode every on-screen variant of ONE camera's frame.
+
+        Runs on an executor thread, one call per camera per tick (see
+        :meth:`preview_loop`). Everything it needs is passed in — it touches no
+        shared state and no camera object — so the cameras encode concurrently
+        while cv2 has the GIL released.
+        """
         import cv2
 
-        flags = 1 if recording else 0
+        index, frame, groups, count, timestamp, fps, dropped = job
+        frame_h, frame_w = frame.shape
         messages = []
-        for index, camera, frame, groups in jobs:
-            # One monotonic frame number and one telemetry snapshot per camera
-            # per tick, shared across that camera's variants.
-            frame_h, frame_w = frame.shape
-            count = self._frame_counters.get(index, 0) + 1
-            self._frame_counters[index] = count
-            timestamp = time.time_ns()
-            fps = camera.resulting_fps
-            dropped = camera.dropped_count
-            for (region, factor), group in groups.items():
-                # Re-clamp against the frame actually popped (it may differ from
-                # camera.width/height for one frame across a live geometry
-                # change); numpy would silently clip otherwise.
-                x, y, w, h = _clamp_crop(region, frame_w, frame_h)
-                whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
-                if factor > 1 or not whole:
-                    sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
-                else:
-                    sub = np.ascontiguousarray(frame)
-                ok, jpeg = cv2.imencode(
-                    ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-                )
-                if not ok:
-                    continue
-                header = FRAME_HEADER.pack(
-                    FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
-                    x, y, w, h, frame_w, frame_h,
-                )
-                messages.append((index, header + jpeg.tobytes(), group))
+        for (region, factor), group in groups.items():
+            # Re-clamp against the frame actually popped (it may differ from
+            # camera.width/height for one frame across a live geometry
+            # change); numpy would silently clip otherwise.
+            x, y, w, h = _clamp_crop(region, frame_w, frame_h)
+            whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
+            if factor > 1 or not whole:
+                sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
+            else:
+                sub = np.ascontiguousarray(frame)
+            ok, jpeg = cv2.imencode(
+                ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+            )
+            if not ok:
+                continue
+            header = FRAME_HEADER.pack(
+                FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
+                x, y, w, h, frame_w, frame_h,
+            )
+            messages.append((index, header + jpeg.tobytes(), group))
         return messages
 
     async def telemetry_loop(self) -> None:
@@ -799,6 +936,8 @@ def create_app(
             )
             continue
         plugin_web[name] = adir
+    # system_descriptor() reads this to advertise each plugin's UI bundle.
+    state.plugin_web = plugin_web
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -834,74 +973,7 @@ def create_app(
 
     @app.get("/api/system")
     def get_system():
-        config_by_serial = {c.serial_number: c for c in state.config.cameras}
-        cameras = []
-        for index, camera in enumerate(controller.camera_system):
-            camera_config = config_by_serial.get(camera.serial_number)
-            cameras.append(
-                {
-                    "index": index,
-                    "serial": camera.serial_number,
-                    "name": camera.name,
-                    "width": camera.width,
-                    "height": camera.height,
-                    "params": camera.read_params(),
-                    "layout": {
-                        key: getattr(camera_config, key) if camera_config else -1.0
-                        for key in (
-                            "window_x",
-                            "window_y",
-                            "window_width",
-                            "window_height",
-                        )
-                    },
-                    "transform": {
-                        key: getattr(camera_config, key) if camera_config else default
-                        for key, default in (
-                            ("scale_x", 1.0),
-                            ("scale_y", 1.0),
-                            ("rotation_deg", 0.0),
-                        )
-                    },
-                    # Live ROI-centering state, so the save dialog can persist it
-                    # for a camera whose Camera tab was never opened this session.
-                    "center_x": camera.center_x,
-                    "center_y": camera.center_y,
-                }
-            )
-        # Tell the SPA which plugins ship a UI bundle (and where), so app.js can
-        # dynamically import each plugin's <name>.js from its own folder instead
-        # of statically importing every plugin by name. Nested under the
-        # existing per-plugin object, so the top-level shape is unchanged.
-        plugins_status = state.plugins.status()
-        for name, adir in plugin_web.items():
-            entry = plugins_status.get(name)
-            if entry is None:
-                continue
-            web = {"module": f"/plugins/{name}/{name}.js"}
-            if (adir / f"{name}.css").is_file():
-                web["css"] = f"/plugins/{name}/{name}.css"
-            entry["web"] = web
-        return {
-            "version": octacam.__version__,
-            # Newer-release advice for the dismissible GUI banner (None until the
-            # background check runs, or if skipped). octacam never self-updates.
-            "update": state.update_status(),
-            "config_dir": config_dir,
-            "plugins": plugins_status,
-            # Enables the "managed" trigger-source option in the GUI: true when a
-            # loaded plugin can drive the trigger (e.g. the triggerbox).
-            "managed_trigger_available": state.controller.managed_trigger_available,
-            "display_refresh_interval_ms": (
-                state.config.gui.display_refresh_interval_ms
-            ),
-            "theme": state.config.gui.theme,
-            "formats": [
-                {"save_method": save_method, "label": video_format.label}
-                for save_method, video_format in FORMATS.items()
-            ],
-            "cameras": cameras,
-        }
+        return state.system_descriptor()
 
     @app.get("/api/serial/ports")
     def get_serial_ports():
@@ -1265,7 +1337,7 @@ def create_app(
         return controller.get_last_diagnostic() or {}
 
     @app.post("/api/shutdown")
-    def shutdown(background_tasks: BackgroundTasks):
+    def shutdown(background_tasks: BackgroundTasks, body: ShutdownRequest | None = None):
         # Shutting down releases the cameras for everyone, so refuse while a
         # recording is in progress rather than discarding it (controller.close
         # aborts). The background task runs after the 202 is flushed, so the
@@ -1275,6 +1347,9 @@ def create_app(
                 409,
                 "Stop the recording or benchmark before shutting down the server",
             )
+        # The body is optional so an empty POST (older clients / tests) still works.
+        # cli.gui reads this flag after uvicorn returns to start detached processing.
+        state.process_after = bool(body and body.process_after)
         background_tasks.add_task(shutdown_callback)
         return JSONResponse({"status": "shutting_down"}, status_code=202)
 
@@ -1287,6 +1362,14 @@ def create_app(
         sender = asyncio.create_task(client.sender())
         loop = asyncio.get_running_loop()
         try:
+            # Send the current /api/system descriptor so a browser connecting
+            # after (or during) the background camera init fills in its grid and
+            # plugin readiness from the socket, without waiting for — or racing —
+            # the one-shot broadcast the init thread fires on completion.
+            descriptor = await loop.run_in_executor(None, state.system_descriptor)
+            client.queue_text(
+                "system", json.dumps({"type": "system", **descriptor})
+            )
             snapshot = await loop.run_in_executor(None, controller.snapshot)
             client.queue_text("state", json.dumps({"type": "state", **snapshot}))
             client.queue_text(

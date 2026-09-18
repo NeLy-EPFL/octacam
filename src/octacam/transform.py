@@ -41,6 +41,18 @@ RECORDING_SUMMARY_FILENAME = "recording_summary.json"
 # per-frame timestamp/dropped series — replacing the old per-camera CSVs.
 TIMESTAMPS_FILENAME = "timestamps.npz"
 
+# The rig config snapshot written into each recording's save directory
+# (RecordingController._snapshot_config). It carries the live recording settings,
+# and each camera's parameter file (``<serial>.<ext>``) is written beside it, so
+# the recording folder is itself a config directory a new session can launch from.
+CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
+
+# Every camera backend's parameter-file suffix (``CameraBackend.extension``):
+# Basler .pfs, the GenApi-TSV backends .txt, and the synthetic ``fake``. Listed
+# here so the transfer step can carry a snapshot's camera files without importing
+# a vendor SDK; tests/test_backends.py keeps it in step with the backends.
+PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

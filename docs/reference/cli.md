@@ -141,8 +141,9 @@ available from the GUI's **Benchmark** tab.
 octacam process [PATHS…]
 ```
 
-Transcode recordings to mp4, build composite grid videos, and transfer to
-storage — all driven by each recording's embedded config snapshot. Pass
+Transcode recordings to mp4, build the configured composite grid videos, and
+transfer to storage — all driven by each recording's embedded config snapshot.
+Grids are built only for a rig whose config has a `[[visualization]]` entry. Pass
 recording folders (or parent directories with `-r`), or select from the cache
 with `--last` / `--last session` / `--all`. See
 [Processing](../guide/processing.md).
@@ -163,18 +164,68 @@ with `--last` / `--last session` / `--all`. See
 | --- | --- |
 | `-r`, `--recursive` | Recurse into the given folders. |
 | `--no-transcode` | Skip transcoding; grid/transfer act on existing mp4s. |
-| `--no-grid` | Skip building the grid video(s). |
+| `--no-grid` | Skip building the configured grid video(s). |
 | `--no-transfer` | Skip transferring to the `[transfer]` destination. |
 | `--force` | Re-transcode / rebuild grids even if outputs already exist. |
 | `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
 | `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
 | `--progress-style` | `octacam` (default) or `ffmpeg` (native output). |
-| `--dry-run` | Log the intended grid/transfer work without writing anything. |
+| `--dry-run` | List what each step would do (files to transcode, grids to build, files to transfer) without writing, copying, or deleting anything. |
+| `--detach` | Run the pipeline as a background job that survives SSH disconnect; print its id and return. Manage it with `octacam jobs`. |
+
+A running job (detached or foreground) auto-pauses while an `octacam gui`/`record`
+on the same machine owns the cameras, and resumes when they are free. A
+`--dry-run` does no heavy work and never pauses. See
+[Processing](../guide/processing.md#running-in-the-background-detached).
+
+## `jobs`
+
+```bash
+octacam jobs list
+octacam jobs attach [JOB]
+octacam jobs pause  [JOB]
+octacam jobs resume [JOB]
+octacam jobs cancel [JOB]
+```
+
+Manage detached `octacam process --detach` jobs. `JOB` is a job id from
+`octacam jobs list`; omit it to target the most recent job.
+
+| Command | Purpose |
+| --- | --- |
+| `list` | Show each job's id, state, phase, progress, and age. |
+| `attach` | Follow a job's live log + progress (Ctrl-C detaches — it does **not** cancel). |
+| `pause` | Pause a running job (it parks at the next file/folder boundary). |
+| `resume` | Clear a manual pause (a gui/record auto-pause clears on its own). |
+| `cancel` | Stop a running job cleanly; already-finished work is kept. |
+
+## `cache`
+
+```bash
+octacam cache info
+octacam cache path
+octacam cache clear [--all] [--yes]
+```
+
+Inspect and clear octacam's on-disk cache under `~/.cache/octacam` (see
+`OCTACAM_CACHE_DIR` below): the recording list backing `octacam process
+--last/--all`, detached-job logs, and small activity markers.
+
+| Command | Purpose |
+| --- | --- |
+| `info` | Show the cache location, total size, and a breakdown (recordings, jobs, live markers). |
+| `path` | Print the cache directory (for scripting). |
+| `clear` | Remove the recording list and stale activity markers. |
+
+`clear` **never touches** a live capture, transcode, or detached job — those are
+reported as kept. Finished detached-job logs are kept by default; add `--all` to
+remove them too. `--yes` (`-y`) skips the confirmation prompt.
 
 ## Environment variables
 
 | Variable | Effect |
 | --- | --- |
 | `PYLON_CAMEMU` | Number of emulated Basler cameras (run without hardware). |
-| `OCTACAM_CACHE_DIR` | Override the recording cache location (default `~/.cache/octacam`). |
+| `OCTACAM_CACHE_DIR` | Override the octacam cache location (recording list, job logs, markers; default `~/.cache/octacam`). Inspect/clear it with `octacam cache`. |
 | `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one. |
+| `OCTACAM_BASLER_CREATE_TIMEOUT` | Seconds to wait for a Basler camera to answer during enumeration (default `15`). A camera that misses the deadline is skipped with an explanation and the rest of the rig still comes up; raise this only for a rig with a genuinely slow camera. |

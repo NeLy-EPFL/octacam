@@ -429,12 +429,20 @@ def read_model(cam) -> str | None:
     return str(model) if model else None
 
 
-def enumerate_pycameleon(requested_serials: list[str] | None = None):
+def enumerate_pycameleon(
+    requested_serials: list[str] | None = None, *, warn_missing: bool = True
+):
     """Return ``[(serial, PyCameleonCamera), ...]`` for the requested cameras.
 
     Mirrors :func:`octacam.cameras.basler.enumerate_basler`: with no requested
     serials, every detected camera is returned (sorted by serial); otherwise the
     listed serials are returned in order, warning about any not connected.
+
+    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
+    auto cascade offers the whole rig's serial list to every tier, so most of
+    those serials legitimately belong to another backend and must not be
+    reported missing here (``CameraSystem._enumerate`` warns once for a serial
+    that no tier claimed).
     """
     p = _pycameleon()
     cams = p.enumerate_cameras()
@@ -458,7 +466,8 @@ def enumerate_pycameleon(requested_serials: list[str] | None = None):
     for serial in final:
         cam = by_serial.get(serial)
         if cam is None:
-            log.warning("Camera with serial number %s not found", serial)
+            if warn_missing:
+                log.warning("Camera with serial number %s not found", serial)
             continue
         out.append((serial, cam))
     return out

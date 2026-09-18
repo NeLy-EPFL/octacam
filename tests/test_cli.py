@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,31 +148,75 @@ def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
 
 
 def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
-    # When the port is free but the cameras cannot be opened (e.g. another
-    # octacam holds them, since SDKs open USB3 devices exclusively), the GUI
-    # exits with a clean message rather than a raw SDK traceback.
+    # The GUI now serves the page before opening the cameras, so a camera-open
+    # failure (e.g. another octacam holds them — SDKs open USB3 devices
+    # exclusively) no longer exits the process. It is surfaced in the GUI: the
+    # background init calls controller.fail_init with a clean message (not a raw
+    # SDK traceback), the server stays up, and the browser shows the reason.
+    import octacam.cameras as cameras_mod
     from octacam.cameras import BackendError
+    from octacam.controller import RecordingSettings
+
+    real_cs = cameras_mod.CameraSystem
+
+    class BusyCameraSystem:
+        @classmethod
+        def pending(cls, backend="auto"):
+            # The sync path still builds a real hardware-free placeholder to
+            # serve against; only opening the real cameras fails.
+            return real_cs.pending(backend)
+
+        def __init__(self, *_a, **_k):
+            raise BackendError("The device is controlled by another application.")
+
+    monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
 
     config = SimpleNamespace(
-        cameras=[SimpleNamespace(serial_number="0815-0000")], backend="fake"
+        cameras=[SimpleNamespace(serial_number="0815-0000", name="cam0")],
+        backend="fake",
+        record=None,
+        transcode=None,
+        transfer=None,
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
+    monkeypatch.setattr(
+        "octacam.cli._settings_from_record",
+        lambda *a, **k: RecordingSettings(save_dir=str(tmp_path / "rec")),
+    )
 
-    def _busy(*_args, **_kwargs):
-        raise BackendError("The device is controlled by another application.")
+    captured = {}
 
-    monkeypatch.setattr("octacam.cameras.CameraSystem", _busy)
-    # --port 0 binds an ephemeral port for the availability probe, so the run
-    # reaches the camera-open step regardless of what else is listening.
+    def fake_run(app_obj, **_kwargs):
+        # Stand in for uvicorn.run: capture the controller, wait for the
+        # background init to finish (fail), then "shut down" by returning.
+        ctrl = app_obj.state.app_state.controller
+        captured["controller"] = ctrl
+        for _ in range(500):
+            if ctrl.ready or ctrl.init_error:
+                break
+            time.sleep(0.01)
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+
+    # --port 0 binds an ephemeral port for the availability probe.
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
-    assert result.exit_code != 0
-    assert "in use by another octacam" in result.output
+    assert result.exit_code == 0, result.output  # served + shut down cleanly
+    ctrl = captured["controller"]
+    assert ctrl.ready is False
+    assert "in use by another octacam" in (ctrl.init_error or "")
 
 
 def _fake_camera_system(cam):
     class FakeSystem:
         def __init__(self, *_a, **_k):
             self._cams = [cam]
+
+        @classmethod
+        def pending(cls, *_a, **_k):
+            # The GUI builds a hardware-free placeholder to serve against before
+            # opening the real cameras; the fake returns itself so len()/iter work.
+            return cls()
 
         def __len__(self):
             return len(self._cams)
@@ -194,10 +239,23 @@ def _fake_camera_system(cam):
 _FACADE_CALLS: list[str] = []
 
 
+class _FakePlugins:
+    plugins: list = []
+
+    def setup_all(self):
+        _FACADE_CALLS.append("setup_all")
+
+    def teardown_all(self):
+        _FACADE_CALLS.append("teardown_all")
+
+    def status(self):
+        return {}
+
+
 def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
-    # start_preview() arms the trigger board/lights over serial; if it or
-    # create_app() then raises, the finally must still run controller.close()
-    # and plugins.teardown_all() — otherwise the Arduino is left strobing.
+    # create_app() runs inside the try (before any hardware is armed); if it
+    # raises, the finally must still run controller.close() and
+    # plugins.teardown_all() so nothing is left half-initialized.
     import octacam.cli as cli_mod
 
     _FACADE_CALLS.clear()
@@ -207,24 +265,11 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
-
-    class FakePlugins:
-        plugins: list = []
-
-        def setup_all(self):
-            _FACADE_CALLS.append("setup_all")
-
-        def teardown_all(self):
-            _FACADE_CALLS.append("teardown_all")
-
-    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
 
     class FakeController:
         def __init__(self, *a, **k):
             pass
-
-        def start_preview(self):
-            _FACADE_CALLS.append("start_preview")
 
         def close(self):
             _FACADE_CALLS.append("controller.close")
@@ -240,8 +285,8 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
     assert result.exit_code != 0  # the RuntimeError propagates after cleanup
-    # The arm ran, then teardown ran despite the failure.
-    assert "start_preview" in _FACADE_CALLS
+    # Teardown ran despite the failure — the background init thread never started
+    # (create_app raised first), so nothing was armed to leak.
     assert "controller.close" in _FACADE_CALLS
     assert "teardown_all" in _FACADE_CALLS
 
@@ -444,7 +489,7 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
             cli._warn_if_transcoding()
     finally:
         logger.removeHandler(handler)
-    assert any("transcod" in m and "CPU-heavy" in m for m in handler.messages)
+    assert any("transcod" in m and "auto-pause" in m for m in handler.messages)
 
 
 def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):
@@ -614,6 +659,67 @@ def test_camera_lines_groups_by_model_and_handles_unknown():
         [("s1", "M1"), ("s2", "M1"), ("s3", "M2"), ("s4", None), ("s5", None)]
     ) == ["M1: s1, s2", "M2: s3", "s4", "s5"]
     assert _camera_lines([]) == []
+
+
+def test_usb_camera_links_reads_speeds_and_filters_non_cameras(tmp_path):
+    # The sysfs link-speed reader: camera-vendor devices (Basler 2676, FLIR 1e10)
+    # and any detected serial are reported with their negotiated speed; non-camera
+    # devices and entries without a serial node are ignored.
+    from octacam.cli import _usb_camera_links
+
+    def mkdev(name, **fields):
+        d = tmp_path / name
+        d.mkdir()
+        for k, v in fields.items():
+            (d / k).write_text(v)
+
+    mkdev("basler-bad", serial="40018619", idVendor="2676",
+          product="acA1920-150um", speed="480")
+    mkdev("basler-ok", serial="40018631", idVendor="2676",
+          product="acA1920-150um", speed="5000")
+    mkdev("flir-bad", serial="010AA673", idVendor="1e10",
+          product="Grasshopper3", speed="480")
+    mkdev("generic-detected", serial="GEN1", idVendor="ffff",
+          product="Cam", speed="480")  # unknown vendor, but octacam detected it
+    mkdev("keyboard", serial="KB1", idVendor="046d", speed="12")  # non-camera vendor
+    mkdev("hub", idVendor="1d6b", speed="480")  # no serial node -> skipped
+
+    got = {s: (p, spd) for s, p, spd in _usb_camera_links({"GEN1"}, root=tmp_path)}
+    assert got["40018619"] == ("acA1920-150um", 480)
+    assert got["40018631"] == ("acA1920-150um", 5000)
+    assert got["010AA673"][1] == 480  # FLIR matched by vendor id
+    assert got["GEN1"][1] == 480  # unknown vendor but detected serial
+    assert "KB1" not in got  # non-camera vendor, not detected
+    slow = {s for s, (_p, spd) in got.items() if spd < 5000}
+    assert slow == {"40018619", "010AA673", "GEN1"}
+
+
+def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
+    # doctor never opens a camera, so a USB3 camera that fell back to USB 2.0 must
+    # be surfaced from its sysfs link speed — the gap the user hit (the GUI warned,
+    # doctor was silent). The warning names the camera, the speed, and the fix.
+    from octacam import cli
+    from octacam.cli import _doctor_backends, _Report
+
+    monkeypatch.setattr(
+        cli, "_usb_camera_links",
+        lambda _detected: [("40018619", "acA1920-150um", 480)],
+    )
+
+    class _FakeScan:
+        def get(self, _name):
+            return []
+
+        def cascade(self):
+            return []
+
+    report = _Report()
+    _doctor_backends(report, only_backend="fake", scan=_FakeScan())
+    warns = [t for _title, items in report.sections for s, t in items if s == "warn"]
+    assert any(
+        "40018619" in w and "480 Mb/s" in w and "USB 2.0" in w and "cable" in w
+        for w in warns
+    ), warns
 
 
 def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
@@ -807,12 +913,22 @@ def test_build_config_doc_includes_plugins():
 # --- process: idempotent re-runs (skip existing outputs) --------------------
 
 
-def _make_recording(folder, *, with_outputs, extra_toml=""):
+# Grids are opt-in, so a recording whose grid path should run needs this in its
+# embedded config snapshot; `visualization=False` gives the bare default rig.
+_VIZ_TOML = '''[[visualization]]
+name = "grid.mp4"
+layout = [["camera_LF", ""]]
+'''
+
+
+def _make_recording(folder, *, with_outputs, extra_toml="", visualization=True):
     """A recording folder with one camera's source .mkv and its summary.
 
     When *with_outputs*, also drop a finished ``camera_LF.mp4`` and ``grid.mp4``
     so ``octacam process``'s skip-on-exists path is exercised. *extra_toml*, if
-    given, is written as the embedded ``octacam_config.toml`` snapshot.
+    given, is written as the embedded ``octacam_config.toml`` snapshot; unless
+    *visualization* is off, a ``[[visualization]]`` entry is appended to it so the
+    grid step has something to build.
     """
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
@@ -836,8 +952,9 @@ def _make_recording(folder, *, with_outputs, extra_toml=""):
             }
         )
     )
-    if extra_toml:
-        (folder / "octacam_config.toml").write_text(extra_toml)
+    toml = extra_toml + (_VIZ_TOML if visualization else "")
+    if toml:
+        (folder / "octacam_config.toml").write_text(toml)
     if with_outputs:
         (folder / "camera_LF.mp4").write_bytes(b"finished-transcode")
         (folder / "grid.mp4").write_bytes(b"finished-grid")
@@ -873,6 +990,66 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
     assert (folder / "grid.mp4").read_bytes() == before_grid
 
 
+def _age(path, seconds):
+    """Backdate a file by *seconds* (the outputs of an earlier take)."""
+    stamp = path.stat().st_mtime - seconds
+    os.utime(path, (stamp, stamp))
+
+
+def test_process_redoes_outputs_left_over_from_an_earlier_take(
+    tmp_path, monkeypatch, process_log
+):
+    # Recording into a folder again (confirming the overwrite) replaces only the
+    # files the new take writes, so the previous take's mp4/grid stay behind.
+    # They must not pass as this recording's finished outputs — that is how a
+    # video from a different take ended up transferred as if it were this one's.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    _age(folder / "camera_LF.mp4", 10)  # older than the new take's source...
+    _age(folder / "grid.mp4", 20)  # ...and the grid older still
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"transcode": 1, "grid": 1}
+    assert any("left over from an earlier recording" in m for m in process_log)
+    assert any("older than the videos it composites" in m for m in process_log)
+
+
+def test_process_dry_run_lists_leftover_outputs_as_work(
+    tmp_path, monkeypatch, process_log
+):
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    _age(folder / "camera_LF.mp4", 10)
+    _age(folder / "grid.mp4", 20)
+    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    # The leftovers are work to redo, not work already done — and the grid is
+    # listed as waiting for the video that will be re-transcoded.
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+    assert any("waits for: camera_LF.mp4" in m for m in process_log)
+
+
 def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
@@ -896,6 +1073,41 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     # --force re-runs both steps even though the outputs already existed.
     assert calls == {"transcode": 1, "grid": 1}
+
+
+def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypatch):
+    # Grids are opt-in: a rig whose config has no [[visualization]] entry gets
+    # no composite at all (octacam used to derive one from the camera names and
+    # spend minutes of ffmpeg on a video the rig never asked for). The transcode
+    # step still runs.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False, visualization=False)
+
+    calls = {"transcode": 0, "grid": 0}
+
+    def fake_transcode(input_path, output, **kwargs):
+        calls["transcode"] += 1
+        Path(output).write_bytes(b"encoded")
+        return output
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        calls["grid"] += 1
+        return output
+
+    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
+    assert result.exit_code == 0, result.output
+    assert calls == {"transcode": 1, "grid": 0}
+    assert not (folder / "grid.mp4").exists()
+
+    # ...and --force doesn't conjure one either: there is nothing configured to
+    # rebuild.
+    result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--force"])
+    assert result.exit_code == 0, result.output
+    assert calls["grid"] == 0
 
 
 def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
@@ -926,6 +1138,155 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     dest = dest_root / folder.name
     assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
     assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
+
+
+# --- process --dry-run: a plan, never a partial run --------------------------
+
+
+@pytest.fixture
+def process_log(monkeypatch):
+    """The plain messages the octacam logger emits during a CLI invocation.
+
+    The CLI callback swaps the logger's handlers for a rich one that wraps lines
+    to the terminal width, so a plain list handler stands in for it."""
+    handler = _MsgHandler()
+    logger = logging.getLogger("octacam")
+
+    def setup_logging(level):
+        logger.handlers.clear()
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+
+    monkeypatch.setattr("octacam.cli._setup_logging", setup_logging)
+    yield handler.messages
+    logger.removeHandler(handler)
+
+
+def _forbid(monkeypatch, *targets):
+    """Make each dotted target raise if a dry run reaches it."""
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a dry run must not do real work")
+
+    for target in targets:
+        monkeypatch.setattr(target, boom)
+
+
+def _transfer_toml(dest_root):
+    return f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+
+
+def test_process_dry_run_plans_every_step_without_running_any(
+    tmp_path, monkeypatch, process_log
+):
+    # Nothing is encoded, composited, copied or deleted, yet every step lists
+    # what a real run would do, including the grid and the transfer of outputs
+    # the transcode step has only planned.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False, extra_toml=_transfer_toml(dest_root))
+    _forbid(
+        monkeypatch,
+        "octacam.writer.transcode_file",
+        # Its input isn't transcoded yet, so there is nothing to probe.
+        "octacam.grid.build_grid_video",
+        "octacam.cli._delete_source_files",
+    )
+    before = sorted(p.name for p in folder.iterdir())
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run", "-d"])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in folder.iterdir()) == before
+    assert not dest_root.exists()
+    source = folder / "camera_LF.mkv"
+    dest = dest_root / folder.name
+    assert f"[dry-run] transcode: {source} → camera_LF.mp4" in process_log
+    assert f"[dry-run] would delete source: {source}" in process_log
+    assert any(
+        m.startswith(f"[dry-run] grid: {folder / 'grid.mp4'}") for m in process_log
+    )
+    for name in ("camera_LF.mp4", "grid.mp4"):
+        assert f"[dry-run] transfer: {folder / name} → {dest / name}" in process_log
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+
+
+def test_process_dry_run_previews_a_grid_whose_inputs_exist(
+    tmp_path, monkeypatch, process_log
+):
+    # With its inputs on disk the grid's exact ffmpeg call can be previewed, so
+    # the dry run hands the grid to the builder, in dry-run mode.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True)
+    (folder / "grid.mp4").unlink()
+    _forbid(monkeypatch, "octacam.writer.transcode_file")
+    dry_runs = []
+
+    def fake_grid(folder, layout=None, output=None, **kwargs):
+        dry_runs.append(kwargs.get("dry_run"))
+        return output
+
+    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run", "--no-transfer"])
+
+    assert result.exit_code == 0, result.output
+    assert dry_runs == [True]
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+
+
+def test_process_dry_run_never_waits_on_a_live_capture(
+    tmp_path, monkeypatch, process_log
+):
+    # The plan is often wanted mid-session. A dry run does no heavy work, so it
+    # must not park behind a live capture the way a real run does, nor tell a
+    # gui launch that a transcode is competing for the CPU.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    folder = tmp_path / "rec"
+    _make_recording(
+        folder, with_outputs=False, extra_toml=_transfer_toml(tmp_path / "dest")
+    )
+    _forbid(
+        monkeypatch,
+        "octacam.cli._pause_gate",
+        "octacam.session_cache.mark_transcode_active",
+        "octacam.writer.transcode_file",
+        "octacam.grid.build_grid_video",
+    )
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+
+
+def test_process_dry_run_lists_no_work_for_a_finished_recording(
+    tmp_path, monkeypatch, process_log
+):
+    # `process --all --dry-run` doubles as "what is left to process?", so a
+    # recording that is fully processed lists no work, only the counts.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
+    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+    finish = runner.invoke(app, ["process", str(folder)])
+    assert finish.exit_code == 0, finish.output
+    process_log.clear()
+
+    result = runner.invoke(app, ["process", str(folder), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    steps = ("transcode:", "would delete", "grid:", "transfer:")
+    assert not [m for m in process_log if m.startswith(tuple(f"[dry-run] {s}" for s in steps))]
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
+    assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log
+    # The mp4, the grid, the summary and the config snapshot.
+    assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log
 
 
 # --- config: the interactive first-run wizard -------------------------------

@@ -92,6 +92,24 @@ def test_shutdown_refused_while_recording(shutdown_client):
     shutdown_client.controller.stop_recording(abort=True)
 
 
+def test_shutdown_process_after_flag(shutdown_client):
+    state = shutdown_client.app.state.app_state
+    # Explicit true is recorded so cli.gui starts detached processing on exit.
+    assert shutdown_client.post("/api/shutdown", json={"process_after": True}).status_code == 202
+    assert state.process_after is True
+    # An empty body (older clients / plain shutdown) leaves it false.
+    shutdown_client.post("/api/shutdown")
+    assert state.process_after is False
+    # Explicit false, too.
+    shutdown_client.post("/api/shutdown", json={"process_after": False})
+    assert state.process_after is False
+
+
+def test_state_snapshot_has_recordings_made(client):
+    body = client.get("/api/state").json()
+    assert body.get("recordings_made") == 0
+
+
 def test_static_assets_served_no_cache(client):
     # The GUI's static assets are unversioned, so they are served with
     # Cache-Control: no-cache and the browser revalidates on every reload —
@@ -108,6 +126,77 @@ def test_static_assets_served_no_cache(client):
     assert etag, "static assets should carry an ETag for revalidation"
     revalidated = client.get("/style.css", headers={"If-None-Match": etag})
     assert revalidated.status_code == 304
+
+
+def test_system_and_state_report_ready(client):
+    # A normally-constructed controller is ready; /api/system and /api/state both
+    # say so, and the WS handshake sends the current `system` descriptor.
+    system = client.get("/api/system").json()
+    assert system["ready"] is True and system["init_error"] is None
+    assert client.get("/api/state").json()["ready"] is True
+    with client.websocket_connect("/api/ws") as ws:
+        sys_msg = None
+        for _ in range(60):
+            message = ws.receive()
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                if payload["type"] == "system":
+                    sys_msg = payload
+                    break
+        assert sys_msg is not None
+        assert sys_msg["ready"] is True
+        assert len(sys_msg["cameras"]) == 2
+
+
+def test_deferred_startup_serves_then_fills_in(tmp_path):
+    # The GUI serves against a hardware-free placeholder: /api/system reports
+    # ready=False + no cameras, and a browser connecting during init gets the
+    # not-ready descriptor over the socket, then a ready one once the real system
+    # is attached and broadcast — filling the grid without a reload.
+    pending = CameraSystem.pending()
+    assert len(pending) == 0
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    controller = RecordingController(pending, settings, ready=False)
+    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    try:
+        with TestClient(app) as client:
+            sys0 = client.get("/api/system").json()
+            assert sys0["ready"] is False and sys0["cameras"] == []
+            assert client.get("/api/state").json()["ready"] is False
+
+            with client.websocket_connect("/api/ws") as ws:
+
+                def next_system():
+                    for _ in range(120):
+                        message = ws.receive()
+                        if message.get("text"):
+                            payload = json.loads(message["text"])
+                            if payload["type"] == "system":
+                                return payload
+                    return None
+
+                first = next_system()
+                assert first is not None and first["ready"] is False
+
+                # Attach the real (emulated) system as the init thread does, then
+                # broadcast; the connected client receives a ready `system`.
+                real = CameraSystem(EMULATED_SERIALS)
+                real.load_config(tmp_path)
+                controller.attach_system(real)
+                app.state.app_state.broadcast_system()
+
+                ready_msg = None
+                for _ in range(5):
+                    msg = next_system()
+                    if msg and msg["ready"]:
+                        ready_msg = msg
+                        break
+                assert ready_msg is not None
+                assert len(ready_msg["cameras"]) == 2
+
+            assert client.get("/api/system").json()["ready"] is True
+    finally:
+        controller.close()  # closes the attached real system (once)
 
 
 def test_system_and_settings_endpoints(client):
@@ -1453,3 +1542,82 @@ def test_system_surfaces_injected_update_notice(client):
     assert data["update"]["available"] is True
     assert data["update"]["latest"] == "0.9.0"
     assert data["update"]["command"] == "uv tool upgrade octacam"
+
+
+def test_encode_camera_is_pure_and_shares_one_header_per_camera():
+    """_encode_camera takes everything it needs by value.
+
+    It runs on an executor thread (one call per camera per tick), so it must
+    touch no shared state and no camera object — that is what lets the cameras
+    encode concurrently while cv2 has the GIL released.
+    """
+    from octacam.web.app import FRAME_VERSION, _AppState
+
+    frame = (np.random.rand(64, 64) * 255).astype(np.uint8)
+    groups = {
+        ((0, 0, 64, 64), 1): ["client-a"],
+        ((0, 0, 32, 32), 1): ["client-b"],  # a distinct crop -> its own encode
+    }
+    job = (1, frame, groups, 7, 123456789, 42.5, 3)
+    messages = _AppState._encode_camera(job, 1)
+
+    assert len(messages) == 2  # one encode per distinct variant
+    for camera_index, message, group in messages:
+        assert camera_index == 1
+        fields = FRAME_HEADER.unpack(message[: FRAME_HEADER.size])
+        version, kind, cam, flags, count, ts, fps, dropped = fields[:8]
+        assert (version, kind, cam, flags) == (FRAME_VERSION, 1, 1, 1)
+        # The per-camera telemetry is shared verbatim across that camera's
+        # variants — computed once on the event loop, not re-read per variant.
+        assert (count, ts, dropped) == (7, 123456789, 3)
+        assert abs(fps - 42.5) < 1e-3
+        assert group and group[0] in ("client-a", "client-b")
+    # The two variants carry different crop rects (never cross-merged).
+    rects = {FRAME_HEADER.unpack(m[: FRAME_HEADER.size])[8:12] for _, m, _ in messages}
+    assert rects == {(0, 0, 64, 64), (0, 0, 32, 32)}
+
+
+def test_preview_tick_encodes_cameras_concurrently(client):
+    """One executor task per camera, not one task encoding them in sequence.
+
+    cv2.imencode releases the GIL, so per-camera dispatch makes a tick cost the
+    slowest single camera instead of the sum. Re-serializing this (a single
+    run_in_executor over all cameras) silently reintroduces a cost that grows
+    linearly with the rig size — at 2048x2048 it overruns the 33 ms tick outright.
+    The encodes here are padded with a sleep so the overlap is observable:
+    serialized, peak concurrency can never exceed 1.
+    """
+    import threading
+
+    from octacam.web.app import _AppState
+
+    live = 0
+    peak = 0
+    seen_cameras = set()
+    lock = threading.Lock()
+    real = _AppState._encode_camera
+
+    def instrumented(job, flags):
+        nonlocal live, peak
+        with lock:
+            live += 1
+            peak = max(peak, live)
+            seen_cameras.add(job[0])
+        try:
+            time.sleep(0.03)  # wide enough for a concurrent partner to overlap
+            return real(job, flags)
+        finally:
+            with lock:
+                live -= 1
+
+    _AppState._encode_camera = staticmethod(instrumented)
+    try:
+        with client.websocket_connect("/api/ws") as ws:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and (peak < 2 or len(seen_cameras) < 2):
+                ws.receive()
+    finally:
+        _AppState._encode_camera = staticmethod(real)
+
+    assert seen_cameras == {0, 1}, seen_cameras
+    assert peak == 2, f"cameras were encoded serially (peak concurrency {peak})"

@@ -7,8 +7,13 @@ feature-stream files.
 """
 
 import logging
+import math
+import os
 import re
+import time
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 
 from pypylon import genicam, pylon
 
@@ -625,12 +630,135 @@ class BaslerBackend(SoftwareTriggerHandoff):
             result.Release()
 
 
-def enumerate_basler(requested_serials: list[str] | None = None):
+def _describe_open_failure(serial: str, exc: Exception) -> str:
+    """An actionable, operator-facing reason a Basler camera cannot be opened.
+
+    The frequent gotcha is a USB3 camera whose SuperSpeed link fails to train and
+    falls back to USB 2.0: it is physically in a USB 3 port, yet pylon refuses it
+    with "The device cannot be operated on an USB 2.0 port." That wording reads
+    like a wrong-port mistake when the real cause is the cable/connector/port
+    link, so translate it into something the operator can act on. Any other
+    open error is passed through verbatim.
+    """
+    text = str(exc)
+    if "USB 2.0" in text or "USB 3.0 compatible port" in text:
+        return (
+            f"Camera {serial} came up on a USB 2.0 link and cannot be opened. A "
+            "USB3 camera whose SuperSpeed link fails to train drops back to USB "
+            "2.0 even in a USB 3 port, so the cause is the cable or connector, "
+            "not the port choice. Reseat both ends of its cable (or swap in a "
+            "known-good USB3 cable), or move it to another USB 3 port, then "
+            "reload. `lsusb -t` shows each camera's link speed — a healthy one "
+            "reads 5000M, this one 480M. Skipping this camera for now."
+        )
+    if "first register" in text or "maximum device response time" in text:
+        return (
+            f"Camera {serial} enumerated but never answered its first register "
+            "read, so pylon could not download its XML description. The link "
+            "trained (it may well report a healthy 5000M) but the camera is not "
+            "answering USB control transfers — almost always a marginal cable or "
+            "connector. Check `dmesg` for a matching `can't set config` line, "
+            "then reseat both ends of its cable or move it to another USB 3 "
+            "port. Skipping this camera for now."
+        )
+    return f"Camera {serial} could not be opened and will be skipped: {text}"
+
+
+# `TlFactory.CreateDevice` downloads the camera's XML over USB, so it is a real
+# device access that a sick camera can stall for *minutes*: a camera whose link
+# trains at full SuperSpeed but whose control transfers time out held one test
+# rig's startup for 271 s inside a single call while pylon retried the first
+# register read (a healthy camera returns in ~0.16 s). pylon exposes no timeout
+# for this — its ReadTimeout/WriteTimeout are GigE-only — so bound it here.
+_CREATE_DEVICE_TIMEOUT_S = 15.0
+# How long to wait before telling the operator which cameras we are still
+# waiting on; also the poll slice of the deadline loop below.
+_CREATE_PROGRESS_INTERVAL_S = 3.0
+
+
+def _create_device_timeout() -> float:
+    """The per-camera ``CreateDevice`` deadline, in seconds.
+
+    ``OCTACAM_BASLER_CREATE_TIMEOUT`` raises (or lowers) it for a rig with a
+    genuinely slow camera. A value that is not a finite positive number is
+    ignored so a typo cannot silently disable the guard — note that ``float()``
+    happily accepts ``inf`` and ``nan``, and neither is caught by a ``<= 0``
+    test: ``inf`` would restore the unbounded stall this exists to prevent, and
+    ``nan`` compares False against everything, which would turn the deadline loop
+    into a spin that never exits.
+    """
+    raw = os.environ.get("OCTACAM_BASLER_CREATE_TIMEOUT", "").strip()
+    if not raw:
+        return _CREATE_DEVICE_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        log.warning(
+            "Ignoring OCTACAM_BASLER_CREATE_TIMEOUT=%r (need a finite number of "
+            "seconds greater than 0); using %gs",
+            raw,
+            _CREATE_DEVICE_TIMEOUT_S,
+        )
+        return _CREATE_DEVICE_TIMEOUT_S
+    return value
+
+
+def _release_late_device(tl_factory, serial: str) -> Callable[["Future"], None]:
+    """A done-callback that destroys a handle which arrived after the deadline.
+
+    We abandoned the camera and reported it as unusable, but the worker thread is
+    still inside pylon and will eventually return a real device. Nothing owns it
+    at that point, and a pylon device left for the garbage collector to destroy
+    after ``PylonTerminate()`` runs from pypylon's ``Py_AtExit`` hook touches
+    freed runtime state and segfaults (see :meth:`BaslerBackend.close`) — so
+    release it here rather than leaking it for the life of the process.
+    """
+
+    def _callback(future: "Future") -> None:
+        try:
+            device = future.result()
+        except Exception:
+            return  # it failed on its own; there is no handle to release
+        try:
+            tl_factory.DestroyDevice(device)
+        except Exception as e:  # best effort — we are already past the deadline
+            log.debug("Could not release late handle for camera %s: %s", serial, e)
+        else:
+            log.info(
+                "Camera %s responded after it had already been skipped; "
+                "released its handle.",
+                serial,
+            )
+
+    return _callback
+
+
+def enumerate_basler(
+    requested_serials: list[str] | None = None, *, warn_missing: bool = True
+):
     """Return ``[(serial, device_handle), ...]`` for the requested cameras.
 
     With no requested serials, every detected camera is returned (sorted by
-    serial); otherwise the listed serials are returned in order, warning about
-    any that are not connected. Mirrors the original CameraSystem enumeration.
+    serial); otherwise the listed serials are returned in order. A camera that is
+    present but cannot be brought up (a USB3 link that trained down to USB 2.0,
+    or one that never answers its first register read) is reported with a
+    ``None`` handle and a loud, actionable message rather than aborting the whole
+    rig. ``CameraSystem._enumerate`` reads that ``None`` as "present but
+    unusable": it claims the serial (so the auto cascade's lower tiers don't
+    pointlessly retry the same broken device) but never opens it.
+
+    ``warn_missing=False`` suppresses the per-serial "not found" warning. The
+    auto cascade passes the *whole* rig's serial list to every tier, so most of
+    them legitimately belong to another backend and must not be reported missing
+    here; :meth:`CameraSystem._enumerate` warns once for a serial no tier
+    claimed.
+
+    The ``CreateDevice`` calls run concurrently under a shared deadline
+    (:func:`_create_device_timeout`), so one unresponsive camera costs that
+    deadline once instead of stalling the whole rig for as long as pylon cares to
+    retry.
     """
     tl_factory = pylon.TlFactory.GetInstance()
     devices = tl_factory.EnumerateDevices()
@@ -644,12 +772,114 @@ def enumerate_basler(requested_serials: list[str] | None = None):
     detected = [str(device.GetSerialNumber()) for device in devices]
     final = sorted(detected) if not requested_serials else list(requested_serials)
 
-    out = []
+    wanted: list[tuple[str, object]] = []
+    seen: set[str] = set()
     for serial in final:
+        if serial in seen:
+            # A serial listed twice in the rig config would otherwise submit two
+            # CreateDevice calls for the same device and create two real handles,
+            # of which only one can be returned (results is keyed by serial) —
+            # orphaning the other with no DestroyDevice.
+            continue
         try:
             index = detected.index(serial)
         except ValueError:
-            log.warning("Camera with serial number %s not found", serial)
+            if warn_missing:
+                log.warning("Camera with serial number %s not found", serial)
             continue
-        out.append((serial, tl_factory.CreateDevice(devices[index])))
-    return out
+        seen.add(serial)
+        wanted.append((serial, devices[index]))
+    if not wanted:
+        return []
+
+    timeout = _create_device_timeout()
+    # NOT a `with` block: ThreadPoolExecutor.__exit__ is shutdown(wait=True),
+    # which would re-block for pylon's full retry and silently undo the deadline
+    # below. shutdown(wait=False) only stops new submissions. The workers are
+    # deliberately non-daemon — an abandoned one is still inside pylon, and
+    # letting the interpreter finalize under a live native call is exactly the
+    # teardown segfault BaslerBackend.close() documents.
+    pool = ThreadPoolExecutor(
+        max_workers=len(wanted), thread_name_prefix="pylon-create"
+    )
+    fut_to_serial: dict[Future, str] = {}
+    for serial, device in wanted:
+        fut_to_serial[pool.submit(tl_factory.CreateDevice, device)] = serial
+    pool.shutdown(wait=False)
+
+    results: dict[str, object | None] = {}
+    pending = set(fut_to_serial)
+    started = time.monotonic()
+    deadline = started + timeout
+    announced = False
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        done, pending = futures_wait(
+            pending,
+            timeout=min(remaining, _CREATE_PROGRESS_INTERVAL_S),
+            return_when=FIRST_COMPLETED,
+        )
+        for future in done:
+            serial = fut_to_serial[future]
+            try:
+                results[serial] = future.result()
+            except genicam.GenericException as e:
+                # CreateDevice downloads the camera's XML over USB, so a device
+                # that enumerated but can't be operated throws here. One bad
+                # camera must not crash the enumeration of the whole rig.
+                log.error("%s", _describe_open_failure(serial, e))
+                results[serial] = None
+        if (
+            pending
+            and not announced
+            and time.monotonic() - started >= _CREATE_PROGRESS_INTERVAL_S
+        ):
+            # The stall used to be completely silent — the operator saw nothing
+            # between "Found N camera(s) in octacam config file" and the grid
+            # appearing minutes later. Name the cameras we are still waiting on.
+            # Time-gated: a healthy rig finishes well inside the interval and must
+            # stay quiet, or every normal startup cries wolf.
+            announced = True
+            log.info(
+                "Waiting up to %gs for %d Basler camera(s) to respond: %s",
+                timeout,
+                len(pending),
+                ", ".join(sorted(fut_to_serial[f] for f in pending)),
+            )
+
+    for future in pending:
+        serial = fut_to_serial[future]
+        if future.done():
+            # It landed between the last wait and the deadline check; it is a
+            # real handle, not a straggler, so take it rather than destroying it.
+            try:
+                results[serial] = future.result()
+            except genicam.GenericException as e:
+                log.error("%s", _describe_open_failure(serial, e))
+                results[serial] = None
+            continue
+        # Unlike _describe_open_failure there is no exception to inspect here —
+        # this fires purely because a wall-clock deadline elapsed — so suggest
+        # causes rather than asserting one.
+        log.error(
+            "Camera %s did not respond within %gs and will be skipped. It "
+            "enumerated, so its link trained (it may even report a healthy "
+            "5000M), but pylon got no answer from it. Most often that is a "
+            "marginal USB cable or connector — check `dmesg` for a matching "
+            "`can't set config` line, then reseat both ends of its cable or move "
+            "it to another USB 3 port. It can also mean another process already "
+            "holds the camera. Set OCTACAM_BASLER_CREATE_TIMEOUT to allow longer "
+            "than %gs. Note that octacam cannot cancel the call it gave up on, so "
+            "shutting down may pause until that camera finally answers.",
+            serial,
+            timeout,
+            timeout,
+        )
+        # Report it with the "present but unusable" None sentinel, and release
+        # the handle if pylon eventually hands one over (see _release_late_device).
+        future.add_done_callback(_release_late_device(tl_factory, serial))
+        results[serial] = None
+
+    return [(serial, results.get(serial)) for serial, _device in wanted]

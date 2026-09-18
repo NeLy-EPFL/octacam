@@ -1,6 +1,6 @@
 # {octacam GenApi persistence}
 # GenApi persistence file (version 3.0.0)
-# Device = Grasshopper3 GS3-U3-41C6NIR (17475187)
+# Device = (17475187)
 # --- AnalogControl ---
 GainAuto	Off
 Gain	0
@@ -20,12 +20,12 @@ TriggerMode	On
 TriggerSource	Line0
 TriggerActivation	RisingEdge
 TriggerDelayEnabled	false
-TriggerDelay	199.854
+TriggerDelay	0
 ExposureMode	Timed
 ExposureAuto	Off
 ExposureTime	1998.01
 AutoExposureTimeLowerLimit	16.0933
-AutoExposureTimeUpperLimit	33257.8
+AutoExposureTimeUpperLimit	43978.5
 pgrExposureCompensationAuto	Off
 pgrExposureCompensation	-0.0614014
 pgrAutoExposureCompensationLowerLimit	0.415039

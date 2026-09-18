@@ -10,6 +10,7 @@ import { BenchmarkTab } from "./diagnose.js";
 import { initSidebarResize } from "./resize.js";
 import { initTheme, applyConfigTheme } from "./theme.js";
 import { SaveDialog } from "./save.js";
+import { ShutdownDialog } from "./shutdown.js";
 import { DirPicker } from "./dirpicker.js";
 import { initShortcuts } from "./shortcuts.js";
 import { initUpdateBanner } from "./update.js";
@@ -210,10 +211,21 @@ async function main() {
   }
   reflowTabs(); // pack the (now-final) tab set into the bar + overflow menu
 
+  // Camera-dependent UI (the grid + View/Camera tabs + Save dialog) is built
+  // lazily by buildCameras() once the camera list is known — either now (the
+  // cameras were already open at load) or when the background init pushes a
+  // ready `system` message over the socket. Until then the grid shows a loading
+  // placeholder and camera controls are gated (see syncEnabled). `grid` is a
+  // `let` the closures below read by reference, so they pick up the real grid the
+  // moment buildCameras replaces it. systemReady/initError mirror the
+  // controller's init state from /api/system, the `system` push, and snapshots.
+  let grid = null;
   let cameraTab = null;
   let viewTab = null;
   let saveDialog = null;
   let dirPicker = null;
+  let systemReady = Boolean(system.ready);
+  let initError = system.init_error || null;
 
   // The grid reports (via onViewChange) whenever the resolution/pause state the
   // server should honor changes — a tile resized, maximized, or zoomed. Coalesce
@@ -223,6 +235,7 @@ async function main() {
   let lastViewJson = "";
   function sendViewNow() {
     viewRaf = 0;
+    if (!grid) return; // no grid yet -> nothing to describe
     const cameras = grid.getViewSpec();
     const json = JSON.stringify(cameras);
     if (json === lastViewJson) return;
@@ -235,20 +248,6 @@ async function main() {
   // monitors) with no element resize, so refresh the spec on window resize too.
   window.addEventListener("resize", scheduleViewSend);
 
-  const grid = new CameraGrid(document.getElementById("grid"), system.cameras, {
-    onSelect: (i) => {
-      cameraTab?.selectCamera(i);
-      viewTab?.selectCamera(i);
-    },
-    onRename: (i, name) => cameraTab?.renameCamera(i, name),
-    onViewChange: scheduleViewSend,
-  });
-  viewTab = new ViewTab({
-    cameras: system.cameras,
-    grid,
-    onSelect: (i) => grid.select(i),
-  });
-
   let record = null;
   const notify = (level, message) => {
     const evt = { time: Date.now() / 1000, level, message };
@@ -260,6 +259,7 @@ async function main() {
   let userDisconnected = false; // user clicked Disconnect — suppress reconnect
   let serverStopped = false; // server was shut down from the UI
   let recordingActive = false; // a trial is in progress on the rig
+  let recordingsMade = 0; // recordings finished this session (for shut-down-&-process)
   let peerCount = 1; // browsers connected to the server (control is shared)
 
   const sock = new ReconnectingSocket(wsUrl(), {
@@ -278,7 +278,7 @@ async function main() {
             ? "offline"
             : "reconnecting"
       ),
-    onFrame: (frame) => grid.handleFrame(frame),
+    onFrame: (frame) => grid?.handleFrame(frame),
     onJson: (msg) => handleJson(msg),
   });
 
@@ -306,6 +306,18 @@ async function main() {
   // Enable the "managed" trigger-source option only when a driving plugin is
   // loaded (e.g. the triggerbox); the server computes this from plugin capability.
   record.setManagedAvailable(!!system.managed_trigger_available);
+
+  // Disconnecting this browser (the rig keeps recording) is a rare, easy-to-
+  // misclick action, so — like the Record tab's own rarely-used knobs — it
+  // stays tucked behind the same Advanced-options switch.
+  {
+    const advancedToggle = document.getElementById("record-advanced-toggle");
+    const syncDisconnectVisibility = () => {
+      document.getElementById("disconnect-btn").hidden = !advancedToggle.checked;
+    };
+    syncDisconnectVisibility();
+    advancedToggle.addEventListener("change", syncDisconnectVisibility);
+  }
 
   // Each plugin that ships a UI advertises its entry module + optional CSS in
   // /api/system; import it from the plugin's own /plugins/<name>/ folder and
@@ -341,36 +353,54 @@ async function main() {
     }
   }
 
-  cameraTab = new CameraTab({
-    cameras: system.cameras,
-    notify,
-    onSelect: (i) => grid.select(i),
-    onRename: (i, name) => {
-      grid.setName(i, name);
-      viewTab?.applyName(i, name);
-    },
-  });
   const benchmark = new BenchmarkTab({ notify });
-  saveDialog = new SaveDialog({
-    grid,
-    notify,
-    getRecording: () => recordingActive,
-  });
   dirPicker = new DirPicker({
     notify,
     onPick: (path) => record.setRecordDir(path),
     getStart: () => record.getRecordDir(),
   });
 
-  // Establish an initial current camera so the grid highlight and both pickers
-  // agree from the start.
-  if (system.cameras.length) grid.select(0);
-
   // Global keyboard shortcuts (one document-level listener; see shortcuts.js).
-  // Wired here, after grid/record/cameraTab/benchmark/plugins exist, so its
-  // bindings reach real, built controls; it drives the same buttons/grid
-  // methods the mouse does, inheriting their gating.
-  initShortcuts({ grid });
+  // The preview/view shortcuts operate on the live grid, which is built lazily
+  // by buildCameras(); forward through this stable object so the bindings keep
+  // working after `grid` is (re)assigned — and no-op harmlessly before it
+  // exists. Non-grid shortcuts (record/theme/save/tabs) work from load. Each
+  // action still drives the same button/grid method the mouse does, inheriting
+  // its gating.
+  const gridShortcuts = {
+    selectPrev: () => grid?.selectPrev(),
+    selectNext: () => grid?.selectNext(),
+    toggleMaximizeSelected: () => grid?.toggleMaximizeSelected(),
+    zoomSelected: (f) => grid?.zoomSelected(f),
+    resetZoomSelected: () => grid?.resetZoomSelected(),
+    applyView: (v, target) => grid?.applyView(v, target),
+  };
+  initShortcuts({ grid: gridShortcuts });
+
+  // Enable camera-dependent controls only when the socket is up AND the rig has
+  // finished initializing (systemReady) — recording/preview/benchmark/save all
+  // need open cameras, so a live socket alone isn't enough during the background
+  // init. Plugin tabs gate on their own serial readiness, so they only track the
+  // socket. Called on every connection-mode change and whenever readiness flips.
+  function syncEnabled() {
+    const connected = connMode === "connected";
+    const camReady = connected && systemReady;
+    record.setConnected(camReady);
+    grid?.setConnected(camReady);
+    cameraTab?.setConnected(camReady);
+    benchmark.setConnected(camReady);
+    saveDialog?.setConnected(camReady);
+    dirPicker?.setConnected(connected);
+    // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
+    // gates its fields on the serial port being open and stops a jog on
+    // disconnect); just forward the connection state to each.
+    for (const tab of pluginTabs.values()) tab.setConnected?.(connected);
+    const viewFields = document.getElementById("view-fields");
+    if (viewFields) viewFields.disabled = !camReady;
+    // Presence is only meaningful while connected; the server resends the
+    // count on (re)connect, so just clear it when the socket is down.
+    if (!connected) updatePeers(1);
+  }
 
   // Connection has five modes: "connecting" (initial handshake / manual
   // reconnect, calm), "connected", "reconnecting" (unexpected drop),
@@ -410,35 +440,26 @@ async function main() {
           ? "connecting"
           : "offline";
 
-    record.setConnected(connected);
-    grid.setConnected(connected);
-    cameraTab?.setConnected(connected);
-    benchmark.setConnected(connected);
-    saveDialog?.setConnected(connected);
-    dirPicker?.setConnected(connected);
-    // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
-    // gates its fields on the serial port being open and stops a jog on
-    // disconnect); just forward the connection state to each.
-    for (const tab of pluginTabs.values()) tab.setConnected?.(connected);
-    const viewFields = document.getElementById("view-fields");
-    if (viewFields) viewFields.disabled = !connected;
-    // Presence is only meaningful while connected; the server resends the
-    // count on (re)connect, so just clear it when the socket is down.
-    if (!connected) updatePeers(1);
+    // Gate camera controls on both the socket and rig readiness (see above).
+    syncEnabled();
 
     const disconnectBtn = document.getElementById("disconnect-btn");
     disconnectBtn.textContent =
       mode === "offline"
-        ? "Connect"
+        ? "🔗" // Connect: re-establish the socket after a voluntary disconnect
         : mode === "stopped"
-          ? "Reconnect"
-          : "Disconnect";
+          ? "🔄" // Reconnect: the click actually reloads the page
+          : "🔌"; // Disconnect: unplug this browser only
     disconnectBtn.title =
       mode === "stopped"
         ? "Reload the page to reconnect to the server"
         : mode === "offline"
           ? "Reconnect this browser to the server"
           : "Disconnect this browser (the recording keeps running on the rig)";
+    disconnectBtn.setAttribute(
+      "aria-label",
+      mode === "offline" ? "Connect" : mode === "stopped" ? "Reconnect" : "Disconnect"
+    );
     // Stay clickable when stopped so recovery doesn't need the browser's own
     // reload control; the click handler reloads the page in that mode.
     disconnectBtn.disabled = false;
@@ -461,6 +482,7 @@ async function main() {
   }
 
   function applyCameraStats(cameras) {
+    if (!grid) return; // stats arrive before the grid is built during init
     const failed = [];
     cameras.forEach((c, i) => {
       const index = grid.indexBySerial.has(c.serial)
@@ -480,14 +502,30 @@ async function main() {
 
   function handleJson(msg) {
     switch (msg.type) {
+      case "system":
+        // Authoritative fill-in: the background init finished (or a browser
+        // connected) and sent the current camera list + plugin readiness.
+        applySystem(msg);
+        break;
       case "state":
       case "telemetry":
         recordingActive = ["waiting", "recording", "finishing"].includes(
           msg.state
         );
+        recordingsMade = msg.recordings_made ?? recordingsMade;
+        // A state/telemetry tick may report readiness before the `system` push
+        // arrives, or a late init failure; keep the gating + placeholder in sync.
+        if (typeof msg.ready === "boolean" && msg.ready !== systemReady) {
+          systemReady = msg.ready;
+          syncEnabled();
+        }
+        if ("init_error" in msg && (msg.init_error || null) !== initError) {
+          initError = msg.init_error || null;
+          if (!grid) showGridPlaceholder();
+        }
         record.applyState(msg);
         benchmark.applyState(msg);
-        grid.setRecording(recordingActive);
+        grid?.setRecording(recordingActive);
         cameraTab?.setRecording(recordingActive);
         if (Array.isArray(msg.cameras)) applyCameraStats(msg.cameras);
         break;
@@ -547,21 +585,19 @@ async function main() {
     }
   });
 
+  const shutdownDialog = new ShutdownDialog();
   document.getElementById("shutdown-btn").addEventListener("click", async () => {
-    const others = peerCount - 1;
-    const extra =
-      others > 0
-        ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
-        : "";
-    const ok = window.confirm(
-      "Shut down the octacam server on the rig? This releases all cameras " +
-        "and disconnects every client." +
-        extra
-    );
-    if (!ok) return;
+    const choice = await shutdownDialog.confirm({
+      recordingActive,
+      hasWork: recordingsMade > 0,
+      peerCount,
+    });
+    if (choice === "cancel") return;
     let r;
     try {
-      r = await api("POST", "/api/shutdown");
+      r = await api("POST", "/api/shutdown", {
+        process_after: choice === "process",
+      });
     } catch {
       notify("error", "Shutdown request failed: server unreachable");
       return;
@@ -587,6 +623,99 @@ async function main() {
       e.returnValue = "";
     }
   });
+
+  // Fill the grid area with a loading placeholder (spinner, or the init error)
+  // while the cameras are still opening on the server. Removed by buildCameras.
+  function showGridPlaceholder() {
+    if (grid) return; // the real grid already replaced it
+    const gridEl = document.getElementById("grid");
+    let ph = gridEl.querySelector(".grid-placeholder");
+    if (!ph) {
+      ph = document.createElement("div");
+      ph.className = "grid-placeholder";
+      gridEl.appendChild(ph);
+    }
+    ph.classList.toggle("error", Boolean(initError));
+    ph.replaceChildren();
+    if (!initError) {
+      const spin = document.createElement("div");
+      spin.className = "grid-spinner";
+      spin.setAttribute("aria-hidden", "true");
+      ph.appendChild(spin);
+    }
+    const label = document.createElement("div");
+    label.className = "grid-placeholder-msg";
+    label.textContent = initError || "Connecting to cameras…";
+    ph.appendChild(label);
+  }
+
+  // Build the camera grid + View/Camera tabs + Save dialog once the camera list
+  // is known. Idempotent: the camera set is fixed for a session, so a second
+  // `system` message (a reconnect handshake, say) is a no-op.
+  function buildCameras(cameras) {
+    if (grid) return;
+    const gridEl = document.getElementById("grid");
+    gridEl.querySelector(".grid-placeholder")?.remove();
+    grid = new CameraGrid(gridEl, cameras, {
+      onSelect: (i) => {
+        cameraTab?.selectCamera(i);
+        viewTab?.selectCamera(i);
+      },
+      onRename: (i, name) => cameraTab?.renameCamera(i, name),
+      onViewChange: scheduleViewSend,
+    });
+    viewTab = new ViewTab({ cameras, grid, onSelect: (i) => grid.select(i) });
+    cameraTab = new CameraTab({
+      cameras,
+      notify,
+      onSelect: (i) => grid.select(i),
+      onRename: (i, name) => {
+        grid.setName(i, name);
+        viewTab?.applyName(i, name);
+      },
+    });
+    saveDialog = new SaveDialog({
+      grid,
+      notify,
+      getRecording: () => recordingActive,
+    });
+    // Establish an initial current camera so the grid highlight and the pickers
+    // agree from the start, and reflect the live recording/connection state.
+    if (cameras.length) grid.select(0);
+    grid.setRecording(recordingActive);
+    syncEnabled();
+    // The grid just appeared; (re)send its view spec so the server starts
+    // encoding previews at the resolutions now on screen.
+    lastViewJson = "";
+    scheduleViewSend();
+  }
+
+  // Apply a fresh /api/system descriptor (initial fetch, WS-connect handshake,
+  // or the background-init broadcast): build the grid once cameras exist, refresh
+  // the managed-trigger option, and forward each plugin's readiness to its tab.
+  function applySystem(sys) {
+    systemReady = Boolean(sys.ready);
+    initError = sys.init_error || null;
+    record.setManagedAvailable(!!sys.managed_trigger_available);
+    for (const [name, info] of Object.entries(sys.plugins ?? {})) {
+      pluginTabs.get(name)?.applyStatus?.(info);
+    }
+    if (Array.isArray(sys.cameras) && sys.cameras.length) {
+      buildCameras(sys.cameras);
+    } else if (!grid) {
+      showGridPlaceholder();
+    }
+    syncEnabled();
+  }
+
+  // Initial render: fill the grid now if the cameras were already open at load
+  // (the fast / no-hardware paths), else show the placeholder until the
+  // background init pushes a ready `system` message over the socket.
+  if (systemReady && Array.isArray(system.cameras) && system.cameras.length) {
+    buildCameras(system.cameras);
+  } else {
+    showGridPlaceholder();
+  }
 
   record.applyState(snap);
   benchmark.applyState(snap);
