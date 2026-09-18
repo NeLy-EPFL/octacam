@@ -844,6 +844,52 @@ against a real 2P rig; the durable findings:
   candidates, one level deeper than a caller who already knows the exact
   folder to classify is working at.
 
+  **The `_2P`/`_Synced` suffix also folds in the matched ThorImage folder's
+  own detail word** (`twophoton_transfer._thorimage_detail`), e.g.
+  `Recording1_2P_Zstack` instead of a bare `Recording1_2P` — Matthias's own
+  request (2026-09-17): the modality naming a fly-session's own ThorImage
+  folders already carry (`Fly1_Zstack`, `Fly1_FastZ_Test`, ...) was only
+  ever visible one level down inside `2P/`, so telling a Z-stack from a
+  behavior-synced recording meant opening the folder. `_thorimage_detail`
+  strips the leading `Fly<N>` token and any trailing `_<digits>` recording
+  number, leaving whatever's left (`""` when there's nothing but the fly/
+  recording number, e.g. plain `Fly1`/`Fly1_004`, or no leading `Fly<N>` at
+  all, e.g. a `SyncData102` sync folder — never guessed). For a `2P`-only
+  entry this reads straight off the folder's own name
+  (`cli._reconcile_sessions`); for a `Synced` take (behavior + 2P both
+  matched) there's no bare 2P folder to name at that point — it's read back
+  from the take's own `twophoton_match.json` sidecar's `matched[]` entries
+  (`cli._take_2p_detail`, preferring the `image`-kind match, since a
+  `sync`-kind name carries no modality info). Because the folder-name shape
+  changed, `_RECONCILED_2P_DIR_RE` (used to re-detect an already-reconciled
+  2P dir on a later run) now allows an optional `_<detail>` tail, and every
+  glob that lists an already-reconciled `RecordingN_2P/2P/` (`_already_
+  present_2p_names`, `_find_twophoton_dest_folder`) was loosened from
+  `Recording*_2P` to `Recording*_2P*` to still match it.
+
+  **Real bug found running this against the real NAS (2026-09-18), fixed
+  same day**: `_reconcile_sessions`' `current_path` for a `2P` entry is
+  always the *leaf* — `<wrapper>/2P/<name>` — never the wrapper directory
+  itself (see `_gather_fly_sessions`). Adding the detail suffix to an
+  *already-reconciled* `RecordingN_2P` wrapper naively renamed just that
+  leaf (`current_path.rename(target)`), which silently stranded any sibling
+  the wrapper already had — confirmed on real data: a Z-stack's own
+  `Renderings/` (MIP preview PNGs/mp4, generated after the original
+  reconcile) was left behind under the stale bare `RecordingN_2P` name while
+  a new, sibling-less `RecordingN_2P_Zstack` was created next to it. Fixed
+  by detecting this shape (`current_path.parent.name == "2P"` and its parent
+  already matches `_RECONCILED_2P_DIR_RE`) and moving the *whole wrapper*
+  in that case, not just the leaf — a fresh `2P_only/<name>` entry (no
+  wrapper yet) is unaffected, still renamed as before. **The real stranded
+  data this produced on the NAS still needs a one-time manual fix** — a
+  handful of `Renderings/` folders left behind under stale bare `RecordingN_
+  2P` names in `260916_AllPAM_G151xCI80` (data itself never lost, just
+  orphaned next to the new `RecordingN_2P_<detail>` sibling the buggy run
+  created) — the fix only prevents new stranding going forward, it doesn't
+  retroactively repair what the one buggy run already left on disk.
+  `test_reconcile_recordings_rerun_moves_whole_wrapper_not_just_leaf` guards
+  the fix.
+
   Also promotes the fuzzier case: data still sitting in the fully generic
   `2p_only/<experiment>/<date>/` bucket (nothing could attribute it to an
   existing fly) is grouped by the same `(experiment, thorimage_base_name)`

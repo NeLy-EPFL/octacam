@@ -3437,6 +3437,29 @@ def test_reconcile_recordings_renumbers_chronologically(tmp_path, monkeypatch):
     assert not (fly_dir / "002").exists()
 
 
+def test_reconcile_recordings_synced_take_folds_in_2p_detail(tmp_path, monkeypatch):
+    # A Synced take (behavior + 2P both matched) whose own 2P match carries a
+    # modality detail beyond the fly/recording number should surface it too,
+    # e.g. "Recording1_Synced_Zstack" — not just a bare "Recording1_Synced".
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    _write_take(
+        dest_root, "day1/Fly1/001", start_time_ns=1_000_000_000_000, duration_s=10.0,
+        matched_paths=["exp/Fly1_Zstack"],
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    fly_dir = dest_root / "day1" / "Fly1"
+    assert (fly_dir / "Recording1_Synced_Zstack" / "recording_summary.json").exists()
+
+
 def test_reconcile_recordings_folds_2p_only_into_sequence(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
@@ -3458,9 +3481,44 @@ def test_reconcile_recordings_folds_2p_only_into_sequence(tmp_path, monkeypatch)
         app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
     )
     assert result.exit_code == 0, result.output
-    assert (fly_dir / "Recording1_2P" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
+    assert (fly_dir / "Recording1_2P_Zstack" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
     assert (fly_dir / "Recording2_Beh" / "recording_summary.json").exists()
     assert not (fly_dir / "2P_only").exists()
+
+
+def test_reconcile_recordings_rerun_moves_whole_wrapper_not_just_leaf(tmp_path, monkeypatch):
+    # Real bug found running this against the real NAS (2026-09-18): an
+    # already-reconciled RecordingN_2P wrapper can have a sibling Renderings/
+    # (e.g. a Z-stack MIP preview) alongside its 2P/<name> leaf. Adding the
+    # detail suffix on a later run must move the whole wrapper, not just the
+    # leaf — otherwise Renderings/ is stranded under the stale bare name.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    fly_dir = dest_root / "day1" / "Fly1"
+    _write_take(dest_root, "day1/Fly1/Recording2_Beh", start_time_ns=3_000_000_000_000, duration_s=10.0)
+    wrapper = fly_dir / "Recording1_2P"
+    two_p = wrapper / "2P" / "Fly1_Zstack"
+    two_p.mkdir(parents=True)
+    (two_p / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="1000" /></ThorImageExperiment>'
+    )
+    renderings = wrapper / "Renderings"
+    renderings.mkdir()
+    (renderings / "zstack_mip_green.png").write_bytes(b"fake-png")
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    new_wrapper = fly_dir / "Recording1_2P_Zstack"
+    assert (new_wrapper / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
+    assert (new_wrapper / "Renderings" / "zstack_mip_green.png").exists()
+    assert not wrapper.exists()
 
 
 def test_reconcile_recordings_rerun_with_no_changes_is_noop(tmp_path, monkeypatch):
@@ -3525,7 +3583,7 @@ def test_reconcile_recordings_promotes_generic_bucket_to_new_fly(tmp_path, monke
     )
     assert result.exit_code == 0, result.output
     new_fly = dest_root / "260903_PAM7xCI63" / "Fly2"
-    assert (new_fly / "Recording1_2P" / "2P" / "Fly9_Zstack" / "Experiment.xml").exists()
+    assert (new_fly / "Recording1_2P_Zstack" / "2P" / "Fly9_Zstack" / "Experiment.xml").exists()
     assert not orphan.exists()
 
 
@@ -3558,7 +3616,7 @@ def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, mo
     )
     assert result.exit_code == 0, result.output
     fly1 = dest_root / "260903_PAM7xCI63" / "Fly1"
-    assert (fly1 / "Recording1_2P" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
+    assert (fly1 / "Recording1_2P_Zstack" / "2P" / "Fly1_Zstack" / "Experiment.xml").exists()
     assert (fly1 / "Recording2_Synced" / "recording_summary.json").exists()
     assert not (dest_root / "260903_PAM7xCI63" / "Fly2").exists()
 
@@ -3591,7 +3649,7 @@ def test_reconcile_recordings_reuses_day_folder_despite_digit_mismatch(tmp_path,
     assert result.exit_code == 0, result.output
     assert existing_take.parent.is_dir()  # 260903_PAM07xCI80/Fly1 still exists
     new_fly = dest_root / "260903_PAM07xCI80" / "Fly2"
-    assert (new_fly / "Recording1_2P" / "2P" / "Fly2_Zstack" / "Experiment.xml").exists()
+    assert (new_fly / "Recording1_2P_Zstack" / "2P" / "Fly2_Zstack" / "Experiment.xml").exists()
     # No spurious near-duplicate day folder ("260903_PAM7xCI80") created.
     assert not (dest_root / "260903_PAM7xCI80").exists()
 

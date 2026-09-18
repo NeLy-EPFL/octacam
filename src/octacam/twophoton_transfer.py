@@ -631,6 +631,27 @@ def _fly_prefix(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _thorimage_detail(name: str) -> str:
+    """The modality/detail word(s) in a ThorImage folder name, beyond the fly
+    number and any trailing recording-number suffix — e.g. ``"Zstack"`` for
+    ``"Fly1_Zstack"`` or ``"Fly1_Zstack_000"``, ``"FastZ_Test"`` for
+    ``"Fly1_FastZ_Test"``, and ``""`` for a plain ``"Fly1"``/``"Fly1_004"``
+    (no detail beyond the fly/recording number) or for a name with no leading
+    ``Fly<N>`` token at all (e.g. a ``SyncData102`` folder, which carries no
+    fly-identifying name to extract a detail from).
+
+    Used to fold a matched 2P folder's own detail into the reconciled
+    ``RecordingN_2P``/``RecordingN_Synced`` directory name (see
+    ``cli._reconcile_sessions``), so the surface-level name hints at what's
+    inside without opening it — e.g. ``Recording1_2P_Zstack`` instead of a
+    bare ``Recording1_2P``."""
+    base = _thorimage_base_name(name)
+    m = _FLY_PREFIX_RE.match(base)
+    if m is None:
+        return ""
+    return base[m.end() :]
+
+
 def correlate_sync_folder_to_image(
     sync_folder: TwoPhotonFolder,
     image_candidates: list[TwoPhotonFolder],

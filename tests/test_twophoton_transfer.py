@@ -13,6 +13,7 @@ from octacam.twophoton_transfer import (
     TwoPhotonFolder,
     _fly_prefix,
     _thorimage_base_name,
+    _thorimage_detail,
     build_match_record,
     correlate_sync_folder_to_image,
     discover_twophoton_folders,
@@ -587,6 +588,16 @@ def test_fly_prefix_extracts_leading_fly_token():
     assert _fly_prefix("Fly12_ZT_Test") == "Fly12"
     assert _fly_prefix("Test1_018") is None
     assert _fly_prefix("SyncData125") is None
+
+
+def test_thorimage_detail_extracts_modality_word():
+    assert _thorimage_detail("Fly1_Zstack") == "Zstack"
+    assert _thorimage_detail("Fly1_Zstack_000") == "Zstack"
+    assert _thorimage_detail("Fly1_FastZ_Test") == "FastZ_Test"
+    assert _thorimage_detail("Fly1_004") == ""
+    assert _thorimage_detail("Fly1") == ""
+    assert _thorimage_detail("SyncData125") == ""
+    assert _thorimage_detail("Test1_018") == ""
 
 
 def test_correlate_sync_folder_to_image_finds_matching_candidate(tmp_path):

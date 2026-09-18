@@ -4712,7 +4712,7 @@ def _already_present_2p_names(dest_root: Path) -> set[str]:
     for two_p_only in dest_root.glob("*/*/2P_only"):
         if two_p_only.is_dir():
             names.update(p.name for p in two_p_only.iterdir() if p.is_dir())
-    for two_p in dest_root.glob("*/*/Recording*_2P/2P"):
+    for two_p in dest_root.glob("*/*/Recording*_2P*/2P"):
         if two_p.is_dir():
             names.update(p.name for p in two_p.iterdir() if p.is_dir())
     return names
@@ -4914,7 +4914,7 @@ def _append_reconciliation_log(
         log.warning("reconcile: couldn't write %s: %s", log_path, e)
 
 
-_RECONCILED_2P_DIR_RE = re.compile(r"^Recording\d+_2P$")
+_RECONCILED_2P_DIR_RE = re.compile(r"^Recording\d+_2P(_.+)?$")
 
 
 def _gather_fly_sessions(
@@ -5101,6 +5101,30 @@ def _promote_generic_2p_only_flies(
     return sessions
 
 
+def _take_2p_detail(take_folder: Path) -> str:
+    """The ThorImage detail suffix (see
+    :func:`~octacam.twophoton_transfer._thorimage_detail`) for a ``Synced``
+    take's matched ``image``-kind 2P folder, read from its
+    ``twophoton_match.json`` sidecar — e.g. ``"Zstack"`` for a take matched
+    against a ``Fly1_Zstack`` folder. Empty when the take has no ``image``-kind
+    match (a sync-only pairing carries no fly-identifying name to extract a
+    detail from) or no sidecar at all."""
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+    from octacam.twophoton_transfer import _thorimage_detail
+
+    record = _read_summary(take_folder / TWOPHOTON_MATCH_FILENAME) or {}
+    for entry in record.get("matched", []):
+        if entry.get("kind") != "image":
+            continue
+        rel_path = entry.get("path")
+        if not rel_path:
+            continue
+        detail = _thorimage_detail(Path(rel_path).name)
+        if detail:
+            return detail
+    return ""
+
+
 def _reconcile_sessions(
     sessions: dict[Path, list[tuple[float, str, Path]]],
     dest_root: Path,
@@ -5113,7 +5137,15 @@ def _reconcile_sessions(
     n_unchanged, n_conflict)``. Never raises — a rename collision (a fly
     whose session count shifted so a target is already occupied) is logged
     and counted as a conflict, not fatal to the rest of the fly or other
-    flies."""
+    flies.
+
+    Each name also folds in the matched 2P folder's own detail word (see
+    :func:`~octacam.twophoton_transfer._thorimage_detail`), when there is one
+    — e.g. ``Recording1_2P_Zstack`` instead of a bare ``Recording1_2P`` — so
+    what's inside is visible from the fly folder's top level without opening
+    it."""
+    from octacam.twophoton_transfer import _thorimage_detail
+
     n_moved = n_unchanged = n_conflict = 0
     for fly_dir, entries in sorted(sessions.items()):
         if not entries:
@@ -5121,28 +5153,47 @@ def _reconcile_sessions(
         entries.sort(key=lambda e: e[0])
         fly_moves: list[tuple[Path, Path]] = []
         for i, (_start, kind, current_path) in enumerate(entries, 1):
-            target = (
-                fly_dir / f"Recording{i}_2P" / "2P" / current_path.name
+            detail = (
+                _thorimage_detail(current_path.name)
                 if kind == "2P"
-                else fly_dir / f"Recording{i}_{kind}"
+                else _take_2p_detail(current_path) if kind == "Synced" else ""
             )
-            if current_path == target:
+            name = f"Recording{i}_{kind}" + (f"_{detail}" if detail else "")
+            already_wrapped = (
+                kind == "2P"
+                and current_path.parent.name == "2P"
+                and _RECONCILED_2P_DIR_RE.match(current_path.parent.parent.name)
+            )
+            if already_wrapped:
+                # current_path is the leaf inside an already-reconciled
+                # <wrapper>/2P/<name> — move the whole wrapper, not just the
+                # leaf, so a sibling directory (e.g. a Z-stack's own
+                # ``Renderings/``) isn't stranded under the stale name.
+                source = current_path.parent.parent
+                target = fly_dir / name
+            elif kind == "2P":
+                source = current_path
+                target = fly_dir / name / "2P" / current_path.name
+            else:
+                source = current_path
+                target = fly_dir / name
+            if source == target:
                 n_unchanged += 1
                 continue
             if dry_run:
-                log.info("[dry-run] reconcile: %s -> %s", current_path, target)
+                log.info("[dry-run] reconcile: %s -> %s", source, target)
                 continue
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                current_path.rename(target)
+                source.rename(target)
             except OSError as e:
                 n_conflict += 1
-                log.error("reconcile: failed to move %s -> %s: %s", current_path, target, e)
+                log.error("reconcile: failed to move %s -> %s: %s", source, target, e)
                 continue
             n_moved += 1
-            log.info("reconcile: %s -> %s", current_path, target)
-            fly_moves.append((current_path, target))
-            _prune_empty_dirs(current_path.parent, dest_root)
+            log.info("reconcile: %s -> %s", source, target)
+            fly_moves.append((source, target))
+            _prune_empty_dirs(source.parent, dest_root)
         if not dry_run:
             _append_reconciliation_log(fly_dir, dest_root, fly_moves)
     return n_moved, n_unchanged, n_conflict
@@ -5494,7 +5545,7 @@ def _find_twophoton_dest_folder(dest_root: Path, name: str) -> Path | None:
     for pattern in (
         f"*/*/*/2P/{name}",
         f"*/*/2P_only/{name}",
-        f"*/*/Recording*_2P/2P/{name}",
+        f"*/*/Recording*_2P*/2P/{name}",
         f"2p_only/*/*/{name}",
     ):
         for candidate in dest_root.glob(pattern):
