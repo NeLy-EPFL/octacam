@@ -285,6 +285,41 @@ def _usb_device_dir(tty_device: str) -> str | None:
     return None
 
 
+def reset_usb_node(bus: int, dev: int, context: str) -> tuple[bool, str]:
+    """Issue ``USBDEVFS_RESET`` to ``/dev/bus/usb/<bus>/<dev>``. Never raises.
+
+    The shared low-level primitive: :func:`reset_usb_device` (tty devices,
+    e.g. the triggerbox) and ``octacam.cameras._usb_reset`` (cameras, found by
+    USB serial rather than tty path) both resolve a ``(bus, dev)`` pair their
+    own way and then call this. *context* is folded into the success/failure
+    message only (e.g. ``"backing /dev/ttyACM0"`` or ``"camera 40012161"``).
+    Returns ``(ok, message)``; ``(False, reason)`` on non-Linux, a missing
+    ``fcntl``, or an unopenable/failing usbfs node (needs write access — root
+    or the ``plugdev`` group). **The caller must not hold the device open.**
+    """
+    if not sys.platform.startswith("linux"):
+        return False, "USB bus reset is only implemented on Linux"
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - fcntl ships on posix
+        return False, "fcntl is unavailable; cannot issue a USB reset"
+    node = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
+    try:
+        fd = os.open(node, os.O_WRONLY)
+    except OSError as e:
+        return False, (
+            f"cannot open {node} to reset it ({e}); a USB reset needs write "
+            "access to the usbfs node (root, or the plugdev group)"
+        )
+    try:
+        fcntl.ioctl(fd, _USBDEVFS_RESET, 0)
+    except OSError as e:
+        return False, f"USB reset ioctl on {node} failed: {e}"
+    finally:
+        os.close(fd)
+    return True, f"issued a USB bus reset to {node} ({context})"
+
+
 def reset_usb_device(device: str) -> tuple[bool, str]:
     """Issue a host-side USB bus reset to the USB device backing *device*.
 
@@ -302,10 +337,6 @@ def reset_usb_device(device: str) -> tuple[bool, str]:
     """
     if not sys.platform.startswith("linux"):
         return False, "USB bus reset is only implemented on Linux"
-    try:
-        import fcntl
-    except ImportError:  # pragma: no cover - fcntl ships on posix
-        return False, "fcntl is unavailable; cannot issue a USB reset"
     usbdir = _usb_device_dir(device)
     if usbdir is None:
         return False, (
@@ -319,21 +350,7 @@ def reset_usb_device(device: str) -> tuple[bool, str]:
             dev = int(f.read().strip())
     except (OSError, ValueError) as e:
         return False, f"{device}: could not read USB bus/dev numbers: {e}"
-    node = f"/dev/bus/usb/{bus:03d}/{dev:03d}"
-    try:
-        fd = os.open(node, os.O_WRONLY)
-    except OSError as e:
-        return False, (
-            f"cannot open {node} to reset it ({e}); a USB reset needs write "
-            "access to the usbfs node (root, or the plugdev group)"
-        )
-    try:
-        fcntl.ioctl(fd, _USBDEVFS_RESET, 0)
-    except OSError as e:
-        return False, f"USB reset ioctl on {node} failed: {e}"
-    finally:
-        os.close(fd)
-    return True, f"issued a USB bus reset to {node} (backing {device})"
+    return reset_usb_node(bus, dev, f"backing {device}")
 
 
 def wait_for_device(device: str, timeout: float = 3.0) -> bool:

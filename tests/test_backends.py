@@ -258,27 +258,39 @@ class _FakeTlFactory:
 
     ``CreateDevice`` raises the real SDK exception for any serial in ``bad`` — as
     pylon does when a USB3 camera's SuperSpeed link trained down to USB 2.0 —
-    and returns a sentinel handle otherwise.
+    and returns a sentinel handle otherwise. ``fail_times`` optionally caps how
+    many *consecutive* calls a ``bad`` serial raises on before it starts
+    succeeding (default: always raises), so a test can simulate "recovers
+    after one reset retry". ``messages`` overrides the raised exception text
+    per serial (default: the real USB-2.0-link wording).
     """
 
-    def __init__(self, serials, bad):
+    def __init__(self, serials, bad, fail_times=None, messages=None):
         self._devices = [_FakeBaslerDevice(s) for s in serials]
         self._bad = set(bad)
+        self._fail_times = dict(fail_times or {})
+        self._messages = dict(messages or {})
         self.created: list[str] = []
+        self.create_calls: dict[str, int] = {}
 
     def EnumerateDevices(self):
         return self._devices
 
     def CreateDevice(self, device):
         serial = device.GetSerialNumber()
+        self.create_calls[serial] = self.create_calls.get(serial, 0) + 1
         if serial in self._bad:
-            from pypylon import genicam
+            remaining = self._fail_times.get(serial)
+            if remaining is None or self.create_calls[serial] <= remaining:
+                from pypylon import genicam
 
-            raise genicam.RuntimeException(
-                "Failed to open device for XML file download. Error: 'The "
-                "device cannot be operated on an USB 2.0 port. The device "
-                "requires an USB 3.0 compatible port.'"
-            )
+                text = self._messages.get(
+                    serial,
+                    "Failed to open device for XML file download. Error: 'The "
+                    "device cannot be operated on an USB 2.0 port. The device "
+                    "requires an USB 3.0 compatible port.'",
+                )
+                raise genicam.RuntimeException(text)
         self.created.append(serial)
         return ("device-handle", serial)
 
@@ -292,13 +304,34 @@ class _FakePylon:
             return _FakePylon.TlFactory._instance
 
 
-def _patch_basler_factory(monkeypatch, serials, bad):
+def _patch_basler_factory(
+    monkeypatch, serials, bad, fail_times=None, messages=None, reset_ok=False
+):
+    """Patch pylon's factory plus the USB-reset retry hooks basler.py calls.
+
+    ``reset_ok`` controls both hooks at once: False (the default) makes a
+    reset retry fail immediately, keeping every test that doesn't care about
+    retry behavior hermetic (no real sysfs access) and behaviorally identical
+    to "no recovery available". A retry-specific test passes ``reset_ok=True``
+    and drives whether ``CreateDevice`` then succeeds via ``fail_times``. Every
+    reset attempt is recorded on ``factory.reset_calls``.
+    """
     pytest.importorskip("pypylon")
     from octacam.cameras import basler
 
-    factory = _FakeTlFactory(serials, bad)
+    factory = _FakeTlFactory(serials, bad, fail_times=fail_times, messages=messages)
+    factory.reset_calls = []
+
+    def fake_reset(serial):
+        factory.reset_calls.append(serial)
+        return reset_ok, "test: reset " + ("ok" if reset_ok else "unavailable")
+
     _FakePylon.TlFactory._instance = factory
     monkeypatch.setattr(basler, "pylon", _FakePylon)
+    monkeypatch.setattr(basler, "reset_camera_usb_link", fake_reset)
+    monkeypatch.setattr(
+        basler, "wait_for_serial", lambda detect_serials, serial, timeout=3.0: reset_ok
+    )
     return factory
 
 
@@ -339,6 +372,73 @@ def test_enumerate_basler_all_uncreatable_have_none_handles(monkeypatch):
     out = enumerate_basler()
     assert [serial for serial, _h in out] == ["A", "B"]
     assert all(handle is None for _serial, handle in out)
+
+
+def test_enumerate_basler_recovers_after_usb_reset_retry(monkeypatch):
+    # Real-hardware finding (2026-09-18, confirmed via dmesg + lsusb -t): the
+    # same camera on the same physical port failed SuperSpeed link training
+    # once and trained cleanly on a later attempt — not a deterministic fault.
+    # One bus-reset retry should turn that into a real handle, not a skip.
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(
+        monkeypatch,
+        ["40012161", "OK1"],
+        bad={"40012161"},
+        fail_times={"40012161": 1},
+        reset_ok=True,
+    )
+    out = enumerate_basler()
+    by_serial = dict(out)
+    assert by_serial["40012161"] is not None
+    assert by_serial["OK1"] is not None
+    assert factory.create_calls["40012161"] == 2  # original attempt + one retry
+    assert factory.reset_calls == ["40012161"]
+
+
+def test_enumerate_basler_gives_up_after_one_retry(monkeypatch):
+    # A link still down after the reset must not be retried in a loop — falls
+    # back to the existing skip-and-log behavior after exactly one retry.
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(
+        monkeypatch, ["40012161"], bad={"40012161"}, reset_ok=True
+    )
+    out = enumerate_basler()
+    assert dict(out)["40012161"] is None
+    assert factory.create_calls["40012161"] == 2  # original + exactly one retry
+
+
+def test_enumerate_basler_retry_skipped_when_reset_itself_fails(monkeypatch):
+    # A permissions error (or no udev access) on the reset ioctl must not even
+    # attempt a second CreateDevice call.
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(
+        monkeypatch, ["40012161"], bad={"40012161"}, reset_ok=False
+    )
+    out = enumerate_basler()
+    assert dict(out)["40012161"] is None
+    assert factory.create_calls["40012161"] == 1  # no retry attempted
+
+
+def test_enumerate_basler_non_usb2_failure_never_triggers_reset(monkeypatch):
+    # _is_usb2_link_failure gates the retry the same way it gates the
+    # actionable message — a permissions error or a genuinely-gone device
+    # must not trigger a pointless reset attempt.
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(
+        monkeypatch,
+        ["SN9"],
+        bad={"SN9"},
+        messages={"SN9": "some other boom"},
+        reset_ok=True,
+    )
+    out = enumerate_basler()
+    assert dict(out)["SN9"] is None
+    assert factory.reset_calls == []
+    assert factory.create_calls["SN9"] == 1
 
 
 def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):

@@ -1138,6 +1138,35 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
   CMOS) + up to 4× Basler acA1920-150um (SN 40018619/40018631/40018632/40022761,
   and 40023151; 1920×1200); external trigger via the common-trigger-circuit Nano
   ESP32. SDKs at `/opt/spinnaker` (Spinnaker) and `/opt/pylon` (Basler pylon).
+- **A USB3 camera "came up on a USB 2.0 link" is sometimes just a flaky
+  SuperSpeed link-training attempt, not a deterministic per-camera or
+  per-port fault.** Confirmed on real hardware (2026-09-18, a 7-camera Basler
+  rig) via `dmesg`/`lsusb -t`: the *same* camera on the *same* physical port
+  failed link training on one attempt and trained cleanly (5000M) on a later
+  one — cable, port, and camera each individually tested healthy. Since
+  octacam identifies cameras purely by **serial number**
+  (`CameraSystem._enumerate`/config's `serial_number` field, never USB
+  port/enumeration order — the septacam-era "must plug cameras in this exact
+  layout" problem this replaces), physically shuffling cameras between ports
+  has no logical effect; it can still surface this flake because it changes
+  which specific camera lands on a marginal port. `enumerate_basler` now
+  reacts: a `CreateDevice` failure whose text matches the USB2-link wording
+  gets one bounded recovery attempt (`_retry_after_usb_reset`) — a host
+  `USBDEVFS_RESET` via the camera's own USB serial
+  (`cameras/_usb_reset.py::reset_camera_usb_link`, which walks
+  `/sys/bus/usb/devices/*/serial` rather than the tty-path walk
+  `serial_ports.py`'s triggerbox recovery uses, since a camera has no tty
+  node) followed by one retried `CreateDevice` — before falling back to the
+  existing skip-and-log behavior. Both reset implementations share the same
+  low-level ioctl primitive, `serial_ports.reset_usb_node(bus, dev,
+  context)`. Only Basler has this failure mode wired up today (it's the only
+  backend with a `None`-handle "present but unusable" convention at all —
+  flir/spinnaker/pycameleon's enumeration has no equivalent try/except around
+  their create/init call, see their `enumerate_*` functions); extending it
+  there would follow the same "retry inside that backend's own except block"
+  shape, not a change to `CameraSystem._enumerate` (which is deliberately
+  backend-agnostic and only ever sees the retry's outcome, never orchestrates
+  it).
 
 ## Where the deep detail lives
 

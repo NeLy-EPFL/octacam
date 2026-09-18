@@ -14,6 +14,7 @@ from collections.abc import Callable
 from pypylon import genicam, pylon
 
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
+from octacam.cameras._usb_reset import reset_camera_usb_link, wait_for_serial
 from octacam.cameras.base import (
     GEOMETRY_FEATURES,
     PARAM_NODES,
@@ -634,6 +635,10 @@ class BaslerBackend(SoftwareTriggerHandoff):
             result.Release()
 
 
+def _is_usb2_link_failure(text: str) -> bool:
+    return "USB 2.0" in text or "USB 3.0 compatible port" in text
+
+
 def _describe_open_failure(serial: str, exc: Exception) -> str:
     """An actionable, operator-facing reason a Basler camera cannot be opened.
 
@@ -642,10 +647,12 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
     with "The device cannot be operated on an USB 2.0 port." That wording reads
     like a wrong-port mistake when the real cause is the cable/connector/port
     link, so translate it into something the operator can act on. Any other
-    open error is passed through verbatim.
+    open error is passed through verbatim. By the time this fires, a bus-reset
+    retry (see ``_retry_after_usb_reset``) has already been attempted and failed
+    — this is the message for a link that stayed down.
     """
     text = str(exc)
-    if "USB 2.0" in text or "USB 3.0 compatible port" in text:
+    if _is_usb2_link_failure(text):
         return (
             f"Camera {serial} came up on a USB 2.0 link and cannot be opened. A "
             "USB3 camera whose SuperSpeed link fails to train drops back to USB "
@@ -656,6 +663,42 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
             "reads 5000M, this one 480M. Skipping this camera for now."
         )
     return f"Camera {serial} could not be opened and will be skipped: {text}"
+
+
+def _retry_after_usb_reset(tl_factory, serial: str):
+    """One bounded recovery attempt for a camera stuck on a degraded USB link.
+
+    Real-hardware testing (2026-09-18, confirmed via dmesg + ``lsusb -t``)
+    found this failure is not a deterministic per-camera or per-port fault:
+    the same camera on the same physical port trained SuperSpeed successfully
+    on one attempt after failing on a previous one. A single host bus reset
+    (mirroring the triggerbox's ``_recover_usb`` — one reset, no loop) clears
+    that far more often than it costs, before falling back to the loud
+    skip-and-log path. Returns the new device handle on success, or None on
+    any failure — never raises, and never retries more than once.
+    """
+    ok, msg = reset_camera_usb_link(serial)
+    log.warning("camera %s: degraded USB link, attempting a bus reset: %s", serial, msg)
+    if not ok:
+        return None
+    if not wait_for_serial(
+        lambda: [str(d.GetSerialNumber()) for d in tl_factory.EnumerateDevices()],
+        serial,
+    ):
+        log.warning("camera %s: did not reappear after the USB reset", serial)
+        return None
+    devices = tl_factory.EnumerateDevices()
+    detected = [str(d.GetSerialNumber()) for d in devices]
+    try:
+        index = detected.index(serial)
+    except ValueError:
+        return None
+    try:
+        device = tl_factory.CreateDevice(devices[index])
+    except genicam.GenericException:
+        return None
+    log.info("camera %s: recovered after a USB bus reset", serial)
+    return device
 
 
 def enumerate_basler(requested_serials: list[str] | None = None):
@@ -696,10 +739,18 @@ def enumerate_basler(requested_serials: list[str] | None = None):
             # CreateDevice downloads the camera's XML over USB, so a device that
             # enumerated but can't be operated (e.g. a SuperSpeed link that fell
             # back to USB 2.0) throws here. One bad camera must not crash the
-            # enumeration of the whole rig. Report it with a None handle — the
-            # sentinel CameraSystem._enumerate reads as "present but unusable":
-            # the serial is claimed (so the auto cascade's lower tiers don't
+            # enumeration of the whole rig. A degraded link gets one bus-reset
+            # retry first (see _retry_after_usb_reset) since that failure mode
+            # is confirmed non-deterministic on real hardware; only if that
+            # doesn't recover it do we report a None handle — the sentinel
+            # CameraSystem._enumerate reads as "present but unusable": the
+            # serial is claimed (so the auto cascade's lower tiers don't
             # pointlessly retry the same broken device) but never opened.
+            if _is_usb2_link_failure(str(e)):
+                recovered = _retry_after_usb_reset(tl_factory, serial)
+                if recovered is not None:
+                    out.append((serial, recovered))
+                    continue
             log.error("%s", _describe_open_failure(serial, e))
             out.append((serial, None))
             continue
