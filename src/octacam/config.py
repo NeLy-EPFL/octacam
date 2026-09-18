@@ -652,6 +652,10 @@ def _parse_section(data: dict, key: str, model_cls: type[_ModelT], default: _Mod
     return _lenient_validate(model_cls, src, key, default)
 
 
+class ConfigError(Exception):
+    """An octacam_config.toml that exists but cannot be parsed at all."""
+
+
 def parse_record_section(data: dict) -> RecordConfig:
     """The ``[record]`` section of a raw parsed config, as :func:`parse_config`
     reads it (invalid fields fall back to their defaults)."""
@@ -670,8 +674,13 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
     try:
         data = tomllib.loads(file_path.read_text())
     except tomllib.TOMLDecodeError as e:
-        log.error("Failed to parse octacam config file: %s", e)
-        return config
+        # Field-level problems warn and fall back to a default (the tolerant
+        # contract the rest of this module implements), but a file that does not
+        # parse yielded *nothing* — continuing would silently run the rig on
+        # stock defaults: every detected camera, save dir "./", no plugins, no
+        # [transfer] destination. That reads to the operator as "octacam ignored
+        # my config", so fail loudly and name the line instead.
+        raise ConfigError(f"{file_path}: {e}") from e
 
     config.backend = _parse_backend(data.get("backend"))
     config.record = parse_record_section(data)
