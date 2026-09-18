@@ -5,6 +5,7 @@ these assert the cascade *structure* and the missing-SDK → BackendUnavailable
 contract rather than any particular camera being present.
 """
 
+import contextlib
 import logging
 import time
 
@@ -818,7 +819,38 @@ def test_roi_reorder_is_a_no_op_for_dump_config_order():
     assert _roi_offsets_last(pairs) == pairs
 
 
-def test_rejected_geometry_write_is_reported_loudly(caplog):
+class _OctacamLogCapture(logging.Handler):
+    """Collect records straight off the "octacam" logger.
+
+    caplog attaches to the *root* logger, but octacam.cli sets
+    ``logger.propagate = False`` — so once anything in the session has configured
+    CLI logging, records never reach root and caplog silently sees nothing. The
+    repo's own tests capture at the octacam logger for this reason.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _octacam_warnings():
+    handler = _OctacamLogCapture()
+    logger = logging.getLogger("octacam")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_rejected_geometry_write_is_reported_loudly():
     """A refused Width/Height must not vanish into a debug log.
 
     The applier is deliberately best-effort (an unknown node on another model is
@@ -826,8 +858,6 @@ def test_rejected_geometry_write_is_reported_loudly(caplog):
     means the take comes out at the previous session's ROI with nothing visible to
     the operator, and the default CLI log level is info.
     """
-    import logging
-
     from octacam.cameras._genicam_config import apply_config
     from octacam.cameras.base import BackendError
 
@@ -844,9 +874,8 @@ def test_rejected_geometry_write_is_reported_loudly(caplog):
         def _set_enum(self, name, value):
             pass
 
-    with caplog.at_level(logging.WARNING, logger="octacam"):
+    with _octacam_warnings() as handler:
         apply_config(Backend(), "Width\t2048\nHeight\t2048\n")
-    warnings = [
-        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
-    ]
-    assert any("Height" in m and "geometry" in m for m in warnings), warnings
+    assert any(
+        "Height" in m and "geometry" in m for m in handler.messages
+    ), handler.messages
