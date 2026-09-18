@@ -73,6 +73,20 @@ TWOPHOTON_MANIFEST_FILENAME = "2p_reconciliation.md"
 # the record a revert would need. See cli._append_reconciliation_log.
 RECONCILIATION_LOG_FILENAME = "reconciliation_log.md"
 
+# Written inside a 2P-only folder (<fly>/2P_only/<name>/) the first time it's
+# attributed to an existing fly with no behavior take involved at all
+# (octacam.cli._sweep_unclaimed_twophoton) — records the 2P source's own
+# "experiment" subfolder name, which the destination layout otherwise loses
+# (<fly>/2P_only/<name> has no room for it, unlike the generic
+# 2p_only/<experiment>/<date>/<name> bucket, where it's already a path
+# segment). Without this, a fly with zero takes has no twophoton_match.json
+# anywhere to read an experiment back from, and a later sweep/reconcile can
+# never recognize more same-fly 2P-only data as belonging to it (see
+# octacam.cli._gather_fly_image_basenames). Absence (pre-existing data from
+# before this was added) just means that entry can't anchor a future match —
+# never a wrong one, always falls back to today's already-safe behavior.
+TWOPHOTON_2P_ONLY_SOURCE_FILENAME = ".octacam_2p_source.json"
+
 
 @dataclass(frozen=True)
 class DisplayTransform:

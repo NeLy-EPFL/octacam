@@ -346,6 +346,29 @@ def test_status_includes_device_and_state():
     assert s["arduino_state"] == "armed"
 
 
+def test_setup_persists_open_failure_so_initial_status_reports_it():
+    # Real bug found auditing the first-run GUI experience (2026-09-18):
+    # setup() (the plugin's very first open, at GUI/record startup) discarded
+    # _open()'s returned error string, so the *initial* status() snapshot —
+    # what a first-time user with nothing plugged in yet actually sees on
+    # page load — always reported error=None even though _open() had
+    # already computed and logged a specific, actionable reason. A later
+    # explicit /api/twophoton/reconnect call surfaced it fine (it uses the
+    # return value directly); only the implicit startup path lost it.
+    plugin, link = _plugin_with_fake(is_open=False)
+
+    def raise_open(device, baud):
+        raise OSError(
+            "could not open port /dev/does_not_exist: No such file or directory"
+        )
+
+    link.open = raise_open
+    plugin.setup()
+    assert plugin._last_error is not None
+    assert "does_not_exist" in plugin._last_error
+    assert plugin.status()["error"] == plugin._last_error
+
+
 # ---------------------------------------------------------------------------
 # Plugin: REST endpoints
 # ---------------------------------------------------------------------------

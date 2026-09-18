@@ -391,7 +391,17 @@ class TwoPhotonPlugin(Plugin):
         Resolves ``device="auto"`` to a single detected board, reads the firmware
         identity, and enriches an open failure with the detected candidate ports.
         Held under the provisioner's port lock so a concurrent flash can't fight
-        over the port (re-entrant: flash's reopen calls this on the same thread)."""
+        over the port (re-entrant: flash's reopen calls this on the same thread).
+
+        A failure here also persists into ``self._last_error`` (not just the
+        return value) — real bug found auditing the first-run experience:
+        ``setup()`` (the plugin's very first open, at GUI/record startup)
+        discards this method's return value, so before this fix the GUI's
+        *first* status snapshot always reported ``error: null`` even when the
+        server log already had the specific, actionable reason (which ports
+        *are* connected, how to fix the config) — a first-timer with no
+        Arduino plugged in yet saw only the frontend's generic static "not
+        open" text, never that detail, until they explicitly hit Reconnect."""
         with self._fw.port_lock:
             self._firmware = None
             self._firmware_ok = True
@@ -399,6 +409,7 @@ class TwoPhotonPlugin(Plugin):
             device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
             if device is None:
                 log.warning("2-photon trigger: %s", reason)
+                self._last_error = reason
                 return reason
             if device != self.device:
                 log.info("2-photon trigger: %s", reason)
@@ -408,6 +419,7 @@ class TwoPhotonPlugin(Plugin):
             except Exception as e:
                 msg = serial_ports.explain_open_failure(device, e)
                 log.warning("2-photon trigger: %s", msg)
+                self._last_error = msg
                 return msg
             log.info("2-photon trigger: opened %s @ %d", device, self.baud)
             self._verify_identity()

@@ -22,6 +22,7 @@ export default class TwoPhotonTab {
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
     this.arduinoState = status?.arduino_state || "idle";
+    this.error = status?.error || null;
     this.connected = false;
 
     this.statusBox     = document.getElementById("twophoton-status");
@@ -79,6 +80,7 @@ export default class TwoPhotonTab {
     // notice) instead of leaving a stale "ready" that would arm a dead link.
     if (typeof msg.ready === "boolean") {
       this.ready = msg.ready;
+      this.error = msg.error || null;
       this._refresh();
     }
     // Surface a backend arm failure (wedged/closed link, no ACK) to the operator —
@@ -126,10 +128,16 @@ export default class TwoPhotonTab {
     if (this.ready) {
       this.statusBox.classList.add("hidden");
     } else {
+      // Prefer the backend's own specific reason (e.g. which serial ports
+      // *are* actually connected, or why an open attempt failed) over the
+      // generic fallback — a first-timer with nothing plugged in yet gets
+      // the same actionable detail `octacam doctor`/the server log already
+      // show, not just "not open, check it's plugged in".
       const where = this.device ? ` (${this.device})` : "";
       this.statusMsg.textContent =
+        this.error ||
         `Serial port${where} is not open — check the Arduino is plugged in ` +
-        `and the device path matches the plugin config, then reconnect.`;
+          `and the device path matches the plugin config, then reconnect.`;
       this.statusBox.classList.remove("hidden");
     }
     // Gate the checkbox on serial being open (state display is always visible).

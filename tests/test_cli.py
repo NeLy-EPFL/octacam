@@ -781,6 +781,49 @@ def test_doctor_lists_cameras_plugins_and_toolchain():
     assert "flywheel" in result.output
 
 
+def test_doctor_warns_when_twophoton_plugin_enabled_without_transfer_config(
+    tmp_path,
+):
+    # Real gap found auditing the first-run experience (2026-09-18): enabling
+    # the twophoton plugin (arms hardware) without [transfer.twophoton]
+    # (matches/transfers the 2P data) was silent — recordings would proceed
+    # normally and only the missing 2P data would ever reveal the mistake.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[plugins]]\nname = "twophoton"\n'
+    )
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "twophoton' plugin is enabled" in flat
+    assert "[transfer.twophoton] isn't configured" in flat
+
+
+def test_doctor_warns_when_transfer_twophoton_configured_without_plugin(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/tmp/x"\n'
+        "[transfer.twophoton]\n"
+        'source = "/tmp/2p"\n'
+    )
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "[transfer.twophoton] is configured but the 'twophoton' plugin" in flat
+    assert "isn't enabled" in flat
+
+
+def test_doctor_no_twophoton_warning_when_both_configured(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[plugins]]\nname = "twophoton"\n'
+        '[transfer]\ndirectory = "/tmp/x"\n'
+        "[transfer.twophoton]\n"
+        'source = "/tmp/2p"\n'
+    )
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "isn't configured" not in result.output
+    assert "isn't enabled" not in result.output
+
+
 def test_doctor_json_is_machine_readable():
     import json
 
@@ -1374,6 +1417,22 @@ def _make_sync_folder_2p(root, experiment, name, mtime):
     # folder's start-time proxy (true in production — nothing else ever gets
     # added to a SyncData folder after its two files) — creating files above
     # bumped it to "now", so reset it to line up with the synthetic mtime.
+    os.utime(folder, (mtime, mtime))
+    return folder
+
+
+def _make_bare_image_folder_2p(root, experiment, name, *, u_time, mtime):
+    """A minimal "image" kind 2P folder — just Experiment.xml, no tif frames
+    — for tests that only care about attribution/naming, not TIFF assembly
+    (avoids an unconditional tifffile importorskip via _make_image_folder_2p)."""
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    xml = folder / "Experiment.xml"
+    xml.write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment>'
+        f'<Date date="x" uTime="{u_time}" /></ThorImageExperiment>'
+    )
+    os.utime(xml, (mtime, mtime))
     os.utime(folder, (mtime, mtime))
     return folder
 
@@ -3585,6 +3644,103 @@ def test_reconcile_recordings_promotes_generic_bucket_to_new_fly(tmp_path, monke
     new_fly = dest_root / "260903_PAM7xCI63" / "Fly2"
     assert (new_fly / "Recording1_2P_Zstack" / "2P" / "Fly9_Zstack" / "Experiment.xml").exists()
     assert not orphan.exists()
+
+
+def test_reconcile_recordings_promotes_new_fly_first_batch_unifies_modalities(
+    tmp_path, monkeypatch
+):
+    # Real bug found building the detail-suffix feature: a brand-new fly's
+    # own *first-ever* batch (no existing anchor at all) used to be grouped
+    # by exact _thorimage_base_name, which can't unify two different
+    # modality words with no shared digit suffix to strip ("Fly9_Zstack"
+    # base stays "Fly9_Zstack", "Fly9_Streaming" base stays "Fly9_Streaming")
+    # — they'd wrongly promote into two separate new flies. Grouping must
+    # prefer the coarser Fly<N> prefix instead, unifying both into one.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    for name, u_time in (("Fly9_Zstack", "1000"), ("Fly9_Streaming", "2000")):
+        orphan = dest_root / "2p_only" / "PAM7xCI63" / "260904" / name
+        orphan.mkdir(parents=True)
+        (orphan / "Experiment.xml").write_text(
+            f'<?xml version="1.0"?><ThorImageExperiment>'
+            f'<Date date="x" uTime="{u_time}" /></ThorImageExperiment>'
+        )
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    day_dirs = [d for d in dest_root.iterdir() if d.is_dir() and d.name != "2p_only"]
+    (day_dir,) = day_dirs
+    fly_dirs = [d for d in day_dir.iterdir() if d.is_dir()]
+    assert len(fly_dirs) == 1, f"expected one unified fly, got {fly_dirs}"
+    (fly_dir,) = fly_dirs
+    assert (fly_dir / "Recording1_2P_Zstack" / "2P" / "Fly9_Zstack").is_dir()
+    assert (fly_dir / "Recording2_2P_Streaming" / "2P" / "Fly9_Streaming").is_dir()
+
+
+def test_sweep_reattributes_later_data_to_a_pure_2p_only_fly(tmp_path, monkeypatch):
+    # Real gap found the same day: a fly with *zero* behavior takes ever
+    # (pure 2P-only, e.g. a lab that never opens octacam for some flies) had
+    # no twophoton_match.json anywhere, so once promoted into its own Fly
+    # folder it became permanently unrecognizable as an attribution target —
+    # every later sweep would either dump new same-fly data back into the
+    # generic bucket or spawn a brand-new, duplicate Fly folder for it.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    source_root = tmp_path / "windows_share" / "MD"
+    _make_bare_image_folder_2p(source_root, "exp1", "Fly1_Zstack", u_time="1000", mtime=1000)
+    _make_bare_image_folder_2p(source_root, "exp1", "Fly1_004", u_time="2000", mtime=2000)
+
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+        f"[transfer.twophoton]\n"
+        f'source = "{source_root.as_posix()}"\n'
+        f"settle_s = 0\n"
+    )
+
+    # Week 1: no take at all — the sweep alone can only dump into the
+    # generic bucket (no existing fly to attribute to yet).
+    result = runner.invoke(app, ["process", "--twophoton-sweep", "--config", str(config_dir)])
+    assert result.exit_code == 0, result.output
+    assert (dest_root / "2p_only" / "exp1").is_dir()
+
+    # Promoting the generic bucket is what actually creates the pure-2P fly.
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    day_dirs = [d for d in dest_root.iterdir() if d.is_dir() and d.name != "2p_only"]
+    (day_dir,) = day_dirs
+    (fly_dir,) = [d for d in day_dir.iterdir() if d.is_dir()]
+    assert not (dest_root / "2p_only").exists()
+
+    # Week 2: a third folder for the SAME fly shows up on the live share.
+    _make_bare_image_folder_2p(source_root, "exp1", "Fly1_005", u_time="90000", mtime=90000)
+    result = runner.invoke(app, ["process", "--twophoton-sweep", "--config", str(config_dir)])
+    assert result.exit_code == 0, result.output
+
+    # It must land directly under the already-existing fly, not the generic
+    # bucket and not a brand-new duplicate Fly.
+    assert (fly_dir / "2P_only" / "Fly1_005").is_dir()
+    assert not (dest_root / "2p_only").exists()
+    other_fly_dirs = [d for d in day_dir.iterdir() if d.is_dir() and d != fly_dir]
+    assert other_fly_dirs == []
+
+    # And a later --all reconcile pass can still find and renumber this
+    # take-less fly (it isn't invisible to whole-tree discovery either).
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (fly_dir / "Recording3_2P" / "2P" / "Fly1_005").is_dir()
 
 
 def test_reconcile_recordings_attributes_prefix_match_not_a_new_fly(tmp_path, monkeypatch):

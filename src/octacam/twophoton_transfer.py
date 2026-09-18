@@ -631,6 +631,27 @@ def _fly_prefix(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _thorimage_group_key(name: str) -> str:
+    """The key used to group same-fly ThorImage folders when there's no
+    *existing* claimed fly to attribute against at all (see
+    ``cli._promote_generic_2p_only_flies``) — the leading ``Fly<N>`` token
+    when present, else the plain trailing-recording-number-stripped base
+    name.
+
+    A real bug found building this: grouping by ``_thorimage_base_name``
+    alone can't unify a brand-new fly's *own first-ever* batch when it mixes
+    modality words with no shared digit suffix to strip (e.g. ``Fly1_Zstack``
+    and ``Fly1_004`` — the same fly, but ``_thorimage_base_name`` gives
+    ``"Fly1_Zstack"`` and ``"Fly1"``, two different keys) — confirmed via a
+    real promotion run that split one such batch into two separate new Fly
+    folders. ``_fly_prefix`` already exists as exactly this coarser,
+    modality-agnostic signal elsewhere (``_attribute_unclaimed_folder``'s own
+    fallback), so grouping prefers it first and only falls back to
+    ``_thorimage_base_name`` for a name with no ``Fly<N>`` token at all (a
+    sync-correlated or otherwise non-Fly-prefixed name)."""
+    return _fly_prefix(name) or _thorimage_base_name(name)
+
+
 def _thorimage_detail(name: str) -> str:
     """The modality/detail word(s) in a ThorImage folder name, beyond the fly
     number and any trailing recording-number suffix — e.g. ``"Zstack"`` for

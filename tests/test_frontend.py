@@ -52,6 +52,15 @@ TRIGGERBOX_JS = (
     / "web"
     / "triggerbox.js"
 )
+TWOPHOTON_JS = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "octacam"
+    / "plugins"
+    / "twophoton"
+    / "web"
+    / "twophoton.js"
+)
 
 # The save-method dropdown is populated from these (mirrors writer.FORMATS as the
 # server serializes it). NVENC_FORMATS adds the GPU method for the nvenc tests.
@@ -1104,5 +1113,87 @@ def test_triggerbox_auto_strobe_updates_when_the_camera_system_attaches(
         )
         # The reads are debounced: a page load must not turn into a fetch storm.
         assert 2 <= exposure_reads["n"] <= 4, exposure_reads["n"]
+    finally:
+        page.close()
+
+
+def test_twophoton_status_shows_specific_error_over_generic_fallback(
+    static_server, browser
+):
+    """Real bug found auditing the first-run experience (2026-09-18): the
+    backend's specific, actionable "port not open" reason (which ports *are*
+    connected, how to fix the config — already shown by `octacam doctor`/the
+    server log) never reached the GUI's initial status, which fell back to a
+    generic "check it's plugged in" message. Now that the backend persists
+    it, the tab must actually render it instead of the fallback — and still
+    fall back correctly once the specific reason clears."""
+    page = browser.new_page()
+    specific_error = (
+        "failed to open /dev/does_not_exist: No such file or directory\n"
+        "  Fix: set [plugins.options].device to a connected port."
+    )
+    plugins = {
+        "twophoton": {
+            "device": "/dev/does_not_exist",
+            "arduino_state": "idle",
+            "ready": False,
+            "firmware": None,
+            "firmware_ok": True,
+            "firmware_state": None,
+            "needs_flash": False,
+            "error": specific_error,
+            "web": {"module": "/plugins/twophoton/twophoton.js"},
+        }
+    }
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(builder())
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route(
+        "**/api/system", json_route(lambda: _system_payload(ready=True, plugins=plugins))
+    )
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=True)))
+    page.route(
+        "**/plugins/twophoton/twophoton.js",
+        lambda route: route.fulfill(
+            status=200, content_type="text/javascript", body=TWOPHOTON_JS.read_text()
+        ),
+    )
+    page.add_init_script(_WS_STUB)
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+
+        page.wait_for_function(
+            """(msg) => document.getElementById('twophoton-status-msg')
+                     ?.textContent === msg""",
+            arg=specific_error,
+            timeout=5000,
+        )
+
+        # A later push with no `error` (e.g. a plain link-drop) must fall back
+        # to the generic message, not keep showing the stale specific one.
+        page.evaluate(
+            "(msg) => window.__pushWs(msg)",
+            {
+                "type": "twophoton_state",
+                "state": "idle",
+                "device": "/dev/does_not_exist",
+                "ready": False,
+                "firmware": None,
+                "firmware_ok": True,
+                "firmware_state": None,
+                "needs_flash": False,
+                "error": None,
+            },
+        )
+        page.wait_for_function(
+            """() => document.getElementById('twophoton-status-msg')
+                     ?.textContent.includes('check the Arduino is plugged in')""",
+            timeout=5000,
+        )
     finally:
         page.close()

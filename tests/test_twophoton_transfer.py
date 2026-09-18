@@ -14,6 +14,7 @@ from octacam.twophoton_transfer import (
     _fly_prefix,
     _thorimage_base_name,
     _thorimage_detail,
+    _thorimage_group_key,
     build_match_record,
     correlate_sync_folder_to_image,
     discover_twophoton_folders,
@@ -598,6 +599,21 @@ def test_thorimage_detail_extracts_modality_word():
     assert _thorimage_detail("Fly1") == ""
     assert _thorimage_detail("SyncData125") == ""
     assert _thorimage_detail("Test1_018") == ""
+
+
+def test_thorimage_group_key_prefers_fly_prefix_over_base_name():
+    # Real bug: grouping a brand-new fly's own first batch by
+    # _thorimage_base_name alone can't unify two different modality words
+    # with no shared digit suffix ("Fly1_Zstack" and "Fly1_004" get
+    # different base names) — _thorimage_group_key must give them the same
+    # key via the coarser Fly<N> prefix instead.
+    assert _thorimage_group_key("Fly1_Zstack") == "Fly1"
+    assert _thorimage_group_key("Fly1_004") == "Fly1"
+    assert _thorimage_group_key("Fly1_Streaming_000") == "Fly1"
+    # No Fly<N> token at all (e.g. a sync-correlated or free-form name) falls
+    # back to the plain base name.
+    assert _thorimage_group_key("SyncData125") == "SyncData125"
+    assert _thorimage_group_key("Test1_018") == "Test1"
 
 
 def test_correlate_sync_folder_to_image_finds_matching_candidate(tmp_path):

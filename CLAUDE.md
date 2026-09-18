@@ -431,6 +431,34 @@ anything fresh; results merge into the summary's `"plugins"` key
 `twophoton` uses it to report `{"armed": bool}` for the twophoton-transfer
 matcher (see the 2P transfer section below).
 
+**First-run UX audit of `twophoton` (2026-09-18), 2 real gaps found and
+fixed**, impersonating a first-time user with no hardware plugged in yet
+(the server-side plugin logic, GUI tab, and `octacam doctor` messaging were
+already otherwise solid — clear per-state labels, the arm checkbox already
+correctly `disabled` while not connected, a detailed udev-rule suggestion on
+a missing device):
+1. `TwoPhotonPlugin.setup()` — the plugin's very first serial-open attempt,
+   at GUI/`record` startup — discarded `_open()`'s returned error string
+   instead of persisting it into `self._last_error` (only an explicit
+   `/api/twophoton/reconnect` call did that correctly). So the GUI's
+   *initial* status always reported `error: null` even when `_open()` had
+   already computed and logged the specific, actionable reason (which
+   ports *are* connected, how to fix `[plugins.options].device`) — a
+   first-timer saw only the frontend's generic static "not open, check
+   it's plugged in" text until they thought to click Reconnect. Fixed by
+   setting `self._last_error` at both failure sites in `_open()`; the
+   frontend (`twophoton.js`) now also renders that specific reason in the
+   persistent status box, not just as a transient toast (`this.error`,
+   read in `_refresh()`) — a toast can be missed if it fades before the
+   operator looks at the tab, the inline box can't be.
+2. `octacam doctor` never cross-checked the plugin (arms the hardware
+   trigger) against `[transfer.twophoton]` (matches/transfers the 2P data
+   it produces) — two independent config sections one workflow needs both
+   of. Enabling one without the other used to be silent: recordings
+   proceed normally, and only a missing `2P/` folder on the NAS (or a
+   trigger that never fires at all) would eventually reveal the mistake.
+   `_doctor_plugins` now warns both directions.
+
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |
 xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, and
@@ -792,6 +820,58 @@ against a real 2P rig; the durable findings:
   lands on disk *after* an unclaimed folder was already swept (e.g. two
   flies sharing a ThorImage prefix processed in separate `process` runs),
   the earlier run's placement isn't retroactively revisited.
+- **A fly with *zero* behavior takes, ever (pure 2P-only — e.g. a lab that
+  never opens octacam for some flies) had three real gaps, all found and
+  fixed 2026-09-18** while auditing robustness — every existing validation
+  of the fly-attribution/reconcile machinery above always had at least one
+  real take anchoring the fly, so this untested case slipped through:
+  1. `_promote_generic_2p_only_flies` grouped a brand-new fly's own *first*
+     batch by `_thorimage_base_name` alone, which can't unify two different
+     modality words with no shared digit suffix (`Fly1_Zstack` and
+     `Fly1_004` get different base names) — confirmed splitting one fly's
+     first-ever batch into two separate new `Fly` folders. Fixed by grouping
+     via the new `twophoton_transfer._thorimage_group_key` (prefers the
+     coarser `Fly<N>` prefix, falling back to the base name only when there's
+     no `Fly<N>` token at all).
+  2. `_gather_fly_image_basenames` (the signal both the sweep's live
+     attribution and the promotion's dedup-check use) was built *only* from
+     `twophoton_match.json` sidecars, which only exist next to a take — so a
+     take-less fly, once promoted, was invisible to it forever: next week's
+     same-fly data would either land back in the generic bucket or spawn a
+     duplicate `Fly`, permanently fragmenting one fly's data across separate
+     folders. Fixed with a small additive sidecar,
+     `transform.TWOPHOTON_2P_ONLY_SOURCE_FILENAME`
+     (`.octacam_2p_source.json`, just `{"experiment": ...}`), written inside
+     each 2P-only entry the moment it's first attributed to a fly with no
+     take (`cli._write_2p_only_source_marker`, called from both
+     `_sweep_unclaimed_twophoton`'s live attribution and
+     `_promote_generic_2p_only_flies`'s from-scratch promotion) — the
+     destination shape (`<fly>/2P_only/<name>`) has nowhere else to record
+     which 2P-source experiment subfolder a folder came from, unlike the
+     generic bucket's own `2p_only/<experiment>/<date>/<name>` path.
+     `_gather_fly_image_basenames` now reads both sources. Purely additive:
+     an entry from before this fix simply has no marker yet and can't anchor
+     a match — never a *wrong* one, the same safe fallback as today.
+  3. `_gather_fly_sessions`'s whole-tree (`--all`) discovery seeded its fly
+     list purely from `recording_summary.json` presence, so a take-less fly
+     was never even scanned for renumbering on a later `--all` run (a
+     PATHS-scoped run was unaffected — it's handed the fly dir explicitly).
+     Fixed by also seeding it directly from any `Fly*` dir holding a
+     `2P_only`/`RecordingN_2P` shape.
+
+  All three were verified end-to-end with a synthetic two-week sweep+
+  reconcile cycle (`tests/test_cli.py::test_sweep_reattributes_later_data_
+  to_a_pure_2p_only_fly`) — a fly recorded purely via ThorImage/ThorSync,
+  never through octacam at all, stays one contiguous `Recording1..N`
+  sequence across repeated sweep runs. Separately confirmed as *not* a
+  robustness gap: the actual behavior↔2P **pairing** itself
+  (`match_take_to_twophoton`/`match_takes_to_twophoton_batch`) never reads a
+  folder's name at all — only timestamps and DAQ edge-count signals — so a
+  messed-up/missing/wrongly-cased `Fly<N>` field, or no modality suffix at
+  all, can never break a pairing; naming only ever affects the two
+  organizational conveniences above (fly attribution, the detail suffix),
+  and both degrade to today's existing safe fallback (generic bucket, no
+  suffix) rather than crashing or guessing.
 - **Unified per-fly `RecordingN` layout (`octacam process
   --reconcile-recordings`, `cli._run_reconcile_recordings`)**: octacam's own
   take numbers and the fly-attributed `2P_only/<name>` bucket are two

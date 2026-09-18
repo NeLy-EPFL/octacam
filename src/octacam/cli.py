@@ -1549,8 +1549,11 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             report.add("info", f"{info.name} — unavailable{suffix}")
     if cfg is None:
         return
+    twophoton_enabled = False
     for pc in cfg.plugins:
         name = plugins_mod._ALIASES.get(pc.name, pc.name)
+        if name == "twophoton":
+            twophoton_enabled = True
         info = by_name.get(name)
         if info is None:
             report.add("error", f"config enables unknown plugin {pc.name!r}")
@@ -1561,6 +1564,31 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             )
         else:
             report.add("ok", f"config enables {name!r} (available)")
+
+    # A real first-timer gap found auditing the setup experience: these two
+    # config sections both have to be set up for one workflow (arming the
+    # hardware trigger vs. matching/transferring the 2P data it produces),
+    # and neither octacam nor `doctor` previously cross-checked them — the
+    # mismatch was silent until someone noticed missing 2P data on the NAS.
+    twophoton_transfer_configured = bool(
+        cfg.transfer and cfg.transfer.twophoton and cfg.transfer.twophoton.source
+    )
+    if twophoton_enabled and not twophoton_transfer_configured:
+        report.add(
+            "warn",
+            "the 'twophoton' plugin is enabled (arms the hardware trigger) but "
+            "[transfer.twophoton] isn't configured — recordings will be armed "
+            "and captured, but the paired ThorSync/ThorImage data will never "
+            "be matched or transferred by `octacam process`; add "
+            '[transfer.twophoton] source = "..." to enable that.',
+        )
+    elif twophoton_transfer_configured and not twophoton_enabled:
+        report.add(
+            "warn",
+            "[transfer.twophoton] is configured but the 'twophoton' plugin "
+            "isn't enabled — recordings won't be armed by the ThorSync trigger "
+            "at all; add a [[plugins]] entry with name = \"twophoton\" to arm it.",
+        )
 
 
 def _plugin_default_device(name: str) -> str | None:
@@ -4605,6 +4633,8 @@ def _sweep_unclaimed_twophoton(
             log.error("2P sweep: failed transferring %s", folder.path)
         else:
             log.info("2P sweep: transferred %s -> %s", folder.path, dest)
+            if fly_dir is not None:
+                _write_2p_only_source_marker(dest, experiment)
     if dry_run:
         log.info("[dry-run] 2P sweep: %d folder(s) would be transferred", len(todo))
     else:
@@ -4718,6 +4748,36 @@ def _already_present_2p_names(dest_root: Path) -> set[str]:
     return names
 
 
+def _write_2p_only_source_marker(dest: Path, experiment: str) -> None:
+    """Best-effort write of ``transform.TWOPHOTON_2P_ONLY_SOURCE_FILENAME``
+    inside a 2P-only folder just attributed to an existing fly (see
+    :func:`_sweep_unclaimed_twophoton`) — see that constant's own docstring
+    for why a fly with no behavior take needs this at all. Never raises."""
+    from octacam.transform import TWOPHOTON_2P_ONLY_SOURCE_FILENAME
+
+    marker_path = dest / TWOPHOTON_2P_ONLY_SOURCE_FILENAME
+    try:
+        marker_path.write_text(json.dumps({"experiment": experiment}) + "\n")
+    except OSError as e:
+        log.warning("2P sweep: couldn't write %s: %s", marker_path, e)
+
+
+def _add_fly_basename_entry(
+    by_key: dict[tuple[str, str], set[Path]], experiment: str, name: str, fly_dir: Path
+) -> None:
+    """Shared by :func:`_gather_fly_image_basenames`'s two sources (a take's
+    ``twophoton_match.json`` and a 2P-only entry's own source marker) — adds
+    both the precise ``(experiment, thorimage_base_name)`` key and the
+    coarser ``(experiment, "fly:<FlyN>")`` fallback key (see
+    :func:`~octacam.twophoton_transfer._fly_prefix`) for *name* to *by_key*."""
+    from octacam.twophoton_transfer import _fly_prefix, _thorimage_base_name
+
+    by_key.setdefault((experiment, _thorimage_base_name(name)), set()).add(fly_dir)
+    fly_token = _fly_prefix(name)
+    if fly_token is not None:
+        by_key.setdefault((experiment, f"fly:{fly_token}"), set()).add(fly_dir)
+
+
 def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Path]]:
     """Every already-claimed ``image``-kind match under *dest_root*, keyed by
     ``(experiment, thorimage_base_name)`` -> the set of fly-dest-dirs
@@ -4734,9 +4794,19 @@ def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Pa
     claimed match's leading ``Fly<N>`` token (see :func:`_fly_prefix`) — a
     fallback signal for a modality word that isn't a shared string prefix at
     all (``Fly1_Streaming`` claimed doesn't help match an unclaimed
-    ``Fly1_Zstack`` by string prefix, but both start with ``Fly1``)."""
-    from octacam.transform import TWOPHOTON_MATCH_FILENAME
-    from octacam.twophoton_transfer import _fly_prefix, _thorimage_base_name
+    ``Fly1_Zstack`` by string prefix, but both start with ``Fly1``).
+
+    A **take's** claimed match is only one of two sources: a fly whose *only*
+    data is 2P-only (no behavior take at all, ever — confirmed as a real,
+    previously-unhandled case: such a fly has no ``twophoton_match.json``
+    anywhere, so it was invisible here and could never be recognized as an
+    attribution target for more of its own data arriving later) also
+    contributes via each of its ``2P_only/<name>``/``RecordingN_2P/2P/<name>``
+    entries' own ``TWOPHOTON_2P_ONLY_SOURCE_FILENAME`` marker."""
+    from octacam.transform import (
+        TWOPHOTON_2P_ONLY_SOURCE_FILENAME,
+        TWOPHOTON_MATCH_FILENAME,
+    )
 
     by_key: dict[tuple[str, str], set[Path]] = {}
     for match_path in dest_root.rglob(TWOPHOTON_MATCH_FILENAME):
@@ -4756,13 +4826,20 @@ def _gather_fly_image_basenames(dest_root: Path) -> dict[tuple[str, str], set[Pa
             if not rel_path:
                 continue
             p = Path(rel_path)
-            key = (p.parent.name, _thorimage_base_name(p.name))
-            by_key.setdefault(key, set()).add(fly_dir)
-            fly_token = _fly_prefix(p.name)
-            if fly_token is not None:
-                by_key.setdefault((p.parent.name, f"fly:{fly_token}"), set()).add(
-                    fly_dir
-                )
+            _add_fly_basename_entry(by_key, p.parent.name, p.name, fly_dir)
+
+    for marker_path in dest_root.rglob(TWOPHOTON_2P_ONLY_SOURCE_FILENAME):
+        entry_dir = marker_path.parent
+        try:
+            rel = entry_dir.relative_to(dest_root)
+        except ValueError:
+            continue
+        if len(rel.parts) < 2:
+            continue
+        fly_dir = dest_root / rel.parts[0] / rel.parts[1]
+        experiment = (_read_summary(marker_path) or {}).get("experiment")
+        if experiment:
+            _add_fly_basename_entry(by_key, experiment, entry_dir.name, fly_dir)
     return by_key
 
 
@@ -4932,7 +5009,10 @@ def _gather_fly_sessions(
     to exactly those fly directories instead of rescanning the whole
     *dest_root* — used by the automatic per-process reconcile step, which
     only ever needs to touch the flies this run's own folders belong to, not
-    a full-tree rglob over a potentially years-old NAS root."""
+    a full-tree rglob over a potentially years-old NAS root. In the
+    whole-tree (``fly_dirs=None``) case, a fly is discovered either via a
+    take (``recording_summary.json``) or, when it has none at all, directly
+    via its own ``2P_only``/``RecordingN_2P`` shape."""
     from octacam.transform import RECORDING_SUMMARY_FILENAME
 
     sessions: dict[Path, list[tuple[float, str, Path]]] = {}
@@ -4960,6 +5040,27 @@ def _gather_fly_sessions(
                 kind, start = content
                 sessions.setdefault(fly_dir, []).append((start, kind, take_folder))
 
+    if fly_dirs is None:
+        # A fly whose only content is ever 2P-only (no behavior take at
+        # all — a real, previously-unhandled case) has no
+        # recording_summary.json anywhere, so the take-scan loop above never
+        # discovers it — confirmed as a real gap: such a fly would be
+        # permanently invisible to a whole-tree (--all) pass, even though a
+        # PATHS-scoped one (fly_dirs given explicitly) already finds it
+        # fine. Seed it directly from its own 2P_only/RecordingN_2P shape.
+        for day_dir in dest_root.iterdir():
+            if not day_dir.is_dir() or day_dir.name == "2p_only":
+                continue
+            for fly_dir in day_dir.glob("Fly*"):
+                if not fly_dir.is_dir():
+                    continue
+                if (fly_dir / "2P_only").is_dir() or any(
+                    _RECONCILED_2P_DIR_RE.match(c.name)
+                    for c in fly_dir.iterdir()
+                    if c.is_dir()
+                ):
+                    found_fly_dirs.add(fly_dir)
+
     for fly_dir in (found_fly_dirs if fly_dirs is None else fly_dirs):
         if not fly_dir.is_dir():
             continue
@@ -4983,15 +5084,17 @@ def _gather_fly_sessions(
 
 
 def _promote_generic_2p_only_flies(
-    dest_root: Path, fly_basenames: dict[tuple[str, str], set[Path]]
+    dest_root: Path, fly_basenames: dict[tuple[str, str], set[Path]], dry_run: bool = False
 ) -> dict[Path, list[tuple[float, str, Path]]]:
     """Group whatever's left in the generic
     ``dest_root/2p_only/<experiment>/<date>/`` bucket by ``(experiment,
-    thorimage_base_name)`` — the same prefix logic
-    :func:`_attribute_unclaimed_folder` already uses — and promote each
-    distinct group into a brand-new Fly folder: the next unused ``FlyN``
-    under an existing day-folder for that experiment (reused if one already
-    exists under *dest_root*, else a freshly created ``<date>_<experiment>``).
+    thorimage_group_key)`` (see
+    :func:`~octacam.twophoton_transfer._thorimage_group_key` — the same
+    fly-identity-first grouping :func:`_attribute_unclaimed_folder` already
+    falls back to) and promote each distinct group into a brand-new Fly
+    folder: the next unused ``FlyN`` under an existing day-folder for that
+    experiment (reused if one already exists under *dest_root*, else a
+    freshly created ``<date>_<experiment>``).
 
     No existing behavior take anchors this decision (unlike the automatic
     sweep's own fly-attribution) — it's the fuzzier half of reconciliation,
@@ -5003,7 +5106,7 @@ def _promote_generic_2p_only_flies(
     :func:`_gather_fly_sessions` does, ready to fold into the same
     renumbering pass."""
     from octacam.twophoton_transfer import (
-        _thorimage_base_name,
+        _thorimage_group_key,
         classify_twophoton_folder,
         correlate_sync_folder_to_image,
     )
@@ -5051,12 +5154,12 @@ def _promote_generic_2p_only_flies(
                         )
                     continue
                 if candidate.kind == "image":
-                    base = _thorimage_base_name(candidate.path.name)
+                    base = _thorimage_group_key(candidate.path.name)
                 else:
                     correlated = correlate_sync_folder_to_image(candidate, image_siblings)
                     if correlated is None:
                         continue
-                    base = _thorimage_base_name(correlated.path.name)
+                    base = _thorimage_group_key(correlated.path.name)
                 key = (experiment_dir.name, base)
                 groups.setdefault(key, []).append(candidate.path)
 
@@ -5098,6 +5201,14 @@ def _promote_generic_2p_only_flies(
             if content is not None:
                 kind, start = content
                 sessions.setdefault(fly_dir, []).append((start, kind, path))
+                # This fly has zero behavior takes (it was just created from
+                # nothing but 2P-only data), so — same reason as the sweep's
+                # own attribution — write the source-experiment marker now,
+                # or a *later* batch sharing this fly's own ThorImage prefix
+                # could never be recognized as belonging to it (see
+                # transform.TWOPHOTON_2P_ONLY_SOURCE_FILENAME).
+                if not dry_run:
+                    _write_2p_only_source_marker(path, experiment)
     return sessions
 
 
@@ -5323,7 +5434,7 @@ def _run_reconcile_recordings(
 
     fly_basenames = _gather_fly_image_basenames(dest_root)
     sessions = _gather_fly_sessions(dest_root)
-    promoted = _promote_generic_2p_only_flies(dest_root, fly_basenames)
+    promoted = _promote_generic_2p_only_flies(dest_root, fly_basenames, dry_run)
     for fly_dir, entries in promoted.items():
         sessions.setdefault(fly_dir, []).extend(entries)
 
