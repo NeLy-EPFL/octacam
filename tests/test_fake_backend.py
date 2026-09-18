@@ -452,3 +452,49 @@ def test_stop_grab_wakes_a_blocked_managed_preview_retrieve():
     assert not th.is_alive()
     assert result["frame"] is None  # grabbing flipped, so it returns None
     assert result["elapsed"] < 1.0  # woken promptly, not the full 5 s timeout
+
+
+# --- an incomplete rig must not be silent ----------------------------------- #
+
+
+def test_missing_camera_is_recorded_and_reported(caplog):
+    """A rig that opens fewer cameras than its config asks for must say so.
+
+    Each individual failure was already logged, but nothing compared the totals,
+    so a rig configured for N running on N-1 looked identical to a healthy one:
+    the GUI simply drew a smaller grid and `octacam record` exited 0. The
+    recording is then short a camera, which is usually found days later.
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        system = CameraSystem(["FAKE-0", "NOT-PRESENT"], backend="fake")
+    try:
+        assert len(system) == 1
+        assert system.incomplete is True
+        assert "NOT-PRESENT" in system.missing
+        assert system.requested_serial_numbers == ["FAKE-0", "NOT-PRESENT"]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("INCOMPLETE RIG" in m and "NOT-PRESENT" in m for m in warnings), (
+            warnings
+        )
+    finally:
+        system.close()
+
+
+def test_complete_rig_is_not_flagged_incomplete(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        system = CameraSystem(FAKE_SERIALS, backend="fake")
+    try:
+        assert len(system) == 2
+        assert system.incomplete is False
+        assert system.missing == {}
+        assert not any(
+            "INCOMPLETE RIG" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        system.close()

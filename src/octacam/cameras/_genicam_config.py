@@ -191,6 +191,37 @@ _FRAMERATE_ENABLE_NODES = ("AcquisitionFrameRateEnable", "AcquisitionFrameRateEn
 _ROI_PAIRS = (("Width", "OffsetX"), ("Height", "OffsetY"))
 
 
+_ROI_OFFSET_NODES = frozenset(offset for _size, offset in _ROI_PAIRS)
+
+# Geometry decides what the camera actually records, so a rejected write here is
+# not the harmless "unknown node on another model" case the debug log is for: the
+# camera silently keeps the previous session's ROI and the whole recording comes
+# out at the wrong size. Report these at warning level.
+_LOUD_NODES = frozenset({"Width", "Height", "OffsetX", "OffsetY"})
+
+
+def _roi_offsets_last(
+    pairs: "list[tuple[str, str]]",
+) -> "list[tuple[str, str]]":
+    """Reorder so every ROI origin is written after every size node.
+
+    A size node's max is ``sensor - offset``, so an origin programmed first
+    clamps the size that follows. :func:`_clear_roi_offsets` zeroes the origins up
+    front, but that only helps if the file's own origin lines come *after* its
+    size lines — true for :func:`dump_config`'s CONFIG_NODES order, and not
+    something a vendor-exported or hand-edited file guarantees. Given
+    ``OffsetY`` before ``Height``, the zeroed origin was immediately overwritten
+    with 278 and the following ``Height = 2048`` was rejected against a max of
+    1770, leaving the camera on the previous session's ROI.
+
+    Nothing depends on an origin being set early, so moving the origins to the end
+    is enough; every other node keeps file order.
+    """
+    head = [(n, v) for n, v in pairs if n not in _ROI_OFFSET_NODES]
+    tail = [(n, v) for n, v in pairs if n in _ROI_OFFSET_NODES]
+    return head + tail
+
+
 def _clear_roi_offsets(backend, names: set[str], serial: str) -> None:
     """Zero the ROI origins that the incoming config's Width/Height must clear.
 
@@ -290,9 +321,11 @@ def apply_config(backend, text: str) -> None:
     :class:`~octacam.cameras.base.BackendError` rather than a raw SDK exception —
     a leak there turns one rejected node into a failed rig init.
 
-    One write is *not* in file order: the ROI origins are zeroed up front, since a
-    stale origin from a previous session clamps the size nodes (see
-    :func:`_clear_roi_offsets`).
+    Two writes are *not* in file order: the ROI origins are zeroed up front, since
+    a stale origin from a previous session clamps the size nodes (see
+    :func:`_clear_roi_offsets`), and they are then re-applied last (see
+    :func:`_roi_offsets_last`) so a file that lists an origin before its size
+    still programs the size against the full sensor.
     """
     serial = getattr(backend, "serial_number", "?")
     pairs = parse_config(text)
@@ -308,7 +341,7 @@ def apply_config(backend, text: str) -> None:
     # grow into (see _clear_roi_offsets) — otherwise a cropped ROI left on the
     # device by an earlier session makes the file's own size out of range.
     _clear_roi_offsets(backend, {name for name, _ in pairs}, serial)
-    for name, value in pairs:
+    for name, value in _roi_offsets_last(pairs):
         if name in CONFIG_SKIP_NODES:
             continue
         kind = NODE_TYPE.get(name)
@@ -325,7 +358,17 @@ def apply_config(backend, text: str) -> None:
                 # enum, or a node not in the registry: set as a symbolic enum.
                 backend._set_enum(name, value)
         except BackendError as e:
-            log.debug("Skipping %s on camera %s: %s", name, serial, e)
+            if name in _LOUD_NODES:
+                log.warning(
+                    "Camera %s rejected %s = %s (%s) — it keeps its current "
+                    "geometry, so this recording may not be the configured size",
+                    serial,
+                    name,
+                    value,
+                    e,
+                )
+            else:
+                log.debug("Skipping %s on camera %s: %s", name, serial, e)
         except (ValueError, TypeError) as e:
             log.debug("Bad value for %s on camera %s: %r (%s)", name, serial, value, e)
 

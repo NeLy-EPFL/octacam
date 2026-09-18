@@ -825,10 +825,20 @@ def enumerate_basler(
             serial = fut_to_serial[future]
             try:
                 results[serial] = future.result()
-            except genicam.GenericException as e:
+            except Exception as e:
                 # CreateDevice downloads the camera's XML over USB, so a device
                 # that enumerated but can't be operated throws here. One bad
                 # camera must not crash the enumeration of the whole rig.
+                #
+                # Deliberately broader than genicam.GenericException: pypylon is a
+                # SWIG binding over a USB transport, so this call can also raise a
+                # plain RuntimeError, or an OSError/MemoryError from the XML
+                # download. Letting one of those escape defeated the whole
+                # (serial, None) "present but unusable" design — it aborted the
+                # rig's enumeration — and skipped the _release_late_device
+                # callbacks below, orphaning every still-pending handle to be
+                # destroyed after PylonTerminate(). _describe_open_failure is
+                # typed for Exception precisely for this.
                 log.error("%s", _describe_open_failure(serial, e))
                 results[serial] = None
         if (
@@ -856,7 +866,7 @@ def enumerate_basler(
             # real handle, not a straggler, so take it rather than destroying it.
             try:
                 results[serial] = future.result()
-            except genicam.GenericException as e:
+            except Exception as e:  # see the same catch above
                 log.error("%s", _describe_open_failure(serial, e))
                 results[serial] = None
             continue

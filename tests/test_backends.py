@@ -775,3 +775,78 @@ def test_flir_fetch_image_accepts_mono8(monkeypatch):
     array, ts = frame
     assert array.dtype == np.uint8 and ts == 12345
     assert img.released == 1
+
+
+# --- ROI apply order (a stale origin must not clamp the file's own size) ----- #
+
+
+def test_roi_offsets_are_applied_after_sizes_whatever_the_file_order():
+    """Origins must be programmed after sizes, however the file lists them.
+
+    A size node's max is ``sensor - origin``, so an origin written first clamps
+    the size that follows. ``_clear_roi_offsets`` zeroes the origins up front, but
+    that only helps when the file's own origin lines come *after* its size lines —
+    true for octacam's ``dump_config`` (CONFIG_NODES order) and not something a
+    vendor-exported or hand-edited file guarantees, though the module advertises
+    the native GenApi persistence TSV. Given ``OffsetY`` before ``Height``, the
+    zeroed origin was immediately overwritten with 278 and the following
+    ``Height = 2048`` was refused against a max of 1770, leaving the camera on the
+    previous session's ROI for the whole recording.
+    """
+    from octacam.cameras._genicam_config import _roi_offsets_last
+
+    pairs = [
+        ("OffsetY", "278"),
+        ("Height", "2048"),
+        ("OffsetX", "64"),
+        ("Width", "2048"),
+        ("ExposureTime", "1000"),
+    ]
+    names = [name for name, _ in _roi_offsets_last(pairs)]
+    assert names.index("Height") < names.index("OffsetY")
+    assert names.index("Width") < names.index("OffsetX")
+    # Nothing is dropped, and non-ROI nodes keep their file order.
+    assert sorted(names) == sorted(n for n, _ in pairs)
+    assert names.index("ExposureTime") < names.index("OffsetY")
+
+
+def test_roi_reorder_is_a_no_op_for_dump_config_order():
+    """octacam's own files already list sizes first; they must be untouched."""
+    from octacam.cameras._genicam_config import _roi_offsets_last
+
+    pairs = [("Width", "2048"), ("Height", "2048"), ("OffsetX", "0"), ("OffsetY", "0")]
+    assert _roi_offsets_last(pairs) == pairs
+
+
+def test_rejected_geometry_write_is_reported_loudly(caplog):
+    """A refused Width/Height must not vanish into a debug log.
+
+    The applier is deliberately best-effort (an unknown node on another model is
+    skipped), but geometry decides what the camera actually records: a silent skip
+    means the take comes out at the previous session's ROI with nothing visible to
+    the operator, and the default CLI log level is info.
+    """
+    import logging
+
+    from octacam.cameras._genicam_config import apply_config
+    from octacam.cameras.base import BackendError
+
+    class Backend:
+        serial_number = "17475185"
+
+        def _set_number(self, name, value, is_int):
+            if name == "Height":
+                raise BackendError("Height = 2048 must be equal or smaller than Max")
+
+        def _set_bool(self, name, value):
+            pass
+
+        def _set_enum(self, name, value):
+            pass
+
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        apply_config(Backend(), "Width\t2048\nHeight\t2048\n")
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    ]
+    assert any("Height" in m and "geometry" in m for m in warnings), warnings
