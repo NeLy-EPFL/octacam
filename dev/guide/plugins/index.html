@@ -951,11 +951,26 @@ armed loop command at the first captured frame so motion is synced to capture.</
 being retyped in the tab, and a recording's config snapshot can restore it:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">[[plugins]]</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"flywheel"</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">options</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">device</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s2">"/dev/ttyACM0"</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="c1"># One sweep: 2048 steps (negative starts counter-clockwise) at 1200 µs per step,</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="c1"># resting 500 ms between sweeps, 5 sweeps, starting 2 s after the first frame.</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="n">options</span><span class="p">.</span><span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">n_steps</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">-2048</span><span class="p">,</span><span class="w"> </span><span class="n">step_interval_us</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1200</span><span class="p">,</span><span class="w"> </span><span class="n">rest_duration_ms</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">500</span><span class="p">,</span><span class="w"> </span><span class="n">n_repeats</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="n">init_wait_duration_s</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">[plugins.options]</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">device</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/dev/ttyACM0"</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="c1"># One sweep: 2048 steps (negative starts counter-clockwise) at 1200 µs per step,</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="c1"># resting 500 ms between sweeps, 5 sweeps, starting 2 s after the first frame.</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="k">[plugins.options.command]</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="n">n_steps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">-2048</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="n">step_interval_us</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1200</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="n">rest_duration_ms</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="n">n_repeats</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">5</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="n">init_wait_duration_s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span>
 </code></pre></div>
+<div class="admonition warning">
+<p class="admonition-title"><code>options</code> must be a sub-table, not an inline table</p>
+<p>TOML inline tables are immutable, so <code>options = { device = "..." }</code> followed
+by <code>options.command = { ... }</code> is a <strong>parse error</strong>, not a merge. Use the
+<code>[plugins.options]</code> / <code>[plugins.options.command]</code> sub-table form above — it
+is also what <code>octacam config</code> writes back.</p>
+</div>
 <p>Omit <code>command</code> to keep the tab's own defaults. Whatever the tab is armed with at
 record time is written into that recording's config snapshot, so the motion can
 be reproduced later.</p>

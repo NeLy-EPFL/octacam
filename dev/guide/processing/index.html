@@ -1185,6 +1185,10 @@ cameras</strong>, and resumes automatically when they are free. The pause releas
 the encoder between units (it holds no GPU/NVENC session while paused) and is
 crash-safe — if the gui/record crashes, the job resumes on its own. <code>octacam
 gui</code>/<code>record</code> also print a one-line note at startup when a job is active.</p>
+<p>The marker is published only once the GUI actually holds the cameras, so a
+GUI that failed to open them never parks a processing run. The pause has no
+timeout, so to process <em>now</em> while a GUI sits on the preview, pass
+<code>--ignore-capture</code> — processing then competes with capture for CPU/GPU/disk.</p>
 </div>
 
 
