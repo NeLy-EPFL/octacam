@@ -209,6 +209,13 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
 
 def _fake_camera_system(cam):
     class FakeSystem:
+        # Mirrors the real CameraSystem's incomplete-rig introspection: `record`
+        # reports opened-vs-configured and gates on a shortfall, so a fake missing
+        # these looks like a rig that failed that check.
+        requested_serial_numbers: list[str] = []
+        incomplete = False
+        missing: dict[str, str] = {}
+
         def __init__(self, *_a, **_k):
             self._cams = [cam]
 
@@ -489,7 +496,14 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
             cli._warn_if_transcoding()
     finally:
         logger.removeHandler(handler)
-    assert any("transcod" in m and "auto-pause" in m for m in handler.messages)
+    blob = "\n".join(handler.messages)
+    assert "transcod" in blob
+    # The warning must describe what _pause_gate actually does. It used to say a
+    # foreground `octacam process` does *not* auto-pause, which was the opposite
+    # of the code (and of docs/guide/processing.md): the gate applies to both, and
+    # only the manual-pause half is detached-only.
+    assert "detached and foreground alike" in blob
+    assert "--ignore-capture" in blob  # the documented way out
 
 
 def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):
