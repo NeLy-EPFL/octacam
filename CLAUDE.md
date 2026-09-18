@@ -1151,14 +1151,24 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
   has no logical effect; it can still surface this flake because it changes
   which specific camera lands on a marginal port. `enumerate_basler` now
   reacts: a `CreateDevice` failure whose text matches the USB2-link wording
-  gets one bounded recovery attempt (`_retry_after_usb_reset`) — a host
-  `USBDEVFS_RESET` via the camera's own USB serial
-  (`cameras/_usb_reset.py::reset_camera_usb_link`, which walks
+  gets up to `_MAX_USB_RESET_ATTEMPTS` (2) bounded recovery attempts
+  (`_retry_after_usb_reset`) — a host `USBDEVFS_RESET` via the camera's own
+  USB serial (`cameras/_usb_reset.py::reset_camera_usb_link`, which walks
   `/sys/bus/usb/devices/*/serial` rather than the tty-path walk
   `serial_ports.py`'s triggerbox recovery uses, since a camera has no tty
-  node) followed by one retried `CreateDevice` — before falling back to the
-  existing skip-and-log behavior. Both reset implementations share the same
-  low-level ioctl primitive, `serial_ports.reset_usb_node(bus, dev,
+  node) followed by a retried `CreateDevice` — before falling back to the
+  existing skip-and-log behavior. **One reset attempt wasn't enough on real
+  hardware** (found the same day, live-testing the first version of this
+  fix): a reset re-enumerates the device but doesn't guarantee it retrains to
+  SuperSpeed rather than falling back to USB 2.0 *again* —
+  `wait_for_serial`/`EnumerateDevices` only confirm the device is enumerated,
+  not which speed it landed on; only the retried `CreateDevice` call reveals
+  that. A camera was observed reset successfully and still get skipped with
+  no further log line — because the first version of this code swallowed the
+  retry's own `CreateDevice` failure silently. Now each failed attempt logs
+  why, and the loop runs up to `_MAX_USB_RESET_ATTEMPTS` times before giving
+  up (still bounded, not unbounded retry). Both reset implementations share
+  the same low-level ioctl primitive, `serial_ports.reset_usb_node(bus, dev,
   context)`. Only Basler has this failure mode wired up today (it's the only
   backend with a `None`-handle "present but unusable" convention at all —
   flir/spinnaker/pycameleon's enumeration has no equivalent try/except around

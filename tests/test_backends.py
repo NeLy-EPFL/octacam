@@ -396,17 +396,53 @@ def test_enumerate_basler_recovers_after_usb_reset_retry(monkeypatch):
     assert factory.reset_calls == ["40012161"]
 
 
-def test_enumerate_basler_gives_up_after_one_retry(monkeypatch):
-    # A link still down after the reset must not be retried in a loop — falls
-    # back to the existing skip-and-log behavior after exactly one retry.
+def test_enumerate_basler_recovers_on_second_reset_attempt(monkeypatch):
+    # Real-hardware finding (2026-09-18): a reset can re-enumerate the device
+    # and still land it back on the degraded USB2 fallback rather than
+    # SuperSpeed — the same rig's dmesg showed a camera cycling through
+    # several disconnect/reconnect events before finally training 5000M. One
+    # retry wasn't always enough; a second attempt within the same bounded
+    # call must still be able to recover it.
+    from octacam.cameras.basler import enumerate_basler
+
+    factory = _patch_basler_factory(
+        monkeypatch,
+        ["40012161"],
+        bad={"40012161"},
+        fail_times={"40012161": 2},  # original + first retry fail, second recovers
+        reset_ok=True,
+    )
+    out = enumerate_basler()
+    assert dict(out)["40012161"] is not None
+    assert factory.create_calls["40012161"] == 3
+    assert factory.reset_calls == ["40012161", "40012161"]
+
+
+def test_enumerate_basler_gives_up_after_max_reset_attempts(monkeypatch):
+    # A link still down after every bounded attempt must not be retried
+    # forever — falls back to the existing skip-and-log behavior, and every
+    # attempt's own failure reason is logged (not silently swallowed).
     from octacam.cameras.basler import enumerate_basler
 
     factory = _patch_basler_factory(
         monkeypatch, ["40012161"], bad={"40012161"}, reset_ok=True
     )
-    out = enumerate_basler()
+    msgs: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: msgs.append(record.getMessage())
+    logger = logging.getLogger("octacam")
+    logger.addHandler(handler)
+    try:
+        out = enumerate_basler()
+    finally:
+        logger.removeHandler(handler)
     assert dict(out)["40012161"] is None
-    assert factory.create_calls["40012161"] == 2  # original + exactly one retry
+    assert factory.create_calls["40012161"] == 3  # original + 2 bounded retries
+    assert factory.reset_calls == ["40012161", "40012161"]
+    # each failed retry attempt logs why, instead of silently swallowing it
+    assert (
+        sum("still on a degraded link after reset attempt" in m for m in msgs) == 2
+    )
 
 
 def test_enumerate_basler_retry_skipped_when_reset_itself_fails(monkeypatch):

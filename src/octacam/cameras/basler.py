@@ -665,40 +665,73 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
     return f"Camera {serial} could not be opened and will be skipped: {text}"
 
 
+_MAX_USB_RESET_ATTEMPTS = 2
+
+
 def _retry_after_usb_reset(tl_factory, serial: str):
-    """One bounded recovery attempt for a camera stuck on a degraded USB link.
+    """Up to ``_MAX_USB_RESET_ATTEMPTS`` recovery attempts for a camera stuck
+    on a degraded USB link.
 
     Real-hardware testing (2026-09-18, confirmed via dmesg + ``lsusb -t``)
     found this failure is not a deterministic per-camera or per-port fault:
     the same camera on the same physical port trained SuperSpeed successfully
-    on one attempt after failing on a previous one. A single host bus reset
-    (mirroring the triggerbox's ``_recover_usb`` — one reset, no loop) clears
-    that far more often than it costs, before falling back to the loud
-    skip-and-log path. Returns the new device handle on success, or None on
-    any failure — never raises, and never retries more than once.
+    on one attempt after failing on a previous one. A host bus reset
+    (mirroring the triggerbox's ``_recover_usb``) clears that far more often
+    than it costs, before falling back to the loud skip-and-log path.
+
+    One reset wasn't always enough on real hardware, though: a bus reset
+    drops and re-enumerates the device, but ``wait_for_serial`` only confirms
+    it is enumerated *again* — not that it retrained to SuperSpeed rather than
+    falling back to USB 2.0 a second time (the same rig's own dmesg showed a
+    camera cycling through several disconnect/reconnect events before finally
+    landing 5000M). Only the retried ``CreateDevice`` call itself reveals
+    that, so this loops up to ``_MAX_USB_RESET_ATTEMPTS`` times — still
+    bounded, not unbounded retry — logging *why* each attempt failed instead
+    of silently swallowing it. Returns the new device handle on the first
+    attempt that succeeds, or None if every attempt fails — never raises.
     """
-    ok, msg = reset_camera_usb_link(serial)
-    log.warning("camera %s: degraded USB link, attempting a bus reset: %s", serial, msg)
-    if not ok:
-        return None
-    if not wait_for_serial(
-        lambda: [str(d.GetSerialNumber()) for d in tl_factory.EnumerateDevices()],
-        serial,
-    ):
-        log.warning("camera %s: did not reappear after the USB reset", serial)
-        return None
-    devices = tl_factory.EnumerateDevices()
-    detected = [str(d.GetSerialNumber()) for d in devices]
-    try:
-        index = detected.index(serial)
-    except ValueError:
-        return None
-    try:
-        device = tl_factory.CreateDevice(devices[index])
-    except genicam.GenericException:
-        return None
-    log.info("camera %s: recovered after a USB bus reset", serial)
-    return device
+    for attempt in range(1, _MAX_USB_RESET_ATTEMPTS + 1):
+        ok, msg = reset_camera_usb_link(serial)
+        log.warning(
+            "camera %s: degraded USB link, attempting a bus reset (%d/%d): %s",
+            serial,
+            attempt,
+            _MAX_USB_RESET_ATTEMPTS,
+            msg,
+        )
+        if not ok:
+            return None  # e.g. a permissions error won't improve on retry
+        if not wait_for_serial(
+            lambda: [str(d.GetSerialNumber()) for d in tl_factory.EnumerateDevices()],
+            serial,
+        ):
+            log.warning("camera %s: did not reappear after the USB reset", serial)
+            continue
+        devices = tl_factory.EnumerateDevices()
+        detected = [str(d.GetSerialNumber()) for d in devices]
+        try:
+            index = detected.index(serial)
+        except ValueError:
+            continue
+        try:
+            device = tl_factory.CreateDevice(devices[index])
+        except genicam.GenericException as e:
+            log.warning(
+                "camera %s: still on a degraded link after reset attempt %d/%d: %s",
+                serial,
+                attempt,
+                _MAX_USB_RESET_ATTEMPTS,
+                e,
+            )
+            continue
+        log.info(
+            "camera %s: recovered after a USB bus reset (attempt %d/%d)",
+            serial,
+            attempt,
+            _MAX_USB_RESET_ATTEMPTS,
+        )
+        return device
+    return None
 
 
 def enumerate_basler(requested_serials: list[str] | None = None):
