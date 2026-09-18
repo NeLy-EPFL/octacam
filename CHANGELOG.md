@@ -7,7 +7,7 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
-## [Unreleased]
+## [0.3.2] - 2026-09-18
 
 ### Added
 
@@ -294,5 +294,6 @@ one-command post-processing, and a much richer web GUI.
   libusb `pycameleon` floor covers the general GenICam-USB3 camera without a
   vendor producer or EULA.
 
+[0.3.2]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.2
 [0.3.1]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.1
 [0.3.0]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.0
