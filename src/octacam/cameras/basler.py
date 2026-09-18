@@ -27,7 +27,26 @@ from octacam.cameras.base import (
 
 log = logging.getLogger("octacam")
 
-if "numpy" in sys.modules:
+
+def _numpy_imported_before_pypylon(module_names: list[str]) -> bool:
+    """Did ``numpy`` land in ``sys.modules`` strictly before ``pypylon``?
+
+    ``import pypylon.pylon`` (just above, in this module) itself pulls in
+    numpy as a transitive dependency — confirmed on real hardware
+    (2026-09-18): a plain ``"numpy" in sys.modules`` check fires on *every*
+    single run regardless of actual import order, because mere presence
+    proves nothing; pypylon guarantees it. What matters is *order*, and
+    ``sys.modules`` is a dict (insertion-ordered since Python 3.7), so
+    comparing the two keys' positions tells the real story: numpy only
+    predates pypylon if something else (e.g. ``octacam.web.app``) imported it
+    before this module's own ``from pypylon import ...`` ran. Returns False
+    (nothing to warn about) if either name is absent."""
+    if "numpy" not in module_names or "pypylon" not in module_names:
+        return False
+    return module_names.index("numpy") < module_names.index("pypylon")
+
+
+if _numpy_imported_before_pypylon(list(sys.modules)):
     log.error(
         "numpy was imported before pypylon in this process — opening a Basler "
         "camera from a worker thread can now segfault at thread teardown (see "
@@ -642,25 +661,35 @@ def _is_usb2_link_failure(text: str) -> bool:
 def _describe_open_failure(serial: str, exc: Exception) -> str:
     """An actionable, operator-facing reason a Basler camera cannot be opened.
 
-    The frequent gotcha is a USB3 camera whose SuperSpeed link fails to train and
-    falls back to USB 2.0: it is physically in a USB 3 port, yet pylon refuses it
-    with "The device cannot be operated on an USB 2.0 port." That wording reads
-    like a wrong-port mistake when the real cause is the cable/connector/port
-    link, so translate it into something the operator can act on. Any other
-    open error is passed through verbatim. By the time this fires, a bus-reset
-    retry (see ``_retry_after_usb_reset``) has already been attempted and failed
-    — this is the message for a link that stayed down.
+    Two distinct real causes produce the identical pylon wording ("The device
+    cannot be operated on an USB 2.0 port") and are not distinguishable from
+    the exception text alone (confirmed on real hardware, 2026-09-18, both
+    ways): a USB3 camera's SuperSpeed link failing to train and falling back
+    to USB 2.0 even in a genuine USB 3 port (cable/connector/link — a
+    bus-reset retry, see ``_retry_after_usb_reset``, has already been
+    attempted and failed by the time this fires), *or* the camera is
+    genuinely plugged into a USB-2-only port (no SuperSpeed lane at all — a
+    reset can never fix that). Give the operator a real way to tell them
+    apart rather than asserting one cause. Any other open error is passed
+    through verbatim.
     """
     text = str(exc)
     if _is_usb2_link_failure(text):
         return (
-            f"Camera {serial} came up on a USB 2.0 link and cannot be opened. A "
-            "USB3 camera whose SuperSpeed link fails to train drops back to USB "
-            "2.0 even in a USB 3 port, so the cause is the cable or connector, "
-            "not the port choice. Reseat both ends of its cable (or swap in a "
-            "known-good USB3 cable), or move it to another USB 3 port, then "
-            "reload. `lsusb -t` shows each camera's link speed — a healthy one "
-            "reads 5000M, this one 480M. Skipping this camera for now."
+            f"Camera {serial} came up on a USB 2.0 link and cannot be opened. "
+            "Two distinct causes produce this: either the port itself is USB "
+            "2.0-only (no SuperSpeed lane at all — check for a USB3/SS marking "
+            "or blue connector, or plug a *different* known-good USB3 device "
+            "into this exact port and see whether `lsusb -t` shows it at "
+            "5000M), or it is a real USB 3 port whose SuperSpeed link failed to "
+            "train and fell back to USB 2.0 (cable/connector — a bus-reset "
+            "retry already tried and failed to recover it just now). "
+            "`lsusb -t` shows each camera's link speed — a healthy one reads "
+            "5000M, this one 480M, but that alone doesn't tell you which of "
+            "the two causes it is. If it's a real USB3 port: reseat both ends "
+            "of the cable (or swap in a known-good USB3 cable) and reload. If "
+            "it's a USB2-only port: move the camera to an actual USB 3 port — "
+            "reseating or a reset won't help. Skipping this camera for now."
         )
     return f"Camera {serial} could not be opened and will be skipped: {text}"
 

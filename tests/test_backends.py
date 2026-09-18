@@ -155,6 +155,31 @@ def test_teardown_backend_noop_for_non_session_backends():
 # --------------------------------------------------------------------------
 
 
+def test_numpy_imported_before_pypylon_true_when_numpy_first():
+    pytest.importorskip("pypylon")
+    from octacam.cameras.basler import _numpy_imported_before_pypylon
+
+    assert _numpy_imported_before_pypylon(["numpy", "pypylon", "pypylon.pylon"])
+
+
+def test_numpy_imported_before_pypylon_false_when_pypylon_first():
+    # The expected/safe case: pypylon's own import transitively pulls in
+    # numpy, so numpy's sys.modules entry lands *after* pypylon's, not before.
+    pytest.importorskip("pypylon")
+    from octacam.cameras.basler import _numpy_imported_before_pypylon
+
+    assert not _numpy_imported_before_pypylon(["pypylon", "pypylon.pylon", "numpy"])
+
+
+def test_numpy_imported_before_pypylon_false_when_either_absent():
+    pytest.importorskip("pypylon")
+    from octacam.cameras.basler import _numpy_imported_before_pypylon
+
+    assert not _numpy_imported_before_pypylon(["pypylon"])
+    assert not _numpy_imported_before_pypylon(["numpy"])
+    assert not _numpy_imported_before_pypylon([])
+
+
 def _make_basler_backend(raw):
     pytest.importorskip("pypylon")
     from octacam.cameras.basler import BaslerBackend
@@ -526,6 +551,12 @@ def test_single_backend_filters_declined_camera(monkeypatch):
 
 
 def test_describe_open_failure_usb2_is_actionable():
+    # Real-hardware finding (2026-09-18): the identical pylon wording covers
+    # two distinct real causes — a USB3 link that failed to train, AND a
+    # camera genuinely plugged into a USB-2-only port — so the message must
+    # not assert only one of them (it used to claim "not the port choice",
+    # which is simply wrong for the second case) and must give a real way to
+    # tell them apart.
     from octacam.cameras.basler import _describe_open_failure
 
     msg = _describe_open_failure(
@@ -534,6 +565,8 @@ def test_describe_open_failure_usb2_is_actionable():
     assert "40018619" in msg
     assert "cable" in msg.lower()
     assert "5000M" in msg and "480M" in msg
+    assert "USB 2.0-only" in msg  # the genuinely-wrong-port possibility
+    assert "known-good USB3 device" in msg  # a real way to disambiguate
 
 
 def test_describe_open_failure_generic_passthrough():

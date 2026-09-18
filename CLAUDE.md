@@ -72,7 +72,18 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   camera-open moved onto a worker thread in 900e074). Fixed by importing
   pypylon first: `cli.py` does a best-effort `import pypylon.pylon` as its
   first statement (before anything else gets a chance to import numpy), since
-  it's the first octacam module loaded for every subcommand.
+  it's the first octacam module loaded for every subcommand. **The runtime
+  check for this (`basler.py`'s module-level warning) was itself broken until
+  2026-09-18**: it only checked `"numpy" in sys.modules`, but `import
+  pypylon.pylon` itself transitively imports numpy (confirmed: a bare `import
+  pypylon.pylon` alone pulls numpy into `sys.modules`), so that check fired on
+  *every* run regardless of actual order — a real false positive a user hit
+  in production (the warning appeared, but everything still worked). Fixed by
+  `_numpy_imported_before_pypylon`, which compares the two names' positions in
+  `sys.modules` (a dict, insertion-ordered since Python 3.7) instead of mere
+  presence — pypylon's own transitive numpy import always lands *after*
+  pypylon's own entry, so only a genuinely-earlier outside import (e.g.
+  `octacam.web.app`) now trips it.
 
 ## Versioning & releases
 
