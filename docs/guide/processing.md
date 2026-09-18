@@ -265,9 +265,13 @@ check/tuning recording: anything the matcher above correctly didn't pair up
 lands here instead, safely, rather than being silently dropped. Pass
 `--no-twophoton-sweep` to skip it for a given run. `octacam process
 --twophoton-sweep --config <rig-config>` is the same logic as its own
-standalone mode — useful run by hand or on a periodic systemd timer (see the
-packaging example) when there's no behavior recording to process at all; it
-ignores `PATHS`/`--last`/`--all`/`--detach`. Right after, `process` also
+standalone mode, needing nothing but the rig's config — useful when there's
+no behavior recording to process at all (a purely 2P-only session); it
+ignores `PATHS`/`--last`/`--all`/`--detach`. There is deliberately **no
+automatic recurring schedule** for this (no systemd timer or similar) — every
+2P mode here is meant to be invoked deliberately, by hand or via the GUI's
+"shut down & process" offer, never run unattended in the background. Right
+after, `process` also
 rebuilds `2p_reconciliation.md` for every day/session folder those sources
 touched — see [Reconciliation manifest](#reconciliation-manifest).
 
@@ -293,38 +297,51 @@ preview of the same decision.
 octacam's own take numbers and the fly-attributed `2P_only/` bucket above
 are two separate numbering schemes within one fly's folder. `octacam process
 --reconcile-recordings` unifies them into one chronological sequence per
-fly — `Recording1`, `Recording2`, ... — suffixed by what's actually inside:
+fly — `Recording1`, `Recording2`, ... — suffixed by what's actually inside,
+and (when the ThorImage sample name has one) its own modality word:
 
 ```
 <transfer.directory>/260914_/Fly1/
-  Recording1_Beh/       # behavior only
-  Recording2_2P/2P/...  # 2P only (a Z-stack, a calibration scan, ...)
-  Recording3_Synced/    # Behavior/, Renderings/, and 2P/ together
+  Recording1_Beh/                 # behavior only
+  Recording2_2P_Zstack/2P/...     # 2P only — sample name was "Fly1_Zstack"
+  Recording3_Synced/              # Behavior/, Renderings/, and 2P/ together
 ```
 
-This is a **separate, explicit, on-demand mode** — a normal `process` run
-never renumbers anything automatically; it keeps writing takes and
-`2P_only/<name>` exactly as described above. Run
-`--reconcile-recordings --config <rig-config>` by hand whenever a day or
-experiment is considered done. Like `--migrate-layout`, it's a
-same-filesystem rename (no data copied), self-contained (works entirely from
-what's already on the NAS, no live 2P source needed), and safe to re-run —
-a fly whose session count hasn't changed since the last pass is left
-untouched. If it *has* changed (a new take, a newly-attributed 2P-only
-entry, or a newly promoted 2P-only fly — see below), that fly is fully
-renumbered from scratch: numbers can shift, by design, since this is only
-ever run deliberately, never mid-session.
+**This renumbering runs automatically** as part of every normal `process`
+invocation, scoped to just the flies that run touched — no separate step
+needed for the common case. It's gated on `[transfer.twophoton]` being
+configured and `reconcile_recordings` not set to `false`;
+`--no-auto-reconcile-recordings` opts a single run out. Like
+`--migrate-layout`, it's a same-filesystem rename (no data copied),
+self-contained (works entirely from what's already on the NAS, no live 2P
+source needed), and safe to re-run — a fly whose session count hasn't
+changed since the last pass is left untouched. If it *has* changed (a new
+take, a newly-attributed 2P-only entry, or a newly promoted 2P-only fly —
+see below), that fly is fully renumbered from scratch: numbers can shift.
 
-It also promotes the fuzzier case: 2P data still sitting in the generic
+Run it standalone with `--reconcile-recordings --config <rig-config>` for
+data that predates this feature, or a fly whose sessions span more than one
+`process` run. This standalone mode needs either explicit `PATHS` (one or
+more day/experiment or fly folders under `[transfer].directory`) or
+`--all`, which also scans the whole tree and runs the fuzzier promotion
+below — it never implicitly scans everything, since a multi-year NAS tree
+can be a real, surprising cost over a network share.
+
+`--all` (or the standalone `PATHS`-scoped mode, for a fly it already knows
+about) also promotes the fuzzier case: 2P data still sitting in the generic
 `2p_only/<experiment>/<date>/` bucket (nothing could attribute it to an
-existing fly) is grouped by the same ThorImage name-prefix logic and
-promoted into a **brand-new Fly folder** — the next unused `FlyN` for that
-experiment. Unlike the automatic attribution above, no existing behavior
-take anchors this decision, so it's the least certain part of this feature —
-nothing is destroyed if a promotion turns out to be a standalone test
-recording rather than a real fly (it's a rename, always previewable with
-`--dry-run` first), but it's worth reviewing the dry-run output before
-running it for real.
+existing fly) is grouped by ThorImage name and promoted into a **brand-new
+Fly folder** — the next unused `FlyN` for that experiment. Unlike the
+automatic attribution above, no existing behavior take anchors this
+decision, so it's the least certain part of this feature — nothing is
+destroyed if a promotion turns out to be a standalone test recording rather
+than a real fly (it's a rename, always previewable with `--dry-run` first),
+but it's worth reviewing the dry-run output before running it for real.
+This grouping works even for a fly that has never had a single behavior
+take — a lab that runs some flies through ThorImage/ThorSync alone, without
+ever opening octacam, still gets one contiguous `RecordingN` sequence for
+it across repeated sweep/reconcile runs, not a fresh duplicate fly each
+time.
 
 Every real move is also recorded to that fly's own
 `reconciliation_log.md` — unlike `2p_reconciliation.md`, this file is

@@ -75,6 +75,7 @@ nav:
       - Web GUI: guide/gui.md
       - Recording: guide/recording.md
       - Processing recordings: guide/processing.md
+      - 2-photon + behavior workflow: guide/twophoton-workflow.md
       - Configuration: guide/configuration.md
       - Camera backends: guide/backends.md
       - Plugins: guide/plugins.md
