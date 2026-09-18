@@ -2,6 +2,8 @@ import logging
 import time
 from pathlib import Path
 
+import pytest
+
 from octacam.config import (
     GuiConfig,
     RecordConfig,
@@ -320,3 +322,69 @@ def test_visualization_layout_known_cameras_no_unknown_warning(tmp_path):
     with _LogCapture() as cap:
         load_config_dir(tmp_path)
     assert not any("unknown camera" in m for m in cap.messages)
+
+
+# --- a config that does not parse at all ------------------------------------ #
+
+
+def test_parse_config_raises_on_malformed_toml(tmp_path):
+    """A file that exists but does not parse must fail loudly, not silently
+    become an all-defaults config.
+
+    Field-level problems stay tolerant (warn-and-default), but a decode error
+    yielded *nothing*: the rig then ran on stock defaults — every detected
+    camera, save dir "./", no plugins, no [transfer] destination — which reads to
+    the operator as "octacam ignored my config". The documented flywheel
+    `options.command` example was itself invalid TOML (an inline table cannot be
+    extended with a dotted key), so copy-pasting the docs hit exactly this.
+    """
+    from octacam.config import ConfigError, parse_config
+
+    bad = tmp_path / "octacam_config.toml"
+    bad.write_text(
+        '[[plugins]]\n'
+        'name = "flywheel"\n'
+        'options = { device = "/dev/ttyACM0" }\n'
+        'options.command = { n_steps = -2048 }\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(bad)
+    # The message names the file and the offending line, so it is actionable.
+    assert str(bad) in str(excinfo.value)
+
+
+def test_parse_config_still_tolerant_of_bad_fields(tmp_path):
+    """The decode-error change must not make field-level parsing strict."""
+    from octacam.config import parse_config
+
+    good = tmp_path / "octacam_config.toml"
+    good.write_text('[record]\nfps = "not-a-number"\n')
+    config = parse_config(good)  # warns and defaults, does not raise
+    assert config.record.fps > 0
+
+
+def test_parse_config_missing_file_returns_defaults(tmp_path):
+    from octacam.config import parse_config
+
+    config = parse_config(tmp_path / "nope.toml")
+    assert config.cameras == []
+
+
+def test_documented_flywheel_options_example_parses():
+    """The docs' [[plugins]] flywheel block must be valid TOML.
+
+    It is copy-paste material for operators, and an invalid one used to land them
+    in the all-defaults path above rather than pointing at the bad line.
+    """
+    import re
+    from pathlib import Path
+
+    import tomllib
+
+    doc = Path(__file__).resolve().parents[1] / "docs" / "guide" / "plugins.md"
+    block = re.search(
+        r"```toml\n(\[\[plugins\]\]\nname = \"flywheel\".*?)```", doc.read_text(), re.S
+    )
+    assert block is not None, "flywheel options example not found in plugins.md"
+    parsed = tomllib.loads(block.group(1))
+    assert parsed["plugins"][0]["options"]["command"]["n_steps"] == -2048

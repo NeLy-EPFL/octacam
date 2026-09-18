@@ -103,7 +103,8 @@ follows the newest release, and `develop` pushes refresh the rolling `dev` versi
 src/octacam/
   cli.py            typer CLI: gui, doctor, config, record, flash, benchmark, process
   controller.py     RecordingController — the framework-free record state machine
-  config.py         octacam_config.toml parsing (pydantic, tolerant/warn-and-default)
+  config.py         octacam_config.toml parsing (pydantic, tolerant per field;
+                    a file that does not parse at all raises ConfigError)
   config_writer.py  writes config snapshots (inline-table TOML for triggerbox)
   writer.py         AsyncFrameWriter → ffmpeg subprocess (H.264) or raw byte dump
   transform.py      DisplayTransform (rotate/flip) + recording-summary constants
@@ -145,7 +146,18 @@ session-cache note). Two subtleties that are easy to break:
   block on an ack), guarded by a `_start_hooks_done` event so a stop/abort can
   never overtake a not-yet-sent hardware arm.
 - **Camera control is locked** while `recording_active` *or* `diagnosing` — any
-  device-touching op (start, param write, node-map snapshot) is refused.
+  device-touching op (start, param write, node-map snapshot) is refused. The
+  per-recording camera-parameter export runs **off** that lock (next to the NVENC
+  warm-up): it walks every camera's full node map over USB with no timeout, and
+  `snapshot()`/`stop_recording()`/`notify_state()` take the same lock, so doing it
+  under the lock let one stalled camera wedge the GUI's status and Stop button.
+- **A rig that opens fewer cameras than its config asks for is not silent.**
+  `CameraSystem` records the shortfall (`.missing`, `.incomplete`), logs one
+  `INCOMPLETE RIG` warning naming each camera, exposes it as `missing_cameras` in
+  `/api/system`, and `octacam record` confirms before recording (or warns under
+  `--force`/non-interactive). Dropping a failed camera and carrying on is
+  deliberate — the rest of the rig is worth having — but synchronized N-camera
+  capture is the point, so a 7-of-8 session must never look like a healthy one.
 
 Each `Camera` runs its own grab thread; `retrieve()` must **never raise** (it
 returns `None` on a device/stop-race error) or a dead grab thread would orphan
@@ -265,7 +277,7 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
 ## Config system
 
 Per-rig **`octacam_config.toml`** (parsed tolerantly in `config.py` —
-warn-and-default, never raise) plus **one per-camera sensor file**:
+warn-and-default per *field*) plus **one per-camera sensor file**:
 - **Basler** → native `.pfs`.
 - **Every other GenICam backend** (flir, spinnaker, pycameleon) → the
   native **GenApi persistence TSV** (`.txt`) via
@@ -274,6 +286,14 @@ warn-and-default, never raise) plus **one per-camera sensor file**:
   sharing the same param files. `fake` writes the same TSV but as `.fake`.
   `transform.PARAM_FILE_EXTENSIONS` lists every suffix (so the transfer step
   needs no SDK import); `tests/test_backends.py` keeps it in step.
+
+That per-field tolerance stops at the file level: a config that exists but does
+not parse **at all** raises `ConfigError` (rendered by `cli.main` as a one-line
+"Config error:" naming the file and offending line, exit 2). It used to log and
+return a bare `OctacamConfig()`, so one bad line silently ran the rig on stock
+defaults — every detected camera, save dir `./`, no plugins, no `[transfer]`
+destination — which reads to an operator as "octacam ignored my config" rather
+than "line 48 is malformed".
 
 **The recording's config snapshot** (`controller._snapshot_config`) makes each
 recording folder a relaunchable config dir, and `octacam process` transfers it
@@ -306,8 +326,14 @@ a size node's max `sensor - origin`, so the *previous* session's cropped/offset
 ROI clamps the *next* config's `Width`/`Height` (hexaview's `OffsetY=278` made
 triggerbox's `Height=2048` out of range at max 1770 — it failed the whole rig
 init). `apply_config` therefore zeroes the origin whose size node the file sets
-(`_clear_roi_offsets`) **before** the file-order loop; the file's own
-`OffsetX`/`OffsetY` lines follow and restore it. Two invariants this rests on:
+(`_clear_roi_offsets`) **before** the loop, and applies the file's own
+`OffsetX`/`OffsetY` lines **last** (`_roi_offsets_last`) so they restore the origin
+after every size is programmed. Both halves are needed: zeroing alone only worked
+for files that happen to list sizes before origins (true of `dump_config`'s
+CONFIG_NODES order, not of the vendor-exported/hand-edited TSVs this module also
+accepts). A refused `Width`/`Height`/`OffsetX`/`OffsetY` write is logged at
+**warning**, not debug — the camera silently keeping the previous ROI changes what
+gets recorded, and the default CLI level is info. Two invariants this rests on:
 every backend's typed setters (`_set_enum`/`_set_bool`/`_set_number`) must raise
 `BackendError` and **never leak a raw SDK exception** — that is what makes
 `apply_config`'s skip-and-continue best-effort real, and a leak turns one refused

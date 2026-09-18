@@ -45,7 +45,12 @@ from starlette.websockets import WebSocketState
 
 import octacam
 from octacam import config_writer, updates
-from octacam.config import OctacamConfig, find_config_file, parse_config
+from octacam.config import (
+    ConfigError,
+    OctacamConfig,
+    find_config_file,
+    parse_config,
+)
 from octacam.controller import (
     RecordingController,
     StartResult,
@@ -448,6 +453,9 @@ class _Client:
         self.id = next(_Client._next_id)
         self.frames: dict[int, bytes] = {}
         self.texts: dict[str, str] = {}
+        # Bumped on every queue_text so a caller that computed a payload before
+        # awaiting can tell whether something newer landed meanwhile.
+        self.text_seq: dict[str, int] = {}
         self.events: deque[str] = deque(maxlen=50)  # events are not dropped
         self.wakeup = asyncio.Event()
         # Per-camera-index display request (resolution / paused). Absent => the
@@ -497,7 +505,23 @@ class _Client:
 
     def queue_text(self, kind: str, message: str) -> None:
         self.texts[kind] = message
+        self.text_seq[kind] = self.text_seq.get(kind, 0) + 1
         self.wakeup.set()
+
+    def queue_text_if_current(self, kind: str, message: str, seen: int) -> bool:
+        """Queue ``message`` only if nothing else queued ``kind`` since ``seen``.
+
+        ``texts`` is newest-only per kind, so a payload computed *before* an
+        ``await`` would otherwise overwrite whatever arrived during it. That is
+        harmless for kinds the server re-sends on a tick (``state``), and fatal
+        for ``system``: nothing re-sends it, so clobbering the init thread's
+        ready descriptor with a stale placeholder strands the GUI on the loading
+        screen until the operator reloads the page.
+        """
+        if self.text_seq.get(kind, 0) != seen:
+            return False
+        self.queue_text(kind, message)
+        return True
 
     def queue_event(self, message: str) -> None:
         self.events.append(message)
@@ -660,6 +684,16 @@ class _AppState:
             # Set if that background init failed to open any camera, so the SPA
             # shows the reason instead of an endless "connecting" placeholder.
             "init_error": controller.init_error,
+            # Populated when the rig came up with fewer cameras than the config
+            # asked for. init_error covers "nothing opened"; this covers the
+            # quieter and more dangerous 7-of-8 case, which otherwise just looks
+            # like a smaller grid.
+            "missing_cameras": [
+                {"serial": serial, "reason": reason}
+                for serial, reason in sorted(
+                    getattr(controller.camera_system, "missing", {}).items()
+                )
+            ],
             "config_dir": self.config_dir,
             "plugins": plugins_status,
             # Enables the "managed" trigger-source option in the GUI: true when a
@@ -1269,8 +1303,15 @@ def create_app(
         # rotation/flip keeps baking into recordings.
         if req.target == "active" and req.save_display and doc is not None:
             state.raw_config = doc
-            state.config = parse_config(find_config_file(active))
-            controller.camera_system.apply_display_config(state.config.cameras)
+            try:
+                state.config = parse_config(find_config_file(active))
+            except ConfigError as e:
+                # The file was just written from a validated document, so this is
+                # not expected — but the save itself succeeded, so keep serving
+                # the previous live config rather than failing the request.
+                log.error("Saved config did not parse back; keeping the live one: %s", e)
+            else:
+                controller.camera_system.apply_display_config(state.config.cameras)
 
         return {
             "status": "ok",
@@ -1366,9 +1407,13 @@ def create_app(
             # after (or during) the background camera init fills in its grid and
             # plugin readiness from the socket, without waiting for — or racing —
             # the one-shot broadcast the init thread fires on completion.
+            seen_system = client.text_seq.get("system", 0)
             descriptor = await loop.run_in_executor(None, state.system_descriptor)
-            client.queue_text(
-                "system", json.dumps({"type": "system", **descriptor})
+            # read_params() walks every camera over USB, so this await lasts tens
+            # to hundreds of ms — long enough for _initialize_rig to finish and
+            # broadcast the real descriptor to this already-registered client.
+            client.queue_text_if_current(
+                "system", json.dumps({"type": "system", **descriptor}), seen_system
             )
             snapshot = await loop.run_in_executor(None, controller.snapshot)
             client.queue_text("state", json.dumps({"type": "state", **snapshot}))

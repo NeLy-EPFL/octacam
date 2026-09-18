@@ -256,6 +256,9 @@ async function main() {
   };
 
   let connMode = "offline";
+  // Assigned once the footer wiring below runs; setConnectionMode calls it, and
+  // can fire first (the initial "connecting" mode) — hence the optional call.
+  let syncDisconnectVisibility = null;
   let userDisconnected = false; // user clicked Disconnect — suppress reconnect
   let serverStopped = false; // server was shut down from the UI
   let recordingActive = false; // a trial is in progress on the rig
@@ -309,11 +312,25 @@ async function main() {
 
   // Disconnecting this browser (the rig keeps recording) is a rare, easy-to-
   // misclick action, so — like the Record tab's own rarely-used knobs — it
-  // stays tucked behind the same Advanced-options switch.
+  // stays tucked behind the same Advanced-options switch *while connected*. Once
+  // the socket is down the same button is the Connect/Reconnect recovery control,
+  // and it is shown regardless of that switch (see syncDisconnectVisibility).
   {
     const advancedToggle = document.getElementById("record-advanced-toggle");
-    const syncDisconnectVisibility = () => {
-      document.getElementById("disconnect-btn").hidden = !advancedToggle.checked;
+    syncDisconnectVisibility = () => {
+      // Visible when the operator opted in via Advanced, OR whenever the socket is
+      // down — which is exactly when this button becomes the Connect/Reconnect
+      // recovery control. It has to be independent of the switch there: the
+      // Advanced toggle lives inside <fieldset id="record-fields">, which
+      // record.setConnected(false) disables on every disconnect, so a default
+      // browser (Advanced off, the localStorage-empty case) could neither see the
+      // button nor reach the control that reveals it. setConnectionMode relabels
+      // it and clears `disabled` for recovery; without this it stayed display:none
+      // while doing so, making the whole affordance dead UI.
+      const needRecovery = connMode !== "connected";
+      document.getElementById("disconnect-btn").hidden = !(
+        advancedToggle.checked || needRecovery
+      );
     };
     syncDisconnectVisibility();
     advancedToggle.addEventListener("change", syncDisconnectVisibility);
@@ -389,7 +406,17 @@ async function main() {
     grid?.setConnected(camReady);
     cameraTab?.setConnected(camReady);
     benchmark.setConnected(camReady);
-    saveDialog?.setConnected(camReady);
+    // SaveDialog is built in buildCameras(), so before the cameras arrive — and
+    // forever, if init fails — nothing had wired #save-config-btn or disabled it:
+    // clicking it (or Ctrl+S, which clicks the same id) silently did nothing while
+    // the button looked live. Until it exists, keep the control honestly disabled;
+    // it has nothing to save without cameras anyway.
+    if (saveDialog) {
+      saveDialog.setConnected(camReady);
+    } else {
+      const saveBtn = document.getElementById("save-config-btn");
+      if (saveBtn) saveBtn.disabled = true;
+    }
     dirPicker?.setConnected(connected);
     // Plugin tabs own their own enable/disable (e.g. the Flywheel tab also
     // gates its fields on the serial port being open and stops a jog on
@@ -463,6 +490,9 @@ async function main() {
     // Stay clickable when stopped so recovery doesn't need the browser's own
     // reload control; the click handler reloads the page in that mode.
     disconnectBtn.disabled = false;
+    // ...and actually on screen: visibility depends on connMode now, and this is
+    // the only place it changes.
+    syncDisconnectVisibility?.();
     document.getElementById("shutdown-btn").disabled = mode === "stopped";
   }
 

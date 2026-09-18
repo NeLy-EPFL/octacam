@@ -7,6 +7,87 @@ and octacam adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 Releases are tagged `vX.Y.Z`; install a specific one with
 `git+https://github.com/NeLy-EPFL/octacam.git@vX.Y.Z`.
 
+## [0.3.3] - 2026-09-18
+
+### Fixed
+
+Fifteen defects found by a review of the 0.3.2 range, all of which shipped in
+0.3.2. Four of them fail *silently* on the rig.
+
+- **A rig no longer records with fewer cameras than its config asks for, silently**
+  — a camera that failed to open was dropped with one log line and recording went
+  ahead. Nothing compared the configured count against the opened one, so the GUI
+  just drew a smaller grid and `octacam record` exited 0: a 7-of-8 session was
+  indistinguishable from a healthy one until the data was analysed. octacam now
+  tracks the shortfall (`CameraSystem.missing`), logs one `INCOMPLETE RIG` warning
+  naming each missing camera and why, reports it in `/api/system`, and makes
+  `octacam record` confirm before recording (`--force` to skip).
+- **A camera's ROI is no longer silently left at the previous session's** — the
+  stale-ROI fix only worked for parameter files that list `Width`/`Height` before
+  `OffsetX`/`OffsetY`. Given the other order the zeroed origin was immediately
+  re-applied and the following size was rejected against a clamped max, and the
+  refusal was logged at *debug*, so the whole take was captured at the wrong
+  geometry with nothing visible to the operator. Origins are now applied after
+  every size whatever the file order, and a rejected geometry write is a warning.
+- **A configured flywheel loop now runs on `octacam record`** — `options.command`
+  seeded only the GUI tab (the plugin implemented no `default_start_params`), so
+  a headless recording never armed the motor and never said so. Relaunching a
+  recording from its own config snapshot therefore did not reproduce its motion.
+- **The documented flywheel `options.command` example is valid TOML** — it
+  extended an inline table with a dotted key, which is a parse error. Worse,
+  `parse_config` swallowed the decode error and returned an all-defaults config,
+  so copy-pasting the docs made octacam run with every detected camera, save dir
+  `./`, no plugins and no destination. A config that does not parse now raises
+  `ConfigError` naming the file and line instead of being silently ignored.
+- **A detached job that cannot take its lock now fails instead of running
+  invisibly** — it kept going "unmarked", but every liveness check keys off that
+  flock: `jobs list` reported it failed while ffmpeg burned CPU, `pause`/`resume`/
+  `cancel` all refused it, and `octacam cache clear --all` deleted the directory
+  it was still writing into.
+- **Two `[[visualization]]` grids no longer rebuild each other forever** — under
+  `--no-transcode` the input set is every `*.mp4` in the folder, grids included,
+  so building one made the other "older than the videos it composites". Both
+  re-encoded on every run, on exactly the flag documented for regenerating grids.
+- **The GUI no longer strands itself on the loading placeholder** — a browser
+  connecting while the cameras were opening could have its ready descriptor
+  overwritten by the handshake's own stale one (newest-only per message kind).
+  Nothing re-sends `system`, so only a reload recovered.
+- **Shutting down asks again** — the path that actually shuts the server down had
+  no confirmation at all, behind a bare icon button next to save-config, and the
+  "N other browsers will be disconnected" warning survived only on the path the
+  server rejects with 409.
+- **Keyboard shortcuts no longer fire behind the shutdown dialog** — the new
+  modal was missing from the suppression guard, so bare keys acted on the app
+  underneath and Ctrl+Enter started a recording, which then made the pending
+  shutdown fail. The guard now finds every modal instead of a hard-coded list.
+- **The Save-config button no longer looks live while doing nothing** — it is
+  wired in the lazy camera build, so before the cameras arrived (and forever, if
+  they failed) clicking it or pressing Ctrl+S silently did nothing.
+- **The Connect/Reconnect button is reachable again** — it was hidden behind the
+  Record tab's Advanced switch, which is disabled exactly when the socket is
+  down, so the recovery control was unreachable by default. It is now always
+  shown while disconnected.
+- **A failed camera open no longer leaks the whole rig** — an error while loading
+  a config left every opened camera claimed for the life of the process, then
+  destroyed after `PylonTerminate()`.
+- **One odd exception no longer aborts Basler enumeration** — only
+  `genicam.GenericException` was caught, so a SWIG `RuntimeError` or an `OSError`
+  from the XML download killed the whole rig's enumeration and orphaned every
+  still-pending device handle.
+- **Starting a recording no longer blocks the GUI's status and Stop** — the
+  per-camera parameter export (a full node-map walk over USB, no timeout) ran
+  under the controller lock that `/api/state`, the telemetry loop and Stop all
+  take. It now runs off the lock, beside the NVENC warm-up.
+- **`octacam process` can no longer be parked forever by an idle GUI** — the
+  capture-active marker was published for the whole `octacam gui` lifetime, even
+  before any camera opened and even when it opened none, and the pause has no
+  timeout. The marker is now published only once the GUI holds the cameras, and
+  `--ignore-capture` opts out. The launch warning claimed foreground runs do not
+  auto-pause, which was the opposite of what the code did.
+- Also: `python -m octacam`'s module no longer runs the CLI on plain import
+  (missing `if __name__ == "__main__"` guard).
+
+
 ## [0.3.2] - 2026-09-18
 
 ### Added
@@ -294,6 +375,7 @@ one-command post-processing, and a much richer web GUI.
   libusb `pycameleon` floor covers the general GenICam-USB3 camera without a
   vendor producer or EULA.
 
+[0.3.3]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.3
 [0.3.2]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.2
 [0.3.1]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.1
 [0.3.0]: https://github.com/NeLy-EPFL/octacam/releases/tag/v0.3.0

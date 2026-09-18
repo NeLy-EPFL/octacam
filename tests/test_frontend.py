@@ -689,16 +689,51 @@ def test_shutdown_plain_button_resolves_shutdown(page):
     assert choice == "shutdown"
 
 
-def test_shutdown_no_modal_when_nothing_recorded(page):
+def test_shutdown_confirms_even_when_nothing_recorded(page):
+    """The no-work path still asks before killing the server.
+
+    It used to return "shutdown" immediately, so the one path /api/shutdown
+    actually honours had no confirmation at all — from a bare icon button sitting
+    next to save-config. The three-way modal stays out of the way (there is
+    nothing to process), but a plain confirm is not optional.
+    """
     _make_shutdown(page)
     result = page.evaluate(
         """async () => {
+            const asked = [];
+            window.confirm = (m) => { asked.push(m); return true; };
             const choice = await window.__sd.confirm({ recordingActive: false, hasWork: false });
             const hidden = document.getElementById('shutdown-dialog').classList.contains('hidden');
-            return { choice, hidden };
+            return { choice, hidden, asked: asked.length };
         }"""
     )
-    assert result == {"choice": "shutdown", "hidden": True}
+    assert result == {"choice": "shutdown", "hidden": True, "asked": 1}
+
+
+def test_shutdown_declined_when_nothing_recorded_cancels(page):
+    _make_shutdown(page)
+    choice = page.evaluate(
+        """async () => {
+            window.confirm = () => false;  // operator backs out
+            return await window.__sd.confirm({ recordingActive: false, hasWork: false });
+        }"""
+    )
+    assert choice == "cancel"
+
+
+def test_shutdown_warns_about_other_browsers_on_every_path(page):
+    """The peer warning used to exist only on the recordingActive path, which the
+    server rejects with 409 — so in practice nobody ever saw it."""
+    _make_shutdown(page)
+    message = page.evaluate(
+        """async () => {
+            let seen = "";
+            window.confirm = (m) => { seen = m; return true; };
+            await window.__sd.confirm({ recordingActive: false, hasWork: false, peerCount: 3 });
+            return seen;
+        }"""
+    )
+    assert "2 other browsers are connected" in message
 
 
 def test_shutdown_while_recording_uses_binary_confirm(page):
@@ -713,6 +748,59 @@ def test_shutdown_while_recording_uses_binary_confirm(page):
         }"""
     )
     assert result == {"choice": "shutdown", "hidden": True}
+
+
+def test_shortcuts_suppressed_while_shutdown_dialog_open(page):
+    """Every modal must mute the bare-key layer, not just the two hard-coded ids.
+
+    #shutdown-dialog was added without being listed in suppressed(), so with the
+    Shut down / Shut down & process dialog open and awaiting a choice, `t`/`f`/`x`
+    and friends still acted on the app behind it — and Ctrl+Enter clicked
+    #record-button, starting a recording that made the pending shutdown 409.
+    """
+    init_shortcuts(page)
+    page.evaluate(
+        "() => document.getElementById('shutdown-dialog').classList.remove('hidden')"
+    )
+    key(page, "f")
+    key(page, "x")
+    key(page, "]")
+    assert page.evaluate("() => window.__calls") == []
+
+
+def test_shortcuts_resume_when_shutdown_dialog_closes(page):
+    init_shortcuts(page)
+    dlg = "() => document.getElementById('shutdown-dialog').classList"
+    page.evaluate(f"{dlg}.remove('hidden')")
+    key(page, "f")
+    page.evaluate(f"{dlg}.add('hidden')")
+    key(page, "f")
+    assert len(page.evaluate("() => window.__calls")) == 1
+
+
+def test_ctrl_enter_does_not_record_while_shutdown_dialog_open(page):
+    """The specific damage: Ctrl+Enter is bound to the record button."""
+    init_shortcuts(page)
+    clicked = page.evaluate(
+        """async () => {
+            const hits = [];
+            document.getElementById('record-button')
+                .addEventListener('click', () => hits.push('record'));
+            document.getElementById('shutdown-dialog').classList.remove('hidden');
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+            }));
+            return hits;
+        }"""
+    )
+    assert clicked == []
+
+
+def test_save_config_button_disabled_until_cameras_exist(page):
+    """It is wired in buildCameras(), so before that (and forever, if camera init
+    fails) clicking it or pressing Ctrl+S silently did nothing while it looked
+    live. It must read as disabled until it actually works."""
+    assert prop(page, "#save-config-btn", "e => e.disabled") is True
 
 
 def test_shutdown_cancel_button_resolves_cancel(page):

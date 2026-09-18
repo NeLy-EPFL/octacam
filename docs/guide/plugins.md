@@ -42,11 +42,26 @@ being retyped in the tab, and a recording's config snapshot can restore it:
 ```toml
 [[plugins]]
 name = "flywheel"
-options = { device = "/dev/ttyACM0" }
+
+[plugins.options]
+device = "/dev/ttyACM0"
+
 # One sweep: 2048 steps (negative starts counter-clockwise) at 1200 µs per step,
 # resting 500 ms between sweeps, 5 sweeps, starting 2 s after the first frame.
-options.command = { n_steps = -2048, step_interval_us = 1200, rest_duration_ms = 500, n_repeats = 5, init_wait_duration_s = 2 }
+[plugins.options.command]
+n_steps = -2048
+step_interval_us = 1200
+rest_duration_ms = 500
+n_repeats = 5
+init_wait_duration_s = 2
 ```
+
+!!! warning "`options` must be a sub-table, not an inline table"
+
+    TOML inline tables are immutable, so `options = { device = "..." }` followed
+    by `options.command = { ... }` is a **parse error**, not a merge. Use the
+    `[plugins.options]` / `[plugins.options.command]` sub-table form above — it
+    is also what `octacam config` writes back.
 
 Omit `command` to keep the tab's own defaults. Whatever the tab is armed with at
 record time is written into that recording's config snapshot, so the motion can

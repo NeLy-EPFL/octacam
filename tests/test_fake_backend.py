@@ -10,6 +10,7 @@ import os
 
 os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
+import contextlib
 import logging
 import threading
 import time
@@ -452,3 +453,70 @@ def test_stop_grab_wakes_a_blocked_managed_preview_retrieve():
     assert not th.is_alive()
     assert result["frame"] is None  # grabbing flipped, so it returns None
     assert result["elapsed"] < 1.0  # woken promptly, not the full 5 s timeout
+
+
+# --- an incomplete rig must not be silent ----------------------------------- #
+
+
+class _OctacamLogCapture(logging.Handler):
+    """Collect records straight off the "octacam" logger.
+
+    caplog attaches to the *root* logger, but octacam.cli sets
+    ``logger.propagate = False`` — so once anything in the session has configured
+    CLI logging, records never reach root and caplog silently sees nothing.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _octacam_warnings():
+    handler = _OctacamLogCapture()
+    logger = logging.getLogger("octacam")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.WARNING)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_missing_camera_is_recorded_and_reported():
+    """A rig that opens fewer cameras than its config asks for must say so.
+
+    Each individual failure was already logged, but nothing compared the totals,
+    so a rig configured for N running on N-1 looked identical to a healthy one:
+    the GUI simply drew a smaller grid and `octacam record` exited 0. The
+    recording is then short a camera, which is usually found days later.
+    """
+    with _octacam_warnings() as handler:
+        system = CameraSystem(["FAKE-0", "NOT-PRESENT"], backend="fake")
+    try:
+        assert len(system) == 1
+        assert system.incomplete is True
+        assert "NOT-PRESENT" in system.missing
+        assert system.requested_serial_numbers == ["FAKE-0", "NOT-PRESENT"]
+        assert any(
+            "INCOMPLETE RIG" in m and "NOT-PRESENT" in m for m in handler.messages
+        ), handler.messages
+    finally:
+        system.close()
+
+
+def test_complete_rig_is_not_flagged_incomplete():
+    with _octacam_warnings() as handler:
+        system = CameraSystem(FAKE_SERIALS, backend="fake")
+    try:
+        assert len(system) == 2
+        assert system.incomplete is False
+        assert system.missing == {}
+        assert not any("INCOMPLETE RIG" in m for m in handler.messages)
+    finally:
+        system.close()

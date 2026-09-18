@@ -43,6 +43,13 @@ class CameraSystem:
         self.cameras: list[Camera] = []
         self._trigger_timer = PreciseTimer(self._trigger_all)
 
+        # What the config asked for, and which of those never came up (serial ->
+        # reason). A rig that opens 7 of 8 cameras still runs — the others are
+        # worth having — but synchronized N-camera capture is the point, so the
+        # shortfall must be visible rather than inferred from a thinner grid.
+        self.requested_serial_numbers: list[str] = list(requested_serial_numbers or [])
+        self.missing: dict[str, str] = {}
+
         # ``backend`` is a selector: "auto" (the default) sweeps every installed
         # hardware backend so one rig can mix vendors; a concrete name restricts
         # to it. Track the backends we actually enumerate so close() releases
@@ -60,6 +67,7 @@ class CameraSystem:
 
         entries = self._enumerate(backend, requested_serial_numbers)
         if not entries:
+            self._warn_if_incomplete()
             return
         for _serial, handle, make_backend in entries:
             self.cameras.append(Camera(make_backend(handle)))
@@ -84,10 +92,39 @@ class CameraSystem:
             for camera, exc in failures:
                 camera.close()  # close() no-ops on a camera that never opened
                 log.error("Failed to open camera %s: %s", camera.serial_number, exc)
+                self.missing[camera.serial_number] = f"failed to open: {exc}"
             self.cameras = [c for c in self.cameras if id(c) not in failed]
         if not self.cameras:
             self._teardown_backends()
             raise failures[0][1]
+        self._warn_if_incomplete()
+
+    def _warn_if_incomplete(self) -> None:
+        """Say so, once and loudly, when fewer cameras opened than were asked for.
+
+        Every individual failure is already logged, but those scroll past during
+        startup and nothing compared the totals — so a rig configured for 8 and
+        running on 7 looked identical to a healthy one: the GUI simply drew a
+        smaller grid, and ``octacam record`` exited 0. The recording is then short
+        a camera, which is usually discovered days later.
+        """
+        if not self.requested_serial_numbers or not self.missing:
+            return
+        detail = ", ".join(
+            f"{serial} ({reason})" for serial, reason in sorted(self.missing.items())
+        )
+        log.warning(
+            "INCOMPLETE RIG: %d of %d configured cameras opened — missing %s. "
+            "Recordings will be short these cameras.",
+            len(self.cameras),
+            len(self.requested_serial_numbers),
+            detail,
+        )
+
+    @property
+    def incomplete(self) -> bool:
+        """True when the config asked for cameras that are not in this system."""
+        return bool(self.requested_serial_numbers and self.missing)
 
     @classmethod
     def pending(cls, backend: str = "auto") -> "CameraSystem":
@@ -140,11 +177,26 @@ class CameraSystem:
 
         if len(active) == 1:
             name, enumerate_fn, make_backend = active[0]
+            enumerated = list(enumerate_fn(requested_serial_numbers))
             entries = [
                 (serial, handle, make_backend)
-                for serial, handle in enumerate_fn(requested_serial_numbers)
+                for serial, handle in enumerated
                 if handle is not None  # None = present but unusable (already logged)
             ]
+            # Record the shortfall here too, not only on the cascade path below:
+            # a rig with one concrete backend is the common case, and it is what
+            # made a missing camera visible as nothing but a smaller grid.
+            if requested_serial_numbers:
+                claimed = {serial for serial, _handle, _mk in entries}
+                unusable = {serial for serial, handle in enumerated if handle is None}
+                for serial in requested_serial_numbers:
+                    if serial in claimed:
+                        continue
+                    self.missing[serial] = (
+                        "detected but unusable"
+                        if serial in unusable
+                        else "not found"
+                    )
             if entries:
                 log.info("Detected %d camera(s) via %s", len(entries), name)
             return entries
@@ -192,6 +244,9 @@ class CameraSystem:
                 # only warn for one that no tier detected at all.
                 if serial not in claimed:
                     log.warning("Camera with serial number %s not found", serial)
+                    self.missing[serial] = "not found"
+                else:
+                    self.missing[serial] = "detected but unusable"
                 continue
             ordered.append(entry)
         self._log_detected(ordered, claimed_by)

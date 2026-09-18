@@ -355,7 +355,9 @@ def test_attach_dead_running_job_reports_failed_no_hang(cache_dir, capsys):
     pj.write_status(jd, _job("dead", state="running", pid=999999))
     # No live lock -> reconciled to failed -> attach prints outcome and returns.
     rc = pj.attach(_job("dead", state="running", pid=999999), Console())
-    assert rc == 0
+    # Non-zero: the job failed. attach used to return 0 unconditionally, so
+    # `octacam jobs attach X && deploy` ran the next command on a failure.
+    assert rc == 1
     assert "failed" in capsys.readouterr().out.lower()
 
 
@@ -371,3 +373,85 @@ def test_python_dash_m_octacam_runs():
     )
     assert r.returncode == 0
     assert r.stdout.strip()  # prints a version
+
+
+# --- a worker that cannot take its lock must not run "unmarked" -------------- #
+
+
+def test_worker_start_refuses_when_the_lock_cannot_be_taken(cache_dir, monkeypatch):
+    """An unmanageable job is worse than no job.
+
+    Every liveness check keys off job.lock — is_live(), _reconcile(),
+    resolve_job(require_live=True), _is_finished(). A worker that ran without it
+    was invisible to all of them at once: `jobs list` reported it FAILED while
+    ffmpeg burned CPU, pause/resume/cancel all refused it (leaving `kill` as the
+    only way to stop it), and _is_finished() read True, so
+    `octacam cache clear --all` rmtree'd the directory it was still writing into.
+    """
+    jd = pj.jobs_dir() / "20260101T000000-1"
+    jd.mkdir(parents=True)
+
+    def _boom(*a, **kw):
+        raise OSError("flock unsupported on this filesystem")
+
+    monkeypatch.setattr(pj.fcntl, "flock", _boom)
+    with pytest.raises(pj.JobLockError):
+        pj.worker_start(jd)
+
+
+def test_worker_start_records_the_failure_for_jobs_list(cache_dir, monkeypatch):
+    """The refusal is written to status.json, so `octacam jobs list` explains it
+    instead of showing a bare 'worker exited without finishing'."""
+    jd = pj.jobs_dir() / "20260101T000000-2"
+    jd.mkdir(parents=True)
+    monkeypatch.setattr(
+        pj.fcntl, "flock", lambda *a, **kw: (_ for _ in ()).throw(OSError("nope"))
+    )
+    with pytest.raises(pj.JobLockError):
+        pj.worker_start(jd)
+
+    status = pj.read_status(jd)
+    assert status is not None
+    assert status.state == pj.FAILED
+    assert "job lock" in (status.error or "")
+
+
+def test_worker_start_succeeds_normally(cache_dir):
+    """The happy path still marks the job running and holds the lock."""
+    jd = pj.jobs_dir() / "20260101T000000-3"
+    jd.mkdir(parents=True)
+    worker = pj.worker_start(jd)
+    try:
+        assert pj.read_status(jd).state == pj.RUNNING
+        assert pj.is_live(jd)
+    finally:
+        worker._release()
+
+
+def test_age_survives_a_naive_timestamp():
+    """One odd `started` must not take out the whole `octacam jobs list` table.
+
+    `datetime.now().astimezone()` is aware; a status.json from an older octacam
+    (or a hand-edited one) can hold a naive stamp, and aware - naive raises
+    TypeError — from a line that sat *outside* the guard, so every job's row died
+    with it, not just the odd one.
+    """
+    assert pj._age("2026-09-18T10:00:00") != "-"
+    assert pj._age("2026-09-18T10:00:00+02:00") != "-"
+    assert pj._age("not-a-date") == "-"
+    assert pj._age("") == "-"
+
+
+def test_attach_exit_code_reflects_the_job_outcome():
+    """`octacam jobs attach` used to exit 0 for a failed job, so a script could
+    not tell (`octacam jobs attach X && deploy` ran on a failure)."""
+    assert pj._attach_exit_code(_job(state=pj.DONE)) == 0
+    assert pj._attach_exit_code(_job(state=pj.FAILED)) == 1
+    assert pj._attach_exit_code(_job(state=pj.FAILED, exit_code=3)) == 3
+    # A reconciled "worker vanished" carries -1, and a signalled child a negative
+    # signal number; neither is a usable exit status (sys.exit(-1) surfaces as 255).
+    assert pj._attach_exit_code(_job(state=pj.FAILED, exit_code=-1)) == 1
+    assert pj._attach_exit_code(_job(state=pj.FAILED, exit_code=999)) == 1
+    assert pj._attach_exit_code(_job(state=pj.CANCELLED)) == 1
+    # Still running: the viewer detached (Ctrl-C), which says nothing about the job.
+    assert pj._attach_exit_code(_job(state=pj.RUNNING)) == 0

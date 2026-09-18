@@ -219,3 +219,8 @@ watch from a terminal with `octacam jobs attach`.
     the encoder between units (it holds no GPU/NVENC session while paused) and is
     crash-safe — if the gui/record crashes, the job resumes on its own. `octacam
     gui`/`record` also print a one-line note at startup when a job is active.
+
+    The marker is published only once the GUI actually holds the cameras, so a
+    GUI that failed to open them never parks a processing run. The pause has no
+    timeout, so to process *now* while a GUI sits on the preview, pass
+    `--ignore-capture` — processing then competes with capture for CPU/GPU/disk.
