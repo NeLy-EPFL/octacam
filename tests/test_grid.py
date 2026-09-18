@@ -434,3 +434,116 @@ def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
     path_probe.unlink()
     with pytest.raises(RuntimeError, match="No ffprobe"):
         find_ffprobe()
+
+
+# --- two configured grids must not mark each other stale --------------------- #
+
+
+def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
+    """A grid is never one of its own inputs, and never another grid's.
+
+    Under ``--no-transcode`` ``folder_outputs`` is "every *.mp4 in the folder",
+    which includes the configured grids. Comparing a grid against that set made
+    two ``[[visualization]]`` entries mark each other stale — building the first
+    refreshes its mtime, so the second is now "older than the videos it
+    composites" — re-encoding both on every run and defeating the idempotent
+    skip-if-exists contract, on precisely the flag documented for regenerating
+    just the grids. Next run the roles swap, so it never settles.
+    """
+    import os
+    import types
+
+    from octacam import cli
+
+    folder = tmp_path / "run1"
+    folder.mkdir()
+    cam_a, cam_b = folder / "cam0.mp4", folder / "cam1.mp4"
+    grid_a, grid_b = folder / "grid.mp4", folder / "overview.mp4"
+    for p in (cam_a, cam_b):
+        p.write_bytes(b"src")
+    # Both grids already exist and are NEWER than their sources: a correct run
+    # rebuilds neither.
+    for p in (grid_a, grid_b):
+        p.write_bytes(b"grid")
+        os.utime(p, (os.stat(cam_a).st_mtime + 10,) * 2)
+    # ...but they differ from each other, which is what used to trip the check.
+    os.utime(grid_b, (os.stat(grid_a).st_mtime + 5,) * 2)
+
+    cfg = types.SimpleNamespace(
+        visualization=[
+            types.SimpleNamespace(
+                name="grid.mp4", layout=[["cam0", "cam1"]], ffmpeg_params=""
+            ),
+            types.SimpleNamespace(
+                name="overview.mp4", layout=[["cam0", "cam1"]], ffmpeg_params=""
+            ),
+        ],
+        transcode=types.SimpleNamespace(ffmpeg_params=""),
+        transfer=None,
+    )
+    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
+    # _pause_gate polls a machine-global "capture-active" marker (a live
+    # octacam gui/record on this box), so neutralise it — a unit test must not
+    # block on whatever else is running on the developer's rig.
+    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
+
+    built = []
+    monkeypatch.setattr(
+        "octacam.grid.build_grid_video",
+        lambda folder, **kw: built.append(kw["output"].name),
+    )
+
+    # --no-transcode semantics: every mp4 in the folder, grids included.
+    folder_outputs = {folder: sorted(folder.glob("*.mp4"))}
+    cli._grid_and_transfer(
+        folder_outputs,
+        True,  # do_grid
+        False,  # do_transfer
+        None,
+        False,  # dry_run
+        False,  # show_bar
+    )
+    assert built == [], f"rebuilt grids that were already current: {built}"
+
+
+def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
+    """The staleness check itself must survive the fix: a genuinely stale grid
+    (older than a camera video it composites) is still redone."""
+    import os
+    import types
+
+    from octacam import cli
+
+    folder = tmp_path / "run1"
+    folder.mkdir()
+    grid = folder / "grid.mp4"
+    grid.write_bytes(b"old")
+    cam = folder / "cam0.mp4"
+    cam.write_bytes(b"new")
+    os.utime(cam, (os.stat(grid).st_mtime + 10,) * 2)
+
+    cfg = types.SimpleNamespace(
+        visualization=[
+            types.SimpleNamespace(
+                name="grid.mp4", layout=[["cam0"]], ffmpeg_params=""
+            )
+        ],
+        transcode=types.SimpleNamespace(ffmpeg_params=""),
+        transfer=None,
+    )
+    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
+    # _pause_gate polls a machine-global "capture-active" marker (a live
+    # octacam gui/record on this box), so neutralise it — a unit test must not
+    # block on whatever else is running on the developer's rig.
+    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
+
+    built = []
+    monkeypatch.setattr(
+        "octacam.grid.build_grid_video",
+        lambda folder, **kw: built.append(kw["output"].name),
+    )
+
+    cli._grid_and_transfer(
+        {folder: sorted(folder.glob("*.mp4"))}, True, False, None, False, False
+    )
+    assert built == ["grid.mp4"]

@@ -1119,6 +1119,19 @@ class RecordingController:
                     len(self.camera_system),
                     pre.max_nvenc_sessions,
                 )
+        # Read each camera's parameters for the config snapshot OFF the lock, for
+        # the same reason as the NVENC warm-up above: save_all_params() walks every
+        # camera's full node map over USB (~60 ms per Basler) with no timeout, and
+        # snapshot(), stop_recording(), notify_state() and _resume_preview() all
+        # take self._lock — so doing it under the lock made every recording start
+        # block /api/state, the telemetry loop and the Stop button for the duration,
+        # and let one camera stalled on a control transfer wedge them indefinitely.
+        # The precondition is the same here as below: the cameras must still be
+        # previewing, so skip it if a recording/benchmark already owns them (the
+        # authoritative BUSY checks under the lock will reject this start anyway).
+        pre_params: dict[str, str] | None = None
+        if not self.recording_active and not self.diagnosing:
+            pre_params = self._export_camera_params()
         with self._lock:
             if self.recording_active:
                 return StartResult(StartResult.BUSY, "Recording in progress")
@@ -1151,10 +1164,13 @@ class RecordingController:
                 )
 
             use_software_trigger = settings.trigger_source == "software"
-            # Read each camera's parameters for the config snapshot now, while the
-            # cameras are still previewing: once the record grab loops run, a full
-            # node-map read would contend with them.
-            camera_params = self._export_camera_params()
+            # Normally already read off the lock above. The fallback covers the
+            # narrow race where a recording was still active at that point but
+            # finished before we took the lock — rare, and correctness (a snapshot
+            # with its camera parameters) beats holding the lock for it.
+            camera_params = (
+                pre_params if pre_params is not None else self._export_camera_params()
+            )
             start_error: str | None = None
             try:
                 self.camera_system.stop_software_trigger()

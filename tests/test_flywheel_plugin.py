@@ -572,3 +572,54 @@ def test_build_reads_fqbn_and_auto_flash():
     p = _build({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
     assert p._auto_flash is True
     assert p._fw.spec.fqbn == "arduino:avr:nano"
+
+
+# --- headless arming (octacam record) --------------------------------------- #
+
+
+def test_default_start_params_returns_the_configured_command():
+    """The per-rig loop program must reach a headless `octacam record`.
+
+    `options.command` only ever seeded the GUI tab: FlywheelPlugin implemented no
+    `default_start_params`, so cli built no slice for it, `on_first_frame` found
+    nothing in params and the motor silently never turned. That also broke
+    relaunching a recording from its own config snapshot with `octacam record` —
+    the whole point of the snapshot carrying the motion.
+    """
+    from dataclasses import asdict
+
+    from octacam.plugins.flywheel import Command, FlywheelPlugin
+
+    command = Command(
+        n_steps=-2048, step_interval_us=1200, rest_duration_ms=500, n_repeats=5
+    )
+    plugin = FlywheelPlugin(device=None, command=command)
+    slice_ = plugin.default_start_params(fps=100.0, duration_s=10.0)
+    assert slice_ == asdict(command)
+    # Round-trips through the same path on_first_frame uses.
+    assert Command.from_payload(slice_) == command
+
+
+def test_default_start_params_is_none_without_a_configured_command():
+    """No `options.command` means no motion: the tab's defaults are a GUI
+    affordance, and spinning an unconfigured motor from the CLI would be a
+    surprise, not a default."""
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    assert FlywheelPlugin(device=None).default_start_params(100.0, 10.0) is None
+
+
+def test_configured_command_arms_on_first_frame_headlessly():
+    """End to end: the slice default_start_params contributes is the shape
+    on_first_frame consumes, so the board actually gets written."""
+    from octacam.plugins.flywheel import Command, FlywheelPlugin
+
+    command = Command(n_steps=1024, step_interval_us=900)
+    plugin = FlywheelPlugin(device=None, command=command)
+
+    written = []
+    plugin._link = type("L", (), {"write_command": lambda _s, c: written.append(c)})()
+
+    params = {plugin.name: plugin.default_start_params(100.0, 10.0)}
+    plugin.on_first_frame(params)
+    assert written == [command]

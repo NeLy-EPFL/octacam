@@ -414,10 +414,11 @@ def _warn_if_transcoding() -> None:
         return
     if count:
         log.warning(
-            "%d octacam process run%s transcoding on this machine. A detached job "
-            "auto-pauses while these cameras run and resumes when they are free; a "
-            "foreground `octacam process` does not — it may slow capture (risking "
-            "dropped frames).",
+            "%d octacam process run%s transcoding on this machine. They pause at "
+            "their next file/folder boundary while these cameras are in use — "
+            "detached and foreground alike — and resume when they are free. A file "
+            "already being transcoded finishes first, so capture may be slowed "
+            "briefly. Use `octacam process --ignore-capture` to opt out.",
             count,
             " is" if count == 1 else "s are",
         )
@@ -612,14 +613,23 @@ def gui(
             opened = CameraSystem(
                 [c.serial_number for c in config.cameras], backend=config.backend
             )
-            if len(opened) == 0:
+            # Everything past the constructor can raise (a malformed per-camera
+            # parameter file makes load_config re-raise BackendError), and by then
+            # the devices are open. The caller only ever sees the exception, so
+            # close here or the whole rig stays claimed for the life of the
+            # process and is destroyed after PylonTerminate() — the teardown
+            # segfault BaslerBackend.close documents.
+            try:
+                if len(opened) == 0:
+                    raise BackendError("no cameras were opened")
+                names = {c.serial_number: c.name for c in config.cameras if c.name}
+                for camera in opened:
+                    camera.name = names.get(camera.serial_number, camera.name)
+                opened.load_config(config_dir)
+                opened.apply_display_config(config.cameras)
+            except BaseException:
                 opened.close()
-                raise BackendError("no cameras were opened")
-            names = {c.serial_number: c.name for c in config.cameras if c.name}
-            for camera in opened:
-                camera.name = names.get(camera.serial_number, camera.name)
-            opened.load_config(config_dir)
-            opened.apply_display_config(config.cameras)
+                raise
             return opened
 
         opened_system: CameraSystem | None = None
@@ -662,6 +672,11 @@ def gui(
             return
 
         controller.attach_system(opened_system)
+        # Now that this GUI holds the cameras, publish the capture-active marker so
+        # an `octacam process` run on this machine pauses at its next work-unit
+        # boundary and resumes when we exit. The shutdown path joins this thread
+        # before closing capture_stack, so the enter/close ordering is safe.
+        capture_stack.enter_context(session_cache.mark_capture_active("gui session"))
         log.info("Opened %d camera(s)", len(opened_system))
         try:
             controller.start_preview()
@@ -679,11 +694,12 @@ def gui(
         # Build the app first (inside the try so a failure still hits the finally,
         # though no hardware is armed yet); the init closure reads `app` lazily.
         app = create_app(controller, config, plugins, config_dir=str(config_dir))
-        # While this GUI owns the cameras, publish a capture-active marker so any
-        # detached `octacam process` job on this machine pauses (it resumes when
-        # we exit). Best-effort; released in the finally before we might kick off
-        # a new job on shutdown.
-        capture_stack.enter_context(session_cache.mark_capture_active("gui session"))
+        # The capture-active marker is published by _initialize_rig once the
+        # cameras are actually attached — not here. Serve-first startup means this
+        # point is reached before any camera is open, and a GUI that then fails to
+        # open them (or is simply left sitting on the preview all day) owns no
+        # hardware, yet the marker parks every `octacam process` on this machine
+        # at its next work-unit boundary with no timeout.
         # Kick off the hardware init in the background, then serve immediately.
         init_thread.start()
         log.info(
@@ -2538,7 +2554,30 @@ def record(
     if len(system) == 0:
         log.warning("No cameras opened. Exiting.")
         sys.exit(1)
-    log.info("Opened %d camera(s)", len(system))
+    log.info(
+        "Opened %d of %d configured camera(s)",
+        len(system),
+        len(system.requested_serial_numbers) or len(system),
+    )
+    if system.incomplete:
+        # CameraSystem already logged the INCOMPLETE RIG warning naming each
+        # missing camera. Recording anyway is a real choice — the take will be
+        # short a camera and nothing downstream can tell that apart from a rig
+        # that only ever had N-1 — so make it an explicit one, exactly like the
+        # save-directory overwrite gate below. --force covers both.
+        if force:
+            log.warning("Recording with an incomplete rig (--force).")
+        elif sys.stdin.isatty() and sys.stderr.isatty():
+            if not typer.confirm(
+                f"Only {len(system)} of {len(system.requested_serial_numbers)} "
+                "configured cameras opened. Record anyway?"
+            ):
+                system.close()
+                raise typer.Exit(1)
+        else:
+            log.warning(
+                "Recording with an incomplete rig (pass --force to silence this)."
+            )
 
     names = {c.serial_number: c.name for c in config.cameras if c.name}
     for camera in system:
@@ -3945,6 +3984,7 @@ def _grid_and_transfer(
     reporter: "JobReporter | None" = None,
     job_dir: Path | None = None,
     rewritten: set[Path] | None = None,
+    ignore_capture: bool = False,
 ) -> int:
     """Build visualization grids and/or transfer each folder to its destination.
 
@@ -3991,7 +4031,7 @@ def _grid_and_transfer(
         with grid_bar or contextlib.nullcontext():
             for i, folder in enumerate(grid_targets, 1):
                 if not dry_run:
-                    _pause_gate(reporter, job_dir, unit="folder")
+                    _pause_gate(reporter, job_dir, unit="folder", ignore_capture=ignore_capture)
                 if reporter is not None:
                     reporter.item_started(i, len(grid_targets), folder)
                 cfg = folder_cfgs[folder]
@@ -4005,9 +4045,22 @@ def _grid_and_transfer(
                     else []
                 )
                 built: list[Path] = []
+                # A grid is never one of its own inputs, and never another grid's.
+                # Under --no-transcode folder_outputs is "every *.mp4 in the
+                # folder", which includes the configured grids: comparing a grid
+                # against them made two [[visualization]] entries mark each other
+                # stale (building the first refreshes its mtime, so the second is
+                # now "older than the videos it composites"), re-encoding both on
+                # every run and defeating the idempotent skip-if-exists contract —
+                # on precisely the flag documented for regenerating just the grids.
+                grid_outputs = {folder / n for n, _layout, _ff in folder_grids[folder]}
                 for name, layout, ff in folder_grids[folder]:
                     out_path = folder / name
-                    inputs = [p for p in folder_outputs[folder] if p.exists()]
+                    inputs = [
+                        p
+                        for p in folder_outputs[folder]
+                        if p.exists() and p not in grid_outputs
+                    ]
                     grid_stale = out_path.exists() and any(
                         _is_stale(out_path, p) for p in inputs
                     )
@@ -4075,7 +4128,7 @@ def _grid_and_transfer(
             transfer_cb = transfer_bar.make_callback() if transfer_bar else None
             for i, (folder, outputs) in enumerate(folder_outputs.items(), 1):
                 if not dry_run:
-                    _pause_gate(reporter, job_dir, unit="folder")
+                    _pause_gate(reporter, job_dir, unit="folder", ignore_capture=ignore_capture)
                 if reporter is not None:
                     reporter.item_started(i, len(folder_outputs), folder)
                 cfg = folder_cfgs[folder]
@@ -4130,6 +4183,7 @@ def _rebuild_process_argv(
     config_dir: Path | None,
     delete_source: bool,
     dry_run: bool,
+    ignore_capture: bool = False,
 ) -> list[str]:
     """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
 
@@ -4153,6 +4207,8 @@ def _rebuild_process_argv(
         argv.append("--delete-source")
     if dry_run:
         argv.append("--dry-run")
+    if ignore_capture:
+        argv.append("--ignore-capture")
     if config_dir is not None:
         argv += ["--config", str(config_dir.resolve())]
     argv += [str(Path(f).resolve()) for f in folders]
@@ -4160,7 +4216,11 @@ def _rebuild_process_argv(
 
 
 def _pause_gate(
-    reporter: "JobReporter | None", job_dir: Path | None, *, unit: str
+    reporter: "JobReporter | None",
+    job_dir: Path | None,
+    *,
+    unit: str,
+    ignore_capture: bool = False,
 ) -> None:
     """Block at a work-unit boundary while capture is active or a manual pause is set.
 
@@ -4170,12 +4230,17 @@ def _pause_gate(
     the pause interrupts the sleep and wins over the pause. A plain foreground run
     (``reporter``/``job_dir`` None) pauses the same way — only the capture-active
     condition applies there (there is no job to manually pause).
+
+    ``ignore_capture`` (``octacam process --ignore-capture``) drops the
+    capture-active condition: an operator who wants to process *now*, while a GUI
+    sits on the preview, has no other way out — the pause has no timeout, and the
+    manual pause flag only covers detached jobs.
     """
     from octacam import process_jobs, session_cache
 
     announced = False
     while True:
-        capture = session_cache.capture_active()
+        capture = (not ignore_capture) and session_cache.capture_active()
         manual = job_dir is not None and process_jobs.is_manually_paused(job_dir)
         if not (capture or manual):
             break
@@ -4286,6 +4351,17 @@ def process(
         bool,
         typer.Option(
             "--no-transfer", help=r"Skip transferring to the \[transfer] destination."
+        ),
+    ] = False,
+    ignore_capture: Annotated[
+        bool,
+        typer.Option(
+            "--ignore-capture",
+            help=(
+                "Do not pause while an octacam gui/record holds the cameras on "
+                "this machine. Processing then competes with capture for "
+                "CPU/GPU/disk."
+            ),
         ),
     ] = False,
     force: Annotated[
@@ -4400,6 +4476,7 @@ def process(
             config_dir=config_dir,
             delete_source=delete_source,
             dry_run=dry_run,
+            ignore_capture=ignore_capture,
         )
         status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
         typer.echo(status.job_id)  # stdout: scriptable
@@ -4411,7 +4488,13 @@ def process(
         raise typer.Exit()
 
     # Worker mode: the detached child records progress/logs into its job dir.
-    worker = process_jobs.worker_start(job_dir) if job_dir is not None else None
+    # A job that cannot take its lock is unmanageable (see worker_start), and
+    # worker_start has already written the failure into status.json for
+    # `octacam jobs list` — exit cleanly rather than raise through to a traceback.
+    try:
+        worker = process_jobs.worker_start(job_dir) if job_dir is not None else None
+    except process_jobs.JobLockError as e:
+        sys.exit(str(e))
     reporter = worker.reporter if worker is not None else None
 
     raw_output = progress_style is ProgressStyle.ffmpeg
@@ -4471,7 +4554,7 @@ def process(
                             # wanted mid-session and does no heavy work, so it
                             # never waits.
                             if not dry_run:
-                                _pause_gate(reporter, job_dir, unit="file")
+                                _pause_gate(reporter, job_dir, unit="file", ignore_capture=ignore_capture)
                             input_path = job.input_path
                             output = input_path.with_suffix(".mp4")
                             if reporter is not None:
@@ -4607,6 +4690,7 @@ def process(
                 reporter=reporter,
                 job_dir=job_dir,
                 rewritten=rewritten,
+                ignore_capture=ignore_capture,
             )
 
         # Report outside the `with` so messages land after the live bar is gone.
@@ -4901,8 +4985,16 @@ def _live_summary(live_jobs: int, live_transcode: int, live_capture: int) -> str
 def main() -> None:
     from rich.traceback import install
 
+    from octacam.config import ConfigError
+
     install(show_locals=False)
-    app()
+    try:
+        app()
+    except ConfigError as e:
+        # A malformed octacam_config.toml is operator error, not a bug: print the
+        # file and the offending line rather than a traceback.
+        _stderr_console().print(f"[bold red]Config error:[/bold red] {e}")
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

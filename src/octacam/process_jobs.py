@@ -445,6 +445,10 @@ class Worker:
             self._lock = None
 
 
+class JobLockError(RuntimeError):
+    """The worker could not take its job.lock, so the job cannot be managed."""
+
+
 def worker_start(jd: Path) -> Worker:
     """Attach the current process to ``jd`` as its worker: lock + mark running."""
     status = read_status(jd) or JobStatus(job_id=jd.name)
@@ -457,11 +461,23 @@ def worker_start(jd: Path) -> Worker:
         lock_handle = open(_lock_path(jd), "a+")
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     except OSError as e:
-        log.debug("Could not take the job lock in %s (%s); running unmarked", jd, e)
+        # Do not fall back to running "unmarked". Every liveness check keys off
+        # this flock — is_live(), _reconcile(), resolve_job(require_live=True),
+        # _is_finished() — so a worker without it is invisible to all of them at
+        # once: `jobs list` reports it FAILED while ffmpeg burns CPU, pause /
+        # resume / cancel all refuse it (leaving `kill` as the only way to stop
+        # it), and _is_finished() reads True, so `octacam cache clear --all`
+        # rmtree's the directory the worker is still writing log.txt/status.json
+        # into. An unmanageable job is worse than no job: fail loudly instead.
         if lock_handle is not None:
             with contextlib.suppress(OSError):
                 lock_handle.close()
-            lock_handle = None
+        status.state = FAILED
+        status.error = f"could not take the job lock in {jd}: {e}"
+        status.exit_code = 1
+        with contextlib.suppress(OSError):
+            write_status(jd, status)
+        raise JobLockError(status.error) from e
     write_status(jd, status)
     return Worker(jd, lock_handle, status)
 
@@ -657,9 +673,16 @@ def render_state(status: JobStatus) -> str:
 def _age(started: str) -> str:
     try:
         dt = datetime.datetime.fromisoformat(started)
-    except (ValueError, TypeError):
+        if dt.tzinfo is None:
+            # A status.json from an older octacam (or a hand-edited one) can carry
+            # a naive timestamp. Subtracting it from an aware "now" raises
+            # TypeError — and that subtraction used to sit outside this guard, so
+            # one odd job crashed `octacam jobs list` for *every* job. Read a naive
+            # stamp as local time, which is what wrote it.
+            dt = dt.astimezone()
+        secs = int((datetime.datetime.now().astimezone() - dt).total_seconds())
+    except (ValueError, TypeError, OverflowError, OSError):
         return "-"
-    secs = int((datetime.datetime.now().astimezone() - dt).total_seconds())
     if secs < 60:
         return f"{secs}s"
     if secs < 3600:
@@ -812,9 +835,34 @@ def _print_final(status: JobStatus, console: Console) -> None:
         console.print(f"[red]Job {status.job_id} failed: {status.error or 'unknown error'}[/]")
 
 
+def _attach_exit_code(status: JobStatus) -> int:
+    """0 for a job that finished cleanly, non-zero for one that did not.
+
+    :func:`attach` used to ``return 0`` unconditionally, so
+    ``octacam jobs attach <id>`` reported success for a failed or cancelled job
+    and a script had no way to tell (``octacam jobs attach X && deploy`` ran on a
+    failure). Detaching with Ctrl-C, and a job still running, stay 0 — neither
+    says anything about the outcome.
+    """
+    if status.state == FAILED:
+        code = status.exit_code
+        # Only a real 1..255 exit status is passed through. A job reconciled as
+        # "worker exited without finishing" carries -1, and a signalled child a
+        # negative signal number; handing either to sys.exit() would surface as
+        # 255, which reads like a different failure. Everything else maps to 1.
+        if isinstance(code, int) and 1 <= code <= 255:
+            return code
+        return 1
+    if status.state == CANCELLED:
+        return 1
+    return 0
+
+
 def attach(status: JobStatus, console: Console | None = None) -> int:
     """Follow a detached job's log + a live progress bar until it ends.
 
+    Returns the job's outcome as an exit code: 0 when it finished cleanly,
+    non-zero when it failed or was cancelled (see :func:`_attach_exit_code`).
     Ctrl-C detaches the viewer (returns 0); it never cancels the job. An
     already-finished job replays its log, prints the outcome, and returns.
     """
@@ -836,7 +884,7 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
         for line in follower.drain():
             _print_log_line(console, line)
         _print_final(fresh, console)
-        return 0
+        return _attach_exit_code(fresh)
 
     detached = False
     final = fresh
@@ -869,4 +917,4 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
         )
         return 0
     _print_final(final, console)
-    return 0
+    return _attach_exit_code(final)

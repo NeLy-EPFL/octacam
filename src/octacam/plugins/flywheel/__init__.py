@@ -587,6 +587,24 @@ class FlywheelPlugin(Plugin):
             return None
         return {"command": asdict(command)}
 
+    def default_start_params(self, fps: float, duration_s: float) -> dict | None:
+        """Headless (CLI) arm slice for ``octacam record`` — the configured loop.
+
+        Without this the CLI builds no slice for this plugin, so ``on_first_frame``
+        found nothing in ``params`` and the motor silently never turned on a
+        headless run: the per-rig ``options.command`` seeded only the GUI tab. That
+        also broke relaunching a recording from its own config snapshot with
+        ``octacam record`` — the snapshot preserves the motion precisely so it can
+        be reproduced, and only a GUI relaunch actually did.
+
+        ``None`` when the rig configured no command: the tab's own defaults are a
+        GUI affordance, and spinning an unconfigured motor from the CLI would be a
+        surprise, not a default.
+        """
+        if self._command is None:
+            return None
+        return asdict(self._command)
+
     def on_first_frame(self, params: dict | None) -> None:
         command = self._command_from(params)
         if command is not None:

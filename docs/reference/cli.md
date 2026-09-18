@@ -166,6 +166,7 @@ with `--last` / `--last session` / `--all`. See
 | `--no-transcode` | Skip transcoding; grid/transfer act on existing mp4s. |
 | `--no-grid` | Skip building the configured grid video(s). |
 | `--no-transfer` | Skip transferring to the `[transfer]` destination. |
+| `--ignore-capture` | Do not pause while an `octacam gui`/`record` holds the cameras on this machine. |
 | `--force` | Re-transcode / rebuild grids even if outputs already exist. |
 | `--delete-source`, `-d` | Delete each `.mkv`/`.raw` once it transcodes successfully. |
 | `--config`, `-c` | Fallback config dir for recordings with no embedded snapshot. |
