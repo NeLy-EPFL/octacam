@@ -33,14 +33,17 @@ export class ShutdownDialog {
 
   // Resolves to "cancel" | "shutdown" | "process".
   confirm({ recordingActive, hasWork, peerCount }) {
+    const others = (peerCount || 1) - 1;
+    // Every operator on this rig loses their cameras and their socket, so say how
+    // many. This warning used to live only in the recordingActive branch — the one
+    // path /api/shutdown rejects with 409 — so in practice nobody ever saw it.
+    const extra =
+      others > 0
+        ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
+        : "";
     // While recording, "& process" is meaningless (the server refuses a shutdown
     // mid-trial), so keep the plain binary confirm as a speed-bump.
     if (recordingActive) {
-      const others = (peerCount || 1) - 1;
-      const extra =
-        others > 0
-          ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
-          : "";
       const ok = window.confirm(
         "Shut down the octacam server on the rig? This releases all cameras " +
           "and disconnects every client." +
@@ -48,13 +51,25 @@ export class ShutdownDialog {
       );
       return Promise.resolve(ok ? "shutdown" : "cancel");
     }
-    // Nothing recorded this session: quit without friction (today's behavior).
-    if (!hasWork) return Promise.resolve("shutdown");
+    // Nothing recorded this session. This is the path that actually shuts the
+    // server down, and it is reached from a bare icon button sitting next to
+    // save-config — so it still confirms. (It previously returned "shutdown"
+    // immediately; the comment claiming that matched main was wrong, main ran an
+    // unconditional window.confirm here.)
+    if (!hasWork) {
+      const ok = window.confirm(
+        "Shut down the octacam server on the rig? This releases all cameras " +
+          "and disconnects every client." +
+          extra
+      );
+      return Promise.resolve(ok ? "shutdown" : "cancel");
+    }
     // Recordings exist: offer to process them in a detached background job.
     this.msg.textContent =
       "Recordings were made this session. Start processing them (transcode, " +
       "grid, transfer) in a background job after shutting down? Reattach from a " +
-      "terminal with `octacam jobs attach`.";
+      "terminal with `octacam jobs attach`." +
+      extra;
     this.dialog.classList.remove("hidden");
     this.focus.activate();
     return new Promise((resolve) => {

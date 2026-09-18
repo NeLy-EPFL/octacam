@@ -1621,3 +1621,52 @@ def test_preview_tick_encodes_cameras_concurrently(client):
 
     assert seen_cameras == {0, 1}, seen_cameras
     assert peak == 2, f"cameras were encoded serially (peak concurrency {peak})"
+
+
+# --- the WS handshake must not clobber a newer system descriptor ------------ #
+
+
+def test_queue_text_if_current_refuses_to_overwrite_newer_state():
+    """``texts`` is newest-only per kind, so a payload computed before an ``await``
+    would otherwise overwrite whatever landed during it.
+
+    The handshake registers the client, then awaits ``system_descriptor`` in an
+    executor (a ``read_params()`` USB walk per camera — tens to hundreds of ms).
+    If the background init finished during that await, ``broadcast_system()`` set
+    the ready descriptor on this client and the handshake then clobbered it with
+    its stale ``ready:false, cameras:[]`` placeholder. Nothing re-sends ``system``,
+    so the browser stayed on the loading placeholder until a manual reload —
+    exactly the browser-connects-while-cameras-open case serve-first targets.
+    """
+    from octacam.web.app import _Client
+
+    client = _Client(ws=None)
+    seen = client.text_seq.get("system", 0)
+
+    # The init thread's broadcast lands while the handshake is still awaiting.
+    client.queue_text("system", "ready")
+
+    # The handshake's stale payload must now be refused.
+    assert client.queue_text_if_current("system", "stale", seen) is False
+    assert client.texts["system"] == "ready"
+
+
+def test_queue_text_if_current_writes_when_nothing_raced():
+    from octacam.web.app import _Client
+
+    client = _Client(ws=None)
+    seen = client.text_seq.get("system", 0)
+    assert client.queue_text_if_current("system", "fresh", seen) is True
+    assert client.texts["system"] == "fresh"
+
+
+def test_queue_text_bumps_the_sequence_per_kind():
+    """Independent kinds must not interfere: a ``state`` tick during the await
+    should not make the handshake drop its ``system`` payload."""
+    from octacam.web.app import _Client
+
+    client = _Client(ws=None)
+    seen = client.text_seq.get("system", 0)
+    client.queue_text("state", "tick")
+    assert client.queue_text_if_current("system", "fresh", seen) is True
+    assert client.texts["system"] == "fresh"

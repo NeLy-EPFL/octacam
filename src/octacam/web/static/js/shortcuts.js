@@ -182,9 +182,16 @@ export function initShortcuts({ grid } = {}) {
       return true;
     }
     // Defer entirely while a modal owns the keyboard (each self-guards Escape).
-    for (const id of ["save-dialog", "dir-dialog"]) {
-      const m = byId(id);
-      if (m && !m.classList.contains("hidden")) return true;
+    // Queried from the DOM rather than a hard-coded id list: #shutdown-dialog was
+    // added without being added here, so with the Shut down / Shut down & process
+    // dialog open and awaiting a choice, every bare key still acted on the app
+    // behind it — and Ctrl+Enter clicked #record-button, starting a recording that
+    // then made the pending shutdown fail with a 409. ModalFocus only traps Tab,
+    // and focus sits on a <button>, which the field test above does not match.
+    // The help overlay is also .modal, but handleKey returns before suppressed()
+    // while it is open, so it never reaches this loop.
+    for (const m of document.querySelectorAll(".modal")) {
+      if (!m.classList.contains("hidden")) return true;
     }
     return false;
   }
