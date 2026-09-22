@@ -9,6 +9,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ## [Unreleased]
 
+### Changed
+
+- **triggerbox firmware: a re-arm at the same fps keeps the frame clock's phase
+  and takes effect at the next frame edge** — outputs that stay in the spec
+  carry their level across the edge, so no output gets an early, late or extra
+  edge, and only pins leaving the spec are parked LOW. Editing a light in the
+  tab during a managed preview therefore no longer disturbs the trigger under
+  cameras already exposing on it (the same dark ramp as the fix below, in the
+  preview). A changed fps or an arm from idle still starts a fresh clock at
+  once, and `duration_ms` / pulse-train t0 restart with the new spec. Boards
+  report *outdated* until reflashed: `octacam flash <config>` or the tab's
+  *Flash firmware* button.
+
 ### Fixed
 
 - **A GUI recording under a managed (triggerbox) preview no longer opens with a

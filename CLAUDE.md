@@ -382,7 +382,16 @@ xor`; payload = fps, duration_ms, N camera lines `{pin, pulse_us, delay_us}`, an
 3 symmetric light channels (`off`/`strobe`/`continuous`/`pulse_train`).
 `PIN_LABELS` is the single source of truth, mirrored in `triggerbox.ino` and
 asserted equal by a unit test. Server-side **auto strobe duty** sizes the LED
-on-time to the longest live camera exposure. On a wedged USB CDC link the plugin
+on-time to the longest live camera exposure. A same-fps re-arm while the board
+is running **keeps the frame clock's phase and lands on the next frame edge**
+(staged in `g_pend_*`, committed in `loop()`; continuing pins carry their level
+across the edge, dropped pins are parked LOW), so no output gets an early, late
+or extra edge — applying a spec mid-frame could insert a rising edge whenever it
+lengthens an on-time, and any stray camera edge is the dark ramp described in the
+recording pipeline above. Only a changed fps or an arm from idle restarts the
+clock at once; the run clock (`duration_ms`, pulse-train t0) restarts with the
+new spec. Verified with the camera as the oscilloscope: a light channel on D13
+and no camera line, so frames arrive only if the light path toggles its pin. On a wedged USB CDC link the plugin
 auto-recovers via a host `USBDEVFS_RESET` bus reset and surfaces the error loudly.
 
 ## Arduino firmware & auto-flash
@@ -493,6 +502,13 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
   common-trigger-circuit board does **not** buffer the camera trigger: D13 routes
   raw to screw terminal J7-4 (GND on J5-1). Only the 3 CCS light channels have
   transistors.
+- **A GS3 trigger pulse must end before its exposure does.** With
+  `TriggerOverlap=ReadOut` an input still asserted at exposure end re-triggers
+  the camera at once, so a pulse ≥ the exposure makes it free-run at its readout
+  limit (7.697 ms at 2048×1408, i.e. 129.9 fps) and ignore the trigger clock —
+  measured with a 2.4 ms pulse against a 2.0 ms exposure; 480–640 µs pulses are
+  clean. The default `pulse_us` = 500 is fine; don't size camera pulses like
+  strobes.
 - Camera trigger inputs are opto-isolated, each needs its own ground return:
   **Basler acA1920-150um** (Hirose HR10A-7R-6PB) Pin2=Line1 in / **Pin5=opto-gnd**;
   **FLIR GS3-U3-41C6NIR** (Hirose HR25-7TR-8SA) Pin1=Line0 in / **Pin6=opto-gnd**.

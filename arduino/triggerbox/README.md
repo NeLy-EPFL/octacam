@@ -109,8 +109,17 @@ Light **mode** fields:
 **Cancel** — `0xCA`. **Identify** — `0x3F` (`?`) → replies `TRIGGERBOX 2 <build>\n`,
 where `<build>` is a short hash of the sketch source (see *Firmware fingerprint* below).
 
-A valid new arm re-arms from any state (restarts a run in progress). `duration_ms`
-is the master gate — a pulse-train longer than the run is truncated at the end.
+A valid new arm re-arms from any state, superseding a run in progress (`C`, then
+`R`). When the fps is unchanged the **frame clock keeps its phase** and the new
+spec **takes effect at the next frame edge**: outputs that stay in the spec carry
+their level across the edge, so no output gets an early, late or extra edge; pins
+that leave the spec are parked LOW and new pins start LOW. So a light edited live
+during a managed preview never disturbs the trigger under cameras already exposing
+on it — an overlapped-readout camera honors a re-phased trigger late and slides its
+exposure out from under the strobe for several frames. A changed fps starts a fresh
+clock at once. The run clock restarts with the new spec: `duration_ms` is the master
+gate — a pulse-train longer than the run is truncated at the end — and pulse-train
+`start_delay_us` counts from it.
 
 ### Arduino → Host (newline-terminated ASCII)
 

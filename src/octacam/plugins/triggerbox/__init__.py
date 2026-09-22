@@ -1184,7 +1184,10 @@ class TriggerboxPlugin(Plugin):
         the plugin's own ``self._cameras``/``self._lights`` — the source both the
         managed preview arm (``default_start_params``) and the timing use — track
         the tab. When a managed preview is currently running, the board is re-armed
-        in place so the live preview strobes exactly as the edited recording will.
+        in place so the live preview strobes exactly as the edited recording will
+        (current firmware keeps the frame clock's phase on a same-fps re-arm and
+        applies the new spec at the next frame edge, so the edit never disturbs
+        the trigger under the exposing cameras).
         """
         if not isinstance(message, dict) or message.get("type") != "triggerbox_spec":
             return False
