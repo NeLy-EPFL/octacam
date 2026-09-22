@@ -467,6 +467,13 @@ class RecordingController:
         # already left the recording-active set; blocks a new recording from
         # racing that tail over the shared trigger plugin.
         self._tearing_down = False
+        # True from the moment start_recording has admitted a start (checks passed,
+        # save dir created, preview grab stopped) until its record grab is running
+        # or the start has failed. Held across the off-lock cancel of a managed
+        # preview's trigger arm, so nothing can hand the cameras a fresh trigger
+        # clock (a concurrent start, a settings-driven preview re-arm, a benchmark,
+        # a grab-cycling parameter write) in that window. See start_recording.
+        self._starting = False
         self._aborted = False
         self._stop_event = threading.Event()
         # Set once the off-lock on_recording_start plugin hooks have finished
@@ -578,13 +585,18 @@ class RecordingController:
 
     @property
     def _camera_locked(self) -> bool:
-        """Camera control is locked while recording *or* benchmarking.
+        """Camera control is locked while recording, benchmarking, or while a
+        recording start is claiming the cameras.
 
         A benchmark drives the cameras directly (its own grab loops + trigger
         timer), so any device-touching operation — starting a recording/preview,
         writing sensor parameters, snapshotting the nodemap — must be refused
-        until it finishes, exactly as during a recording."""
-        return self.recording_active or self.diagnosing
+        until it finishes, exactly as during a recording. The same holds for the
+        window in which start_recording has stopped the preview grab and is
+        canceling a managed preview's trigger arm off the lock (``_starting``):
+        a preview re-arm or a grab-cycling parameter write there would hand the
+        cameras a fresh trigger clock right before the recording's own arm."""
+        return self.recording_active or self.diagnosing or self._starting
 
     def get_settings(self) -> RecordingSettings:
         with self._lock:
@@ -595,6 +607,10 @@ class RecordingController:
         with self._lock:
             if self.recording_active:
                 raise RuntimeError("Settings are locked while recording")
+            if self._starting:
+                # A start is claiming the cameras (see start_recording); a change
+                # here could re-arm the preview under the recording's feet.
+                raise RuntimeError("Settings are locked while a recording is starting")
             unknown = set(changes) - {
                 f.name for f in dataclasses.fields(RecordingSettings)
             }
@@ -1100,11 +1116,6 @@ class RecordingController:
         confirm_overwrite: bool = False,
         plugin_params: dict | None = None,
     ) -> StartResult:
-        # Bound up front so the off-lock tail below is provably assigned on every
-        # path (they are only *read* on the matching branch, but pyright can't
-        # connect the two `if not started` blocks / the early return).
-        failed_resume_mode: str | None = None
-        hooks_done: threading.Event | None = None
         # Warm the NVENC capability probe OFF the lock. resolve_capture_formats
         # (called under the lock below) runs an ffmpeg probe subprocess on the
         # first GPU recording of the process; doing it here first means the
@@ -1127,10 +1138,11 @@ class RecordingController:
         # block /api/state, the telemetry loop and the Stop button for the duration,
         # and let one camera stalled on a control transfer wedge them indefinitely.
         # The precondition is the same here as below: the cameras must still be
-        # previewing, so skip it if a recording/benchmark already owns them (the
-        # authoritative BUSY checks under the lock will reject this start anyway).
+        # previewing, so skip it if a recording, benchmark or in-flight start
+        # already owns them (the authoritative BUSY checks under the lock will
+        # reject this start anyway).
         pre_params: dict[str, str] | None = None
-        if not self.recording_active and not self.diagnosing:
+        if not self._camera_locked:
             pre_params = self._export_camera_params()
         with self._lock:
             if self.recording_active:
@@ -1148,6 +1160,10 @@ class RecordingController:
                 return StartResult(
                     StartResult.BUSY, "Previous recording is still finishing"
                 )
+            if self._starting:
+                # Another start has passed these checks and is canceling the
+                # managed preview's trigger arm off the lock (below).
+                return StartResult(StartResult.BUSY, "Recording is already starting")
             settings = self._settings
             save_dir = Path(settings.save_dir)
             if save_dir.exists() and not confirm_overwrite:
@@ -1163,11 +1179,74 @@ class RecordingController:
                     StartResult.ERROR, f"Could not create directory: {e}"
                 )
 
+            # The start is admitted: claim the cameras.
+            #
+            # Under a managed preview the trigger plugin is pulsing the cameras
+            # (and strobing the lights) from its indefinite preview arm right now.
+            # That arm is canceled BEFORE the record grab begins — off the lock,
+            # below — rather than superseded by the recording arm once the
+            # cameras are already grabbing. A re-arm restarts the board's frame
+            # clock at an arbitrary phase, and a camera that takes that trigger
+            # mid-pipeline (TriggerOverlap=ReadOut) delays its exposure to the end
+            # of the previous readout while the strobe stays locked to the trigger
+            # edge: on the GS3 at 125 fps every GUI recording opened with a dark
+            # ramp over frames 1–7 (up to ~20), the exposures sliding back under
+            # the strobe by one period-minus-readout (~0.3 ms) per frame — the
+            # hexaview "IR lights flash once at record start". Headless `octacam
+            # record` never showed it because it has no preview arm: its recording
+            # arm starts the trigger clock against an idle camera. So does this
+            # now — the recording's frame 0 is the board's run start (pulse-train
+            # t0, duration_ms), exactly as on the CLI.
+            #
+            # The preview grab is stopped here, while the pulses still flow, so
+            # every grab loop exits within a frame instead of waiting out a grab
+            # timeout on a trigger that has just gone quiet. `_starting` refuses a
+            # concurrent start, a settings-driven preview re-arm, a benchmark and a
+            # grab-cycling parameter write until the record grab is running (or
+            # the start has failed and the preview is re-armed).
+            disarm_preview = (
+                self._state == "preview"
+                and self._effective_preview_mode() == "managed"
+            )
+            if disarm_preview:
+                self.camera_system.stop()
+            self._starting = True
+        try:
+            if disarm_preview:
+                # Off the lock, like every plugin hook: the cancel is a serial write.
+                self.plugins.dispatch("on_preview_stop")
+            return self._start_recording_admitted(plugin_params, pre_params)
+        finally:
+            with self._lock:
+                self._starting = False
+
+    def _start_recording_admitted(
+        self, plugin_params: dict | None, pre_params: dict[str, str] | None
+    ) -> StartResult:
+        """Second half of :meth:`start_recording`, after the admission checks.
+
+        Starts the record grab under the lock, then arms the plugins off it. Runs
+        with the ``_starting`` gate held by the caller — which has also stopped
+        the preview grab and canceled a managed preview's trigger arm, if there
+        was one — so no concurrent start, preview re-arm or camera
+        reconfiguration can interleave. ``pre_params`` is the camera-parameter
+        export the caller took off the lock (None if it could not).
+        """
+        # Bound up front so the off-lock tail below is provably assigned on every
+        # path (they are only *read* on the matching branch, but pyright can't
+        # connect the two `if not started` blocks / the early return).
+        failed_resume_mode: str | None = None
+        hooks_done: threading.Event | None = None
+        with self._lock:
+            settings = self._settings
+            save_dir = Path(settings.save_dir)
+
             use_software_trigger = settings.trigger_source == "software"
-            # Normally already read off the lock above. The fallback covers the
-            # narrow race where a recording was still active at that point but
-            # finished before we took the lock — rare, and correctness (a snapshot
-            # with its camera parameters) beats holding the lock for it.
+            # Normally already read off the lock by start_recording. The fallback
+            # covers the narrow race where a recording was still active at that
+            # point but finished before the admission checks — rare, and
+            # correctness (a snapshot with its camera parameters) beats holding
+            # the lock for it.
             camera_params = (
                 pre_params if pre_params is not None else self._export_camera_params()
             )
@@ -1362,6 +1441,8 @@ class RecordingController:
                 return StartResult(
                     StartResult.BUSY, "Camera reconfiguration in progress"
                 )
+            if self._starting:
+                return StartResult(StartResult.BUSY, "A recording is starting")
             # Snapshot the settings so a concurrent edit can't shift the target
             # mid-run, and flip to the diagnosing state (which locks camera
             # control) before releasing the lock.

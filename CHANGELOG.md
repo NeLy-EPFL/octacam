@@ -9,6 +9,23 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ## [Unreleased]
 
+### Fixed
+
+- **A GUI recording under a managed (triggerbox) preview no longer opens with a
+  dark ramp** — the first frames of every recording came out dim and brightened
+  back to normal over the next ~7 frames (the hexaview "IR lights flash once at
+  record start"). The preview arm kept pulsing the cameras while they switched
+  into the record grab, and the recording arm then restarted the board's frame
+  clock at an arbitrary phase. A camera in overlapped readout
+  (`TriggerOverlap=ReadOut`) delays such an exposure to the end of the previous
+  readout while the strobe stays locked to the trigger edge, so the exposures
+  slid out from under the strobe and crept back by one period-minus-readout
+  (~0.3 ms) per frame. The start now stops the preview grab, cancels the preview
+  arm, and only then starts the record grab and arms the board — the recording's
+  frame 0 is the board's run start, as it always was for headless `octacam
+  record`. A concurrent start, benchmark, settings edit or preview restart is
+  refused during that hand-off.
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed

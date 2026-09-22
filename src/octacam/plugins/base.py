@@ -75,6 +75,10 @@ class OctacamPlugin(Protocol):
     # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
     # plugin arm can block on a serial write + ack. params is the same
     # {name: slice} shape as default_start_params / the recording hooks.
+    # on_preview_stop also fires right before a recording's record grab starts
+    # (after the preview grab has stopped), so on_recording_start always arms the
+    # trigger against idle cameras instead of re-phasing a running clock under
+    # them — see RecordingController.start_recording.
     def drives_preview_trigger(self) -> bool: ...
     def on_preview_start(self, params: dict | None) -> None: ...
     def on_preview_stop(self) -> None: ...

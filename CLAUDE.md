@@ -151,6 +151,18 @@ session-cache note). Two subtleties that are easy to break:
   warm-up): it walks every camera's full node map over USB with no timeout, and
   `snapshot()`/`stop_recording()`/`notify_state()` take the same lock, so doing it
   under the lock let one stalled camera wedge the GUI's status and Stop button.
+- **A managed preview's trigger arm is canceled *before* the record grab starts.**
+  `start_recording` is two-phase: admission checks + stop the preview grab under
+  the lock (fast: pulses still flow) → `on_preview_stop` off the lock under a
+  `_starting` gate (folded into `_camera_locked`) → `start_record` →
+  `on_recording_start`. Letting the recording arm supersede the preview arm once
+  the cameras were grabbing re-phased the board's frame clock mid-pipeline, and a
+  camera in overlapped readout (`TriggerOverlap=ReadOut`) then delays each
+  exposure to the end of the previous readout while the strobe stays on the
+  trigger edge — a dark ramp over the first ~7 frames of every GUI recording
+  (period − readout ≈ 0.3 ms of catch-up per frame on the GS3 at 125 fps; the
+  timestamps show it as 7.7 ms intervals). Frame 0 must be the board's run
+  start, as it is for headless `octacam record`, which never had a preview arm.
 - **A rig that opens fewer cameras than its config asks for is not silent.**
   `CameraSystem` records the shortfall (`.missing`, `.incomplete`), logs one
   `INCOMPLETE RIG` warning naming each camera, exposes it as `missing_cameras` in

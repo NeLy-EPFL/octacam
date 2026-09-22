@@ -192,6 +192,7 @@ def test_capture_frame_count():
 
 def test_update_settings_validation():
     controller = RecordingController.__new__(RecordingController)
+    controller._starting = False  # __init__ bypassed: no start is in flight
     controller._settings = RecordingSettings()
     controller._state = "preview"
     controller._lock = __import__("threading").RLock()
@@ -248,6 +249,7 @@ def test_update_settings_lone_save_dir_clears_split_halves():
     import threading
 
     controller = RecordingController.__new__(RecordingController)
+    controller._starting = False  # __init__ bypassed: no start is in flight
     controller._settings = RecordingSettings(
         record_directory="/base",
         relative_directory="240101/001",
@@ -287,6 +289,7 @@ def test_browse_directory(tmp_path):
     (tmp_path / "f.txt").write_text("x")
 
     controller = RecordingController.__new__(RecordingController)
+    controller._starting = False  # __init__ bypassed: no start is in flight
     controller._settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
 
     listing = controller.browse_directory(str(tmp_path))
