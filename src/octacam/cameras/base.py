@@ -37,6 +37,11 @@ GRAB_TIMEOUT_MS = 100
 # ~0.8 s of headroom at 80 fps; rigs can override it via record.writer_queue_size
 # (raise it for high camera counts / bursty encoders, lower it to save memory).
 WRITER_QUEUE_SIZE = 64
+# After a recording's priming pulses (see Camera.arm_counting), a frame stamped
+# within this long of the last priming frame is a priming straggler, not the
+# recording's first pulse: the controller leaves far more than this between the
+# last priming pulse and the first pulse of the train.
+PRIME_STRAGGLER_NS = 50_000_000
 # Upper bound on the per-frame timestamp series kept during *preview* (the GUI's
 # idle steady state, never periodically restarted): preview only needs the last
 # few for the rolling fps readout, so the series is trimmed to this many instead
@@ -417,11 +422,16 @@ class Camera:
         self._dropped_count = 0
         self._writer_dropped = 0
         # Pulse accounting of the last recording (see octacam.pulses). Frames
-        # that belong to no pulse of the train are discarded as extra.
+        # that belong to no pulse of the train are discarded as extra; frames
+        # delivered while the recording primes the cameras, before counting
+        # starts, are discarded as primed.
         self._tracker: PulseTracker | None = None
         self._pulse_clock: PulseClock | None = None
         self._extra_frames = 0
+        self._primed_frames = 0
         self._unclocked_frames = 0
+        self._armed = threading.Event()
+        self._armed.set()
         self._fill_to: int | None = None
         # Frames whose backend timestamp was 0 and fell back to host time_ns.
         # A per-recording provenance signal (see timestamp_source in the summary):
@@ -519,6 +529,11 @@ class Camera:
     def extra_frames(self) -> int:
         """Frames discarded because they belong to no pulse of the train."""
         return self._extra_frames
+
+    @property
+    def primed_frames(self) -> int:
+        """Frames delivered while the cameras were primed, before counting."""
+        return self._primed_frames
 
     @property
     def pulse_clock(self) -> PulseClock | None:
@@ -1035,6 +1050,7 @@ class Camera:
         queue_size: int = WRITER_QUEUE_SIZE,
         max_frames: int | None = None,
         pulse_clock: PulseClock | None = None,
+        hold: bool = False,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
@@ -1055,6 +1071,8 @@ class Camera:
         is filled with the previous frame when the clock says so, and the loop
         ends once the train's last pulse is accounted for. Without one, a clock is
         derived from ``fps`` and ``max_frames`` (a legacy fixed frame count).
+        ``hold`` discards every frame until :meth:`arm_counting` — the recording
+        primes the cameras with sacrificial triggers first.
         """
         self._stop_flag.clear()
         self._started = False
@@ -1071,6 +1089,10 @@ class Camera:
         self._pulse_clock = pulse_clock
         self._tracker = PulseTracker(pulse_clock)
         self._fill_to = None
+        if hold:
+            self._armed.clear()
+        else:
+            self._armed.set()
 
         bake = record_form == "display" and not self.display_transform.is_identity
         transform = self.display_transform if bake else None
@@ -1107,6 +1129,17 @@ class Camera:
         )
         self._thread.start()
         return True
+
+    def arm_counting(self) -> None:
+        """Start counting pulses: the recording's first trigger follows.
+
+        Ends the priming ``hold`` of :meth:`start_record` — frames delivered
+        before this were answers to sacrificial triggers and are discarded — and
+        restarts a software-trigger sequence so the first counted trigger is 0."""
+        restart = getattr(self._backend, "restart_trigger_sequence", None)
+        if callable(restart):
+            restart()
+        self._armed.set()
 
     def stop(self, fill_to: int | None = None) -> None:
         """Stop the grab loop. ``fill_to`` (a completed train's pulse count) has
@@ -1185,6 +1218,7 @@ class Camera:
         self._writer_dropped = 0
         self._host_fallback_count = 0
         self._extra_frames = 0
+        self._primed_frames = 0
         self._unclocked_frames = 0
         self._tracker = None
 
@@ -1226,6 +1260,7 @@ class Camera:
         # on the next queued frame (or on close) so the video keeps exactly one
         # frame per pulse.
         owed = 0
+        last_primed_ts: int | None = None
         writer = self._video_writer
         assert writer is not None
         while not self._stop_flag.is_set() and backend.is_grabbing():
@@ -1241,6 +1276,17 @@ class Camera:
             if array is None:  # record always requests the array; defensive
                 continue
             host_ns = time.monotonic_ns()
+            if not self._armed.is_set() or (
+                last_primed_ts is not None
+                and timestamp
+                and 0 <= timestamp - last_primed_ts < PRIME_STRAGGLER_NS
+            ):
+                # An answer to a priming trigger (the controller primes the
+                # cameras before the train: a camera may ignore the first
+                # triggers after acquisition start), not part of the recording.
+                self._primed_frames += 1
+                last_primed_ts = timestamp or last_primed_ts
+                continue
             arrival = time.time_ns()
             index = getattr(backend, "last_trigger_index", None)
             if index is not None:

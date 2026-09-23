@@ -124,6 +124,7 @@ def test_software_missed_pulses_are_filled_and_reported(fake_system, tmp_path):
     assert bad["missed_pulse_indices"] == [10, 11, 30]
     assert bad["dropped"] == 3 and bad["dropped_indices"] == [10, 11, 30]
     assert summary["pulse_train"]["count"] == 50
+    assert summary["pulse_train"]["primed"] > 0
     assert summary["schema_version"] == 4
     np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(50))
     assert np.flatnonzero(arrays["FAKE-1/missed"]).tolist() == [10, 11, 30]
@@ -152,6 +153,28 @@ def test_a_missed_pulse_is_found_from_hardware_timestamps(fake_system, tmp_path)
     # The filled frame is time-stamped when its pulse was due.
     ts = arrays["FAKE-0/timestamp_ns"]
     assert np.all(np.diff(ts) == PERIOD_NS)
+
+
+def test_priming_absorbs_the_triggers_a_camera_ignores_after_start(
+    fake_system, tmp_path
+):
+    # A GS3 ignores its first two triggers after acquisition start; without
+    # priming, frame 0 would be pulse 2 and the video two frames short.
+    for serial in FAKE_SERIALS:
+        backend = _backend(fake_system, serial)
+        backend.hardware_period_ns = PERIOD_NS
+        backend.ignore_first_triggers = 2
+    board = Board(fake_system, count=50)
+    _save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
+    )
+    assert board.primed == 4
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+        assert cam["primed_frames"] == 2  # the 4 priming pulses minus the 2 ignored
+    assert summary["sync"]["ok"], summary["sync"]
+    assert summary["pulse_train"]["source"] == "managed"
 
 
 def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(
