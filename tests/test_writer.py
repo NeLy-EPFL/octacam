@@ -448,3 +448,56 @@ def test_ffmpeg_probes_and_transcode_never_grab_the_tty(tmp_path, monkeypatch):
     for raw in (False, True):
         flags = writer_mod._reporting_args(["/fake/ffmpeg", "-i", "in.mkv"], raw)
         assert "-nostdin" in flags, f"_reporting_args(raw_output={raw}) missing -nostdin"
+
+
+class _ListSink(AsyncFrameWriter):
+    def _open_sink(self, filename, fps, frame_size):
+        self.written = []
+
+    def _write_frame(self, frame):
+        self.written.append(frame)
+
+    def _close_sink(self):
+        pass
+
+
+def test_fill_before_repeats_the_previous_frame():
+    # A missed trigger pulse rides on the next frame: the writer repeats the
+    # frame before it, so the file keeps one frame per pulse.
+    writer = _ListSink(max_queue_size=10)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    a, b, c = synthetic_frames(3)
+    assert writer.write(a)
+    assert writer.write(b, fill_before=2)
+    assert writer.write(c)
+    writer.close(fill_after=1)
+    assert [id(f) for f in writer.written] == [id(a), id(a), id(a), id(b), id(c), id(c)]
+    assert writer.frames_written == 6
+
+
+def test_a_leading_fill_repeats_the_first_frame():
+    # Nothing written yet (the camera missed the train's first pulse): the fill
+    # repeats the frame it precedes rather than inventing one.
+    writer = _ListSink(max_queue_size=10)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    (a,) = synthetic_frames(1)
+    assert writer.write(a, fill_before=2)
+    writer.close()
+    assert [id(f) for f in writer.written] == [id(a)] * 3
+
+
+def test_a_fill_is_never_dropped_on_its_own():
+    # The fill travels with its frame: if the queue is full both are refused
+    # together (the caller re-owes them on the next write), never the fill alone.
+    writer = _SlowSink(max_queue_size=1)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    frames = synthetic_frames(6)
+    owed, accepted = 0, 0
+    for frame in frames:
+        if writer.write(frame, fill_before=owed):
+            accepted += 1 + owed
+            owed = 0
+        else:
+            owed += 1
+    writer.close(fill_after=owed)
+    assert len(writer.written) == len(frames)

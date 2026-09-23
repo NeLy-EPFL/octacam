@@ -25,6 +25,14 @@ Backend ``retrieve`` bodies become::
 which keeps the invariant **one frame recorded per trigger fired**: every drained
 pending count fires one FrameStart trigger (one exposure) and fetches one frame.
 
+Trigger sequence
+    Every trigger offered while grabbing gets a sequence number (0, 1, 2, … from
+    the grab start, or from :meth:`SoftwareTriggerHandoff.restart_trigger_sequence`),
+    including the ones the overflow policy drops. :attr:`last_trigger_index` is
+    the number of the trigger the latest ``retrieve`` fired, so the recording's
+    pulse accounting knows exactly which trigger each frame answers — a dropped
+    trigger, or one whose frame never arrived, shows up as a gap in the sequence.
+
 Overflow policy (:data:`PENDING_MAX`)
     Requesting a higher fps than a camera can deliver (its exposure + readout is
     longer than the trigger period) would make the counter grow without bound.
@@ -41,6 +49,7 @@ Overflow policy (:data:`PENDING_MAX`)
 
 import logging
 import threading
+from collections import deque
 
 log = logging.getLogger("octacam")
 
@@ -64,8 +73,31 @@ class SoftwareTriggerHandoff:
     def _init_trigger_handoff(self) -> None:
         self._cond = threading.Condition()
         self._pending = 0
+        # Sequence numbers of the pending triggers (parallel to _pending), the
+        # next number to hand out, and the one the latest retrieve fired.
+        self._pending_seqs: deque[int] = deque()
+        self._next_seq = 0
+        self._last_trigger_index: int | None = None
         self._grabbing = False
         self._dropped_triggers = 0
+
+    @property
+    def last_trigger_index(self) -> int | None:
+        """Sequence number of the trigger the latest ``retrieve`` fired (None
+        until one fires in this grab — e.g. on a hardware-triggered fetch, which
+        never draws on the hand-off)."""
+        return self._last_trigger_index
+
+    def restart_trigger_sequence(self) -> None:
+        """Forget pending triggers and number the next one 0.
+
+        Called when a recording starts counting after the cameras were primed,
+        so the recording's first trigger is sequence 0 in every camera."""
+        with self._cond:
+            self._pending = 0
+            self._pending_seqs.clear()
+            self._next_seq = 0
+            self._last_trigger_index = None
 
     # --------------------------------------------------------------- triggering
 
@@ -80,8 +112,11 @@ class SoftwareTriggerHandoff:
         with self._cond:
             if not self._grabbing:
                 return
+            seq = self._next_seq
+            self._next_seq += 1
             if self._pending < PENDING_MAX:
                 self._pending += 1
+                self._pending_seqs.append(seq)
                 self._cond.notify()
             else:
                 self._dropped_triggers += 1
@@ -100,6 +135,9 @@ class SoftwareTriggerHandoff:
         """Arm the hand-off when streaming starts (resets the backlog)."""
         with self._cond:
             self._pending = 0
+            self._pending_seqs.clear()
+            self._next_seq = 0
+            self._last_trigger_index = None
             self._grabbing = True
 
     def _end_grab(self) -> bool:
@@ -132,4 +170,7 @@ class SoftwareTriggerHandoff:
             if self._pending <= 0 or not self._grabbing:
                 return False
             self._pending -= 1
+            self._last_trigger_index = (
+                self._pending_seqs.popleft() if self._pending_seqs else None
+            )
             return True

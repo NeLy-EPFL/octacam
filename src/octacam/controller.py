@@ -33,6 +33,7 @@ import numpy as np
 from octacam import config_writer
 from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
 from octacam.plugins.base import PluginManager
+from octacam.pulses import PulseClock
 from octacam.transform import (
     CONFIG_SNAPSHOT_FILENAME,
     RECORDING_SUMMARY_FILENAME,
@@ -61,6 +62,13 @@ STOP_GRACE_S = 0.5  # matches cli.py's in-flight frame grace period
 # wedged start hook (e.g. a plugin serial write stalled on its write_timeout) so
 # it can never block recording teardown indefinitely.
 START_HOOKS_TIMEOUT_S = 5.0
+# A counted train is over this long after its last pulse was due: time for the
+# last frames to arrive (a GS3 delivers ~10-30 ms after its pulse). The recording
+# then stops on the train's end instead of waiting out the duration's deadline.
+TRAIN_END_MARGIN_S = 0.3
+# Summary lists of per-pulse indices are capped at this length (the full series
+# is in timestamps.npz); the counts next to them are never capped.
+SUMMARY_INDEX_LIMIT = 1000
 
 _TRAILING_NUMBER_RE = re.compile(r"\d{3}")
 
@@ -200,6 +208,32 @@ def capture_frame_count(settings: RecordingSettings) -> int | None:
     return max(1, round(settings.fps * settings.duration_s))
 
 
+def resolve_pulse_clock(
+    settings: RecordingSettings,
+    plugins: PluginManager | None = None,
+    plugin_params: dict | None = None,
+) -> PulseClock:
+    """The trigger train a recording's frames are counted against.
+
+    ``managed``: the train the driving plugin will actually emit (its integer
+    period and exact pulse count — see the ``trigger_train`` plugin hook), else
+    one derived from the settings. ``software``: octacam's own timer, one tick per
+    ``round(fps * duration)``. Both are filled: a camera that misses a pulse gets
+    the previous frame repeated in its place, so video frame k is pulse k in
+    every camera. ``external``: a source octacam does not drive, so its length is
+    unknown and a missed pulse is only reported (in the per-frame pulse map),
+    never filled — an external clock may be irregular by design.
+    """
+    period = int(round(1e9 / settings.fps)) if settings.fps > 0 else 0
+    if settings.trigger_source == "external":
+        return PulseClock(period, None, "external", fill=False)
+    if settings.trigger_source == "managed" and plugins is not None:
+        train = plugins.trigger_train(plugin_params)
+        if train:
+            return PulseClock(int(train["period_ns"]), int(train["count"]), "managed")
+    return PulseClock(period, capture_frame_count(settings), settings.trigger_source)
+
+
 def record_config_values(settings: RecordingSettings) -> dict:
     """The recording settings as ``[record]`` config keys, for the config snapshot.
 
@@ -239,11 +273,17 @@ class StartResult:
 
 
 _DROPPED_FRAMES_NOTE = (
-    "`dropped` counts only frames the encoder/writer queue could not accept "
-    "(the host could not keep up). Frames the camera or transport never "
-    "delivered (e.g. USB bandwidth gaps) are NOT detected here; enable "
-    "save_frame_timestamps and inspect the inter-frame timestamp gaps to "
-    "investigate those."
+    "Every frame is assigned to the trigger pulse that exposed it, from the "
+    "camera's hardware timestamps (or, under a software trigger, the trigger's "
+    "sequence number). `missed_pulses` lists pulses the camera delivered no frame "
+    "for (a missed trigger, or a frame lost in transport) and `writer_dropped` "
+    "counts frames the writer queue "
+    "could not accept. On an octacam-driven train (software/managed) both are "
+    "filled with the previous frame, so video frame k is pulse k in every camera "
+    "and `dropped`/`dropped_indices` count/list those filled frames; "
+    "timestamps.npz marks them per frame (`dropped`, `missed`) with each frame's "
+    "`pulse_index`. On an external trigger missed pulses are reported only. "
+    "`late_pulse_indices` are frames exposed markedly after their pulse."
 )
 
 _TIMESTAMP_NOTE = (
@@ -271,11 +311,17 @@ def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
     return "mixed"
 
 
+def _capped(indices: list[int]) -> list[int]:
+    return list(indices[:SUMMARY_INDEX_LIMIT])
+
+
 def build_recording_summary(
     settings: RecordingSettings,
     cameras,
     start_wall_ns: int,
     aborted: bool,
+    pulse_clock: PulseClock | None = None,
+    sync: dict | None = None,
 ) -> dict:
     """Assemble the recording_summary.json payload from finalized camera stats.
 
@@ -307,7 +353,21 @@ def build_recording_summary(
                 "fps": round(camera.mean_fps, 3),
                 "frames": camera.frames_recorded,
                 "dropped": camera.dropped_count,
-                "dropped_indices": camera.dropped_indices,
+                "dropped_indices": _capped(camera.dropped_indices),
+                # Pulse accounting (read tolerantly: a duck-typed camera, as in
+                # tests or a remote node's summary, may predate these fields).
+                "missed_pulses": len(missed := list(getattr(camera, "missed_pulses", []))),
+                "missed_pulse_indices": _capped(missed),
+                "writer_dropped": getattr(camera, "writer_dropped", 0),
+                "late_frames": len(late := list(getattr(camera, "late_pulses", []))),
+                "late_pulse_indices": _capped(late),
+                "extra_frames": getattr(camera, "extra_frames", 0),
+                "clock_mismatch": getattr(camera, "clock_mismatch", False),
+                "timestamp_glitches": getattr(camera, "timestamp_glitches", []),
+                "unclocked_frames": getattr(camera, "unclocked_frames", 0),
+                "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
+                    camera.name
+                ),
                 "start_timestamp_ns": camera.start_timestamp_ns,
                 "timestamp_source": _timestamp_source(
                     camera.frames_recorded, camera.host_fallback_count
@@ -319,7 +379,7 @@ def build_recording_summary(
             }
         )
     summary = {
-        "schema_version": 3,
+        "schema_version": 4,
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
@@ -336,6 +396,11 @@ def build_recording_summary(
         # the destination; resolved once here so a later transfer never
         # re-templates the date on a different day.
         "relative_directory": _relative_directory(settings),
+        "pulse_train": pulse_clock.to_dict() if pulse_clock is not None else None,
+        "sync": {
+            "ok": (sync or {}).get("ok", True),
+            "warnings": list((sync or {}).get("warnings", [])),
+        },
         "dropped_frames_note": _DROPPED_FRAMES_NOTE,
         "timestamp_note": _TIMESTAMP_NOTE,
         "cameras": cams,
@@ -358,21 +423,28 @@ def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
     """Assemble the {key: array} payload for ``timestamps.npz`` from finalized
     camera stats.
 
-    Pure (no I/O) so it can be unit-tested without a recording. Per camera, two
-    parallel arrays keyed ``"<name>/timestamp_ns"`` (int64) and
-    ``"<name>/dropped"`` (bool); ``frame_index`` is implicit (array position).
-    Lengths are truncated to the shared minimum (mirrors the defensive
-    non-strict zip the old CSV used) so a rare skew truncates rather than raises;
-    a zero-frame camera contributes empty arrays."""
+    Pure (no I/O) so it can be unit-tested without a recording. Per camera,
+    parallel arrays with one entry per video frame (``frame_index`` is implicit:
+    the array position): ``"<name>/timestamp_ns"`` (int64; a filled frame carries
+    the time its pulse was due), ``"<name>/dropped"`` (bool: a fill, not an image
+    of its own pulse), ``"<name>/missed"`` (bool: of those, a pulse the camera
+    never delivered), ``"<name>/pulse_index"`` (int64: the trigger pulse the frame
+    stands for) and ``"<name>/arrival_ns"`` (int64: host wall-clock delivery, 0
+    for a fill). Lengths are truncated to the shared minimum so a rare skew
+    truncates rather than raises; a zero-frame camera contributes empty arrays."""
     arrays: dict[str, np.ndarray] = {}
     for camera in cameras:
-        timestamps = camera.frame_timestamps
-        dropped = camera.frame_dropped
-        n = min(len(timestamps), len(dropped))
-        arrays[f"{camera.name}/timestamp_ns"] = np.asarray(
-            timestamps[:n], dtype=np.int64
-        )
-        arrays[f"{camera.name}/dropped"] = np.asarray(dropped[:n], dtype=bool)
+        series = {
+            "timestamp_ns": (camera.frame_timestamps, np.int64),
+            "dropped": (camera.frame_dropped, bool),
+            "missed": (getattr(camera, "frame_missed", None), bool),
+            "pulse_index": (getattr(camera, "frame_pulse_index", None), np.int64),
+            "arrival_ns": (getattr(camera, "frame_arrival_ns", None), np.int64),
+        }
+        present = {k: v for k, v in series.items() if v[0] is not None}
+        n = min(len(values) for values, _dtype in present.values())
+        for key, (values, dtype) in present.items():
+            arrays[f"{camera.name}/{key}"] = np.asarray(values[:n], dtype=dtype)
     return arrays
 
 
@@ -490,6 +562,13 @@ class RecordingController:
         # Host wall-clock (ns) captured when the current/last recording started,
         # written into recording_summary.json as the real-world start time.
         self._recording_start_wall_ns = 0
+        # The trigger train the current/last recording is counted against, and
+        # the cross-camera sync verdict written into its summary (see
+        # _check_sync).
+        self._pulse_clock: PulseClock | None = None
+        self._sync: dict | None = None
+        # When the current counted train is over (host monotonic), once started.
+        self._train_end: float | None = None
         # Bumped each time a countdown starts so clients can tell one recording
         # from the next even if they miss the intervening non-recording states.
         self._recording_seq = 0
@@ -1242,6 +1321,11 @@ class RecordingController:
             save_dir = Path(settings.save_dir)
 
             use_software_trigger = settings.trigger_source == "software"
+            # Count every frame against the train octacam will clock.
+            clock = resolve_pulse_clock(settings, self.plugins, plugin_params)
+            self._pulse_clock = clock
+            self._sync = None
+            self._train_end = None
             # Normally already read off the lock by start_recording. The fallback
             # covers the narrow race where a recording was still active at that
             # point but finished before the admission checks — rare, and
@@ -1277,7 +1361,7 @@ class RecordingController:
                     settings.record_form,
                     use_software_trigger=use_software_trigger,
                     writer_queue_size=settings.writer_queue_size,
-                    max_frames=capture_frame_count(settings),
+                    pulse_clock=clock,
                 )
             except Exception as e:
                 # A non-BackendError escaping the trigger-config or start_record
@@ -1363,6 +1447,12 @@ class RecordingController:
         # the cameras have already stopped.
         try:
             if not self._stop_event.is_set():
+                if clock.count and clock.fill:
+                    self._train_end = (
+                        time.monotonic()
+                        + clock.count * clock.period_ns / 1e9
+                        + TRAIN_END_MARGIN_S
+                    )
                 self.plugins.dispatch("on_recording_start", plugin_params)
         finally:
             # Unblock the monitor's on_first_frame / on_recording_stop regardless
@@ -1611,19 +1701,38 @@ class RecordingController:
                 self._deadline = deadline
                 self._recording_seq += 1
                 self._set_state("recording")
-            # --- countdown
+            # --- countdown. A counted train ends on its pulse count: as soon as
+            # every camera has the train's last pulse, or once the train is over
+            # (a camera that missed its last pulses cannot know it before then);
+            # the duration's deadline is only the backstop.
+            reported: dict[str, int] = {}
             while not self._stop_event.is_set():
+                if self.camera_system.all_pulses_complete:
+                    break
+                train_end = self._train_end
+                if train_end is not None and time.monotonic() >= train_end:
+                    break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
+                self._report_missed_pulses(reported)
                 self._stop_event.wait(min(remaining, 0.2))
 
         # --- finishing: same teardown order as MainWindow._stop_record and
         # cli.record: trigger off -> grab loops exit -> writers drain -> CSVs
+        completed = not self._stop_event.is_set()
         with self._lock:
             self._set_state("finishing")
         self.camera_system.stop_software_trigger()
-        self.camera_system.stop()
+        # A train that ran to its end pads each camera's video to the train's
+        # pulse count (a camera that missed the last pulses still ends on the
+        # same pulse as the others); a stopped/aborted one ends where it was.
+        clock = self._pulse_clock
+        fill_to = clock.count if completed and clock is not None and clock.fill else None
+        self.camera_system.stop(fill_to)
+        self._sync = self._check_sync(completed)
+        for message in self._sync["warnings"]:
+            self._event("warning", message)
         for camera in self.camera_system:
             if camera.writer_failed:
                 self._event(
@@ -1729,6 +1838,138 @@ class RecordingController:
         finally:
             with self._lock:
                 self._tearing_down = False
+
+    def _report_missed_pulses(self, reported: dict[str, int]) -> None:
+        """Tell the operator, while recording, that a camera is missing pulses."""
+        for camera in self.camera_system:
+            missed = camera.missed_pulses
+            before = reported.get(camera.name, 0)
+            if len(missed) > before:
+                reported[camera.name] = len(missed)
+                new = missed[before:]
+                shown = ", ".join(str(p) for p in new[:5]) + (" …" if len(new) > 5 else "")
+                self._event(
+                    "warning",
+                    f"Camera {camera.name} missed trigger pulse(s) {shown} "
+                    f"({len(missed)} so far)"
+                    + (
+                        "; filled with the previous frame to keep the cameras aligned"
+                        if camera.pulse_clock is not None and camera.pulse_clock.fill
+                        else ""
+                    ),
+                )
+
+    def _check_sync(self, completed: bool) -> dict:
+        """Whether frame k is the same trigger pulse in every camera, and why not.
+
+        Fills keep the cameras aligned through missed pulses and writer drops, so
+        those are reported but do not break sync. What does: a camera whose frames
+        did not follow the trigger clock, frames that could not be placed on it
+        (no hardware timestamps), pulses an external trigger's camera missed (not
+        filled), cameras ending on different pulses after a completed train, and a
+        camera that started late. The last is caught by comparing when each
+        camera's first frames arrived on the host: same-model cameras deliver the
+        same pulse within ~0.5 ms of each other, a pulse later is a whole period.
+        """
+        clock = self._pulse_clock
+        warnings: list[str] = []
+        offsets: dict[str, int | None] = {}
+        ok = True
+        cams = [c for c in self.camera_system if c.frames_recorded]
+        for camera in cams:
+            name = camera.name
+            missed = camera.missed_pulses
+            if missed:
+                shown = ", ".join(str(p) for p in missed[:10])
+                more = f" and {len(missed) - 10} more" if len(missed) > 10 else ""
+                if clock is not None and clock.fill:
+                    warnings.append(
+                        f"Camera {name} missed {len(missed)} trigger pulse(s) "
+                        f"({shown}{more}); each was filled with the previous frame"
+                    )
+                else:
+                    ok = False
+                    warnings.append(
+                        f"Camera {name} missed {len(missed)} trigger pulse(s) "
+                        f"({shown}{more}); on an external trigger they are not "
+                        "filled — map frames to pulses with pulse_index in "
+                        f"{TIMESTAMPS_FILENAME}"
+                    )
+            if camera.writer_dropped:
+                warnings.append(
+                    f"Camera {name}: {camera.writer_dropped} frame(s) arrived while "
+                    "the writer queue was full and were filled with the previous "
+                    "frame (the encoder could not keep up)"
+                )
+            if camera.extra_frames:
+                warnings.append(
+                    f"Camera {name}: {camera.extra_frames} frame(s) belonged to no "
+                    "pulse of the train and were discarded"
+                )
+            if camera.clock_mismatch:
+                ok = False
+                warnings.append(
+                    f"Camera {name}: its frames did not follow the trigger clock's "
+                    "period (is it free-running? A trigger pulse longer than the "
+                    "exposure re-triggers some cameras at their readout limit)"
+                )
+            if camera.unclocked_frames:
+                ok = False
+                warnings.append(
+                    f"Camera {name}: {camera.unclocked_frames} frame(s) had no "
+                    "hardware timestamp, so missed pulses cannot be detected"
+                )
+            for glitch in camera.timestamp_glitches:
+                warnings.append(
+                    f"Camera {name}: its hardware clock jumped by "
+                    f"{glitch['jump_ns'] / 1e9:+.6f} s at pulse {glitch['pulse']} "
+                    "(corrected; not a lost frame)"
+                )
+        if completed and clock is not None and clock.fill and clock.count:
+            short = [c.name for c in cams if c.frames_recorded != clock.count]
+            if short:
+                ok = False
+                warnings.append(
+                    f"Camera(s) {', '.join(short)} did not end on the train's last "
+                    f"pulse ({clock.count} expected)"
+                )
+        period = clock.period_ns if clock is not None else 0
+        delays: dict[str, float] = {}
+        for camera in cams:
+            rows = [
+                (arrival, pulse)
+                for arrival, pulse in zip(
+                    camera.frame_arrival_ns, camera.frame_pulse_index, strict=False
+                )
+                if arrival
+            ][:16]
+            if period and len(rows) >= 4:
+                delays[camera.name] = float(
+                    np.median([arrival - pulse * period for arrival, pulse in rows])
+                )
+        if len(delays) > 1:
+            earliest = min(delays.values())
+            for name, delay in delays.items():
+                pulses = (delay - earliest) / period
+                nearest = round(pulses)
+                if abs(pulses - nearest) > 0.25:
+                    offsets[name] = None
+                    ok = False
+                    warnings.append(
+                        f"Camera {name}: could not verify that its first frame is "
+                        f"the others' first pulse (first frames arrived "
+                        f"{pulses:+.2f} periods from the earliest camera's)"
+                    )
+                else:
+                    offsets[name] = nearest
+                    if nearest:
+                        ok = False
+                        warnings.append(
+                            f"Camera {name} started {nearest} pulse(s) late: its "
+                            f"frame i shows the moment of the other cameras' frame "
+                            f"i+{nearest} (it missed the train's first pulse(s))"
+                        )
+        return {"ok": ok, "warnings": warnings, "start_offsets": offsets}
 
     def _snapshot_source(self) -> Path | None:
         """The rig config file each recording's snapshot is made from, or None
@@ -1839,6 +2080,8 @@ class RecordingController:
                 list(self.camera_system),
                 self._recording_start_wall_ns,
                 aborted,
+                pulse_clock=self._pulse_clock,
+                sync=self._sync,
             )
             path.write_text(json.dumps(summary, indent=2) + "\n")
             log.info("Wrote recording summary: %s", path)
@@ -1921,6 +2164,7 @@ class RecordingController:
                     "fps": round(camera.resulting_fps, 2),
                     "frames": camera.frames_recorded,
                     "dropped": camera.dropped_count,
+                    "missed": camera.missed_count,
                     "writer_failed": camera.writer_failed,
                 }
                 for camera in self.camera_system

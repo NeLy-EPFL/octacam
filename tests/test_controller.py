@@ -50,16 +50,21 @@ def test_build_recording_summary():
     summary = build_recording_summary(
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["fps_target"] == 100.0
     assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
-    assert "USB" in summary["dropped_frames_note"]
+    assert "trigger pulse" in summary["dropped_frames_note"]
+    assert summary["pulse_train"] is None  # no clock passed
+    assert summary["sync"] == {"ok": True, "warnings": []}
     assert summary["start_time"].startswith("20")
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
     assert entry["pixel_format"] == "Mono8"
     assert entry["dropped_indices"] == [137, 411]
+    # A camera that predates pulse accounting reads as having none.
+    assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
+    assert entry["writer_dropped"] == 0
     # No fallbacks -> the series is entirely the camera's hardware timestamp.
     assert entry["timestamp_source"] == "hardware"
     assert entry["host_fallback_count"] == 0

@@ -22,6 +22,7 @@ from octacam.cameras.registry import (
     select_backend,
     teardown_backend,
 )
+from octacam.pulses import PulseClock
 from octacam.transform import DisplayTransform, from_camera_config
 from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
@@ -409,6 +410,7 @@ class CameraSystem:
         use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
         max_frames: int | None = None,
+        pulse_clock: PulseClock | None = None,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
@@ -418,8 +420,9 @@ class CameraSystem:
         forwarded so an external-trigger recording fetches frames without the
         software-trigger hand-off (see :meth:`Camera.start_record`).
         ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
-        ``max_frames`` caps every camera at the same frame count so a teardown
-        race can't leave cameras one frame apart (None = uncapped).
+        ``pulse_clock`` is the trigger train every camera's frames are assigned
+        to (see :meth:`Camera.start_record`; ``max_frames`` is the legacy fixed
+        frame count it replaces).
 
         ``video_format`` may be a single format used for every camera, or a list
         with one format per camera (positionally, matching ``self.cameras``) so a
@@ -451,6 +454,7 @@ class CameraSystem:
                 software_trigger=use_software_trigger,
                 queue_size=writer_queue_size,
                 max_frames=max_frames,
+                pulse_clock=pulse_clock,
             )
 
         # Start every camera at once so they begin grabbing closer together
@@ -498,9 +502,16 @@ class CameraSystem:
             for camera in self.cameras
         ]
 
-    def stop(self) -> None:
+    @property
+    def all_pulses_complete(self) -> bool:
+        """True once every camera has accounted for its train's last pulse."""
+        return bool(self.cameras) and all(c.pulses_complete for c in self.cameras)
+
+    def stop(self, fill_to: int | None = None) -> None:
+        """Stop every grab loop. ``fill_to`` (a completed train's pulse count)
+        pads each recording camera's video to that many frames."""
         for camera in self.cameras:
-            camera.stop()
+            camera.stop(fill_to)
         for camera in self.cameras:
             camera.join()
 

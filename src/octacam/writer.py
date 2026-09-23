@@ -554,6 +554,14 @@ class AsyncFrameWriter:
     it afterwards); callers pass a freshly owned copy from GrabResult.Array.
     Subclasses implement _open_sink/_write_frame/_close_sink.
 
+    Filling: ``write(frame, fill_before=n)`` first writes the previously written
+    frame ``n`` more times (the first frame itself, if nothing was written yet)
+    and then ``frame``, and ``close(fill_after=n)`` appends ``n`` repeats at the
+    end. This is how a recording keeps one video frame per trigger pulse when a
+    camera misses a pulse or a frame is refused here: the fill rides on the next
+    queued item instead of taking queue slots of its own, so it can never be
+    dropped on its own and leave the video short.
+
     ``profile`` (off by default, so a normal recording pays nothing) turns on
     lightweight per-frame instrumentation for the diagnostics engine: the writer
     thread times each ``_write_frame`` (the real encode/disk cost) into
@@ -620,8 +628,9 @@ class AsyncFrameWriter:
         self._thread.start()
         return True
 
-    def write(self, frame) -> bool:
-        """Enqueue a frame; returns False if it was dropped."""
+    def write(self, frame, fill_before: int = 0) -> bool:
+        """Enqueue a frame, preceded by ``fill_before`` repeats of the previous
+        one; returns False if it was dropped (and with it, the fill)."""
         if not self._running or self._failed:
             return False
         if self._profile:
@@ -629,16 +638,19 @@ class AsyncFrameWriter:
             if depth > self._max_queue_depth:
                 self._max_queue_depth = depth
         try:
-            self._queue.put_nowait(frame)
+            self._queue.put_nowait((frame, fill_before))
             return True
         except queue.Full:
             return False
 
-    def close(self) -> None:
-        """Stop accepting frames, drain the queue, and finalize the file."""
+    def close(self, fill_after: int = 0) -> None:
+        """Stop accepting frames, drain the queue, append ``fill_after`` repeats
+        of the last frame, and finalize the file."""
         if self._thread is None:
             return
         self._running = False
+        if fill_after > 0:
+            self._queue.put((None, fill_after))  # blocking: a fill is never dropped
         self._queue.put(_SENTINEL)  # queued frames are written first
         self._thread.join()
         self._thread = None
@@ -649,20 +661,30 @@ class AsyncFrameWriter:
             log.error("Failed to finalize video: %s", e)
 
     def _writer_loop(self) -> None:
+        last = None
         while True:
-            frame = self._queue.get()
-            if frame is _SENTINEL:
+            item = self._queue.get()
+            if item is _SENTINEL:
                 break
+            frame, fill = item
             if self._failed:
                 continue  # keep draining so close() semantics are unchanged
+            # A fill repeats the previous frame; a leading one (nothing written
+            # yet) repeats the frame it precedes.
+            filler = last if last is not None else frame
             try:
-                if self._profile:
-                    t0 = time.perf_counter_ns()
-                    self._write_frame(frame)
-                    self._encode_ns_samples.append(time.perf_counter_ns() - t0)
-                else:
-                    self._write_frame(frame)
-                self._written += 1
+                for _ in range(fill if filler is not None else 0):
+                    self._write_frame(filler)
+                    self._written += 1
+                if frame is not None:
+                    if self._profile:
+                        t0 = time.perf_counter_ns()
+                        self._write_frame(frame)
+                        self._encode_ns_samples.append(time.perf_counter_ns() - t0)
+                    else:
+                        self._write_frame(frame)
+                    self._written += 1
+                    last = frame
             except Exception as e:
                 self._failed = True
                 self._on_sink_failure(e)

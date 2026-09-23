@@ -150,6 +150,19 @@ class FakeBackend(SoftwareTriggerHandoff):
         # start_grab_record/stop_grab). Lets retrieve_freerun pace an uncapped
         # managed preview without pacing the benchmark's uncapped record-grab probe.
         self._preview_grab = False
+        # Test knobs modelling a hardware-triggered camera's failure modes:
+        # ``miss_triggers`` — trigger sequence numbers whose frame never arrives
+        # (a missed pulse); ``ignore_first_triggers`` — how many triggers after
+        # each grab start produce no frame at all (a FLIR Grasshopper3 ignores its
+        # first two); ``hardware_period_ns`` — stamp frames from an ideal camera
+        # clock ticking at the trigger period and hide the trigger sequence, so a
+        # recording places frames by timestamp exactly as it must for a real
+        # hardware-triggered camera.
+        self.miss_triggers: set[int] = set()
+        self.ignore_first_triggers = 0
+        self.hardware_period_ns: int | None = None
+        self._clock_t0 = 1_000_000_000_000
+        self._triggers_since_grab = 0
         self._init_trigger_handoff()
 
     @property
@@ -426,6 +439,7 @@ class FakeBackend(SoftwareTriggerHandoff):
 
     def start_grab_preview(self) -> None:
         self._preview_grab = True
+        self._triggers_since_grab = 0
         self._begin_grab()
 
     def start_grab_record(self) -> bool:
@@ -437,17 +451,41 @@ class FakeBackend(SoftwareTriggerHandoff):
         self._preview_grab = False
         self._end_grab()
 
+    def restart_trigger_sequence(self) -> None:
+        # A real camera's clock runs on through the pause between a recording's
+        # priming pulses and its train; model it (1 s) so the train's frames are
+        # not mistaken for priming stragglers.
+        if self.hardware_period_ns:
+            self._clock_t0 += self._next_seq * self.hardware_period_ns + 1_000_000_000
+        super().restart_trigger_sequence()
+
+    @property
+    def last_trigger_index(self) -> int | None:
+        # A hardware-clocked fake behaves like a real hardware-triggered camera:
+        # its frames carry a timestamp, not the trigger's sequence number.
+        if self.hardware_period_ns:
+            return None
+        return self._last_trigger_index
+
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         if not self._wait_pending(timeout_ms):
             return None
         with self._cond:
+            self._triggers_since_grab += 1
+            seq = self._last_trigger_index
+            if self._triggers_since_grab <= self.ignore_first_triggers:
+                return None  # this trigger never exposed a frame
+            if seq is not None and seq in self.miss_triggers:
+                return None  # the pulse was missed
             self._frame_index += 1
             index = self._frame_index
             width = int(self._nodes["Width"]["value"])
             height = int(self._nodes["Height"]["value"])
         array = _render(width, height, index) if wants_array() else None
+        if self.hardware_period_ns and seq is not None:
+            return (array, self._clock_t0 + seq * self.hardware_period_ns)
         return (array, time.time_ns())
 
     def retrieve_external(
