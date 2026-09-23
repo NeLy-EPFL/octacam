@@ -107,6 +107,10 @@ DEFAULT_STROBE_GUARD_US = 100
 
 # How long on_recording_start waits for the firmware's 'R' (or 'E') response.
 ACK_TIMEOUT_S = 1.0
+# How long a cancel waits for the board's 'C': the cancel must be done before a
+# recording's record grab starts, or a last preview pulse could reach a camera
+# that is already counting.
+CANCEL_ACK_TIMEOUT_S = 0.3
 
 _NO_PYSERIAL_MSG = (
     "pyserial is not importable (it ships with octacam by default, so the "
@@ -209,6 +213,41 @@ def _coerce_float(value, default: float) -> float:
 def pin_id(label: str) -> int:
     """Index of a pin label in PIN_LABELS. Raises ValueError if unknown."""
     return PIN_LABELS.index(str(label).upper())
+
+
+def period_us(fps: int) -> int:
+    """The firmware's integer frame period for ``fps`` (triggerbox.ino's
+    ``(1000000 + fps / 2) / fps``): what the board actually emits."""
+    return max(2, (1_000_000 + fps // 2) // fps)
+
+
+def pulse_count(fps: int, duration_ms: int) -> int:
+    """Pulses a recording of ``duration_ms`` at ``fps`` should get:
+    ``round(fps * duration)``, the frame count the recording expects."""
+    return max(1, round(duration_ms * fps / 1000))
+
+
+def train_duration_ms(fps: int, pulses: int) -> int:
+    """A run length that makes the board emit exactly ``pulses`` pulses.
+
+    The firmware ends a run once its millisecond clock reaches the duration, so
+    it goes idle anywhere in the last millisecond before it. A length that falls
+    on a frame edge (``pulses * period`` — the naive choice whenever the period
+    divides it) races that edge and can emit one runt pulse more, and a period
+    that does not divide it (90 fps: 11 111 µs) emits one pulse more outright. So
+    end the run at least half a period after the last pulse's rising edge even if
+    the idle comes a millisecond early — after its pulse and strobe are out — and
+    never at or after the next edge. (Under a ~2 ms period a millisecond clock
+    cannot separate the two; the recording then tolerates ±1 pulse at the end: an
+    extra frame is discarded and a missing one filled.)
+    """
+    period = period_us(fps)
+    last = (pulses - 1) * period  # the last pulse's rising edge, µs from t0
+    nxt = pulses * period  # the edge that must not come
+    duration = -(-(last + period // 2 + 1000) // 1000)  # ceil, in ms
+    if duration * 1000 >= nxt:
+        duration = (nxt - 1) // 1000
+    return max(1, duration)
 
 
 # ============================================================================
@@ -419,7 +458,7 @@ class TriggerboxLink(SerialReaderLink):
             if s is None or not s.is_open:
                 break
             try:
-                chunk = s.read(64)
+                chunk = self._read_chunk(s)
             except serial.SerialException:  # pyright: ignore[reportOptionalMemberAccess]
                 if not self._reader_stop.is_set():
                     self._mark_broken()
@@ -608,6 +647,9 @@ class TriggerboxPlugin(Plugin):
             is_busy=self._fw_is_busy,
         )
         self._arduino_state = "idle"
+        # Set on the board's 'D' (a run finished) / 'C' (cancelled or idle).
+        self._done_event = threading.Event()
+        self._idle_event = threading.Event()
         self._armed_event = threading.Event()
         self._arm_lock = threading.Lock()  # serialize arms sharing _armed_event/_last_reject
         self._last_reject: str | None = None
@@ -776,6 +818,10 @@ class TriggerboxPlugin(Plugin):
         state = _STATE_LABELS.get(token, "idle")
         if state == "running":
             self._armed_event.set()
+        elif token == "D":
+            self._done_event.set()
+        elif token == "C":
+            self._idle_event.set()
         self._set_arduino_state(state)
 
     def _on_arduino_reject(self, code: str) -> None:
@@ -1070,11 +1116,12 @@ class TriggerboxPlugin(Plugin):
             )
             return
 
-        fps = max(1, min(_MAX_FPS, _coerce_int(spec.get("fps"), self._default_fps)))
+        fps = self._spec_fps(spec)
+        pulses: int | None = None
         if duration_ms is None:
-            duration_ms = max(
-                1, min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms))
-            )
+            # A recording: exactly the pulses it expects (see train_duration_ms).
+            pulses = pulse_count(fps, self._spec_duration_ms(spec))
+            duration_ms = min(0xFFFF_FFFF, train_duration_ms(fps, pulses))
         cams = self._cameras_from_spec(spec)
         lights = self._lights_from_spec(spec)
         try:
@@ -1087,7 +1134,11 @@ class TriggerboxPlugin(Plugin):
         log.info(
             "triggerbox: arming %d fps for %s — %d camera line(s), %d light channel(s)",
             fps,
-            "preview (until cancel)" if duration_ms == 0 else f"{duration_ms} ms",
+            "preview (until cancel)"
+            if duration_ms == 0
+            else f"{pulses} pulses ({duration_ms} ms)"
+            if pulses is not None
+            else f"{duration_ms} ms",
             len(arm.cameras), len(arm.lights),
         )
         result = self._arm_and_wait(arm)
@@ -1120,6 +1171,74 @@ class TriggerboxPlugin(Plugin):
                 f"attempt — {subject} will wait for a trigger that never fires. "
                 "Power-cycle or replug the board and check the cable."
             )
+
+    def _spec_fps(self, spec: dict) -> int:
+        return max(1, min(_MAX_FPS, _coerce_int(spec.get("fps"), self._default_fps)))
+
+    def _spec_duration_ms(self, spec: dict) -> int:
+        return max(
+            1,
+            min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms)),
+        )
+
+    def trigger_train(self, params: dict | None) -> dict | None:
+        """The train on_recording_start emits for ``params`` (exact period and
+        pulse count), so the recording counts every frame against it."""
+        spec = self._spec_from_params(params)
+        if spec is None:
+            return None
+        fps = self._spec_fps(spec)
+        return {
+            "fps": fps,
+            "period_ns": period_us(fps) * 1000,
+            "count": pulse_count(fps, self._spec_duration_ms(spec)),
+        }
+
+    def prime_trigger(self, params: dict | None, pulses: int) -> bool:
+        """Emit ``pulses`` sacrificial pulses on the camera lines, lights dark.
+
+        A FLIR Grasshopper3 ignores the first two hardware triggers after its
+        acquisition starts, so the recording spends a few pulses right before its
+        train (the cameras discard their frames). Returns once the board reports
+        the burst done — or has been cancelled — so the train that follows starts
+        on a fresh clock after a clear gap."""
+        spec = self._spec_from_params(params)
+        if spec is None or not self._link.is_open or not self._firmware_ok:
+            return False
+        cams = self._cameras_from_spec(spec)
+        if not cams or pulses <= 0:
+            return False
+        fps = self._spec_fps(spec)
+        try:
+            arm = self._build_arm_spec(fps, train_duration_ms(fps, pulses), cams, [])
+        except Exception:
+            log.exception("triggerbox: could not build the priming packet")
+            return False
+        self._done_event.clear()
+        if self._arm_and_wait(arm) != "ok":
+            return False
+        if self._ack_timeout_s > 0:
+            burst_s = pulses * period_us(fps) / 1e6
+            if not self._done_event.wait(burst_s + self._ack_timeout_s):
+                log.warning(
+                    "triggerbox: no end-of-run from %s after the priming pulses; "
+                    "cancelling", self.device,
+                )
+                self._cancel_and_wait()
+        self._set_arduino_state("idle")
+        return True
+
+    def _cancel_and_wait(self) -> bool:
+        """Cancel the board and wait (bounded) for its 'C'; True if acknowledged."""
+        with self._arm_lock:
+            self._idle_event.clear()
+            self._link.send_cancel()
+            if self._ack_timeout_s <= 0 or not self._link.is_open:
+                return True
+            acked = self._idle_event.wait(min(self._ack_timeout_s, CANCEL_ACK_TIMEOUT_S))
+        if not acked:
+            log.warning("triggerbox: %s did not acknowledge the cancel", self.device)
+        return acked
 
     def _arm_and_wait(self, arm: ArmSpec) -> str:
         """Send an arm packet and classify the outcome.
@@ -1171,9 +1290,11 @@ class TriggerboxPlugin(Plugin):
         self._arm_from_spec(spec, duration_ms=0, context="preview")
 
     def on_preview_stop(self) -> None:
-        # Cancel the indefinite preview arm; harmless no-op if already idle.
+        # Cancel the indefinite preview arm (harmless if already idle) and wait
+        # for the board to confirm: this runs right before a recording's record
+        # grab starts, which must not see a stray preview pulse.
         self._preview_armed = False
-        self._link.send_cancel()
+        self._cancel_and_wait()
         self._set_arduino_state("idle")
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:

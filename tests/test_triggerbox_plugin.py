@@ -22,7 +22,9 @@ from octacam.plugins.triggerbox import (
     TriggerboxLink,
     TriggerboxPlugin,
     _build,
+    period_us,
     pin_id,
+    train_duration_ms,
 )
 
 ARM_MAGIC = 0xA5
@@ -362,8 +364,9 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
     rec = _last_arm(link)
     plugin.on_preview_start({"triggerbox": slice_})
     prev = _last_arm(link)
-    # Recording runs its finite duration; preview runs until cancel (0)...
-    assert rec["duration_ms"] == 10000
+    # Recording runs exactly its 800 pulses (ending half a period after the
+    # last, see train_duration_ms); preview runs until cancel (0)...
+    assert rec["duration_ms"] == train_duration_ms(80, 800) == 9995
     assert prev["duration_ms"] == 0
     # ...but is otherwise the same trigger + strobe as the recording (user chose
     # "strobe as in recording"), so preview is WYSIWYG.
@@ -524,7 +527,8 @@ def test_on_recording_start_arms_with_full_spec():
         }
     )
     dec = _last_arm(link)
-    assert dec["fps"] == 100 and dec["duration_ms"] == 2000
+    # 2000 ms at 100 fps = 200 pulses; the run ends 6 ms after the last one.
+    assert dec["fps"] == 100 and dec["duration_ms"] == train_duration_ms(100, 200) == 1996
     assert dec["cams"] == [(pin_id("D13"), 500, 0)]
     assert dec["lights"] == [(pin_id("D5"), 2, 0, 0, 0, 0)]
 
@@ -1356,3 +1360,163 @@ def test_build_reads_auto_flash_option():
     plugin = _build({"device": DEVICE, "auto_flash": True})
     assert plugin._auto_flash is True
     assert plugin.firmware_provisioning()["auto_flash"] is True
+
+
+# ===========================================================================
+# Exact trains, priming, acknowledged cancel, prompt tokens
+# ===========================================================================
+
+
+def test_trigger_train_describes_the_exact_train():
+    plugin, _link = _plugin_with_fake()
+    assert plugin.trigger_train({"triggerbox": {"fps": 125, "duration_ms": 900_000}}) == {
+        "fps": 125,
+        "period_ns": 8_000_000,
+        "count": 112_500,
+    }
+    # 90 fps: the board's integer period, and round(fps * duration) pulses.
+    train = plugin.trigger_train({"triggerbox": {"fps": 90, "duration_ms": 10_000}})
+    assert train == {"fps": 90, "period_ns": 11_111_000, "count": 900}
+    assert plugin.trigger_train(None) is None
+
+
+@pytest.mark.parametrize("fps", [10, 30, 80, 90, 100, 125, 200, 300])
+@pytest.mark.parametrize("pulses", [1, 2, 13, 800, 112_500])
+def test_train_duration_emits_exactly_the_count(fps, pulses):
+    # Model the firmware: rising edges at k * period from t0; the run goes idle
+    # (all outputs LOW) once millis() - start >= duration_ms, i.e. anywhere in
+    # (duration - 1 ms, duration]. Every such end must give exactly `pulses`
+    # edges and must let the last pulse (500 µs) finish first. (Up to 300 fps: a
+    # millisecond clock cannot separate edges under a ~2 ms period.)
+    period = period_us(fps)
+    end_us = train_duration_ms(fps, pulses) * 1000
+    for idle_us in (end_us - 999, end_us):
+        edges = sum(1 for k in range(pulses + 2) if k * period < idle_us)
+        assert edges == pulses, (fps, pulses, idle_us)
+        assert (pulses - 1) * period + 500 < idle_us
+
+
+class _AckingLink(FakeLink):
+    """A FakeLink whose board answers: 'R' on an arm, 'D' once a finite run is
+    over, 'C' on a cancel — delivered to the plugin like the reader thread."""
+
+    def __init__(self, plugin_ref, *, ack_cancel=True):
+        super().__init__()
+        self.plugin_ref = plugin_ref
+        self.ack_cancel = ack_cancel
+
+    def _later(self, delay, token):
+        threading.Timer(delay, lambda: self.plugin_ref[0]._on_arduino_status(token)).start()
+
+    def send_arm(self, spec):
+        ok = super().send_arm(spec)
+        if ok:
+            self._later(0.005, "R")
+            if spec.duration_ms:
+                self._later(0.005 + spec.duration_ms / 1000, "D")
+        return ok
+
+    def send_cancel(self):
+        super().send_cancel()
+        if self.ack_cancel:
+            self._later(0.005, "C")
+
+
+def _acking_plugin(**kwargs):
+    plugin = _build({"device": DEVICE, **kwargs})
+    ref = [plugin]
+    link = _AckingLink(ref, **{k: v for k, v in kwargs.items() if k == "ack_cancel"})
+    plugin._link = link
+    plugin._ack_timeout_s = 0.5
+    return plugin, link
+
+
+def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
+    plugin, link = _acking_plugin(
+        cameras=[{"pin": "D13", "pulse_us": 500}],
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25}],
+    )
+    spec = plugin.default_start_params(125.0, 10.0)
+    started = time.monotonic()
+    assert plugin.prime_trigger({"triggerbox": spec}, 4) is True
+    elapsed = time.monotonic() - started
+    arm = _last_arm(link)
+    assert arm["lights"] == []  # no light flash before the recording
+    assert arm["cams"] == [(pin_id("D13"), 500, 0)]
+    assert arm["duration_ms"] == train_duration_ms(125, 4)
+    # it returned on the board's 'D', i.e. after the burst was out
+    assert elapsed >= arm["duration_ms"] / 1000
+
+
+def test_prime_trigger_declines_without_a_camera_line_or_a_board():
+    plugin, _link = _plugin_with_fake(is_open=False)
+    assert plugin.prime_trigger({"triggerbox": plugin.default_start_params(80, 1)}, 4) is False
+    plugin, _link = _plugin_with_fake()
+    assert plugin.prime_trigger(None, 4) is False
+
+
+def test_on_preview_stop_waits_for_the_boards_cancel_ack():
+    plugin, link = _acking_plugin()
+    plugin._idle_event.clear()
+    plugin.on_preview_stop()
+    assert plugin._idle_event.is_set()  # returned only once 'C' arrived
+    assert link.snapshot()[-1] == bytes([CANCEL_MAGIC])
+
+
+def test_an_unacknowledged_cancel_is_bounded(caplog):
+    plugin, _link = _acking_plugin(ack_cancel=False)
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        plugin.on_preview_stop()
+    assert time.monotonic() - started < 1.0
+
+
+class _BlockingSerial(_FakeSerial):
+    """pyserial's read(n) semantics: block until n bytes or the port timeout."""
+
+    timeout = 0.2
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._buf = bytearray()
+        self._cv = threading.Condition()
+
+    def feed(self, data: bytes) -> None:
+        with self._cv:
+            self._buf.extend(data)
+            self._cv.notify_all()
+
+    @property
+    def in_waiting(self) -> int:
+        return len(self._buf)
+
+    def read(self, n: int = 1) -> bytes:
+        deadline = time.monotonic() + self.timeout
+        with self._cv:
+            while len(self._buf) < n and self.is_open:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cv.wait(remaining)
+            out = bytes(self._buf[:n])
+            del self._buf[:n]
+            return out
+
+
+def test_status_tokens_arrive_without_waiting_for_the_port_timeout(monkeypatch):
+    import octacam.plugins.triggerbox as m
+
+    fake = _BlockingSerial()
+    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    seen = []
+    link = TriggerboxLink(on_status=lambda t: seen.append((time.monotonic(), t)))
+    link.open(DEVICE, 115200)
+    try:
+        time.sleep(0.05)
+        sent = time.monotonic()
+        fake.feed(b"R\n")
+        assert _wait(lambda: seen, timeout=1.0)
+        # A read(64) would have held the 2-byte token for the full 0.2 s timeout.
+        assert seen[0][1] == "R" and seen[0][0] - sent < 0.1
+    finally:
+        link.close()
