@@ -161,8 +161,9 @@ session-cache note). Two subtleties that are easy to break:
   exposure to the end of the previous readout while the strobe stays on the
   trigger edge — a dark ramp over the first ~7 frames of every GUI recording
   (period − readout ≈ 0.3 ms of catch-up per frame on the GS3 at 125 fps; the
-  timestamps show it as 7.7 ms intervals). Frame 0 must be the board's run
-  start, as it is for headless `octacam record`, which never had a preview arm.
+  timestamps show it as 7.7 ms intervals). The cancel waits for the board's `C`,
+  and the cameras are then primed (see below), so frame 0 is the train's first
+  pulse, as for headless `octacam record`, which never had a preview arm.
 - **A rig that opens fewer cameras than its config asks for is not silent.**
   `CameraSystem` records the shortfall (`.missing`, `.incomplete`), logs one
   `INCOMPLETE RIG` warning naming each camera, exposes it as `missing_cameras` in
@@ -175,16 +176,59 @@ Each `Camera` runs its own grab thread; `retrieve()` must **never raise** (it
 returns `None` on a device/stop-race error) or a dead grab thread would orphan
 its ffmpeg writer.
 
-Each grab thread is **capped at `round(fps × duration)` frames**
-(`controller.capture_frame_count` → `Camera.start_record(max_frames=…)`) for the
-`software`/`managed` trigger sources octacam clocks, so the independent grab
-loops all stop at the same count instead of ending a frame apart when the
-teardown race lets one retrieve a trailing pulse (e.g. 801 vs 800). `external`
-(a source octacam doesn't drive) has an unknown pulse count and stays uncapped —
-bounded only by the deadline. A camera that can't keep up never reaches the cap
-and is bounded by the deadline too (the existing short-capture path). The writer
-queue depth is `record.writer_queue_size` (default 64), tunable per rig to absorb
-transient encoder stalls (a full queue is the only source of a "dropped" frame).
+**Every frame is assigned to the trigger pulse that exposed it** (`pulses.py ::
+PulseTracker`, fed by `Camera._record_loop`). A hardware-triggered camera that
+misses a pulse delivers *nothing* for it, so frame counts cannot tell it from a
+healthy one — a camera that missed pulses used to drift a frame behind per miss
+and still match the others' count by catching trailing pulses. Rules that are
+easy to break:
+
+- **Per-interval rounding against the *measured* period**, not a phase-locked
+  grid: an interval of k periods is k−1 missed pulses. An exposure is never
+  before its pulse and its delay (trigger latency, a falling-edge trigger
+  +500 µs, readout catch-up after a late frame, a late board pulse) stays far
+  below half a period, so rounding is unambiguous; a phase-locked model lost
+  count through a re-armed board's phase jump (it failed on half the archive).
+  The measured period absorbs the camera clock's ppm drift (the rig's top GS3
+  reads the 8 ms board period as 7.998945 ms), so a long outage is bridged
+  exactly; `clock_mismatch` flags a camera that does not follow the period at all
+  (free-running). A jump by a whole **128 s** is folded (a GS3 timestamp-
+  extension race), any other implausible jump is re-anchored by host time.
+- Under the **software trigger** the index comes from the hand-off's trigger
+  sequence number (`SoftwareTriggerHandoff.last_trigger_index`), exact; a backend
+  with no hardware timestamp (pycameleon) is `unclocked` and cannot detect misses.
+- **Fill, don't skip** (`software`/`managed`, `PulseClock.fill`): a missed pulse
+  *and* a frame the writer queue refused are written as a repeat of the previous
+  frame (`AsyncFrameWriter.write(frame, fill_before=n)` — the fill rides on the
+  next queued item so it can never be dropped on its own), so video frame k is
+  pulse k in every camera. `external` (a source octacam doesn't drive, possibly
+  irregular) is report-only: nothing filled or discarded, `pulse_index` maps it.
+- **Priming**: a GS3 ignores the first two hardware triggers after *every*
+  acquisition start (see the hardware quirks), so `start_recording` starts the
+  record grab on `hold`, sends `PRIME_PULSES` sacrificial pulses (triggerbox
+  `prime_trigger`: camera lines only, lights dark; or software triggers), waits
+  `PRIME_SETTLE_S`, then `arm_counting()` and only then starts the train. Frames
+  before that, and stragglers within `PRIME_STRAGGLER_NS` of the last primed
+  frame, are discarded. The whole sequence runs before `hooks_done`, which the
+  monitor now waits on *before* stopping anything, so a stop can never overtake
+  the arm or the software timer's start.
+- **Stop on the pulse count**: the countdown ends when every camera has the
+  train's last pulse or once the train is over (`_train_end`, start + count ×
+  period + `TRAIN_END_MARGIN_S`) — a camera that missed the last pulses cannot
+  know it before then — and `stop(fill_to=count)` pads it; a stopped/aborted take
+  ends where it was. The managed train's exact period and count come from the
+  plugin (`trigger_train`), not the settings.
+- `_check_sync` compares when each camera's first frames arrived on the host:
+  same-model cameras deliver a pulse within ~0.5 ms of each other, so a camera
+  that started a pulse late shows up as a whole period (`start_offset_pulses`).
+
+The writer queue depth is `record.writer_queue_size` (default 64), tunable per
+rig to absorb transient encoder stalls. Summary schema 4 reports, per camera,
+`missed_pulse_indices`, `writer_dropped`, `late_pulse_indices`, `extra_frames`,
+the SDK's `stream` counters (a missed pulse with none of them moving is a trigger
+the camera never exposed, not a transport loss) and a cross-camera `sync`;
+`dropped` counts every fill. `octacam check` screens recordings, re-deriving
+pre-schema-4 ones from `timestamps.npz`.
 
 ## Camera backends & the auto cascade
 
@@ -373,6 +417,9 @@ board** — a plugin that omits this never arms on the CLI), `drives_preview_tri
 /`on_preview_start/stop`, `snapshot_options` (the live settings a recording's
 config snapshot must carry; a plugin whose tab edits settings the config also
 holds must implement it, or a relaunch from the recording behaves differently);
+`trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
+recording counts frames against it) and `prime_trigger` (sacrificial pulses
+before the train) for a trigger-*generating* plugin;
 `set_controller`/`set_broadcast` are duck-typed injections. Each plugin adds a
 WS topic + `/api/<name>/*` REST + a GUI tab.
 
@@ -393,6 +440,12 @@ clock at once; the run clock (`duration_ms`, pulse-train t0) restarts with the
 new spec. Verified with the camera as the oscilloscope: a light channel on D13
 and no camera line, so frames arrive only if the light path toggles its pin. On a wedged USB CDC link the plugin
 auto-recovers via a host `USBDEVFS_RESET` bus reset and surfaces the error loudly.
+The firmware ends a run on a millisecond clock, so the host sends a recording
+**`train_duration_ms`: half a period after the last pulse** — exactly
+`round(fps × duration)` pulses, never an extra edge (a duration on a frame edge
+races it; a period that doesn't divide it, e.g. 90 fps, emitted one more). The
+reader blocks for one byte then drains (`SerialReaderLink._read_chunk`): a fixed
+`read(64)` delayed every token by up to the 0.2 s port timeout.
 
 ## Arduino firmware & auto-flash
 
@@ -468,8 +521,9 @@ scales with the box (draw at real pixel size); force a theme by setting
 
 ## CLI notes
 
-Seven commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
-`record`, `flash`, `benchmark`, `process`. `doctor` never opens a camera (safe
+Eight commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
+`record`, `flash`, `benchmark`, `process`, `check` (screen recordings for missed
+pulses / desync; read-only). `doctor` never opens a camera (safe
 during a live session). A rig **instance-lock** prevents two octacams owning one
 rig.
 
@@ -509,6 +563,29 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
   measured with a 2.4 ms pulse against a 2.0 ms exposure; 480–640 µs pulses are
   clean. The default `pulse_us` = 500 is fine; don't size camera pulses like
   strobes.
+- **A GS3 ignores the first two hardware triggers after every acquisition
+  start** — measured: three 13-pulse trains in one acquisition give 11, 13, 13
+  frames; waiting 25–327 ms after `BeginAcquisition` changes nothing, and
+  `AcquisitionStatus[FrameTriggerWait]` reports ready after 0.2 ms, so it is no
+  readiness signal. Recordings prime with sacrificial pulses (recording pipeline
+  above); an `external` source octacam doesn't drive can't be primed, so its
+  first two pulses produce no frame on a GS3.
+- **A GS3 that misses a trigger's rising edge may fire on its falling edge**,
+  one pulse width late (+503 µs at 500 µs pulses, +1003 µs at 1000 µs), then
+  catch up at its readout limit (7.697 → ~7.8 → 8.0 ms intervals); if it misses
+  both it skips the pulse (a 16 ms interval). The camera never exposes a skipped
+  pulse — its own FrameCounter chunk and the SDK FrameID show no gap and
+  `TransmitFrameCount` rises by exactly what arrived — so it is the trigger input,
+  not transport. On the rig **17475187 ("top") does this ~20–35× more often than
+  17475185** on the same D13 line (per pulse: ~2e-5 misses, ~1e-4 late),
+  independent of fps (100 vs 125), pulse width, strobe current and host load: its
+  trigger path (cable, connector, opto ground, the unbuffered 3.3 V D13 driving two
+  opto inputs) is marginal. Hardware, reported to the user; octacam fills and
+  reports the misses.
+- **GS3 timestamps can jump by exactly +128 s**: the 64-bit ns timestamp is
+  extended from a counter whose seconds wrap every 128 s, and a frame ~60 µs
+  before a wrap came out 128 s ahead (hexaview 260916/Fly9). Not a lost frame —
+  the pulse tracker folds it.
 - Camera trigger inputs are opto-isolated, each needs its own ground return:
   **Basler acA1920-150um** (Hirose HR10A-7R-6PB) Pin2=Line1 in / **Pin5=opto-gnd**;
   **FLIR GS3-U3-41C6NIR** (Hirose HR25-7TR-8SA) Pin1=Line0 in / **Pin6=opto-gnd**.

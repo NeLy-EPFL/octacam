@@ -4297,6 +4297,87 @@ class _ProcessCommand(typer.core.TyperCommand):
         return super().parse_args(ctx, _inject_default_last(args))
 
 
+@app.command()
+def check(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(
+            exists=True,
+            help="Recording folders, or directories to search for them "
+            r"\[default: the current directory].",
+        ),
+    ] = None,
+    fps: Annotated[
+        float | None,
+        typer.Option(
+            "--fps", help=r"Trigger rate to check against \[default: each summary's]."
+        ),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print machine-readable results.")
+    ] = False,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Only list recordings with problems."),
+    ] = False,
+) -> None:
+    """Check recordings for missed trigger pulses and desynchronized cameras.
+
+    Reads each recording's timestamps.npz (never modifies anything) and reports,
+    per camera, the trigger pulses it delivered no frame for — each one shifts its
+    later frames by one against a camera that did not miss it — plus unequal
+    frame counts, a start offset between cameras, late exposures and camera-clock
+    jumps. Recordings made before octacam counted pulses are re-derived from the
+    hardware timestamps. Exits 1 if any recording has a problem.
+    """
+    from rich.console import Console
+    from rich.text import Text
+
+    from octacam.check import check_recording, find_recordings
+
+    folders = find_recordings(paths or [Path(".")])
+    if not folders:
+        sys.exit("No recording folders (recording_summary.json) found.")
+    results = []
+    for folder in folders:
+        try:
+            results.append(check_recording(folder, fps))
+        except (OSError, ValueError, KeyError) as e:
+            log.error("Could not check %s: %s", folder, e)
+    if as_json:
+        typer.echo(json.dumps([r.to_dict() for r in results], indent=2))
+    else:
+        console = Console()
+        for result in results:
+            if quiet and result.ok:
+                continue
+            verdict = Text("ok", style="green") if result.ok else Text("PROBLEM", style="bold red")
+            console.print(Text(f"{result.folder}  ", style="bold") + verdict)
+            for cam in result.cameras:
+                missed = (
+                    f"{len(cam.missed)} missed pulse(s)"
+                    + (" (filled)" if cam.filled and cam.missed else "")
+                    if cam.source != "none"
+                    else "no timestamps"
+                )
+                console.print(
+                    f"    {cam.name:12s} {cam.frames:8d} frames  {missed}"
+                    + (f", {len(cam.late)} late" if cam.late else "")
+                )
+            for problem in result.problems:
+                console.print(Text(f"    ! {problem}", style="red"))
+            for warning in result.warnings:
+                console.print(Text(f"    - {warning}", style="yellow"))
+        bad = sum(1 for r in results if not r.ok)
+        console.print()
+        console.print(
+            f"{len(results)} recording(s) checked: "
+            + (f"[bold red]{bad} with problems[/]" if bad else "[green]all ok[/]")
+        )
+    if any(not r.ok for r in results):
+        raise typer.Exit(1)
+
+
 @app.command(cls=_ProcessCommand)
 def process(
     paths: Annotated[
