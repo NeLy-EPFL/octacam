@@ -272,3 +272,38 @@ def test_live_misses_reach_the_operator_as_events(fake_system, tmp_path):
     )
     messages = [e["message"] for e in controller.events if e["level"] == "warning"]
     assert any("FAKE-1 missed" in m for m in messages), messages
+
+
+def test_transport_counters_cover_only_the_recording(fake_system, tmp_path):
+    # Model an SDK with both kinds of counter: one that restarts with every
+    # acquisition (Spinnaker's delivered count) and one that runs on for the
+    # life of the stream (its lost count). A preview before the recording must
+    # not leak into either.
+    backend = _backend(fake_system, "FAKE-0")
+    counters = {"per_acquisition": 0, "cumulative": 7}
+    original_start = backend.start_grab_record
+    original_retrieve = backend.retrieve
+
+    def start_grab_record():
+        counters["per_acquisition"] = 0
+        return original_start()
+
+    def retrieve(timeout_ms, wants_array):
+        frame = original_retrieve(timeout_ms, wants_array)
+        if frame is not None:
+            counters["per_acquisition"] += 1
+        return frame
+
+    backend.start_grab_record = start_grab_record
+    backend.retrieve = retrieve
+    backend.stream_statistics = lambda: {
+        "Delivered": counters["per_acquisition"],
+        "Lost": counters["cumulative"],
+    }
+    counters["per_acquisition"] = 500  # left over from a preview acquisition
+    _save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    stream = _cam(summary, "FAKE-0")["stream"]
+    primed = _cam(summary, "FAKE-0")["primed_frames"]
+    assert stream == {"Delivered": 50 + primed, "Lost": 0}

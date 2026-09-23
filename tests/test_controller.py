@@ -64,7 +64,7 @@ def test_build_recording_summary():
     assert entry["dropped_indices"] == [137, 411]
     # A camera that predates pulse accounting reads as having none.
     assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
-    assert entry["writer_dropped"] == 0
+    assert entry["writer_dropped"] == 0 and entry["stream"] == {}
     # No fallbacks -> the series is entirely the camera's hardware timestamp.
     assert entry["timestamp_source"] == "hardware"
     assert entry["host_fallback_count"] == 0

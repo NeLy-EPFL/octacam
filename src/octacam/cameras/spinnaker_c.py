@@ -107,6 +107,16 @@ _ERR_NAMES = {
 # snap_value and the GUI slider step both tolerate a missing inc.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
+# Transport counters a recording reports, and the record grab's buffer pool —
+# identical to the PySpin tier (see flir.py).
+STREAM_STATISTICS = (
+    "StreamLostFrameCount",
+    "StreamDroppedFrameCount",
+    "StreamIncompleteFrameCount",
+    "StreamDeliveredFrameCount",
+)
+RECORD_STREAM_BUFFERS = 128
+
 # spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
 # node-map walk (Camera tab). The unmapped types (ValueNode/BaseNode/Register/
 # EnumEntry/Port and UnknownNode=-1) are containers or leaves the browser skips.
@@ -914,6 +924,9 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._stream_nodemap: Any = None
         self._serial = _spin().read_serial(cam)
         self._original_trigger_source: str | None = None
+        # Images the SDK delivered incomplete (discarded: never corrupt data);
+        # counted so a recording can report them instead of losing them silently.
+        self._incomplete_images = 0
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware execute moves into retrieve() on the grab
         # thread so the shared trigger timer never blocks on this camera.
@@ -1143,7 +1156,32 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     # ------------------------------------------------------------- grabbing
 
-    def _begin_acquisition(self, buffer_mode: str) -> None:
+    def stream_statistics(self) -> dict[str, int]:
+        """Spinnaker's transport counters plus the incomplete images discarded
+        (mirrors FlirBackend.stream_statistics)."""
+        out = {"IncompleteImagesDiscarded": self._incomplete_images}
+        if self._stream_nodemap is None:
+            return out
+        spin = _spin()
+        for name in STREAM_STATISTICS:
+            try:
+                out[name] = int(spin.read_number(self._stream_nodemap, name, True).value)
+            except BackendError:
+                continue
+        return out
+
+    def _set_stream_buffers(self, buffers: int) -> None:
+        """Best-effort: a manual stream buffer count of ``buffers`` (≤ the max)."""
+        spin = _spin()
+        try:
+            spin.set_enum(self._stream_nodemap, "StreamBufferCountMode", "Manual")
+            info = spin.read_number(self._stream_nodemap, "StreamBufferCountManual", True)
+            target = min(buffers, int(info.max)) if info.max is not None else buffers
+            spin.write_number(self._stream_nodemap, "StreamBufferCountManual", target, True)
+        except BackendError as e:
+            log.debug("Could not size the stream buffers of camera %s: %s", self._serial, e)
+
+    def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
         spin = _spin()
         try:
             spin.set_enum(self._nodemap, "AcquisitionMode", "Continuous")
@@ -1164,6 +1202,8 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     self._serial,
                     e,
                 )
+            if buffers:
+                self._set_stream_buffers(buffers)
         try:
             spin.begin_acquisition(self._cam)
         except BackendError as e:
@@ -1177,8 +1217,10 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     def start_grab_record(self) -> bool:
         # Spinnaker has no WaitForFrameTriggerReady; the camera arms on the first
-        # software trigger, so report ready once acquisition has begun.
-        self._begin_acquisition("OldestFirst")
+        # software trigger, so report ready once acquisition has begun. (A GS3
+        # still ignores its first two hardware triggers after this — the recording
+        # primes the cameras before its train.) Deep buffer pool: see flir.py.
+        self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
 
     def stop_grab(self) -> None:
@@ -1225,6 +1267,10 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return None
         try:
             if spin.image_incomplete(image):
+                self._incomplete_images += 1
+                log.warning(
+                    "Camera %s delivered an incomplete image; discarded", self._serial
+                )
                 return None
             timestamp = spin.image_timestamp(image)
             array = None

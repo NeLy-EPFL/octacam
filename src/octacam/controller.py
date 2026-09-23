@@ -285,8 +285,8 @@ _DROPPED_FRAMES_NOTE = (
     "Every frame is assigned to the trigger pulse that exposed it, from the "
     "camera's hardware timestamps (or, under a software trigger, the trigger's "
     "sequence number). `missed_pulses` lists pulses the camera delivered no frame "
-    "for (a missed trigger, or a frame lost in transport) and `writer_dropped` "
-    "counts frames the writer queue "
+    "for (a missed trigger, or a frame lost in transport — `stream` shows the "
+    "SDK's own loss counters) and `writer_dropped` counts frames the writer queue "
     "could not accept. On an octacam-driven train (software/managed) both are "
     "filled with the previous frame, so video frame k is pulse k in every camera "
     "and `dropped`/`dropped_indices` count/list those filled frames; "
@@ -376,6 +376,7 @@ def build_recording_summary(
                 "clock_mismatch": getattr(camera, "clock_mismatch", False),
                 "timestamp_glitches": getattr(camera, "timestamp_glitches", []),
                 "unclocked_frames": getattr(camera, "unclocked_frames", 0),
+                "stream": getattr(camera, "stream_statistics", {}),
                 "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
                     camera.name
                 ),

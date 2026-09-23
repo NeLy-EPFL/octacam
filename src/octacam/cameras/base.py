@@ -433,6 +433,8 @@ class Camera:
         self._armed = threading.Event()
         self._armed.set()
         self._fill_to: int | None = None
+        self._stream_at_start: dict[str, int] = {}
+        self._stream_at_stop: dict[str, int] = {}
         # Frames whose backend timestamp was 0 and fell back to host time_ns.
         # A per-recording provenance signal (see timestamp_source in the summary):
         # normally 0 (all hardware) or == frames (host-only backend like
@@ -508,6 +510,16 @@ class Camera:
         """How many trigger pulses the current/last recording has missed (cheap:
         for live telemetry)."""
         return len(self._tracker.missed) if self._tracker is not None else 0
+
+    @property
+    def stream_statistics(self) -> dict[str, int]:
+        """The SDK's own transport counters over the last recording (lost,
+        incomplete, ... frames), where the backend reports them; ``{}`` otherwise.
+        A missed pulse with none of these is a trigger the camera never exposed."""
+        start, stop = self._stream_at_start, self._stream_at_stop
+        # A counter the SDK restarts at acquisition start reads below its start
+        # value; its stop value is then already the recording's own count.
+        return {k: v - start.get(k, 0) if v >= start.get(k, 0) else v for k, v in stop.items()}
 
     @property
     def writer_dropped(self) -> int:
@@ -1089,6 +1101,8 @@ class Camera:
         self._pulse_clock = pulse_clock
         self._tracker = PulseTracker(pulse_clock)
         self._fill_to = None
+        self._stream_at_start = {}
+        self._stream_at_stop = {}
         if hold:
             self._armed.clear()
         else:
@@ -1121,6 +1135,10 @@ class Camera:
         except Exception:
             self._video_writer.close()
             raise
+        # Baseline the SDK's transport counters once the record acquisition has
+        # started (no trigger has fired yet): some counters restart with each
+        # acquisition, the others run on, and both then diff to this recording's.
+        self._stream_at_start = self._read_stream_statistics()
 
         self._thread = threading.Thread(
             target=self._record_loop,
@@ -1207,6 +1225,19 @@ class Camera:
                 if array is not None and self.frame_for_display.push(array):
                     self._update_resulting_fps()
         backend.stop_grab()
+
+    def _read_stream_statistics(self) -> dict[str, int]:
+        reader = getattr(self._backend, "stream_statistics", None)
+        if not callable(reader):
+            return {}
+        try:
+            stats = reader()
+        except Exception as e:  # diagnostics must never break a recording
+            log.debug("Could not read stream statistics of %s: %s", self.serial_number, e)
+            return {}
+        if not isinstance(stats, dict):
+            return {}
+        return {str(k): int(v) for k, v in stats.items() if isinstance(v, int)}
 
     def _reset_series(self) -> None:
         self._timestamps.clear()
@@ -1352,6 +1383,7 @@ class Camera:
                 self._update_resulting_fps()
 
             self._started = True
+        self._stream_at_stop = self._read_stream_statistics()
         backend.stop_grab()
         # A counted train that ran to its end: pad the pulses this camera missed
         # at the very end, so it ends on the same pulse as the others. (Only

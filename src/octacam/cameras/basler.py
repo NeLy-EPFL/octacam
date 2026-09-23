@@ -31,6 +31,15 @@ from octacam.cameras.base import (
 log = logging.getLogger("octacam")
 
 TRIGGER_READY_TIMEOUT_MS = 1000
+# pylon stream-grabber counters a recording reports, where the transport layer
+# has them (names differ between transport layers; absent ones are skipped).
+_STREAM_STATISTICS = (
+    "Statistic_Total_Buffer_Count",
+    "Statistic_Failed_Buffer_Count",
+    "Statistic_Buffer_Underrun_Count",
+    "Statistic_Missed_Frame_Count",
+    "Statistic_Resynchronization_Count",
+)
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
 
@@ -515,13 +524,52 @@ class BaslerBackend(SoftwareTriggerHandoff):
         except genicam.GenericException:
             return None
         try:
-            if not result.IsValid() or not result.GrabSucceeded():
+            if not result.IsValid():
+                return None
+            if not result.GrabSucceeded():
+                # A failed grab of a hardware-triggered frame is a lost pulse:
+                # count it (the recording's pulse accounting reports it) rather
+                # than dropping it silently.
+                self._count_incomplete(result)
                 return None
             return (result.Array if wants_array() else None, result.TimeStamp)
         except genicam.GenericException:
             return None
         finally:
             result.Release()
+
+    def _count_incomplete(self, result) -> None:
+        """Count a failed grab, surfacing its cause periodically (rate-limited to
+        avoid flooding at the trigger rate)."""
+        self._incomplete_grabs += 1
+        if self._incomplete_grabs % 100 == 1:
+            log.warning(
+                "Camera %s: %d incomplete grab(s); last: %s (0x%08X)",
+                self._serial,
+                self._incomplete_grabs,
+                result.GetErrorDescription(),
+                result.GetErrorCode(),
+            )
+
+    def stream_statistics(self) -> dict[str, int]:
+        """The failed grabs this backend discarded, plus pylon's stream-grabber
+        statistics where the transport layer exposes them."""
+        out = {"IncompleteImagesDiscarded": self._incomplete_grabs}
+        raw = self.raw
+        if raw is None:
+            return out
+        try:
+            nodemap = raw.GetStreamGrabberNodeMap()
+        except Exception:
+            return out
+        for name in _STREAM_STATISTICS:
+            try:
+                node = nodemap.GetNode(name)
+                if node is not None and genicam.IsReadable(node):
+                    out[name] = int(node.GetValue())
+            except Exception:
+                continue
+        return out
 
     # ------------------------------------------------------------- grabbing
 
@@ -611,15 +659,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # a prime suspect for corrupt previews, so surface the cause
             # periodically (rate-limited to avoid flooding at the trigger rate).
             if not result.GrabSucceeded():
-                self._incomplete_grabs += 1
-                if self._incomplete_grabs % 100 == 1:
-                    log.warning(
-                        "Camera %s: %d incomplete grab(s); last: %s (0x%08X)",
-                        self._serial,
-                        self._incomplete_grabs,
-                        result.GetErrorDescription(),
-                        result.GetErrorCode(),
-                    )
+                self._count_incomplete(result)
                 return None
             timestamp = result.TimeStamp
             array = result.Array if wants_array() else None
