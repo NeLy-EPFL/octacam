@@ -49,13 +49,44 @@ def train(n, *, period=P, ppm=0.0, jitter_ns=3_000, t0=1_800_000_000_000_000, se
     return out, pulses
 
 
-def run(ts, count=None, host=None):
-    tracker = PulseTracker(PulseClock(P, count))
+def run(ts, count=None, host=None, period=P):
+    tracker = PulseTracker(PulseClock(period, count))
     got = []
     for i, t in enumerate(ts):
         a = tracker.assign(t, None if host is None else host[i])
         got.append(a.pulse)
     return tracker, got
+
+
+P50 = 20_000_000  # 50 fps: 128 stream buffers hold 2.56 s of frames
+LATENCY = 5_000_000  # exposure to host delivery, when the grab thread keeps up
+BURST_GAP = 50_000  # buffered frames reach the host back to back
+
+
+def delivered(ts, *, stall_from=None, stall_ns=0, buffers=None):
+    """Host arrival times of the frames exposed at ``ts``, and the frames kept.
+
+    The grab thread stalls for ``stall_ns`` just before frame ``stall_from``:
+    the frames exposed meanwhile wait in the stream buffers and reach the host
+    back to back when it resumes. With ``buffers``, only that many fit; the
+    frames exposed once they are full never arrive (lost at transport)."""
+    kept, host = [], []
+    stall_end = next_free = None  # next_free: when the host takes the next frame
+    waiting = 0
+    for i, t in enumerate(ts):
+        h = t + LATENCY
+        if i == stall_from:
+            stall_end = next_free = h + stall_ns
+        if stall_end is not None and h < stall_end:
+            waiting += 1
+            if buffers is not None and waiting > buffers:
+                continue  # exposed while the stream buffers were full: lost
+        if next_free is not None:
+            h = max(h, next_free)
+            next_free = h + BURST_GAP
+        kept.append(i)
+        host.append(h)
+    return kept, host
 
 
 def test_a_clean_train_maps_frame_k_to_pulse_k():
@@ -134,6 +165,71 @@ def test_an_unexplained_clock_jump_is_placed_by_host_time():
     tracker, got = run(ts, host=host)
     assert got == pulses
     assert tracker.glitches[0].kind == "reanchor"
+
+
+def test_a_backward_clock_jump_is_placed_by_host_time():
+    ts, pulses = train(500)
+    ts = [t - (5_000_000_000 if i >= 300 else 0) for i, t in enumerate(ts)]  # -5 s
+    host = [p * P for p in pulses]
+    tracker, got = run(ts, host=host)
+    assert got == pulses and tracker.missed == []
+    assert [(g.pulse, g.kind) for g in tracker.glitches] == [(300, "reanchor")]
+
+
+def test_a_delivery_stall_is_not_a_clock_jump():
+    # The grab thread stalls 2 s at 50 fps: the first buffered frame is one
+    # period after its predecessor on the camera clock but 2 s on the host's,
+    # then the ~100 frames the stream buffers held arrive back to back. The
+    # camera missed nothing; re-anchoring by host time put frame 100 on pulse
+    # 199, filled 99 pulses it never missed and ended the train 99 frames early.
+    ts, pulses = train(500, period=P50)
+    kept, host = delivered(ts, stall_from=100, stall_ns=2_000_000_000)
+    assert kept == pulses
+    assert host[100] - host[99] > 2_000_000_000  # the stall
+    assert host[150] - host[149] == BURST_GAP  # the burst that drains it
+    tracker = PulseTracker(PulseClock(P50, 500))
+    got, completed_at = [], None
+    for i, (t, h) in enumerate(zip(ts, host, strict=True)):
+        got.append(tracker.assign(t, h).pulse)
+        if completed_at is None and tracker.complete:
+            completed_at = i
+    assert got == pulses
+    assert tracker.glitches == [] and tracker.missed == [] and tracker.extra == 0
+    assert completed_at == 499  # on the train's last frame, not 99 frames early
+
+
+def test_frames_the_full_stream_buffers_lost_are_counted_after_the_burst():
+    # A 6 s stall at 50 fps outlasts the 128 stream buffers: frames 100-227 wait,
+    # the ones exposed after that are lost, and the burst's last frame reaches
+    # the host just before the first new one. That camera interval (the lost
+    # pulses) is seconds longer than the host's, but only by as much as the
+    # burst was behind, so it is a real outage, not a clock jump.
+    ts, _ = train(600, period=P50)
+    kept, host = delivered(ts, stall_from=100, stall_ns=6_000_000_000, buffers=128)
+    lost = sorted(set(range(600)) - set(kept))
+    assert lost[0] == 228 and len(lost) > 100
+    tracker, got = run([ts[i] for i in kept], count=600, host=host, period=P50)
+    assert got == kept
+    assert tracker.missed == lost and tracker.glitches == []
+    assert tracker.complete
+
+
+def test_a_real_outage_seen_by_both_clocks_is_missed_pulses():
+    # The camera misses 100 pulses: both clocks see 101 periods between frames.
+    ts, pulses = train(500, period=P50, missed=set(range(200, 300)))
+    host = [t + LATENCY for t in ts]
+    tracker, got = run(ts, count=500, host=host, period=P50)
+    assert got == pulses
+    assert tracker.missed == list(range(200, 300)) and tracker.glitches == []
+
+
+def test_a_128_second_jump_during_a_stall_burst_is_folded():
+    ts, pulses = train(500, period=P50)
+    _, host = delivered(ts, stall_from=100, stall_ns=2_000_000_000)
+    ts = [t + (TIMESTAMP_WRAP_NS if i >= 150 else 0) for i, t in enumerate(ts)]
+    tracker, got = run(ts, count=500, host=host, period=P50)
+    assert got == pulses and tracker.missed == []
+    assert [(g.pulse, g.kind) for g in tracker.glitches] == [(150, "wrap")]
 
 
 def test_a_spurious_retrigger_is_extra_not_a_new_pulse():

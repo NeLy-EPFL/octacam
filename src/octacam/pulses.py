@@ -52,9 +52,12 @@ _PERIOD_WINDOW = 256
 # the camera is reported as not following the trigger clock (a camera free-
 # running at its readout limit, e.g. under a pulse that outlasts its exposure).
 CLOCK_MISMATCH_FRACTION = 0.01
-# A camera-time interval may differ from the host-time interval between the same
-# two deliveries by this much before the camera clock is treated as having
-# jumped (queued frames make host deliveries bunch up, but never by seconds).
+# A camera-time interval may exceed the host-time interval between the same two
+# deliveries (plus the host backlog, see PulseTracker._host_allows) by this much
+# before the camera clock is treated as having jumped. Only an excess counts:
+# delivery can lag an exposure by any amount (a grab-thread stall the stream
+# buffers absorb), so a camera interval shorter than the host one is late
+# delivery, never a jump.
 _GLITCH_TOLERANCE_NS = 1_500_000_000
 
 
@@ -142,6 +145,12 @@ class PulseTracker:
         self._clean_intervals = 0
         self._last_ts: int | None = None
         self._last_host: int | None = None
+        # How much later than its promptest delivery the previous frame reached
+        # the host (camera-to-host latency above the lowest seen): seconds right
+        # after a stall, draining back to ~0 through the burst that follows. A
+        # camera clock slower than the host's adds its drift (ppm of the elapsed
+        # time), which only loosens the jump check by as much.
+        self._backlog = 0
         self._offset = 0  # folded clock correction added to every timestamp
 
     # ------------------------------------------------------------- queries
@@ -236,6 +245,10 @@ class PulseTracker:
             self._period += weight * (dt - self._period)
         self.last_pulse = pulse
         self._last_ts = ts
+        if dh is not None:
+            # This frame's latency against the previous one's is dh - dt; the
+            # sum, floored at 0, is its latency above the lowest seen.
+            self._backlog = max(0, self._backlog + dh - dt)
         if host_ns is not None:
             self._last_host = host_ns
         return Assignment(pulse, missed, late, excursion)
@@ -246,11 +259,25 @@ class PulseTracker:
         if dt <= 0:
             return False
         if dh is not None:
-            return abs(dt - dh) <= _GLITCH_TOLERANCE_NS
+            return self._host_allows(dt, dh)
         # Offline (no host times): any positive interval is taken at face value
         # (a real outage is a run of missed pulses) — except one that sits a
         # whole timestamp wrap away from a normal frame interval.
         return not self._near_wrap(dt)
+
+    def _host_allows(self, dt: int, dh: int) -> bool:
+        """Whether a camera interval ``dt`` fits deliveries ``dh`` apart on the host.
+
+        Asymmetric, because delivery only ever lags: after a grab-thread stall
+        the first buffered frame is one period after its predecessor but
+        seconds later on the host, and the burst that drains the buffers
+        arrives back to back (dh ~ 0), so any dt up to dh is a real interval.
+        dt can exceed dh only by how far behind the previous frame was (the
+        backlog: the burst's last frame, when the full buffers lost the frames
+        after it, is followed by a real outage the host did not wait out); more
+        than that is a clock jump, e.g. the GS3's +128 s with dh one period.
+        """
+        return dt <= dh + self._backlog + _GLITCH_TOLERANCE_NS
 
     def _near_wrap(self, dt: int) -> bool:
         return any(
@@ -272,7 +299,7 @@ class PulseTracker:
             if folded <= 0:
                 continue
             if dh is not None:
-                if abs(folded - dh) > _GLITCH_TOLERANCE_NS:
+                if not self._host_allows(folded, dh):
                     continue
             elif folded >= 16 * self._period:
                 continue
