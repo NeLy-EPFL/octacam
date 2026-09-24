@@ -12,16 +12,20 @@ import json
 import os
 import threading
 import time
+from typing import Any
 
 os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import numpy as np
 import pytest
 
+import octacam.cameras._trigger_handoff as handoff
 import octacam.controller as controller_module
 from octacam.cameras import CameraSystem
 from octacam.controller import RecordingController, RecordingSettings
 from octacam.plugins.base import Plugin, PluginManager
+from octacam.pulses import PulseClock
+from octacam.writer import FORMATS
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 W, H = 64, 48
@@ -383,3 +387,349 @@ def test_transport_counters_cover_only_the_recording(fake_system, tmp_path):
     stream = _cam(summary, "FAKE-0")["stream"]
     primed = _cam(summary, "FAKE-0")["primed_frames"]
     assert stream == {"Delivered": 50 + primed, "Lost": 0}
+
+
+# --- software-trigger pairing: an image answers the trigger that exposed it --- #
+
+
+def test_a_late_image_is_credited_to_its_own_trigger(fake_system, tmp_path):
+    # Trigger 10's image arrives a fetch after the one that fired it (30's three
+    # fetches after). Firing the next trigger regardless credited that image to
+    # trigger 11: pulse 10 "missed" and every later frame of FAKE-1 a pulse late,
+    # while the summary said aligned.
+    _backend(fake_system, "FAKE-1").late_triggers = {10: 1, 30: 3}
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+    np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(50))
+    video = _frames(save_dir, "FAKE-1")
+    np.testing.assert_array_equal(video, _frames(save_dir, "FAKE-0"))
+    # The fake draws each frame from its trigger's number: frame k is pulse k.
+    np.testing.assert_array_equal(video[:, 0, 0], np.arange(50))
+
+
+def test_an_image_that_never_arrives_is_given_up_on(
+    fake_system, tmp_path, monkeypatch
+):
+    # No image ever answers trigger 10 (and the SDK says nothing). The hand-off
+    # fires nothing until it gives up on it at its deadline; the pulses offered
+    # meanwhile are missed and filled, and every later frame is still its pulse.
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.1)
+    bad_backend = _backend(fake_system, "FAKE-1")
+    bad_backend.lost_triggers = {10}
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software", duration_s=2.0
+    )
+    count = summary["pulse_train"]["count"]
+    bad = _cam(summary, "FAKE-1")
+    assert bad["frames"] == _cam(summary, "FAKE-0")["frames"] == count
+    assert _cam(summary, "FAKE-0")["missed_pulses"] == 0
+    missed = bad["missed_pulse_indices"]
+    # 10 and the pulses within the 0.1 s deadline after it (5 periods), no more.
+    assert missed[0] == 10 and missed[-1] <= 16, missed
+    assert bad_backend.unanswered_triggers == 1
+    np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(count))
+    good, video = _frames(save_dir, "FAKE-0"), _frames(save_dir, "FAKE-1")
+    for k in range(count):
+        expected = video[k - 1] if k in missed else good[k]
+        assert (video[k] == expected).all(), k
+
+
+def _direct_camera(serial):
+    from octacam.cameras.base import Camera
+    from octacam.cameras.fake import FakeBackend
+
+    backend: Any = FakeBackend(serial)
+    backend.open()
+    backend.write_node("width", W)
+    backend.write_node("height", H)
+    return backend, Camera(backend)
+
+
+def _wait_for(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.001)
+
+
+def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
+    # The last priming trigger's image is still on its way when counting starts.
+    # It must be discarded as a priming answer — not recorded as pulse 0, which
+    # put every frame of the take a pulse late.
+    backend, camera = _direct_camera("FAKE-P")
+    path = tmp_path / "cam.raw"
+    clock = PulseClock(PERIOD_NS, count=10, source="software")
+    assert camera.start_record(
+        str(path), FPS, FORMATS["raw"], pulse_clock=clock, hold=True
+    )
+    try:
+        backend.late_triggers = {3: 100}  # ~100 fetches late: well after the arm
+        for _ in range(4):
+            camera.trigger_once()
+            time.sleep(PERIOD_NS / 1e9)
+        _wait_for(lambda: backend._pending == 0 and bool(backend._outstanding))
+        assert camera.primed_frames == 3
+        backend.late_triggers = {}
+        camera.arm_counting()
+        _wait_for(lambda: camera.primed_frames == 4)
+        for _ in range(10):
+            camera.trigger_once()
+            time.sleep(PERIOD_NS / 1e9)
+        _wait_for(lambda: camera.pulses_complete)
+    finally:
+        camera.stop(fill_to=10)
+        camera.join()
+    assert camera.primed_frames == 4 and camera.missed_pulses == []
+    assert camera.frame_pulse_index == list(range(10))
+    video = np.fromfile(path, dtype=np.uint8).reshape(-1, H, W)
+    np.testing.assert_array_equal(video[:, 0, 0], np.arange(10))
+
+
+def test_a_buffered_priming_frame_is_a_straggler_at_low_fps(tmp_path):
+    # At 10 fps a priming frame still buffered when counting starts arrives a
+    # whole period (100 ms) after the previous priming frame — past the fixed
+    # 50 ms straggler window — and became pulse 0 of the recording.
+    period = 100_000_000
+    backend, camera = _direct_camera("FAKE-S")
+    backend.hardware_period_ns = period
+    buffered: list = []
+    real = backend.retrieve_external
+
+    def retrieve_external(timeout_ms, wants_array):
+        return buffered.pop() if buffered else real(timeout_ms, wants_array)
+
+    backend.retrieve_external = retrieve_external
+    path = tmp_path / "cam.raw"
+    clock = PulseClock(period, count=5, source="managed")
+    assert camera.start_record(
+        str(path),
+        10.0,
+        FORMATS["raw"],
+        software_trigger=False,
+        pulse_clock=clock,
+        hold=True,
+    )
+    try:
+        for _ in range(3):
+            camera.trigger_once()
+            time.sleep(0.01)
+        _wait_for(lambda: camera.primed_frames == 3)
+        # The fourth priming pulse's frame: exposed a period after the third,
+        # still in the SDK's buffer when counting starts.
+        stamp = backend._clock_t0 + 3 * period
+        camera.arm_counting()
+        buffered.append((np.full((H, W), 3, dtype=np.uint8), stamp))
+        _wait_for(lambda: camera.primed_frames == 4)
+        for _ in range(5):
+            camera.trigger_once()
+            time.sleep(0.01)
+        _wait_for(lambda: camera.pulses_complete)
+    finally:
+        camera.stop(fill_to=5)
+        camera.join()
+    assert camera.primed_frames == 4 and camera.missed_pulses == []
+    assert camera.frame_pulse_index == list(range(5))
+    assert camera.extra_frames == 0
+
+
+# --- stray zero timestamps and fill timestamps -------------------------------- #
+
+
+def test_a_stray_zero_timestamp_does_not_shift_later_frames(fake_system, tmp_path):
+    # One frame of a hardware-clocked camera comes without a timestamp. Placing
+    # it as the next pulse but leaving the clock anchor on the frame before made
+    # the next interval two periods: an invented miss, and every later frame a
+    # pulse late (the train's last real frame thrown away as extra).
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
+    _backend(fake_system, "FAKE-1").zero_timestamp_triggers = {4}
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert bad["frames"] == 50, bad
+    assert bad["missed_pulses"] == 0 and bad["extra_frames"] == 0, bad
+    assert bad["unclocked_frames"] == 1 and bad["host_fallback_count"] == 1
+    np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(50))
+    np.testing.assert_array_equal(
+        _frames(save_dir, "FAKE-1"), _frames(save_dir, "FAKE-0")
+    )
+    # Stamped when its pulse was due, on the camera's own clock.
+    assert np.all(np.diff(arrays["FAKE-1/timestamp_ns"]) == PERIOD_NS)
+
+
+def test_zero_timestamps_before_the_first_timed_frame_do_not_restart_the_count(
+    fake_system, tmp_path
+):
+    # The tracker anchors the camera clock at its first timed frame; after two
+    # untimed ones that frame is pulse 2, not the train's first pulse again
+    # (which put two frames on pulse 0 and every later one a pulse early).
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
+    _backend(fake_system, "FAKE-1").zero_timestamp_triggers = {0, 1}
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert bad["frames"] == 50 and bad["missed_pulses"] == 0, bad
+    assert bad["unclocked_frames"] == 2
+    np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(50))
+    np.testing.assert_array_equal(
+        _frames(save_dir, "FAKE-1"), _frames(save_dir, "FAKE-0")
+    )
+
+
+def test_fills_are_time_stamped_when_their_pulse_was_due(fake_system, tmp_path):
+    # Under the software trigger the pulse comes from the trigger sequence, so
+    # the tracker has no clock to place a fill on: the trailing fills were
+    # stamped 0, which made the camera's summary fps negative (and a raw
+    # transcode then ran at -framerate).
+    _backend(fake_system, "FAKE-1").miss_triggers = {0, 25, 48, 49}
+    _save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert bad["missed_pulse_indices"] == [0, 25, 48, 49]
+    ts = arrays["FAKE-1/timestamp_ns"].astype(np.int64)
+    assert (ts > 0).all()
+    assert ts[0] == ts[1] - PERIOD_NS  # a leading miss counts back
+    assert ts[25] == ts[24] + PERIOD_NS
+    assert ts[48] == ts[47] + PERIOD_NS and ts[49] == ts[47] + 2 * PERIOD_NS
+    assert 0.5 * FPS < bad["fps"] < 2 * FPS
+    assert bad["timestamp_source"] == "hardware"
+
+
+def test_fills_of_a_host_clocked_camera_are_host_time(fake_system, tmp_path):
+    # A backend with no hardware timestamp (pycameleon) is stamped with host
+    # time; its fills must be too — not "0 minus a few periods" — and count as
+    # host-clocked rows, so the summary says "host", not "mixed".
+    backend = _backend(fake_system, "FAKE-1")
+    backend.miss_triggers = {0, 25, 49}
+    retrieve = backend.retrieve
+
+    def unclocked(timeout_ms, wants_array):
+        frame = retrieve(timeout_ms, wants_array)
+        return None if frame is None else (frame[0], 0)
+
+    backend.retrieve = unclocked
+    _save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert bad["missed_pulse_indices"] == [0, 25, 49]
+    ts = arrays["FAKE-1/timestamp_ns"].astype(np.int64)
+    assert (ts > 1_500_000_000 * 10**9).all()  # all host wall-clock time
+    assert bad["start_timestamp_ns"] > 0
+    assert bad["host_fallback_count"] == bad["frames"] == 50
+    assert bad["timestamp_source"] == "host"
+
+
+def test_mean_fps_of_a_series_that_runs_backward_is_zero():
+    from octacam.cameras.base import Camera
+    from octacam.cameras.fake import FakeBackend
+
+    backend: Any = FakeBackend("FAKE-T")
+    camera = Camera(backend)
+    camera._timestamps[:] = [3_600_000_000_000, 0]
+    assert camera.mean_fps == 0.0
+
+
+# --- writer overload: a sustained shortfall is skipped, not filled ------------- #
+
+
+def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
+    fake_system, tmp_path
+):
+    # FAKE-0's sink writes ~33 frames/s against a 50 fps train. Filling every
+    # refused frame made each queued frame carry more fills, each costing a
+    # real write: the real frames the writer accepted decayed toward zero and
+    # close() had the whole backlog to write. Past a queue's worth of refusals
+    # the camera now skips refused frames.
+    queue_size = 8
+    camera = next(c for c in fake_system if c.serial_number == "FAKE-0")
+    original = camera.start_record
+
+    def start_record(*args, **kwargs):
+        ok = original(*args, **kwargs)
+        writer = camera._video_writer
+        write_frame = writer._write_frame
+
+        def slow(frame):
+            time.sleep(0.03)
+            write_frame(frame)
+
+        writer._write_frame = slow
+        return ok
+
+    camera.start_record = start_record
+    save_dir, summary, arrays, _ = _record(
+        fake_system,
+        tmp_path,
+        trigger_source="software",
+        duration_s=2.0,
+        writer_queue_size=queue_size,
+    )
+    count = summary["pulse_train"]["count"]
+    cam = _cam(summary, "FAKE-0")
+    skipped = camera.writer_skipped_pulses
+    assert camera.writer_skipped == len(skipped) > 0
+    # At most a queue's worth of refused frames was filled before the switch.
+    assert 0 < cam["writer_dropped"] <= queue_size
+    assert cam["missed_pulses"] == 0
+    # Rows are video frames: a skipped pulse has neither.
+    pulses = arrays["FAKE-0/pulse_index"].tolist()
+    video = _frames(save_dir, "FAKE-0")
+    assert len(video) == len(pulses) == cam["frames"] == count - len(skipped)
+    assert sorted(pulses + skipped) == list(range(count))
+    dropped = arrays["FAKE-0/dropped"]
+    for row, pulse in enumerate(pulses):
+        expected = video[row - 1, 0, 0] if dropped[row] else pulse % 256
+        assert video[row, 0, 0] == expected, (row, pulse)
+    # The other camera is untouched.
+    assert _cam(summary, "FAKE-1")["frames"] == count
+    other = next(c for c in fake_system if c.serial_number == "FAKE-1")
+    assert other.writer_skipped == 0
+
+
+def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
+    # Three separate 0.26 s encoder stalls, each refusing ~5 frames against a
+    # queue of 8: every one is caught up on before the next, so the writer is
+    # never judged overloaded, although more than a queue's worth is refused in
+    # all — every refused frame is filled and the video keeps every pulse.
+    queue_size = 8
+    camera = next(c for c in fake_system if c.serial_number == "FAKE-0")
+    original = camera.start_record
+
+    def start_record(*args, **kwargs):
+        ok = original(*args, **kwargs)
+        writer = camera._video_writer
+        write_frame = writer._write_frame
+        writes = {"n": 0}
+
+        def stalling(frame):
+            writes["n"] += 1
+            if writes["n"] in (10, 40, 70):
+                time.sleep(0.26)
+            write_frame(frame)
+
+        writer._write_frame = stalling
+        return ok
+
+    camera.start_record = start_record
+    save_dir, summary, arrays, _ = _record(
+        fake_system,
+        tmp_path,
+        trigger_source="software",
+        duration_s=2.0,
+        writer_queue_size=queue_size,
+    )
+    count = summary["pulse_train"]["count"]
+    cam = _cam(summary, "FAKE-0")
+    assert camera.writer_skipped == 0
+    assert cam["writer_dropped"] > queue_size
+    assert cam["frames"] == count and len(_frames(save_dir, "FAKE-0")) == count
+    np.testing.assert_array_equal(arrays["FAKE-0/pulse_index"], np.arange(count))

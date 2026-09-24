@@ -501,3 +501,43 @@ def test_a_fill_is_never_dropped_on_its_own():
             owed += 1
     writer.close(fill_after=owed)
     assert len(writer.written) == len(frames)
+
+
+class _GatedSink(AsyncFrameWriter):
+    """Writes a frame only once the test lets it through."""
+
+    def _open_sink(self, filename, fps, frame_size):
+        import threading
+
+        self.gate = threading.Semaphore(0)
+        self.written = []
+
+    def _write_frame(self, frame):
+        self.gate.acquire()
+        self.written.append(frame)
+
+    def _close_sink(self):
+        pass
+
+
+def test_backlog_counts_the_fills_riding_on_each_queued_frame():
+    # The grab loop tells a transient stall from a sustained shortfall by how
+    # far behind the encoder is, and the queue's item count hides the fills.
+    writer = _GatedSink(max_queue_size=4)
+    assert writer.max_queue_size == 4
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    a, b = synthetic_frames(2)
+    assert writer.backlog == 0
+    assert writer.write(a)
+    assert writer.write(b, fill_before=3)
+    assert writer.backlog == 5
+    for _ in range(3):
+        writer.gate.release()
+    deadline = time.monotonic() + 2.0
+    while writer.frames_written < 3 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert writer.backlog == 2
+    for _ in range(2):
+        writer.gate.release()
+    writer.close()
+    assert writer.backlog == 0 and writer.frames_written == 5

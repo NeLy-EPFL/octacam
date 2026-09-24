@@ -626,8 +626,11 @@ class BaslerBackend(SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
+        # trigger and fetch exactly one frame on this camera's own grab thread —
+        # or, while a fired trigger's image is still due, only fetch (see
+        # _trigger_handoff: a late image must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         # The device call now lives here (not on the caught _trigger_all path), and
         # the grab loop does not wrap retrieve() in a try/except — so a stop-race
@@ -637,10 +640,12 @@ class BaslerBackend(SoftwareTriggerHandoff):
         raw = self.raw
         if raw is None or not self._grabbing:
             return None
-        try:
-            raw.ExecuteSoftwareTrigger()
-        except genicam.GenericException:
-            return None
+        if fire:
+            try:
+                raw.ExecuteSoftwareTrigger()
+            except genicam.GenericException:
+                self._trigger_unfired()
+                return None
         # RetrieveResult can raise (not just time out) on a device-level error
         # — device removed/unplugged mid-record, grab-engine/transport failure —
         # so guard it too, returning None (one lost frame) to uphold the
@@ -655,6 +660,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # accessors throw, so bail before touching them.
             if not result.IsValid():
                 return None
+            self._trigger_answered()  # a failed grab answers its trigger too
             # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
             # packet loss): pylon already drops it for us, but partial frames are
             # a prime suspect for corrupt previews, so surface the cause

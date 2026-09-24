@@ -576,6 +576,9 @@ class AsyncFrameWriter:
         self._thread: threading.Thread | None = None
         self._running = False
         self._failed = False
+        # Frames accepted (fills included) and frames handed to the sink; each
+        # counter has a single writer thread, so their difference is race-free.
+        self._accepted = 0
         self._written = 0
         self._profile = profile
         self._encode_ns_samples: list[int] = []
@@ -592,6 +595,18 @@ class AsyncFrameWriter:
         a sink failure). The grab loop reconciles this against the queue to
         keep the CSV's per-frame `dropped` column accurate."""
         return self._written
+
+    @property
+    def max_queue_size(self) -> int:
+        """How many items the queue holds before :meth:`write` refuses one."""
+        return self._max_queue_size
+
+    @property
+    def backlog(self) -> int:
+        """Frames accepted but not yet handed to the sink, fills included — how
+        far behind the encoder is (the queue's item count hides the fills that
+        ride on each item)."""
+        return max(0, self._accepted - self._written)
 
     @property
     def encode_ns_samples(self) -> list[int]:
@@ -619,6 +634,7 @@ class AsyncFrameWriter:
             log.error("Failed to open writer for %s: %s", filename, e)
             return False
         self._failed = False
+        self._accepted = 0
         self._written = 0
         self._encode_ns_samples = []
         self._max_queue_depth = 0
@@ -639,9 +655,10 @@ class AsyncFrameWriter:
                 self._max_queue_depth = depth
         try:
             self._queue.put_nowait((frame, fill_before))
-            return True
         except queue.Full:
             return False
+        self._accepted += fill_before + 1
+        return True
 
     def close(self, fill_after: int = 0) -> None:
         """Stop accepting frames, drain the queue, append ``fill_after`` repeats

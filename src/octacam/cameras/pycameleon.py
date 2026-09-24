@@ -358,20 +358,29 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # Wait (like the fake backend) for a software trigger, then do the
         # execute+receive back-to-back under the device lock so nothing else
         # touches the camera in between. A 0 timestamp makes Camera fall back to
-        # host time.
-        if not self._wait_pending(timeout_ms):
+        # host time. While a fired trigger's frame is still due, only receive (see
+        # _trigger_handoff: a late frame must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         with self._lock:
             if not self._grabbing or self._receiver is None or self._cam is None:
                 return None
+            if fire:
+                try:
+                    self._cam.execute("TriggerSoftware")
+                except Exception as e:
+                    log.debug("trigger failed on camera %s: %s", self._serial, e)
+                    self._trigger_unfired()
+                    return None
             try:
-                self._cam.execute("TriggerSoftware")
                 array = self._receive_bounded(timeout_ms)
             except Exception as e:
                 log.debug("receive failed on camera %s: %s", self._serial, e)
                 return None
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
+        self._trigger_answered()
         # Own the frame; skip the copy when the display slot is full (preview).
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)

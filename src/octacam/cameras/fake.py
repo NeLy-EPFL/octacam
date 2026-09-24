@@ -40,6 +40,10 @@ _DEFAULT_SERIALS = "FAKE-0,FAKE-1"
 # Full sensor size the fake models; Width/Height ROI sits within it and the
 # offset ranges (and centering) are derived from it, like real hardware.
 _SENSOR_W, _SENSOR_H = 1920, 1200
+# How long a software-trigger fetch that finds no image ready waits (a real one
+# blocks up to its timeout): long enough not to spin, short enough that an image
+# one fetch late is still well inside a test's trigger period.
+_FETCH_WAIT_S = 0.002
 
 # The fake's node model is keyed by SFNC name (matching real GenICam backends);
 # the six legacy snake_case params (read_node/write_node/set_live_param) map onto
@@ -150,19 +154,31 @@ class FakeBackend(SoftwareTriggerHandoff):
         # start_grab_record/stop_grab). Lets retrieve_freerun pace an uncapped
         # managed preview without pacing the benchmark's uncapped record-grab probe.
         self._preview_grab = False
-        # Test knobs modelling a hardware-triggered camera's failure modes:
-        # ``miss_triggers`` — trigger sequence numbers whose frame never arrives
-        # (a missed pulse); ``ignore_first_triggers`` — how many triggers after
-        # each grab start produce no frame at all (a FLIR Grasshopper3 ignores its
-        # first two); ``hardware_period_ns`` — stamp frames from an ideal camera
-        # clock ticking at the trigger period and hide the trigger sequence, so a
-        # recording places frames by timestamp exactly as it must for a real
-        # hardware-triggered camera.
+        # Test knobs modelling a camera's failure modes, keyed by trigger sequence
+        # number: ``miss_triggers`` — no frame for these (a missed pulse; on the
+        # software path the SDK says so at once, like an incomplete image);
+        # ``ignore_first_triggers`` — how many triggers after each grab start
+        # produce no frame at all (a FLIR Grasshopper3 ignores its first two);
+        # ``hardware_period_ns`` — stamp frames from an ideal camera clock ticking
+        # at the trigger period and hide the trigger sequence, so a recording
+        # places frames by timestamp exactly as it must for a real
+        # hardware-triggered camera; ``zero_timestamp_triggers`` — on that clock,
+        # frames that come without a timestamp (0). The software-trigger path
+        # (no ``hardware_period_ns``) models the device's image queue:
+        # ``late_triggers`` maps a trigger to how many fetches its image misses
+        # before it arrives, and ``lost_triggers`` never deliver an image, without
+        # a word (the hand-off gives up on them at its answer deadline).
         self.miss_triggers: set[int] = set()
         self.ignore_first_triggers = 0
         self.hardware_period_ns: int | None = None
+        self.zero_timestamp_triggers: set[int] = set()
+        self.late_triggers: dict[int, int] = {}
+        self.lost_triggers: set[int] = set()
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
+        # Images exposed but not yet fetched, oldest first: [trigger sequence
+        # number (-1 when unnumbered), fetches it still misses].
+        self._device_images: list[list[int]] = []
         self._init_trigger_handoff()
 
     @property
@@ -440,6 +456,7 @@ class FakeBackend(SoftwareTriggerHandoff):
     def start_grab_preview(self) -> None:
         self._preview_grab = True
         self._triggers_since_grab = 0
+        self._device_images.clear()
         self._begin_grab()
 
     def start_grab_record(self) -> bool:
@@ -465,28 +482,91 @@ class FakeBackend(SoftwareTriggerHandoff):
         # its frames carry a timestamp, not the trigger's sequence number.
         if self.hardware_period_ns:
             return None
-        return self._last_trigger_index
+        return super().last_trigger_index
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
+        # A frame shows its trigger's sequence number (mod 256), so a test can
+        # tell which pulse a video frame really is.
+        period = self.hardware_period_ns
+        if period:
+            return self._retrieve_clocked(timeout_ms, wants_array, period)
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
+            return None
+        with self._cond:
+            if fire and not self._expose():
+                return None
+            seq = self._fetch()
+            if seq is None:
+                return None
+            self._frame_index += 1
+            index = self._frame_index if seq < 0 else seq
+            width = int(self._nodes["Width"]["value"])
+            height = int(self._nodes["Height"]["value"])
+        array = _render(width, height, index) if wants_array() else None
+        return (array, time.time_ns())
+
+    def _expose(self) -> bool:
+        """The device's response to the trigger just fired (the newest outstanding
+        one; caller holds the condition). False when no image will come of it."""
+        if not self._outstanding:  # the grab restarted under us: nothing fired
+            return False
+        self._triggers_since_grab += 1
+        seq = self._outstanding[-1][0]
+        if self._triggers_since_grab <= self.ignore_first_triggers or (
+            seq in self.miss_triggers
+        ):
+            # No frame, and the SDK says so at once (like an incomplete image):
+            # the trigger is answered, and the next one can fire.
+            self._trigger_answered()
+            return False
+        if seq in self.lost_triggers:
+            return True  # nothing will arrive; the hand-off gives up on it
+        key = -1 if seq is None else seq
+        self._device_images.append([key, self.late_triggers.get(key, 0)])
+        return True
+
+    def _fetch(self) -> int | None:
+        """One fetch from the device's image queue (caller holds the condition):
+        the sequence number of the image it hands over (-1 when unnumbered), or
+        None when none is ready — after a short wait, standing in for a real
+        fetch's timeout without holding a test up for it."""
+        if not self._device_images or self._device_images[0][1] > 0:
+            if self._device_images:
+                self._device_images[0][1] -= 1
+            self._cond.wait(_FETCH_WAIT_S)
+            return None
+        seq, _late = self._device_images.pop(0)
+        self._trigger_answered()
+        return seq
+
+    def _retrieve_clocked(
+        self, timeout_ms: int, wants_array: Callable[[], bool], period_ns: int
+    ) -> Frame | None:
+        # The hardware-clock model: a pulse exposes a frame (or is missed) whether
+        # or not the camera answered the previous one, so there is no answer to
+        # wait for.
         if not self._wait_pending(timeout_ms):
             return None
         with self._cond:
             self._triggers_since_grab += 1
-            seq = self._last_trigger_index
+            seq = self._answer[0] if self._answer is not None else None
             if self._triggers_since_grab <= self.ignore_first_triggers:
                 return None  # this trigger never exposed a frame
-            if seq is not None and seq in self.miss_triggers:
+            if seq is not None and (seq in self.miss_triggers or seq in self.lost_triggers):
                 return None  # the pulse was missed
             self._frame_index += 1
-            index = self._frame_index
+            index = self._frame_index if seq is None else seq
             width = int(self._nodes["Width"]["value"])
             height = int(self._nodes["Height"]["value"])
         array = _render(width, height, index) if wants_array() else None
-        if self.hardware_period_ns and seq is not None:
-            return (array, self._clock_t0 + seq * self.hardware_period_ns)
-        return (array, time.time_ns())
+        if seq is None:
+            return (array, time.time_ns())
+        if seq in self.zero_timestamp_triggers:
+            return (array, 0)
+        return (array, self._clock_t0 + seq * period_ns)
 
     def retrieve_external(
         self, timeout_ms: int, wants_array: Callable[[], bool]
@@ -506,7 +586,8 @@ class FakeBackend(SoftwareTriggerHandoff):
 
 
 def _render(width: int, height: int, index: int) -> np.ndarray:
-    """A cheap, owned mono frame whose content advances with the frame index."""
+    """A cheap, owned mono frame of value ``index`` mod 256 (the trigger's
+    sequence number where the frame answers one, else the frame count)."""
     return np.full((height, width), index % 256, dtype=np.uint8)
 
 

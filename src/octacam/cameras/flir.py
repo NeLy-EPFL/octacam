@@ -667,8 +667,11 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     ) -> Frame | None:
         spin = _spin()
         # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
+        # trigger and fetch exactly one frame on this camera's own grab thread —
+        # or, while a fired trigger's image is still due, only fetch (see
+        # _trigger_handoff: a late image must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         cam = self._cam
         if cam is None or not self._grabbing:
@@ -677,20 +680,28 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # grab loop does not wrap retrieve() in try/except, so a stop-race or a
         # trigger failure must return None, never raise — a lost trigger is one
         # lost frame, the same as the GetNextImage timeout below.
-        try:
-            spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
-        except spin.SpinnakerException:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
+        if fire:
+            try:
+                spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
+            except spin.SpinnakerException:
+                self._trigger_unfired()
+                return None
+        return self._fetch_image(cam, timeout_ms, wants_array, answers_trigger=True)
 
-    def _fetch_image(self, cam, timeout_ms, wants_array) -> Frame | None:
+    def _fetch_image(
+        self, cam, timeout_ms, wants_array, answers_trigger: bool = False
+    ) -> Frame | None:
         # Fetch exactly one image; never raises (a timeout or incomplete frame is
-        # one lost frame, as the grab loop expects).
+        # one lost frame, as the grab loop expects). ``answers_trigger``: the
+        # software-trigger path, where any image the SDK hands over answers the
+        # oldest fired trigger.
         spin = _spin()
         try:
             image = cam.GetNextImage(timeout_ms)
         except spin.SpinnakerException:
             return None  # timeout: the analogue of pylon's empty result
+        if answers_trigger:
+            self._trigger_answered()
         try:
             if image.IsIncomplete():
                 self._count_incomplete()
