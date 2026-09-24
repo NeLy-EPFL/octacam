@@ -42,6 +42,7 @@ Structure:
 import atexit
 import ctypes
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -107,8 +108,9 @@ _ERR_NAMES = {
 # snap_value and the GUI slider step both tolerate a missing inc.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
-# Transport counters a recording reports, and the record grab's buffer pool —
-# identical to the PySpin tier (see flir.py).
+# Transport counters a recording reports, the record grab's buffer pool, and how
+# often a grab's incomplete images are logged — identical to the PySpin tier
+# (see flir.py).
 STREAM_STATISTICS = (
     "StreamLostFrameCount",
     "StreamDroppedFrameCount",
@@ -116,6 +118,7 @@ STREAM_STATISTICS = (
     "StreamDeliveredFrameCount",
 )
 RECORD_STREAM_BUFFERS = 128
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 # spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
 # node-map walk (Camera tab). The unmapped types (ValueNode/BaseNode/Register/
@@ -927,6 +930,11 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # Images the SDK delivered incomplete (discarded: never corrupt data);
         # counted so a recording can report them instead of losing them silently.
         self._incomplete_images = 0
+        # The current grab's share, for the rate-limited log (_count_incomplete).
+        self._grab_is_record = False
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+        self._incomplete_logged_at = 0.0
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware execute moves into retrieve() on the grab
         # thread so the shared trigger timer never blocks on this camera.
@@ -1213,6 +1221,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
+        self._begin_incomplete_log(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
@@ -1220,8 +1229,44 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # software trigger, so report ready once acquisition has begun. (A GS3
         # still ignores its first two hardware triggers after this — the recording
         # primes the cameras before its train.) Deep buffer pool: see flir.py.
+        self._begin_incomplete_log(record=True)
         self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
+
+    def _begin_incomplete_log(self, *, record: bool) -> None:
+        """Start a grab's incomplete-image log afresh (see _count_incomplete)."""
+        self._grab_is_record = record
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+
+    def _count_incomplete(self) -> None:
+        """Count a discarded incomplete image, logging it rate-limited as
+        FlirBackend._count_incomplete does (the grab's first, then its running
+        total at most every INCOMPLETE_REPORT_INTERVAL_S; debug in a preview)."""
+        self._incomplete_images += 1
+        self._grab_incomplete += 1
+        now = time.monotonic()
+        first = self._grab_incomplete == 1
+        if not first and now - self._incomplete_logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._grab_is_record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial, self._grab_incomplete,
+                self._grab_incomplete - self._grab_incomplete_logged,
+            )
+        self._grab_incomplete_logged = self._grab_incomplete
+        self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
         # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
@@ -1267,10 +1312,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return None
         try:
             if spin.image_incomplete(image):
-                self._incomplete_images += 1
-                log.warning(
-                    "Camera %s delivered an incomplete image; discarded", self._serial
-                )
+                self._count_incomplete()
                 return None
             timestamp = spin.image_timestamp(image)
             array = None

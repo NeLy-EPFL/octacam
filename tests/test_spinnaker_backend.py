@@ -8,6 +8,8 @@ close, and the enumerate handle-release are all exercised in pure Python: the
 real ctypes ABI is exercised only by the on-rig hardware verification.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -101,7 +103,7 @@ class FakeCam:
         self.initialized = False
         self.streaming = False
         self.released = False
-        self.next_image = None
+        self.next_image: FakeImage | None = None
 
 
 class FakeSpin:
@@ -629,6 +631,79 @@ def test_retrieve_skips_incomplete_image_but_releases_it():
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None
     assert image.released  # incomplete frames are still released
+
+
+class _Records(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+@pytest.fixture
+def octacam_log():
+    """Every record the octacam logger emits, debug included."""
+    handler = _Records()
+    logger = logging.getLogger("octacam")
+    level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    yield handler.records
+    logger.removeHandler(handler)
+    logger.setLevel(level)
+
+
+def _incomplete_logs(records):
+    return [(r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()]
+
+
+def _incomplete_grab(record):
+    backend, cam = _open_backend()
+    if record:
+        backend.start_grab_record()
+    else:
+        backend.start_grab_preview()
+    cam.next_image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), incomplete=True)
+    return backend, lambda: backend.retrieve_freerun(100, lambda: True)
+
+
+def test_incomplete_images_are_counted_but_logged_once_per_grab(monkeypatch, octacam_log):
+    # A saturated bus delivers incomplete images continuously: every one is
+    # counted, but a record grab logs only its first until the report interval.
+    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
+    backend, fetch = _incomplete_grab(record=True)
+    assert all(fetch() is None for _ in range(250))
+    assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 250
+    logs = _incomplete_logs(octacam_log)
+    assert len(logs) == 1 and logs[0][0] == logging.WARNING
+    backend.stop_grab()
+    backend.start_grab_record()  # a new grab logs its own first one again
+    assert fetch() is None
+    assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 251
+    assert len(_incomplete_logs(octacam_log)) == 2
+
+
+def test_incomplete_images_in_a_preview_log_at_debug(monkeypatch, octacam_log):
+    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
+    backend, fetch = _incomplete_grab(record=False)
+    for _ in range(5):
+        fetch()
+    logs = _incomplete_logs(octacam_log)
+    assert logs and all(level == logging.DEBUG for level, _ in logs)
+    assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 5
+
+
+def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, octacam_log):
+    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
+    _backend, fetch = _incomplete_grab(record=True)
+    for _ in range(3):
+        fetch()
+    messages = [m for _, m in _incomplete_logs(octacam_log)]
+    assert "delivered an incomplete image" in messages[0]
+    assert "2 incomplete images discarded in this grab (1 since" in messages[1]
+    assert "3 incomplete images discarded in this grab (1 since" in messages[2]
 
 
 def test_retrieve_skips_non_mono8_frame_but_releases_it():

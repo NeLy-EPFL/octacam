@@ -23,6 +23,7 @@ Mapping notes vs. the Basler backend:
 
 import atexit
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -60,6 +61,10 @@ STREAM_STATISTICS = (
 # frames at 125 fps against the SDK default of 9, so a grab thread stalled for a
 # GC pause or a disk hiccup delays frames instead of losing them.
 RECORD_STREAM_BUFFERS = 128
+# A camera on a saturated USB bus delivers incomplete images continuously, so
+# only a grab's first is logged, then its running total at most this often (a
+# preview's at debug: dropped frames of a live view). The count itself is exact.
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 
 def _set_stream_buffers(spin, snodemap, buffers: int, serial: str) -> None:
@@ -214,6 +219,11 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # Images the SDK delivered incomplete (discarded: never corrupt data);
         # counted so a recording can report them instead of losing them silently.
         self._incomplete_images = 0
+        # The current grab's share, for the rate-limited log (_count_incomplete).
+        self._grab_is_record = False
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+        self._incomplete_logged_at = 0.0
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware execute moves into retrieve() on the grab
         # thread so the shared trigger timer never blocks on this camera.
@@ -592,6 +602,7 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
+        self._begin_incomplete_log(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
@@ -601,8 +612,45 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # recording primes the cameras before its train.) Record with a deep
         # buffer pool: the SDK default (9) is 72 ms at 125 fps, so a grab thread
         # stalled longer than that would lose frames at the host.
+        self._begin_incomplete_log(record=True)
         self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
+
+    def _begin_incomplete_log(self, *, record: bool) -> None:
+        """Start a grab's incomplete-image log afresh (see _count_incomplete)."""
+        self._grab_is_record = record
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+
+    def _count_incomplete(self) -> None:
+        """Count a discarded incomplete image. The grab's first is logged (a
+        warning in a record grab, debug in a preview), then its running total at
+        most every INCOMPLETE_REPORT_INTERVAL_S, so a saturated bus does not log
+        at the frame rate; stream_statistics reports the exact count."""
+        self._incomplete_images += 1
+        self._grab_incomplete += 1
+        now = time.monotonic()
+        first = self._grab_incomplete == 1
+        if not first and now - self._incomplete_logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._grab_is_record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial, self._grab_incomplete,
+                self._grab_incomplete - self._grab_incomplete_logged,
+            )
+        self._grab_incomplete_logged = self._grab_incomplete
+        self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
         # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
@@ -645,10 +693,7 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return None  # timeout: the analogue of pylon's empty result
         try:
             if image.IsIncomplete():
-                self._incomplete_images += 1
-                log.warning(
-                    "Camera %s delivered an incomplete image; discarded", self._serial
-                )
+                self._count_incomplete()
                 return None
             timestamp = image.GetTimeStamp()
             array = None

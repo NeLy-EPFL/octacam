@@ -24,7 +24,8 @@ from octacam.plugins.triggerbox import (
     _build,
     period_us,
     pin_id,
-    train_duration_ms,
+    plan_train,
+    pulse_count,
 )
 
 ARM_MAGIC = 0xA5
@@ -364,9 +365,10 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
     rec = _last_arm(link)
     plugin.on_preview_start({"triggerbox": slice_})
     prev = _last_arm(link)
-    # Recording runs exactly its 800 pulses (ending half a period after the
-    # last, see train_duration_ms); preview runs until cancel (0)...
-    assert rec["duration_ms"] == train_duration_ms(80, 800) == 9995
+    # Recording runs exactly its 800 pulses (ending once the last pulse and
+    # strobe are out, see plan_train); preview runs until cancel (0)...
+    assert rec["duration_ms"] == plan_train(80, 800, rec["cams"], rec["lights"]).duration_ms
+    assert rec["duration_ms"] == 9991
     assert prev["duration_ms"] == 0
     # ...but is otherwise the same trigger + strobe as the recording (user chose
     # "strobe as in recording"), so preview is WYSIWYG.
@@ -527,8 +529,10 @@ def test_on_recording_start_arms_with_full_spec():
         }
     )
     dec = _last_arm(link)
-    # 2000 ms at 100 fps = 200 pulses; the run ends 6 ms after the last one.
-    assert dec["fps"] == 100 and dec["duration_ms"] == train_duration_ms(100, 200) == 1996
+    # 2000 ms at 100 fps = 200 pulses; the run ends once the last one is out.
+    assert dec["fps"] == 100
+    assert dec["duration_ms"] == plan_train(100, 200, dec["cams"], dec["lights"]).duration_ms
+    assert dec["duration_ms"] == 1992
     assert dec["cams"] == [(pin_id("D13"), 500, 0)]
     assert dec["lights"] == [(pin_id("D5"), 2, 0, 0, 0, 0)]
 
@@ -1380,20 +1384,267 @@ def test_trigger_train_describes_the_exact_train():
     assert plugin.trigger_train(None) is None
 
 
-@pytest.mark.parametrize("fps", [10, 30, 80, 90, 100, 125, 200, 300])
-@pytest.mark.parametrize("pulses", [1, 2, 13, 800, 112_500])
-def test_train_duration_emits_exactly_the_count(fps, pulses):
-    # Model the firmware: rising edges at k * period from t0; the run goes idle
-    # (all outputs LOW) once millis() - start >= duration_ms, i.e. anywhere in
-    # (duration - 1 ms, duration]. Every such end must give exactly `pulses`
-    # edges and must let the last pulse (500 µs) finish first. (Up to 300 fps: a
-    # millisecond clock cannot separate edges under a ~2 ms period.)
+# --- A model of how the board ends a finite run (triggerbox.ino), kept apart
+# from the plugin's own: camera line i rises at k * period + delay_i for frame
+# k; the run goes idle (every output LOW) once millis() - start >= duration_ms,
+# i.e. anywhere in the duration's last millisecond, give or take the loop's
+# polling; an edge due in the pass that sees the end still goes out.
+
+
+def _fw_line(period, pulse_us, delay_us):
+    """A camera line as prepare_outputs() clamps it: (delay, pulse)."""
+    delay = min(delay_us, period - 1)
+    pulse = max(pulse_us or 500, 5)
+    return delay, min(pulse, period - 1 - delay if period > delay + 1 else 1)
+
+
+def _fw_emitted(period, line, end_us):
+    """(pulses a line emits, µs its last one is high) for an idle at ``end_us``
+    from the train's first frame edge."""
+    delay, pulse = line
+    if end_us < delay:
+        return 0, 0
+    n = (end_us - delay) // period + 1
+    return n, min(pulse, end_us - ((n - 1) * period + delay))
+
+
+def _fw_ends(duration_ms):
+    """The earliest and latest idle of a run of ``duration_ms``."""
+    from octacam.plugins.triggerbox import RUN_END_EARLY_US, RUN_END_LATE_US
+
+    return duration_ms * 1000 - 1000 - RUN_END_EARLY_US, duration_ms * 1000 + RUN_END_LATE_US
+
+
+def _fw_strobe_done(period, light, count, duration_ms):
+    """Whether a strobe record's on-time of the train's last frame is over when
+    a run of ``duration_ms`` ends (a continuous light or pulse train has none).
+    A strobe may lose the few µs by which the run can end early, so this takes
+    the nominal earliest end, a whole millisecond before the duration."""
+    _pin, mode, delay, on_us, _p2, _p3 = light
+    if mode != 1 or not 0 < on_us < period:
+        return True
+    on = min(delay, period - 1)
+    return (count - 1) * period + min(on + on_us, period) <= duration_ms * 1000 - 1000
+
+
+def _fw_exact(fps, cams, duration_ms, count):
+    """Every line emits exactly ``count`` complete pulses for every end."""
     period = period_us(fps)
-    end_us = train_duration_ms(fps, pulses) * 1000
-    for idle_us in (end_us - 999, end_us):
-        edges = sum(1 for k in range(pulses + 2) if k * period < idle_us)
-        assert edges == pulses, (fps, pulses, idle_us)
-        assert (pulses - 1) * period + 500 < idle_us
+    first, last = _fw_ends(duration_ms)
+    for _pin, pulse_us, delay_us in cams:
+        line = _fw_line(period, pulse_us, delay_us)
+        if _fw_emitted(period, line, first) != (count, line[1]):
+            return False
+        if _fw_emitted(period, line, last)[0] != count:
+            return False
+    return True
+
+
+def _train_count(plugin, params):
+    """The pulse count trigger_train tells the recording."""
+    train = plugin.trigger_train(params)
+    assert train is not None
+    return train["count"]
+
+
+_DURATIONS_MS = (20, 1000, 7_300, 10_000, 12_345, 600_000, 3_600_000)
+_D13 = [(pin_id("D13"), 500, 0)]
+
+
+def test_plan_train_counts_what_the_board_emits_at_every_gui_fps():
+    # The GUI allows 1-1000 fps. Wherever a millisecond end can separate the
+    # last pulse from the next frame edge the plan is exact (every line gets
+    # exactly `count` complete pulses, whatever the run clock's phase); below
+    # 400 fps that is always the requested count.
+    from octacam.plugins.triggerbox import MAX_COUNT_SHIFT
+
+    for fps in range(1, 1001):
+        period = period_us(fps)
+        line = _fw_line(period, 500, 0)
+        for duration_ms in _DURATIONS_MS:
+            wanted = pulse_count(fps, duration_ms)
+            plan = plan_train(fps, wanted, _D13)
+            where = (fps, duration_ms, plan)
+            assert abs(plan.count - wanted) <= MAX_COUNT_SHIFT, where
+            first, last = _fw_ends(plan.duration_ms)
+            if fps < 400:
+                assert plan.exact and plan.count == wanted, where
+            if plan.exact:
+                assert _fw_exact(fps, _D13, plan.duration_ms, plan.count), where
+            elif plan.certain:
+                # The last pulse may be cut short, never below half its width.
+                n_first, high = _fw_emitted(period, line, first)
+                assert n_first == _fw_emitted(period, line, last)[0] == plan.count, where
+                assert 2 * high >= line[1], where
+            else:
+                # Not guaranteed: but the likeliest outcome over the end window.
+                outcomes = [
+                    _fw_emitted(period, line, end)[0] for end in range(first, last + 1, 5)
+                ]
+                assert max(set(outcomes), key=outcomes.count) == plan.count, where
+
+
+@pytest.mark.parametrize("fps", [90, 300, 333, *range(400, 505), *range(505, 1001, 7), 1000])
+def test_plan_train_misses_no_exact_count(fps):
+    # Brute force over counts and durations with the board model: an exact plan
+    # exists within the shift iff the planner finds one, at the smallest shift.
+    from octacam.plugins.triggerbox import MAX_COUNT_SHIFT
+
+    period = period_us(fps)
+    for duration_ms in (1000, 10_000, 12_345):
+        wanted = pulse_count(fps, duration_ms)
+        plan = plan_train(fps, wanted, _D13)
+        shifts = [
+            abs(count - wanted)
+            for count in range(wanted - MAX_COUNT_SHIFT, wanted + MAX_COUNT_SHIFT + 1)
+            if count >= 1
+            and any(
+                _fw_exact(fps, _D13, d, count)
+                for d in range((count - 1) * period // 1000, count * period // 1000 + 3)
+            )
+        ]
+        assert plan.exact == bool(shifts), (fps, duration_ms, plan)
+        if shifts:
+            assert abs(plan.count - wanted) == min(shifts), (fps, duration_ms, plan)
+
+
+def test_plan_train_ends_after_the_last_strobe_and_delayed_pulses():
+    # Several camera lines (one delayed) and strobes: exact, and the end comes
+    # after every line's last pulse and every strobe's last on-time, before the
+    # next frame edge — for every fps and duration where that fits.
+    cams = [(pin_id("D13"), 500, 0), (pin_id("D12"), 300, 2000)]
+    for fps in (1, 10, 50, 80, 90, 100, 125, 150, 200):
+        period = period_us(fps)
+        lights = [
+            (pin_id("D5"), 1, 0, period * 3 // 10, 0, 0),  # 30 % duty
+            (pin_id("D6"), 1, 1000, 1500, 0, 0),  # delayed strobe
+            (pin_id("D7"), 2, 0, 0, 0, 0),  # continuous: nothing to finish
+        ]
+        for duration_ms in _DURATIONS_MS:
+            wanted = pulse_count(fps, duration_ms)
+            plan = plan_train(fps, wanted, cams, lights)
+            where = (fps, duration_ms, plan)
+            assert plan.exact and plan.count == wanted, where
+            assert plan.lights_cut == () and not plan.light_overrun, where
+            assert _fw_exact(fps, cams, plan.duration_ms, plan.count), where
+            done = [_fw_strobe_done(period, lt, plan.count, plan.duration_ms) for lt in lights]
+            assert all(done), where
+            assert _fw_ends(plan.duration_ms)[1] < plan.count * period, where  # no next edge
+
+
+def test_plan_train_count_does_not_depend_on_the_lights():
+    # trigger_train plans without light timing (no camera reads under the
+    # controller lock); the arm plans with it. They must agree on the count.
+    for fps in (80, 125, 333, 450, 505, 600, 777, 1000):
+        period = period_us(fps)
+        wanted = pulse_count(fps, 10_000)
+        bare = plan_train(fps, wanted, _D13)
+        for on_us in (0, 1, period // 5, period // 2, period - 1, period, 10 * period):
+            for delay in (0, period // 3, period - 1):
+                lights = [(pin_id("D5"), 1, delay, on_us, 0, 0)]
+                assert plan_train(fps, wanted, _D13, lights).count == bare.count
+
+
+def test_plan_train_ends_just_before_the_next_edge_when_a_strobe_cannot_finish():
+    # A 95 % strobe cannot finish a millisecond before the next frame edge: the
+    # count is still exact, the run ends as late as it can, and the plan says by
+    # how much the last strobe may be cut.
+    period = period_us(80)
+    light = (pin_id("D5"), 1, 0, period * 95 // 100, 0, 0)
+    plan = plan_train(80, 800, _D13, [light])
+    assert plan.exact and plan.count == 800
+    first, last = _fw_ends(plan.duration_ms)
+    assert last < 800 * period and last + 1000 >= 800 * period  # as late as it can
+    ((index, cut_us),) = plan.lights_cut
+    assert index == 0
+    assert cut_us == 799 * period + period * 95 // 100 - (plan.duration_ms * 1000 - 1000)
+
+
+def test_trigger_train_counts_the_pulses_the_arm_emits():
+    # Through the plugin: the count the recording is told is the count the arm's
+    # duration makes the board emit — also above 500 fps, where a run ended
+    # half a period after the last pulse emitted up to 9 fewer.
+    for fps in (90, 300, 333, 401, 450, 480, 504, 505, 550, 610):
+        plugin, link = _plugin_with_fake(cameras=[{"pin": "D13", "pulse_us": 500}])
+        params = {"triggerbox": {"fps": fps, "duration_ms": 10_000}}
+        count = _train_count(plugin, params)
+        plugin.on_recording_start(params)
+        arm = _last_arm(link)
+        assert _fw_exact(fps, arm["cams"], arm["duration_ms"], count), (fps, count, arm)
+
+
+def test_a_delayed_camera_line_gets_its_last_pulse():
+    # A line delayed past half the period used to lose its last pulse: the run
+    # ended half a period after the last frame edge.
+    for delay_us in (5500, 6000, 7000, 9000):
+        plugin, link = _plugin_with_fake(
+            cameras=[{"pin": "D13", "pulse_us": 500, "delay_us": delay_us}]
+        )
+        params = {"triggerbox": {"fps": 100, "duration_ms": 10_000}}
+        count = _train_count(plugin, params)
+        plugin.on_recording_start(params)
+        arm = _last_arm(link)
+        assert count == 1000
+        assert _fw_exact(100, arm["cams"], arm["duration_ms"], count), (delay_us, arm)
+
+
+@pytest.mark.parametrize(
+    ("fps", "light", "exposure_us"),
+    [
+        (80, {"mode": "strobe", "duty_mode": "manual", "duty_percent": 60}, None),
+        (125, {"mode": "strobe", "duty_mode": "auto"}, 5000),
+        (100, {"mode": "strobe", "duty_mode": "manual", "duty_percent": 40, "delay_us": 4000}, None),
+    ],
+)
+def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
+    # The run used to end half a period after the last pulse, cutting a strobe
+    # longer than that (60 % at 80 fps; a 5 ms exposure's auto duty at 125 fps).
+    plugin, link = _plugin_with_fake(
+        cameras=[{"pin": "D13", "pulse_us": 500}],
+        lights=[{"channel": 1, **light}],
+        strobe_guard_us=100,
+    )
+    if exposure_us is not None:
+        controller = FakeController([FakeCamera("a", exposure_us, 0)])
+        plugin.set_controller(controller)  # pyright: ignore[reportArgumentType]
+    params = {"triggerbox": {"fps": fps, "duration_ms": 10_000}}
+    count = _train_count(plugin, params)
+    plugin.on_recording_start(params)
+    arm = _last_arm(link)
+    assert _fw_exact(fps, arm["cams"], arm["duration_ms"], count)
+    assert _fw_strobe_done(period_us(fps), arm["lights"][0], count, arm["duration_ms"]), arm
+
+
+def test_arm_warns_when_the_train_cannot_end_cleanly():
+    logger = logging.getLogger("octacam")
+    level = logger.level
+    logger.setLevel(logging.INFO)
+    records, detach = _capture_octacam_logs()
+    try:
+        # 1000 fps: no millisecond end separates the last pulse from the next
+        # frame edge; 450 fps: one does, a pulse later; 95 % duty: the last strobe
+        # cannot finish first.
+        for fps, duty in ((1000, 20), (450, 20), (80, 95)):
+            plugin, _link = _plugin_with_fake(
+                cameras=[{"pin": "D13", "pulse_us": 500}],
+                lights=[{"channel": 1, "mode": "strobe", "duty_percent": duty}],
+            )
+            plugin.on_recording_start({"triggerbox": {"fps": fps, "duration_ms": 10_000}})
+    finally:
+        detach()
+        logger.setLevel(level)
+    messages = [(r.levelno, r.getMessage()) for r in records]
+    assert any(
+        level == logging.WARNING and "at 1000 fps" in m and "cannot end the train" in m
+        for level, m in messages
+    ), messages
+    assert any(
+        level == logging.INFO and "at 450 fps" in m and "arming 4501 pulses" in m
+        for level, m in messages
+    ), messages
+    assert any(
+        level == logging.WARNING and "last strobe on D5" in m for level, m in messages
+    ), messages
 
 
 class _AckingLink(FakeLink):
@@ -1443,7 +1694,7 @@ def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
     arm = _last_arm(link)
     assert arm["lights"] == []  # no light flash before the recording
     assert arm["cams"] == [(pin_id("D13"), 500, 0)]
-    assert arm["duration_ms"] == train_duration_ms(125, 4)
+    assert arm["duration_ms"] == plan_train(125, 4, arm["cams"]).duration_ms
     # it returned on the board's 'D', i.e. after the burst was out
     assert elapsed >= arm["duration_ms"] / 1000
 

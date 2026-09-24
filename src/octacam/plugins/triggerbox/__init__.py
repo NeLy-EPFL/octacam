@@ -222,32 +222,218 @@ def period_us(fps: int) -> int:
 
 
 def pulse_count(fps: int, duration_ms: int) -> int:
-    """Pulses a recording of ``duration_ms`` at ``fps`` should get:
-    ``round(fps * duration)``, the frame count the recording expects."""
+    """Pulses a recording of ``duration_ms`` at ``fps`` asks for:
+    ``round(fps * duration)``. The train the board can end on exactly may differ
+    by a few above ~400 fps; :func:`plan_train` says what it emits."""
     return max(1, round(duration_ms * fps / 1000))
 
 
-def train_duration_ms(fps: int, pulses: int) -> int:
-    """A run length that makes the board emit exactly ``pulses`` pulses.
+# ---- Finite trains (must model triggerbox.ino) ------------------------------
+# prepare_outputs() clamps every camera line with the firmware's default and
+# minimum pulse width (kDefaultCamPulseUs / kMinCamPulseUs).
+_FW_DEFAULT_PULSE_US = 500
+_FW_MIN_PULSE_US = 5
+# A finite run goes idle once millis() - start >= duration_ms. Its millisecond
+# boundaries fall anywhere against the frame clock's t0, so the idle comes
+# anywhere in the duration's last millisecond. Around that: the run clock starts
+# a µs or two before the frame clock (early), and the loop polls both every few
+# µs, emitting an edge due in the same pass before it checks the run clock
+# (late; this much also covers an interrupt).
+RUN_END_EARLY_US = 5
+RUN_END_LATE_US = 20
+# How far a recording's pulse count may move from round(fps * duration) to a
+# count the board can end on exactly (only above ~400 fps; see plan_train).
+MAX_COUNT_SHIFT = 10
 
-    The firmware ends a run once its millisecond clock reaches the duration, so
-    it goes idle anywhere in the last millisecond before it. A length that falls
-    on a frame edge (``pulses * period`` — the naive choice whenever the period
-    divides it) races that edge and can emit one runt pulse more, and a period
-    that does not divide it (90 fps: 11 111 µs) emits one pulse more outright. So
-    end the run at least half a period after the last pulse's rising edge even if
-    the idle comes a millisecond early — after its pulse and strobe are out — and
-    never at or after the next edge. (Under a ~2 ms period a millisecond clock
-    cannot separate the two; the recording then tolerates ±1 pulse at the end: an
-    extra frame is discarded and a missing one filled.)
+
+@dataclass(frozen=True)
+class TrainPlan:
+    """A finite train: the ``duration_ms`` to arm and the pulses the board emits.
+
+    ``count`` pulses on every camera line. ``exact``: wherever in its last
+    millisecond the run ends, every line gets exactly ``count`` complete pulses
+    and no more. Otherwise the board's millisecond run clock cannot separate the
+    last pulse from the next frame edge at this fps and ``count`` is the likeliest
+    outcome: ``certain`` still guarantees it, the last pulse possibly cut short
+    but to no less than half its width; without it the train may come out a
+    pulse short or long. ``lights_cut`` lists ``(light index, µs)`` for each
+    strobe whose last on-time the run's end may cut by up to that much, and
+    ``light_overrun`` that a strobe of the frame after the train may start before
+    the end.
+    """
+
+    duration_ms: int
+    count: int
+    exact: bool = True
+    certain: bool = True
+    lights_cut: tuple[tuple[int, int], ...] = ()
+    light_overrun: bool = False
+
+
+def _camera_pulses(period: int, cameras) -> list[tuple[int, int]]:
+    """``(rise, fall)`` µs into its frame of each camera line's pulse, clamped as
+    triggerbox.ino's prepare_outputs() does. ``cameras`` are wire records
+    ``(pin_id, pulse_us, delay_us)``. A train without a camera line still counts
+    frames: a zero-width pulse on every frame edge."""
+    pulses = []
+    for _pin, pulse_us, delay_us in cameras:
+        delay = min(int(delay_us), period - 1)
+        pulse = max(int(pulse_us) or _FW_DEFAULT_PULSE_US, _FW_MIN_PULSE_US)
+        pulse = min(pulse, period - 1 - delay if period > delay + 1 else 1)
+        pulses.append((delay, delay + pulse))
+    return pulses or [(0, 0)]
+
+
+def _strobe_windows(period: int, lights) -> list[tuple[int, int, int]]:
+    """``(light index, on, off)`` µs into its frame of each strobing light, as the
+    firmware runs it: the delay clamped into the frame, the on-time cut at the
+    frame's end. Only a strobe is frame-locked: a continuous light (and a strobe
+    on for a whole period, which the firmware makes one) stays on for the run,
+    and a pulse train keeps its own clock for its ``train_ms`` or the whole run,
+    so the run's end stops those wherever they are."""
+    windows = []
+    for index, (_pin, mode, delay, on_us, _p2, _p3) in enumerate(lights):
+        if mode == 1 and 0 < on_us < period:
+            on = min(int(delay), period - 1)
+            windows.append((index, on, min(on + int(on_us), period)))
+    return windows
+
+
+def _end_window(duration_ms: int) -> tuple[int, int]:
+    """When a run of ``duration_ms`` may go idle: ``[first, last]`` µs from its
+    first frame edge."""
+    return (
+        duration_ms * 1000 - 1000 - RUN_END_EARLY_US,
+        duration_ms * 1000 + RUN_END_LATE_US,
+    )
+
+
+def _durations_ending_in(start: int, stop: int) -> tuple[int, int]:
+    """The durations ``(lo, hi)`` (inclusive; none if lo > hi) whose run always
+    ends in ``[start, stop)``, in µs from the train's first frame edge."""
+    lo = -(-(start + 1000 + RUN_END_EARLY_US) // 1000)
+    hi = (stop - 1 - RUN_END_LATE_US) // 1000
+    return max(1, lo), hi
+
+
+def plan_train(fps: int, pulses: int, cameras=(), lights=()) -> TrainPlan:
+    """The run length to arm for a train of ``pulses``, and what the board emits.
+
+    ``cameras`` / ``lights`` are the arm's wire records. The board raises camera
+    line ``i`` at ``k * period + delay_i`` for frame ``k`` and goes idle
+    (everything LOW) somewhere in the duration's last millisecond, so the run
+    must end after every line's last pulse has fallen and before any line's next
+    one rises. That needs about a millisecond between the two. From ~400 fps
+    (with the default 500 µs pulse) a whole-millisecond end lands there for some
+    counts only, and the nearest count within ``MAX_COUNT_SHIFT`` it lands for is
+    taken instead. From ~650 fps (and at a few fps below it, 500 among them) it
+    lands for none, and the plan is not ``exact``: it takes the count and
+    duration whose end is least likely to lose or add a pulse, then least likely
+    to cut one, preferring the wanted count.
+
+    The count depends on the camera lines only, so ``trigger_train`` (which has
+    no light timing: the auto strobe duty needs the live exposures) and the arm
+    agree on it. The lights only choose among the durations that end that count
+    exactly: the earliest that also lets every strobe's last on-time finish
+    before the next frame edge, else the latest before that edge, so the last
+    strobe loses as little as possible.
     """
     period = period_us(fps)
-    last = (pulses - 1) * period  # the last pulse's rising edge, µs from t0
-    nxt = pulses * period  # the edge that must not come
-    duration = -(-(last + period // 2 + 1000) // 1000)  # ceil, in ms
-    if duration * 1000 >= nxt:
-        duration = (nxt - 1) // 1000
-    return max(1, duration)
+    cams = _camera_pulses(period, cameras)
+    # µs into a frame by which its pulses have all risen, have all lasted half
+    # their width (sure to trigger even if the end then cuts them) and have all
+    # fallen, and at which the next frame's first pulse rises.
+    all_rise = max(rise for rise, _ in cams)
+    all_up = max(rise + (fall - rise + 1) // 2 for rise, fall in cams)
+    all_down = max(fall for _, fall in cams)
+    first_up = min(rise for rise, _ in cams)
+    wanted = max(1, int(pulses))
+    shifts = [0] + [s for i in range(1, MAX_COUNT_SHIFT + 1) for s in (i, -i)]
+    ranks = {wanted + s: rank for rank, s in enumerate(shifts) if wanted + s >= 1}
+
+    def ends(count: int, into_frame: int) -> tuple[int, int]:
+        """End times (µs from the first frame edge) past ``into_frame`` of the
+        train's last frame and before the next frame's first pulse."""
+        return (count - 1) * period + into_frame, count * period + first_up
+
+    for count in ranks:  # nearest first
+        lo, hi = _durations_ending_in(*ends(count, all_down))
+        if lo <= hi:
+            return _place_train_end(period, count, lo, hi, lights)
+
+    # No end fits any count near the wanted one. Take the duration whose likeliest
+    # count is near it and least often comes out otherwise or with its last pulse
+    # cut below half its width (sure to trigger above that), then the nearest
+    # count, then the one that cuts the last pulse least.
+    candidates: set[int] = set()
+    for count in ranks:
+        candidates.update(_durations_ending_in(*ends(count, all_up)))
+        for into_frame in (all_rise, all_up, all_down):
+            start, stop = ends(count, into_frame)
+            centered = (start + stop) // 2 // 1000 + 1  # its end window's middle there
+            candidates.update((centered - 1, centered, centered + 1))
+    best: tuple[tuple[bool, int, int, int, int], int] | None = None
+    for duration in candidates:
+        if duration < 1:
+            continue
+        first, last = _end_window(duration)
+        lowest = max(1, (first - first_up) // period)  # the counts it may end on
+        highest = max(lowest, (last - all_rise) // period + 1)
+        likeliest = max(
+            range(lowest, highest + 1),
+            key=lambda n: -_end_outside(duration, *ends(n, all_rise)),
+        )
+        key = (
+            likeliest not in ranks,
+            _end_outside(duration, *ends(likeliest, all_up)),
+            ranks.get(likeliest, len(ranks)),
+            _end_outside(duration, *ends(likeliest, all_down)),
+            duration,
+        )
+        if best is None or key < best[0]:
+            best = (key, likeliest)
+    assert best is not None  # the wanted count's own centered ends are candidates
+    (_far, unsure_us, _rank, _cut_us, duration), count = best
+    plan = _place_train_end(period, count, duration, duration, lights)
+    return replace(plan, exact=False, certain=unsure_us == 0)
+
+
+def _end_outside(duration_ms: int, start: int, stop: int) -> int:
+    """How many µs of a run's possible end times fall outside ``[start, stop)``."""
+    first, last = _end_window(duration_ms)
+    inside = min(last, stop - 1) - max(first, start)
+    return (last - first) - max(0, inside)
+
+
+def _place_train_end(period: int, count: int, lo: int, hi: int, lights) -> TrainPlan:
+    """Pick the duration in ``[lo, hi]`` (all end ``count`` pulses alike) that
+    suits the strobes best, and report what its end does to them."""
+    last, following = (count - 1) * period, count * period
+    strobes = _strobe_windows(period, lights)
+    if not strobes:
+        return TrainPlan(duration_ms=lo, count=count)
+    # A strobe may lose the few µs by which a run can end early, immaterial to
+    # its exposure: it counts as finished if it is by the nominal millisecond.
+    strobes_off = last + max(off for _, _, off in strobes) - RUN_END_EARLY_US
+    next_strobe = following + min(on for _, on, _ in strobes)
+    clean_lo, clean_hi = _durations_ending_in(strobes_off, next_strobe)
+    if max(lo, clean_lo) <= min(hi, clean_hi):
+        duration = max(lo, clean_lo)
+    else:
+        # A strobe runs too close to the next frame edge to finish first: end
+        # just before the edge (or the next strobe), so it loses the least.
+        duration = max(lo, min(hi, clean_hi))
+    earliest = duration * 1000 - 1000  # the nominal one (see above)
+    return TrainPlan(
+        duration_ms=duration,
+        count=count,
+        lights_cut=tuple(
+            (index, min(off - on, last + off - earliest))
+            for index, on, off in strobes
+            if last + off > earliest
+        ),
+        light_overrun=_end_window(duration)[1] >= next_strobe,
+    )
 
 
 # ============================================================================
@@ -1117,15 +1303,18 @@ class TriggerboxPlugin(Plugin):
             return
 
         fps = self._spec_fps(spec)
-        pulses: int | None = None
-        if duration_ms is None:
-            # A recording: exactly the pulses it expects (see train_duration_ms).
-            pulses = pulse_count(fps, self._spec_duration_ms(spec))
-            duration_ms = min(0xFFFF_FFFF, train_duration_ms(fps, pulses))
         cams = self._cameras_from_spec(spec)
         lights = self._lights_from_spec(spec)
+        plan: TrainPlan | None = None
         try:
-            arm = self._build_arm_spec(fps, duration_ms, cams, lights)
+            arm = self._build_arm_spec(fps, duration_ms or 0, cams, lights)
+            if duration_ms is None:
+                # A recording: the train trigger_train counts, ended after the
+                # last frame's pulses and strobes (see plan_train).
+                wanted = pulse_count(fps, self._spec_duration_ms(spec))
+                plan = plan_train(fps, wanted, arm.cameras, arm.lights)
+                arm = replace(arm, duration_ms=min(0xFFFF_FFFF, plan.duration_ms))
+                self._report_train_plan(fps, wanted, plan, arm)
             arm.to_bytes()  # validate the packet builds before we announce arming
         except Exception:
             log.exception("triggerbox: could not build arm packet; not arming")
@@ -1135,10 +1324,10 @@ class TriggerboxPlugin(Plugin):
             "triggerbox: arming %d fps for %s — %d camera line(s), %d light channel(s)",
             fps,
             "preview (until cancel)"
-            if duration_ms == 0
-            else f"{pulses} pulses ({duration_ms} ms)"
-            if pulses is not None
-            else f"{duration_ms} ms",
+            if arm.duration_ms == 0
+            else f"{plan.count} pulses ({arm.duration_ms} ms)"
+            if plan is not None
+            else f"{arm.duration_ms} ms",
             len(arm.cameras), len(arm.lights),
         )
         result = self._arm_and_wait(arm)
@@ -1183,16 +1372,53 @@ class TriggerboxPlugin(Plugin):
 
     def trigger_train(self, params: dict | None) -> dict | None:
         """The train on_recording_start emits for ``params`` (exact period and
-        pulse count), so the recording counts every frame against it."""
+        pulse count), so the recording counts every frame against it.
+
+        The count is plan_train's for the camera lines the arm sends; it does not
+        depend on the lights, whose auto duty needs a camera read this pure hook
+        (called under the controller lock) must not make."""
         spec = self._spec_from_params(params)
         if spec is None:
             return None
         fps = self._spec_fps(spec)
-        return {
-            "fps": fps,
-            "period_ns": period_us(fps) * 1000,
-            "count": pulse_count(fps, self._spec_duration_ms(spec)),
-        }
+        cameras = [c.record() for c in self._cameras_from_spec(spec)[:_MAX_CAM]]
+        plan = plan_train(fps, pulse_count(fps, self._spec_duration_ms(spec)), cameras)
+        return {"fps": fps, "period_ns": period_us(fps) * 1000, "count": plan.count}
+
+    def _report_train_plan(
+        self, fps: int, wanted: int, plan: TrainPlan, arm: ArmSpec
+    ) -> None:
+        """Tell the operator where a recording's train cannot end cleanly."""
+        if plan.count != wanted:
+            log.info(
+                "triggerbox: at %d fps the board's millisecond run clock cannot end "
+                "a train cleanly after pulse %d; arming %d pulses instead (the "
+                "recording counts %d)", fps, wanted, plan.count, plan.count,
+            )
+        if not plan.exact:
+            log.warning(
+                "triggerbox: at %d fps the board's millisecond run clock cannot end "
+                "the train cleanly after its last pulse (that needs about 1 ms "
+                "between the last camera pulse's end and the next frame edge): %s",
+                fps,
+                "the last camera pulse may be cut short"
+                if plan.certain
+                else "the last pulse may be lost, or one more may start, and the "
+                "recording then reports a missed pulse or an extra frame",
+            )
+            return  # the lights end wherever the camera pulses let them
+        for index, cut_us in plan.lights_cut:
+            log.warning(
+                "triggerbox: the train's last strobe on %s may end up to %d µs "
+                "early: it runs too close to the next frame edge for the run to end "
+                "after it, so the last frame may be under-lit",
+                PIN_LABELS[arm.lights[index][0]], cut_us,
+            )
+        if plan.light_overrun:
+            log.warning(
+                "triggerbox: a strobe may flash once after the train: a camera "
+                "line's delay keeps the run going past that strobe's next edge"
+            )
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
         """Emit ``pulses`` sacrificial pulses on the camera lines, lights dark.
@@ -1210,7 +1436,8 @@ class TriggerboxPlugin(Plugin):
             return False
         fps = self._spec_fps(spec)
         try:
-            arm = self._build_arm_spec(fps, train_duration_ms(fps, pulses), cams, [])
+            arm = self._build_arm_spec(fps, 0, cams, [])
+            arm = replace(arm, duration_ms=plan_train(fps, pulses, arm.cameras).duration_ms)
         except Exception:
             log.exception("triggerbox: could not build the priming packet")
             return False
@@ -1218,7 +1445,7 @@ class TriggerboxPlugin(Plugin):
         if self._arm_and_wait(arm) != "ok":
             return False
         if self._ack_timeout_s > 0:
-            burst_s = pulses * period_us(fps) / 1e6
+            burst_s = arm.duration_ms / 1000
             if not self._done_event.wait(burst_s + self._ack_timeout_s):
                 log.warning(
                     "triggerbox: no end-of-run from %s after the priming pulses; "
