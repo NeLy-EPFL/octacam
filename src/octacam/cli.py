@@ -4333,12 +4333,14 @@ def check(
 ) -> None:
     """Check recordings for missed trigger pulses and desynchronized cameras.
 
-    Reads each recording's timestamps.npz (never modifies anything) and reports,
-    per camera, the trigger pulses it delivered no frame for — each one shifts its
-    later frames by one against a camera that did not miss it — plus unequal
-    frame counts, a start offset between cameras, late exposures and camera-clock
-    jumps. Recordings made before octacam counted pulses are re-derived from the
-    hardware timestamps. Exits 1 if any recording has a problem.
+    Reads each recording's summary and timestamps.npz (never modifies anything)
+    and reports, per camera, the trigger pulses it delivered no frame for — an
+    unfilled one shifts its later frames by one against a camera that did not
+    miss it — plus unequal frame counts, a start offset between cameras, the
+    recorder's own sync verdict, late exposures and camera-clock jumps.
+    Recordings made before octacam counted pulses are re-derived from the
+    hardware timestamps. A recording that cannot be read is a problem too.
+    Exits 1 if any recording has a problem.
     """
     from rich.console import Console
     from rich.text import Text
@@ -4348,12 +4350,9 @@ def check(
     folders = find_recordings(paths or [Path(".")])
     if not folders:
         sys.exit("No recording folders (recording_summary.json) found.")
-    results = []
-    for folder in folders:
-        try:
-            results.append(check_recording(folder, fps))
-        except (OSError, ValueError, KeyError) as e:
-            log.error("Could not check %s: %s", folder, e)
+    # check_recording reports a damaged recording as a problem rather than
+    # raising, so one bad folder neither ends the scan nor goes unreported.
+    results = [check_recording(folder, fps) for folder in folders]
     if as_json:
         typer.echo(json.dumps([r.to_dict() for r in results], indent=2))
     else:
@@ -4364,16 +4363,17 @@ def check(
             verdict = Text("ok", style="green") if result.ok else Text("PROBLEM", style="bold red")
             console.print(Text(f"{result.folder}  ", style="bold") + verdict)
             for cam in result.cameras:
-                missed = (
-                    f"{len(cam.missed)} missed pulse(s)"
-                    + (" (filled)" if cam.filled and cam.missed else "")
-                    if cam.source != "none"
-                    else "no timestamps"
-                )
-                console.print(
-                    f"    {cam.name:12s} {cam.frames:8d} frames  {missed}"
-                    + (f", {len(cam.late)} late" if cam.late else "")
-                )
+                if cam.source == "none":
+                    detail = "not checked"
+                else:
+                    detail = f"{cam.missed_count} missed pulse(s)" + (
+                        " (filled)" if cam.filled and cam.missed_count else ""
+                    )
+                    if cam.late_count:
+                        detail += f", {cam.late_count} late"
+                    if cam.writer_dropped:
+                        detail += f", {cam.writer_dropped} writer-dropped"
+                console.print(f"    {cam.name:12s} {cam.frames:8d} frames  {detail}")
             for problem in result.problems:
                 console.print(Text(f"    ! {problem}", style="red"))
             for warning in result.warnings:
