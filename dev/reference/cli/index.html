@@ -745,6 +745,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        check
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#flash" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -929,6 +940,17 @@
     <span class="md-ellipsis">
       
         record
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        check
       
     </span>
   </a>
@@ -1194,8 +1216,42 @@ override only the day-to-day values. See <a href="../../guide/recording/">Record
 </tr>
 </tbody>
 </table>
+<h2 id="check"><code>check</code><a class="headerlink" href="#check" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>check<span class="w"> </span><span class="o">[</span>PATHS...<span class="o">]</span>
+</code></pre></div>
+<p>Screen recording folders — or whole directory trees, searched for
+<code>recording_summary.json</code> — for missed trigger pulses, unequal frame counts, a
+start offset between cameras, late exposures and camera-clock jumps. Reads each
+recording's summary and <code>timestamps.npz</code> and never modifies anything: new
+recordings are checked from the recorder's own accounting (the summary alone
+suffices, and its <code>sync</code> verdict counts), recordings made before octacam counted
+pulses are re-derived from their hardware timestamps. Exits 1 if any recording
+has a problem, including one it cannot read. See
+<a href="../../guide/recording/#checking-recordings">Checking recordings</a>.</p>
+<table>
+<thead>
+<tr>
+<th>Option</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--fps</code></td>
+<td>Trigger rate to check against (default: each summary's <code>fps_target</code>).</td>
+</tr>
+<tr>
+<td><code>--quiet</code>, <code>-q</code></td>
+<td>Only list recordings with problems.</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>Print machine-readable results.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="flash"><code>flash</code><a class="headerlink" href="#flash" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>flash<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>flash<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
 </code></pre></div>
 <p>Check a serial plugin's board firmware against the bundled Arduino sketch and,
 unless <code>--check</code>, compile + upload the current sketch with arduino-cli. Pass
@@ -1227,7 +1283,7 @@ unless <code>--check</code>, compile + upload the current sketch with arduino-cl
 </tbody>
 </table>
 <h2 id="benchmark"><code>benchmark</code><a class="headerlink" href="#benchmark" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>octacam<span class="w"> </span>benchmark<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>benchmark<span class="w"> </span><span class="o">[</span>CONFIG_DIR<span class="o">]</span>
 </code></pre></div>
 <p>A short instrumented dry-run against the cameras in <code>CONFIG_DIR</code> (no video is
 kept): tests whether the target frame rate is achievable, searches for the
@@ -1291,7 +1347,7 @@ available from the GUI's <strong>Benchmark</strong> tab.</p>
 </tbody>
 </table>
 <h2 id="process"><code>process</code><a class="headerlink" href="#process" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>octacam<span class="w"> </span>process<span class="w"> </span><span class="o">[</span>PATHS…<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>octacam<span class="w"> </span>process<span class="w"> </span><span class="o">[</span>PATHS…<span class="o">]</span>
 </code></pre></div>
 <p>Transcode recordings to mp4, build the configured composite grid videos, and
 transfer to storage — all driven by each recording's embedded config snapshot.
@@ -1387,11 +1443,11 @@ on the same machine owns the cameras, and resumes when they are free. A
 <code>--dry-run</code> does no heavy work and never pauses. See
 <a href="../../guide/processing/#running-in-the-background-detached">Processing</a>.</p>
 <h2 id="jobs"><code>jobs</code><a class="headerlink" href="#jobs" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">  </span><span class="o">[</span>JOB<span class="o">]</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
-<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>list
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>attach<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>pause<span class="w">  </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>resume<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>octacam<span class="w"> </span><span class="nb">jobs</span><span class="w"> </span>cancel<span class="w"> </span><span class="o">[</span>JOB<span class="o">]</span>
 </code></pre></div>
 <p>Manage detached <code>octacam process --detach</code> jobs. <code>JOB</code> is a job id from
 <code>octacam jobs list</code>; omit it to target the most recent job.</p>
@@ -1426,9 +1482,9 @@ on the same machine owns the cameras, and resumes when they are free. A
 </tbody>
 </table>
 <h2 id="cache"><code>cache</code><a class="headerlink" href="#cache" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>octacam<span class="w"> </span>cache<span class="w"> </span>info
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>octacam<span class="w"> </span>cache<span class="w"> </span>path
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>octacam<span class="w"> </span>cache<span class="w"> </span>clear<span class="w"> </span><span class="o">[</span>--all<span class="o">]</span><span class="w"> </span><span class="o">[</span>--yes<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>octacam<span class="w"> </span>cache<span class="w"> </span>info
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>octacam<span class="w"> </span>cache<span class="w"> </span>path
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>octacam<span class="w"> </span>cache<span class="w"> </span>clear<span class="w"> </span><span class="o">[</span>--all<span class="o">]</span><span class="w"> </span><span class="o">[</span>--yes<span class="o">]</span>
 </code></pre></div>
 <p>Inspect and clear octacam's on-disk cache under <code>~/.cache/octacam</code> (see
 <code>OCTACAM_CACHE_DIR</code> below): the recording list backing <code>octacam process

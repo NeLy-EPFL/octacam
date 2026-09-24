@@ -525,10 +525,32 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#frame-alignment-and-missed-trigger-pulses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame alignment and missed trigger pulses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#per-frame-timestamps" class="md-nav__link">
     <span class="md-ellipsis">
       
         Per-frame timestamps
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#checking-recordings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking recordings
       
     </span>
   </a>
@@ -877,10 +899,32 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#frame-alignment-and-missed-trigger-pulses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frame alignment and missed trigger pulses
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#per-frame-timestamps" class="md-nav__link">
     <span class="md-ellipsis">
       
         Per-frame timestamps
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#checking-recordings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checking recordings
       
     </span>
   </a>
@@ -1002,32 +1046,169 @@ options override only the day-to-day values:</p>
 </ul>
 <h3 id="the-recording-summary">The recording summary<a class="headerlink" href="#the-recording-summary" title="Permanent link">&para;</a></h3>
 <p><code>recording_summary.json</code> holds what matters for checking a trial: per camera the
-recording fps, the start timestamp, and which frame indices were <strong>dropped</strong>,
-plus the session start wall-clock time and the recording settings.</p>
-<div class="admonition note">
-<p class="admonition-title">What <em>dropped</em> does and doesn't count</p>
-<p>Only frames the encoder/writer queue could not accept are counted as
-dropped — <strong>not</strong> frames the camera or transport never delivered (e.g. USB
-bandwidth gaps). To catch the latter, turn on the per-frame timestamps
-(<code>record.save_timestamps = true</code>, off by default) and inspect the
-inter-frame gaps.</p>
-</div>
+recording fps, the start timestamp and the frame accounting described below,
+plus the session start wall-clock time, the recording settings, the trigger
+train the recording was counted against (<code>pulse_train</code>), whether the take
+<code>completed</code> (ran to its end rather than being stopped) and a cross-camera <code>sync</code>
+verdict with its warnings and informational <code>notes</code>.</p>
+<h3 id="frame-alignment-and-missed-trigger-pulses">Frame alignment and missed trigger pulses<a class="headerlink" href="#frame-alignment-and-missed-trigger-pulses" title="Permanent link">&para;</a></h3>
+<p>A camera that misses a trigger pulse delivers no frame for it, and nothing in
+its frame stream says so — the next frame just arrives one period late. Counting
+frames cannot tell such a camera from a healthy one, so octacam assigns every
+frame to the <strong>trigger pulse that exposed it</strong>: from the camera's hardware
+timestamps on a hardware trigger (an interval of k periods is k-1 missed
+pulses), from the trigger's sequence number on the software trigger.</p>
+<p>On a trigger train octacam drives itself (<code>trigger_source = "software"</code> or
+<code>"managed"</code>):</p>
+<ul>
+<li><strong>Frame k of every camera's video is pulse k.</strong> A missed pulse is filled with
+  a repeat of the previous frame, and so is a frame the writer queue could not
+  accept during a brief stall, so a camera that misses pulses stays aligned with
+  the others instead of drifting a frame behind for the rest of the take.</li>
+<li>If the encoder or disk <strong>cannot keep up at all</strong> (more than a queue's worth of
+  refused frames before it catches up), padding would only make it worse — a fill
+  costs as much to write as a real frame. From then on that camera's refused
+  frames are <strong>skipped</strong> (<code>writer_skipped</code>), the <code>sync</code> verdict fails, and
+  <code>pulse_index</code> in the timestamps is the frame-to-pulse map. Lower the fps or
+  resolution, use a faster encoder, or raise <code>record.writer_queue_size</code>.</li>
+<li>The recording <strong>stops on the train's pulse count</strong>: every camera ends on the
+  train's last pulse (a camera that missed the last pulses is padded to it), not
+  on its own frame count.</li>
+<li>Before the train, the cameras are <strong>primed</strong> with a few sacrificial pulses,
+  camera lines only, lights dark, whose frames are discarded. A FLIR
+  Grasshopper3 ignores the first two triggers after its acquisition starts; without
+  this every recording lost its first pulses, and two cameras starting either side
+  of a pulse ended up a frame apart for the whole take. Priming repeats until every
+  camera has answered a priming pulse, because a Grasshopper3 just powered up
+  ignores more than two. A camera that answers none is reported: it may start the
+  recording late, or not be receiving the trigger.</li>
+</ul>
+<p>Per camera the summary reports:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>frames</code></td>
+<td>Video frames written (fills included) — the train's pulse count on a completed octacam-driven train.</td>
+</tr>
+<tr>
+<td><code>missed_pulses</code>, <code>missed_pulse_indices</code></td>
+<td>Pulses the camera delivered no frame for.</td>
+</tr>
+<tr>
+<td><code>writer_dropped</code></td>
+<td>Frames the camera delivered but the writer queue refused.</td>
+</tr>
+<tr>
+<td><code>dropped</code>, <code>dropped_indices</code></td>
+<td>Every video frame that is a fill (missed + writer-refused).</td>
+</tr>
+<tr>
+<td><code>late_frames</code>, <code>late_pulse_indices</code></td>
+<td>Frames exposed markedly after their pulse (e.g. a camera that fired on the trigger pulse's falling edge).</td>
+</tr>
+<tr>
+<td><code>writer_skipped</code>, <code>writer_skipped_pulse_indices</code></td>
+<td>Writer-refused frames that were skipped, not filled, because the writer could not keep up at all (see above).</td>
+</tr>
+<tr>
+<td><code>extra_frames</code></td>
+<td>Frames discarded because they belong to no pulse of the train.</td>
+</tr>
+<tr>
+<td><code>stream</code></td>
+<td>The camera SDK's own transport counters over the recording (lost, incomplete, … frames). A missed pulse with none of these is a trigger the camera never exposed, not a transport loss.</td>
+</tr>
+<tr>
+<td><code>start_offset_pulses</code></td>
+<td>0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and <code>sync.notes</code> says which were not.</td>
+</tr>
+</tbody>
+</table>
+<p>On an <strong>external</strong> trigger (a source octacam does not drive) the train's length
+is unknown and it may be irregular by design, so missed pulses are <strong>reported,
+not filled</strong> — use <code>pulse_index</code> in the timestamps to line the cameras up.</p>
+<p>Missed pulses and the other anomalies also appear as warnings in the GUI's
+event log while recording, and each tile's <em>dropped</em> counter includes them.</p>
 <h3 id="per-frame-timestamps">Per-frame timestamps<a class="headerlink" href="#per-frame-timestamps" title="Permanent link">&para;</a></h3>
 <p>With <code>record.save_timestamps = true</code>, each recording also writes a single
-compressed <code>timestamps.npz</code> holding every camera's per-frame series (replacing
-the old per-camera CSVs). Per camera it stores two arrays keyed by camera name —
-<code>"&lt;name&gt;/timestamp_ns"</code> (int64, <code>frame_index</code> is the array position) and
-<code>"&lt;name&gt;/dropped"</code> (bool):</p>
+compressed <code>timestamps.npz</code> holding every camera's per-frame series, one entry
+per <strong>video</strong> frame, keyed by camera name:</p>
+<table>
+<thead>
+<tr>
+<th>Key</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"&lt;name&gt;/timestamp_ns"</code></td>
+<td>int64</td>
+<td>Hardware timestamp of the frame (for a fill: when its pulse was due).</td>
+</tr>
+<tr>
+<td><code>"&lt;name&gt;/dropped"</code></td>
+<td>bool</td>
+<td>The frame is a fill, not an image of its own pulse.</td>
+</tr>
+<tr>
+<td><code>"&lt;name&gt;/missed"</code></td>
+<td>bool</td>
+<td>Of those, the camera never delivered that pulse.</td>
+</tr>
+<tr>
+<td><code>"&lt;name&gt;/pulse_index"</code></td>
+<td>int64</td>
+<td>The trigger pulse the frame stands for.</td>
+</tr>
+<tr>
+<td><code>"&lt;name&gt;/arrival_ns"</code></td>
+<td>int64</td>
+<td>Host wall-clock time the frame was delivered (0 for a fill).</td>
+</tr>
+</tbody>
+</table>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"timestamps.npz"</span><span class="p">)</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">ts</span> <span class="o">=</span> <span class="n">d</span><span class="p">[</span><span class="s2">"cam0/timestamp_ns"</span><span class="p">]</span>          <span class="c1"># nanoseconds</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">gaps_ms</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">ts</span><span class="p">)</span> <span class="o">/</span> <span class="mf">1e6</span>          <span class="c1"># inter-frame gaps</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">real</span> <span class="o">=</span> <span class="o">~</span><span class="n">d</span><span class="p">[</span><span class="s2">"cam0/dropped"</span><span class="p">]</span>            <span class="c1"># frames that are images of their own pulse</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">gaps_ms</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">ts</span><span class="p">[</span><span class="n">real</span><span class="p">])</span> <span class="o">/</span> <span class="mf">1e6</span>    <span class="c1"># inter-frame gaps between real frames</span>
 </code></pre></div>
 <p>Where each camera's timestamps came from — hardware (the camera/SDK clock) or
 host wall-clock fallback — is recorded per camera as <code>timestamp_source</code> in
 <code>recording_summary.json</code> (see its <code>timestamp_note</code>). Hardware timestamps are
 free-running per-camera counters: precise for one camera's relative timing, but
 not wall-clock and not aligned across cameras.</p>
+<h3 id="checking-recordings">Checking recordings<a class="headerlink" href="#checking-recordings" title="Permanent link">&para;</a></h3>
+<p><code>octacam check</code> screens recording folders (or whole directory trees) for missed
+pulses, unequal frame counts, a start offset between cameras, late exposures and
+camera-clock jumps, and exits 1 if any recording has a problem:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>check<span class="w"> </span>~/octacam/data/hexaview/260917<span class="w">          </span><span class="c1"># every recording under it</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>octacam<span class="w"> </span>check<span class="w"> </span>-q<span class="w"> </span>/mnt/lab/data/experiment<span class="w">             </span><span class="c1"># only the ones with problems</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>octacam<span class="w"> </span>check<span class="w"> </span>--json<span class="w"> </span>rec/001<span class="w"> </span>&gt;<span class="w"> </span>check.json
+</code></pre></div>
+<p>Recordings made with pulse accounting (summary <code>schema_version</code> 4) are checked
+from the recorder's own accounting: per frame from <code>timestamps.npz</code> when it was
+saved, otherwise from the summary's per-camera counts, which are authoritative.
+The recorder's own <code>sync</code> verdict counts: a failed one is a problem. Unequal frame
+counts are only a warning when the take was aborted or stopped before its train
+ended (<code>completed</code> false). A folder whose summary or timestamps cannot be read is
+reported as <em>unreadable</em> and fails the check.</p>
+<p>Recordings made before octacam counted pulses (summary <code>schema_version</code> &lt; 4)
+are checked by re-deriving the pulse of every frame from <code>timestamps.npz</code> —
+without it there is nothing to check, and a camera whose timestamps are host
+delivery times rather than a camera clock is skipped with a warning. Each missed pulse there shifts every later
+frame of that camera one pulse behind a camera that did not miss it. A start
+offset is found by lining up the trigger source's own timing events (the start of
+a train, a late pulse), which reach every camera at the same pulse; when a
+recording has too few of them it is reported as undetermined.</p>
 <h3 id="the-embedded-config-snapshot">The embedded config snapshot<a class="headerlink" href="#the-embedded-config-snapshot" title="Permanent link">&para;</a></h3>
 <p>Each recording also saves its config into its own folder: a copy of the rig's
 <code>octacam_config.toml</code> updated with everything changed live in the GUI, plus each
@@ -1049,10 +1230,10 @@ kept as written; the path this recording used is stored in its summary.</p>
 <p>To record again with the same setup, copy those files into a new config
 directory and launch from it. The copy on your storage works too, since
 <code>octacam process</code> transfers the config along with the videos:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>configs/wt-rerun
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>rsync<span class="w"> </span>-a<span class="w"> </span>--include<span class="o">=</span><span class="s1">'octacam_config.toml'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.pfs'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.txt'</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--exclude<span class="o">=</span><span class="s1">'*'</span><span class="w"> </span>/mnt/store/matthias/260620-wt/Fly1/001-bhv/<span class="w"> </span>configs/wt-rerun/
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>octacam<span class="w"> </span>gui<span class="w"> </span>configs/wt-rerun
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>mkdir<span class="w"> </span>-p<span class="w"> </span>configs/wt-rerun
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>rsync<span class="w"> </span>-a<span class="w"> </span>--include<span class="o">=</span><span class="s1">'octacam_config.toml'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.pfs'</span><span class="w"> </span>--include<span class="o">=</span><span class="s1">'*.txt'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>--exclude<span class="o">=</span><span class="s1">'*'</span><span class="w"> </span>/mnt/store/matthias/260620-wt/Fly1/001-bhv/<span class="w"> </span>configs/wt-rerun/
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>octacam<span class="w"> </span>gui<span class="w"> </span>configs/wt-rerun
 </code></pre></div>
 <p>New recordings go to the templated save directory, with today's date and a fresh
 trial number. You can also run <code>octacam gui &lt;recording folder&gt;</code> directly, but a

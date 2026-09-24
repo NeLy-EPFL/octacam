@@ -1016,6 +1016,14 @@ hardware-triggered cameras are driven for the recording's fps + duration.</p>
 <p>Omitting <code>cameras</code>/<code>lights</code> defaults to the classic rig: one <code>D13</code> line plus
 channels 1 and 2 strobing. The firmware and wiring notes are in
 <a href="https://github.com/NeLy-EPFL/octacam/tree/main/arduino/triggerbox">arduino/triggerbox/</a>.</p>
+<p>With <code>trigger_source = "managed"</code> the board also drives the cameras during live
+preview, strobing exactly as the recording will. When a recording starts,
+octacam cancels that preview arm, switches the cameras into the recording grab,
+and only then arms the board for the recording, so the lights go dark for a
+fraction of a second between preview and recording. That is deliberate: the
+recording's first frame is the board's first pulse (pulse trains and
+<code>start_delay_ms</code> count from it), and no frame is exposed under a strobe that was
+re-phased while the camera was mid-readout.</p>
 <p>If the board fails to arm — the ESP32-S3 USB link can occasionally <em>wedge</em>
 (every transfer stalls while the port stays enumerated), which would otherwise
 leave external-triggered cameras waiting forever — the plugin says so loudly in

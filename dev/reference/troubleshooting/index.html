@@ -771,10 +771,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#dropped-frames" class="md-nav__link">
+  <a href="#dropped-frames-and-missed-trigger-pulses" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Dropped frames
+        Dropped frames and missed trigger pulses
       
     </span>
   </a>
@@ -912,10 +912,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#dropped-frames" class="md-nav__link">
+  <a href="#dropped-frames-and-missed-trigger-pulses" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Dropped frames
+        Dropped frames and missed trigger pulses
       
     </span>
   </a>
@@ -1019,17 +1019,27 @@ cameras through the <code>spinnaker</code> C-API tier (or the pycameleon floor),
 needed. Confirm with:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>octacam<span class="w"> </span>doctor<span class="w"> </span>--backend<span class="w"> </span>flir
 </code></pre></div>
-<h2 id="dropped-frames">Dropped frames<a class="headerlink" href="#dropped-frames" title="Permanent link">&para;</a></h2>
+<h2 id="dropped-frames-and-missed-trigger-pulses">Dropped frames and missed trigger pulses<a class="headerlink" href="#dropped-frames-and-missed-trigger-pulses" title="Permanent link">&para;</a></h2>
+<p>Run <code>octacam check &lt;recording or directory&gt;</code> — it lists every camera's missed
+pulses, unequal frame counts and start offsets. In <code>recording_summary.json</code>:</p>
 <ul>
-<li><code>recording_summary.json</code> counts frames the <strong>encoder/writer queue</strong> could not
-  accept. If you see these, the machine is CPU-bound — check whether an
-  <code>octacam process</code> transcode is running at the same time (it's CPU-heavy and
-  <code>gui</code>/<code>record</code> warn about it at startup).</li>
-<li>Frames the <strong>camera or transport</strong> never delivered (e.g. USB bandwidth gaps)
-  are <em>not</em> counted as dropped. Enable <code>record.save_timestamps = true</code> and
-  inspect the inter-frame gaps in <code>timestamps.npz</code> to find those — e.g.
-  <code>np.diff(np.load("timestamps.npz")["cam0/timestamp_ns"])</code>.</li>
+<li><code>writer_dropped</code> counts frames the <strong>encoder/writer queue</strong> could not accept.
+  If you see these, the machine is CPU-bound — check whether an <code>octacam process</code>
+  transcode is running at the same time (it's CPU-heavy and <code>gui</code>/<code>record</code> warn
+  about it at startup).</li>
+<li><code>missed_pulses</code> counts trigger pulses a camera delivered <strong>no frame</strong> for. The
+  camera SDK's own counters, <code>stream</code>, tell a transport loss (frames lost,
+  incomplete) from a trigger the camera never exposed (none of them move). On an
+  octacam-driven train both kinds of loss are filled with the previous frame, so
+  the cameras stay aligned; <code>dropped</code> counts the fills.</li>
 </ul>
+<p>A camera that <strong>misses triggers</strong> the others on the same trigger line catch —
+with no transport loss — has a trigger-input problem: its cable, connector,
+ground return or opto-isolated input. A FLIR Grasshopper3 that misses a pulse's
+rising edge sometimes fires on its <strong>falling edge</strong> instead, one pulse width late
+(<code>late_pulse_indices</code>, ~500 µs with the triggerbox default); the same camera
+showing both is the signature. Swap the two cameras' trigger cables to see
+whether the fault follows the cable or the camera.</p>
 <h2 id="transfer-destination-not-present-not-writable">Transfer destination not present / not writable<a class="headerlink" href="#transfer-destination-not-present-not-writable" title="Permanent link">&para;</a></h2>
 <p><code>octacam process</code> reports when the <code>[transfer]</code> destination isn't
 mounted/present or isn't writable (local recording still works either way). Mount
