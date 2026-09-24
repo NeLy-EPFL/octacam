@@ -18,24 +18,35 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   its summary reported `dropped: 0` (13 of 21 hexaview recordings: 1–5 missed
   pulses on one camera, invisible). octacam now places each frame on the trigger
   clock from the camera's hardware timestamps (from the trigger's sequence
-  number under the software trigger), following the camera clock's drift and
-  folding the Grasshopper3's 128 s timestamp glitch. On an octacam-driven train
-  (`software`/`managed`) a missed pulse — and a frame the writer queue refused —
-  is filled with a repeat of the previous frame, so **video frame k is pulse k in
-  every camera**. The summary (schema 4) lists each camera's
+  number under the software trigger, where each image answers its own trigger
+  even when it arrives late), following the camera clock's drift, folding the
+  Grasshopper3's 128 s timestamp glitch, and reading a grab stall's burst of
+  buffered frames as late delivery rather than a clock jump. On an octacam-driven
+  train (`software`/`managed`) a missed pulse — and a frame the writer queue
+  refused during a transient stall — is filled with a repeat of the previous
+  frame, so **video frame k is pulse k in every camera**. A *sustained* encoder or
+  disk shortfall is not padded (a fill costs as much as a real frame): once a
+  camera has refused more than a queue's worth of frames, further refused frames
+  are skipped and reported (`writer_skipped`), the recording's `sync` fails, and
+  `pulse_index` maps its frames. The summary (schema 4) lists each camera's
   `missed_pulse_indices`, `writer_dropped`, `late_pulse_indices` (e.g. a camera
   that fired on the pulse's falling edge), `extra_frames`, the camera SDK's own
-  transport counters (`stream`), the `pulse_train` and a cross-camera `sync`
-  verdict including a start-offset check; `dropped` now counts every fill.
+  transport counters (`stream`), `writer_skipped`, the `pulse_train`, whether the
+  take `completed`, and a cross-camera `sync` verdict including a start-offset
+  check (between cameras with the same model, geometry and exposure — others get
+  an informational note); `dropped` now counts every fill.
   `timestamps.npz` gains per-frame `missed`, `pulse_index` and `arrival_ns`.
   Misses surface live as GUI events and in each tile's *dropped* counter. On an
   `external` trigger (a source octacam does not drive) misses are reported, not
   filled.
 - **`octacam check`** — screens recording folders or directory trees for missed
   pulses, unequal frame counts, start offsets between cameras, late exposures and
-  camera-clock jumps; exits 1 on a problem. Recordings made before this release
-  are re-derived from their `timestamps.npz`, and a start offset is found by
-  lining up the trigger source's timing events that reach every camera.
+  camera-clock jumps; exits 1 on a problem, including a recording it cannot read.
+  New recordings are checked from their own accounting (the summary alone
+  suffices, and its `sync` verdict counts); recordings made before this release
+  are re-derived from their `timestamps.npz` (host-clock series are skipped), and
+  a start offset is found by lining up the trigger source's timing events that
+  reach every camera.
 
 ### Changed
 
@@ -81,10 +92,14 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   the end of the train and matched the others' count while its frames were
   shifted. A counted train now ends when every camera has its last pulse, or once
   the train is over; a camera that missed the last pulses is padded to it.
-- **The triggerbox emits exactly `round(fps × duration)` pulses** — the run ended
+- **A recording counts exactly the pulses the triggerbox emits** — the run ended
   on a millisecond clock exactly on a frame edge, racing it, and at a period that
   does not divide the duration (90 fps) it emitted one pulse more. The host now
-  ends the run half a period after the last pulse.
+  plans the run from the firmware's semantics: it ends right after the last
+  frame's camera pulses and strobes, and the recording counts what is emitted.
+  Above ~400 fps the count may differ by a few pulses from `round(fps × duration)`;
+  from ~650 fps the firmware's millisecond run clock cannot end a train exactly,
+  and octacam warns.
 - **Triggerbox status tokens arrive within USB latency** — the reader waited for
   64 bytes or its 0.2 s timeout, so the board's `R`/`D`/`C` reached the host up to
   200 ms late. The preview cancel before a recording now waits for the board's
@@ -92,6 +107,8 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **Incomplete images are counted, not silently discarded** — on the FLIR (PySpin
   and C-API) backends and on the Basler hardware-trigger path; FLIR record grabs
   also use a 128-buffer stream pool (the SDK default of 9 is 72 ms at 125 fps).
+  Each FLIR grab logs its first incomplete image, then a running total at most
+  every 10 s (debug level in preview).
 - **A GUI recording under a managed (triggerbox) preview no longer opens with a
   dark ramp** — the first frames of every recording came out dim and brightened
   back to normal over the next ~7 frames (the hexaview "IR lights flash once at

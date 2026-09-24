@@ -131,6 +131,7 @@ def test_software_missed_pulses_are_filled_and_reported(fake_system, tmp_path):
     assert summary["pulse_train"]["count"] == 50
     assert summary["pulse_train"]["primed"] > 0
     assert summary["schema_version"] == 4
+    assert summary["completed"] is True
     np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(50))
     assert np.flatnonzero(arrays["FAKE-1/missed"]).tolist() == [10, 11, 30]
     assert np.flatnonzero(arrays["FAKE-1/dropped"]).tolist() == [10, 11, 30]
@@ -873,6 +874,10 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
     cam = _cam(summary, "FAKE-0")
     skipped = camera.writer_skipped_pulses
     assert camera.writer_skipped == len(skipped) > 0
+    # The summary carries them, and the recording is no longer frame k = pulse k.
+    assert cam["writer_skipped"] == len(skipped)
+    assert cam["writer_skipped_pulse_indices"] == skipped[:1000]
+    assert not summary["sync"]["ok"]
     # At most a queue's worth of refused frames was filled before the switch.
     assert 0 < cam["writer_dropped"] <= queue_size
     assert cam["missed_pulses"] == 0

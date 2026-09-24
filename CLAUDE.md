@@ -198,21 +198,41 @@ easy to break:
   reads the 8 ms board period as 7.998945 ms), so a long outage is bridged
   exactly; `clock_mismatch` flags a camera that does not follow the period at all
   (free-running). A jump by a whole **128 s** is folded (a GS3 timestamp-
-  extension race), any other implausible jump is re-anchored by host time.
+  extension race), any other jump the host contradicts is re-anchored by host
+  time. That host check is **one-sided** (`PulseTracker._host_allows`): delivery
+  only ever lags, so a camera interval up to the host interval plus the previous
+  frame's backlog plus 1.5 s is a real one. A grab stall the 128 FLIR stream
+  buffers absorb (dt = one period, dh = seconds, then a burst with dh ≈ 0) must
+  never read as a clock jump: re-anchoring it filled pulses the camera never
+  missed, shifted its video and ended its take early.
 - Under the **software trigger** the index comes from the hand-off's trigger
-  sequence number (`SoftwareTriggerHandoff.last_trigger_index`), exact; a backend
+  sequence number (`SoftwareTriggerHandoff.last_trigger_index`): a fetched image
+  answers the **oldest outstanding** trigger (see the hand-off below), so an
+  image that arrives after its fetch timed out keeps its own pulse; a backend
   with no hardware timestamp (pycameleon) is `unclocked` and cannot detect misses.
+  A stray zero timestamp on a clocked camera is placed as the next pulse on that
+  camera's own clock.
 - **Fill, don't skip** (`software`/`managed`, `PulseClock.fill`): a missed pulse
   *and* a frame the writer queue refused are written as a repeat of the previous
   frame (`AsyncFrameWriter.write(frame, fill_before=n)` — the fill rides on the
   next queued item so it can never be dropped on its own), so video frame k is
   pulse k in every camera. `external` (a source octacam doesn't drive, possibly
   irregular) is report-only: nothing filled or discarded, `pulse_index` maps it.
+  One exception, **writer overload**: a fill costs as much to encode as a real
+  frame, so filling a *sustained* encoder/disk shortfall snowballs (real frames
+  decay toward zero and `close()` blocks for minutes). Once a camera has refused
+  more than `record.writer_queue_size` frames before its writer caught up (backlog
+  ≤ half a queue), refused frames are **skipped** for the rest of the take
+  (`writer_skipped`, no video frame and no row, one loud error) and `sync.ok` is
+  False: `pulse_index` is then the frame-to-pulse map. Camera-side misses are
+  always filled. Fill rows are stamped from the tracker clock, else from the last
+  delivered frame plus whole periods — never 0.
 - **Priming**: a GS3 ignores its first hardware triggers after an acquisition
   start (two, measured; more after a power-up; see the hardware quirks), so
   `start_recording` starts the record grab on `hold` and sends rounds of
   `PRIME_PULSES` sacrificial pulses (triggerbox `prime_trigger`: camera lines
-  only, lights dark; or software triggers), each followed by `PRIME_SETTLE_S`,
+  only, lights dark; or software triggers), each followed by a settle of
+  max(`PRIME_SETTLE_S`, `PRIME_SETTLE_PERIODS` = 4 periods),
   **until every recording camera has answered one** (`primed_frames > 0`; a
   camera whose record grab failed to start is not waited on). It then calls
   `arm_counting()` and only then starts the train. A fixed count is not enough:
@@ -220,28 +240,45 @@ easy to break:
   late against the board with nothing to show for it but a "missed" last pulse on
   both — they were still aligned with each other, so the sync check was silent. No
   round starts after `PRIME_BUDGET_S`; a camera still silent is warned about. The
-  budget keeps the start sequence inside `START_HOOKS_TIMEOUT_S` even with a board
-  slow to acknowledge. Frames before `arm_counting()`, and stragglers within
-  `PRIME_STRAGGLER_NS` of the last primed frame, are discarded. The whole sequence
+  monitor's `hooks_done` waits use `start_sequence_timeout_s(period, primed)` —
+  `START_HOOKS_TIMEOUT_S` plus the priming's upper bound — because at 1 fps one
+  round alone is 8 s. Frames before `arm_counting()`, and stragglers within
+  max(`PRIME_STRAGGLER_NS`, 2.5 periods) of the last primed frame (which must stay
+  below the settle), are discarded; a software-trigger image answering a
+  pre-`arm_counting` trigger reads `PRIMING_TRIGGER` and is discarded too. The whole sequence
   runs before `hooks_done`, which the monitor now waits on *before* stopping
   anything, so a stop can never overtake the arm or the software timer's start.
 - **Stop on the pulse count**: the countdown ends when every camera has the
-  train's last pulse or once the train is over (`_train_end`, start + count ×
-  period + `TRAIN_END_MARGIN_S`) — a camera that missed the last pulses cannot
+  train's last pulse or once the train is over (`_train_end`, count × period +
+  `TRAIN_END_MARGIN_S` from when the arm — `start_software_trigger` +
+  `on_recording_start` — *returned*; anchored before it, a slow arm such as the
+  USB-reset re-arm stopped the take early and filled its tail with repeats) — a camera that missed the last pulses cannot
   know it before then — and `stop(fill_to=count)` pads it; a stopped/aborted take
   ends where it was. The managed train's exact period and count come from the
   plugin (`trigger_train`), not the settings.
 - `_check_sync` compares when each camera's first frames arrived on the host:
   same-model cameras deliver a pulse within ~0.5 ms of each other, so a camera
   that started a pulse late shows up as a whole period (`start_offset_pulses`).
+  Arrival includes exposure, readout and USB transfer (a 2048² GS3 lands ~4.5 ms
+  after an acA1920 — most of a period at 125 fps), so offsets are compared only
+  **between cameras with the same delivery profile** (backend, DeviceModelName,
+  W×H, pixel format, exposure in whole µs, read at recording start off the lock
+  next to the parameter export, never at teardown); across profiles an
+  informational `sync.notes` entry is written, not a failure. `sync.ok` is also
+  False when a recording camera captured no frame or skipped writer frames.
 
 The writer queue depth is `record.writer_queue_size` (default 64), tunable per
 rig to absorb transient encoder stalls. Summary schema 4 reports, per camera,
 `missed_pulse_indices`, `writer_dropped`, `late_pulse_indices`, `extra_frames`,
 the SDK's `stream` counters (a missed pulse with none of them moving is a trigger
-the camera never exposed, not a transport loss) and a cross-camera `sync`;
-`dropped` counts every fill. `octacam check` screens recordings, re-deriving
-pre-schema-4 ones from `timestamps.npz`.
+the camera never exposed, not a transport loss), `writer_skipped` /
+`writer_skipped_pulse_indices`, a cross-camera `sync` (with `notes`) and whether
+the take `completed` (ran to its end rather than being stopped); `dropped` counts
+every fill. `octacam check` screens recordings: schema-4 ones from their own
+accounting (the summary is authoritative without `timestamps.npz`, its capped
+index lists are never counted, `sync.ok` and `completed` are honored),
+pre-schema-4 ones re-derived from `timestamps.npz` (host-clock series skipped);
+an unreadable folder is a problem, never an exception.
 
 ## Camera backends & the auto cascade
 
@@ -325,7 +362,16 @@ approximate the recording — `auto` mirrors `trigger_source`.
 a shared trigger-timer thread calling each backend's device trigger serially let
 a slow FLIR starve a fast Basler. So `trigger_once()` only bumps a `_pending`
 counter; each camera's own `retrieve()` fires the device trigger + fetches one
-frame. This is why `trigger_once` is *not* a device call.
+frame. This is why `trigger_once` is *not* a device call. A fired trigger stays
+**outstanding** until an image answers it (`_claim_trigger` / `_trigger_unfired`
+/ `_trigger_answered`): while one is outstanding and younger than
+`ANSWER_TIMEOUT_S` (1 s), `retrieve` fires nothing and only fetches, so a late
+image is paired with its own trigger — firing on regardless labeled every later
+frame one pulse late. Past the deadline the trigger is given up (a missed pulse).
+`restart_trigger_sequence` bumps an epoch, so a pre-restart answer reads
+`PRIMING_TRIGGER`; an image no outstanding trigger accounts for reads
+`UNMATCHED_TRIGGER` and is discarded as extra. Cost: a camera that *silently
+ignores* a software trigger stalls `ANSWER_TIMEOUT_S` instead of one fetch.
 
 ## Frame-rate ceilings (test-rig hardware)
 
@@ -453,10 +499,17 @@ clock at once; the run clock (`duration_ms`, pulse-train t0) restarts with the
 new spec. Verified with the camera as the oscilloscope: a light channel on D13
 and no camera line, so frames arrive only if the light path toggles its pin. On a wedged USB CDC link the plugin
 auto-recovers via a host `USBDEVFS_RESET` bus reset and surfaces the error loudly.
-The firmware ends a run on a millisecond clock, so the host sends a recording
-**`train_duration_ms`: half a period after the last pulse** — exactly
-`round(fps × duration)` pulses, never an extra edge (a duration on a frame edge
-races it; a period that doesn't divide it, e.g. 90 fps, emitted one more). The
+The firmware ends a finite run on a millisecond clock (idle anywhere in the
+duration's last ms), so **`plan_train`** models `triggerbox.ino` and returns both
+the arm's `duration_ms` and the camera-pulse count it makes the board emit;
+`trigger_train` (pure, no camera reads) and the arm share it, so the recording
+counts exactly what is emitted. The run ends after every camera line's
+delay + pulse and every strobe's last on-time, and before the next frame edge
+(a strobe that cannot finish is cut and warned about). From ~400 fps (500 µs
+pulse) a whole-ms end fits only some counts, so the count may move by up to
+`MAX_COUNT_SHIFT` from `round(fps × duration)`; from ~650 fps (and at 500/625/…)
+no end is exact with the current firmware — the plan is marked inexact and the
+arm warns. Ending on a pulse count in the firmware would remove that limit. The
 reader blocks for one byte then drains (`SerialReaderLink._read_chunk`): a fixed
 `read(64)` delayed every token by up to the 0.2 s port timeout.
 

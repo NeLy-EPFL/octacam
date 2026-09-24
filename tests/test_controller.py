@@ -51,6 +51,7 @@ def test_build_recording_summary():
         settings, [cam], start_wall_ns=1_700_000_000_000_000_000, aborted=False
     )
     assert summary["schema_version"] == 4
+    assert summary["completed"] is None  # not given: unknown
     assert summary["fps_target"] == 100.0
     assert summary["save_method"] == "ffmpeg"
     assert summary["record_form"] == "display"
@@ -65,7 +66,7 @@ def test_build_recording_summary():
     # A camera that predates pulse accounting reads as having none.
     assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
     assert entry["writer_dropped"] == 0 and entry["stream"] == {}
-    assert entry["writer_skipped"] == 0 and entry["writer_skipped_indices"] == []
+    assert entry["writer_skipped"] == 0 and entry["writer_skipped_pulse_indices"] == []
     # No fallbacks -> the series is entirely the camera's hardware timestamp.
     assert entry["timestamp_source"] == "hardware"
     assert entry["host_fallback_count"] == 0
@@ -173,7 +174,7 @@ def test_check_sync_compares_a_camera_without_a_profile_with_none():
 def test_check_sync_flags_frames_the_writer_skipped():
     cams = [
         _sync_camera("f0", 12_700_000),
-        _sync_camera("f1", 12_600_000, writer_skipped=2, writer_skipped_indices=[7, 8]),
+        _sync_camera("f1", 12_600_000, writer_skipped=2, writer_skipped_pulses=[7, 8]),
     ]
     controller = _sync_controller(cams, {"f0": GS3, "f1": GS3})
     sync = controller._check_sync(completed=True)
@@ -207,7 +208,7 @@ def test_check_sync_flags_frames_the_writer_skipped():
         sync=sync,
     )
     entry = summary["cameras"][1]
-    assert entry["writer_skipped"] == 2 and entry["writer_skipped_indices"] == [7, 8]
+    assert entry["writer_skipped"] == 2 and entry["writer_skipped_pulse_indices"] == [7, 8]
     assert summary["sync"]["ok"] is False
 
 

@@ -339,6 +339,12 @@ def _ended_early(summary: dict, cams: list[CameraCheck]) -> str | None:
     run to its end), or None."""
     if summary.get("aborted"):
         return "the recording was aborted"
+    completed = summary.get("completed")
+    if completed is False:
+        return "the recording was stopped before its train ended"
+    if completed is True:
+        return None
+    # Older schema-4 summaries do not say: infer it from the frame counts.
     schema = summary.get("schema_version")
     if not (isinstance(schema, int) and schema >= 4) or not cams:
         # Before schema 4 nothing but ``aborted`` says so, and an unequal count

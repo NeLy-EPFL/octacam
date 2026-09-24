@@ -364,7 +364,7 @@ def _capped(indices: list[int]) -> list[int]:
 def _writer_skipped(camera) -> tuple[int, list[int]]:
     """How many frames the writer refused that were skipped rather than filled,
     and which (read tolerantly: a camera may predate the counters)."""
-    indices = list(getattr(camera, "writer_skipped_indices", None) or [])
+    indices = list(getattr(camera, "writer_skipped_pulses", None) or [])
     return int(getattr(camera, "writer_skipped", 0) or len(indices)), indices
 
 
@@ -376,6 +376,7 @@ def build_recording_summary(
     pulse_clock: PulseClock | None = None,
     sync: dict | None = None,
     primed_pulses: int = 0,
+    completed: bool | None = None,
 ) -> dict:
     """Assemble the recording_summary.json payload from finalized camera stats.
 
@@ -414,7 +415,7 @@ def build_recording_summary(
                 "missed_pulse_indices": _capped(missed),
                 "writer_dropped": getattr(camera, "writer_dropped", 0),
                 "writer_skipped": (skipped := _writer_skipped(camera))[0],
-                "writer_skipped_indices": _capped(skipped[1]),
+                "writer_skipped_pulse_indices": _capped(skipped[1]),
                 "late_frames": len(late := list(getattr(camera, "late_pulses", []))),
                 "late_pulse_indices": _capped(late),
                 "extra_frames": getattr(camera, "extra_frames", 0),
@@ -441,6 +442,9 @@ def build_recording_summary(
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
+        # Ran to its end (train or duration), not stopped: octacam check relies
+        # on it to tell a take stopped early from one whose cameras disagree.
+        "completed": completed,
         "fps_target": settings.fps,
         "duration_s": settings.duration_s,
         "trigger_source": settings.trigger_source,
@@ -631,6 +635,9 @@ class RecordingController:
         self._pulse_clock: PulseClock | None = None
         self._primed_pulses = 0
         self._sync: dict | None = None
+        # Whether the last recording ran to its end (its train, or its duration)
+        # rather than being stopped or aborted; None until one has finished.
+        self._completed: bool | None = None
         # The cameras whose record grab started, and each camera's frame-delivery
         # profile read as the recording started (by serial; see
         # _read_delivery_profiles), for the sync check.
@@ -1408,6 +1415,7 @@ class RecordingController:
             self._pulse_clock = clock
             self._primed_pulses = 0
             self._sync = None
+            self._completed = None
             self._train_end = None
             self._recording_cameras = []
             self._delivery_profiles = profiles
@@ -1904,6 +1912,7 @@ class RecordingController:
         # First let the start sequence (priming, counting, the arm) finish, so
         # this stop can never overtake it and leave a trigger running.
         completed = not self._stop_event.is_set()
+        self._completed = completed
         hooks_done.wait(hooks_timeout_s)
         with self._lock:
             self._set_state("finishing")
@@ -2131,10 +2140,20 @@ class RecordingController:
                 )
             if camera.unclocked_frames:
                 ok = False
-                warnings.append(
-                    f"Camera {name}: {camera.unclocked_frames} frame(s) had no "
-                    "hardware timestamp, so missed pulses cannot be detected"
-                )
+                if camera.unclocked_frames < camera.frames_recorded:
+                    # A stray frame without a timestamp on a clocked camera: it
+                    # was placed as the next pulse, so only a miss right before
+                    # it could go unseen.
+                    warnings.append(
+                        f"Camera {name}: {camera.unclocked_frames} frame(s) had no "
+                        "hardware timestamp and were placed as the next pulse; a "
+                        "pulse missed just before one of them cannot be detected"
+                    )
+                else:
+                    warnings.append(
+                        f"Camera {name}: {camera.unclocked_frames} frame(s) had no "
+                        "hardware timestamp, so missed pulses cannot be detected"
+                    )
             for glitch in camera.timestamp_glitches:
                 warnings.append(
                     f"Camera {name}: its hardware clock jumped by "
@@ -2367,6 +2386,7 @@ class RecordingController:
                 pulse_clock=self._pulse_clock,
                 sync=self._sync,
                 primed_pulses=self._primed_pulses,
+                completed=self._completed,
             )
             path.write_text(json.dumps(summary, indent=2) + "\n")
             log.info("Wrote recording summary: %s", path)

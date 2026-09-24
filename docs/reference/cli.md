@@ -98,9 +98,11 @@ octacam check [PATHS...]
 Screen recording folders — or whole directory trees, searched for
 `recording_summary.json` — for missed trigger pulses, unequal frame counts, a
 start offset between cameras, late exposures and camera-clock jumps. Reads each
-recording's `timestamps.npz` and never modifies anything; recordings made before
-octacam counted pulses are re-derived from their hardware timestamps. Exits 1 if
-any recording has a problem. See
+recording's summary and `timestamps.npz` and never modifies anything: new
+recordings are checked from the recorder's own accounting (the summary alone
+suffices, and its `sync` verdict counts), recordings made before octacam counted
+pulses are re-derived from their hardware timestamps. Exits 1 if any recording
+has a problem, including one it cannot read. See
 [Checking recordings](../guide/recording.md#checking-recordings).
 
 | Option | Purpose |

@@ -352,6 +352,22 @@ def test_an_early_stop_may_end_cameras_on_different_pulses(tmp_path):
     assert any(p.startswith("unequal frame counts: top 1000") for p in result.problems)
 
 
+def test_the_recorders_completed_flag_decides_whether_a_take_ended_early(tmp_path):
+    # The recorder says whether the take ran to its end; check believes it over
+    # its frame-count guess (a stop right before the last pulse reaches the count).
+    stopped = _summary4(
+        tmp_path / "stopped",
+        [_cam4("top", 1000), _cam4("bottom", 999)],
+        completed=False,
+    )
+    assert check_recording(stopped).ok
+    done = _summary4(
+        tmp_path / "done", [_cam4("top", 512), _cam4("bottom", 513)], completed=True
+    )
+    result = check_recording(done)
+    assert any(p.startswith("unequal frame counts: top 512") for p in result.problems)
+
+
 def test_an_early_stop_on_an_external_trigger_is_judged_by_its_duration(tmp_path):
     early = _summary4(
         tmp_path / "early", [_cam4("top", 400), _cam4("bottom", 401)], fill=False

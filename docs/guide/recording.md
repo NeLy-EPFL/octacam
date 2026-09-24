@@ -42,8 +42,9 @@ Each recording writes, into its own save directory:
 `recording_summary.json` holds what matters for checking a trial: per camera the
 recording fps, the start timestamp and the frame accounting described below,
 plus the session start wall-clock time, the recording settings, the trigger
-train the recording was counted against (`pulse_train`) and a cross-camera
-`sync` verdict with its warnings.
+train the recording was counted against (`pulse_train`), whether the take
+`completed` (ran to its end rather than being stopped) and a cross-camera `sync`
+verdict with its warnings and informational `notes`.
 
 ### Frame alignment and missed trigger pulses
 
@@ -59,9 +60,14 @@ On a trigger train octacam drives itself (`trigger_source = "software"` or
 
 - **Frame k of every camera's video is pulse k.** A missed pulse is filled with
   a repeat of the previous frame, and so is a frame the writer queue could not
-  accept (the host could not keep up), so a camera that misses pulses stays
-  aligned with the others instead of drifting a frame behind for the rest of the
-  take.
+  accept during a brief stall, so a camera that misses pulses stays aligned with
+  the others instead of drifting a frame behind for the rest of the take.
+- If the encoder or disk **cannot keep up at all** (more than a queue's worth of
+  refused frames before it catches up), padding would only make it worse — a fill
+  costs as much to write as a real frame. From then on that camera's refused
+  frames are **skipped** (`writer_skipped`), the `sync` verdict fails, and
+  `pulse_index` in the timestamps is the frame-to-pulse map. Lower the fps or
+  resolution, use a faster encoder, or raise `record.writer_queue_size`.
 - The recording **stops on the train's pulse count**: every camera ends on the
   train's last pulse (a camera that missed the last pulses is padded to it), not
   on its own frame count.
@@ -83,9 +89,10 @@ Per camera the summary reports:
 | `writer_dropped` | Frames the camera delivered but the writer queue refused. |
 | `dropped`, `dropped_indices` | Every video frame that is a fill (missed + writer-refused). |
 | `late_frames`, `late_pulse_indices` | Frames exposed markedly after their pulse (e.g. a camera that fired on the trigger pulse's falling edge). |
+| `writer_skipped`, `writer_skipped_pulse_indices` | Writer-refused frames that were skipped, not filled, because the writer could not keep up at all (see above). |
 | `extra_frames` | Frames discarded because they belong to no pulse of the train. |
 | `stream` | The camera SDK's own transport counters over the recording (lost, incomplete, … frames). A missed pulse with none of these is a trigger the camera never exposed, not a transport loss. |
-| `start_offset_pulses` | 0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived). |
+| `start_offset_pulses` | 0 when this camera's first frame is the same pulse as the others' (checked from when each camera's first frames arrived; positive = started that many pulses late). Only cameras with the same model, frame size, pixel format and exposure are compared — their frames take equally long to arrive — and `sync.notes` says which were not. |
 
 On an **external** trigger (a source octacam does not drive) the train's length
 is unknown and it may be irregular by design, so missed pulses are **reported,
@@ -134,9 +141,18 @@ octacam check -q /mnt/lab/data/experiment             # only the ones with probl
 octacam check --json rec/001 > check.json
 ```
 
+Recordings made with pulse accounting (summary `schema_version` 4) are checked
+from the recorder's own accounting: per frame from `timestamps.npz` when it was
+saved, otherwise from the summary's per-camera counts, which are authoritative.
+The recorder's own `sync` verdict counts: a failed one is a problem. Unequal frame
+counts are only a warning when the take was aborted or stopped before its train
+ended (`completed` false). A folder whose summary or timestamps cannot be read is
+reported as *unreadable* and fails the check.
+
 Recordings made before octacam counted pulses (summary `schema_version` < 4)
 are checked by re-deriving the pulse of every frame from `timestamps.npz` —
-without it there is nothing to check. Each missed pulse there shifts every later
+without it there is nothing to check, and a camera whose timestamps are host
+delivery times rather than a camera clock is skipped with a warning. Each missed pulse there shifts every later
 frame of that camera one pulse behind a camera that did not miss it. A start
 offset is found by lining up the trigger source's own timing events (the start of
 a train, a late pulse), which reach every camera at the same pulse; when a
