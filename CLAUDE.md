@@ -393,7 +393,12 @@ is a near-constant offset; a stale image's is lower by at least the gap between
 the two fires (a deadline, ≥ 0.1 s), so one more than `STALE_IMAGE_TOLERANCE_NS`
 (50 ms) below the median of the last `OFFSET_WINDOW` answers answers nothing
 (`stale_images`) and its trigger keeps waiting. The fire time is taken at the
-claim, before the device call, so a host stall only ever raises an offset.
+claim, before the device call, so a host stall only ever raises an offset. The
+check judges only with ≥ `REFERENCE_MIN_SAMPLES` (8) answers — a median of one or
+two is the samples themselves, and one early stall or 128 s glitch made every
+later image look stale, locking the camera out for the take — and a trigger given
+up on after an image was rejected for it clears the reference (that image was
+probably its own).
 Backends pass a timestamp only when it counts ns (FLIR, Spinnaker C, Basler USB —
 not GigE ticks; pycameleon has none). (2) **Drain**: the check cannot see a
 steady one-trigger shift (one period), which starts when a late image waits in

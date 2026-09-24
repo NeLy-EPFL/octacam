@@ -431,6 +431,36 @@ def test_handoff_an_image_older_than_its_trigger_answers_nothing(monkeypatch):
     assert h.last_trigger_index == 10 and not h._outstanding
 
 
+def test_handoff_trusts_no_reference_of_too_few_answers_and_heals_a_bad_one(monkeypatch):
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
+    h = _handoff()
+    h.restart_trigger_sequence()
+    offset = 5_000_000_000
+
+    def answer(extra_ns):
+        h._bump_trigger()
+        assert h._claim_trigger(10) is True
+        h._trigger_answered(h._outstanding[0][4] + offset + extra_ns)
+
+    answer(200_000_000)  # one answer inflated by a 0.2 s host stall
+    answer(1_000_000)  # a normal one: too few answers to judge it by
+    assert h.last_trigger_index == 1 and h.stale_images == 0
+    # A reference gone wrong (8 inflated answers): the normal image is rejected,
+    # its trigger is given up on, and the reference is cleared, not trusted.
+    for _ in range(8):
+        answer(200_000_000)
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._trigger_answered(h._outstanding[0][4] + offset + 1_000_000)
+    assert h.stale_images == 1
+    time.sleep(0.03)
+    h._bump_trigger()
+    h._claim_trigger(10)  # expires the rejected trigger
+    assert not h._offsets
+
+
 def test_handoff_drops_a_trigger_left_pending_for_half_a_period(monkeypatch):
     # While a recording counts at a low rate, a trigger left pending behind an
     # unanswered one must be dropped once it is half a period old — not fired a

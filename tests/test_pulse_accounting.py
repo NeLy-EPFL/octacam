@@ -330,6 +330,40 @@ def test_an_image_later_than_its_deadline_cannot_answer_a_later_trigger(
     assert backend.stale_images >= 1
 
 
+def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp_path):
+    # GS3-like: the two ignored priming triggers reset the offset reference at
+    # counting start. A 60 ms host stall between FAKE-1's first counted claim and
+    # its trigger inflates that answer's offset; judged against a reference of
+    # one sample, every later image then looked stale and the camera lost the
+    # rest of the take. Now it costs only the pulses the stall itself spans (60 ms
+    # at a 20 ms period: the triggers due meanwhile are too stale to fire).
+    for serial in FAKE_SERIALS:
+        backend = _backend(fake_system, serial)
+        backend.ignore_first_triggers = 2
+        backend.ignore_first_silently = True
+        backend.fetch_blocks = True
+    slow = _backend(fake_system, "FAKE-1")
+    claim = slow._claim_trigger
+    claims = []
+
+    def stalled(timeout_ms):
+        fire = claim(timeout_ms)
+        if fire:
+            claims.append(1)
+            if len(claims) == 5:  # 4 priming claims, then the first counted one
+                time.sleep(0.06)
+        return fire
+
+    slow._claim_trigger = stalled
+    save_dir, summary, arrays, _ = _record(fake_system, tmp_path, trigger_source="software")
+    bad = _cam(summary, "FAKE-1")
+    assert bad["frames"] == 50 and bad["missed_pulses"] <= 4, bad
+    video = _frames(save_dir, "FAKE-1")[:, 0, 0]
+    dropped = arrays["FAKE-1/dropped"]
+    for row in range(50):
+        assert video[row] == (video[row - 1] if dropped[row] else row), row
+
+
 def test_triggers_left_pending_through_a_wait_are_dropped_not_fired_late(
     fake_system, tmp_path
 ):

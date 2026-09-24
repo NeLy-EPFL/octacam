@@ -126,6 +126,12 @@ STALE_TRIGGER_S = 0.02
 # when they are.)
 STALE_IMAGE_TOLERANCE_NS = 50_000_000
 OFFSET_WINDOW = 64
+# The check judges only once this many answers make its reference: a median of a
+# sample or two is the samples themselves, and one host stall on them (or a GS3's
+# +128 s timestamp glitch) would make every later image look stale. And if a
+# trigger is given up on after an image was rejected for it, that image was most
+# likely its own: the reference is cleared rather than trusted.
+REFERENCE_MIN_SAMPLES = 8
 # The offset check sees an image older than its trigger by more than the
 # tolerance, not a steady one-trigger shift (a period, 20 ms at 50 fps). That
 # shift starts when a late image is still in the buffer while nothing is
@@ -182,6 +188,9 @@ class SoftwareTriggerHandoff:
         # STALE_IMAGE_TOLERANCE_NS), and the images found older than their trigger.
         self._offsets: deque[int] = deque(maxlen=OFFSET_WINDOW)
         self._stale_images = 0
+        # (sequence number, epoch) of the outstanding trigger an image was last
+        # rejected for (see REFERENCE_MIN_SAMPLES).
+        self._rejected_for: tuple[int | None, int] | None = None
         # Until when an idle grab loop fetches anyway (see DRAIN_WINDOW_S), and
         # whether this grab has given up on any trigger yet.
         self._drain_until = 0.0
@@ -324,6 +333,7 @@ class SoftwareTriggerHandoff:
             self._stale_triggers = 0
             self._offsets.clear()
             self._stale_images = 0
+            self._rejected_for = None
             self._drain_until = 0.0
             self._expired_in_grab = False
             self._grabbing = True
@@ -410,10 +420,11 @@ class SoftwareTriggerHandoff:
             offset = timestamp_ns - fired_ns if timestamp_ns else None
             if (
                 offset is not None
-                and self._offsets
+                and len(self._offsets) >= REFERENCE_MIN_SAMPLES
                 and offset < _median(self._offsets) - STALE_IMAGE_TOLERANCE_NS
             ):
                 self._answer = (UNMATCHED_TRIGGER, self._epoch)
+                self._rejected_for = (seq, epoch)
                 self._stale_images += 1
                 if self._stale_images % 100 == 1:
                     log.warning(
@@ -480,7 +491,12 @@ class SoftwareTriggerHandoff:
         caller holds the condition)."""
         now = time.monotonic()
         while self._outstanding and now > self._outstanding[0][2]:
-            _seq, _epoch, _deadline, counted, _fired = self._outstanding.popleft()
+            seq, epoch, _deadline, counted, _fired = self._outstanding.popleft()
+            if self._rejected_for == (seq, epoch):
+                # An image was rejected for this trigger and none else came: it
+                # was probably its own, judged against a reference gone wrong.
+                self._offsets.clear()
+                self._rejected_for = None
             window = max(DRAIN_WINDOW_S, 2 * self._period_s) if self._period_s else DRAIN_WINDOW_S
             self._drain_until = max(self._drain_until, now + window)
             self._expired_in_grab = True
