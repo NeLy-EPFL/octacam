@@ -170,6 +170,10 @@ class FakeBackend(SoftwareTriggerHandoff):
         # a word (the hand-off gives up on them at its answer deadline).
         self.miss_triggers: set[int] = set()
         self.ignore_first_triggers = 0
+        # On the software path, ignore those first triggers *silently*, as a real
+        # Grasshopper3 does (no image, no error: the hand-off waits out each one's
+        # answer deadline) instead of answering them at once.
+        self.ignore_first_silently = False
         self.hardware_period_ns: int | None = None
         self.zero_timestamp_triggers: set[int] = set()
         self.late_triggers: dict[int, int] = {}
@@ -515,6 +519,10 @@ class FakeBackend(SoftwareTriggerHandoff):
             return False
         self._triggers_since_grab += 1
         seq = self._outstanding[-1][0]
+        if self._triggers_since_grab <= self.ignore_first_triggers and (
+            self.ignore_first_silently
+        ):
+            return True  # nothing will arrive, and nothing says so
         if self._triggers_since_grab <= self.ignore_first_triggers or (
             seq in self.miss_triggers
         ):

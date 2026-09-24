@@ -521,12 +521,16 @@ class CameraSystem:
         interval = 1.0 / fps if fps > 0 else 0.01
         for _ in range(pulses):
             self._trigger_all()
+            # One at a time: the next only once every camera has fired this one.
+            # A camera ignoring its first triggers answers none of them and waits
+            # out each one's (short) answer deadline, so firing at the interval
+            # regardless overflowed the hand-off's backlog and dropped the rest.
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if all(getattr(c.backend, "_pending", 0) == 0 for c in self.cameras):
+                    break
+                time.sleep(0.002)
             time.sleep(interval)
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if all(getattr(c.backend, "_pending", 0) == 0 for c in self.cameras):
-                break
-            time.sleep(0.005)
 
     @property
     def all_pulses_complete(self) -> bool:

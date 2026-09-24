@@ -55,6 +55,17 @@ Pairing images with triggers
     and answered after it reports :data:`PRIMING_TRIGGER`: the recording discards
     that image as a priming answer rather than counting it as pulse 0.
 
+    A Grasshopper3 ignores its first software triggers after acquisition start,
+    like its hardware ones, silently (no image, no error): at the long deadline
+    each cost a second (measured: priming answered nothing, and the stale priming
+    trigger then blocked the train's first 37 pulses at 50 fps). So until a grab's
+    first answer, and before a recording counts, a trigger gets only
+    :data:`PRIMING_ANSWER_TIMEOUT_S` — that is the ignore window, and no frame is
+    counted yet. Once the camera has answered once, or the recording counts, a
+    silent trigger is more likely a late image, which must keep its own trigger:
+    :data:`ANSWER_TIMEOUT_S`. Only triggers fired while counting are reported as
+    unanswered.
+
 Overflow policy (:data:`PENDING_MAX`)
     Requesting a higher fps than a camera can deliver (its exposure + readout is
     longer than the trigger period) would make the counter grow without bound.
@@ -90,6 +101,10 @@ PENDING_MAX = 2
 # second; an image dropped without a word is rare (a transport failure normally
 # comes back as an incomplete image, which answers its trigger at once).
 ANSWER_TIMEOUT_S = 1.0
+# The deadline in a camera's ignore window — before a grab's first answer, while
+# no recording counts (see "Pairing images with triggers"): one grab-loop fetch,
+# as before the pairing. The controller's post-priming settle outlasts it.
+PRIMING_ANSWER_TIMEOUT_S = 0.1
 # ``last_trigger_index`` of an image that answers no trigger of the current
 # sequence: one fired before ``restart_trigger_sequence`` (a recording's priming
 # trigger whose image arrived after counting started) ...
@@ -120,11 +135,17 @@ class SoftwareTriggerHandoff:
         self._pending_seqs: deque[int] = deque()
         self._next_seq = 0
         # Fired triggers no image has answered yet, oldest first, as (sequence
-        # number, sequence epoch, monotonic fire time). The epoch advances with
-        # every sequence restart, so an answer to an earlier sequence's trigger
-        # is recognized as one.
-        self._outstanding: deque[tuple[int | None, int, float]] = deque()
+        # number, sequence epoch, monotonic answer deadline, counted). The epoch
+        # advances with every sequence restart, so an answer to an earlier
+        # sequence's trigger is recognized as one; ``counted`` is whether it was
+        # fired while a recording counts (only those are reported unanswered).
+        self._outstanding: deque[tuple[int | None, int, float, bool]] = deque()
         self._epoch = 0
+        # Whether this grab has had a real answer yet, and whether a recording
+        # counts its triggers (restart_trigger_sequence): together they pick a
+        # fired trigger's answer deadline (see "Pairing images with triggers").
+        self._answered_in_grab = False
+        self._counting = False
         # (sequence number, epoch) of the trigger the latest image answered.
         self._answer: tuple[int | None, int] | None = None
         self._grabbing = False
@@ -159,13 +180,15 @@ class SoftwareTriggerHandoff:
         Called when a recording starts counting after the cameras were primed,
         so the recording's first trigger is sequence 0 in every camera. A
         priming trigger still awaiting its image stays outstanding — nothing is
-        fired until it is answered or given up on — and that image then reports
-        :data:`PRIMING_TRIGGER`."""
+        fired until it is answered or given up on, at its own short deadline — and
+        that image then reports :data:`PRIMING_TRIGGER`. Triggers fired from here
+        on are counted, so they get the long :data:`ANSWER_TIMEOUT_S`."""
         with self._cond:
             self._pending = 0
             self._pending_seqs.clear()
             self._next_seq = 0
             self._epoch += 1
+            self._counting = True
 
     # --------------------------------------------------------------- triggering
 
@@ -208,6 +231,8 @@ class SoftwareTriggerHandoff:
             self._outstanding.clear()
             self._answer = None
             self._epoch += 1
+            self._answered_in_grab = False
+            self._counting = False
             self._unanswered_triggers = 0
             self._grabbing = True
 
@@ -250,7 +275,10 @@ class SoftwareTriggerHandoff:
                 return None
             self._pending -= 1
             seq = self._pending_seqs.popleft() if self._pending_seqs else None
-            self._outstanding.append((seq, self._epoch, time.monotonic()))
+            patient = self._answered_in_grab or self._counting
+            timeout = ANSWER_TIMEOUT_S if patient else PRIMING_ANSWER_TIMEOUT_S
+            deadline = time.monotonic() + timeout
+            self._outstanding.append((seq, self._epoch, deadline, self._counting))
             return True
 
     def _trigger_unfired(self) -> None:
@@ -265,8 +293,9 @@ class SoftwareTriggerHandoff:
         trigger (see :attr:`last_trigger_index`)."""
         with self._cond:
             if self._outstanding:
-                seq, epoch, _fired = self._outstanding.popleft()
+                seq, epoch, _deadline, _counted = self._outstanding.popleft()
                 self._answer = (seq, epoch)
+                self._answered_in_grab = True
             else:
                 self._answer = (UNMATCHED_TRIGGER, self._epoch)
 
@@ -290,11 +319,13 @@ class SoftwareTriggerHandoff:
             return True
 
     def _expire_unanswered(self) -> None:
-        """Give up on the outstanding triggers older than :data:`ANSWER_TIMEOUT_S`
-        (the caller holds the condition)."""
+        """Give up on the outstanding triggers past their answer deadline (the
+        caller holds the condition)."""
         now = time.monotonic()
-        while self._outstanding and now - self._outstanding[0][2] > ANSWER_TIMEOUT_S:
-            self._outstanding.popleft()
+        while self._outstanding and now > self._outstanding[0][2]:
+            _seq, _epoch, _deadline, counted = self._outstanding.popleft()
+            if not counted:
+                continue  # ignored before the recording counts: expected
             self._unanswered_triggers += 1
             if self._unanswered_triggers % 100 == 1:
                 log.warning(

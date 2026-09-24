@@ -217,6 +217,35 @@ def test_priming_repeats_until_every_camera_has_answered(fake_system, tmp_path, 
     assert not [e for e in controller.events if "priming" in e["message"]]
 
 
+def test_software_priming_absorbs_triggers_a_camera_silently_ignores(
+    fake_system, tmp_path
+):
+    # A real Grasshopper3 ignores its first software triggers after acquisition
+    # start without a word (no image, no error), like its hardware ones. Before
+    # counting, each ignored trigger must cost only a short answer deadline: on
+    # the rig the long one made priming answer nothing, and the stale priming
+    # trigger then blocked the train's first 37 pulses (missed 2-38 at 50 fps).
+    for serial in FAKE_SERIALS:
+        backend = _backend(fake_system, serial)
+        backend.ignore_first_triggers = 2
+        backend.ignore_first_silently = True
+    started = time.monotonic()
+    _save_dir, summary, _arrays, controller = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    elapsed = time.monotonic() - started
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+        assert cam["primed_frames"] == 2, cam  # 4 priming triggers, 2 ignored
+    assert summary["pulse_train"]["primed"] == 4  # one round was enough
+    assert summary["sync"]["ok"], summary["sync"]
+    assert not [e for e in controller.events if "priming" in e["message"]]
+    # Priming cost two short deadlines, not two seconds: a 1 s take, a few
+    # hundred ms of start-up.
+    assert elapsed < 3.0, elapsed
+
+
 def test_a_camera_still_silent_after_priming_is_warned_about(
     fake_system, tmp_path, monkeypatch
 ):

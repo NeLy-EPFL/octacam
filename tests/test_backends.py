@@ -366,6 +366,7 @@ def test_handoff_gives_up_on_a_trigger_past_its_answer_deadline(monkeypatch):
 
     monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
     h = _handoff()
+    h.restart_trigger_sequence()  # a recording counts: the long deadline applies
     h._bump_trigger()
     assert h._claim_trigger(10) is True
     h._bump_trigger()
@@ -377,6 +378,33 @@ def test_handoff_gives_up_on_a_trigger_past_its_answer_deadline(monkeypatch):
     # A late image of the abandoned trigger answers nothing outstanding.
     h._trigger_answered()
     assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
+
+
+def test_handoff_a_silent_camera_costs_only_the_short_deadline_until_it_answers(
+    monkeypatch,
+):
+    # A Grasshopper3 silently ignores its first triggers after acquisition start:
+    # before the grab's first answer (and before a recording counts) each costs
+    # only PRIMING_ANSWER_TIMEOUT_S and is not reported as unanswered. After the
+    # first answer a silent trigger may be a late image: the long deadline.
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "PRIMING_ANSWER_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 5.0)
+    h = _handoff()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # ignored by the camera
+    h._bump_trigger()
+    time.sleep(0.03)
+    assert h._claim_trigger(10) is True  # 0 given up on after the short deadline
+    assert h.unanswered_triggers == 0  # expected, not reported
+    h._trigger_answered()
+    assert h.last_trigger_index == 1
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._bump_trigger()
+    time.sleep(0.03)
+    assert h._claim_trigger(10) is False  # now patient: 2 may still be on its way
 
 
 def test_handoff_a_trigger_the_device_refused_is_not_outstanding():

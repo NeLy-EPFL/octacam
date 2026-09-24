@@ -370,8 +370,15 @@ image is paired with its own trigger — firing on regardless labeled every late
 frame one pulse late. Past the deadline the trigger is given up (a missed pulse).
 `restart_trigger_sequence` bumps an epoch, so a pre-restart answer reads
 `PRIMING_TRIGGER`; an image no outstanding trigger accounts for reads
-`UNMATCHED_TRIGGER` and is discarded as extra. Cost: a camera that *silently
-ignores* a software trigger stalls `ANSWER_TIMEOUT_S` instead of one fetch.
+`UNMATCHED_TRIGGER` and is discarded as extra. A GS3 **silently ignores its first
+software triggers** after acquisition start too (no image, no error): at the long
+deadline each cost 1 s, so priming answered nothing and the stale priming trigger
+blocked the train's first 37 pulses (rig, 50 fps). So a trigger fired before the
+grab's first answer, while no recording counts, gets only
+`PRIMING_ANSWER_TIMEOUT_S` (0.1 s, one fetch) and is not reported; after the first
+answer, or once counting, a silent trigger may be a late image: the long deadline.
+`prime_software_trigger` fires one priming trigger at a time (bursting at the fps
+overflowed `PENDING_MAX` while a camera waited out an ignored one).
 
 ## Frame-rate ceilings (test-rig hardware)
 
