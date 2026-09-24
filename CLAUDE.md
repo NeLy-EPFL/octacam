@@ -382,10 +382,29 @@ overflowed `PENDING_MAX` while a camera waited out an ignored one). A software
 recording tells the hand-off its period (`configure_trigger_period`, set by
 `Camera.start_record`, cleared for preview): both deadlines become at least two
 periods — at 5 fps a 150 ms exposure outlasted the 0.1 s window, slipped the
-pairing by one and made the last priming image frame 0 — and a pending trigger
-older than max(`STALE_TRIGGER_S`, two periods) is **dropped, not fired**: fired
-after a wait it would show a moment up to a second after the pulse it is labeled
-with. Every backend's failed fetch answers its trigger (pycameleon: a payload
+pairing by one and made the last priming image frame 0 — and, while counting, a
+pending trigger older than max(`STALE_TRIGGER_S` = 20 ms, half a period) is
+**dropped, not fired**: fired after a wait it would show a moment nearer another
+pulse than the one it is labeled with.
+Deadlines alone cannot tell a late image from the next trigger's, so two more
+guards keep a given-up trigger's late image from answering a later one. (1)
+**Camera-clock check**: an image's timestamp minus its trigger's host fire time
+is a near-constant offset; a stale image's is lower by at least the gap between
+the two fires (a deadline, ≥ 0.1 s), so one more than `STALE_IMAGE_TOLERANCE_NS`
+(50 ms) below the median of the last `OFFSET_WINDOW` answers answers nothing
+(`stale_images`) and its trigger keeps waiting. The fire time is taken at the
+claim, before the device call, so a host stall only ever raises an offset.
+Backends pass a timestamp only when it counts ns (FLIR, Spinnaker C, Basler USB —
+not GigE ticks; pycameleon has none). (2) **Drain**: the check cannot see a
+steady one-trigger shift (one period), which starts when a late image waits in
+the buffer while nothing is outstanding — the loop does not fetch when it has
+nothing to fire. So for max(`DRAIN_WINDOW_S`, two periods) after a give-up, an
+idle loop fetches anyway (a `DRAIN_POLL_MS` poll via `_fetch_timeout_ms`, since a
+real fetch blocks for its whole timeout and would make the next trigger stale),
+and what it gets answers nothing. Counting start ends the drain and, if priming
+gave a trigger up, resets the offset reference. The fake's `fetch_blocks` models
+a real SDK fetch (not woken by a trigger offer): without it the fake hid that the
+drain made the train's first trigger stale. Every backend's failed fetch answers its trigger (pycameleon: a payload
 cameleon rejects raises from `receive_async`; a timeout is `asyncio.TimeoutError`,
 distinct from `TimeoutError` before Python 3.11). Under the software trigger
 `_check_sync` skips the arrival check and records offset 0: the sequence number

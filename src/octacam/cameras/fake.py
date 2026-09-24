@@ -179,13 +179,18 @@ class FakeBackend(SoftwareTriggerHandoff):
         self.late_triggers: dict[int, int] = {}
         self.lost_triggers: set[int] = set()
         # Seconds from a software trigger to its image being ready (a long
-        # exposure plus readout and transfer).
+        # exposure plus readout and transfer), and per trigger fired since the
+        # grab started (1 = the first) a latency of its own (a USB stall).
         self.image_latency_s = 0.0
+        self.latency_by_fire: dict[int, float] = {}
+        # A fetch that finds no image waits out the retrieve's whole timeout, as
+        # a real SDK's does, instead of a token wait that keeps tests quick.
+        self.fetch_blocks = False
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
         # Images exposed but not yet fetched, oldest first: [trigger sequence
         # number (-1 when unnumbered), fetches it still misses, monotonic time
-        # it is ready].
+        # it is ready, its timestamp: when it was exposed, as a camera stamps it].
         self._device_images: list[list[float]] = []
         self._init_trigger_handoff()
 
@@ -506,15 +511,16 @@ class FakeBackend(SoftwareTriggerHandoff):
         with self._cond:
             if fire and not self._expose():
                 return None
-            seq = self._fetch()
-            if seq is None:
+            fetched = self._fetch(self._fetch_timeout_ms(timeout_ms))
+            if fetched is None:
                 return None
+            seq, stamp = fetched
             self._frame_index += 1
             index = self._frame_index if seq < 0 else seq
             width = int(self._nodes["Width"]["value"])
             height = int(self._nodes["Height"]["value"])
         array = _render(width, height, index) if wants_array() else None
-        return (array, time.time_ns())
+        return (array, stamp)
 
     def _expose(self) -> bool:
         """The device's response to the trigger just fired (the newest outstanding
@@ -538,25 +544,44 @@ class FakeBackend(SoftwareTriggerHandoff):
             return True  # nothing will arrive; the hand-off gives up on it
         key = -1 if seq is None else seq
         self._device_images.append(
-            [key, self.late_triggers.get(key, 0), time.monotonic() + self.image_latency_s]
+            [
+                key,
+                self.late_triggers.get(key, 0),
+                time.monotonic()
+                + self.latency_by_fire.get(self._triggers_since_grab, self.image_latency_s),
+                time.time_ns(),
+            ]
         )
         return True
 
-    def _fetch(self) -> int | None:
+    def _fetch(self, timeout_ms: int = 0) -> tuple[int, int] | None:
         """One fetch from the device's image queue (caller holds the condition):
-        the sequence number of the image it hands over (-1 when unnumbered), or
-        None when none is ready — after a short wait, standing in for a real
-        fetch's timeout without holding a test up for it."""
+        the sequence number (-1 when unnumbered) and timestamp of the image it
+        hands over, or None when none is ready — after a short wait, standing in
+        for a real fetch's timeout without holding a test up for it."""
         head = self._device_images[0] if self._device_images else None
         if head is None or head[1] > 0 or time.monotonic() < head[2]:
             if head is not None and head[1] > 0:
                 head[1] -= 1
-            self._cond.wait(_FETCH_WAIT_S)
-            return None
-        seq = int(head[0])
+            if not self.fetch_blocks:
+                self._cond.wait(_FETCH_WAIT_S)
+                return None
+            # A real fetch returns early only for an image, never because a
+            # trigger was offered meanwhile (the condition's notify).
+            until = time.monotonic() + timeout_ms / 1000.0
+            while (now := time.monotonic()) < until:
+                if self._device_images and self._device_images[0][1] <= 0 and (
+                    now >= self._device_images[0][2]
+                ):
+                    break
+                self._cond.wait(until - now)
+            else:
+                return None
+            head = self._device_images[0]
+        seq, stamp = int(head[0]), int(head[3])
         self._device_images.pop(0)
-        self._trigger_answered()
-        return seq
+        self._trigger_answered(stamp)
+        return seq, stamp
 
     def _retrieve_clocked(
         self, timeout_ms: int, wants_array: Callable[[], bool], period_ns: int

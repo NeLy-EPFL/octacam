@@ -407,6 +407,51 @@ def test_handoff_a_silent_camera_costs_only_the_short_deadline_until_it_answers(
     assert h._claim_trigger(10) is False  # now patient: 2 may still be on its way
 
 
+def test_handoff_an_image_older_than_its_trigger_answers_nothing(monkeypatch):
+    # The camera clock says when an image was exposed: one exposed before the
+    # trigger it would answer was fired is a late image of a trigger already
+    # given up on. It answers nothing; the trigger keeps waiting for its own.
+    import octacam.cameras._trigger_handoff as handoff
+
+    h = _handoff()
+    h.restart_trigger_sequence()
+    offset = 5_000_000_000  # camera clock ahead of the host's by 5 s
+    for _ in range(10):
+        h._bump_trigger()
+        assert h._claim_trigger(10) is True
+        fired = h._outstanding[0][4]
+        h._trigger_answered(fired + offset + 1_000_000)  # exposed 1 ms after firing
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    fired = h._outstanding[0][4]
+    h._trigger_answered(fired + offset - 200_000_000)  # exposed 0.2 s before firing
+    assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
+    assert h.stale_images == 1 and len(h._outstanding) == 1
+    h._trigger_answered(fired + offset + 1_000_000)  # its own image
+    assert h.last_trigger_index == 10 and not h._outstanding
+
+
+def test_handoff_drops_a_trigger_left_pending_for_half_a_period(monkeypatch):
+    # While a recording counts at a low rate, a trigger left pending behind an
+    # unanswered one must be dropped once it is half a period old — not fired a
+    # whole period late under its own pulse number.
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.05)
+    h = _handoff()
+    h.configure_trigger_period(0.2)  # deadline max(0.05, 2P) = 0.4 s; stale 0.1 s
+    h.restart_trigger_sequence()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # never answered
+    time.sleep(0.2)
+    h._bump_trigger()  # due now; it will wait out the deadline behind trigger 0
+    time.sleep(0.25)
+    # 0 given up on, 1 too stale to fire: dropped; with nothing left to fire the
+    # grab loop only fetches, in case 0's image is merely late.
+    assert h._claim_trigger(10) is False
+    assert h.stale_triggers == 1 and h.unanswered_triggers == 1 and not h._outstanding
+
+
 def test_handoff_a_trigger_the_device_refused_is_not_outstanding():
     h = _handoff()
     h._bump_trigger()

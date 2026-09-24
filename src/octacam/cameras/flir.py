@@ -686,7 +686,9 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except spin.SpinnakerException:
                 self._trigger_unfired()
                 return None
-        return self._fetch_image(cam, timeout_ms, wants_array, answers_trigger=True)
+        return self._fetch_image(
+            cam, self._fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
 
     def _fetch_image(
         self, cam, timeout_ms, wants_array, answers_trigger: bool = False
@@ -701,7 +703,7 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         except spin.SpinnakerException:
             return None  # timeout: the analogue of pylon's empty result
         if answers_trigger:
-            self._trigger_answered()
+            self._trigger_answered(_complete_timestamp(image))
         try:
             if image.IsIncomplete():
                 self._count_incomplete()
@@ -810,6 +812,15 @@ def enumerate_flir(
             continue
         out.append((serial, cam))
     return out
+
+
+def _complete_timestamp(image) -> int | None:
+    """A complete image's camera timestamp (ns), for pairing it with its
+    trigger; None for an incomplete one. Never raises."""
+    try:
+        return None if image.IsIncomplete() else int(image.GetTimeStamp())
+    except Exception:
+        return None
 
 
 def teardown() -> None:

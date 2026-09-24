@@ -107,12 +107,38 @@ ANSWER_TIMEOUT_S = 1.0
 PRIMING_ANSWER_TIMEOUT_S = 0.1
 # A recording's trigger period stretches both deadlines to at least two periods
 # (see configure_trigger_period): at a low rate the exposure alone can outlast
-# them, and an image later than its deadline would slip the pairing by one. And a
-# pending trigger older than max(this, two periods) is dropped instead of fired:
-# fired that late, its image would show a later moment than the pulse it is
-# labeled with (a trigger kept pending through an answer wait fired up to a
-# second late). This is the staleness the old fetch timeout bounded.
-STALE_TRIGGER_S = 0.1
+# them. And while a recording counts, a pending trigger older than max(this, half
+# a period) is dropped instead of fired: fired that late, its image would show a
+# moment nearer the next pulse than the one it is labeled with (a trigger kept
+# pending through an answer wait fired up to a second late).
+STALE_TRIGGER_S = 0.02
+# An image answering a trigger is checked against the camera's own clock: its
+# timestamp minus the host time its trigger fired is a near-constant offset (the
+# clocks' difference plus the fire-to-exposure delay, which varies by a few ms).
+# An image older than the trigger it would answer — the late image of a trigger
+# already given up on — shows an offset lower by at least the gap between the two
+# fires, which is an answer deadline (>= 0.1 s) in every way that happens. So an
+# image more than this far below the median offset of the last OFFSET_WINDOW
+# answers is stale: it answers nothing, and its trigger keeps waiting for its own.
+# The fire time is taken as the trigger is claimed, before the device call, so a
+# host stall can only raise a real image's offset, never lower it; the median
+# shrugs off such outliers. (Timestamps must be in ns; a backend passes one only
+# when they are.)
+STALE_IMAGE_TOLERANCE_NS = 50_000_000
+OFFSET_WINDOW = 64
+# The offset check sees an image older than its trigger by more than the
+# tolerance, not a steady one-trigger shift (a period, 20 ms at 50 fps). That
+# shift starts when a late image is still in the buffer while nothing is
+# outstanding — the grab loop does not fetch when it has nothing to fire, so the
+# image waits for the next trigger's fetch. So for max(this, two periods) after a
+# trigger is given up on, an idle grab loop fetches anyway: anything it gets
+# answers nothing and is discarded. (A priming round whose first image stalled
+# leaves its late images to this drain during the post-priming settle.)
+DRAIN_WINDOW_S = 0.25
+# A drain fetch polls: a real SDK fetch blocks for its whole timeout when no image
+# comes, and a trigger offered meanwhile would wait it out (and be dropped as
+# stale, or fire late). See _fetch_timeout_ms.
+DRAIN_POLL_MS = 5
 # ``last_trigger_index`` of an image that answers no trigger of the current
 # sequence: one fired before ``restart_trigger_sequence`` (a recording's priming
 # trigger whose image arrived after counting started) ...
@@ -120,6 +146,11 @@ PRIMING_TRIGGER = -1
 # ... or one no outstanding trigger accounts for (e.g. the late image of a
 # trigger already given up on at its answer deadline).
 UNMATCHED_TRIGGER = -2
+
+
+def _median(values: deque[int]) -> int:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
 
 
 class SoftwareTriggerHandoff:
@@ -147,12 +178,23 @@ class SoftwareTriggerHandoff:
         # The recording's trigger period, when one counts (configure_trigger_period).
         self._period_s: float | None = None
         self._stale_triggers = 0
+        # Camera timestamp minus host fire time of the latest answers (see
+        # STALE_IMAGE_TOLERANCE_NS), and the images found older than their trigger.
+        self._offsets: deque[int] = deque(maxlen=OFFSET_WINDOW)
+        self._stale_images = 0
+        # Until when an idle grab loop fetches anyway (see DRAIN_WINDOW_S), and
+        # whether this grab has given up on any trigger yet.
+        self._drain_until = 0.0
+        self._expired_in_grab = False
+        # Whether the fetch the latest claim asked for is a drain poll.
+        self._drain_poll = False
         # Fired triggers no image has answered yet, oldest first, as (sequence
-        # number, sequence epoch, monotonic answer deadline, counted). The epoch
-        # advances with every sequence restart, so an answer to an earlier
-        # sequence's trigger is recognized as one; ``counted`` is whether it was
-        # fired while a recording counts (only those are reported unanswered).
-        self._outstanding: deque[tuple[int | None, int, float, bool]] = deque()
+        # number, sequence epoch, monotonic answer deadline, counted, monotonic
+        # fire time in ns). The epoch advances with every sequence restart, so an
+        # answer to an earlier sequence's trigger is recognized as one; ``counted``
+        # is whether it was fired while a recording counts (only those are
+        # reported unanswered).
+        self._outstanding: deque[tuple[int | None, int, float, bool, int]] = deque()
         self._epoch = 0
         # Whether this grab has had a real answer yet, and whether a recording
         # counts its triggers (restart_trigger_sequence): together they pick a
@@ -191,6 +233,12 @@ class SoftwareTriggerHandoff:
             self._period_s = period_s if period_s and period_s > 0 else None
 
     @property
+    def stale_images(self) -> int:
+        """Images discarded in this grab because their camera timestamp showed
+        them older than the trigger they would have answered."""
+        return self._stale_images
+
+    @property
     def stale_triggers(self) -> int:
         """Pending triggers dropped in this grab because they could no longer be
         fired in time."""
@@ -217,6 +265,15 @@ class SoftwareTriggerHandoff:
             self._next_seq = 0
             self._epoch += 1
             self._counting = True
+            # The train's first trigger must fire on time: a drain fetch blocks
+            # for a whole fetch timeout, and its trigger would then be dropped as
+            # stale (the post-priming settle has drained the priming images).
+            self._drain_until = 0.0
+            # A fresh reference for the counted answers when priming gave up on a
+            # trigger: its answers may be a stalled first image's, and would make
+            # a stale offset look normal.
+            if self._expired_in_grab:
+                self._offsets.clear()
 
     # --------------------------------------------------------------- triggering
 
@@ -265,6 +322,10 @@ class SoftwareTriggerHandoff:
             self._counting = False
             self._unanswered_triggers = 0
             self._stale_triggers = 0
+            self._offsets.clear()
+            self._stale_images = 0
+            self._drain_until = 0.0
+            self._expired_in_grab = False
             self._grabbing = True
 
     def _end_grab(self) -> bool:
@@ -295,12 +356,16 @@ class SoftwareTriggerHandoff:
         pending, or not grabbing).
         """
         with self._cond:
+            self._drain_poll = False
             if not self._grabbing:
                 return None
             self._expire_unanswered()
             if self._outstanding:
                 return False
             self._drop_stale_pending()
+            if self._pending <= 0 and time.monotonic() < self._drain_until:
+                self._drain_poll = True
+                return False  # nothing to fire: fetch a given-up trigger's late image
             if self._pending <= 0:
                 self._cond.wait(timeout_ms / 1000.0)
             if self._pending <= 0 or not self._grabbing:
@@ -314,8 +379,16 @@ class SoftwareTriggerHandoff:
             if self._period_s:
                 timeout = max(timeout, 2 * self._period_s)
             deadline = time.monotonic() + timeout
-            self._outstanding.append((seq, self._epoch, deadline, self._counting))
+            self._outstanding.append(
+                (seq, self._epoch, deadline, self._counting, time.monotonic_ns())
+            )
             return True
+
+    def _fetch_timeout_ms(self, timeout_ms: int) -> int:
+        """The timeout for the fetch this ``retrieve`` makes: the caller's, or a
+        short poll when the claim only asked for a drain (see
+        :data:`DRAIN_POLL_MS`). Called by the grab thread right after its claim."""
+        return min(timeout_ms, DRAIN_POLL_MS) if self._drain_poll else timeout_ms
 
     def _trigger_unfired(self) -> None:
         """The device refused the trigger just claimed: no image will answer it,
@@ -324,16 +397,37 @@ class SoftwareTriggerHandoff:
             if self._outstanding:
                 self._outstanding.pop()
 
-    def _trigger_answered(self) -> None:
+    def _trigger_answered(self, timestamp_ns: int | None = None) -> None:
         """An image was fetched, usable or not: it answers the oldest outstanding
-        trigger (see :attr:`last_trigger_index`)."""
+        trigger (see :attr:`last_trigger_index`) — unless its camera timestamp
+        (``timestamp_ns``, ns; None for a failed image or a clock in other units)
+        shows it older than that trigger (see :data:`STALE_IMAGE_TOLERANCE_NS`)."""
         with self._cond:
-            if self._outstanding:
-                seq, epoch, _deadline, _counted = self._outstanding.popleft()
-                self._answer = (seq, epoch)
-                self._answered_in_grab = True
-            else:
+            if not self._outstanding:
                 self._answer = (UNMATCHED_TRIGGER, self._epoch)
+                return
+            seq, epoch, _deadline, _counted, fired_ns = self._outstanding[0]
+            offset = timestamp_ns - fired_ns if timestamp_ns else None
+            if (
+                offset is not None
+                and self._offsets
+                and offset < _median(self._offsets) - STALE_IMAGE_TOLERANCE_NS
+            ):
+                self._answer = (UNMATCHED_TRIGGER, self._epoch)
+                self._stale_images += 1
+                if self._stale_images % 100 == 1:
+                    log.warning(
+                        "Camera %s: an image arrived after its trigger was given up "
+                        "on (%d so far); discarded, so it cannot answer a later one",
+                        getattr(self, "_serial", "?"),
+                        self._stale_images,
+                    )
+                return
+            self._outstanding.popleft()
+            self._answer = (seq, epoch)
+            self._answered_in_grab = True
+            if offset is not None:
+                self._offsets.append(offset)
 
     def _wait_pending(self, timeout_ms: int) -> bool:
         """Consume one pending trigger at once, without awaiting its answer.
@@ -357,12 +451,13 @@ class SoftwareTriggerHandoff:
             return True
 
     def _drop_stale_pending(self) -> None:
-        """Drop the pending triggers too old to fire (only while a recording's
-        period is known; the caller holds the condition): their pulses become
-        gaps in the sequence, i.e. missed pulses."""
-        if not self._period_s:
+        """Drop the pending triggers too old to fire (only while a recording
+        counts, at a known period; the caller holds the condition): their pulses
+        become gaps in the sequence, i.e. missed pulses. Priming triggers are
+        never stale — they wait out an ignored one's deadline by design."""
+        if not self._period_s or not self._counting:
             return
-        limit = max(STALE_TRIGGER_S, 2 * self._period_s)
+        limit = max(STALE_TRIGGER_S, 0.5 * self._period_s)
         now = time.monotonic()
         while self._pending > 0 and self._pending_times and (
             now - self._pending_times[0] > limit
@@ -385,7 +480,10 @@ class SoftwareTriggerHandoff:
         caller holds the condition)."""
         now = time.monotonic()
         while self._outstanding and now > self._outstanding[0][2]:
-            _seq, _epoch, _deadline, counted = self._outstanding.popleft()
+            _seq, _epoch, _deadline, counted, _fired = self._outstanding.popleft()
+            window = max(DRAIN_WINDOW_S, 2 * self._period_s) if self._period_s else DRAIN_WINDOW_S
+            self._drain_until = max(self._drain_until, now + window)
+            self._expired_in_grab = True
             if not counted:
                 continue  # ignored before the recording counts: expected
             self._unanswered_triggers += 1

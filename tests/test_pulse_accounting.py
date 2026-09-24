@@ -247,6 +247,30 @@ def test_software_priming_absorbs_triggers_a_camera_silently_ignores(
     assert elapsed < 3.0, elapsed
 
 
+def test_software_priming_with_a_real_fetch_leaves_the_first_pulse_intact(
+    fake_system, tmp_path, monkeypatch
+):
+    # As above, but a fetch that finds no image blocks for its whole timeout, as a
+    # real SDK's does. The ignored triggers open a drain window (made long here
+    # so counting starts inside it); were counting not to end it, the train's
+    # first trigger would wait out a drain fetch and be dropped as stale — pulse
+    # 0 missed at the start of every software take.
+    monkeypatch.setattr(handoff, "DRAIN_WINDOW_S", 2.0)
+    for serial in FAKE_SERIALS:
+        backend = _backend(fake_system, serial)
+        backend.ignore_first_triggers = 2
+        backend.ignore_first_silently = True
+        backend.fetch_blocks = True
+    _save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+        assert cam["primed_frames"] == 2, cam
+    assert summary["sync"]["ok"], summary["sync"]
+
+
 def test_a_long_exposure_keeps_every_image_on_its_own_pulse(fake_system, tmp_path):
     # 5 fps, each image ready 150 ms after its trigger (a ~140 ms exposure plus
     # a GS3's transfer): longer than a fixed 0.1 s answer deadline, which gave
@@ -263,6 +287,47 @@ def test_a_long_exposure_keeps_every_image_on_its_own_pulse(fake_system, tmp_pat
         # A frame shows its trigger's sequence number: frame k is pulse k.
         np.testing.assert_array_equal(_frames(save_dir, serial)[:, 0, 0], np.arange(10))
     assert summary["sync"]["ok"], summary["sync"]
+
+
+@pytest.mark.parametrize("delay_s", [0.13, 0.3, 0.6])
+def test_a_late_first_image_cannot_shift_the_take(fake_system, tmp_path, delay_s):
+    # FAKE-1's first image of the record grab is held up (a USB stall) past its
+    # trigger's short priming deadline: the next trigger fires and the late image
+    # arrives in its place. Its camera timestamp shows it older than that trigger,
+    # so it is discarded instead of slipping the pairing — which left the last
+    # priming image in the buffer to become pulse 0 of the take (reported clean).
+    _backend(fake_system, "FAKE-1").latency_by_fire = {1: delay_s}
+    save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+        np.testing.assert_array_equal(_frames(save_dir, serial)[:, 0, 0], np.arange(50))
+    assert summary["sync"]["ok"], summary["sync"]
+
+
+def test_an_image_later_than_its_deadline_cannot_answer_a_later_trigger(
+    fake_system, tmp_path, monkeypatch
+):
+    # Mid-take, FAKE-1's image for one trigger arrives after the answer deadline
+    # gave up on it. It must not answer the trigger fired next (every later frame
+    # a pulse late): its timestamp marks it stale, it is discarded, its pulse is
+    # a filled miss, and every other frame is its own pulse.
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.2)
+    _backend(fake_system, "FAKE-1").latency_by_fire = {20: 0.35}
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert bad["frames"] == 50 and bad["missed_pulses"] > 0, bad
+    video = _frames(save_dir, "FAKE-1")[:, 0, 0]
+    dropped = arrays["FAKE-1/dropped"]
+    for row in range(50):
+        expected = video[row - 1] if dropped[row] else row % 256
+        assert video[row] == expected, (row, video[max(0, row - 3) : row + 3])
+    backend = _backend(fake_system, "FAKE-1")
+    assert backend.stale_images >= 1
 
 
 def test_triggers_left_pending_through_a_wait_are_dropped_not_fired_late(

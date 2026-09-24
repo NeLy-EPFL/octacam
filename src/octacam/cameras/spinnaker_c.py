@@ -1306,7 +1306,9 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except BackendError:
                 self._trigger_unfired()
                 return None
-        return self._fetch_image(cam, timeout_ms, wants_array, answers_trigger=True)
+        return self._fetch_image(
+            cam, self._fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
 
     def _fetch_image(
         self, cam, timeout_ms: int, wants_array, answers_trigger: bool = False
@@ -1320,7 +1322,13 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         if image is None:
             return None
         if answers_trigger:
-            self._trigger_answered()
+            # A complete image is checked against the camera clock (ns), so a
+            # late one cannot answer a later trigger.
+            try:
+                stamp = None if spin.image_incomplete(image) else int(spin.image_timestamp(image))
+            except Exception:
+                stamp = None
+            self._trigger_answered(stamp)
         try:
             if spin.image_incomplete(image):
                 self._count_incomplete()

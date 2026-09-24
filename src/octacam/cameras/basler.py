@@ -229,6 +229,21 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # a raw pylon traceback escape.
             raise BackendError(str(e)) from e
 
+    def _stamps_ns(self) -> bool:
+        """Whether this camera's grab timestamps count nanoseconds (USB3 Vision
+        does; a GigE camera's count device ticks)."""
+        known = getattr(self, "_timestamps_ns", None)
+        if known is None:
+            raw = self.raw
+            if raw is None:
+                return False
+            try:
+                known = raw.GetDeviceInfo().GetDeviceClass() == "BaslerUsb"
+            except Exception:
+                known = False
+            self._timestamps_ns = known
+        return known
+
     def close(self) -> None:
         # Tear the device down while the pylon runtime is still alive. pypylon
         # runs PylonTerminate() from a Py_AtExit hook during interpreter
@@ -651,7 +666,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # so guard it too, returning None (one lost frame) to uphold the
         # never-raises contract the grab loop relies on for its post-loop cleanup.
         try:
-            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+            result = raw.RetrieveResult(
+                self._fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
+            )
         except genicam.GenericException:
             return None
         try:
@@ -660,12 +677,18 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # accessors throw, so bail before touching them.
             if not result.IsValid():
                 return None
-            self._trigger_answered()  # a failed grab answers its trigger too
+            succeeded = result.GrabSucceeded()
+            # A failed grab answers its trigger too; a good one is checked against
+            # the camera clock, when that clock counts ns (USB3 Vision; a GigE
+            # camera's ticks are not), so a late image cannot answer a later one.
+            self._trigger_answered(
+                int(result.TimeStamp) if succeeded and self._stamps_ns() else None
+            )
             # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
             # packet loss): pylon already drops it for us, but partial frames are
             # a prime suspect for corrupt previews, so surface the cause
             # periodically (rate-limited to avoid flooding at the trigger rate).
-            if not result.GrabSucceeded():
+            if not succeeded:
                 self._count_incomplete(result)
                 return None
             timestamp = result.TimeStamp

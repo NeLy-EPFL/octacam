@@ -374,7 +374,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     self._trigger_unfired()
                     return None
             try:
-                array = self._receive_bounded(timeout_ms)
+                array = self._receive_bounded(self._fetch_timeout_ms(timeout_ms))
             except Exception as e:
                 # A payload cameleon rejected (short, or a trailer error): this
                 # backend's incomplete image. It answers its trigger like one, or
