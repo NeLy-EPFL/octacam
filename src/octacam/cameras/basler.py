@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
@@ -704,6 +705,47 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
     return f"Camera {serial} could not be opened and will be skipped: {text}"
 
 
+# pylon's GenTL-consumer transport layer loads every GenTL producer on
+# GENICAM_GENTL64_PATH when the factory first loads its transport layers. A
+# system pylon install puts its own producers there (/etc/profile.d/
+# basler-gentl-path.sh), and its ProducerU3V.cti pulls /opt/pylon's
+# libuxapi.so.15 into the process under the same soname as pypylon's bundled
+# copy. pypylon's USB transport layer then binds whichever copy loaded first,
+# and the producers' unload segfaulted every process at interpreter exit (each
+# `octacam record` on such a rig exited 139 after writing its outputs). octacam
+# drives Basler cameras through pylon's native transport layers only — it has
+# no GenTL path — so the path is hidden while the factory loads its transport
+# layers, then restored for the rest of the process. pylon reads it only then:
+# later enumerations and device opens load no producer (measured). Mutating the
+# environment is not thread-safe against a concurrent C getenv, so it happens
+# once, on the first factory use, before any other SDK starts: the auto cascade
+# enumerates its tiers one at a time with basler first, and doctor's parallel
+# scan loads the factory on its main thread before starting its workers.
+_tl_factory_lock = threading.Lock()
+_tl_factory_ready = False
+
+
+def tl_factory():
+    """pylon's transport-layer factory, loaded without any GenTL producer.
+
+    Every octacam path into pylon goes through here, so the first one loads the
+    factory's transport layers with ``GENICAM_GENTL64_PATH`` hidden (see above).
+    A process that used pylon before octacam did has already loaded them."""
+    global _tl_factory_ready
+    with _tl_factory_lock:
+        if _tl_factory_ready:
+            return pylon.TlFactory.GetInstance()
+        saved = os.environ.pop("GENICAM_GENTL64_PATH", None)
+        try:
+            factory = pylon.TlFactory.GetInstance()
+            factory.EnumerateTls()  # loads every transport layer, the GenTL one too
+        finally:
+            if saved is not None:
+                os.environ["GENICAM_GENTL64_PATH"] = saved
+        _tl_factory_ready = True
+        return factory
+
+
 # `TlFactory.CreateDevice` downloads the camera's XML over USB, so it is a real
 # device access that a sick camera can stall for *minutes*: a camera whose link
 # trains at full SuperSpeed but whose control transfers time out held one test
@@ -745,7 +787,7 @@ def _create_device_timeout() -> float:
     return value
 
 
-def _release_late_device(tl_factory, serial: str) -> Callable[["Future"], None]:
+def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
     """A done-callback that destroys a handle which arrived after the deadline.
 
     We abandoned the camera and reported it as unusable, but the worker thread is
@@ -762,7 +804,7 @@ def _release_late_device(tl_factory, serial: str) -> Callable[["Future"], None]:
         except Exception:
             return  # it failed on its own; there is no handle to release
         try:
-            tl_factory.DestroyDevice(device)
+            factory.DestroyDevice(device)
         except Exception as e:  # best effort — we are already past the deadline
             log.debug("Could not release late handle for camera %s: %s", serial, e)
         else:
@@ -800,8 +842,8 @@ def enumerate_basler(
     deadline once instead of stalling the whole rig for as long as pylon cares to
     retry.
     """
-    tl_factory = pylon.TlFactory.GetInstance()
-    devices = tl_factory.EnumerateDevices()
+    factory = tl_factory()
+    devices = factory.EnumerateDevices()
     if not devices:
         return []
     # Debug, not info: in the auto cascade every tier enumerates in turn, so
@@ -844,7 +886,7 @@ def enumerate_basler(
     )
     fut_to_serial: dict[Future, str] = {}
     for serial, device in wanted:
-        fut_to_serial[pool.submit(tl_factory.CreateDevice, device)] = serial
+        fut_to_serial[pool.submit(factory.CreateDevice, device)] = serial
     pool.shutdown(wait=False)
 
     results: dict[str, object | None] = {}
@@ -929,7 +971,7 @@ def enumerate_basler(
         )
         # Report it with the "present but unusable" None sentinel, and release
         # the handle if pylon eventually hands one over (see _release_late_device).
-        future.add_done_callback(_release_late_device(tl_factory, serial))
+        future.add_done_callback(_release_late_device(factory, serial))
         results[serial] = None
 
     return [(serial, results.get(serial)) for serial, _device in wanted]

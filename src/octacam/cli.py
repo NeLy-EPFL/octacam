@@ -834,9 +834,9 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     if key in ("auto", "all", ""):
         return [(serial, model) for serial, _backend, model in _cascade_assignment()]
     if key == "basler":
-        from pypylon import pylon
+        from octacam.cameras.basler import tl_factory
 
-        devices = pylon.TlFactory.GetInstance().EnumerateDevices()
+        devices = tl_factory().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
     enumerate_fn, _factory, _extension = select_backend(name)
     read_model = getattr(importlib.import_module(enumerate_fn.__module__), "read_model", None)
@@ -917,6 +917,16 @@ class _CameraScan:
             except Exception:
                 continue
             self.targets.append(name)
+        # pylon loads its transport layers with GENICAM_GENTL64_PATH hidden (see
+        # basler.tl_factory); do it here too, so the environment never changes
+        # while the other SDKs' workers are reading it.
+        if "basler" in self.targets:
+            try:
+                from octacam.cameras.basler import tl_factory
+
+                tl_factory()
+            except Exception:
+                pass  # the basler worker retries it and reports the failure
         # Cascade selection order (priority) is CASCADE restricted to the tiers we
         # scanned.
         self._cascade_order = [b for b in CASCADE if b in self.targets]

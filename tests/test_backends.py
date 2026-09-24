@@ -7,6 +7,9 @@ contract rather than any particular camera being present.
 
 import contextlib
 import logging
+import os
+import subprocess
+import sys
 import time
 
 import pytest
@@ -286,6 +289,9 @@ class _FakeBaslerDevice:
     def GetSerialNumber(self):
         return self._serial
 
+    def GetModelName(self):
+        return "acA1920-150um"
+
 
 class _FakeTlFactory:
     """pylon transport-layer factory stand-in with no hardware.
@@ -304,6 +310,13 @@ class _FakeTlFactory:
         self._slow_seconds = slow_seconds
         self.created: list[str] = []
         self.destroyed: list[str] = []
+        # GENICAM_GENTL64_PATH as pylon would see it while loading its transport
+        # layers (see basler.tl_factory).
+        self.gentl_path_at_load: list[str | None] = []
+
+    def EnumerateTls(self):
+        self.gentl_path_at_load.append(os.environ.get("GENICAM_GENTL64_PATH"))
+        return []
 
     def EnumerateDevices(self):
         return self._devices
@@ -343,7 +356,96 @@ def _patch_basler_factory(monkeypatch, serials, bad, slow=(), slow_seconds=30.0)
     factory = _FakeTlFactory(serials, bad, slow=slow, slow_seconds=slow_seconds)
     _FakePylon.TlFactory._instance = factory
     monkeypatch.setattr(basler, "pylon", _FakePylon)
+    monkeypatch.setattr(basler, "_tl_factory_ready", False)
     return factory
+
+
+def test_tl_factory_loads_its_transport_layers_with_the_gentl_path_hidden(monkeypatch):
+    # A system pylon install puts its GenTL producers on GENICAM_GENTL64_PATH;
+    # pylon's GenTL transport layer loaded them, and their unload segfaulted
+    # every octacam process at exit. The path is hidden while the factory loads
+    # its transport layers, restored after, and touched only on first use.
+    from octacam.cameras import basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    assert basler.tl_factory() is factory
+    assert factory.gentl_path_at_load == [None]
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/opt/pylon/lib/gentlproducer/gtl"
+    assert basler.tl_factory() is factory
+    assert factory.gentl_path_at_load == [None]  # loaded once
+
+
+def test_tl_factory_restores_the_gentl_path_when_loading_fails(monkeypatch):
+    from octacam.cameras import basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/somewhere")
+    factory = _patch_basler_factory(monkeypatch, [], bad=set())
+
+    def fail():
+        raise RuntimeError("no transport layers")
+
+    monkeypatch.setattr(factory, "EnumerateTls", fail)
+    with pytest.raises(RuntimeError):
+        basler.tl_factory()
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/somewhere"
+    assert basler._tl_factory_ready is False  # the next use tries again
+
+
+def test_enumerate_basler_goes_through_the_guarded_factory(monkeypatch):
+    from octacam.cameras.basler import enumerate_basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    assert [serial for serial, _handle in enumerate_basler(["40018631"])] == ["40018631"]
+    assert factory.gentl_path_at_load == [None]
+
+
+def test_doctor_reaches_pylon_through_the_guarded_factory(monkeypatch):
+    # doctor's own route into pylon (cli._enumerate_backend, not enumerate_basler),
+    # and its parallel scan loads the factory on the main thread, before the
+    # other SDKs' workers start.
+    from octacam import cli
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    cli._CameraScan("basler")
+    assert factory.gentl_path_at_load == [None]
+    monkeypatch.setattr("octacam.cameras.basler._tl_factory_ready", False)
+    assert cli._enumerate_backend("basler") == [("40018631", "acA1920-150um")]
+    assert factory.gentl_path_at_load == [None, None]
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/opt/pylon/lib/gentlproducer/gtl"
+
+
+def _gentl_producers_on_path() -> list[str]:
+    paths = os.environ.get("GENICAM_GENTL64_PATH", "").split(os.pathsep)
+    found = []
+    for d in paths:
+        try:
+            found += [os.path.join(d, n) for n in os.listdir(d) if n.endswith(".cti")]
+        except OSError:  # missing or unreadable: collection must not fail on it
+            continue
+    return found
+
+
+@pytest.mark.skipif(
+    not _gentl_producers_on_path(), reason="no GenTL producer on GENICAM_GENTL64_PATH"
+)
+def test_real_pylon_loads_no_gentl_producer_and_exits_cleanly():
+    # The real crash, where it can happen: a machine with a system pylon install
+    # (its producers on GENICAM_GENTL64_PATH). Enumeration only, no camera opened.
+    pytest.importorskip("pypylon")
+    script = (
+        "from octacam.cameras.basler import tl_factory\n"
+        "tl_factory().EnumerateDevices()\n"
+        "maps = open('/proc/self/maps').read()\n"
+        "print('cti' if '.cti' in maps else 'clean', flush=True)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert result.stdout.strip().splitlines()[-1] == "clean"
 
 
 def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(monkeypatch):

@@ -52,6 +52,17 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **octacam crashed at exit (segmentation fault, exit code 139) on a machine with
+  a system pylon install** — every `octacam record`, and pytest, after all outputs
+  were written. pylon's GenTL transport layer loaded the system pylon's GenTL
+  producers from `GENICAM_GENTL64_PATH` (set by the pylon installer's
+  `/etc/profile.d/basler-gentl-path.sh`); they pulled `/opt/pylon`'s `libuxapi`
+  into the process beside pypylon's own copy of the same library, and their
+  unload at exit jumped into unmapped code. octacam drives Basler cameras only
+  through pylon's native transport layers, so it now loads them with
+  `GENICAM_GENTL64_PATH` hidden (restored right after). Besides the clean exit,
+  pypylon's USB transport layer now binds its own bundled `libuxapi`, not the
+  system copy.
 - **FLIR Grasshopper3 recordings lost their first two pulses, and could start a
   frame apart** — a GS3 ignores the first two hardware triggers after every
   acquisition start (measured: three 13-pulse trains in one acquisition give 11,

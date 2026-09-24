@@ -62,9 +62,14 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   inside a method is fine). An unquoted one took out the whole CLI on every
   supported interpreter below 3.14. `tests/test_typing_hygiene.py` walks the AST
   for this and so catches it on any version; an import test cannot.
-- **Known crash:** on some setups `pytest` can SIGSEGV *at process teardown* when
-  pypylon + genicam are both loaded in one process (a multi-lib native-teardown
-  interaction, not octacam code — the tests themselves pass). Don't chase it.
+- **The exit-time SIGSEGV was pylon's GenTL producers** (fixed): pylon's GenTL
+  transport layer loaded the *system* pylon's producers from
+  `GENICAM_GENTL64_PATH` (`/etc/profile.d/basler-gentl-path.sh`), whose
+  `libuxapi` unload segfaulted every `octacam record` and pytest process at exit
+  (kernel log: `segfault at …88bb9 … error 14`). `basler.tl_factory()` loads the
+  transport layers with the path hidden; every pylon entry point must go through
+  it (the first `TlFactory` use decides, and pylon reads the path only then). A
+  process that imports pypylon and enumerates *before* octacam still loads them.
 
 ## Versioning & releases
 
