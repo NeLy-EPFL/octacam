@@ -8,6 +8,7 @@ rest of the system only ever sees :class:`~octacam.cameras.base.Camera`.
 """
 
 import logging
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -22,6 +23,7 @@ from octacam.cameras.registry import (
     select_backend,
     teardown_backend,
 )
+from octacam.pulses import PulseClock
 from octacam.transform import DisplayTransform, from_camera_config
 from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
@@ -409,6 +411,8 @@ class CameraSystem:
         use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
         max_frames: int | None = None,
+        pulse_clock: PulseClock | None = None,
+        hold: bool = False,
     ) -> list[str]:
         """Start recording on all cameras; return the names that started.
 
@@ -418,8 +422,10 @@ class CameraSystem:
         forwarded so an external-trigger recording fetches frames without the
         software-trigger hand-off (see :meth:`Camera.start_record`).
         ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
-        ``max_frames`` caps every camera at the same frame count so a teardown
-        race can't leave cameras one frame apart (None = uncapped).
+        ``pulse_clock`` is the trigger train every camera's frames are assigned
+        to (see :meth:`Camera.start_record`; ``max_frames`` is the legacy fixed
+        frame count it replaces), and ``hold`` has each camera discard frames
+        until :meth:`arm_counting`, for priming.
 
         ``video_format`` may be a single format used for every camera, or a list
         with one format per camera (positionally, matching ``self.cameras``) so a
@@ -451,6 +457,8 @@ class CameraSystem:
                 software_trigger=use_software_trigger,
                 queue_size=writer_queue_size,
                 max_frames=max_frames,
+                pulse_clock=pulse_clock,
+                hold=hold,
             )
 
         # Start every camera at once so they begin grabbing closer together
@@ -498,9 +506,42 @@ class CameraSystem:
             for camera in self.cameras
         ]
 
-    def stop(self) -> None:
+    def arm_counting(self) -> None:
+        """Start counting pulses on every camera (ends a priming hold)."""
         for camera in self.cameras:
-            camera.stop()
+            camera.arm_counting()
+
+    def prime_software_trigger(self, pulses: int, fps: float, timeout_s: float = 1.0) -> None:
+        """Fire ``pulses`` sacrificial software triggers at every recording camera.
+
+        A camera may ignore the first triggers after its acquisition starts (a
+        FLIR Grasshopper3 ignores two), so a software-triggered recording spends
+        a few before its first counted one; their frames are discarded under the
+        record grab's priming hold. Returns once each camera has fired them."""
+        interval = 1.0 / fps if fps > 0 else 0.01
+        for _ in range(pulses):
+            self._trigger_all()
+            # One at a time: the next only once every camera has fired this one.
+            # A camera ignoring its first triggers answers none of them and waits
+            # out each one's (short) answer deadline, so firing at the interval
+            # regardless overflowed the hand-off's backlog and dropped the rest.
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if all(getattr(c.backend, "_pending", 0) == 0 for c in self.cameras):
+                    break
+                time.sleep(0.002)
+            time.sleep(interval)
+
+    @property
+    def all_pulses_complete(self) -> bool:
+        """True once every camera has accounted for its train's last pulse."""
+        return bool(self.cameras) and all(c.pulses_complete for c in self.cameras)
+
+    def stop(self, fill_to: int | None = None) -> None:
+        """Stop every grab loop. ``fill_to`` (a completed train's pulse count)
+        pads each recording camera's video to that many frames."""
+        for camera in self.cameras:
+            camera.stop(fill_to)
         for camera in self.cameras:
             camera.join()
 

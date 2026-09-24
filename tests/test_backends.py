@@ -7,6 +7,9 @@ contract rather than any particular camera being present.
 
 import contextlib
 import logging
+import os
+import subprocess
+import sys
 import time
 
 import pytest
@@ -279,12 +282,249 @@ def test_basler_retrieve_freerun_swallows_device_error():
     assert be.retrieve_freerun(50, lambda: True) is None
 
 
+class _GrabResult:
+    def __init__(self, valid=True, timestamp=0):
+        self._valid = valid
+        self.TimeStamp = timestamp
+        self.Array = None
+
+    def IsValid(self):
+        return self._valid
+
+    def GrabSucceeded(self):
+        return True
+
+    def Release(self):
+        pass
+
+
+class _LateImageRaw:
+    """A raw whose RetrieveResult hands out queued results (an empty one: the
+    fetch timed out) and counts the software triggers fired."""
+
+    def __init__(self, results):
+        self.results = list(results)
+        self.fired = 0
+
+    def ExecuteSoftwareTrigger(self):
+        self.fired += 1
+
+    def RetrieveResult(self, timeout_ms, handling):
+        return self.results.pop(0) if self.results else _GrabResult(valid=False)
+
+
+def test_basler_retrieve_credits_a_late_image_to_its_own_trigger():
+    # Trigger 0's image misses the fetch after it. The next retrieve must not
+    # fire trigger 1 — it would then fetch image 0 and credit it to trigger 1,
+    # putting every later frame a pulse late — but only fetch.
+    raw = _LateImageRaw([_GrabResult(valid=False), _GrabResult(timestamp=111)])
+    be = _make_basler_backend(raw)
+    be._begin_grab()
+    be._bump_trigger()
+    assert be.retrieve(50, lambda: True) is None  # fired 0; its image is late
+    be._bump_trigger()
+    frame = be.retrieve(50, lambda: True)
+    assert frame is not None and frame[1] == 111
+    assert raw.fired == 1 and be.last_trigger_index == 0
+    raw.results.append(_GrabResult(timestamp=222))
+    frame = be.retrieve(50, lambda: True)  # now trigger 1 fires
+    assert frame is not None and frame[1] == 222
+    assert raw.fired == 2 and be.last_trigger_index == 1
+
+
+# --- the software-trigger hand-off's pairing (cameras/_trigger_handoff.py) --- #
+
+
+def _handoff():
+    from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
+
+    class _Handoff(SoftwareTriggerHandoff):
+        _serial = "test-handoff"
+
+    h = _Handoff()
+    h._init_trigger_handoff()
+    h._begin_grab()
+    return h
+
+
+def test_handoff_fires_nothing_while_a_trigger_awaits_its_image():
+    h = _handoff()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # fire trigger 0
+    h._bump_trigger()
+    assert h._claim_trigger(10) is False  # 0 unanswered: fetch only
+    assert h._claim_trigger(10) is False
+    h._trigger_answered()
+    assert h.last_trigger_index == 0
+    assert h._claim_trigger(10) is True  # trigger 1 fires now
+    h._trigger_answered()
+    assert h.last_trigger_index == 1
+
+
+def test_handoff_gives_up_on_a_trigger_past_its_answer_deadline(monkeypatch):
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
+    h = _handoff()
+    h.restart_trigger_sequence()  # a recording counts: the long deadline applies
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._bump_trigger()
+    assert h._claim_trigger(10) is False
+    time.sleep(0.03)
+    assert h._claim_trigger(10) is True  # 0 given up on; 1 fires
+    h._trigger_answered()
+    assert h.last_trigger_index == 1 and h.unanswered_triggers == 1
+    # A late image of the abandoned trigger answers nothing outstanding.
+    h._trigger_answered()
+    assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
+
+
+def test_handoff_a_silent_camera_costs_only_the_short_deadline_until_it_answers(
+    monkeypatch,
+):
+    # A Grasshopper3 silently ignores its first triggers after acquisition start:
+    # before the grab's first answer (and before a recording counts) each costs
+    # only PRIMING_ANSWER_TIMEOUT_S and is not reported as unanswered. After the
+    # first answer a silent trigger may be a late image: the long deadline.
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "PRIMING_ANSWER_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 5.0)
+    h = _handoff()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # ignored by the camera
+    h._bump_trigger()
+    time.sleep(0.03)
+    assert h._claim_trigger(10) is True  # 0 given up on after the short deadline
+    assert h.unanswered_triggers == 0  # expected, not reported
+    h._trigger_answered()
+    assert h.last_trigger_index == 1
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._bump_trigger()
+    time.sleep(0.03)
+    assert h._claim_trigger(10) is False  # now patient: 2 may still be on its way
+
+
+def test_handoff_an_image_older_than_its_trigger_answers_nothing(monkeypatch):
+    # The camera clock says when an image was exposed: one exposed before the
+    # trigger it would answer was fired is a late image of a trigger already
+    # given up on. It answers nothing; the trigger keeps waiting for its own.
+    import octacam.cameras._trigger_handoff as handoff
+
+    h = _handoff()
+    h.restart_trigger_sequence()
+    offset = 5_000_000_000  # camera clock ahead of the host's by 5 s
+    for _ in range(10):
+        h._bump_trigger()
+        assert h._claim_trigger(10) is True
+        fired = h._outstanding[0][4]
+        h._trigger_answered(fired + offset + 1_000_000)  # exposed 1 ms after firing
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    fired = h._outstanding[0][4]
+    h._trigger_answered(fired + offset - 200_000_000)  # exposed 0.2 s before firing
+    assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
+    assert h.stale_images == 1 and len(h._outstanding) == 1
+    h._trigger_answered(fired + offset + 1_000_000)  # its own image
+    assert h.last_trigger_index == 10 and not h._outstanding
+
+
+def test_handoff_trusts_no_reference_of_too_few_answers_and_heals_a_bad_one(monkeypatch):
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
+    h = _handoff()
+    h.restart_trigger_sequence()
+    offset = 5_000_000_000
+
+    def answer(extra_ns):
+        h._bump_trigger()
+        assert h._claim_trigger(10) is True
+        h._trigger_answered(h._outstanding[0][4] + offset + extra_ns)
+
+    answer(200_000_000)  # one answer inflated by a 0.2 s host stall
+    answer(1_000_000)  # a normal one: too few answers to judge it by
+    assert h.last_trigger_index == 1 and h.stale_images == 0
+    # A reference gone wrong (8 inflated answers): the normal image is rejected,
+    # its trigger is given up on, and the reference is cleared, not trusted.
+    for _ in range(8):
+        answer(200_000_000)
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._trigger_answered(h._outstanding[0][4] + offset + 1_000_000)
+    assert h.stale_images == 1
+    time.sleep(0.03)
+    h._bump_trigger()
+    h._claim_trigger(10)  # expires the rejected trigger
+    assert not h._offsets
+
+
+def test_handoff_drops_a_trigger_left_pending_for_half_a_period(monkeypatch):
+    # While a recording counts at a low rate, a trigger left pending behind an
+    # unanswered one must be dropped once it is half a period old — not fired a
+    # whole period late under its own pulse number.
+    import octacam.cameras._trigger_handoff as handoff
+
+    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.05)
+    h = _handoff()
+    h.configure_trigger_period(0.2)  # deadline max(0.05, 2P) = 0.4 s; stale 0.1 s
+    h.restart_trigger_sequence()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # never answered
+    time.sleep(0.2)
+    h._bump_trigger()  # due now; it will wait out the deadline behind trigger 0
+    time.sleep(0.25)
+    # 0 given up on, 1 too stale to fire: dropped; with nothing left to fire the
+    # grab loop only fetches, in case 0's image is merely late.
+    assert h._claim_trigger(10) is False
+    assert h.stale_triggers == 1 and h.unanswered_triggers == 1 and not h._outstanding
+
+
+def test_handoff_a_trigger_the_device_refused_is_not_outstanding():
+    h = _handoff()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._trigger_unfired()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # nothing to wait for
+    h._trigger_answered()
+    assert h.last_trigger_index == 1
+
+
+def test_handoff_an_answer_to_a_trigger_from_before_the_restart_is_priming():
+    from octacam.cameras._trigger_handoff import PRIMING_TRIGGER
+
+    h = _handoff()
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True  # a priming trigger, image still due
+    h.restart_trigger_sequence()
+    h._bump_trigger()  # the recording's trigger 0
+    assert h._claim_trigger(10) is False  # the priming image comes first
+    h._trigger_answered()
+    assert h.last_trigger_index == PRIMING_TRIGGER
+    assert h._claim_trigger(10) is True
+    h._trigger_answered()
+    assert h.last_trigger_index == 0
+    # An image answered before the restart reads as priming, however late the
+    # reader looks.
+    h._bump_trigger()
+    assert h._claim_trigger(10) is True
+    h._trigger_answered()
+    h.restart_trigger_sequence()
+    assert h.last_trigger_index == PRIMING_TRIGGER
+
+
 class _FakeBaslerDevice:
     def __init__(self, serial):
         self._serial = serial
 
     def GetSerialNumber(self):
         return self._serial
+
+    def GetModelName(self):
+        return "acA1920-150um"
 
 
 class _FakeTlFactory:
@@ -304,6 +544,13 @@ class _FakeTlFactory:
         self._slow_seconds = slow_seconds
         self.created: list[str] = []
         self.destroyed: list[str] = []
+        # GENICAM_GENTL64_PATH as pylon would see it while loading its transport
+        # layers (see basler.tl_factory).
+        self.gentl_path_at_load: list[str | None] = []
+
+    def EnumerateTls(self):
+        self.gentl_path_at_load.append(os.environ.get("GENICAM_GENTL64_PATH"))
+        return []
 
     def EnumerateDevices(self):
         return self._devices
@@ -343,7 +590,96 @@ def _patch_basler_factory(monkeypatch, serials, bad, slow=(), slow_seconds=30.0)
     factory = _FakeTlFactory(serials, bad, slow=slow, slow_seconds=slow_seconds)
     _FakePylon.TlFactory._instance = factory
     monkeypatch.setattr(basler, "pylon", _FakePylon)
+    monkeypatch.setattr(basler, "_tl_factory_ready", False)
     return factory
+
+
+def test_tl_factory_loads_its_transport_layers_with_the_gentl_path_hidden(monkeypatch):
+    # A system pylon install puts its GenTL producers on GENICAM_GENTL64_PATH;
+    # pylon's GenTL transport layer loaded them, and their unload segfaulted
+    # every octacam process at exit. The path is hidden while the factory loads
+    # its transport layers, restored after, and touched only on first use.
+    from octacam.cameras import basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    assert basler.tl_factory() is factory
+    assert factory.gentl_path_at_load == [None]
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/opt/pylon/lib/gentlproducer/gtl"
+    assert basler.tl_factory() is factory
+    assert factory.gentl_path_at_load == [None]  # loaded once
+
+
+def test_tl_factory_restores_the_gentl_path_when_loading_fails(monkeypatch):
+    from octacam.cameras import basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/somewhere")
+    factory = _patch_basler_factory(monkeypatch, [], bad=set())
+
+    def fail():
+        raise RuntimeError("no transport layers")
+
+    monkeypatch.setattr(factory, "EnumerateTls", fail)
+    with pytest.raises(RuntimeError):
+        basler.tl_factory()
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/somewhere"
+    assert basler._tl_factory_ready is False  # the next use tries again
+
+
+def test_enumerate_basler_goes_through_the_guarded_factory(monkeypatch):
+    from octacam.cameras.basler import enumerate_basler
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    assert [serial for serial, _handle in enumerate_basler(["40018631"])] == ["40018631"]
+    assert factory.gentl_path_at_load == [None]
+
+
+def test_doctor_reaches_pylon_through_the_guarded_factory(monkeypatch):
+    # doctor's own route into pylon (cli._enumerate_backend, not enumerate_basler),
+    # and its parallel scan loads the factory on the main thread, before the
+    # other SDKs' workers start.
+    from octacam import cli
+
+    monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
+    factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
+    cli._CameraScan("basler")
+    assert factory.gentl_path_at_load == [None]
+    monkeypatch.setattr("octacam.cameras.basler._tl_factory_ready", False)
+    assert cli._enumerate_backend("basler") == [("40018631", "acA1920-150um")]
+    assert factory.gentl_path_at_load == [None, None]
+    assert os.environ["GENICAM_GENTL64_PATH"] == "/opt/pylon/lib/gentlproducer/gtl"
+
+
+def _gentl_producers_on_path() -> list[str]:
+    paths = os.environ.get("GENICAM_GENTL64_PATH", "").split(os.pathsep)
+    found = []
+    for d in paths:
+        try:
+            found += [os.path.join(d, n) for n in os.listdir(d) if n.endswith(".cti")]
+        except OSError:  # missing or unreadable: collection must not fail on it
+            continue
+    return found
+
+
+@pytest.mark.skipif(
+    not _gentl_producers_on_path(), reason="no GenTL producer on GENICAM_GENTL64_PATH"
+)
+def test_real_pylon_loads_no_gentl_producer_and_exits_cleanly():
+    # The real crash, where it can happen: a machine with a system pylon install
+    # (its producers on GENICAM_GENTL64_PATH). Enumeration only, no camera opened.
+    pytest.importorskip("pypylon")
+    script = (
+        "from octacam.cameras.basler import tl_factory\n"
+        "tl_factory().EnumerateDevices()\n"
+        "maps = open('/proc/self/maps').read()\n"
+        "print('cti' if '.cti' in maps else 'clean', flush=True)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+    assert result.stdout.strip().splitlines()[-1] == "clean"
 
 
 def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(monkeypatch):

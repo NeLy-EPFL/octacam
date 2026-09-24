@@ -834,9 +834,9 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     if key in ("auto", "all", ""):
         return [(serial, model) for serial, _backend, model in _cascade_assignment()]
     if key == "basler":
-        from pypylon import pylon
+        from octacam.cameras.basler import tl_factory
 
-        devices = pylon.TlFactory.GetInstance().EnumerateDevices()
+        devices = tl_factory().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
     enumerate_fn, _factory, _extension = select_backend(name)
     read_model = getattr(importlib.import_module(enumerate_fn.__module__), "read_model", None)
@@ -917,6 +917,16 @@ class _CameraScan:
             except Exception:
                 continue
             self.targets.append(name)
+        # pylon loads its transport layers with GENICAM_GENTL64_PATH hidden (see
+        # basler.tl_factory); do it here too, so the environment never changes
+        # while the other SDKs' workers are reading it.
+        if "basler" in self.targets:
+            try:
+                from octacam.cameras.basler import tl_factory
+
+                tl_factory()
+            except Exception:
+                pass  # the basler worker retries it and reports the failure
         # Cascade selection order (priority) is CASCADE restricted to the tiers we
         # scanned.
         self._cascade_order = [b for b in CASCADE if b in self.targets]
@@ -4295,6 +4305,87 @@ class _ProcessCommand(typer.core.TyperCommand):
 
     def parse_args(self, ctx, args):  # type: ignore[override]
         return super().parse_args(ctx, _inject_default_last(args))
+
+
+@app.command()
+def check(
+    paths: Annotated[
+        list[Path] | None,
+        typer.Argument(
+            exists=True,
+            help="Recording folders, or directories to search for them "
+            r"\[default: the current directory].",
+        ),
+    ] = None,
+    fps: Annotated[
+        float | None,
+        typer.Option(
+            "--fps", help=r"Trigger rate to check against \[default: each summary's]."
+        ),
+    ] = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Print machine-readable results.")
+    ] = False,
+    quiet: Annotated[
+        bool,
+        typer.Option("--quiet", "-q", help="Only list recordings with problems."),
+    ] = False,
+) -> None:
+    """Check recordings for missed trigger pulses and desynchronized cameras.
+
+    Reads each recording's summary and timestamps.npz (never modifies anything)
+    and reports, per camera, the trigger pulses it delivered no frame for — an
+    unfilled one shifts its later frames by one against a camera that did not
+    miss it — plus unequal frame counts, a start offset between cameras, the
+    recorder's own sync verdict, late exposures and camera-clock jumps.
+    Recordings made before octacam counted pulses are re-derived from the
+    hardware timestamps. A recording that cannot be read is a problem too.
+    Exits 1 if any recording has a problem.
+    """
+    from rich.console import Console
+    from rich.text import Text
+
+    from octacam.check import check_recording, find_recordings
+
+    folders = find_recordings(paths or [Path(".")])
+    if not folders:
+        sys.exit("No recording folders (recording_summary.json) found.")
+    # check_recording reports a damaged recording as a problem rather than
+    # raising, so one bad folder neither ends the scan nor goes unreported.
+    results = [check_recording(folder, fps) for folder in folders]
+    if as_json:
+        typer.echo(json.dumps([r.to_dict() for r in results], indent=2))
+    else:
+        console = Console()
+        for result in results:
+            if quiet and result.ok:
+                continue
+            verdict = Text("ok", style="green") if result.ok else Text("PROBLEM", style="bold red")
+            console.print(Text(f"{result.folder}  ", style="bold") + verdict)
+            for cam in result.cameras:
+                if cam.source == "none":
+                    detail = "not checked"
+                else:
+                    detail = f"{cam.missed_count} missed pulse(s)" + (
+                        " (filled)" if cam.filled and cam.missed_count else ""
+                    )
+                    if cam.late_count:
+                        detail += f", {cam.late_count} late"
+                    if cam.writer_dropped:
+                        detail += f", {cam.writer_dropped} writer-dropped"
+                console.print(f"    {cam.name:12s} {cam.frames:8d} frames  {detail}")
+            for problem in result.problems:
+                console.print(Text(f"    ! {problem}", style="red"))
+            for warning in result.warnings:
+                console.print(Text(f"    - {warning}", style="yellow"))
+        bad = sum(1 for r in results if not r.ok)
+        console.print()
+        console.print(
+            f"{len(results)} recording(s) checked: "
+            + (f"[bold red]{bad} with problems[/]" if bad else "[green]all ok[/]")
+        )
+    if any(not r.ok for r in results):
+        raise typer.Exit(1)
 
 
 @app.command(cls=_ProcessCommand)

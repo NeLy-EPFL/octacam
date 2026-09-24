@@ -62,16 +62,28 @@ needed. Confirm with:
 octacam doctor --backend flir
 ```
 
-## Dropped frames
+## Dropped frames and missed trigger pulses
 
-- `recording_summary.json` counts frames the **encoder/writer queue** could not
-  accept. If you see these, the machine is CPU-bound — check whether an
-  `octacam process` transcode is running at the same time (it's CPU-heavy and
-  `gui`/`record` warn about it at startup).
-- Frames the **camera or transport** never delivered (e.g. USB bandwidth gaps)
-  are *not* counted as dropped. Enable `record.save_timestamps = true` and
-  inspect the inter-frame gaps in `timestamps.npz` to find those — e.g.
-  `np.diff(np.load("timestamps.npz")["cam0/timestamp_ns"])`.
+Run `octacam check <recording or directory>` — it lists every camera's missed
+pulses, unequal frame counts and start offsets. In `recording_summary.json`:
+
+- `writer_dropped` counts frames the **encoder/writer queue** could not accept.
+  If you see these, the machine is CPU-bound — check whether an `octacam process`
+  transcode is running at the same time (it's CPU-heavy and `gui`/`record` warn
+  about it at startup).
+- `missed_pulses` counts trigger pulses a camera delivered **no frame** for. The
+  camera SDK's own counters, `stream`, tell a transport loss (frames lost,
+  incomplete) from a trigger the camera never exposed (none of them move). On an
+  octacam-driven train both kinds of loss are filled with the previous frame, so
+  the cameras stay aligned; `dropped` counts the fills.
+
+A camera that **misses triggers** the others on the same trigger line catch —
+with no transport loss — has a trigger-input problem: its cable, connector,
+ground return or opto-isolated input. A FLIR Grasshopper3 that misses a pulse's
+rising edge sometimes fires on its **falling edge** instead, one pulse width late
+(`late_pulse_indices`, ~500 µs with the triggerbox default); the same camera
+showing both is the signature. Swap the two cameras' trigger cables to see
+whether the fault follows the cable or the camera.
 
 ## Transfer destination not present / not writable
 

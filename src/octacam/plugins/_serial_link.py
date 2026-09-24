@@ -170,6 +170,22 @@ class SerialReaderLink:
         self._identity_event.wait(timeout)
         return self._identity
 
+    @staticmethod
+    def _read_chunk(s) -> bytes:
+        """Read what the port has, returning as soon as a byte arrives.
+
+        ``read(n)`` blocks until n bytes or the port timeout (0.2 s), so reading a
+        fixed-size block delayed every one-byte status token by up to the timeout
+        — the host saw the board's run start ('R') 140 ms after it happened.
+        Blocking for one byte, then draining whatever is waiting, delivers each
+        token within USB latency and still wakes every timeout to check for
+        shutdown."""
+        chunk = s.read(1)
+        waiting = getattr(s, "in_waiting", 0) if chunk else 0
+        if waiting:
+            chunk += s.read(waiting)
+        return chunk
+
     def _dispatch(self, cb, arg) -> None:
         """Invoke a status/reject callback, swallowing (and logging) any error."""
         if cb is None:

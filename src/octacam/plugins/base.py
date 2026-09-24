@@ -75,9 +75,26 @@ class OctacamPlugin(Protocol):
     # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
     # plugin arm can block on a serial write + ack. params is the same
     # {name: slice} shape as default_start_params / the recording hooks.
+    # on_preview_stop also fires right before a recording's record grab starts
+    # (after the preview grab has stopped), so on_recording_start always arms the
+    # trigger against idle cameras instead of re-phasing a running clock under
+    # them — see RecordingController.start_recording.
     def drives_preview_trigger(self) -> bool: ...
     def on_preview_start(self, params: dict | None) -> None: ...
     def on_preview_stop(self) -> None: ...
+
+    # ---- trigger train (optional; only a trigger-GENERATING plugin acts) ----
+    # trigger_train(params) describes the train on_recording_start will emit for
+    # these params — {"period_ns": int, "count": int}, the exact period and pulse
+    # count — so the recording can assign every frame to its pulse and stop on
+    # the pulse count (pure computation; called under the controller lock).
+    # prime_trigger(params, pulses) emits that many sacrificial pulses on the
+    # camera lines (no lights) and returns once they are out, True if it did:
+    # a camera may ignore its first triggers after acquisition start (a FLIR
+    # Grasshopper3 ignores two), so the recording spends a few before its train
+    # and discards their frames. Called off the lock, before on_recording_start.
+    def trigger_train(self, params: dict | None) -> dict | None: ...
+    def prime_trigger(self, params: dict | None, pulses: int) -> bool: ...
 
     # ---- web contribution (optional) ----
     # client_id identifies the WebSocket connection a message/disconnect came
@@ -138,6 +155,12 @@ class Plugin:
 
     def on_preview_stop(self) -> None:
         pass
+
+    def trigger_train(self, params: dict | None) -> dict | None:
+        return None
+
+    def prime_trigger(self, params: dict | None, pulses: int) -> bool:
+        return False
 
     def api_router(self) -> APIRouter | None:
         return None
@@ -207,6 +230,36 @@ class PluginManager:
             if slice_ is not None:
                 params[self._name(plugin)] = slice_
         return params
+
+    def trigger_train(self, params: dict | None) -> dict | None:
+        """The trigger train the recording arm will emit, from the first plugin
+        that generates one (see :meth:`Plugin.trigger_train`), else None."""
+        for plugin in self.plugins:
+            hook = getattr(plugin, "trigger_train", None)
+            if hook is None:
+                continue
+            try:
+                train = hook(params)
+            except Exception:
+                log.exception("Plugin %s.trigger_train failed", self._name(plugin))
+                continue
+            if train:
+                return train
+        return None
+
+    def prime_trigger(self, params: dict | None, pulses: int) -> bool:
+        """Have the trigger-generating plugin emit ``pulses`` priming pulses;
+        True if one did (see :meth:`Plugin.prime_trigger`)."""
+        for plugin in self.plugins:
+            hook = getattr(plugin, "prime_trigger", None)
+            if hook is None:
+                continue
+            try:
+                if hook(params, pulses):
+                    return True
+            except Exception:
+                log.exception("Plugin %s.prime_trigger failed", self._name(plugin))
+        return False
 
     def snapshot_options(self, params: dict | None) -> dict[str, dict]:
         """Each loaded plugin's live options for a recording's config snapshot.

@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
@@ -31,6 +32,15 @@ from octacam.cameras.base import (
 log = logging.getLogger("octacam")
 
 TRIGGER_READY_TIMEOUT_MS = 1000
+# pylon stream-grabber counters a recording reports, where the transport layer
+# has them (names differ between transport layers; absent ones are skipped).
+_STREAM_STATISTICS = (
+    "Statistic_Total_Buffer_Count",
+    "Statistic_Failed_Buffer_Count",
+    "Statistic_Buffer_Underrun_Count",
+    "Statistic_Missed_Frame_Count",
+    "Statistic_Resynchronization_Count",
+)
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
 
@@ -218,6 +228,21 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # BackendError so the caller reports it cleanly instead of letting
             # a raw pylon traceback escape.
             raise BackendError(str(e)) from e
+
+    def _stamps_ns(self) -> bool:
+        """Whether this camera's grab timestamps count nanoseconds (USB3 Vision
+        does; a GigE camera's count device ticks)."""
+        known = getattr(self, "_timestamps_ns", None)
+        if known is None:
+            raw = self.raw
+            if raw is None:
+                return False
+            try:
+                known = raw.GetDeviceInfo().GetDeviceClass() == "BaslerUsb"
+            except Exception:
+                known = False
+            self._timestamps_ns = known
+        return known
 
     def close(self) -> None:
         # Tear the device down while the pylon runtime is still alive. pypylon
@@ -515,13 +540,52 @@ class BaslerBackend(SoftwareTriggerHandoff):
         except genicam.GenericException:
             return None
         try:
-            if not result.IsValid() or not result.GrabSucceeded():
+            if not result.IsValid():
+                return None
+            if not result.GrabSucceeded():
+                # A failed grab of a hardware-triggered frame is a lost pulse:
+                # count it (the recording's pulse accounting reports it) rather
+                # than dropping it silently.
+                self._count_incomplete(result)
                 return None
             return (result.Array if wants_array() else None, result.TimeStamp)
         except genicam.GenericException:
             return None
         finally:
             result.Release()
+
+    def _count_incomplete(self, result) -> None:
+        """Count a failed grab, surfacing its cause periodically (rate-limited to
+        avoid flooding at the trigger rate)."""
+        self._incomplete_grabs += 1
+        if self._incomplete_grabs % 100 == 1:
+            log.warning(
+                "Camera %s: %d incomplete grab(s); last: %s (0x%08X)",
+                self._serial,
+                self._incomplete_grabs,
+                result.GetErrorDescription(),
+                result.GetErrorCode(),
+            )
+
+    def stream_statistics(self) -> dict[str, int]:
+        """The failed grabs this backend discarded, plus pylon's stream-grabber
+        statistics where the transport layer exposes them."""
+        out = {"IncompleteImagesDiscarded": self._incomplete_grabs}
+        raw = self.raw
+        if raw is None:
+            return out
+        try:
+            nodemap = raw.GetStreamGrabberNodeMap()
+        except Exception:
+            return out
+        for name in _STREAM_STATISTICS:
+            try:
+                node = nodemap.GetNode(name)
+                if node is not None and genicam.IsReadable(node):
+                    out[name] = int(node.GetValue())
+            except Exception:
+                continue
+        return out
 
     # ------------------------------------------------------------- grabbing
 
@@ -577,8 +641,11 @@ class BaslerBackend(SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
+        # trigger and fetch exactly one frame on this camera's own grab thread —
+        # or, while a fired trigger's image is still due, only fetch (see
+        # _trigger_handoff: a late image must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         # The device call now lives here (not on the caught _trigger_all path), and
         # the grab loop does not wrap retrieve() in a try/except — so a stop-race
@@ -588,16 +655,20 @@ class BaslerBackend(SoftwareTriggerHandoff):
         raw = self.raw
         if raw is None or not self._grabbing:
             return None
-        try:
-            raw.ExecuteSoftwareTrigger()
-        except genicam.GenericException:
-            return None
+        if fire:
+            try:
+                raw.ExecuteSoftwareTrigger()
+            except genicam.GenericException:
+                self._trigger_unfired()
+                return None
         # RetrieveResult can raise (not just time out) on a device-level error
         # — device removed/unplugged mid-record, grab-engine/transport failure —
         # so guard it too, returning None (one lost frame) to uphold the
         # never-raises contract the grab loop relies on for its post-loop cleanup.
         try:
-            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
+            result = raw.RetrieveResult(
+                self._fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
+            )
         except genicam.GenericException:
             return None
         try:
@@ -606,20 +677,19 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # accessors throw, so bail before touching them.
             if not result.IsValid():
                 return None
+            succeeded = result.GrabSucceeded()
+            # A failed grab answers its trigger too; a good one is checked against
+            # the camera clock, when that clock counts ns (USB3 Vision; a GigE
+            # camera's ticks are not), so a late image cannot answer a later one.
+            self._trigger_answered(
+                int(result.TimeStamp) if succeeded and self._stamps_ns() else None
+            )
             # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
             # packet loss): pylon already drops it for us, but partial frames are
             # a prime suspect for corrupt previews, so surface the cause
             # periodically (rate-limited to avoid flooding at the trigger rate).
-            if not result.GrabSucceeded():
-                self._incomplete_grabs += 1
-                if self._incomplete_grabs % 100 == 1:
-                    log.warning(
-                        "Camera %s: %d incomplete grab(s); last: %s (0x%08X)",
-                        self._serial,
-                        self._incomplete_grabs,
-                        result.GetErrorDescription(),
-                        result.GetErrorCode(),
-                    )
+            if not succeeded:
+                self._count_incomplete(result)
                 return None
             timestamp = result.TimeStamp
             array = result.Array if wants_array() else None
@@ -664,6 +734,47 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
     return f"Camera {serial} could not be opened and will be skipped: {text}"
 
 
+# pylon's GenTL-consumer transport layer loads every GenTL producer on
+# GENICAM_GENTL64_PATH when the factory first loads its transport layers. A
+# system pylon install puts its own producers there (/etc/profile.d/
+# basler-gentl-path.sh), and its ProducerU3V.cti pulls /opt/pylon's
+# libuxapi.so.15 into the process under the same soname as pypylon's bundled
+# copy. pypylon's USB transport layer then binds whichever copy loaded first,
+# and the producers' unload segfaulted every process at interpreter exit (each
+# `octacam record` on such a rig exited 139 after writing its outputs). octacam
+# drives Basler cameras through pylon's native transport layers only — it has
+# no GenTL path — so the path is hidden while the factory loads its transport
+# layers, then restored for the rest of the process. pylon reads it only then:
+# later enumerations and device opens load no producer (measured). Mutating the
+# environment is not thread-safe against a concurrent C getenv, so it happens
+# once, on the first factory use, before any other SDK starts: the auto cascade
+# enumerates its tiers one at a time with basler first, and doctor's parallel
+# scan loads the factory on its main thread before starting its workers.
+_tl_factory_lock = threading.Lock()
+_tl_factory_ready = False
+
+
+def tl_factory():
+    """pylon's transport-layer factory, loaded without any GenTL producer.
+
+    Every octacam path into pylon goes through here, so the first one loads the
+    factory's transport layers with ``GENICAM_GENTL64_PATH`` hidden (see above).
+    A process that used pylon before octacam did has already loaded them."""
+    global _tl_factory_ready
+    with _tl_factory_lock:
+        if _tl_factory_ready:
+            return pylon.TlFactory.GetInstance()
+        saved = os.environ.pop("GENICAM_GENTL64_PATH", None)
+        try:
+            factory = pylon.TlFactory.GetInstance()
+            factory.EnumerateTls()  # loads every transport layer, the GenTL one too
+        finally:
+            if saved is not None:
+                os.environ["GENICAM_GENTL64_PATH"] = saved
+        _tl_factory_ready = True
+        return factory
+
+
 # `TlFactory.CreateDevice` downloads the camera's XML over USB, so it is a real
 # device access that a sick camera can stall for *minutes*: a camera whose link
 # trains at full SuperSpeed but whose control transfers time out held one test
@@ -705,7 +816,7 @@ def _create_device_timeout() -> float:
     return value
 
 
-def _release_late_device(tl_factory, serial: str) -> Callable[["Future"], None]:
+def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
     """A done-callback that destroys a handle which arrived after the deadline.
 
     We abandoned the camera and reported it as unusable, but the worker thread is
@@ -722,7 +833,7 @@ def _release_late_device(tl_factory, serial: str) -> Callable[["Future"], None]:
         except Exception:
             return  # it failed on its own; there is no handle to release
         try:
-            tl_factory.DestroyDevice(device)
+            factory.DestroyDevice(device)
         except Exception as e:  # best effort — we are already past the deadline
             log.debug("Could not release late handle for camera %s: %s", serial, e)
         else:
@@ -760,8 +871,8 @@ def enumerate_basler(
     deadline once instead of stalling the whole rig for as long as pylon cares to
     retry.
     """
-    tl_factory = pylon.TlFactory.GetInstance()
-    devices = tl_factory.EnumerateDevices()
+    factory = tl_factory()
+    devices = factory.EnumerateDevices()
     if not devices:
         return []
     # Debug, not info: in the auto cascade every tier enumerates in turn, so
@@ -804,7 +915,7 @@ def enumerate_basler(
     )
     fut_to_serial: dict[Future, str] = {}
     for serial, device in wanted:
-        fut_to_serial[pool.submit(tl_factory.CreateDevice, device)] = serial
+        fut_to_serial[pool.submit(factory.CreateDevice, device)] = serial
     pool.shutdown(wait=False)
 
     results: dict[str, object | None] = {}
@@ -889,7 +1000,7 @@ def enumerate_basler(
         )
         # Report it with the "present but unusable" None sentinel, and release
         # the handle if pylon eventually hands one over (see _release_late_device).
-        future.add_done_callback(_release_late_device(tl_factory, serial))
+        future.add_done_callback(_release_late_device(factory, serial))
         results[serial] = None
 
     return [(serial, results.get(serial)) for serial, _device in wanted]

@@ -8,6 +8,7 @@ of range. That is the constraint the rig hit (``Value = 2048 must be equal or
 smaller than Max = 1770`` on Height), and it is reproduced here in pure Python.
 """
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +149,10 @@ def _present(node):
     return node is not None and getattr(node, "readable", True)
 
 
+def _no_stream_nodemap():
+    raise FakeSpinnakerException("no TL stream node map on the fake")
+
+
 @pytest.fixture
 def backend(monkeypatch):
     nodemap = FakeNodeMap()
@@ -175,6 +180,7 @@ def backend(monkeypatch):
         ),
         GetUniqueID=lambda: "17475185",
         IsInitialized=lambda: True,
+        GetTLStreamNodeMap=_no_stream_nodemap,
     )
     b = flir.FlirBackend(cam)
     assert b.serial_number == "17475185"
@@ -266,3 +272,93 @@ def test_save_params_round_trips_the_roi(backend):
     assert values["Height"] == "1024"
     assert values["OffsetX"] == "512"
     assert values["OffsetY"] == "256"
+
+
+# ------------------------------------------------------ incomplete-image log
+class FakeImage:
+    def __init__(self, incomplete=True):
+        self.incomplete = incomplete
+        self.released = False
+
+    def IsIncomplete(self):
+        return self.incomplete
+
+    def GetTimeStamp(self):
+        return 7
+
+    def Release(self):
+        self.released = True
+
+
+class _Records(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record):
+        self.records.append(record)
+
+
+@pytest.fixture
+def octacam_log():
+    """Every record the octacam logger emits, debug included."""
+    handler = _Records()
+    logger = logging.getLogger("octacam")
+    level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    yield handler.records
+    logger.removeHandler(handler)
+    logger.setLevel(level)
+
+
+def _grab(backend, monkeypatch, *, record):
+    """Start a (native-free) grab and return a fetch of one incomplete image."""
+    monkeypatch.setattr(backend, "_begin_acquisition", lambda *args, **kwargs: None)
+    if record:
+        backend.start_grab_record()
+    else:
+        backend.start_grab_preview()
+    cam = SimpleNamespace(GetNextImage=lambda _timeout: FakeImage())
+    return lambda: backend._fetch_image(cam, 100, lambda: False)
+
+
+def _incomplete_logs(records):
+    return [(r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()]
+
+
+def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeypatch, octacam_log):
+    # A saturated bus delivers incomplete images continuously: every one is
+    # counted, but a record grab logs only its first until the report interval.
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
+    fetch = _grab(backend, monkeypatch, record=True)
+    assert all(fetch() is None for _ in range(250))
+    assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 250}
+    logs = _incomplete_logs(octacam_log)
+    assert len(logs) == 1 and logs[0][0] == logging.WARNING
+    # A new grab logs its own first one again; the total runs on.
+    fetch = _grab(backend, monkeypatch, record=True)
+    assert fetch() is None and fetch() is None
+    assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 252}
+    assert len(_incomplete_logs(octacam_log)) == 2
+
+
+def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, octacam_log):
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
+    fetch = _grab(backend, monkeypatch, record=False)
+    for _ in range(5):
+        fetch()
+    logs = _incomplete_logs(octacam_log)
+    assert logs and all(level == logging.DEBUG for level, _ in logs)
+    assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 5}
+
+
+def test_incomplete_image_reports_carry_the_grabs_running_total(backend, monkeypatch, octacam_log):
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
+    fetch = _grab(backend, monkeypatch, record=True)
+    for _ in range(3):
+        fetch()
+    messages = [m for _, m in _incomplete_logs(octacam_log)]
+    assert "delivered an incomplete image" in messages[0]
+    assert "2 incomplete images discarded in this grab (1 since" in messages[1]
+    assert "3 incomplete images discarded in this grab (1 since" in messages[2]

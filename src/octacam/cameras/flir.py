@@ -23,6 +23,7 @@ Mapping notes vs. the Basler backend:
 
 import atexit
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -47,6 +48,37 @@ except ImportError:  # pragma: no cover - exercised only on a non-FLIR box
 log = logging.getLogger("octacam")
 
 TRIGGER_READY_TIMEOUT_MS = 1000
+
+# Spinnaker TL-stream counters a recording reports (lost at the host, dropped
+# from the output queue, delivered incomplete, delivered at all).
+STREAM_STATISTICS = (
+    "StreamLostFrameCount",
+    "StreamDroppedFrameCount",
+    "StreamIncompleteFrameCount",
+    "StreamDeliveredFrameCount",
+)
+# Stream buffers for a record grab (capped by StreamBufferCountMax): ~1 s of
+# frames at 125 fps against the SDK default of 9, so a grab thread stalled for a
+# GC pause or a disk hiccup delays frames instead of losing them.
+RECORD_STREAM_BUFFERS = 128
+# A camera on a saturated USB bus delivers incomplete images continuously, so
+# only a grab's first is logged, then its running total at most this often (a
+# preview's at debug: dropped frames of a live view). The count itself is exact.
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
+
+
+def _set_stream_buffers(spin, snodemap, buffers: int, serial: str) -> None:
+    """Best-effort: a manual stream buffer count of ``buffers`` (≤ the max)."""
+    try:
+        mode = spin.CEnumerationPtr(snodemap.GetNode("StreamBufferCountMode"))
+        manual = mode.GetEntryByName("Manual")
+        if spin.IsAvailable(manual) and spin.IsWritable(mode):
+            mode.SetIntValue(manual.GetValue())
+        count = spin.CIntegerPtr(snodemap.GetNode("StreamBufferCountManual"))
+        if spin.IsAvailable(count) and spin.IsWritable(count):
+            count.SetValue(int(min(buffers, count.GetMax())))
+    except spin.SpinnakerException as e:
+        log.debug("Could not size the stream buffers of camera %s: %s", serial, e)
 
 # Spinnaker node interface types differ per parameter; the rest are floats.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
@@ -184,6 +216,14 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._cam: Any = cam
         self._serial = _read_serial(cam)
         self._original_trigger_source: str | None = None
+        # Images the SDK delivered incomplete (discarded: never corrupt data);
+        # counted so a recording can report them instead of losing them silently.
+        self._incomplete_images = 0
+        # The current grab's share, for the rate-limited log (_count_incomplete).
+        self._grab_is_record = False
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+        self._incomplete_logged_at = 0.0
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware execute moves into retrieve() on the grab
         # thread so the shared trigger timer never blocks on this camera.
@@ -520,7 +560,27 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     # ------------------------------------------------------------- grabbing
 
-    def _begin_acquisition(self, buffer_mode: str) -> None:
+    def stream_statistics(self) -> dict[str, int]:
+        """Spinnaker's transport counters (see STREAM_STATISTICS) plus the
+        incomplete images this backend discarded."""
+        spin = _spin()
+        out = {"IncompleteImagesDiscarded": self._incomplete_images}
+        if self._cam is None:
+            return out
+        try:
+            snodemap = self._cam.GetTLStreamNodeMap()
+        except spin.SpinnakerException:
+            return out
+        for name in STREAM_STATISTICS:
+            node = spin.CIntegerPtr(snodemap.GetNode(name))
+            try:
+                if spin.IsAvailable(node) and spin.IsReadable(node):
+                    out[name] = int(node.GetValue())
+            except spin.SpinnakerException:
+                continue
+        return out
+
+    def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
         spin = _spin()
         try:
             self._set_enum("AcquisitionMode", "Continuous")
@@ -532,6 +592,8 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             entry = handling.GetEntryByName(buffer_mode)
             if spin.IsAvailable(entry) and spin.IsReadable(entry):
                 handling.SetIntValue(entry.GetValue())
+            if buffers:
+                _set_stream_buffers(spin, snodemap, buffers, self._serial)
             self._cam.BeginAcquisition()
         except spin.SpinnakerException as e:
             # Name the camera (mirrors the Basler "insufficient resources" hint).
@@ -540,13 +602,55 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
+        self._begin_incomplete_log(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
         # Spinnaker has no WaitForFrameTriggerReady; the camera arms on the
         # first software trigger, so report ready once acquisition has begun.
-        self._begin_acquisition("OldestFirst")
+        # (A GS3 still ignores its first two hardware triggers after this — the
+        # recording primes the cameras before its train.) Record with a deep
+        # buffer pool: the SDK default (9) is 72 ms at 125 fps, so a grab thread
+        # stalled longer than that would lose frames at the host.
+        self._begin_incomplete_log(record=True)
+        self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
+
+    def _begin_incomplete_log(self, *, record: bool) -> None:
+        """Start a grab's incomplete-image log afresh (see _count_incomplete)."""
+        self._grab_is_record = record
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+
+    def _count_incomplete(self) -> None:
+        """Count a discarded incomplete image. The grab's first is logged (a
+        warning in a record grab, debug in a preview), then its running total at
+        most every INCOMPLETE_REPORT_INTERVAL_S, so a saturated bus does not log
+        at the frame rate; stream_statistics reports the exact count."""
+        self._incomplete_images += 1
+        self._grab_incomplete += 1
+        now = time.monotonic()
+        first = self._grab_incomplete == 1
+        if not first and now - self._incomplete_logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._grab_is_record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial, self._grab_incomplete,
+                self._grab_incomplete - self._grab_incomplete_logged,
+            )
+        self._grab_incomplete_logged = self._grab_incomplete
+        self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
         # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
@@ -563,8 +667,11 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     ) -> Frame | None:
         spin = _spin()
         # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
+        # trigger and fetch exactly one frame on this camera's own grab thread —
+        # or, while a fired trigger's image is still due, only fetch (see
+        # _trigger_handoff: a late image must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         cam = self._cam
         if cam is None or not self._grabbing:
@@ -573,22 +680,33 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # grab loop does not wrap retrieve() in try/except, so a stop-race or a
         # trigger failure must return None, never raise — a lost trigger is one
         # lost frame, the same as the GetNextImage timeout below.
-        try:
-            spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
-        except spin.SpinnakerException:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
+        if fire:
+            try:
+                spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
+            except spin.SpinnakerException:
+                self._trigger_unfired()
+                return None
+        return self._fetch_image(
+            cam, self._fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
 
-    def _fetch_image(self, cam, timeout_ms, wants_array) -> Frame | None:
+    def _fetch_image(
+        self, cam, timeout_ms, wants_array, answers_trigger: bool = False
+    ) -> Frame | None:
         # Fetch exactly one image; never raises (a timeout or incomplete frame is
-        # one lost frame, as the grab loop expects).
+        # one lost frame, as the grab loop expects). ``answers_trigger``: the
+        # software-trigger path, where any image the SDK hands over answers the
+        # oldest fired trigger.
         spin = _spin()
         try:
             image = cam.GetNextImage(timeout_ms)
         except spin.SpinnakerException:
             return None  # timeout: the analogue of pylon's empty result
+        if answers_trigger:
+            self._trigger_answered(_complete_timestamp(image))
         try:
             if image.IsIncomplete():
+                self._count_incomplete()
                 return None
             timestamp = image.GetTimeStamp()
             array = None
@@ -694,6 +812,15 @@ def enumerate_flir(
             continue
         out.append((serial, cam))
     return out
+
+
+def _complete_timestamp(image) -> int | None:
+    """A complete image's camera timestamp (ns), for pairing it with its
+    trigger; None for an incomplete one. Never raises."""
+    try:
+        return None if image.IsIncomplete() else int(image.GetTimeStamp())
+    except Exception:
+        return None
 
 
 def teardown() -> None:

@@ -89,6 +89,28 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 
+## `check`
+
+```bash
+octacam check [PATHS...]
+```
+
+Screen recording folders — or whole directory trees, searched for
+`recording_summary.json` — for missed trigger pulses, unequal frame counts, a
+start offset between cameras, late exposures and camera-clock jumps. Reads each
+recording's summary and `timestamps.npz` and never modifies anything: new
+recordings are checked from the recorder's own accounting (the summary alone
+suffices, and its `sync` verdict counts), recordings made before octacam counted
+pulses are re-derived from their hardware timestamps. Exits 1 if any recording
+has a problem, including one it cannot read. See
+[Checking recordings](../guide/recording.md#checking-recordings).
+
+| Option | Purpose |
+| --- | --- |
+| `--fps` | Trigger rate to check against (default: each summary's `fps_target`). |
+| `--quiet`, `-q` | Only list recordings with problems. |
+| `--json` | Print machine-readable results. |
+
 ## `flash`
 
 ```bash

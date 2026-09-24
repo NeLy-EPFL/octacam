@@ -22,6 +22,8 @@ from typing import ClassVar, Protocol
 
 import numpy as np
 
+from octacam.cameras._trigger_handoff import PRIMING_TRIGGER
+from octacam.pulses import Assignment, PulseClock, PulseTracker
 from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.writer import AsyncFrameWriter, VideoFormat
 
@@ -30,12 +32,22 @@ log = logging.getLogger("octacam")
 GRAB_TIMEOUT_MS = 100
 # Default depth of each camera's writer queue (frames buffered between the grab
 # loop and the encoder). The grab loop never blocks: a frame that arrives while
-# the queue is full is dropped. The bound must absorb a *transient* encoder
-# stall (e.g. several GPU NVENC sessions warming up together) without dropping,
-# while capping worst-case memory (depth x frame bytes x cameras). 64 frames is
-# ~0.8 s of headroom at 80 fps; rigs can override it via record.writer_queue_size
-# (raise it for high camera counts / bursty encoders, lower it to save memory).
+# the queue is full is refused (and filled, see Camera._record_loop). The bound
+# must absorb a *transient* encoder stall (e.g. several GPU NVENC sessions
+# warming up together) without refusing, while capping worst-case memory (depth
+# x frame bytes x cameras). 64 frames is ~0.8 s of headroom at 80 fps; rigs can
+# override it via record.writer_queue_size (raise it for high camera counts /
+# bursty encoders, lower it to save memory).
 WRITER_QUEUE_SIZE = 64
+# After a recording's priming pulses (see Camera.arm_counting), a frame stamped
+# within this long — or within PRIME_STRAGGLER_PERIODS trigger periods, if that
+# is longer — of the last priming frame is a priming straggler, not the
+# recording's first pulse. The period term catches a priming frame still
+# buffered at a low fps, a whole period after the one before it; both stay below
+# the controller's pause between the last priming pulse and the train's first
+# (PRIME_SETTLE_S, and at least four periods).
+PRIME_STRAGGLER_NS = 50_000_000
+PRIME_STRAGGLER_PERIODS = 2.5
 # Upper bound on the per-frame timestamp series kept during *preview* (the GUI's
 # idle steady state, never periodically restarted): preview only needs the last
 # few for the rolling fps readout, so the series is trimmed to this many instead
@@ -402,11 +414,39 @@ class Camera:
         # cycle) against itself; the preview loop stays lock-free.
         self._param_lock = threading.RLock()
         self._thread: threading.Thread | None = None
+        # The per-video-frame series of the last recording, all parallel: the
+        # frame's timestamp (for a filled frame, when its pulse was due), whether
+        # it is a fill rather than an image of its own pulse (``_dropped``), and
+        # of those whether the camera never delivered that pulse at all
+        # (``_missed``, vs. a frame the writer queue refused), its trigger pulse,
+        # and the host wall-clock time it was delivered (0 for a fill).
         self._timestamps: list[int] = []
         self._dropped: list[bool] = []
+        self._missed: list[bool] = []
+        self._pulse_index: list[int] = []
+        self._arrival_ns: list[int] = []
         self._dropped_count = 0
-        # Frames whose backend timestamp was 0 and fell back to host time_ns.
-        # A per-recording provenance signal (see timestamp_source in the summary):
+        self._writer_dropped = 0
+        # Pulses whose frame the writer refused once it was overloaded: skipped,
+        # not filled, so they have no row and no video frame (see _record_loop).
+        self._writer_skipped: list[int] = []
+        # Pulse accounting of the last recording (see octacam.pulses). Frames
+        # that belong to no pulse of the train are discarded as extra; frames
+        # delivered while the recording primes the cameras, before counting
+        # starts, are discarded as primed.
+        self._tracker: PulseTracker | None = None
+        self._pulse_clock: PulseClock | None = None
+        self._extra_frames = 0
+        self._primed_frames = 0
+        self._unclocked_frames = 0
+        self._armed = threading.Event()
+        self._armed.set()
+        self._fill_to: int | None = None
+        self._stream_at_start: dict[str, int] = {}
+        self._stream_at_stop: dict[str, int] = {}
+        # Rows whose timestamp the camera did not supply: frames whose backend
+        # timestamp was 0, and fills time-stamped from such a frame. A
+        # per-recording provenance signal (see timestamp_source in the summary):
         # normally 0 (all hardware) or == frames (host-only backend like
         # pycameleon); anything in between flags a stray-zero anomaly. (The fake
         # deliberately supplies a nonzero host-derived timestamp, so it never
@@ -465,12 +505,102 @@ class Camera:
 
     @property
     def dropped_count(self) -> int:
+        """Video frames of the last recording that are not an image of their own
+        pulse: pulses the camera missed plus frames the writer refused — each is
+        filled with the previous frame so the video keeps one frame per pulse
+        (the :attr:`writer_skipped` frames are not filled, so not counted)."""
         return self._dropped_count
 
     @property
     def dropped_indices(self) -> list[int]:
-        """Frame indices that were dropped (encoder/queue could not accept)."""
+        """Video frame indices that are fills (see :attr:`dropped_count`)."""
         return [i for i, dropped in enumerate(self._dropped) if dropped]
+
+    @property
+    def missed_count(self) -> int:
+        """How many trigger pulses the current/last recording has missed (cheap:
+        for live telemetry)."""
+        return len(self._tracker.missed) if self._tracker is not None else 0
+
+    @property
+    def stream_statistics(self) -> dict[str, int]:
+        """The SDK's own transport counters over the last recording (lost,
+        incomplete, ... frames), where the backend reports them; ``{}`` otherwise.
+        A missed pulse with none of these is a trigger the camera never exposed."""
+        start, stop = self._stream_at_start, self._stream_at_stop
+        # A counter the SDK restarts at acquisition start reads below its start
+        # value; its stop value is then already the recording's own count.
+        return {k: v - start.get(k, 0) if v >= start.get(k, 0) else v for k, v in stop.items()}
+
+    @property
+    def writer_dropped(self) -> int:
+        """Frames the camera delivered but the writer queue could not accept,
+        each filled with the previous frame (see :attr:`writer_skipped` for the
+        ones refused once the writer was overloaded)."""
+        return self._writer_dropped
+
+    @property
+    def writer_skipped(self) -> int:
+        """Frames the writer refused after it fell behind for good (it had refused
+        more than its queue size before catching up): skipped rather than filled,
+        so the video — and the per-frame series — have no frame for their pulses
+        and end that many frames short of the train."""
+        return len(self._writer_skipped)
+
+    @property
+    def writer_skipped_pulses(self) -> list[int]:
+        """The pulses of the :attr:`writer_skipped` frames."""
+        return list(self._writer_skipped)
+
+    @property
+    def missed_pulses(self) -> list[int]:
+        """Trigger pulses of the last recording the camera delivered no frame for."""
+        return list(self._tracker.missed) if self._tracker is not None else []
+
+    @property
+    def late_pulses(self) -> list[int]:
+        """Pulses whose frame was exposed markedly later than the trigger clock
+        predicts (e.g. a camera firing on the trigger pulse's falling edge)."""
+        return list(self._tracker.late) if self._tracker is not None else []
+
+    @property
+    def extra_frames(self) -> int:
+        """Frames discarded because they belong to no pulse of the train."""
+        return self._extra_frames
+
+    @property
+    def primed_frames(self) -> int:
+        """Frames delivered while the cameras were primed, before counting."""
+        return self._primed_frames
+
+    @property
+    def pulse_clock(self) -> PulseClock | None:
+        return self._pulse_clock
+
+    @property
+    def pulses_complete(self) -> bool:
+        """True once every pulse of a counted train is accounted for."""
+        return self._tracker is not None and self._tracker.complete
+
+    @property
+    def clock_mismatch(self) -> bool:
+        """True when the frames did not follow the trigger clock's period."""
+        return self._tracker is not None and self._tracker.clock_mismatch
+
+    @property
+    def timestamp_glitches(self) -> list[dict]:
+        """Camera-clock jumps the pulse accounting corrected (see octacam.pulses)."""
+        if self._tracker is None:
+            return []
+        return [
+            {"pulse": g.pulse, "kind": g.kind, "jump_ns": g.jump_ns}
+            for g in self._tracker.glitches
+        ]
+
+    @property
+    def unclocked_frames(self) -> int:
+        """Frames placed without evidence of their pulse (no hardware timestamp)."""
+        return self._unclocked_frames
 
     @property
     def frame_timestamps(self) -> list[int]:
@@ -481,14 +611,32 @@ class Camera:
 
     @property
     def frame_dropped(self) -> list[bool]:
-        """Per-frame dropped flags of the last recording (parallel to
+        """Per-frame fill flags of the last recording (parallel to
         :attr:`frame_timestamps`). A copy."""
         return list(self._dropped)
 
     @property
+    def frame_missed(self) -> list[bool]:
+        """Per-frame: the camera delivered no image for this frame's pulse."""
+        return list(self._missed)
+
+    @property
+    def frame_pulse_index(self) -> list[int]:
+        """Per-frame trigger pulse index (``frame k`` is pulse ``k`` whenever the
+        train is filled)."""
+        return list(self._pulse_index)
+
+    @property
+    def frame_arrival_ns(self) -> list[int]:
+        """Per-frame host wall-clock delivery time (0 for a filled frame)."""
+        return list(self._arrival_ns)
+
+    @property
     def host_fallback_count(self) -> int:
-        """How many of the recorded frames fell back to host time because the
-        backend reported no hardware timestamp."""
+        """How many of the recorded frames carry a timestamp the camera did not
+        supply: frames the backend reported none for (stamped with host time, or
+        — on a camera that otherwise has hardware timestamps — with when its
+        pulse was due), and fills time-stamped from such a frame."""
         return self._host_fallback_count
 
     @property
@@ -503,7 +651,8 @@ class Camera:
         if len(timestamps) < 2:
             return 0.0
         span_ns = timestamps[-1] - timestamps[0]
-        return (len(timestamps) - 1) * 1e9 / span_ns if span_ns else 0.0
+        # A span that is not positive (a clock that jumped back) has no rate.
+        return (len(timestamps) - 1) * 1e9 / span_ns if span_ns > 0 else 0.0
 
     @property
     def recorded_frame_size(self) -> tuple[int, int] | None:
@@ -925,10 +1074,8 @@ class Camera:
         else:
             mode = "software"
             self._backend.begin_software_trigger_preview()
-        self._timestamps.clear()
-        self._dropped.clear()
-        self._dropped_count = 0  # so preview never shows a stale recording count
-        self._host_fallback_count = 0
+        self._reset_series()  # so preview never shows a stale recording count
+        self._configure_trigger_period(None)  # no recording counts preview triggers
         self._backend.start_grab_preview()
         self._thread = threading.Thread(
             target=self._preview_loop, args=(mode,), daemon=True
@@ -944,6 +1091,8 @@ class Camera:
         software_trigger: bool = True,
         queue_size: int = WRITER_QUEUE_SIZE,
         max_frames: int | None = None,
+        pulse_clock: PulseClock | None = None,
+        hold: bool = False,
     ) -> bool:
         """Start recording; returns True iff the record loop was launched.
 
@@ -957,18 +1106,37 @@ class Camera:
         record loop on it (``retrieve``) would capture nothing — external recording
         must use the un-gated ``retrieve_freerun`` fetch instead. ``queue_size``
         bounds the writer queue that buffers frames between the grab loop and the
-        encoder (see :data:`WRITER_QUEUE_SIZE`). ``max_frames`` caps the grab loop
-        at a fixed number of frames so every camera captures the same count (None
-        = uncapped; see :meth:`_record_loop`).
+        encoder (see :data:`WRITER_QUEUE_SIZE`).
+
+        ``pulse_clock`` is the trigger train the recording is clocked by: every
+        frame is assigned to its pulse (see :mod:`octacam.pulses`), a missed pulse
+        is filled with the previous frame when the clock says so, and the loop
+        ends once the train's last pulse is accounted for. Without one, a clock is
+        derived from ``fps`` and ``max_frames`` (a legacy fixed frame count).
+        ``hold`` discards every frame until :meth:`arm_counting` — the recording
+        primes the cameras with sacrificial triggers first.
         """
         self._stop_flag.clear()
         self._started = False
         if not self._backend.is_open():
             return False
-        self._timestamps.clear()
-        self._dropped.clear()
-        self._dropped_count = 0
-        self._host_fallback_count = 0
+        if pulse_clock is None:
+            pulse_clock = PulseClock(
+                period_ns=int(round(1e9 / fps)) if fps > 0 else 0,
+                count=max_frames,
+                source="software" if software_trigger else "external",
+                fill=max_frames is not None,
+            )
+        self._reset_series()
+        self._pulse_clock = pulse_clock
+        self._tracker = PulseTracker(pulse_clock)
+        self._fill_to = None
+        self._stream_at_start = {}
+        self._stream_at_stop = {}
+        if hold:
+            self._armed.clear()
+        else:
+            self._armed.set()
 
         bake = record_form == "display" and not self.display_transform.is_identity
         transform = self.display_transform if bake else None
@@ -987,6 +1155,15 @@ class Camera:
         # failure below so a failed start (e.g. "insufficient resources")
         # cannot orphan the child process and its threads.
         try:
+            # A software train's period sets how long a trigger may await its
+            # image, and when a pending one is too stale to fire (see
+            # _trigger_handoff.STALE_TRIGGER_S).
+            software_period = (
+                pulse_clock.period_ns / 1e9
+                if software_trigger and pulse_clock is not None and pulse_clock.period_ns
+                else None
+            )
+            self._configure_trigger_period(software_period)
             if not self._backend.start_grab_record():
                 log.error(
                     "Failed to start grabbing for recording on camera %s",
@@ -997,16 +1174,41 @@ class Camera:
         except Exception:
             self._video_writer.close()
             raise
+        # Baseline the SDK's transport counters once the record acquisition has
+        # started (no trigger has fired yet): some counters restart with each
+        # acquisition, the others run on, and both then diff to this recording's.
+        self._stream_at_start = self._read_stream_statistics()
 
         self._thread = threading.Thread(
             target=self._record_loop,
-            args=(transform, software_trigger, max_frames),
+            args=(transform, software_trigger),
             daemon=True,
         )
         self._thread.start()
         return True
 
-    def stop(self) -> None:
+    def _configure_trigger_period(self, period_s: float | None) -> None:
+        configure = getattr(self._backend, "configure_trigger_period", None)
+        if callable(configure):
+            configure(period_s)
+
+    def arm_counting(self) -> None:
+        """Start counting pulses: the recording's first trigger follows.
+
+        Ends the priming ``hold`` of :meth:`start_record` — frames delivered
+        before this were answers to sacrificial triggers and are discarded — and
+        restarts a software-trigger sequence so the first counted trigger is 0."""
+        restart = getattr(self._backend, "restart_trigger_sequence", None)
+        if callable(restart):
+            restart()
+        self._armed.set()
+
+    def stop(self, fill_to: int | None = None) -> None:
+        """Stop the grab loop. ``fill_to`` (a completed train's pulse count) has
+        a recording pad the video with repeats up to that many frames, so a
+        camera that missed the train's last pulses still ends aligned."""
+        if fill_to is not None:
+            self._fill_to = fill_to
         self._stop_flag.set()
 
     def join(self) -> None:
@@ -1022,10 +1224,12 @@ class Camera:
     # ------------------------------------------------------- grab loop bodies
 
     def _store_timestamp(self, timestamp: int) -> None:
+        self._store_timestamp_fallback(timestamp)
+        self._timestamps.append(timestamp or time.time_ns())
+
+    def _store_timestamp_fallback(self, timestamp: int) -> None:
         if not timestamp:  # backend supplied no hardware timestamp for this frame
             self._host_fallback_count += 1
-            timestamp = time.time_ns()
-        self._timestamps.append(timestamp)
 
     def _update_resulting_fps(self, n_frames: int = 6) -> None:
         timestamps = self._timestamps
@@ -1035,7 +1239,7 @@ class Camera:
         last = len(timestamps) - 1
         start = last - n_frames if last > n_frames else 0
         delta_ns = timestamps[last] - timestamps[start]
-        self._resulting_fps = (last - start) * 1e9 / delta_ns if delta_ns else 0.0
+        self._resulting_fps = (last - start) * 1e9 / delta_ns if delta_ns > 0 else 0.0
 
     def _preview_loop(self, mode: str = "software") -> None:
         backend = self._backend
@@ -1066,13 +1270,124 @@ class Camera:
                     self._update_resulting_fps()
         backend.stop_grab()
 
+    def _read_stream_statistics(self) -> dict[str, int]:
+        reader = getattr(self._backend, "stream_statistics", None)
+        if not callable(reader):
+            return {}
+        try:
+            stats = reader()
+        except Exception as e:  # diagnostics must never break a recording
+            log.debug("Could not read stream statistics of %s: %s", self.serial_number, e)
+            return {}
+        if not isinstance(stats, dict):
+            return {}
+        return {str(k): int(v) for k, v in stats.items() if isinstance(v, int)}
+
+    def _reset_series(self) -> None:
+        self._timestamps.clear()
+        self._dropped.clear()
+        self._missed.clear()
+        self._pulse_index.clear()
+        self._arrival_ns.clear()
+        self._dropped_count = 0
+        self._writer_dropped = 0
+        self._writer_skipped.clear()
+        self._host_fallback_count = 0
+        self._extra_frames = 0
+        self._primed_frames = 0
+        self._unclocked_frames = 0
+        self._tracker = None
+
+    def _append_row(
+        self,
+        timestamp: int,
+        pulse: int,
+        *,
+        missed: bool,
+        dropped: bool,
+        arrival: int,
+        unstamped: bool = False,
+    ) -> None:
+        """One video frame's row. ``unstamped``: the camera did not supply its
+        timestamp (see :attr:`host_fallback_count`)."""
+        self._timestamps.append(timestamp)
+        self._pulse_index.append(pulse)
+        self._missed.append(missed)
+        self._dropped.append(dropped)
+        self._arrival_ns.append(arrival)
+        if dropped:
+            self._dropped_count += 1
+        if unstamped:
+            self._host_fallback_count += 1
+
+    @staticmethod
+    def _fill_stamp(
+        tracker: PulseTracker, pulse: int, anchor: tuple[int, int, bool]
+    ) -> tuple[int, bool]:
+        """The timestamp of a fill for ``pulse``: when that pulse was due.
+
+        On the camera's clock where the tracker follows it; otherwise (a pulse
+        index from the software-trigger sequence, unclocked frames) a whole
+        number of periods from ``anchor`` — (timestamp, pulse, unstamped) of a
+        delivered frame. Returns it with whether it inherits an unstamped
+        anchor. Never 0 or negative: a timestamp is a positive clock reading.
+        """
+        due = tracker.expected_ts(pulse)
+        if due is not None:
+            return max(due, 1), False
+        stamp, at_pulse, unstamped = anchor
+        # Integer offset from the anchor: a host-time stamp (~1.8e18 ns) is past
+        # float precision.
+        offset = int(round((pulse - at_pulse) * tracker.period_ns))
+        return max(stamp + offset, 1), unstamped
+
+    def _place_frame(
+        self, tracker: PulseTracker, index: int | None, timestamp: int, host_ns: int
+    ) -> tuple[Assignment, int | None]:
+        """Assign a delivered frame to its pulse; returns ``(assignment, stamp)``,
+        ``stamp`` being the timestamp its row carries (None: host arrival time).
+
+        ``index`` is the software-trigger sequence number of the trigger the frame
+        answers (exact), else the frame is placed from its camera ``timestamp``.
+        """
+        if index is not None:
+            return tracker.assign_index(index), (timestamp or None)
+        if timestamp:
+            if tracker.last_pulse is not None and tracker.expected_ts(tracker.next_pulse) is None:
+                # The first timed frame after frames placed without a timestamp:
+                # the tracker anchors the camera clock at its first_pulse, so
+                # point that at the pulse this frame is due at, not the train's
+                # first (which would restart the count and shift every frame).
+                tracker.first_pulse = tracker.next_pulse
+            return tracker.assign(timestamp, host_ns), timestamp
+        self._unclocked_frames += 1
+        due = tracker.expected_ts(tracker.next_pulse)
+        if due is not None and due > 0:
+            # A stray frame without a timestamp on a camera that has them: take
+            # it as the next pulse on the camera's own clock, stamped when that
+            # pulse was due, so the next timed frame is measured from an anchor
+            # that agrees with the pulse this one was given (placing it as the
+            # next pulse while leaving the anchor on the frame before made the
+            # next interval read as two periods: an invented miss, and every
+            # later frame a pulse late). Not by host arrival: that is no clock —
+            # buffered frames arrive bunched, a delayed delivery reads as a
+            # whole period, and the timed frame after it would then be discarded
+            # as extra. If the camera did miss the pulse before, the error stays
+            # local: this one frame is labeled a pulse early.
+            return tracker.assign(due, host_ns), due
+        # No hardware timestamp at all (a host-clocked backend): nothing places
+        # the frame on the trigger clock, so take it as the next pulse.
+        return tracker.assign_index(tracker.next_pulse), None
+
     def _record_loop(
         self,
         transform: DisplayTransform | None = None,
         software_trigger: bool = True,
-        max_frames: int | None = None,
     ) -> None:
         backend = self._backend
+        tracker = self._tracker
+        clock = self._pulse_clock
+        assert tracker is not None and clock is not None
         # With an external trigger the frames arrive on their own; the
         # software-trigger hand-off (retrieve) would block forever waiting for a
         # pending count that only the software trigger timer bumps. Fetch
@@ -1086,17 +1401,42 @@ class Camera:
             retrieve = getattr(backend, "retrieve_external", None) or (
                 backend.retrieve_freerun
             )
-        frame_count = 0
+        # Video frames owed to the file and not yet queued: fills for missed
+        # pulses (when the clock fills) and frames the writer refused. They ride
+        # on the next queued frame (or on close) so the video keeps exactly one
+        # frame per pulse.
+        owed = 0
+        writer = self._video_writer
+        assert writer is not None
+        # Writer overload. Filling a refused frame is right for a transient
+        # encoder stall, which the queue absorbs and the encoder then catches up
+        # on. But a fill costs the encoder as much as a real frame, so under a
+        # sustained shortfall (an encoder or disk slower than the camera) the
+        # fills never drain: each queued frame carries more of them, the rate of
+        # real frames the writer accepts decays toward zero, and close() is left
+        # to encode the whole backlog. So once more than a whole queue's worth of
+        # frames has been refused since the writer last caught up (its backlog,
+        # fills included, back down to half a queue), the writer is overloaded
+        # for the rest of the take: a refused frame is skipped — no video frame,
+        # no row — and counted in writer_skipped. Camera-side misses are still
+        # filled. (Not for a writer that failed outright: nothing reaches its
+        # file either way, and its rows are reconciled at the end.)
+        queue_size = writer.max_queue_size
+        refused_run = 0
+        overloaded = False
+        last_primed_ts: int | None = None
+        straggler_ns = max(
+            PRIME_STRAGGLER_NS, int(PRIME_STRAGGLER_PERIODS * clock.period_ns)
+        )
+        # (timestamp, pulse, unstamped) of the last frame delivered in the
+        # recording: what a fill is time-stamped from when the tracker cannot
+        # place its pulse on the camera clock (see _fill_stamp).
+        anchor: tuple[int, int, bool] | None = None
         while not self._stop_flag.is_set() and backend.is_grabbing():
-            # Stop at the intended frame count so every camera captures the same
-            # number: octacam clocks software/managed triggers for a fixed number
-            # of pulses (max_frames = round(fps x duration)), but each camera's
-            # grab loop is independent, so without this the teardown race lets one
-            # camera retrieve a trailing pulse the others don't (e.g. 801 vs 800).
-            # A camera that can't keep up never reaches max_frames and is bounded
-            # instead by the monitor's deadline (the existing short-capture path).
-            # max_frames is None for a truly external trigger (unknown pulse count).
-            if max_frames is not None and frame_count >= max_frames:
+            # Stop on the pulse count, not a frame count: the train's last pulse
+            # has its frame (or was accounted missed), so every camera ends on
+            # the same pulse whatever it missed on the way.
+            if tracker.complete:
                 break
             frame = retrieve(GRAB_TIMEOUT_MS, _ALWAYS)
             if frame is None:
@@ -1104,53 +1444,193 @@ class Camera:
             array, timestamp = frame
             if array is None:  # record always requests the array; defensive
                 continue
-            self._store_timestamp(timestamp)
+            host_ns = time.monotonic_ns()
+            if not self._armed.is_set():
+                # An answer to a priming trigger (the controller primes the
+                # cameras before the train: a camera may ignore the first
+                # triggers after acquisition start), not part of the recording.
+                self._primed_frames += 1
+                last_primed_ts = timestamp or last_primed_ts
+                continue
+            # Read after the armed check: an image answered before the sequence
+            # restart reports PRIMING_TRIGGER however late this read comes.
+            index = getattr(backend, "last_trigger_index", None)
+            if index is not None and index < 0:
+                # A software-trigger image that answers no trigger of the
+                # recording: a priming trigger's, arriving after counting
+                # started, or one the hand-off already gave up on.
+                if index == PRIMING_TRIGGER:
+                    self._primed_frames += 1
+                else:
+                    self._extra_frames += 1
+                continue
+            if (
+                index is None
+                and timestamp
+                and last_primed_ts is not None
+                and 0 <= timestamp - last_primed_ts < straggler_ns
+            ):
+                # A priming frame still buffered when counting started (only its
+                # timestamp tells: a hardware-triggered camera has no sequence).
+                self._primed_frames += 1
+                last_primed_ts = timestamp
+                continue
+            arrival = time.time_ns()
+            assignment, placed = self._place_frame(tracker, index, timestamp, host_ns)
+            stamp = placed or arrival
+            if assignment.extra:
+                if clock.fill:
+                    self._extra_frames += 1
+                    continue
+                # An external clock octacam cannot see: report, never discard.
+                pulse = tracker.last_pulse if tracker.last_pulse is not None else 0
+            else:
+                pulse = assignment.pulse
+                assert pulse is not None
+            if clock.fill and assignment.missed:
+                # Fills are stamped from the last delivered frame; a leading miss
+                # counts back from this one.
+                ref = anchor if anchor is not None else (stamp, pulse, not timestamp)
+                for missed_pulse in assignment.missed:
+                    due, unstamped = self._fill_stamp(tracker, missed_pulse, ref)
+                    self._append_row(
+                        due,
+                        missed_pulse,
+                        missed=True,
+                        dropped=True,
+                        arrival=0,
+                        unstamped=unstamped,
+                    )
+                owed += len(assignment.missed)
+                log.warning(
+                    "Camera %s missed trigger pulse(s) %s; filled with the "
+                    "previous frame",
+                    self.serial_number,
+                    _format_pulses(assignment.missed),
+                )
+            anchor = (stamp, pulse, not timestamp)
 
             # Bake the display orientation into the recorded frame when asked;
             # the preview still gets the raw array (the browser applies the
             # transform via CSS), and identity/sensor recordings pay nothing.
             to_write = apply_display_transform(array, transform) if transform else array
-            written = self._video_writer.write(to_write)  # pyright: ignore[reportOptionalMemberAccess]
-            if not written:
-                self._dropped_count += 1
+            written = writer.write(to_write, fill_before=owed)
+            skipped = False
+            if written:
+                owed = 0
+            elif writer.failed or (not overloaded and refused_run < queue_size):
+                owed += 1
+                refused_run += 1
+                self._writer_dropped += 1
                 log.warning(
-                    "Frame %d dropped for camera %s",
-                    frame_count,
+                    "Frame for pulse %d dropped for camera %s (writer queue full); "
+                    "it will be filled with the previous frame",
+                    pulse,
                     self.serial_number,
                 )
-            self._dropped.append(not written)
+            else:
+                if not overloaded:
+                    overloaded = True
+                    log.error(
+                        "Camera %s: the video writer cannot keep up — %d frames "
+                        "refused before it caught up. From pulse %d on, a frame it "
+                        "refuses is skipped instead of filled: this camera's video "
+                        "will be short of the train (pulse_index in the timestamps "
+                        "maps each frame to its pulse). The encoder or disk is "
+                        "slower than the camera: use a faster save method or disk, "
+                        "or a lower frame rate.",
+                        self.serial_number,
+                        refused_run,
+                        pulse,
+                    )
+                self._writer_skipped.append(pulse)
+                skipped = True
+            if refused_run and writer.backlog <= queue_size // 2:
+                refused_run = 0  # the writer caught up: that stall was transient
+            if not skipped:  # a skipped frame has no video frame, so no row
+                self._append_row(
+                    stamp,
+                    pulse,
+                    missed=False,
+                    dropped=not written,
+                    arrival=arrival,
+                    unstamped=not timestamp,
+                )
 
             if self.frame_for_display.push(array):
                 self._update_resulting_fps()
 
             self._started = True
-            frame_count += 1
+        self._stream_at_stop = self._read_stream_statistics()
         backend.stop_grab()
-        self._video_writer.close()  # pyright: ignore[reportOptionalMemberAccess]
+        # A counted train that ran to its end: pad the pulses this camera missed
+        # at the very end, so it ends on the same pulse as the others. (Only
+        # after at least one frame — there is nothing to repeat otherwise. A
+        # stopped or aborted take, fill_to None, ends where it was.)
+        fill_to = self._fill_to
+        if (
+            clock.fill
+            and fill_to is not None
+            and clock.count is not None
+            and self._timestamps
+            and anchor is not None
+        ):
+            end = min(fill_to, clock.count)
+            trailing = range(tracker.next_pulse, end)
+            for missed_pulse in trailing:
+                due, unstamped = self._fill_stamp(tracker, missed_pulse, anchor)
+                self._append_row(
+                    due,
+                    missed_pulse,
+                    missed=True,
+                    dropped=True,
+                    arrival=0,
+                    unstamped=unstamped,
+                )
+            if trailing:
+                tracker.missed.extend(trailing)
+                tracker.last_pulse = end - 1
+                owed += len(trailing)
+                log.warning(
+                    "Camera %s missed the last trigger pulse(s) %s; filled with "
+                    "the previous frame",
+                    self.serial_number,
+                    _format_pulses(trailing),
+                )
+        writer.close(fill_after=owed)
         self._reconcile_unwritten_frames()
 
-        dropped_count = sum(self._dropped)
         log.info(
-            "Camera %s: %d frames recorded, %d frames dropped",
+            "Camera %s: %d frames recorded (%d missed pulses and %d writer drops "
+            "filled, %d writer drops skipped), %d extra frames discarded",
             self.serial_number,
-            frame_count,
-            dropped_count,
+            len(self._timestamps),
+            sum(self._missed),
+            self._writer_dropped,
+            len(self._writer_skipped),
+            self._extra_frames,
         )
 
     def _reconcile_unwritten_frames(self) -> None:
-        """If the sink died, frames accepted into the queue after the failure
-        were discarded rather than written. Mark that trailing run of
-        accepted frames as dropped so the timestamp series reflects what reached
-        the file.
+        """If the sink died, everything queued after the failure was discarded
+        rather than written, so the file ends at ``frames_written``. Mark the
+        rows past that point as dropped so the series reflects what reached the
+        file.
         """
         if self._video_writer is None or not self._video_writer.failed:
             return
         written = self._video_writer.frames_written
-        accepted = [i for i, dropped in enumerate(self._dropped) if not dropped]
-        for index in accepted[written:]:
-            self._dropped[index] = True
-            self._dropped_count += 1
+        for index in range(written, len(self._dropped)):
+            if not self._dropped[index]:
+                self._dropped[index] = True
+                self._dropped_count += 1
 
 
 def _ALWAYS() -> bool:
     return True
+
+
+def _format_pulses(pulses: range) -> str:
+    if len(pulses) == 1:
+        return str(pulses.start)
+    return f"{pulses.start}-{pulses.stop - 1}"

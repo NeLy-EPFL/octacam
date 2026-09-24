@@ -42,6 +42,7 @@ Structure:
 import atexit
 import ctypes
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -106,6 +107,18 @@ _ERR_NAMES = {
 # yields None on them too. The fields are left None for the respective kind;
 # snap_value and the GUI slider step both tolerate a missing inc.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
+
+# Transport counters a recording reports, the record grab's buffer pool, and how
+# often a grab's incomplete images are logged — identical to the PySpin tier
+# (see flir.py).
+STREAM_STATISTICS = (
+    "StreamLostFrameCount",
+    "StreamDroppedFrameCount",
+    "StreamIncompleteFrameCount",
+    "StreamDeliveredFrameCount",
+)
+RECORD_STREAM_BUFFERS = 128
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 # spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
 # node-map walk (Camera tab). The unmapped types (ValueNode/BaseNode/Register/
@@ -914,6 +927,14 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._stream_nodemap: Any = None
         self._serial = _spin().read_serial(cam)
         self._original_trigger_source: str | None = None
+        # Images the SDK delivered incomplete (discarded: never corrupt data);
+        # counted so a recording can report them instead of losing them silently.
+        self._incomplete_images = 0
+        # The current grab's share, for the rate-limited log (_count_incomplete).
+        self._grab_is_record = False
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+        self._incomplete_logged_at = 0.0
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # the device TriggerSoftware execute moves into retrieve() on the grab
         # thread so the shared trigger timer never blocks on this camera.
@@ -1143,7 +1164,32 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     # ------------------------------------------------------------- grabbing
 
-    def _begin_acquisition(self, buffer_mode: str) -> None:
+    def stream_statistics(self) -> dict[str, int]:
+        """Spinnaker's transport counters plus the incomplete images discarded
+        (mirrors FlirBackend.stream_statistics)."""
+        out = {"IncompleteImagesDiscarded": self._incomplete_images}
+        if self._stream_nodemap is None:
+            return out
+        spin = _spin()
+        for name in STREAM_STATISTICS:
+            try:
+                out[name] = int(spin.read_number(self._stream_nodemap, name, True).value)
+            except BackendError:
+                continue
+        return out
+
+    def _set_stream_buffers(self, buffers: int) -> None:
+        """Best-effort: a manual stream buffer count of ``buffers`` (≤ the max)."""
+        spin = _spin()
+        try:
+            spin.set_enum(self._stream_nodemap, "StreamBufferCountMode", "Manual")
+            info = spin.read_number(self._stream_nodemap, "StreamBufferCountManual", True)
+            target = min(buffers, int(info.max)) if info.max is not None else buffers
+            spin.write_number(self._stream_nodemap, "StreamBufferCountManual", target, True)
+        except BackendError as e:
+            log.debug("Could not size the stream buffers of camera %s: %s", self._serial, e)
+
+    def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
         spin = _spin()
         try:
             spin.set_enum(self._nodemap, "AcquisitionMode", "Continuous")
@@ -1164,6 +1210,8 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     self._serial,
                     e,
                 )
+            if buffers:
+                self._set_stream_buffers(buffers)
         try:
             spin.begin_acquisition(self._cam)
         except BackendError as e:
@@ -1173,13 +1221,52 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
+        self._begin_incomplete_log(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
         # Spinnaker has no WaitForFrameTriggerReady; the camera arms on the first
-        # software trigger, so report ready once acquisition has begun.
-        self._begin_acquisition("OldestFirst")
+        # software trigger, so report ready once acquisition has begun. (A GS3
+        # still ignores its first two hardware triggers after this — the recording
+        # primes the cameras before its train.) Deep buffer pool: see flir.py.
+        self._begin_incomplete_log(record=True)
+        self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
+
+    def _begin_incomplete_log(self, *, record: bool) -> None:
+        """Start a grab's incomplete-image log afresh (see _count_incomplete)."""
+        self._grab_is_record = record
+        self._grab_incomplete = 0
+        self._grab_incomplete_logged = 0
+
+    def _count_incomplete(self) -> None:
+        """Count a discarded incomplete image, logging it rate-limited as
+        FlirBackend._count_incomplete does (the grab's first, then its running
+        total at most every INCOMPLETE_REPORT_INTERVAL_S; debug in a preview)."""
+        self._incomplete_images += 1
+        self._grab_incomplete += 1
+        now = time.monotonic()
+        first = self._grab_incomplete == 1
+        if not first and now - self._incomplete_logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._grab_is_record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial, self._grab_incomplete,
+                self._grab_incomplete - self._grab_incomplete_logged,
+            )
+        self._grab_incomplete_logged = self._grab_incomplete
+        self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
         # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
@@ -1199,8 +1286,11 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread.
-        if not self._wait_pending(timeout_ms):
+        # trigger and fetch exactly one frame on this camera's own grab thread —
+        # or, while a fired trigger's image is still due, only fetch (see
+        # _trigger_handoff: a late image must answer its own trigger).
+        fire = self._claim_trigger(timeout_ms)
+        if fire is None:
             return None
         cam = self._cam
         if cam is None or not self._grabbing:
@@ -1210,21 +1300,38 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # grab loop does not wrap retrieve() in try/except, so a stop-race or a
         # trigger failure must return None, never raise — a lost trigger is one
         # lost frame, the same as the GetNextImageEx timeout below.
-        try:
-            spin.execute_command(self._nodemap, "TriggerSoftware")
-        except BackendError:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
+        if fire:
+            try:
+                spin.execute_command(self._nodemap, "TriggerSoftware")
+            except BackendError:
+                self._trigger_unfired()
+                return None
+        return self._fetch_image(
+            cam, self._fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
 
-    def _fetch_image(self, cam, timeout_ms: int, wants_array) -> Frame | None:
+    def _fetch_image(
+        self, cam, timeout_ms: int, wants_array, answers_trigger: bool = False
+    ) -> Frame | None:
         # Fetch exactly one image; never raises (a timeout, incomplete or bad
-        # frame is one lost frame, as the grab loop expects).
+        # frame is one lost frame, as the grab loop expects). ``answers_trigger``:
+        # the software-trigger path, where any image the SDK hands over answers
+        # the oldest fired trigger.
         spin = _spin()
         image = spin.get_next_image(cam, timeout_ms)  # None on timeout — GIL-free
         if image is None:
             return None
+        if answers_trigger:
+            # A complete image is checked against the camera clock (ns), so a
+            # late one cannot answer a later trigger.
+            try:
+                stamp = None if spin.image_incomplete(image) else int(spin.image_timestamp(image))
+            except Exception:
+                stamp = None
+            self._trigger_answered(stamp)
         try:
             if spin.image_incomplete(image):
+                self._count_incomplete()
                 return None
             timestamp = spin.image_timestamp(image)
             array = None
