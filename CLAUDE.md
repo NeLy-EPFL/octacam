@@ -203,15 +203,23 @@ easy to break:
   next queued item so it can never be dropped on its own), so video frame k is
   pulse k in every camera. `external` (a source octacam doesn't drive, possibly
   irregular) is report-only: nothing filled or discarded, `pulse_index` maps it.
-- **Priming**: a GS3 ignores the first two hardware triggers after *every*
-  acquisition start (see the hardware quirks), so `start_recording` starts the
-  record grab on `hold`, sends `PRIME_PULSES` sacrificial pulses (triggerbox
-  `prime_trigger`: camera lines only, lights dark; or software triggers), waits
-  `PRIME_SETTLE_S`, then `arm_counting()` and only then starts the train. Frames
-  before that, and stragglers within `PRIME_STRAGGLER_NS` of the last primed
-  frame, are discarded. The whole sequence runs before `hooks_done`, which the
-  monitor now waits on *before* stopping anything, so a stop can never overtake
-  the arm or the software timer's start.
+- **Priming**: a GS3 ignores its first hardware triggers after an acquisition
+  start (two, measured; more after a power-up; see the hardware quirks), so
+  `start_recording` starts the record grab on `hold` and sends rounds of
+  `PRIME_PULSES` sacrificial pulses (triggerbox `prime_trigger`: camera lines
+  only, lights dark; or software triggers), each followed by `PRIME_SETTLE_S`,
+  **until every recording camera has answered one** (`primed_frames > 0`; a
+  camera whose record grab failed to start is not waited on). It then calls
+  `arm_counting()` and only then starts the train. A fixed count is not enough:
+  two freshly powered GS3s answered none of four, and the whole take ran a pulse
+  late against the board with nothing to show for it but a "missed" last pulse on
+  both — they were still aligned with each other, so the sync check was silent. No
+  round starts after `PRIME_BUDGET_S`; a camera still silent is warned about. The
+  budget keeps the start sequence inside `START_HOOKS_TIMEOUT_S` even with a board
+  slow to acknowledge. Frames before `arm_counting()`, and stragglers within
+  `PRIME_STRAGGLER_NS` of the last primed frame, are discarded. The whole sequence
+  runs before `hooks_done`, which the monitor now waits on *before* stopping
+  anything, so a stop can never overtake the arm or the software timer's start.
 - **Stop on the pulse count**: the countdown ends when every camera has the
   train's last pulse or once the train is over (`_train_end`, start + count ×
   period + `TRAIN_END_MARGIN_S`) — a camera that missed the last pulses cannot
@@ -563,13 +571,18 @@ Free-run / transfer numbers are not yet calibrated on real hardware.
   measured with a 2.4 ms pulse against a 2.0 ms exposure; 480–640 µs pulses are
   clean. The default `pulse_us` = 500 is fine; don't size camera pulses like
   strobes.
-- **A GS3 ignores the first two hardware triggers after every acquisition
-  start** — measured: three 13-pulse trains in one acquisition give 11, 13, 13
-  frames; waiting 25–327 ms after `BeginAcquisition` changes nothing, and
+- **A GS3 ignores its first hardware triggers after an acquisition start**,
+  how many depending on its state — measured: three 13-pulse trains in one
+  acquisition give 11, 13, 13 frames (two ignored); waiting 25–327 ms after
+  `BeginAcquisition` changes nothing, and
   `AcquisitionStatus[FrameTriggerWait]` reports ready after 0.2 ms, so it is no
-  readiness signal. Recordings prime with sacrificial pulses (recording pipeline
-  above); an `external` source octacam doesn't drive can't be primed, so its
-  first two pulses produce no frame on a GS3.
+  readiness signal. On the **first acquisition after a power-up** it ignores
+  more: both GS3s, replugged 1–2 min earlier, answered none of four priming
+  pulses and delivered 149999 of a 150000-pulse train (most likely 5 ignored each;
+  the fake reproduces the exact signature). After a preview's pulses it ignored
+  none. Recordings prime until every camera answers (recording pipeline above); an
+  `external` source octacam doesn't drive can't be primed, so its first pulses
+  produce no frame on a GS3.
 - **A GS3 that misses a trigger's rising edge may fire on its falling edge**,
   one pulse width late (+503 µs at 500 µs pulses, +1003 µs at 1000 µs), then
   catch up at its readout limit (7.697 → ~7.8 → 8.0 ms intervals); if it misses

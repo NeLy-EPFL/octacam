@@ -18,6 +18,7 @@ os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 import numpy as np
 import pytest
 
+import octacam.controller as controller_module
 from octacam.cameras import CameraSystem
 from octacam.controller import RecordingController, RecordingSettings
 from octacam.plugins.base import Plugin, PluginManager
@@ -175,6 +176,81 @@ def test_priming_absorbs_the_triggers_a_camera_ignores_after_start(
         assert cam["primed_frames"] == 2  # the 4 priming pulses minus the 2 ignored
     assert summary["sync"]["ok"], summary["sync"]
     assert summary["pulse_train"]["source"] == "managed"
+
+
+def _ignoring_cameras(system, ignored):
+    for serial, count in zip(FAKE_SERIALS, ignored, strict=True):
+        backend = _backend(system, serial)
+        backend.hardware_period_ns = PERIOD_NS
+        backend.ignore_first_triggers = count
+
+
+@pytest.mark.parametrize("source", ["managed", "software"])
+def test_priming_repeats_until_every_camera_has_answered(fake_system, tmp_path, source):
+    # Two GS3s fresh from a power-up answered none of four priming pulses, and
+    # most likely not the train's first pulse either: one round would leave
+    # FAKE-1 starting the recording on pulse 1 (a pulse behind FAKE-0, and its
+    # last pulse "missed"). A second round gets it past what it ignores.
+    _ignoring_cameras(fake_system, [2, 5])
+    board = Board(fake_system, count=50)
+    _save_dir, summary, _arrays, controller = _record(
+        fake_system,
+        tmp_path,
+        plugins=PluginManager([board]) if source == "managed" else None,
+        trigger_source=source,
+    )
+    if source == "managed":
+        assert board.primed == 8
+    assert summary["pulse_train"]["primed"] == 8
+    assert _cam(summary, "FAKE-0")["primed_frames"] == 6
+    assert _cam(summary, "FAKE-1")["primed_frames"] == 3
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50 and cam["missed_pulses"] == 0, cam
+        assert cam["start_offset_pulses"] == 0, cam
+    assert summary["sync"]["ok"], summary["sync"]
+    assert not [e for e in controller.events if "priming" in e["message"]]
+
+
+def test_a_camera_still_silent_after_priming_is_warned_about(
+    fake_system, tmp_path, monkeypatch
+):
+    # Out of budget after one round: FAKE-1 is still ignoring triggers, so it
+    # starts on the train's second pulse. Priming says so, and the start check
+    # catches the offset against FAKE-0.
+    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
+    _ignoring_cameras(fake_system, [0, 5])
+    board = Board(fake_system, count=50)
+    _save_dir, summary, _arrays, controller = _record(
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
+    )
+    assert board.primed == 4
+    warnings = [
+        e["message"]
+        for e in controller.events
+        if e["level"] == "warning" and "priming" in e["message"]
+    ]
+    assert len(warnings) == 1 and "FAKE-1" in warnings[0], warnings
+    assert "FAKE-0" not in warnings[0]
+    assert _cam(summary, "FAKE-1")["primed_frames"] == 0
+    assert _cam(summary, "FAKE-1")["start_offset_pulses"] == 1
+    assert not summary["sync"]["ok"]
+
+
+def test_priming_does_not_wait_on_a_camera_that_failed_to_start(fake_system, tmp_path):
+    # FAKE-1's record grab never starts (the rig carries on with the rest): it
+    # can answer no priming pulse, so it must neither hold priming to its
+    # budget nor be blamed on the trigger.
+    _ignoring_cameras(fake_system, [0, 0])
+    _backend(fake_system, "FAKE-1").start_grab_record = lambda: False
+    board = Board(fake_system, count=25)
+    _save_dir, summary, _arrays, controller = _record(
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
+    )
+    assert board.primed == 4
+    assert summary["pulse_train"]["primed"] == 4
+    assert not [e for e in controller.events if "priming" in e["message"]]
+    assert _cam(summary, "FAKE-0")["frames"] == 25
 
 
 def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(

@@ -69,7 +69,10 @@ On a trigger train octacam drives itself (`trigger_source = "software"` or
   camera lines only, lights dark, whose frames are discarded. A FLIR
   Grasshopper3 ignores the first two triggers after its acquisition starts; without
   this every recording lost its first pulses, and two cameras starting either side
-  of a pulse ended up a frame apart for the whole take.
+  of a pulse ended up a frame apart for the whole take. Priming repeats until every
+  camera has answered a priming pulse, because a Grasshopper3 just powered up
+  ignores more than two. A camera that answers none is reported: it may start the
+  recording late, or not be receiving the trigger.
 
 Per camera the summary reports:
 

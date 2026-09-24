@@ -62,12 +62,19 @@ STOP_GRACE_S = 0.5  # matches cli.py's in-flight frame grace period
 # wedged start hook (e.g. a plugin serial write stalled on its write_timeout) so
 # it can never block recording teardown indefinitely.
 START_HOOKS_TIMEOUT_S = 5.0
-# Sacrificial triggers sent before a recording's train (octacam-driven trigger
-# sources only). A camera may ignore the first triggers after its acquisition
-# starts — a FLIR Grasshopper3 ignores exactly two, measured — so without them
-# the train's first pulses produce no frame, and two cameras that start either
-# side of a pulse end up a frame apart. Their frames are discarded.
+# Sacrificial triggers sent per priming round before a recording's train
+# (octacam-driven trigger sources only). A camera may ignore the first triggers
+# after its acquisition starts — a FLIR Grasshopper3 ignores two, measured, and
+# more on its first acquisition after a power-up — so without them the train's
+# first pulses produce no frame, and two cameras that start either side of a
+# pulse end up a frame apart. Their frames are discarded.
 PRIME_PULSES = 4
+# Priming repeats its round until every camera has answered one of the pulses
+# (two freshly powered GS3s answered none of the first four), but starts no new
+# round once this long has passed; a camera still silent then is warned about.
+# Well inside START_HOOKS_TIMEOUT_S, which the whole start sequence (priming and
+# the arm) has to fit in even when the board is slow to acknowledge.
+PRIME_BUDGET_S = 1.0
 # Wait after the priming pulses for their frames to land (and be discarded)
 # before counting starts: well above a frame's trigger-to-delivery latency.
 PRIME_SETTLE_S = 0.15
@@ -1469,7 +1476,7 @@ class RecordingController:
             # which the monitor waits on before any teardown, so a stop can never
             # overtake the arm (or the software timer's start).
             if prime and not self._stop_event.is_set():
-                self._prime_cameras(settings, plugin_params)
+                self._prime_cameras(settings, plugin_params, started)
                 self.camera_system.arm_counting()
             if not self._stop_event.is_set():
                 if clock.count and clock.fill:
@@ -1492,29 +1499,67 @@ class RecordingController:
                 hooks_done.set()
         return StartResult(StartResult.OK)
 
-    def _prime_cameras(self, settings: RecordingSettings, plugin_params: dict | None) -> None:
+    def _prime_cameras(
+        self,
+        settings: RecordingSettings,
+        plugin_params: dict | None,
+        recording: list[str],
+    ) -> None:
         """Send the cameras sacrificial triggers before the recording's train.
 
         A camera may ignore the first triggers after its acquisition starts (a
-        FLIR Grasshopper3 ignores exactly two), so without this the train's first
-        pulses expose nothing — every camera's frame 0 would be a later pulse, and
-        cameras starting either side of a pulse would disagree by a frame. The
-        record grabs discard what the priming triggers produce (their ``hold``)."""
-        if settings.trigger_source == "software":
-            self.camera_system.prime_software_trigger(PRIME_PULSES, settings.fps)
-            primed = True
-        else:
-            primed = self.plugins.prime_trigger(plugin_params, PRIME_PULSES)
-        if primed:
-            self._primed_pulses = PRIME_PULSES
-        else:
+        FLIR Grasshopper3 ignores two, and more on its first acquisition after a
+        power-up), so without this the train's first pulses expose nothing —
+        every camera's frame 0 would be a later pulse, and cameras starting
+        either side of a pulse would disagree by a frame. A round of
+        PRIME_PULSES repeats until every camera in ``recording`` (the ones whose
+        record grab started) has answered one (the triggers it ignores are then
+        behind it), within PRIME_BUDGET_S. The record grabs discard what the
+        priming triggers produce (their ``hold``)."""
+        deadline = time.monotonic() + PRIME_BUDGET_S
+        sent = 0
+        while not self._stop_event.is_set():
+            if settings.trigger_source == "software":
+                self.camera_system.prime_software_trigger(PRIME_PULSES, settings.fps)
+            elif not self.plugins.prime_trigger(plugin_params, PRIME_PULSES):
+                # A burst the board never acknowledged may still land: let it
+                # land under the hold, not in the count.
+                time.sleep(PRIME_SETTLE_S)
+                break
+            sent += PRIME_PULSES
+            time.sleep(PRIME_SETTLE_S)
+            if not self._unprimed_cameras(recording) or time.monotonic() >= deadline:
+                break
+        self._primed_pulses = sent
+        if self._stop_event.is_set():
+            return
+        if not sent:
             self._event(
                 "warning",
                 "The trigger source could not prime the cameras; a camera that "
                 "ignores its first triggers after acquisition start (e.g. a FLIR "
                 "Grasshopper3) will start this recording a few pulses late",
             )
-        time.sleep(PRIME_SETTLE_S)
+            return
+        silent = self._unprimed_cameras(recording)
+        if silent:
+            names = ", ".join(silent)
+            self._event(
+                "warning",
+                f"Camera{'s' if len(silent) > 1 else ''} {names} answered none of "
+                f"the {sent} priming pulses: {'they' if len(silent) > 1 else 'it'} "
+                "may start this recording a few pulses late, or not be receiving "
+                "the trigger",
+            )
+
+    def _unprimed_cameras(self, recording: list[str]) -> list[str]:
+        """Recording cameras that have answered no priming pulse yet (a camera
+        whose record grab failed to start can never answer one)."""
+        return [
+            camera.name
+            for camera in self.camera_system
+            if camera.name in recording and getattr(camera, "primed_frames", 1) == 0
+        ]
 
     def _resume_preview(self) -> str | None:
         """Arm preview (or go idle) after a recording/benchmark ends; caller holds

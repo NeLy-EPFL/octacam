@@ -60,8 +60,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   recording's frame 0 was the board's pulse 2, and while the record grab still
   started under the preview's pulses, two cameras starting either side of a pulse
   ended up one frame apart for the whole take (hexaview 260916/Fly4). The
-  cameras are now primed with four sacrificial pulses (camera lines only, lights
+  cameras are now primed with sacrificial pulses (camera lines only, lights
   dark) whose frames are discarded, so frame 0 is the train's first pulse.
+  Priming repeats its four pulses until every camera has answered one: on its
+  first acquisition after a power-up a GS3 ignored more than four. A camera that
+  still answers none within a second is warned about.
 - **A recording stops on the trigger train's pulse count** — each camera stopped
   on its own frame count, so a camera that missed pulses caught up on pulses past
   the end of the train and matched the others' count while its frames were
