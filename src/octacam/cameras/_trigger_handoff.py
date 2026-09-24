@@ -105,6 +105,14 @@ ANSWER_TIMEOUT_S = 1.0
 # no recording counts (see "Pairing images with triggers"): one grab-loop fetch,
 # as before the pairing. The controller's post-priming settle outlasts it.
 PRIMING_ANSWER_TIMEOUT_S = 0.1
+# A recording's trigger period stretches both deadlines to at least two periods
+# (see configure_trigger_period): at a low rate the exposure alone can outlast
+# them, and an image later than its deadline would slip the pairing by one. And a
+# pending trigger older than max(this, two periods) is dropped instead of fired:
+# fired that late, its image would show a later moment than the pulse it is
+# labeled with (a trigger kept pending through an answer wait fired up to a
+# second late). This is the staleness the old fetch timeout bounded.
+STALE_TRIGGER_S = 0.1
 # ``last_trigger_index`` of an image that answers no trigger of the current
 # sequence: one fired before ``restart_trigger_sequence`` (a recording's priming
 # trigger whose image arrived after counting started) ...
@@ -133,7 +141,12 @@ class SoftwareTriggerHandoff:
         # Sequence numbers of the pending triggers (parallel to _pending) and the
         # next number to hand out.
         self._pending_seqs: deque[int] = deque()
+        # When each pending trigger was offered (parallel to _pending_seqs).
+        self._pending_times: deque[float] = deque()
         self._next_seq = 0
+        # The recording's trigger period, when one counts (configure_trigger_period).
+        self._period_s: float | None = None
+        self._stale_triggers = 0
         # Fired triggers no image has answered yet, oldest first, as (sequence
         # number, sequence epoch, monotonic answer deadline, counted). The epoch
         # advances with every sequence restart, so an answer to an earlier
@@ -169,6 +182,20 @@ class SoftwareTriggerHandoff:
             return PRIMING_TRIGGER
         return seq
 
+    def configure_trigger_period(self, period_s: float | None) -> None:
+        """The period this camera's software triggers come at, when a recording
+        counts them (None otherwise — preview, benchmark). Stretches the answer
+        deadlines to at least two periods and drops pending triggers too stale to
+        fire (see :data:`STALE_TRIGGER_S`)."""
+        with self._cond:
+            self._period_s = period_s if period_s and period_s > 0 else None
+
+    @property
+    def stale_triggers(self) -> int:
+        """Pending triggers dropped in this grab because they could no longer be
+        fired in time."""
+        return self._stale_triggers
+
     @property
     def unanswered_triggers(self) -> int:
         """Fired triggers given up on at their answer deadline in this grab."""
@@ -186,6 +213,7 @@ class SoftwareTriggerHandoff:
         with self._cond:
             self._pending = 0
             self._pending_seqs.clear()
+            self._pending_times.clear()
             self._next_seq = 0
             self._epoch += 1
             self._counting = True
@@ -208,6 +236,7 @@ class SoftwareTriggerHandoff:
             if self._pending < PENDING_MAX:
                 self._pending += 1
                 self._pending_seqs.append(seq)
+                self._pending_times.append(time.monotonic())
                 self._cond.notify()
             else:
                 self._dropped_triggers += 1
@@ -227,6 +256,7 @@ class SoftwareTriggerHandoff:
         with self._cond:
             self._pending = 0
             self._pending_seqs.clear()
+            self._pending_times.clear()
             self._next_seq = 0
             self._outstanding.clear()
             self._answer = None
@@ -234,6 +264,7 @@ class SoftwareTriggerHandoff:
             self._answered_in_grab = False
             self._counting = False
             self._unanswered_triggers = 0
+            self._stale_triggers = 0
             self._grabbing = True
 
     def _end_grab(self) -> bool:
@@ -269,14 +300,19 @@ class SoftwareTriggerHandoff:
             self._expire_unanswered()
             if self._outstanding:
                 return False
+            self._drop_stale_pending()
             if self._pending <= 0:
                 self._cond.wait(timeout_ms / 1000.0)
             if self._pending <= 0 or not self._grabbing:
                 return None
             self._pending -= 1
             seq = self._pending_seqs.popleft() if self._pending_seqs else None
+            if self._pending_times:
+                self._pending_times.popleft()
             patient = self._answered_in_grab or self._counting
             timeout = ANSWER_TIMEOUT_S if patient else PRIMING_ANSWER_TIMEOUT_S
+            if self._period_s:
+                timeout = max(timeout, 2 * self._period_s)
             deadline = time.monotonic() + timeout
             self._outstanding.append((seq, self._epoch, deadline, self._counting))
             return True
@@ -315,8 +351,34 @@ class SoftwareTriggerHandoff:
                 return False
             self._pending -= 1
             seq = self._pending_seqs.popleft() if self._pending_seqs else None
+            if self._pending_times:
+                self._pending_times.popleft()
             self._answer = (seq, self._epoch)
             return True
+
+    def _drop_stale_pending(self) -> None:
+        """Drop the pending triggers too old to fire (only while a recording's
+        period is known; the caller holds the condition): their pulses become
+        gaps in the sequence, i.e. missed pulses."""
+        if not self._period_s:
+            return
+        limit = max(STALE_TRIGGER_S, 2 * self._period_s)
+        now = time.monotonic()
+        while self._pending > 0 and self._pending_times and (
+            now - self._pending_times[0] > limit
+        ):
+            self._pending -= 1
+            self._pending_seqs.popleft()
+            self._pending_times.popleft()
+            self._stale_triggers += 1
+            if self._stale_triggers % 100 == 1:
+                log.warning(
+                    "Camera %s: dropped %d software trigger(s) that could no longer "
+                    "be fired in time (the camera was still waiting on an earlier "
+                    "image); their pulses are missed and filled",
+                    getattr(self, "_serial", "?"),
+                    self._stale_triggers,
+                )
 
     def _expire_unanswered(self) -> None:
         """Give up on the outstanding triggers past their answer deadline (the

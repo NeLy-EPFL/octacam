@@ -22,6 +22,7 @@ import pytest
 import octacam.cameras._trigger_handoff as handoff
 import octacam.controller as controller_module
 from octacam.cameras import CameraSystem
+from octacam.check import check_recording
 from octacam.controller import RecordingController, RecordingSettings
 from octacam.plugins.base import Plugin, PluginManager
 from octacam.pulses import PulseClock
@@ -246,6 +247,47 @@ def test_software_priming_absorbs_triggers_a_camera_silently_ignores(
     assert elapsed < 3.0, elapsed
 
 
+def test_a_long_exposure_keeps_every_image_on_its_own_pulse(fake_system, tmp_path):
+    # 5 fps, each image ready 150 ms after its trigger (a ~140 ms exposure plus
+    # a GS3's transfer): longer than a fixed 0.1 s answer deadline, which gave
+    # the first priming trigger up, slipped the pairing by one, and made the
+    # last priming image frame 0 of the take. Deadlines are at least two periods.
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).image_latency_s = 0.15
+    save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software", fps=5.0, duration_s=2.0
+    )
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 10 and cam["missed_pulses"] == 0, cam
+        # A frame shows its trigger's sequence number: frame k is pulse k.
+        np.testing.assert_array_equal(_frames(save_dir, serial)[:, 0, 0], np.arange(10))
+    assert summary["sync"]["ok"], summary["sync"]
+
+
+def test_triggers_left_pending_through_a_wait_are_dropped_not_fired_late(
+    fake_system, tmp_path
+):
+    # FAKE-1 never delivers trigger 30's image: it waits out the answer deadline
+    # while the timer keeps offering triggers. Those left pending must be dropped
+    # (missed, filled), not fired ~a second late under their own pulse numbers:
+    # every frame FAKE-1 did take must be exposed when the others took theirs.
+    _backend(fake_system, "FAKE-1").lost_triggers = {30}
+    _save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software", duration_s=2.0
+    )
+    bad = _cam(summary, "FAKE-1")
+    assert 30 in bad["missed_pulse_indices"]
+    real = ~arrays["FAKE-1/dropped"]
+    pulses = arrays["FAKE-1/pulse_index"][real]
+    arrival1 = arrays["FAKE-1/arrival_ns"][real]
+    arrival0 = dict(zip(arrays["FAKE-0/pulse_index"].tolist(),
+                        arrays["FAKE-0/arrival_ns"].tolist(), strict=True))
+    late = [int(p) for p, a in zip(pulses, arrival1, strict=True)
+            if abs(int(a) - arrival0[int(p)]) > 3 * PERIOD_NS]
+    assert not late, late
+
+
 def test_a_camera_still_silent_after_priming_is_warned_about(
     fake_system, tmp_path, monkeypatch
 ):
@@ -285,6 +327,26 @@ def test_priming_does_not_wait_on_a_camera_that_failed_to_start(fake_system, tmp
     assert summary["pulse_train"]["primed"] == 4
     assert not [e for e in controller.events if "priming" in e["message"]]
     assert _cam(summary, "FAKE-0")["frames"] == 25
+
+
+def test_a_camera_with_no_timestamps_at_all_is_not_called_a_stray(
+    fake_system, tmp_path
+):
+    # Every FAKE-1 frame lacks a timestamp; fills at the train's end make its
+    # frame count exceed its real frames. The warning must still say misses
+    # cannot be detected at all, not that only a stray frame was placed.
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
+    bad = _backend(fake_system, "FAKE-1")
+    bad.zero_timestamp_triggers = set(range(10_000))
+    bad.miss_triggers = {48, 49}
+    board = Board(fake_system, count=50)
+    _save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
+    )
+    (warning,) = [w for w in summary["sync"]["warnings"] if "no hardware timestamp" in w]
+    assert "so missed pulses cannot be detected" in warning, warning
+    assert not summary["sync"]["ok"]
 
 
 def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(
@@ -484,8 +546,9 @@ def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlik
         slow.set_live_param("exposure", 12000)
     elif unlike == "geometry":
         slow.set_geometry(width=2 * W, height=2 * H)
+    _ignoring_cameras(fake_system, [0, 0])  # hardware-clocked, trigger line
     backend = slow.backend
-    original = backend.retrieve
+    original = backend.retrieve_external
 
     def late(timeout_ms, wants_array):
         frame = original(timeout_ms, wants_array)
@@ -493,9 +556,10 @@ def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlik
             time.sleep(0.8 * PERIOD_NS / 1e9)
         return frame
 
-    backend.retrieve = late
+    backend.retrieve_external = late
+    board = Board(fake_system, count=50)
     _save_dir, summary, _arrays, _ = _record(
-        fake_system, tmp_path, trigger_source="software"
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
     )
     sync = summary["sync"]
     if unlike is None:
@@ -507,6 +571,30 @@ def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlik
         assert _cam(summary, serial)["start_offset_pulses"] is None
     (note,) = sync["notes"]
     assert "[FAKE-0]" in note and "[FAKE-1]" in note, note
+
+
+def test_the_start_check_trusts_the_software_trigger_sequence(fake_system, tmp_path):
+    # Under the software trigger a frame's pulse is its own trigger's sequence
+    # number, so frame 0 is trigger 0 in every camera by construction. A like
+    # camera that merely delivers later (a busier USB lane) must not read as
+    # having started a pulse late.
+    slow = next(c for c in fake_system if c.serial_number == "FAKE-1")
+    original = slow.backend.retrieve
+
+    def late(timeout_ms, wants_array):
+        frame = original(timeout_ms, wants_array)
+        if frame is not None:
+            time.sleep(0.8 * PERIOD_NS / 1e9)
+        return frame
+
+    slow.backend.retrieve = late
+    save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    assert summary["sync"]["ok"], summary["sync"]
+    for serial in FAKE_SERIALS:
+        assert _cam(summary, serial)["start_offset_pulses"] == 0
+    assert check_recording(save_dir).ok
 
 
 def test_external_trigger_misses_are_reported_not_filled(fake_system, tmp_path):

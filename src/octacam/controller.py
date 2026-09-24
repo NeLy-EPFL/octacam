@@ -2140,7 +2140,8 @@ class RecordingController:
                 )
             if camera.unclocked_frames:
                 ok = False
-                if camera.unclocked_frames < camera.frames_recorded:
+                real_frames = camera.frames_recorded - len(camera.dropped_indices)
+                if camera.unclocked_frames < real_frames:
                     # A stray frame without a timestamp on a clocked camera: it
                     # was placed as the next pulse, so only a miss right before
                     # it could go unseen.
@@ -2169,6 +2170,14 @@ class RecordingController:
                     f"pulse ({clock.count} expected)"
                 )
         period = clock.period_ns if clock is not None else 0
+        if clock is not None and clock.source == "software":
+            # Each frame's pulse is its own trigger's sequence number, and frame
+            # 0 answers trigger 0 in every camera by construction: nothing to
+            # verify, and a camera that merely delivers later (a busier USB lane)
+            # must not read as having started late.
+            for camera in cams:
+                offsets[camera.name] = 0
+            return {"ok": ok, "warnings": warnings, "notes": notes, "start_offsets": offsets}
         delays: dict[str, float] = {}
         for camera in cams:
             rows = [

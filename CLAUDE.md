@@ -378,7 +378,20 @@ grab's first answer, while no recording counts, gets only
 `PRIMING_ANSWER_TIMEOUT_S` (0.1 s, one fetch) and is not reported; after the first
 answer, or once counting, a silent trigger may be a late image: the long deadline.
 `prime_software_trigger` fires one priming trigger at a time (bursting at the fps
-overflowed `PENDING_MAX` while a camera waited out an ignored one).
+overflowed `PENDING_MAX` while a camera waited out an ignored one). A software
+recording tells the hand-off its period (`configure_trigger_period`, set by
+`Camera.start_record`, cleared for preview): both deadlines become at least two
+periods — at 5 fps a 150 ms exposure outlasted the 0.1 s window, slipped the
+pairing by one and made the last priming image frame 0 — and a pending trigger
+older than max(`STALE_TRIGGER_S`, two periods) is **dropped, not fired**: fired
+after a wait it would show a moment up to a second after the pulse it is labeled
+with. Every backend's failed fetch answers its trigger (pycameleon: a payload
+cameleon rejects raises from `receive_async`; a timeout is `asyncio.TimeoutError`,
+distinct from `TimeoutError` before Python 3.11). Under the software trigger
+`_check_sync` skips the arrival check and records offset 0: the sequence number
+makes frame 0 trigger 0 in every camera, and a camera that merely delivers later
+must not read as late. `octacam check` never re-derives a schema-4 recording's
+start offsets from timing events (the recorder's `pulse_index` is the word).
 
 ## Frame-rate ceilings (test-rig hardware)
 

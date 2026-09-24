@@ -379,6 +379,36 @@ def test_an_early_stop_on_an_external_trigger_is_judged_by_its_duration(tmp_path
     assert not check_recording(full).ok
 
 
+def test_a_start_the_recorder_left_unchecked_is_not_re_derived(tmp_path):
+    # Schema 4, unlike cameras: the recorder compared no start offsets (None).
+    # Timing events that would line these series up a pulse apart must not be
+    # read into a start offset: the per-frame pulse_index is the recorder's word.
+    events = {100: 900_000, 900: 1_500_000, 1500: 600_000}
+    top = np.asarray(_train(2000, events=events), dtype=np.int64)
+    bottom = np.asarray(_train(2001, events=events, first=1), dtype=np.int64)
+    rec = _write(
+        tmp_path / "unchecked",
+        {"top": top, "bottom": bottom},
+        schema=4,
+        extra_summary={"pulse_train": {"fill": True, "count": 2000},
+                       "sync": {"ok": True, "warnings": [], "notes": ["not compared"]}},
+        arrays_extra={
+            f"{name}/{key}": value
+            for name in ("top", "bottom")
+            for key, value in (
+                ("missed", np.zeros(2000, dtype=bool)),
+                ("dropped", np.zeros(2000, dtype=bool)),
+                ("pulse_index", np.arange(2000)),
+            )
+        },
+    )
+    for index in (0, 1):
+        _patch_summary(rec, index, **{**_cam4("x", 2000), "start_offset_pulses": None,
+                                      "name": ("top", "bottom")[index]})
+    result = check_recording(rec)
+    assert not [p for p in result.problems if "offset" in p or "late" in p], result.problems
+
+
 def test_recorded_and_rederived_start_offsets_share_a_sign(tmp_path):
     # bottom started one pulse late: its frame k is top's frame k+1.
     events = {100: 900_000, 900: 1_500_000, 1500: 600_000}

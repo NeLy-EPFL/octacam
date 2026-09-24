@@ -253,3 +253,52 @@ def test_read_model_from_info_descriptor():
 
     assert read_model(_NoModel()) is None
     assert read_model(_Broken()) is None
+
+
+def test_a_rejected_payload_answers_its_software_trigger():
+    # cameleon raises for a payload it rejects (short, trailer error): that is
+    # this backend's incomplete image, and it must answer its trigger at once.
+    # Left unanswered, the camera waited out the answer deadline (1 s, once it
+    # has answered a trigger) for an image that had already been consumed.
+    import asyncio
+    import time
+
+    class DeviceCam(FakePyCam):
+        def __init__(self):
+            super().__init__()
+            self.queue: list[str] = []
+            self.triggers = 0
+
+        def execute(self, node):
+            super().execute(node)
+            if node == "TriggerSoftware":
+                self.triggers += 1
+                self.queue.append("bad" if self.triggers == 3 else "ok")
+
+        async def receive_async(self, rx):
+            while not self.queue:
+                await asyncio.sleep(0.001)
+            if self.queue.pop(0) == "bad":
+                raise RuntimeError("Failed to receive image: invalid trailer")
+            return np.zeros((4, 4), dtype=np.uint8)
+
+    cam = DeviceCam()
+    backend = PycameleonBackend(cam)
+    backend.open()
+    backend.start_grab_preview()
+    try:
+        started = time.monotonic()
+        first = None
+        frames = 0
+        next_trigger = started
+        while time.monotonic() - started < 0.5:
+            if time.monotonic() >= next_trigger:
+                backend.trigger_once()
+                next_trigger += 0.02
+            if backend.retrieve(20, lambda: True) is not None:
+                frames += 1
+                first = first if first is not None else time.monotonic() - started
+    finally:
+        backend.stop_grab()
+    assert first is not None and first < 0.2, first
+    assert frames >= 15, frames  # at 50 fps over 0.5 s; a 1 s stall leaves 2

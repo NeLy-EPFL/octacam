@@ -376,7 +376,12 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             try:
                 array = self._receive_bounded(timeout_ms)
             except Exception as e:
+                # A payload cameleon rejected (short, or a trailer error): this
+                # backend's incomplete image. It answers its trigger like one, or
+                # the camera would wait out the answer deadline for an image
+                # that has already been consumed.
                 log.debug("receive failed on camera %s: %s", self._serial, e)
+                self._trigger_answered()
                 return None
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
@@ -409,7 +414,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return loop.run_until_complete(
                 asyncio.wait_for(_await_frame(), max(timeout_ms, 0) / 1000.0)
             )
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):  # distinct before Python 3.11
             return None
 
 

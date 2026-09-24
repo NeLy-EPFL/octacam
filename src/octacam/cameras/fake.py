@@ -178,11 +178,15 @@ class FakeBackend(SoftwareTriggerHandoff):
         self.zero_timestamp_triggers: set[int] = set()
         self.late_triggers: dict[int, int] = {}
         self.lost_triggers: set[int] = set()
+        # Seconds from a software trigger to its image being ready (a long
+        # exposure plus readout and transfer).
+        self.image_latency_s = 0.0
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
         # Images exposed but not yet fetched, oldest first: [trigger sequence
-        # number (-1 when unnumbered), fetches it still misses].
-        self._device_images: list[list[int]] = []
+        # number (-1 when unnumbered), fetches it still misses, monotonic time
+        # it is ready].
+        self._device_images: list[list[float]] = []
         self._init_trigger_handoff()
 
     @property
@@ -533,7 +537,9 @@ class FakeBackend(SoftwareTriggerHandoff):
         if seq in self.lost_triggers:
             return True  # nothing will arrive; the hand-off gives up on it
         key = -1 if seq is None else seq
-        self._device_images.append([key, self.late_triggers.get(key, 0)])
+        self._device_images.append(
+            [key, self.late_triggers.get(key, 0), time.monotonic() + self.image_latency_s]
+        )
         return True
 
     def _fetch(self) -> int | None:
@@ -541,12 +547,14 @@ class FakeBackend(SoftwareTriggerHandoff):
         the sequence number of the image it hands over (-1 when unnumbered), or
         None when none is ready — after a short wait, standing in for a real
         fetch's timeout without holding a test up for it."""
-        if not self._device_images or self._device_images[0][1] > 0:
-            if self._device_images:
-                self._device_images[0][1] -= 1
+        head = self._device_images[0] if self._device_images else None
+        if head is None or head[1] > 0 or time.monotonic() < head[2]:
+            if head is not None and head[1] > 0:
+                head[1] -= 1
             self._cond.wait(_FETCH_WAIT_S)
             return None
-        seq, _late = self._device_images.pop(0)
+        seq = int(head[0])
+        self._device_images.pop(0)
         self._trigger_answered()
         return seq
 

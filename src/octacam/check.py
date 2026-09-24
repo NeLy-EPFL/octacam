@@ -450,6 +450,12 @@ def _start_offsets(
                     f"k shows the other cameras' frame k+{cam.start_offset}"
                 )
         return
+    if isinstance(result.schema, int) and result.schema >= 4:
+        # The recorder checked start alignment itself, between cameras that
+        # deliver alike, and left the rest unchecked on purpose (its sync notes
+        # say so). Timing events are no substitute for its per-frame pulse index:
+        # re-derived here they fabricated offsets from jitter.
+        return
     cands = [c for c in checked if c.name in reports or c.name in series]
     if len(cands) < 2:
         return

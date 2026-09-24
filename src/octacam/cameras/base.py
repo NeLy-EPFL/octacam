@@ -1075,6 +1075,7 @@ class Camera:
             mode = "software"
             self._backend.begin_software_trigger_preview()
         self._reset_series()  # so preview never shows a stale recording count
+        self._configure_trigger_period(None)  # no recording counts preview triggers
         self._backend.start_grab_preview()
         self._thread = threading.Thread(
             target=self._preview_loop, args=(mode,), daemon=True
@@ -1154,6 +1155,15 @@ class Camera:
         # failure below so a failed start (e.g. "insufficient resources")
         # cannot orphan the child process and its threads.
         try:
+            # A software train's period sets how long a trigger may await its
+            # image, and when a pending one is too stale to fire (see
+            # _trigger_handoff.STALE_TRIGGER_S).
+            software_period = (
+                pulse_clock.period_ns / 1e9
+                if software_trigger and pulse_clock is not None and pulse_clock.period_ns
+                else None
+            )
+            self._configure_trigger_period(software_period)
             if not self._backend.start_grab_record():
                 log.error(
                     "Failed to start grabbing for recording on camera %s",
@@ -1176,6 +1186,11 @@ class Camera:
         )
         self._thread.start()
         return True
+
+    def _configure_trigger_period(self, period_s: float | None) -> None:
+        configure = getattr(self._backend, "configure_trigger_period", None)
+        if callable(configure):
+            configure(period_s)
 
     def arm_counting(self) -> None:
         """Start counting pulses: the recording's first trigger follows.
