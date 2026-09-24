@@ -56,7 +56,7 @@ def test_build_recording_summary():
     assert summary["record_form"] == "display"
     assert "trigger pulse" in summary["dropped_frames_note"]
     assert summary["pulse_train"] is None  # no clock passed
-    assert summary["sync"] == {"ok": True, "warnings": []}
+    assert summary["sync"] == {"ok": True, "warnings": [], "notes": []}
     assert summary["start_time"].startswith("20")
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
@@ -65,6 +65,7 @@ def test_build_recording_summary():
     # A camera that predates pulse accounting reads as having none.
     assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
     assert entry["writer_dropped"] == 0 and entry["stream"] == {}
+    assert entry["writer_skipped"] == 0 and entry["writer_skipped_indices"] == []
     # No fallbacks -> the series is entirely the camera's hardware timestamp.
     assert entry["timestamp_source"] == "hardware"
     assert entry["host_fallback_count"] == 0
@@ -78,6 +79,143 @@ def test_build_recording_summary():
     )
     assert sensor_summary["cameras"][0]["transform_applied"] is False
     assert sensor_summary["start_time"] is None
+
+
+PERIOD_125_FPS = 8_000_000
+BASLER = ("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 2000)
+GS3 = ("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
+
+
+def _sync_camera(name, latency_ns, *, late_pulses=0, frames=16, **extra):
+    """A finished camera as _check_sync reads it: ``frames`` frames of a train at
+    125 fps, each reaching the host ``latency_ns`` after its pulse, the whole
+    video ``late_pulses`` pulses behind the train."""
+    from types import SimpleNamespace
+
+    t0 = 1_700_000_000_000_000_000
+    fields = {
+        "name": name,
+        "serial_number": name,
+        "frames_recorded": frames,
+        "missed_pulses": [],
+        "writer_dropped": 0,
+        "extra_frames": 0,
+        "clock_mismatch": False,
+        "unclocked_frames": 0,
+        "timestamp_glitches": [],
+        "frame_arrival_ns": [
+            t0 + (p + late_pulses) * PERIOD_125_FPS + latency_ns for p in range(frames)
+        ],
+        "frame_pulse_index": list(range(frames)),
+        **extra,
+    }
+    return SimpleNamespace(**fields)
+
+
+def _sync_controller(cameras, profiles):
+    from typing import Any, cast
+
+    from octacam.pulses import PulseClock
+
+    controller = RecordingController(
+        cast(Any, cameras), RecordingSettings(fps=125.0), auto_preview=False
+    )
+    controller._pulse_clock = PulseClock(PERIOD_125_FPS, 16, "managed")
+    controller._delivery_profiles = profiles
+    controller._recording_cameras = [c.name for c in cameras]
+    return controller
+
+
+def test_check_sync_does_not_compare_unlike_cameras():
+    # The rig at 125 fps: a 2048² GS3 frame reaches the host 6 ms (0.75 of a
+    # period) after an acA1920 frame of the same pulse. Compared as if alike,
+    # every GS3 read as "started 1 pulse late".
+    cams = [
+        _sync_camera("b0", 6_700_000),
+        _sync_camera("b1", 6_800_000),
+        _sync_camera("f0", 12_700_000),
+        _sync_camera("f1", 12_600_000),
+    ]
+    sync = _sync_controller(
+        cams, {"b0": BASLER, "b1": BASLER, "f0": GS3, "f1": GS3}
+    )._check_sync(completed=True)
+    assert sync["ok"], sync
+    assert sync["start_offsets"] == {"b0": 0, "b1": 0, "f0": 0, "f1": 0}
+    assert sync["warnings"] == []
+    (note,) = sync["notes"]
+    assert "[b0, b1]" in note and "[f0, f1]" in note, note
+
+
+def test_check_sync_still_catches_a_like_camera_a_pulse_late():
+    cams = [
+        _sync_camera("b0", 6_700_000),
+        _sync_camera("f0", 12_700_000),
+        _sync_camera("f1", 12_600_000, late_pulses=1),
+    ]
+    sync = _sync_controller(cams, {"b0": BASLER, "f0": GS3, "f1": GS3})._check_sync(
+        completed=True
+    )
+    assert not sync["ok"]
+    assert sync["start_offsets"] == {"f0": 0, "f1": 1}
+    assert any("f1 started 1 pulse(s) late" in w for w in sync["warnings"]), sync
+    # b0 has no like camera: its start was not checked, and a note says so.
+    (note,) = sync["notes"]
+    assert "[b0]" in note and "[f0, f1]" in note, note
+
+
+def test_check_sync_compares_a_camera_without_a_profile_with_none():
+    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, late_pulses=1)]
+    sync = _sync_controller(cams, {"f0": GS3, "f1": None})._check_sync(completed=True)
+    assert sync["ok"] and sync["start_offsets"] == {}, sync
+    assert len(sync["notes"]) == 1
+
+
+def test_check_sync_flags_frames_the_writer_skipped():
+    cams = [
+        _sync_camera("f0", 12_700_000),
+        _sync_camera("f1", 12_600_000, writer_skipped=2, writer_skipped_indices=[7, 8]),
+    ]
+    controller = _sync_controller(cams, {"f0": GS3, "f1": GS3})
+    sync = controller._check_sync(completed=True)
+    assert not sync["ok"]
+    (warning,) = sync["warnings"]
+    assert "f1" in warning and "2 frame(s)" in warning and "pulse_index" in warning
+    from types import SimpleNamespace
+
+    from octacam.controller import build_recording_summary
+    from octacam.transform import DisplayTransform
+
+    summary = build_recording_summary(
+        RecordingSettings(fps=125.0),
+        [
+            SimpleNamespace(
+                **vars(cam),
+                recorded_frame_size=(2048, 2048),
+                pixel_format="Mono8",
+                mean_fps=125.0,
+                dropped_count=0,
+                dropped_indices=[],
+                start_timestamp_ns=1,
+                host_fallback_count=0,
+                writer_failed=False,
+                display_transform=DisplayTransform(),
+            )
+            for cam in cams
+        ],
+        0,
+        aborted=False,
+        sync=sync,
+    )
+    entry = summary["cameras"][1]
+    assert entry["writer_skipped"] == 2 and entry["writer_skipped_indices"] == [7, 8]
+    assert summary["sync"]["ok"] is False
+
+
+def test_check_sync_flags_a_recording_camera_with_no_frame():
+    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, frames=0)]
+    sync = _sync_controller(cams, {"f0": GS3, "f1": GS3})._check_sync(completed=True)
+    assert not sync["ok"]
+    assert any("f1 recorded no frame" in w for w in sync["warnings"]), sync
 
 
 def test_timestamp_source_derivation():

@@ -283,6 +283,202 @@ def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(
     assert summary["sync"]["ok"]  # filled: still aligned
 
 
+class SlowArmBoard(Board):
+    """A board whose recording arm lands late (the triggerbox's USB-reset
+    recovery and re-arm take seconds) before its train starts."""
+
+    def on_recording_start(self, params):
+        time.sleep(1.0)
+        super().on_recording_start(params)
+
+
+def test_a_slow_arm_does_not_cut_the_train_short(fake_system, tmp_path):
+    # The train's end used to be counted from before the arm, so the recording
+    # stopped a second early and the rest of the train was filled with repeats.
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
+    board = SlowArmBoard(fake_system, count=50)
+    _save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
+    )
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 50, cam
+        assert cam["missed_pulses"] == 0 and cam["dropped"] == 0, cam
+        assert not arrays[f"{serial}/dropped"].any()
+    assert summary["sync"]["ok"], summary["sync"]
+
+
+class HookLog(Board):
+    """A board that logs when each lifecycle hook ran and when priming ended."""
+
+    def __init__(self, system, count, period_ns):
+        super().__init__(system, count, period_ns)
+        self.log: list[tuple[str, float]] = []
+
+    def prime_trigger(self, params, pulses):
+        primed = super().prime_trigger(params, pulses)
+        self.log.append(("primed", time.monotonic()))
+        return primed
+
+    def on_recording_start(self, params):
+        self.log.append(("start", time.monotonic()))
+        super().on_recording_start(params)
+
+    def on_first_frame(self, params):
+        self.log.append(("first_frame", time.monotonic()))
+
+    def on_recording_stop(self, aborted):
+        super().on_recording_stop(aborted)
+        self.log.append(("stop", time.monotonic()))
+
+
+class HookSpy(Plugin):
+    """Logs the lifecycle hooks of a software-triggered recording."""
+
+    name = "board"
+
+    def __init__(self):
+        self.log: list[tuple[str, float]] = []
+
+    def on_recording_start(self, params):
+        self.log.append(("start", time.monotonic()))
+
+    def on_first_frame(self, params):
+        self.log.append(("first_frame", time.monotonic()))
+
+    def on_recording_stop(self, aborted):
+        self.log.append(("stop", time.monotonic()))
+
+
+@pytest.mark.parametrize("source", ["managed", "software"])
+def test_a_low_fps_start_sequence_is_waited_out(
+    fake_system, tmp_path, monkeypatch, source
+):
+    # At a low fps priming takes several periods — at 1 fps a round alone is 8 s —
+    # which outlasted the monitor's fixed waits: on_first_frame (and a teardown)
+    # ran before the arm. Scaled down here: 5 fps, and waits that a round of
+    # priming outlasts unless they allow for it.
+    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)  # one round
+    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.4)
+    fps = 5.0
+    period_ns = int(1e9 / fps)
+    for serial in FAKE_SERIALS:
+        _backend(fake_system, serial).hardware_period_ns = period_ns
+    if source == "managed":
+        plugin = HookLog(fake_system, count=5, period_ns=period_ns)
+    else:
+        plugin = HookSpy()
+        prime = fake_system.prime_software_trigger
+
+        def logged_prime(pulses, rate):
+            prime(pulses, rate)
+            plugin.log.append(("primed", time.monotonic()))
+
+        monkeypatch.setattr(fake_system, "prime_software_trigger", logged_prime)
+    _save_dir, summary, _arrays, controller = _record(
+        fake_system,
+        tmp_path,
+        plugins=PluginManager([plugin]),
+        trigger_source=source,
+        fps=fps,
+    )
+    order = [hook for hook, _t in plugin.log]
+    assert order == ["primed", "start", "first_frame", "stop"], order
+    at = dict(plugin.log)
+    # The priming frames of a slow train get a few periods to land.
+    assert at["start"] - at["primed"] >= 4 * period_ns / 1e9 - 0.02
+    assert not [e for e in controller.events if "countdown anyway" in e["message"]]
+    for serial in FAKE_SERIALS:
+        cam = _cam(summary, serial)
+        assert cam["frames"] == 5 and cam["missed_pulses"] == 0, cam
+    assert summary["sync"]["ok"], summary["sync"]
+
+
+def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monkeypatch):
+    # Stopped while a slow train's priming burst is still going out: the
+    # teardown (and the board's disarm) must wait for it, not time out first.
+    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    period_ns = int(1e9 / 5.0)
+    board = HookLog(fake_system, count=5, period_ns=period_ns)
+    settings = RecordingSettings(
+        fps=5.0,
+        duration_s=1.0,
+        save_dir=str(tmp_path / "rec" / "001"),
+        save_method="raw",
+        trigger_source="managed",
+    )
+    controller = RecordingController(
+        fake_system, settings, plugins=PluginManager([board]), auto_preview=False
+    )
+    starter = threading.Thread(
+        target=controller.start_recording, kwargs={"plugin_params": {"board": {}}}
+    )
+    starter.start()
+    deadline = time.monotonic() + 5
+    while controller.state != "waiting" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)  # into the 0.8 s priming burst
+    controller.stop_recording(abort=True)
+    starter.join(timeout=10)
+    controller.join(timeout=10)
+    order = [hook for hook, _t in board.log]
+    assert order == ["primed", "stop"], order  # the stop skipped the arm
+
+
+def test_a_camera_that_records_nothing_breaks_sync(fake_system, tmp_path, monkeypatch):
+    # FAKE-1's record grab starts but it never answers a trigger: there is no
+    # video of it to align, whatever the other camera did.
+    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+    _backend(fake_system, "FAKE-1").ignore_first_triggers = 10**9
+    _save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    assert _cam(summary, "FAKE-0")["frames"] == 50
+    assert _cam(summary, "FAKE-1")["frames"] == 0
+    assert not summary["sync"]["ok"]
+    assert any("FAKE-1 recorded no frame" in w for w in summary["sync"]["warnings"])
+
+
+@pytest.mark.parametrize("unlike", [None, "exposure", "geometry"])
+def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlike):
+    # FAKE-1's frames reach the host 0.8 of a period after FAKE-0's, as a slower
+    # model's, a larger frame's or a longer exposure's do. Cameras alike in all
+    # of those deliver a pulse equally fast, so between them that is a camera a
+    # pulse late (or unverifiable); between unlike cameras it says nothing.
+    slow = next(c for c in fake_system if c.serial_number == "FAKE-1")
+    if unlike == "exposure":
+        slow.set_live_param("exposure", 12000)
+    elif unlike == "geometry":
+        slow.set_geometry(width=2 * W, height=2 * H)
+    backend = slow.backend
+    original = backend.retrieve
+
+    def late(timeout_ms, wants_array):
+        frame = original(timeout_ms, wants_array)
+        if frame is not None:
+            time.sleep(0.8 * PERIOD_NS / 1e9)
+        return frame
+
+    backend.retrieve = late
+    _save_dir, summary, _arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
+    sync = summary["sync"]
+    if unlike is None:
+        assert not sync["ok"], sync
+        assert not sync["notes"], sync
+        return
+    assert sync["ok"], sync
+    for serial in FAKE_SERIALS:
+        assert _cam(summary, serial)["start_offset_pulses"] is None
+    (note,) = sync["notes"]
+    assert "[FAKE-0]" in note and "[FAKE-1]" in note, note
+
+
 def test_external_trigger_misses_are_reported_not_filled(fake_system, tmp_path):
     for serial in FAKE_SERIALS:
         _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
