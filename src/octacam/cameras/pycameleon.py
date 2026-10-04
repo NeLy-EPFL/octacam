@@ -108,7 +108,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # _receive_bounded); created lazily on the grab thread, closed by close().
         self._recv_loop: asyncio.AbstractEventLoop | None = None
         # Serializes every device call (pycameleon allows only one at a time).
-        # Reentrant so composed methods (read_node → _read_int_opt) can nest.
+        # Reentrant: open() sets Mono8 through _set_enum while holding it.
         self._lock = threading.RLock()
         # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
         # retrieve consumes it and does the execute+receive under _lock. pycameleon
@@ -181,20 +181,6 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     # ----------------------------------------------------- node plumbing
 
-    def _read_int_opt(self, node: str) -> int | None:
-        with self._lock:
-            try:
-                return int(self._cam.read_integer(node))
-            except Exception:
-                return None
-
-    def _read_enum_opt(self, node: str) -> str | None:
-        with self._lock:
-            try:
-                return self._cam.read_enum_as_str(node)
-            except Exception:
-                return None
-
     def _set_enum(self, node: str, value: str) -> None:
         with self._lock:
             try:
@@ -203,7 +189,11 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 raise BackendError(str(e)) from e
 
     def _get_enum(self, node: str) -> str | None:
-        return self._read_enum_opt(node)
+        with self._lock:
+            try:
+                return self._cam.read_enum_as_str(node)
+            except Exception:
+                return None
 
     # Typed-setter seam used by the native-TSV config applier (_genicam_config).
     def _set_bool(self, node: str, value: bool) -> None:
@@ -257,9 +247,9 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         # exposes no min/inc/unit or per-node writability.
         maximum: float | None = None
         if name == "width":
-            maximum = self._read_int_opt("WidthMax")
+            maximum = self._get_number("WidthMax", True)
         elif name == "height":
-            maximum = self._read_int_opt("HeightMax")
+            maximum = self._get_number("HeightMax", True)
         return NodeInfo(
             value=value,
             min=None,
@@ -299,9 +289,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     # config_values / load_params / save_params and the software-trigger chain
     # (enable_frame_trigger / set_trigger_source / begin_software_trigger_preview
     # / trigger_once / begin_freerun / _enable_trigger_overlap) are inherited
-    # unchanged from GenICamTriggerConfig. load_params captures the original
-    # TriggerSource via the shared _get_enum, which pycameleon routes through
-    # _read_enum_opt (same lock-guarded read).
+    # unchanged from GenICamTriggerConfig.
 
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
