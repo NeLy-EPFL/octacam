@@ -1572,21 +1572,26 @@ def test_view_message_server_side_crop(client):
 
 
 # --------------------------------------------------------------------------- #
-# /api/system exposes the update notice for the GUI banner. The background PyPI
-# probe is skipped under the test suite (PYTEST_CURRENT_TEST), so it defaults to
-# None; a notice is injected via the app.state test seam to check surfacing.
+# /api/system exposes the update notice for the GUI banner. The app runs the
+# check in the background; conftest's OCTACAM_NO_UPDATE_CHECK keeps it off the
+# network. A notice is injected via the app.state test seam to check surfacing.
 
 
-def test_system_update_defaults_to_none(client):
+def test_system_update_check_makes_no_network_call(client):
+    state = client.app.state.app_state
+    assert wait_until(lambda: state.update_status() is not None)
     data = client.get("/api/system").json()
-    assert "update" in data
-    assert data["update"] is None  # no unattended network call under pytest
+    assert data["update"]["latest"] is None and data["update"]["available"] is False
+    assert data["update"]["note"] == "update check disabled"
 
 
 def test_system_surfaces_injected_update_notice(client):
     from octacam.updates import UpdateNotice
 
-    client.app.state.app_state._update_notice = UpdateNotice(
+    state = client.app.state.app_state
+    # Inject after the background check has stored its own notice.
+    wait_until(lambda: state.update_status() is not None)
+    state._update_notice = UpdateNotice(
         current="0.3.0",
         latest="0.9.0",
         update_available=True,

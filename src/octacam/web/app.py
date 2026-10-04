@@ -994,14 +994,13 @@ def create_app(
     # Check PyPI for a newer release once, in the background, and cache it on
     # `state` for the /api/system banner — off the hot path so GUI load never
     # waits on the network. octacam.updates is fail-soft and honors the user
-    # opt-out; additionally skip the unattended probe under CI / the test suite.
+    # opt-out.
     app.state.app_state = state  # test seam: a test can inject a notice here
-    if not (os.environ.get("CI") or os.environ.get("PYTEST_CURRENT_TEST")):
-        threading.Thread(
-            target=state.refresh_update_notice,
-            name="octacam-update-check",
-            daemon=True,
-        ).start()
+    threading.Thread(
+        target=state.refresh_update_notice,
+        name="octacam-update-check",
+        daemon=True,
+    ).start()
 
     # Handlers are sync `def` on purpose: FastAPI runs them in its thread
     # pool, so blocking pylon/serial/filesystem calls never stall the
