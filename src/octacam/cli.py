@@ -64,10 +64,8 @@ _stderr_console_singleton = None
 
 
 def _stderr_console():
-    """The single rich Console octacam draws on stderr (logs + progress bars).
-
-    Sharing one Console lets a live progress bar and the logger coordinate, so
-    log lines render cleanly above the bar instead of corrupting it."""
+    """The one stderr Console, shared by the logger and every progress bar so log
+    lines render above a live bar instead of corrupting it."""
     global _stderr_console_singleton
     if _stderr_console_singleton is None:
         from rich.console import Console
@@ -77,10 +75,8 @@ def _stderr_console():
 
 
 def _setup_logging(level: LogLevel) -> None:
-    """Route the "octacam" logger through rich (colored level, pretty tracebacks).
-
-    Logs go to stderr so stdout stays clean for the machine-readable output of
-    `record`/`doctor --json`."""
+    """Route the "octacam" logger through rich on stderr, keeping stdout clean for
+    machine-readable output (`record`'s video paths, `--json`)."""
     from rich.logging import RichHandler
 
     handler = RichHandler(
@@ -100,11 +96,9 @@ def _setup_logging(level: LogLevel) -> None:
 def _raise_fd_limit() -> None:
     """Raise the soft open-file limit to the hard limit.
 
-    pylon's USB stack uses ~150 file descriptors per streaming camera
-    (one eventfd per queued URB), so 8 cameras exceed the common 1024
-    soft limit and StartGrabbing fails with "Insufficient system
-    resources exist to complete the API".
-    """
+    pylon uses ~150 fds per streaming camera (one eventfd per queued URB), so
+    8 cameras exceed the usual 1024 and StartGrabbing fails ("Insufficient
+    system resources")."""
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     if soft < hard:
         resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
@@ -114,14 +108,8 @@ def _raise_fd_limit() -> None:
 def _port_available(host: str, port: int) -> bool:
     """Return False if a server is already bound to ``host:port``.
 
-    A second `octacam gui` on a rig would otherwise spend seconds opening
-    cameras only to die when uvicorn cannot bind; probing first lets it fail
-    instantly with a useful message. SO_REUSEADDR mirrors uvicorn so a socket
-    lingering in TIME_WAIT (which uvicorn could still rebind) is not misreported
-    as in use, while an actively listening server still fails to bind and is
-    reported correctly. There is a tiny race between this probe and uvicorn's
-    own bind; losing it just falls back to uvicorn's own bind error.
-    """
+    SO_REUSEADDR mirrors uvicorn, so a socket lingering in TIME_WAIT (which
+    uvicorn could rebind) is not reported as in use; a listening server is."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -133,10 +121,8 @@ def _port_available(host: str, port: int) -> bool:
 
 
 class _NoLock:
-    """Placeholder lock for when the lock file itself cannot be opened (e.g. an
-    unwritable temp dir): the single-instance guard is skipped and the exclusive
-    camera open is the only backstop. close() no-ops so the caller need not
-    special-case it."""
+    """Stand-in when the lock file cannot be opened: the exclusive camera open is
+    then the only guard. close() is a no-op so callers need no special case."""
 
     def close(self) -> None:
         pass
@@ -146,27 +132,18 @@ _LOCK_UNAVAILABLE = _NoLock()
 
 
 def _instance_lock_path(config_dir: Path) -> Path:
-    """Stable per-config-dir lock path under the system temp directory.
-
-    Keyed on the resolved path, so every spelling of one rig shares one lock."""
+    """Per-rig lock path, keyed on the resolved config dir so every spelling of
+    one rig shares one lock."""
     key = hashlib.sha1(str(config_dir.resolve()).encode()).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / f"octacam-{key}.lock"
 
 
 def _acquire_instance_lock(config_dir: Path):
-    """Take an exclusive, auto-releasing lock so one octacam owns this rig.
+    """Flock a per-rig file so one octacam owns this rig, on any ``--port``.
 
-    A second `octacam gui <config_dir>` — on any ``--port`` — must not fight the
-    running one over the cameras. We flock a per-config-dir file: the lock is
-    held for the life of the process and released by the OS on exit, even on a
-    crash or SIGKILL, so there is never a stale lock to clear. Keying on the
-    config dir (not the port) means re-running the same rig is refused while two
-    genuinely different configs may still run side by side.
-
-    Returns the locked file handle on success (keep it referenced for the whole
-    run), ``None`` if another instance already holds it (the caller should
-    exit), or :data:`_LOCK_UNAVAILABLE` if the lock file could not be opened.
-    """
+    The OS releases the lock on exit, even on SIGKILL, so it never goes stale.
+    Returns the locked handle (keep it referenced for the whole run), ``None``
+    if another instance holds it, or :data:`_LOCK_UNAVAILABLE`."""
     path = _instance_lock_path(config_dir)
     try:
         handle = open(path, "a+")
@@ -178,8 +155,7 @@ def _acquire_instance_lock(config_dir: Path):
     except OSError:
         handle.close()
         return None
-    # Record our PID for anyone inspecting the file (purely informational).
-    handle.seek(0)
+    handle.seek(0)  # the pid is informational (doctor names the holder)
     handle.truncate()
     handle.write(f"{os.getpid()}\n")
     handle.flush()
@@ -189,15 +165,12 @@ def _acquire_instance_lock(config_dir: Path):
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
-    # "rich" gives the coloured help panels. It also treats `[...]` in help text
-    # as markup, so literal TOML section names below are escaped as `\[record]`.
+    # rich markup reads `[...]` in help text, so TOML section names are escaped
+    # as `\[record]`.
     rich_markup_mode="rich",
-    # Accept `-h` alongside `--help` on the root and every subcommand.
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-# `octacam jobs …` manages detached `octacam process --detach` jobs. Kept as a
-# sub-group (its own verbs) rather than more flags on `process`.
 jobs_app = typer.Typer(
     no_args_is_help=True,
     help="Manage detached `octacam process` jobs (list, attach, pause, cancel).",
@@ -205,8 +178,6 @@ jobs_app = typer.Typer(
 )
 app.add_typer(jobs_app, name="jobs")
 
-# `octacam cache …` inspects and clears octacam's on-disk cache under
-# ~/.cache/octacam (the recording list, detached-job logs, activity markers).
 cache_app = typer.Typer(
     no_args_is_help=True,
     help="Inspect and clear the octacam cache (recording list, job logs, markers).",
@@ -221,8 +192,6 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-# Plugins are opt-in; the default launch loads none. Enable them per-rig in the
-# config's `plugins` section, or per-launch with these options.
 EnabledPlugins = Annotated[
     list[str] | None,
     typer.Option(
@@ -241,25 +210,17 @@ NoPlugins = Annotated[
 
 
 def _resolve_enabled(enabled_plugins, no_plugins):
-    """Map the CLI flags to build_plugins' `enabled` argument.
-
-    None = no override (use the config), [] = --no-plugins, or the list of
-    --plugin names to add to the config selection.
-    """
+    """build_plugins' ``enabled``: None to use the config, [] for --no-plugins,
+    else the --plugin names to add to the config's selection."""
     if no_plugins:
         return []
     return list(enabled_plugins) if enabled_plugins else None
 
 
 def _resolve_config_dir(config_dir: Path) -> Path:
-    """The config dir a command's CONFIG_DIR argument names, allowing a recording.
-
-    A recording folder keeps its config snapshot and camera parameter files in
-    its ``octacam_recording`` subfolder, which is a complete config dir, so
-    `octacam gui <recording>` relaunches the setup that recording ran with. Every
-    command that opens a rig from a config dir goes through here once, where it
-    first takes the path. A redirect is logged, since the operator named a
-    different folder than the one whose config is used."""
+    """The config dir CONFIG_DIR names: a recording folder resolves to its config
+    snapshot, so `octacam gui <recording>` relaunches what it ran with. Every
+    command that opens a rig calls this once; a redirect is logged."""
     from octacam.config import resolve_config_dir
 
     resolved = resolve_config_dir(config_dir)
@@ -315,7 +276,7 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
 
 
 def _in_ssh_session() -> bool:
-    """True when this shell was started over SSH (sshd exports these)."""
+    """True when this shell was started over SSH."""
     return any(
         os.environ.get(var) for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
     )
@@ -324,11 +285,8 @@ def _in_ssh_session() -> bool:
 def _browser_skip_reason(no_browser: bool) -> str | None:
     """Why auto-opening the browser should be skipped, or None to open it.
 
-    A browser is only useful when octacam runs on the machine the user is
-    sitting at. Over SSH the browser would launch on the rig rather than the
-    user's laptop, so we skip it and let them reach the GUI through the tunnel.
-    The headless check covers SSH setups that strip the SSH_* variables.
-    """
+    Over SSH the browser would open on the rig, not the user's machine; the
+    no-display check catches SSH setups that strip the SSH_* variables."""
     if no_browser:
         return "--no-browser was passed"
     if _in_ssh_session():
@@ -343,12 +301,9 @@ def _browser_skip_reason(no_browser: bool) -> str | None:
 def _launch_browser(url: str) -> bool:
     """Open url in the default browser; return True if a launcher started.
 
-    On Linux/macOS we prefer the desktop's own opener (xdg-open / open): it
-    honours the user's default-browser setting and is more reliable than the
-    stdlib's browser hunt, which on Linux can "succeed" by spawning some other
-    browser that never actually shows a window. An explicit $BROWSER preference
-    and every other platform go through webbrowser, which also covers Windows.
-    """
+    $BROWSER wins; otherwise xdg-open/open, which honor the desktop's default,
+    whereas webbrowser's hunt on Linux can "succeed" with a browser that never
+    shows a window. Everything else falls back to webbrowser."""
 
     def _via_webbrowser() -> bool:
         try:
@@ -357,7 +312,6 @@ def _launch_browser(url: str) -> bool:
             log.debug("webbrowser.open failed: %s", e)
             return False
 
-    # A user who set $BROWSER asked for that specific browser; webbrowser honours it.
     if os.environ.get("BROWSER") and _via_webbrowser():
         return True
 
@@ -381,11 +335,8 @@ def _launch_browser(url: str) -> bool:
 
 
 def _open_browser_when_ready(url: str, host: str, port: int) -> None:
-    """Wait for the server to accept connections, then open the default browser.
-
-    Runs in a daemon thread so the blocking uvicorn.run() can start the server
-    while we poll the port; opening before the server is up shows an error page.
-    """
+    """Open the browser once the server accepts connections (on a daemon thread
+    beside uvicorn.run; opening earlier shows an error page)."""
     connect_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     deadline = time.monotonic() + 10.0
     try:
@@ -402,16 +353,12 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
             log.warning(
                 "Couldn't open a browser automatically — open %s manually.", url
             )
-    except Exception:
-        # A helper thread must never die silently; tell the user what to do.
+    except Exception:  # a helper thread must never die silently
         log.warning("Failed to open a browser — open %s manually.", url, exc_info=True)
 
 
 def _print_transcode_hints(session_id: str) -> None:
-    """On GUI shutdown, print the `process` commands for what was just recorded.
-
-    Stays silent when the session recorded nothing (it only previewed).
-    """
+    """Print the `process` commands for this session's recordings, if any."""
     from octacam import session_cache
 
     try:
@@ -430,13 +377,8 @@ def _print_transcode_hints(session_id: str) -> None:
 
 
 def _warn_if_transcoding() -> None:
-    """Warn when an `octacam process` is transcoding elsewhere on this machine.
-
-    Transcoding runs slow x264 presets across many files and saturates the CPU,
-    so it competes with live capture/encoding and can cause dropped frames. The
-    operator should know before starting a GUI session or a headless recording.
-    Best-effort: any failure to check is silently ignored.
-    """
+    """Warn (best-effort) when an `octacam process` is transcoding on this
+    machine: it competes with live capture for the CPU."""
     from octacam import session_cache
 
     try:
@@ -457,13 +399,8 @@ def _warn_if_transcoding() -> None:
 
 
 def _finish_gui_session(session_id: str, config_dir: Path, process_after: bool) -> None:
-    """On GUI shutdown, either kick off detached processing or print the hints.
-
-    If the operator chose "shut down & process" and this session actually recorded
-    something, start a detached `octacam process --session-id …` job (which they
-    reattach to from a terminal). Best-effort: any failure falls back to printing
-    the ready-to-run hints and never raises during teardown.
-    """
+    """On GUI shutdown, start a detached `process` job for this session's
+    recordings when asked, else print the hints. Never raises."""
     from octacam import process_jobs, session_cache
 
     if process_after:
@@ -555,16 +492,12 @@ def gui(
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
 
-    # Reachable loopback address for the browser / hint messages (binding to
-    # 0.0.0.0 or :: is not connectable, so point at localhost in that case).
+    # A wildcard bind address is not connectable; the browser uses loopback.
     browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
     config_dir = _resolve_config_dir(config_dir).resolve()
     log.info("Using config directory: %s", config_dir)
 
-    # One octacam process must own a rig's cameras at a time. The guard is keyed
-    # on the config dir rather than the port (which --port can change), so
-    # re-running `octacam gui <config>` is refused even on a different port.
     instance_lock = _acquire_instance_lock(config_dir)
     if instance_lock is None:
         sys.exit(
@@ -572,9 +505,6 @@ def gui(
             f"({config_dir}). Open its GUI in a browser, or stop it first."
         )
 
-    # Separately, fail early if the chosen port is taken (by other software, or
-    # by an octacam serving a different config) instead of letting uvicorn's
-    # bind fail later with an opaque traceback.
     if not _port_available(host, port):
         sys.exit(
             f"Port {port} is already in use on {host}. "
@@ -582,23 +512,16 @@ def gui(
         )
 
     config = load_config_dir(config_dir)
-
-    # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()
 
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
 
     settings = _settings_from_record(config.record, config.transcode, config.transfer)
-    # One session id for this GUI run; every recording made before shutdown is
-    # tagged with it in the session cache so `octacam process --last session`
-    # can find the whole batch later (and we print the commands on the way out).
+    # Tags every recording of this run, for `octacam process --last session`.
     session_id = session_cache.new_session_id()
-    # Serve the page *before* touching hardware: the controller starts holding a
-    # hardware-free placeholder system (ready=False) so uvicorn can bind and the
-    # browser render the shell immediately. The slow work — opening the cameras,
-    # arming the serial plugins, starting preview — runs on the init thread below
-    # and is swapped in via controller.attach_system, which pushes the filled-in
-    # system to every connected browser.
+    # Serve first: the controller starts on a hardware-free placeholder
+    # (ready=False) so the page renders at once; _initialize_rig opens the
+    # hardware and swaps it in with attach_system.
     system = CameraSystem.pending(config.backend)
     controller = RecordingController(
         system,
@@ -609,27 +532,19 @@ def gui(
         ready=False,
     )
     capture_stack = contextlib.ExitStack()
-    # Set on shutdown so a still-running init bails before arming hardware the
-    # teardown is about to release (join() below also serializes the two).
+    # Set on shutdown: a still-running init releases the cameras instead of arming.
     stopping = threading.Event()
 
     def _initialize_rig(app_state) -> None:
-        """Open the cameras + arm the plugins (in parallel), load params, start
-        preview, then push the ready system to any connected browser.
+        """Open the cameras and arm the plugins in parallel, start preview, publish.
 
-        Runs on a daemon thread so ``octacam gui`` serves the page immediately.
-        A failure here surfaces to the GUI (an error event + placeholder) and the
-        log rather than aborting the already-running server."""
+        A failure goes to the GUI (fail_init) and the log; the server keeps
+        running."""
         from concurrent.futures import ThreadPoolExecutor
 
         def _publish() -> None:
-            # Push the current system descriptor + state to every connected
-            # browser, on success OR failure. On failure this still matters: the
-            # serial plugins arm in parallel with the camera open and may have
-            # succeeded, so their tabs must flip to ready even though the grid
-            # shows the init error — otherwise an armed board reads as
-            # "unavailable" until a manual reload (the WS-connect handshake, sent
-            # before setup_all finished, reported it not-ready).
+            # On failure too: the plugins armed in parallel may be ready, and
+            # their tabs must say so without a reload.
             app_state.broadcast_system()
             controller.notify_state()
 
@@ -637,12 +552,9 @@ def gui(
             opened = CameraSystem(
                 [c.serial_number for c in config.cameras], backend=config.backend
             )
-            # Everything past the constructor can raise (a malformed per-camera
-            # parameter file makes load_config re-raise BackendError), and by then
-            # the devices are open. The caller only ever sees the exception, so
-            # close here or the whole rig stays claimed for the life of the
-            # process and is destroyed after PylonTerminate() — the teardown
-            # segfault BaslerBackend.close documents.
+            # The devices are open: close on any failure (a bad parameter file
+            # raises), or they stay claimed and are destroyed after
+            # PylonTerminate (the segfault BaslerBackend.close documents).
             try:
                 if len(opened) == 0:
                     raise BackendError("no cameras were opened")
@@ -658,11 +570,8 @@ def gui(
 
         opened_system: CameraSystem | None = None
         try:
-            # Cameras (USB) and serial plugins are independent hardware, so open
-            # and arm them concurrently — startup is bounded by the slower of the
-            # two, not their sum. plugins.setup_all logs and swallows its own
-            # errors; the ThreadPoolExecutor's exit waits for it even if the
-            # camera open raises first.
+            # Cameras and serial plugins are independent hardware. setup_all logs
+            # its own errors; the pool's exit waits for it if the open raises.
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rig-init") as ex:
                 cam_future = ex.submit(_open_cameras)
                 ex.submit(plugins.setup_all)
@@ -671,8 +580,6 @@ def gui(
             if isinstance(e, BackendUnavailable):
                 message = str(e)
             elif isinstance(e, BackendError):
-                # Most often another octacam already holds the cameras (vendor SDKs
-                # open USB3 devices exclusively), or one is disconnected.
                 message = (
                     f"Could not open the cameras: {e}. They may already be in use by "
                     "another octacam instance on this rig, or disconnected — only one "
@@ -685,28 +592,21 @@ def gui(
             _publish()
             return
 
-        if stopping.is_set():
-            # Shutdown began while we were opening; release rather than arm
-            # hardware the finally is about to close (it join()s us first). Don't
-            # publish — we're on our way down.
+        if stopping.is_set():  # the finally joins us before closing anything
             with contextlib.suppress(Exception):
                 opened_system.close()
             return
 
         controller.attach_system(opened_system)
-        # Now that this GUI holds the cameras, publish the capture-active marker so
-        # an `octacam process` run on this machine pauses at its next work-unit
-        # boundary and resumes when we exit. The shutdown path joins this thread
-        # before closing capture_stack, so the enter/close ordering is safe.
+        # The capture-active marker parks every `octacam process` on this machine,
+        # with no timeout, so it is taken only once the GUI owns cameras. The
+        # finally joins this thread before closing capture_stack.
         capture_stack.enter_context(session_cache.mark_capture_active("gui session"))
         log.info("Opened %d camera(s)", len(opened_system))
         try:
             controller.start_preview()
         except Exception:
             log.exception("Failed to start live preview")
-        # Fill in the already-served GUI: push the now-ready system descriptor +
-        # a fresh state so a browser that loaded against the placeholder shows the
-        # grid (and enables camera controls) without a reload.
         _publish()
 
     # Assigned inside the try, so a create_app failure still runs the teardown.
@@ -714,13 +614,6 @@ def gui(
     init_thread: threading.Thread | None = None
     try:
         app = create_app(controller, config, plugins, config_dir=str(config_dir))
-        # The capture-active marker is published by _initialize_rig once the
-        # cameras are actually attached — not here. Serve-first startup means this
-        # point is reached before any camera is open, and a GUI that then fails to
-        # open them (or is simply left sitting on the preview all day) owns no
-        # hardware, yet the marker parks every `octacam process` on this machine
-        # at its next work-unit boundary with no timeout.
-        # Kick off the hardware init in the background, then serve immediately.
         init_thread = threading.Thread(
             target=_initialize_rig,
             args=(app.state.app_state,),
@@ -746,21 +639,11 @@ def gui(
                 args=(browser_url, host, port),
                 daemon=True,
             ).start()
-        # ws_ping_timeout: uvicorn's websocket keepalive pings the browser and
-        # drops the socket if no pong returns within this window. That same
-        # socket also carries the preview stream (up to ~8 cameras worth of JPEG
-        # frames at the display refresh rate), so over a slow `ssh -L` tunnel the
-        # link can stay congested long enough that the default 20s pong wait
-        # elapses and a perfectly live GUI is killed with a 1011 "keepalive ping
-        # timeout". Give the pong a generous window; the ping still runs at the
-        # default interval, so a genuinely dead (half-open) client is reaped and
-        # its preview encoding stops.
-        # ws="websockets-sansio": uvicorn's default "auto" still selects its
-        # legacy websockets implementation, which imports the deprecated
-        # websockets.legacy / WebSocketServerProtocol APIs and prints
-        # DeprecationWarnings on startup and on every connection (removed in a
-        # future websockets release). The sansio implementation is the supported
-        # successor and speaks the same protocol to the browser.
+        # ws_ping_timeout: the keepalive socket also carries the preview, and over a
+        # slow `ssh -L` tunnel congestion outlasts the default 20 s pong wait and
+        # kills a live GUI (1011); the default ping interval still reaps dead
+        # clients. websockets-sansio: "auto" picks uvicorn's legacy websockets
+        # implementation, which warns of deprecation on every connection.
         uvicorn.run(
             app,
             host=host,
@@ -769,41 +652,26 @@ def gui(
             ws="websockets-sansio",
             ws_ping_timeout=60.0,
         )
-    finally:
-        # Runs on Ctrl+C, on the /api/shutdown self-signal, and on errors.
-        # Cleanup can take a moment (finalizing recordings, draining ffmpeg,
-        # closing cameras), so bracket it with messages.
+    finally:  # Ctrl+C, /api/shutdown and errors all land here
         log.info("Shutting down — finalizing recordings and releasing cameras…")
-        # Tell a still-running init thread to skip arming, then wait for it: the
-        # join makes its attach_system/start_preview happen-before the close
-        # below, so the two never race over the cameras. Bounded so a wedged SDK
-        # open can't hang shutdown forever.
+        # The join orders the init's attach/start_preview before close(); bounded
+        # so a wedged SDK open cannot hang shutdown.
         stopping.set()
         if init_thread is not None and init_thread.is_alive():
             init_thread.join(timeout=30)
         controller.close()
         plugins.teardown_all()
-        # Release the single-instance lock so a relaunch is not briefly blocked
-        # while this process lingers; the OS would also drop it on exit.
-        instance_lock.close()
-        # Drop the capture-active marker before a kicked-off job starts, so it
-        # runs unpaused rather than parking on our just-released cameras.
+        instance_lock.close()  # a relaunch need not wait for this process to exit
+        # Drop the marker before a processing job starts, or it parks at once.
         capture_stack.close()
-        # The shutdown button can ask us to start processing this session's
-        # recordings on the way out (POST /api/shutdown {process_after}); else we
-        # just print the ready-to-run `octacam process` hints.
         process_after = app is not None and app.state.app_state.process_after
         _finish_gui_session(session_id, config_dir, process_after)
         log.info("octacam stopped.")
 
 
 # ---------------------------------------------------------------------------
-# `octacam doctor` — environment + rig diagnostics
-#
-# Lists detected cameras and bundled plugins and adds pass/warn/fail checks for
-# the toolchain, storage, recording cache, and runtime conflicts. It never
-# *opens* a camera (vendor SDKs open USB3 devices exclusively), so it is safe to
-# run while a GUI/record session is live: it only enumerates and reads locks.
+# `octacam doctor`: it only enumerates and reads locks, never opens a camera
+# (vendor SDKs open USB3 devices exclusively), so it is safe beside a live session.
 # ---------------------------------------------------------------------------
 
 # status -> (marker, rich style). "list" is a plain indented enumeration line.
@@ -878,12 +746,8 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
 
 
 def _cascade_assignment() -> list[tuple[str, str, str | None]]:
-    """``[(serial, backend, model|None), ...]``: the tier that would claim each camera.
-
-    Sweeps the available cascade in priority order and claims each serial for the
-    first tier that enumerates it, so the result shows exactly which backend
-    :class:`CameraSystem` would open each detected camera through under ``auto``.
-    A backend whose enumeration fails is skipped."""
+    """``[(serial, backend, model|None), ...]``: the tier :class:`CameraSystem`
+    would open each camera through under ``auto``. A failing tier is skipped."""
     from octacam.cameras.registry import available_backends
 
     claimed: dict[str, tuple[str, str | None]] = {}
@@ -902,39 +766,22 @@ def _cascade_assignment() -> list[tuple[str, str, str | None]]:
 
 
 class _CameraScan:
-    """Enumerate each relevant camera backend exactly ONCE, concurrently.
+    """Enumerate each backend doctor reports on once, concurrently, and serve
+    every section from that scan (re-entering a vendor SDK is slow: Spinnaker
+    re-inits its System per call, ~2.4 s).
 
-    ``octacam doctor`` used to enumerate the backends ~3× per run — the
-    Camera-backends sweep, the cascade-selection line, and the cameras-vs-config
-    cross-check each re-enumerated — and every re-entry into a vendor SDK paid a
-    steep re-init cost (``enumerate_spinnaker`` releases and re-acquires the
-    Spinnaker ``System`` on each call, ~2.4 s), so the redundancy dominated the
-    whole command (~11 s). This scans every backend the report will show once,
-    caches the result, and serves the three consumers (:meth:`get`,
-    :meth:`cascade`, :meth:`detected_serials`) from that single pass.
-
-    The scan runs the per-backend enumerations on worker threads, but every SDK is
-    imported first on the *calling* thread (the ``select_backend`` gate in
-    ``__init__``), so no two cold vendor-SDK imports race the Python import lock;
-    the worker threads only run the device scan itself. The slowest single backend
-    is the wall-clock floor — e.g. ``enumerate_spinnaker``'s ~2.4 s ``System``
-    re-init — but the tiers now overlap instead of running back-to-back.
-
-    Enumeration never opens a camera, so this is safe alongside a live session.
-    """
+    Every SDK is imported on the calling thread first, so no two cold imports
+    race the import lock; the workers only scan."""
 
     def __init__(self, only_backend: str | None) -> None:
         from octacam.cameras.registry import BACKENDS, CASCADE, select_backend
 
         key = (only_backend or "").strip().lower()
         self.only = key if key and key not in ("auto", "all") else None
-        # The backends doctor's Camera-backends section enumerates: a single
-        # explicit --backend, else every real tier (fake is synthetic, named-only).
+        # fake is synthetic: scanned only when named.
         display = [self.only] if self.only else [b for b in BACKENDS if b != "fake"]
-        # Gate on the main thread: select_backend triggers the SDK import / CDLL
-        # load, so the workers only do the (I/O-bound, GIL-releasing) device scan
-        # and no two cold imports ever race. An unavailable tier is dropped here
-        # and reported as "info" by _doctor_backends' own select_backend pass.
+        # select_backend imports the SDK here, on the calling thread. An
+        # unavailable tier is dropped (_doctor_backends reports it).
         self.targets: list[str] = []
         for name in display:
             try:
@@ -942,9 +789,8 @@ class _CameraScan:
             except Exception:
                 continue
             self.targets.append(name)
-        # pylon loads its transport layers with GENICAM_GENTL64_PATH hidden (see
-        # basler.tl_factory); do it here too, so the environment never changes
-        # while the other SDKs' workers are reading it.
+        # tl_factory hides GENICAM_GENTL64_PATH while pylon loads; do it before the
+        # workers start, so the environment never changes under the other SDKs.
         if "basler" in self.targets:
             try:
                 from octacam.cameras.basler import tl_factory
@@ -952,8 +798,6 @@ class _CameraScan:
                 tl_factory()
             except Exception:
                 pass  # the basler worker retries it and reports the failure
-        # Cascade selection order (priority) is CASCADE restricted to the tiers we
-        # scanned.
         self._cascade_order = [b for b in CASCADE if b in self.targets]
         self._cams: dict[str, list[tuple[str, str | None]]] = {}
         self._errs: dict[str, Exception] = {}
@@ -961,13 +805,9 @@ class _CameraScan:
     def run(
         self, on_done: "Callable[[str, Exception | None], None] | None" = None
     ) -> None:
-        """Enumerate every target once, concurrently; cache results/exceptions.
+        """Enumerate every target once, concurrently, caching results and errors.
 
-        ``on_done(name, err)`` fires as each backend finishes — on THIS thread (the
-        ``as_completed`` loop runs on the caller), so updating a rich ``Progress``
-        from it is safe. Calls the module-level :func:`_enumerate_backend` by name
-        so a test can count enumerations by monkeypatching it.
-        """
+        ``on_done(name, err)`` runs on the calling thread as each one finishes."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if not self.targets:
@@ -988,22 +828,15 @@ class _CameraScan:
                     on_done(name, err)
 
     def get(self, name: str) -> list[tuple[str, str | None]]:
-        """Cached ``[(serial, model), ...]`` for a scanned backend.
-
-        Re-raises a stored enumeration failure so the caller reports it exactly as
-        the pre-scan direct ``_enumerate_backend`` call did. Case-insensitive to
-        match ``select_backend``/``_enumerate_backend`` — the cache is keyed by the
-        normalized name, so ``--backend BASLER`` resolves like ``basler``."""
+        """Cached ``[(serial, model), ...]`` for a scanned backend (any case);
+        re-raises its enumeration failure."""
         key = name.strip().lower()
         if key in self._errs:
             raise self._errs[key]
         return self._cams[key]
 
     def cascade(self) -> list[tuple[str, str, str | None]]:
-        """``[(serial, backend, model), ...]``: the tier that claims each camera.
-
-        Mirrors :func:`_cascade_assignment` but reads the single scan instead of
-        re-enumerating; a tier whose scan failed is skipped, never re-raised."""
+        """:func:`_cascade_assignment` from the scan; a failed tier is skipped."""
         claimed: dict[str, tuple[str, str | None]] = {}
         order: list[str] = []
         for backend in self._cascade_order:
@@ -1017,11 +850,8 @@ class _CameraScan:
         return [(s, claimed[s][0], claimed[s][1]) for s in order]
 
     def detected_serials(self, backend: str | None) -> set[str]:
-        """Serials to cross-check the config against, mirroring ``_enumerate_backend``.
-
-        ``auto`` uses the cascade; a specific backend is served from the scan when
-        it was a target, else enumerated live once (a config that pins an
-        uninstalled backend — the live call raises and the caller warns, as before)."""
+        """Serials to cross-check the config against: the cascade under ``auto``;
+        a backend the scan skipped is enumerated live (and may raise)."""
         key = (backend or "auto").strip().lower()
         if key in ("auto", "all", ""):
             return {serial for serial, _backend, _model in self.cascade()}
@@ -1031,13 +861,8 @@ class _CameraScan:
 
 
 def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
-    """Run the parallel backend scan behind a live per-backend spinner.
-
-    The report renders on stdout; this spinner lives on the stderr console, so it
-    never corrupts ``--json`` output or a piped report, and it is suppressed when
-    stderr is not a terminal or ``--json`` was requested. ``transient=True`` clears
-    it before the report prints. The work (``scan.run``) executes even when the
-    display is disabled — a disabled ``Progress`` just makes the updates no-ops."""
+    """Run the scan behind a per-backend spinner on stderr, shown only on a
+    terminal and without ``--json``; the scan runs either way."""
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
     console = _stderr_console()
@@ -1108,10 +933,8 @@ def _ffmpeg_source(exe: str) -> str:
 
 
 def _nvidia_gpus() -> list[str]:
-    """Detected NVIDIA GPUs as "<name> (driver <ver>)", via nvidia-smi.
-
-    Empty when no NVIDIA driver/GPU is present (nvidia-smi missing or failing) —
-    the signal that GPU (NVENC) encoding is unavailable on this host."""
+    """Detected NVIDIA GPUs as "<name> (driver <ver>)", via nvidia-smi; empty
+    when there is none (so NVENC is unavailable)."""
     if not shutil.which("nvidia-smi"):
         return []
     try:
@@ -1144,10 +967,8 @@ def _nvidia_gpus() -> list[str]:
 def _instance_lock_holder(config_dir: Path) -> str | None:
     """The PID holding this rig's instance lock, or None if it is free.
 
-    Read-only: we try a non-blocking flock and release it immediately if we win,
-    so probing never steals the lock from — nor blocks — a running session. A
-    failed acquire means another octacam owns the rig; its PID is read from the
-    file (purely informational, so "unknown" if the file is empty)."""
+    A non-blocking flock, released at once if won, so probing never steals or
+    blocks a running session's lock."""
     path = _instance_lock_path(config_dir)
     try:
         handle = open(path)
@@ -1205,13 +1026,8 @@ def _doctor_system(report: _Report) -> None:
 
 
 def _doctor_updates(report: _Report) -> None:
-    """Add one line to the System section: is a newer octacam release available?
-
-    Read-only and fail-soft — octacam never updates itself, this only advises the
-    correct command for the install (see octacam.updates). Stays silent/graceful
-    (a dev install or a pre-PyPI package returns no signal), and a slow/unreachable
-    PyPI never fails the command.
-    """
+    """Report whether a newer octacam release is available (advice only; a
+    failed check never fails the command)."""
     from octacam import updates
 
     notice = updates.check()
@@ -1227,11 +1043,8 @@ def _doctor_updates(report: _Report) -> None:
 
 
 def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
-    """Collapse ``[(serial, model), ...]`` into compact ``model: s1, s2, …`` lines.
-
-    One line per distinct model (first-seen order), serials comma-joined, so four
-    same-model cameras read as a single line instead of four. Cameras whose model
-    is unknown fall back to a bare serial line each."""
+    """One ``model: s1, s2, …`` line per model (first-seen order); a camera of
+    unknown model gets a bare serial line."""
     groups: dict[str | None, list[str]] = {}
     for serial, model in cams:
         groups.setdefault(model, []).append(serial)
@@ -1244,9 +1057,8 @@ def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
     return lines
 
 
-# USB vendor IDs of the USB3-Vision camera makers octacam drives. Used by the
-# doctor USB-link-speed check to spot a camera without opening it; extend as more
-# vendors are used (the pycameleon floor also matches any detected serial).
+# USB vendor IDs of camera makers, for the link-speed check (which also matches
+# any detected serial).
 _CAMERA_USB_VENDORS = {"2676": "Basler", "1e10": "FLIR"}
 _SUPERSPEED_MBPS = 5000
 
@@ -1256,11 +1068,7 @@ def _usb_camera_links(
 ) -> "list[tuple[str, str, int]]":
     """``[(serial, product, speed_mbps), ...]`` for connected camera USB devices.
 
-    Reads sysfs (``<root>/*/{idVendor,serial,product,speed}``) so it needs no
-    device open — safe during a live session and backend-agnostic. A device
-    counts as a camera if its vendor is a known camera maker or its serial
-    matches one octacam detected. Returns ``[]`` on any platform without that
-    sysfs layout (doctor then simply skips the link-speed check)."""
+    Read from sysfs, so no device is opened; ``[]`` without that sysfs layout."""
 
     def _read(dev: Path, field: str) -> str:
         try:
@@ -1283,7 +1091,7 @@ def _usb_camera_links(
         try:
             speed = int(float(_read(dev, "speed")))
         except ValueError:
-            continue  # no/garbled speed node (e.g. a non-USB match); skip it
+            continue
         seen.add(serial)
         out.append((serial, _read(dev, "product"), speed))
     return out
@@ -1296,9 +1104,6 @@ def _doctor_backends(
     from octacam.cameras.registry import BACKENDS, select_backend
 
     report.section("Camera backends")
-    # `fake` is a synthetic test/CI backend that always reports FAKE-* serials
-    # regardless of hardware, so it is only enumerated when explicitly requested
-    # (--backend fake) — never in the default all-backends sweep.
     backends = (
         (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
     )
@@ -1306,17 +1111,13 @@ def _doctor_backends(
     for name in backends:
         try:
             select_backend(name)
-        except BackendUnavailable as e:
-            # A backend whose SDK isn't installed is expected — report it as info,
-            # not a warning (the cascade simply skips that tier).
+        except BackendUnavailable as e:  # an SDK not installed is expected
             report.add("info", str(e))
             continue
         except Exception as e:
             report.add("warn", f"{name}: could not select backend ({e})")
             continue
         try:
-            # Served from the single parallel scan; a select_backend success above
-            # guarantees this name was a scan target (see _CameraScan).
             cams = scan.get(name)
         except Exception as e:
             report.add("warn", f"{name}: available, but enumeration failed ({e})")
@@ -1325,10 +1126,8 @@ def _doctor_backends(
         detected_serials.update(serial for serial, _model in cams)
         for line in _camera_lines(cams):
             report.add("list", line)
-    # USB link-speed check: a USB3 camera whose SuperSpeed link fails to train
-    # falls back to USB 2.0 (480 Mb/s) and then fails to open — the error the GUI
-    # reports at open time. doctor never opens a camera, so surface it from the
-    # negotiated link speed in sysfs, visible without touching a device.
+    # A camera whose SuperSpeed link fails to train falls back to USB 2.0 and
+    # then fails to open; the negotiated speed shows it without opening.
     for serial, product, speed in _usb_camera_links(detected_serials):
         if speed >= _SUPERSPEED_MBPS:
             continue
@@ -1351,8 +1150,6 @@ def _doctor_backends(
         assignment = scan.cascade()
         if assignment:
             report.add("info", "cascade selection (backend each camera opens through):")
-            # Group by (backend, model) in first-seen order so same-model cameras
-            # on one tier collapse to a single "model: s1, s2 → backend" line.
             grouped: dict[tuple[str, str | None], list[str]] = {}
             for serial, backend, model in assignment:
                 grouped.setdefault((backend, model), []).append(serial)
@@ -1576,10 +1373,8 @@ def _plugin_default_device(name: str) -> str | None:
 
 
 def _configured_device(pc) -> tuple[str | None, bool]:
-    """``(device, is_auto)`` for a plugin config, mirroring the factory logic.
-
-    Returns the device string the plugin would use (explicit ``device`` option
-    or the plugin's ``DEFAULT_DEVICE``), and whether it is ``"auto"`` (dynamic)."""
+    """``(device, is_auto)`` a plugin config resolves to, as its factory would:
+    the ``device`` option, else the plugin's ``DEFAULT_DEVICE``."""
     from octacam.plugins import canonical_name
 
     name = canonical_name(pc.name)
@@ -1591,11 +1386,8 @@ def _configured_device(pc) -> tuple[str | None, bool]:
 
 
 def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
-    """List connected serial/Arduino devices and cross-check plugin ports.
-
-    Passive by default (never opens a port), so it is safe alongside a live
-    session. ``probe=True`` (``--probe-serial``) additionally reads each board's
-    firmware identity, skipping any port already held by a running session."""
+    """List serial devices and cross-check plugin ports. Passive unless
+    ``probe``, which reads each board's identity, skipping ports a session holds."""
     from octacam import serial_ports as sp
 
     report.section("Serial devices")
@@ -1606,15 +1398,12 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
     if not ports:
         report.add("info", "no serial ports detected")
 
-    # Microcontroller-class ports (Arduino/ESP/bridge chips) are the interesting
-    # ones; a host can have dozens of legacy /dev/ttyS* — collapse those to one
-    # line so the report stays readable.
+    # A host can have dozens of legacy /dev/ttyS*: they collapse to one line.
     mcus = [p for p in ports if p.likely_microcontroller]
     generic = [p for p in ports if not p.likely_microcontroller]
     for p in mcus:
         sn = f"  sn={p.serial_number}" if p.serial_number else ""
         line = f"{p.board_name}  {p.device}  [{p.vid_pid}]{sn}"
-        # Highlight boards that are (almost certainly) an Arduino with a marker.
         report.add("info" if p.likely_arduino else "list", line)
     if generic:
         shown = ", ".join(p.device for p in generic[:4])
@@ -1627,11 +1416,8 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
 
 
 def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
-    """Cross-check each enabled serial plugin's device against detected ports.
-
-    The serial analogue of :func:`_doctor_cameras_vs_config`: an "error" when a
-    configured device is absent (drives a nonzero exit), an "info" for a detected
-    board no plugin uses."""
+    """Cross-check each serial plugin's device against the detected ports: an
+    error when it is absent, info for a board no plugin uses."""
     from octacam import serial_ports as sp
     from octacam.plugins import canonical_name
 
@@ -1750,7 +1536,7 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
             if check.state is fw.FirmwareState.CURRENT:
                 report.add("ok", f"{p.device}: {name} firmware up to date (build {needed})")
             elif check.needs_flash and check.state is not fw.FirmwareState.UNIDENTIFIED:
-                # UNIDENTIFIED is already covered by the "no identity reply" line above.
+                # (UNIDENTIFIED already got the "no identity reply" line.)
                 report.add(
                     "warn",
                     f"{p.device}: {name} firmware needs flashing — {check.detail}; "
@@ -1805,7 +1591,6 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
             )
         else:
             report.add("ok", "no other octacam instance holds this rig")
-    # Report the GUI port only by exception — a free port is the unremarkable case.
     if not _port_available("127.0.0.1", 8765):
         report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
     skip = _browser_skip_reason(no_browser=False)
@@ -1919,9 +1704,7 @@ def doctor(
     if config_dir is not None:
         config_dir = _resolve_config_dir(config_dir)
     report = _Report()
-    # The only slow part of doctor is camera enumeration; do it ONCE, up front, in
-    # parallel across backends, behind a live progress spinner (suppressed under
-    # --json). Every _doctor_* section below reads this single cached scan.
+    # Enumeration is the slow part: one parallel scan serves every section.
     scan = _CameraScan(backend)
     _run_scan_with_progress(scan, quiet=json_output)
     _doctor_system(report)
@@ -1946,24 +1729,14 @@ def doctor(
 
 
 # ---------------------------------------------------------------------------
-# `octacam config` — interactive first-run config wizard
-#
-# Scaffolds a new rig config dir (octacam_config.toml) by detecting the camera
-# backend and serials, then prompting for the record/transfer scalars. The
-# visual per-camera bits — window placement, rotation, the grid — are left to
-# `octacam gui`, which tunes them against a live preview; this wizard just
-# produces a good starting point and hands off. It never opens a camera
-# (enumeration only), so it is safe to run while another session is live.
+# `octacam config`: the first-run wizard. It only enumerates cameras (opening
+# them just for --snapshot-params) and leaves placement and grid to `gui`.
 # ---------------------------------------------------------------------------
 
 
 def _resolve_backend(console, cli_backend: str | None) -> str:
-    """Resolve the wizard's backend selector; no interactive prompt.
-
-    Without ``--backend`` the wizard does not ask which vendor to use: a rig
-    auto-detects every installed backend (Basler, FLIR) and simply uses whatever
-    is plugged in, so mixing vendors just works. ``--backend`` still pins the rig
-    to one vendor, or selects the synthetic ``fake`` backend for tests/CI."""
+    """The wizard's backend, without prompting: ``auto`` (every installed
+    backend, so mixed vendors just work) unless ``--backend`` pins one."""
     from octacam.cameras.registry import BACKENDS, available_backends
 
     if cli_backend is not None:
@@ -1991,10 +1764,8 @@ def _resolve_backend(console, cli_backend: str | None) -> str:
 
 
 def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
-    """List (serial, model|None) for *backend*; [] if none or enumeration fails.
-
-    ``backend`` may be ``"auto"``, in which case every installed backend is swept
-    and the combined list returned."""
+    """Print and return ``[(serial, model|None)]`` for *backend* (``auto``
+    sweeps the cascade); [] if none or enumeration fails."""
     label = "" if backend in ("auto", "all", "") else f"{backend} "
     try:
         cams = _enumerate_backend(backend)
@@ -2011,11 +1782,8 @@ def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
 
 
 def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dict]:
-    """Build ``cameras`` entry dicts from detected serials (+ optional manual).
-
-    Each entry is ``{"serial_number": ...}`` plus a validated, unique ``name``
-    when the user gives one. Left empty when no serials are known, so the config
-    falls back to using every camera detected at record time."""
+    """``cameras`` entries (serial plus an optional unique, safe ``name``) for
+    the detected or typed serials; [] means every camera detected at record time."""
     from rich.prompt import Confirm, Prompt
 
     from octacam.config import _is_safe_camera_name
@@ -2069,12 +1837,10 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
 
 
 def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
-    """Offer a single auto-arranged ``grid.mp4`` visualization from named cameras.
+    """Offer one auto-arranged ``grid.mp4`` of the named cameras (two or more).
 
-    Only offered when at least two cameras are named (a grid of one is pointless);
-    the near-square layout reuses :func:`octacam.grid.auto_layout`. Declining is
-    the default: `octacam process` builds a composite only for a rig that wrote a
-    ``[[visualization]]`` entry, so the answer here is the whole opt-in."""
+    Declining is the default: `octacam process` builds a grid only for a rig
+    with a ``[[visualization]]`` entry, so this answer is the whole opt-in."""
     from rich.prompt import Confirm
 
     from octacam.grid import auto_layout
@@ -2135,8 +1901,7 @@ def _prompt_record(console) -> "RecordConfig":
         default=d.save_method,
         console=console,
     )
-    # model_validate (not the constructor) so pydantic narrows the choice strings
-    # to their Literal fields at runtime instead of pyright rejecting `str` here.
+    # model_validate narrows the choice strings to their Literal fields.
     return RecordConfig.model_validate(
         {
             "fps": fps,
@@ -2169,10 +1934,8 @@ def _prompt_transfer(console) -> dict | None:
 
 
 def _detect_serial_ports(console):
-    """Print detected microcontroller-class serial ports; return that list.
-
-    Mirrors :func:`_detect_cameras` — the legacy ``/dev/ttyS*`` ports are omitted
-    so only the plausible Arduino candidates are shown."""
+    """Print and return the microcontroller-class serial ports (no legacy
+    ``/dev/ttyS*``)."""
     from octacam import serial_ports as sp
 
     mcus = [p for p in sp.list_serial_ports() if p.likely_microcontroller]
@@ -2187,9 +1950,7 @@ def _detect_serial_ports(console):
 
 
 def _prompt_serial_plugin(console) -> list[dict]:
-    """Optionally enable one serial/trigger plugin and choose its device.
-
-    Returns a list of plugin entry dicts for the config (empty when declined)."""
+    """Optionally enable one serial plugin; its ``plugins`` entries ([] if not)."""
     from rich.prompt import Confirm, Prompt
 
     from octacam import serial_ports as sp
@@ -2215,7 +1976,7 @@ def _prompt_serial_plugin(console) -> list[dict]:
     )
     device = Prompt.ask("  Device", default=default_device, console=console).strip()
     options = {"device": device} if device else {}
-    # Offer a stable udev rule for the chosen board (survives re-enumeration).
+    # A udev rule gives the board a /dev path that survives re-enumeration.
     chosen = next((p for p in ports if p.device == device), None)
     if (
         chosen is not None
@@ -2242,11 +2003,8 @@ def _build_config_doc(
     transfer: dict | None,
     plugins: list[dict] | None = None,
 ) -> dict:
-    """Assemble the raw-TOML dict the config writer serializes.
-
-    ``backend`` is written only when the user pinned a vendor with ``--backend``;
-    the default ``"auto"`` is left absent (auto-detect all) so the rig keeps
-    picking up whatever is plugged in. Empty sections are omitted entirely."""
+    """The raw-TOML dict for the config writer. ``backend`` is written only when
+    pinned (``auto`` stays implicit); empty sections are omitted."""
     from octacam.config import TranscodeConfig
 
     doc: dict = {}
@@ -2268,13 +2026,10 @@ def _build_config_doc(
 def _snapshot_camera_params(
     console, backend: str, serials: list[str], target: Path
 ) -> list[str]:
-    """Open the given cameras once and save each one's sensor params into *target*.
+    """Save each camera's sensor params into *target*; return the filenames.
 
-    This is the wizard's only step that needs exclusive camera access, so a
-    camera already held by a live session (or otherwise un-openable) is never
-    fatal: we warn and skip, leaving a valid but parameter-less config the GUI's
-    Save… dialog can complete later. Returns the parameter filenames written
-    (``[]`` when skipped or there was nothing to snapshot)."""
+    Never fatal: a camera that will not open (say, a live session holds it) is
+    skipped with a warning, and the GUI's Save… completes the config later."""
     if not serials:
         return []
     from octacam import config_writer
@@ -2300,8 +2055,7 @@ def _snapshot_camera_params(
         pfs = system.save_all_params()
         if not pfs:
             return []
-        # Each camera persists in its own backend's format (.pfs / .txt), so a
-        # mixed rig writes per-serial rather than one shared extension.
+        # Each backend has its own format (.pfs / .txt): a mixed rig writes per serial.
         ext_by_serial = system.extension_by_serial()
         config_writer.write_pfs_files(target, pfs, ext_by_serial)
         return [f"{serial}.{ext_by_serial.get(serial, 'pfs')}" for serial in pfs]
@@ -2419,12 +2173,8 @@ def config(
 
 
 def _drive_record_progress(controller, duration_s: float) -> None:
-    """Show live recording progress until the recording leaves the active state.
-
-    On a TTY a determinate rich bar tracks the countdown with a running total
-    frame count; off a TTY a periodic log heartbeat stands in (so a piped/cron
-    run still shows it is alive). Returns once the recording is no longer active
-    — the caller then join()s the monitor to finalize the summary."""
+    """Show progress until the recording is no longer active: a bar on a TTY,
+    else a log heartbeat every 2 s. The caller then joins the monitor."""
     poll = 0.1
     if not sys.stderr.isatty():
         next_beat = 0.0
@@ -2532,8 +2282,7 @@ def record(
     config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
 
-    # Apply the fps override to the [record] section before resolving the
-    # templated save directory from it.
+    # The fps override applies before the save-dir template resolves.
     record_cfg = (
         config.record.model_copy(update={"fps": fps})
         if fps is not None
@@ -2544,14 +2293,12 @@ def record(
     if duration is not None:
         settings.duration_s = duration
     if output is not None:
-        # An explicit save dir bypasses the template; drop the record_directory
-        # base and relative sub-path so the summary's relative_directory falls
-        # back to the folder name.
+        # Bypasses the template; the summary's relative_directory falls back to
+        # the folder name.
         settings.save_dir = normalize_save_dir(str(output))
         settings.record_directory = ""
         settings.relative_directory = ""
 
-    # A transcode running on this machine will fight live capture for the CPU.
     _warn_if_transcoding()
 
     try:
@@ -2561,9 +2308,6 @@ def record(
     except BackendUnavailable as e:
         sys.exit(str(e))
     except BackendError as e:
-        # The cameras could not be opened — most often because another octacam
-        # already holds them (vendor SDKs open USB3 devices exclusively), or a
-        # camera is disconnected. A clean message beats a raw SDK traceback.
         sys.exit(
             f"Could not open the cameras: {e}\n"
             "They may already be in use by another octacam instance on this "
@@ -2581,11 +2325,9 @@ def record(
             len(system.requested_serial_numbers) or len(system),
         )
         if system.incomplete:
-            # CameraSystem already logged the INCOMPLETE RIG warning naming each
-            # missing camera. Recording anyway is a real choice — the take will be
-            # short a camera and nothing downstream can tell that apart from a rig
-            # that only ever had N-1 — so make it an explicit one, exactly like the
-            # save-directory overwrite gate below. --force covers both.
+            # (CameraSystem logged INCOMPLETE RIG.) Nothing downstream can tell a
+            # short take from a smaller rig, so recording one is an explicit
+            # choice, like the overwrite gate below; --force covers both.
             if force:
                 log.warning("Recording with an incomplete rig (--force).")
             elif sys.stdin.isatty() and sys.stderr.isatty():
@@ -2610,15 +2352,12 @@ def record(
             if force:
                 log.warning("Save directory exists; overwriting: %s", settings.save_dir)
             elif sys.stdin.isatty() and sys.stderr.isatty():
-                # Interactive: let the operator confirm before clobbering data.
                 if not typer.confirm(
                     f"Save directory already exists and will be overwritten:\n"
                     f"  {settings.save_dir}\nContinue?"
                 ):
                     raise typer.Exit(1)
-            else:
-                # Non-interactive (scripted/cron): keep overwriting for backward
-                # compatibility, but say so loudly. Use --force to silence this.
+            else:  # non-interactive runs overwrite, loudly
                 log.warning(
                     "Save directory exists, data may be overwritten: %s "
                     "(pass --force to silence this)",
@@ -2628,15 +2367,11 @@ def record(
         plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
         plugins.setup_all()
 
-        # If a serial plugin's board is running stale/wrong firmware, offer to reflash
-        # it before we start (interactive prompt) — or, headless, warn unless opted in
-        # via --yes / auto_flash. Without this an external-triggered rig would silently
-        # record against the wrong firmware (or, for a wrong protocol version, get no
-        # triggers at all).
+        # Wrong firmware would record against the wrong protocol, or get no
+        # triggers at all.
         _preflight_firmware(plugins, assume_yes=yes)
 
-        # Tag this headless run in the session cache so `octacam process --last`
-        # and `--last session` pick it up too (a one-off, single-folder "session").
+        # A one-take session, so `octacam process --last session` finds it too.
         controller = RecordingController(
             system,
             settings,
@@ -2652,10 +2387,8 @@ def record(
     # Held until the cameras are closed: `octacam process` pauses meanwhile.
     with session_cache.mark_capture_active("recording"):
         try:
-            # Hand a controller reference to plugins that read live device state (e.g.
-            # triggerbox's auto strobe duty reads each camera's ExposureTime).
-            # Duck-typed so core stays decoupled from concrete plugin classes;
-            # mirrors create_app.
+            # Plugins reading live device state (triggerbox's auto strobe duty)
+            # need the controller, as in create_app.
             for plugin in plugins.plugins:
                 if hasattr(plugin, "set_controller"):
                     plugin.set_controller(controller)
@@ -2666,10 +2399,8 @@ def record(
                 settings.duration_s,
                 settings.save_dir,
             )
-            # Headless record has no GUI to POST plugin_params, so build each enabled
-            # plugin's start slice from the recording's fps/duration (e.g. triggerbox
-            # arms its trigger board — without this the external-trigger cameras wait
-            # forever for a trigger that never fires). Empty -> None (no-op dispatch).
+            # No GUI posts plugin_params here: without a start slice triggerbox
+            # never arms and its cameras wait forever for a trigger.
             plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
             result = controller.start_recording(
                 confirm_overwrite=True, plugin_params=plugin_params or None
@@ -2679,18 +2410,13 @@ def record(
             _drive_record_progress(controller, settings.duration_s)
             controller.join()
         finally:
-            # controller.close() sets abort, joins the daemon recording monitor (so
-            # its finishing block writes recording_summary.json/timestamps.npz into the
-            # recording's octacam_recording subfolder, and the session-cache note),
-            # then closes the camera system exactly once — mirror of the gui shutdown
-            # above. Calling system.close() directly would race the
-            # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
+            # close() joins the monitor (which writes the summary and timestamps),
+            # then closes the cameras; system.close() would race the monitor on a
+            # Ctrl-C and lose them.
             controller.close()
             plugins.teardown_all()
 
-    # stdout lists just the videos (scriptable); they sit in the recording folder
-    # itself, while its summary, timestamps and config snapshot are in the
-    # octacam_recording subfolder, named on stderr.
+    # stdout lists just the videos (scriptable); the info folder goes to stderr.
     from octacam.transform import recording_info_dir
 
     extension = settings.video_format().extension
@@ -2701,9 +2427,7 @@ def record(
         recording_info_dir(settings.save_dir),
     )
 
-    # A camera that captured 0 frames wrote only a header (no video) — usually an
-    # external trigger that never fired during the window. Fail the exit code so a
-    # scripted rig can detect it instead of seeing a "successful" run of empty files.
+    # 0 frames (usually a trigger that never fired) fails the exit code.
     empty = [c.name for c in system if c.frames_recorded == 0]
     if empty:
         sys.exit(
@@ -2713,13 +2437,9 @@ def record(
 
 
 # ---------------------------------------------------------------------------
-# `octacam flash` — check & upload a serial plugin's Arduino firmware
-#
-# Serial plugins whose board needs a specific sketch (today: triggerbox) expose
-# firmware_provisioning()/flash_firmware(). This command opens the board, compares
-# its build fingerprint to the sketch source, and (unless --check) offers to
-# compile + upload the current firmware with arduino-cli. `octacam record` runs the
-# same check at start; `octacam doctor --probe-serial` reports it read-only.
+# `octacam flash`: compare each serial plugin board's build fingerprint with its
+# sketch and (unless --check) upload the current firmware with arduino-cli.
+# `record` runs the same check at start.
 # ---------------------------------------------------------------------------
 
 
@@ -2753,16 +2473,13 @@ def _flashable_plugins(plugins, only: str | None):
 
 def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: bool) -> int:
     """Report one board's firmware and, unless --check, offer to flash it.
-
-    Returns 0 when up to date or freshly flashed, 1 otherwise (out of date and
-    not flashed)."""
+    Returns 0 when up to date or flashed, else 1."""
     from rich.prompt import Confirm
 
     device = prov.get("device")
     console.print()
     console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
-    # An un-openable board (unplugged, wrong path, or port held by a running
-    # session) can't be probed — never report that as "up to date".
+    # A board that did not open cannot be probed: never call it up to date.
     if not plugin.is_ready():
         console.print(
             "  [red]could not open the board[/red] — it may be unplugged, the "
@@ -2813,12 +2530,9 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
 
 
 def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
-    """At record start, offer to reflash a serial plugin's stale board.
-
-    Interactive (a TTY): prompt per out-of-date board. Headless: warn only —
-    unless ``--yes`` or the plugin's ``auto_flash`` is set AND the board is
-    unambiguously *this* board running an old build (a blank/foreign board is
-    never auto-flashed; the operator must confirm with ``octacam flash``)."""
+    """At record start, offer to reflash a stale board: prompt on a TTY;
+    headless, flash only under ``--yes`` or ``auto_flash`` and only a board known
+    to run an old build of this sketch (never a blank or foreign one)."""
     interactive = sys.stdin.isatty()
     console = None
     for p in plugins.plugins:
@@ -2922,8 +2636,7 @@ def flash(
             "give a rig CONFIG_DIR or --plugin <name>", param_hint="--plugin"
         )
 
-    # Flashing resets the board, so refuse to flash a rig another octacam owns
-    # (its board may be armed mid-recording). Same per-config lock the GUI takes.
+    # Flashing resets the board, which another octacam may have armed.
     instance_lock = None
     if config_dir is not None:
         instance_lock = _acquire_instance_lock(config_dir)
@@ -2971,13 +2684,8 @@ def flash(
 
 
 # ---------------------------------------------------------------------------
-# `octacam benchmark` — frame-rate diagnostic / stress-test
-#
-# A short instrumented dry-run against the real cameras: is the target fps
-# achievable, what is the maximum achievable rate, and which pipeline stage
-# (acquisition / encoding / host) is the bottleneck. No video is kept. Unlike
-# `doctor` (which only enumerates and never opens a camera), this opens and
-# drives the cameras, so it needs exclusive access like `record`/`gui`.
+# `octacam benchmark`: an instrumented dry run (no video kept) for the achievable
+# and maximum fps and the limiting stage. It opens the cameras, like `record`.
 # ---------------------------------------------------------------------------
 
 
@@ -2994,14 +2702,8 @@ def _bottleneck_label(bottleneck: str) -> str:
 
 
 class _BenchmarkProgressBar:
-    """Determinate benchmark progress bar, animated between phase boundaries.
-
-    The diagnostic only reports progress at phase boundaries (each measurement
-    window blocks for a few seconds), so a background ticker interpolates the bar
-    from the phase's start ``fraction`` toward its ``target`` over the phase's
-    expected ``eta_s`` — the bar keeps moving during a window instead of freezing.
-    Fed by :class:`octacam.diagnostics.Progress` via :meth:`update`.
-    """
+    """Benchmark progress bar. diagnose reports only at phase boundaries, so a
+    ticker eases the bar toward each phase's ``target`` over its ``eta_s``."""
 
     def __init__(self) -> None:
         from rich.progress import (
@@ -3022,9 +2724,9 @@ class _BenchmarkProgressBar:
         )
         self._task = self._progress.add_task("Benchmarking…", total=1000)
         self._lock = threading.Lock()
-        self._shown = 0.0  # last displayed fraction (monotonic, never regresses)
-        self._anchor = 0.0  # bar position when the current goal was set
-        self._goal = 0.0  # fraction to ease toward (monotonic)
+        self._shown = 0.0  # displayed fraction; never regresses
+        self._anchor = 0.0  # where the bar was when the goal was set
+        self._goal = 0.0
         self._eta = 0.0
         self._phase_start = time.monotonic()
         self._stop = threading.Event()
@@ -3042,13 +2744,8 @@ class _BenchmarkProgressBar:
         self._progress.stop()
 
     def update(self, p) -> None:
-        """Phase-boundary update (an :class:`octacam.diagnostics.Progress`).
-
-        Eases toward the phase target from wherever the bar currently sits — the
-        goal is clamped monotonic and the bar is never snapped back to the phase
-        start, so the many probe updates in the max-fps search keep it moving
-        forward instead of resetting it each time.
-        """
+        """Start easing toward ``p.target`` from where the bar is (a
+        :class:`octacam.diagnostics.Progress`); the bar never moves back."""
         with self._lock:
             self._goal = max(self._goal, p.target)
             self._anchor = self._shown
@@ -3067,7 +2764,7 @@ class _BenchmarkProgressBar:
                     frac = self._anchor + (self._goal - self._anchor) * ratio
                 else:
                     frac = self._goal
-                frac = min(1.0, max(self._shown, frac))  # monotonic, never regress
+                frac = min(1.0, max(self._shown, frac))
                 self._shown = frac
             self._progress.update(self._task, completed=frac * 1000)
 
@@ -3082,12 +2779,8 @@ def _fps(value) -> str:
 
 
 def _render_benchmark(report) -> None:
-    """Render a DiagnosticReport as a human report on stdout (rich).
-
-    Inverted pyramid: the two numbers an operator acts on first (KEY RESULTS),
-    then which pipeline stage caps the system (BY STAGE), then the per-camera
-    detail (BY CAMERA).
-    """
+    """Render a DiagnosticReport on stdout: key results, then the limiting stage,
+    then per-camera detail."""
     from rich.console import Console
     from rich.table import Table
     from rich.text import Text
@@ -3108,7 +2801,6 @@ def _render_benchmark(report) -> None:
         f"target {r.target_fps:g} fps · {r.trigger_source} trigger · sink={encoder}"
     )
 
-    # ---- KEY RESULTS: the two headline max rates + the target verdict ----
     console.print()
     console.print(Text("KEY RESULTS", style="bold"))
     if r.measured_max_fps is not None:
@@ -3141,7 +2833,6 @@ def _render_benchmark(report) -> None:
             )
         )
 
-    # ---- BY STAGE: which pipeline stage caps the synchronized rate ----
     if c is not None:
         console.print()
         console.print(
@@ -3180,7 +2871,6 @@ def _render_benchmark(report) -> None:
                 )
             )
 
-    # ---- BY CAMERA: per-camera ceilings + end-to-end trial detail ----
     console.print()
     console.print(Text("BY CAMERA", style="bold"))
     table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
@@ -3221,7 +2911,6 @@ def _render_benchmark(report) -> None:
         )
     )
 
-    # ---- Free-run trial (measured real free-run pipeline, encoder in loop) ----
     if r.freerun_trials:
         console.print()
         console.print(
@@ -3345,7 +3034,6 @@ def benchmark(
     if record_form is not None:
         settings.record_form = record_form.value
 
-    # A transcode running here would fight the benchmark for the CPU and skew it.
     _warn_if_transcoding()
 
     try:
@@ -3399,12 +3087,9 @@ def benchmark(
     else:
         _render_benchmark(report)
 
-    # The achievable verdict comes from the software-trigger trial. On an
-    # external-trigger rig the cameras are hardware-clocked and overlap
-    # exposure+transfer (so they can run faster than software triggering), and the
-    # rig records fine via its trigger box — a software-trigger "NOT achievable"
-    # there is a misleading lower bound, not a failure. Only fail the exit code
-    # for software/managed rigs, whose recording really does use this path.
+    # The verdict comes from a software-trigger trial. Hardware-triggered cameras
+    # overlap exposure and transfer, so on an external rig it is only a lower
+    # bound, not a failure.
     if not report.achievable and settings.trigger_source != "external":
         raise typer.Exit(1)
 
@@ -3420,11 +3105,8 @@ def _read_summary(path: Path) -> dict | None:
 
 @dataclass
 class TranscodeJob:
-    """One source file to transcode, with the geometry a .raw input needs.
-
-    For a ``.raw`` input, width/height/fps/pixel_format/frames come from the
-    recording_summary.json (the raw stream carries none of its own). Encoded
-    inputs (.mkv/.mp4) read their own geometry, so those stay None."""
+    """One source file to transcode. A ``.raw`` stream carries no geometry, so
+    the summary supplies it; encoded inputs leave these None."""
 
     input_path: Path
     frames: int | None = None
@@ -3435,16 +3117,11 @@ class TranscodeJob:
 
 
 def _is_stale(output: Path, source: Path) -> bool:
-    """Whether a derived file predates the file it was made from.
+    """Whether a derived file predates its source.
 
-    A recording folder can be recorded into twice: confirming the overwrite
-    (GUI, or `octacam record`) replaces only the files the new take writes, so
-    the previous take's ``.mp4``/``grid.mp4`` stay behind. They look finished,
-    so the transcode and grid steps would skip them and `octacam process` would
-    transfer a video belonging to a different recording. Comparing mtimes
-    catches it: an output made from this source was written after it. Equal
-    mtimes count as current, and a stat error as not stale — never redo work
-    because a file could not be read."""
+    A folder recorded into twice keeps the previous take's ``.mp4``/``grid.mp4``,
+    which would otherwise pass as finished and be transferred as this take's.
+    Equal mtimes count as current, a stat error as not stale."""
     try:
         return output.stat().st_mtime_ns < source.stat().st_mtime_ns
     except OSError:
@@ -3454,18 +3131,10 @@ def _is_stale(output: Path, source: Path) -> bool:
 def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     """Resolve folders/files to a deduped list of :class:`TranscodeJob`.
 
-    A folder with a recording_summary.json is driven by it (each camera entry's
-    geometry threaded onto the job); one without has its loose .mkv/.raw
-    transcoded with a warning. A file is matched against a summary in its own
-    folder, else transcoded plainly. Recordings are reproduced as-saved (the
-    display transform, if any, was baked in at record time).
-
-    The summary is found in either layout (:func:`recording_summary_path`): in
-    the recording's ``octacam_recording`` subfolder, or flat beside the videos
-    for a recording made before it. Its camera ``file`` names are relative to the
-    recording folder either way. That subfolder holds no videos, so a recursive
-    walk never descends into it, and naming it directly means the recording
-    around it."""
+    A recording's summary (in either layout) supplies each camera's geometry;
+    loose .mkv/.raw without one are transcoded with defaults and a warning. An
+    ``octacam_recording`` folder named directly means its recording, and a
+    recursive walk never enters one."""
     from octacam.transform import (
         RECORDING_INFO_DIRNAME,
         RECORDING_SUMMARY_FILENAME,
@@ -3492,9 +3161,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
         )
 
     def _warn_zero_frames(video: Path) -> None:
-        # A 0-frame recording is a header-only file with no video (e.g. an
-        # external trigger that never fired). Feeding it to ffmpeg only yields a
-        # cryptic matroska/EBML error, so skip it here with a clear message.
+        # A header-only file: ffmpeg would fail with a cryptic EBML error.
         log.warning(
             "Skipping %s: recording captured 0 frames (empty header-only file)",
             video,
@@ -3541,16 +3208,12 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
             handle_dir(path)
             if recursive:
                 for sub in sorted(path.rglob("*")):
-                    # Skip every octacam_recording subfolder and anything under
-                    # one: it is a recording's metadata, never a folder of videos.
+                    # octacam_recording holds metadata, never videos.
                     if sub.is_dir() and RECORDING_INFO_DIRNAME not in (
                         sub.relative_to(path).parts
                     ):
                         handle_dir(sub)
-        elif is_partial_transcode(path):
-            # An orphaned in-progress temp (left by a hard kill) named directly
-            # is not a real recording — skip it as the folder scan does, so it
-            # is never fed to ffmpeg.
+        elif is_partial_transcode(path):  # an orphan from a hard kill
             log.warning("Skipping orphaned partial transcode: %s", path)
         else:
             entry = None
@@ -3569,8 +3232,6 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
                         None,
                     )
             if entry is not None and entry.get("frames") == 0:
-                # Mirror handle_dir: a directly-named 0-frame capture is a
-                # header-only file ffmpeg can't transcode — skip it too.
                 _warn_zero_frames(path)
             elif entry is not None:
                 add(_job_from_entry(path, entry, fps_target))
@@ -3591,19 +3252,11 @@ def _resolve_transcode_paths(
     session_id: str | None,
     all_: bool,
 ) -> list[Path]:
-    """Resolve explicit PATHS or one cache selector to a list of folders.
-
-    The selectors --last/--session-id/--all are mutually exclusive and cannot be
-    combined with explicit PATHS. They read the recording cache
-    (octacam.session_cache) and skip folders that have since been deleted, so a
-    removed recording is simply ignored. ``--last`` (or ``--last recording``) is
-    the single most recent recording folder; ``--last session`` is every folder
-    from the most recent session; ``--session-id`` names an exact session (what
-    the GUI prints on exit, so the command stays correct even if another
-    recording happens afterwards); ``--all`` is every folder the cache still
-    holds (last RETENTION_DAYS). Exits with a clear message on a bad value, a bad
-    combination, or when nothing is found.
-    """
+    """Explicit PATHS, or the cached folders one selector names (deleted ones
+    skipped): ``--last [recording]`` the newest, ``--last session`` its whole
+    session, ``--session-id`` an exact one (what the GUI prints), ``--all``
+    every one. The selectors exclude each other and PATHS; exits on a bad
+    value or combination, or when nothing is found."""
     from octacam import session_cache
 
     if last is not None and last not in ("recording", "session"):
@@ -3759,20 +3412,12 @@ _TranscodeProgressBar = _FileProgressBar
 
 
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
-    """Collect recording directories from *roots*.
+    """Collect the recordings (either layout) at *roots*, or under them when
+    *recursive*, deduped. An ``octacam_recording`` root means its recording.
 
-    A directory is considered a recording if it has a
-    ``recording_summary.json``, in either layout: in its ``octacam_recording``
-    subfolder, or flat beside the videos for a recording made before that
-    subfolder existed. The subfolder itself is never a recording of its own (a
-    root naming it means the recording around it).  In non-recursive mode each
-    *root* must itself be a recording directory; a root that is not one is
-    warned about and skipped (so a stray folder mixed in with valid recordings
-    never aborts the batch). If that leaves *nothing* to do, this exits with a
-    hint — suggesting ``-r`` when recordings exist beneath the given path(s).  In
-    recursive mode every recording at or under *roots* is collected.  Results are
-    deduped and returned in sorted order so the output is deterministic.
-    """
+    A root that is not a recording is warned about and skipped, so a stray
+    folder never aborts the batch; if nothing is left and recordings lie
+    beneath, the exit suggests ``-r``."""
     from octacam.transform import (
         RECORDING_INFO_DIRNAME,
         RECORDING_SUMMARY_FILENAME,
@@ -3810,8 +3455,6 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
         if is_recording_dir(root):
             _add(root)
             continue
-        # Not itself a recording: warn and skip rather than abort, so valid
-        # recordings passed alongside it are still processed.
         nested = _nested_recordings(root)
         if nested:
             saw_nested = True
@@ -3828,7 +3471,6 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
                 RECORDING_SUMMARY_FILENAME,
             )
 
-    # Nothing usable was given directly: turn the silent no-op into a hint.
     if not recursive and not result and saw_nested:
         sys.exit(
             "No recording directory given directly — re-run with -r/--recursive "
@@ -3839,15 +3481,8 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
 
 
 def _config_for_recording(folder: Path, cli_config_dir: Path | None):
-    """Resolve the config governing one recording folder.
-
-    Precedence: the octacam_config.toml snapshot saved into the folder at record
-    time > a --config dir passed on the command line > built-in defaults. This is
-    what lets `octacam process` run with no --config for anything recorded after
-    the snapshot feature landed. The snapshot is looked up with the recording's
-    summary (:func:`recording_info_dir`): in its ``octacam_recording`` subfolder,
-    or flat in the folder for a recording made before that subfolder existed.
-    """
+    """The config governing one recording: its own snapshot (either layout),
+    else ``--config``, else built-in defaults."""
     from octacam.config import OctacamConfig, find_config_file, load_config_dir
     from octacam.transform import recording_info_dir
 
@@ -3869,11 +3504,8 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
 
 
 def _transfer_dest(cfg, folder: Path) -> Path | None:
-    """Destination for one folder's transfer, or None to skip it.
-
-    Mirrors the recording's ``relative_directory`` (resolved at record time and
-    stored in the summary) under the resolved ``transfer.directory``.
-    """
+    """Where one folder transfers to (None to skip): its summary's
+    ``relative_directory`` under ``transfer.directory``."""
     from octacam.config import resolve_dir_template
     from octacam.transform import recording_summary_path
 
@@ -3902,29 +3534,19 @@ def _grid_and_transfer(
     rewritten: set[Path] | None = None,
     ignore_capture: bool = False,
 ) -> int:
-    """Build visualization grids and/or transfer each folder to its destination.
+    """Build the grids, then transfer each folder; return the number of files
+    that failed to transfer. Both phases pause between folders while a
+    gui/record owns the cameras (not on a dry run).
 
-    Two sequential phases (grids then transfers) so each gets its own progress
-    bar. Returns the number of files that failed to transfer. When ``reporter`` is
-    set (a detached job) each phase reports progress. Both phases pause between
-    folders while a gui/record owns the cameras, except on a dry run, which does
-    no heavy work.
-
-    On a dry run, ``folder_outputs`` may name outputs the transcode step only
-    planned. They aren't on disk to probe, so a grid built from any of them is
-    listed instead of having its ffmpeg call previewed. ``rewritten`` names the
-    outputs that run will (re)write — the planned ones plus any left over from
-    an earlier take — so the preview treats a grid built from them as work to
-    do, exactly as the real run will once their bytes are new."""
+    On a dry run ``folder_outputs`` may name outputs the transcode step only
+    planned, and ``rewritten`` those it will rewrite: a grid built from either
+    is listed as work to do instead of being probed."""
     from octacam.grid import build_grid_video
     from octacam.transfer import transfer_folder
 
     folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
 
-    # --- Phase 1: visualization grids ---------------------------------------
-    # Only folders whose config asks for a grid ([[visualization]]) take part, so
-    # on a rig that configured none the phase vanishes instead of running an empty
-    # pass (no progress bar, no job phase) over every folder.
+    # Phase 1, grids: only folders with a [[visualization]] take part.
     grid_files: dict[Path, list[Path]] = {}
     folder_grids = {}
     if do_grid:
@@ -3962,14 +3584,9 @@ def _grid_and_transfer(
                     else []
                 )
                 built: list[Path] = []
-                # A grid is never one of its own inputs, and never another grid's.
-                # Under --no-transcode folder_outputs is "every *.mp4 in the
-                # folder", which includes the configured grids: comparing a grid
-                # against them made two [[visualization]] entries mark each other
-                # stale (building the first refreshes its mtime, so the second is
-                # now "older than the videos it composites"), re-encoding both on
-                # every run and defeating the idempotent skip-if-exists contract —
-                # on precisely the flag documented for regenerating just the grids.
+                # A grid is never an input, not even of another grid: under
+                # --no-transcode folder_outputs is every *.mp4, and two grids
+                # would mark each other stale and rebuild on every run.
                 grid_outputs = {folder / n for n, _layout, _ff in folder_grids[folder]}
                 for name, layout, ff in folder_grids[folder]:
                     out_path = folder / name
@@ -3988,11 +3605,8 @@ def _grid_and_transfer(
                             out_path.name,
                         )
                     if out_path.exists() and not force and not grid_stale:
-                        # Idempotent re-run: the grid is already built. Grid
-                        # generation is atomic (temp + rename), so a present file
-                        # is complete — skip rebuilding, but still hand it to the
-                        # transfer phase (which skips it if already copied).
-                        # Counted for the summary rather than logged per grid.
+                        # Built atomically, so a present grid is complete; it
+                        # still goes to the transfer phase.
                         grid_skipped += 1
                         built.append(out_path)
                         continue
@@ -4034,7 +3648,7 @@ def _grid_and_transfer(
                 grid_skipped,
             )
 
-    # --- Phase 2: transfer --------------------------------------------------
+    # Phase 2, transfer.
     transfer_failed = 0
     if do_transfer:
         n_copied = n_skipped = 0
@@ -4102,13 +3716,9 @@ def _rebuild_process_argv(
     dry_run: bool,
     ignore_capture: bool = False,
 ) -> list[str]:
-    """Rebuild a canonical, absolute ``process`` argv for a detached re-exec.
-
-    Cache selectors (``--last``/``--session-id``/``--all``) are already resolved to
-    ``folders`` so they are dropped; every path is made absolute (the child runs
-    from ``$HOME`` with no inherited cwd). ``--progress-style`` is omitted so the
-    detached ``log.txt`` stays line-oriented rather than a verbatim ffmpeg stream.
-    """
+    """The ``process`` argv for a detached re-exec. Selectors arrive resolved to
+    ``folders``; every path is absolute (the child runs from $HOME); no
+    ``--progress-style``, so log.txt stays line-oriented."""
     argv: list[str] = []
     if no_transcode:
         argv.append("--no-transcode")
@@ -4139,20 +3749,11 @@ def _pause_gate(
     unit: str,
     ignore_capture: bool = False,
 ) -> None:
-    """Block at a work-unit boundary while capture is active or a manual pause is set.
+    """Block at a work-unit boundary while capture is active or the job
+    (``job_dir``) is manually paused, polling every second.
 
-    Polls ~1 s and stays paused while either condition holds, then resumes at the
-    next un-done unit (the idempotent output-exists skip gives resume-in-place).
-    It deliberately does NOT catch ``KeyboardInterrupt``, so a cancel/Ctrl-C during
-    the pause interrupts the sleep and wins over the pause. A plain foreground run
-    (``reporter``/``job_dir`` None) pauses the same way — only the capture-active
-    condition applies there (there is no job to manually pause).
-
-    ``ignore_capture`` (``octacam process --ignore-capture``) drops the
-    capture-active condition: an operator who wants to process *now*, while a GUI
-    sits on the preview, has no other way out — the pause has no timeout, and the
-    manual pause flag only covers detached jobs.
-    """
+    A cancel or Ctrl-C interrupts the sleep. The capture pause has no timeout,
+    so ``ignore_capture`` is the operator's only way past it."""
     from octacam import process_jobs, session_cache
 
     announced = False
@@ -4180,15 +3781,9 @@ def _pause_gate(
 
 
 def _inject_default_last(args: list[str]) -> list[str]:
-    """Give a value-less ``--last`` its default (``recording``) before parsing.
-
-    ``--last`` takes an optional value (``recording`` | ``session``), but typer
-    doesn't forward click's optional-value (flag_value) support, and doing it
-    via click internals would be brittle across the ``typer>=0.15`` range. So we
-    normalize the raw args here instead: a ``--last`` that ends the list or is
-    followed by another option gets an explicit ``recording`` inserted after it.
-    Tokens after a ``--`` separator are left untouched.
-    """
+    """Give a bare ``--last`` (last token, or followed by an option) its default
+    ``recording``. typer's vendored click drops ``flag_value``, so the raw args
+    are normalized instead; tokens after ``--`` are left alone."""
     out: list[str] = []
     seen_ddash = False
     for i, tok in enumerate(args):
@@ -4205,10 +3800,7 @@ def _inject_default_last(args: list[str]) -> list[str]:
 
 
 class _ProcessCommand(typer.core.TyperCommand):
-    """`process` command whose ``--last`` accepts an optional value.
-
-    Bare ``--last`` means ``--last recording``; see :func:`_inject_default_last`.
-    """
+    """`process`, whose bare ``--last`` means ``--last recording``."""
 
     def parse_args(self, ctx, args):  # type: ignore[override]
         return super().parse_args(ctx, _inject_default_last(args))
@@ -4257,8 +3849,7 @@ def check(
     folders = find_recordings(paths or [Path(".")])
     if not folders:
         sys.exit("No recording folders (recording_summary.json) found.")
-    # check_recording reports a damaged recording as a problem rather than
-    # raising, so one bad folder neither ends the scan nor goes unreported.
+    # A damaged recording is reported as a problem, never raised.
     results = [check_recording(folder, fps) for folder in folders]
     if as_json:
         typer.echo(json.dumps([r.to_dict() for r in results], indent=2))
@@ -4420,9 +4011,7 @@ def process(
     ] = False,
     job_dir: Annotated[
         Path | None,
-        # Internal: set on the re-exec'd detached child so it writes status/logs
-        # into its job dir. Not for direct use.
-        typer.Option("--_job-dir", hidden=True),
+        typer.Option("--_job-dir", hidden=True),  # the detached child's job dir
     ] = None,
 ) -> None:
     """Post-recording pipeline: transcode, build grids, and transfer recordings.
@@ -4463,9 +4052,7 @@ def process(
     if config_dir is not None:
         config_dir = _resolve_config_dir(config_dir)
 
-    # --detach: re-exec this same, already-resolved pipeline as a background job
-    # that survives an SSH disconnect, then return its id. (The re-exec'd child
-    # runs the very same command with --_job-dir set — the worker branch below.)
+    # The detached child re-runs this command with --_job-dir: the worker below.
     if detach and job_dir is None:
         argv_tail = _rebuild_process_argv(
             folders,
@@ -4488,10 +4075,7 @@ def process(
         )
         raise typer.Exit()
 
-    # Worker mode: the detached child records progress/logs into its job dir.
-    # A job that cannot take its lock is unmanageable (see worker_start), and
-    # worker_start has already written the failure into status.json for
-    # `octacam jobs list` — exit cleanly rather than raise through to a traceback.
+    # worker_start has already written a lock failure into status.json.
     try:
         worker = process_jobs.worker_start(job_dir) if job_dir is not None else None
     except process_jobs.JobLockError as e:
@@ -4499,12 +4083,9 @@ def process(
     reporter = worker.reporter if worker is not None else None
 
     raw_output = progress_style is ProgressStyle.ffmpeg
-    # A detached worker (job_dir set) forces color into its log.txt, which makes
-    # the stderr console report is_terminal — but its animated bar would then
-    # pollute the log with cursor-control codes and, worse, bypass the reporter's
-    # status.json percent that `octacam jobs attach` renders. Keep the live bar to
-    # real foreground runs; the worker's progress rides status.json instead. A dry
-    # run has no progress to show.
+    # A worker's forced-color log makes stderr look like a terminal, but its
+    # progress belongs in status.json (what `jobs attach` renders), not in
+    # cursor codes in log.txt.
     show_bar = (
         not raw_output
         and not dry_run
@@ -4513,13 +4094,10 @@ def process(
     )
 
     def _run() -> None:
-        # Which output mp4s exist per source folder (on a dry run, also the ones
-        # the transcode would write), so grid/transfer run once per folder after
-        # its files are done. Insertion-ordered (3.7+).
+        # Each folder's outputs (on a dry run, also the planned ones).
         folder_outputs: dict[Path, list[Path]] = {}
-        # Outputs this run will (re)write: not yet on disk, or left over from an
-        # earlier take. The grid step plans around them on a dry run, where they
-        # are still the old bytes (a real run rebuilds from their new mtime).
+        # Outputs this run will (re)write; a dry run's grid preview plans around
+        # them, as their bytes are still the old ones.
         rewritten: set[Path] = set()
         cfg_cache: dict[Path, object] = {}
         failures = 0
@@ -4528,7 +4106,6 @@ def process(
         planned = 0
         interrupted = False
 
-        # --- Transcode phase ------------------------------------------------
         if do_transcode:
             jobs = _transcode_jobs(folders, recursive)
             if not jobs:
@@ -4538,22 +4115,16 @@ def process(
                 if reporter is not None:
                     reporter.begin_phase("transcode", len(jobs))
                 with (
-                    # A dry run encodes nothing, so it must not tell a gui/record
-                    # launch that a transcode is competing for the CPU.
+                    # A dry run encodes nothing: no transcode-active marker.
                     contextlib.nullcontext()
                     if dry_run
                     else session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
                     bar or contextlib.nullcontext(),
                 ):
-                    # A Ctrl-C stops the batch where it stands: transcode_file kills
-                    # its ffmpeg child and discards the partial output.
+                    # Ctrl-C stops the batch; transcode_file discards the partial.
                     try:
                         for index, job in enumerate(jobs, 1):
-                            # Pause between files while a gui/record owns the
-                            # cameras (or a manual pause is set); a queued cancel
-                            # (SIGINT) breaks the gate and wins. A dry run is often
-                            # wanted mid-session and does no heavy work, so it
-                            # never waits.
+                            # A dry run (often wanted mid-session) never waits.
                             if not dry_run:
                                 _pause_gate(reporter, job_dir, unit="file", ignore_capture=ignore_capture)
                             input_path = job.input_path
@@ -4574,9 +4145,6 @@ def process(
                             folder = input_path.parent
                             stale = output.exists() and _is_stale(output, input_path)
                             if stale:
-                                # Loud: the folder holds a video from an earlier
-                                # take, which a plain re-run would have kept (and
-                                # transferred) as if it were this recording's.
                                 log.warning(
                                     "%s is older than %s — it is left over from an "
                                     "earlier recording in this folder; re-transcoding",
@@ -4585,21 +4153,14 @@ def process(
                                 )
                                 rewritten.add(output)
                             if output.exists() and not force and not stale:
-                                # Idempotent re-run: a finished .mp4 already sits at
-                                # the target. Transcoding is atomic (temp + rename),
-                                # so its presence means a complete encode — skip
-                                # re-encoding, but still feed it to grid/transfer.
-                                # Counted for the summary rather than logged per
-                                # file so a full re-run doesn't spam one line per
-                                # output.
+                                # Transcoded atomically, so a present .mp4 is
+                                # complete; it still feeds grid/transfer.
                                 skipped += 1
                                 folder_outputs.setdefault(folder, []).append(output)
                                 if reporter is not None:
                                     reporter.item_done()
                                 continue
                             if dry_run:
-                                # List the encode, and pass its not-yet-written
-                                # output on so grid/transfer plan around it too.
                                 log.info(
                                     "[dry-run] transcode: %s → %s",
                                     input_path,
@@ -4669,15 +4230,13 @@ def process(
                         else "",
                     )
         else:
-            # No transcode: grid/transfer act on the mp4s already present, ignoring
-            # any orphaned partial (.octacam-part) temp a hard kill may have left.
+            # The mp4s already present, minus orphaned partials from a hard kill.
             for folder in _find_recording_dirs(folders, recursive):
                 folder_outputs.setdefault(
                     folder,
                     sorted(p for p in folder.glob("*.mp4") if not is_partial_transcode(p)),
                 )
 
-        # --- Grid + transfer phases -----------------------------------------
         transfer_failed = 0
         if not interrupted and (do_grid or do_transfer) and folder_outputs:
             transfer_failed = _grid_and_transfer(
@@ -4744,12 +4303,8 @@ def process(
 
 
 def _delete_source_files(input_path: Path) -> None:
-    """Delete a transcoded source (.mkv/.raw) once it has been transcoded.
-
-    Never removes the recording's summary, timestamps or config snapshot (its
-    ``octacam_recording`` subfolder, or the flat files of an older recording):
-    only the video named here is unlinked. Deletion failures are logged but
-    never fail the run (the transcode already succeeded)."""
+    """Delete a source video once it has transcoded; only that file goes (never
+    the recording's info), and a failure is only logged."""
     try:
         input_path.unlink(missing_ok=True)
     except OSError as e:
@@ -4757,7 +4312,7 @@ def _delete_source_files(input_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# `octacam jobs` — manage detached processing jobs
+# `octacam jobs` and `octacam cache`
 # ---------------------------------------------------------------------------
 
 _JobArg = Annotated[
@@ -4909,10 +4464,8 @@ def cache_clear(
     """
     from octacam import process_jobs, session_cache
 
-    # A pre-confirm snapshot, used only for the "will clear" preview. The report
-    # below re-reads the live/finished picture *after* clearing, so a job that
-    # finishes (or a capture that ends) while the operator dwells at the prompt is
-    # never both "Cleared" and "Kept: live".
+    # For the preview only: the report re-reads after clearing, so a job ending
+    # at the prompt is never both "Cleared" and "Kept: live".
     n_recordings = session_cache.recordings_count()
     rec_exists = (session_cache.cache_dir() / session_cache.CACHE_FILENAME).exists()
 
@@ -4956,7 +4509,6 @@ def cache_clear(
         )
     typer.echo("Cleared: " + ", ".join(cleared) + "." if cleared else "Nothing needed clearing.")
 
-    # Re-read the post-clear picture so the report matches what remains on disk.
     live_jobs, live_transcode, live_capture = _live_counts(session_cache, process_jobs)
     finished_jobs = process_jobs.job_dir_counts()[1]
     kept = _live_summary(live_jobs, live_transcode, live_capture)
@@ -5001,9 +4553,7 @@ def main() -> None:
     install(show_locals=False)
     try:
         app()
-    except ConfigError as e:
-        # A malformed octacam_config.toml is operator error, not a bug: print the
-        # file and the offending line rather than a traceback.
+    except ConfigError as e:  # operator error: the file and line, no traceback
         _stderr_console().print(f"[bold red]Config error:[/bold red] {e}")
         raise SystemExit(2) from None
 
