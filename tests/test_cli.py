@@ -2090,3 +2090,39 @@ def test_benchmark_closes_the_cameras_when_it_exits_before_measuring(
     result = runner.invoke(app, ["--log-level", "error", "benchmark", str(tmp_path)])
     assert result.exit_code != 0
     assert len(closed) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra", "sink", "record_form", "with_bar"),
+    [
+        ([], "config", "display", True),
+        (["--sink", "null", "--record-form", "sensor", "--json"], "null", "sensor", False),
+    ],
+)
+def test_benchmark_passes_its_options_to_diagnose(
+    tmp_path, monkeypatch, extra, sink, record_form, with_bar
+):
+    (tmp_path / "octacam_config.toml").write_text(
+        'backend = "fake"\n[[cameras]]\nserial_number = "FAKE-0"\n'
+    )
+    seen = {}
+
+    def diagnose(system, settings, **kwargs):
+        seen.update(kwargs, record_form=settings.record_form)
+        raise SystemExit("stop")
+
+    monkeypatch.setattr("octacam.diagnostics.diagnose", diagnose)
+    result = runner.invoke(
+        app, ["--log-level", "error", "benchmark", str(tmp_path), *extra]
+    )
+    assert result.exit_code != 0
+    assert type(seen["sink"]) is str and seen["sink"] == sink
+    assert type(seen["record_form"]) is str and seen["record_form"] == record_form
+    assert callable(seen.get("progress_cb")) is with_bar
+
+
+@pytest.mark.parametrize("option", ["--sink", "--record-form"])
+def test_benchmark_rejects_an_unknown_choice(tmp_path, option):
+    result = runner.invoke(app, ["benchmark", str(tmp_path), option, "bogus"])
+    assert result.exit_code == 2
+    assert option in result.output

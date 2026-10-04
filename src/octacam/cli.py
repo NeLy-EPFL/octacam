@@ -50,6 +50,16 @@ class ProgressStyle(StrEnum):
     ffmpeg = "ffmpeg"
 
 
+class BenchmarkSink(StrEnum):
+    config = "config"
+    null = "null"
+
+
+class RecordForm(StrEnum):
+    display = "display"
+    sensor = "sensor"
+
+
 _stderr_console_singleton = None
 
 
@@ -3284,20 +3294,20 @@ def benchmark(
         ),
     ] = True,
     sink: Annotated[
-        str,
+        BenchmarkSink,
         typer.Option(
             "--sink",
             help="What to write through: 'config' (the rig's real save_method, so "
             "the encode cost is measured) or 'null' (discard frames — isolate "
             "acquisition, skip the encoder).",
         ),
-    ] = "config",
+    ] = BenchmarkSink.config,
     backend: Annotated[
         str | None,
         typer.Option("--backend", help="Override the config's camera backend."),
     ] = None,
     record_form: Annotated[
-        str | None,
+        RecordForm | None,
         typer.Option(
             "--record-form",
             help=r"'display' (bake the transform) or 'sensor' \[default: from config].",
@@ -3324,13 +3334,6 @@ def benchmark(
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
 
-    if sink not in ("config", "null"):
-        raise typer.BadParameter("expected 'config' or 'null'", param_hint="--sink")
-    if record_form is not None and record_form not in ("display", "sensor"):
-        raise typer.BadParameter(
-            "expected 'display' or 'sensor'", param_hint="--record-form"
-        )
-
     config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
     record_cfg = (
@@ -3340,7 +3343,7 @@ def benchmark(
     )
     settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
     if record_form is not None:
-        settings.record_form = record_form
+        settings.record_form = record_form.value
 
     # A transcode running here would fight the benchmark for the CPU and skew it.
     _warn_if_transcoding()
@@ -3374,7 +3377,7 @@ def benchmark(
             len(system),
             settings.fps,
             settings.trigger_source,
-            sink,
+            sink.value,
         )
 
         if json_output:
@@ -3385,7 +3388,7 @@ def benchmark(
                 duration_s=duration,
                 find_max=find_max,
                 measure_freerun=freerun,
-                sink=sink,
+                sink=sink.value,
             )
         else:
             with _BenchmarkProgressBar() as bar:
@@ -3395,7 +3398,7 @@ def benchmark(
                     duration_s=duration,
                     find_max=find_max,
                     measure_freerun=freerun,
-                    sink=sink,
+                    sink=sink.value,
                     progress_cb=bar.update,
                 )
     finally:
