@@ -75,8 +75,8 @@ class FirmwareSpec:
     fqbn: str
     banner_prefix: str
     protocol_version: int
+    build_define: str
     build_header: str = "fw_build_info.h"
-    build_define: str = "TRIGGERBOX_FW_BUILD"
 
     @property
     def main_ino(self) -> Path:

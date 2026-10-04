@@ -114,6 +114,7 @@ def spec():
         fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX",
         protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
 
 
@@ -260,7 +261,7 @@ def test_preflight_no_cli(spec):
 def test_preflight_no_sketch(monkeypatch):
     spec = fw.FirmwareSpec(
         name="x", sketch_dir=Path("/nope/x"), fqbn="arduino:esp32:nano_nora",
-        banner_prefix="X", protocol_version=1,
+        banner_prefix="X", protocol_version=1, build_define="X_FW_BUILD",
     )
     ok, msg = fw.preflight(spec, "arduino-cli")
     assert not ok and "sketch" in msg.lower()
@@ -271,6 +272,7 @@ def test_preflight_core_missing(monkeypatch):
     spec = fw.FirmwareSpec(
         name="triggerbox", sketch_dir=spec_dir, fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX", protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
     monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: False)
     ok, msg = fw.preflight(spec, "arduino-cli")
@@ -282,6 +284,7 @@ def test_preflight_ok(monkeypatch):
     spec = fw.FirmwareSpec(
         name="triggerbox", sketch_dir=spec_dir, fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX", protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
     monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
     ok, msg = fw.preflight(spec, "arduino-cli")
