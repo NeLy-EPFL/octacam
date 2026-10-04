@@ -216,7 +216,7 @@ def apply_freerun_rate_cap(backend, fps: float) -> None:
 
 def clear_freerun_rate_cap(backend) -> None:
     """Best-effort removal of the free-run cap before a triggered mode, which it
-    would clip (on Basler the enable applies even while triggered)."""
+    would clip."""
     for name in _FRAMERATE_ENABLE_NODES:
         try:
             backend._set_bool(name, False)
