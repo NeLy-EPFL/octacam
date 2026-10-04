@@ -815,7 +815,7 @@ class TriggerboxPlugin(Plugin):
         # a (re)open can never fight over the port. See octacam.firmware.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(),
-            resolve_device=lambda: serial_ports.resolve_device(self._configured_device, self.baud),
+            resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
             reopen=lambda: self._open(allow_recovery=False),
             close_link=lambda: self._link.close(),  # late-bound: link may be replaced
             wait_for_device=serial_ports.wait_for_device,
@@ -1013,7 +1013,7 @@ class TriggerboxPlugin(Plugin):
             self._firmware = None
             self._firmware_ok = True
             self._last_error = None  # a fresh connection attempt clears stale failures
-            device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+            device, reason = serial_ports.resolve_device(self._configured_device)
             if device is None:
                 log.warning("triggerbox: %s", reason)
                 return reason

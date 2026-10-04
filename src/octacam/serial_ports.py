@@ -334,9 +334,7 @@ def wait_for_device(device: str, timeout: float = 3.0) -> bool:
         time.sleep(0.1)
 
 
-def resolve_device(
-    configured: str | None, baud: int = DEFAULT_BAUD
-) -> tuple[str | None, str]:
+def resolve_device(configured: str | None) -> tuple[str | None, str]:
     """Resolve a plugin's configured ``device`` to a concrete port.
 
     Returns ``(device|None, reason)``. Precedence: an explicit concrete path is

@@ -421,7 +421,7 @@ class FlywheelPlugin(Plugin):
         # plugins). Owns the port lock; _open takes it too. See octacam.firmware.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(fqbn),
-            resolve_device=lambda: serial_ports.resolve_device(self._configured_device, self.baud),
+            resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
             reopen=self._open,
             close_link=lambda: self._link.close(),
             wait_for_device=serial_ports.wait_for_device,
@@ -466,7 +466,7 @@ class FlywheelPlugin(Plugin):
             self._firmware = None
             self._firmware_ok = True
             self._last_error = None
-            device, reason = serial_ports.resolve_device(self._configured_device, self.baud)
+            device, reason = serial_ports.resolve_device(self._configured_device)
             if device is None:
                 log.warning("Flywheel plugin: %s", reason)
                 return reason
