@@ -785,7 +785,7 @@ def test_diagnostics_rest_endpoints(fake_system, tmp_path):
             assert client.post("/api/shutdown").status_code == 409
 
             wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
-            last = client.get("/api/diagnostics/last").json()
+            last = controller.get_last_diagnostic() or {}
             assert last.get("backend") == "fake"
             assert "trials" in last
     finally:

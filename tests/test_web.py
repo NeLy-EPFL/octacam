@@ -1302,48 +1302,20 @@ def _config_dir(path, text="[gui]\n"):
     return path
 
 
-def test_list_configs_lists_every_launchable_sibling(tmp_path):
-
-    rigs = tmp_path / "rigs"
-    active = _config_dir(rigs / "active")
-    _config_dir(rigs / "other")
-    (rigs / "notes").mkdir()  # no config: not listed
-    flat = _config_dir(rigs / "take_flat")  # a flat recording's snapshot
-    (flat / "recording_summary.json").write_text("{}")
-    _config_dir(rigs / "take_nested" / RECORDING_INFO_DIRNAME)  # a nested one
-    controller, app = _save_client(tmp_path, active)
-    try:
-        with TestClient(app) as client:
-            r = client.get("/api/config/configs")
-            assert r.status_code == 200, r.text
-            assert r.json() == {
-                "active": "active",
-                "configs": ["active", "other", "take_flat", "take_nested"],
-            }
-    finally:
-        controller.close()
-
-
-def test_a_session_relaunched_from_a_recording_stands_for_the_recording(tmp_path):
+def test_a_config_saved_as_new_from_a_relaunched_recording_lands_beside_it(tmp_path):
     # `octacam gui <recording>` runs from the recording's octacam_recording
-    # subfolder. Its siblings are the recording's videos, so the recording
-    # folder stands for it: that is the active name, its siblings are listed,
-    # and a config saved as new lands beside the recording, not inside it.
+    # subfolder, whose siblings are the recording's videos, so a config saved
+    # as new lands beside the recording folder, not inside it.
 
     fly = tmp_path / "data" / "Fly1"
     info = _config_dir(fly / "001" / RECORDING_INFO_DIRNAME)
     (info / "recording_summary.json").write_text("{}")
     (info / "fictrac_camera_config.pfs").write_text("aux\n")
     (fly / "001" / "camera_0.mp4").write_bytes(b"v")
-    _config_dir(fly / "002" / RECORDING_INFO_DIRNAME)
-    _config_dir(fly / "rig")
     controller, app = _save_client(tmp_path, info)
     cams = [{"serial": s} for s in EMULATED_SERIALS]
     try:
         with TestClient(app) as client:
-            listed = client.get("/api/config/configs").json()
-            assert listed == {"active": "001", "configs": ["001", "002", "rig"]}
-
             r = client.post(
                 "/api/config/save",
                 json={"target": "new", "name": "variant", "cameras": cams},
@@ -1354,7 +1326,6 @@ def test_a_session_relaunched_from_a_recording_stands_for_the_recording(tmp_path
             assert (variant / "octacam_config.toml").exists()
             assert (variant / "fictrac_camera_config.pfs").exists()  # aux copied
             assert not (fly / "001" / "variant").exists()
-            assert "variant" in client.get("/api/config/configs").json()["configs"]
 
             # Saving to the active config still writes the recording's own.
             r = client.post(

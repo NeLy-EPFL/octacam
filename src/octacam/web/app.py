@@ -50,7 +50,6 @@ from octacam.config import (
     OctacamConfig,
     find_config_file,
     parse_config,
-    resolve_config_dir,
 )
 from octacam.controller import (
     RecordingController,
@@ -1128,24 +1127,6 @@ def create_app(
         active = Path(config_dir)
         return active.parent if active.name == RECORDING_INFO_DIRNAME else active
 
-    @app.get("/api/config/configs")
-    def list_configs():
-        if not config_dir:
-            return {"active": "", "configs": []}
-        anchor = _preset_anchor()
-        try:
-            # Every sibling octacam can launch from: a rig config, or a
-            # recording (either layout) through its config snapshot.
-            names = sorted(
-                p.name
-                for p in anchor.parent.iterdir()
-                if p.name != RECORDING_INFO_DIRNAME
-                and find_config_file(resolve_config_dir(p)).exists()
-            )
-        except OSError:
-            names = []
-        return {"active": anchor.name, "configs": names}
-
     @app.post("/api/config/save")
     def save_config(req: SaveConfigRequest):
         active = _require_config_dir()
@@ -1269,10 +1250,6 @@ def create_app(
     def cancel_diagnostic():
         controller.cancel_diagnostic()
         return JSONResponse({"status": "ok"}, status_code=202)
-
-    @app.get("/api/diagnostics/last")
-    def last_diagnostic():
-        return controller.get_last_diagnostic() or {}
 
     @app.post("/api/shutdown")
     def shutdown(background_tasks: BackgroundTasks, body: ShutdownRequest | None = None):
