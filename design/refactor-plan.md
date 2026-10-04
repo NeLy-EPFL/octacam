@@ -584,3 +584,7 @@ Load-bearing behavior and knowledge. Condense the words, keep the substance.
 | Date | Step | Result |
 |---|---|---|
 | 2026-10-04 | Review, plan | This document |
+| 2026-10-04 | P0.1 test harness | `tests/conftest.py` + `helpers.py`; 950 lines of per-file setup gone; doctor tests hermetic; emulated-rig tests pinned to `backend="basler"` (suite 9.5 → 6 min) |
+| 2026-10-04 | P0.2 safety net | 17 tests: `octacam record` end to end, take/benchmark/serial/rig routes, controller lock discipline |
+| 2026-10-04 | P0.3 bug fixes | the six planned fixes, plus `benchmark` leaving the cameras open |
+| 2026-10-04 | Rig checkpoint | 2 Basler + 2 GS3 + triggerbox, 80 fps: 240/240 on every camera. Found and fixed: full-sensor GS3 pairs could not record (128 stream buffers > 1000 MB usbfs; now halved until they fit), abort at exit after a failed FLIR start (`gc.collect()` before teardown), a camera that never started left `sync.ok` true. Fixed a flaky benchmark test (fake cameras starving each other of the GIL) |
