@@ -850,6 +850,7 @@ def _system_payload(*, ready, plugins=None):
         "update": None,
         "ready": ready,
         "init_error": None,
+        "missing_cameras": [],
         "config_dir": "/x",
         "plugins": plugins or {},
         "managed_trigger_available": False,
@@ -1161,5 +1162,50 @@ def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
             "ccw": True,
             "cw": False,
         }
+    finally:
+        page.close()
+
+
+def test_incomplete_rig_warning_names_each_missing_camera(static_server, browser):
+    """A rig that opened fewer cameras than its config asks for must not look
+    like a healthy one with a smaller grid: a persistent warning names each
+    missing camera and why. The cameras open after the page is served, so the
+    shortfall arrives with the `system` push that fills the grid in."""
+    page = browser.new_page()
+
+    def json_route(builder):
+        return lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(builder()),
+        )
+
+    page.route("**/api/**", json_route(dict))
+    page.route("**/api/system", json_route(lambda: _system_payload(ready=False)))
+    page.route("**/api/state", json_route(lambda: _state_payload(ready=False)))
+    page.add_init_script(_WS_STUB)
+    missing = [
+        {"serial": "S1", "reason": "not found"},
+        {"serial": "S2", "reason": "failed to open: device busy"},
+    ]
+
+    try:
+        page.goto(f"{static_server}/index.html", wait_until="domcontentloaded")
+        page.wait_for_selector(".grid-placeholder", timeout=5000)
+        assert _hidden(page, "#rig-alert")
+
+        page.evaluate(
+            "(sys) => window.__pushWs(sys)",
+            {"type": "system", **_system_payload(ready=True), "missing_cameras": missing},
+        )
+        page.wait_for_selector("#rig-alert", state="visible", timeout=5000)
+        text = page.eval_on_selector("#rig-alert", "el => el.textContent")
+        assert "1 of 3 configured cameras" in text
+        assert "S1: not found" in text
+        assert "S2: failed to open: device busy" in text
+
+        # It stays up on every tab, not only the Record tab.
+        page.click('#tabs button[data-tab="view"]')
+        assert page.is_visible("#rig-alert")
     finally:
         page.close()

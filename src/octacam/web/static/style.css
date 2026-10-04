@@ -424,6 +424,20 @@ body {
 .tabs-menu button[data-tab]:hover { color: var(--text); background: var(--border); }
 .tabs-menu button[data-tab].active { color: var(--text); }
 
+/* Incomplete-rig warning (app.js showMissingCameras), above every tab for the
+   whole session. Amber like the firmware banner: attention, not an error. */
+#rig-alert {
+  flex: none;
+  margin: 10px 10px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+#rig-alert ul { margin: 4px 0 0; padding-left: 18px; }
+
 .tab {
   display: none;
   padding: 12px 10px;

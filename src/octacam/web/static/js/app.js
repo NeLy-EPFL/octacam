@@ -42,6 +42,27 @@ function addEvent(evt) {
   list.scrollTop = list.scrollHeight;
 }
 
+// A rig that opened fewer cameras than its config asks for must not pass for a
+// healthy one with a smaller grid: name each missing camera and why.
+function showMissingCameras(sys) {
+  const el = document.getElementById("rig-alert");
+  const missing = sys.missing_cameras;
+  el.classList.toggle("hidden", missing.length === 0);
+  if (missing.length === 0) return;
+  const opened = sys.cameras.length;
+  const title = document.createElement("div");
+  title.textContent =
+    `⚠ Incomplete rig: ${opened} of ${opened + missing.length} configured ` +
+    "cameras opened. Missing:";
+  const list = document.createElement("ul");
+  for (const { serial, reason } of missing) {
+    const item = document.createElement("li");
+    item.textContent = `${serial}: ${reason}`;
+    list.append(item);
+  }
+  el.replaceChildren(title, list);
+}
+
 // Wire the tab bar and its "priority+" overflow menu. Returns a reflow() the
 // caller runs once the set of tabs is final (plugin tabs are removed after this
 // is called), so the overflow packing is computed against the real tab list.
@@ -199,6 +220,7 @@ async function main() {
   // Read-only "a newer octacam is available" banner (dismissible; see update.js).
   // The server computes system.update; octacam never self-updates from here.
   initUpdateBanner(system.update);
+  showMissingCameras(system);
 
   const reflowTabs = setupTabs();
   // Show optional plugin tabs only when the plugin is loaded. A not-ready
@@ -726,6 +748,7 @@ async function main() {
   function applySystem(sys) {
     systemReady = Boolean(sys.ready);
     initError = sys.init_error || null;
+    showMissingCameras(sys);
     record.setManagedAvailable(!!sys.managed_trigger_available);
     for (const [name, info] of Object.entries(sys.plugins ?? {})) {
       pluginTabs.get(name)?.applyStatus?.(info);
