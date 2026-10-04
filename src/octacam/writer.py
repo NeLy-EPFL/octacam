@@ -446,15 +446,12 @@ def _strip_opts(tokens: list[str], names: tuple[str, ...]) -> list[str]:
     return cleaned
 
 
-def _merge_vf(transform_vf: str, tokens: list[str]) -> tuple[list[str], str]:
-    """Pull any ``-vf``/``-filter:v`` out of ``tokens`` and merge with the
-    caller-owned transform filter.
+def _split_vf(tokens: list[str]) -> tuple[list[str], str]:
+    """Pull any ``-vf``/``-filter:v`` out of ``tokens``.
 
-    ffmpeg accepts only one ``-vf``; the display-transform filter is octacam's
-    to inject, so a user filter inside ``ffmpeg_params`` must be merged rather
-    than left to silently override it. The transform runs first (rotate/flip),
-    the user's filter after — matching the numpy transform ordering. Returns the
-    tokens with ``-vf`` removed and the single merged filter chain ("" if none).
+    ffmpeg accepts only one ``-vf``, so a user filter inside ``ffmpeg_params``
+    must be merged with octacam's full-range conversion rather than passed
+    beside it. Returns the tokens without it and the user's filter ("" if none).
     """
     cleaned: list[str] = []
     user_vf = ""
@@ -469,7 +466,7 @@ def _merge_vf(transform_vf: str, tokens: list[str]) -> tuple[list[str], str]:
                 skip = True
             continue
         cleaned.append(tok)
-    return cleaned, ",".join(p for p in (transform_vf, user_vf) if p)
+    return cleaned, user_vf
 
 
 _PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
@@ -521,22 +518,22 @@ def _playable_pix_fmt(tokens: list[str], frame_size: tuple[int, int] | None) -> 
 
 
 def _output_args(
-    ffmpeg_params: str, vf: str, frame_size: tuple[int, int] | None = None
+    ffmpeg_params: str, frame_size: tuple[int, int] | None = None
 ) -> tuple[list[str], str, list[str]]:
     """Split a config ``ffmpeg_params`` string into the pieces ffmpeg needs.
 
     Returns ``(encoder_tokens, merged_vf, color_range_args)``: the verbatim
     encoder tokens (with any user ``-vf`` removed, and a 4:0:0 H.264/HEVC output
     made 4:2:0 for an even ``frame_size`` — see :func:`_playable_pix_fmt`), the
-    single merged filter chain (transform + user filter + full-range conversion
-    for limited-range YUV), and the ``-color_range`` tag args. Shared by the
+    single merged filter chain (user filter + full-range conversion for
+    limited-range YUV), and the ``-color_range`` tag args. Shared by the
     raw-input encoder (:func:`build_encode_args`) and :func:`transcode_encoded`
     so both apply the ``-vf`` merge and full-range handling identically.
     """
     tokens = _playable_pix_fmt(shlex.split(ffmpeg_params), frame_size)
     out_pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS) or ""
-    tokens, merged_vf = _merge_vf(vf, tokens)
-    merged_vf = _full_range_vf(out_pix_fmt, merged_vf)
+    tokens, user_vf = _split_vf(tokens)
+    merged_vf = _full_range_vf(out_pix_fmt, user_vf)
     return tokens, merged_vf, _color_range_args(out_pix_fmt)
 
 
@@ -549,7 +546,6 @@ def build_encode_args(
     ffmpeg_params: str,
     *,
     source: str = "pipe:0",
-    vf: str = "",
     input_pix_fmt: str = "gray",
 ) -> list[str]:
     """ffmpeg argv encoding a rawvideo stream (from `source`) with `ffmpeg_params`.
@@ -557,11 +553,10 @@ def build_encode_args(
     The **input** args (``-f rawvideo -pixel_format … -video_size … -framerate
     …``) are derived from the frame geometry; the **output/encoder** args come
     verbatim from ``ffmpeg_params`` (shlex-split), e.g. ``-c:v libx264 -preset
-    ultrafast -crf 18 -pix_fmt yuv420p``. Any ``-vf`` inside ``ffmpeg_params`` is
-    merged with the caller-owned ``vf`` (display transform) into one filter
-    chain (see :func:`_merge_vf`). For a limited-range YUV ``-pix_fmt`` a
-    full-range conversion filter + tag is injected so 0-255 luma survives (see
-    :func:`_full_range_vf`).
+    ultrafast -crf 18 -pix_fmt yuv420p``. For a limited-range YUV ``-pix_fmt`` a
+    full-range conversion filter + tag is injected so 0-255 luma survives,
+    merged with any ``-vf`` inside ``ffmpeg_params`` into one filter chain (see
+    :func:`_output_args`).
 
     A libx264/libx265 ``-pix_fmt gray`` is written as full-range ``yuv420p``
     unless the frame has an odd side (see :func:`_playable_pix_fmt`): 4:0:0
@@ -569,7 +564,7 @@ def build_encode_args(
     as yuvj420p (the H.264 decoder synthesizes neutral chroma for 4:0:0); the
     x264 encoder log ("4:0:0" vs "4:2:0") is the source of truth.
     """
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf, (width, height))
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, (width, height))
     return [
         ffmpeg,
         "-hide_banner",
@@ -1224,7 +1219,6 @@ def transcode_raw(
     raw_path: Path,
     output: Path | None = None,
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    vf: str = "",
     *,
     width: int | None = None,
     height: int | None = None,
@@ -1241,7 +1235,7 @@ def transcode_raw(
     layout is unknown and a clear error is raised. ``frames`` (the summary's
     exact count) makes the progress bar determinate; it falls back to the file
     size / (w*h*bytes-per-pixel) when absent. ``output`` defaults to
-    ``<raw>.mkv``; ``vf`` bakes a display orientation (see build_encode_args).
+    ``<raw>.mkv``.
     """
     raw_path = Path(raw_path)
     output = Path(output) if output else raw_path.with_suffix(".mkv")
@@ -1263,7 +1257,6 @@ def transcode_raw(
             height,
             ffmpeg_params,
             source=str(raw_path),
-            vf=vf,
             input_pix_fmt=_input_pix_fmt(pixel_format),
         )
         _run_ffmpeg(
@@ -1280,7 +1273,6 @@ def transcode_encoded(
     src: Path,
     output: Path,
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    vf: str = "",
     *,
     width: int | None = None,
     height: int | None = None,
@@ -1293,8 +1285,7 @@ def transcode_encoded(
     Always re-encodes with the given ``ffmpeg_params`` rather than
     stream-copying the source: captures are written with a fast preset to keep
     up with the cameras, so this offline pass is where a slow preset earns its
-    compression. ``vf``, when non-empty, additionally bakes a display transform
-    in (merged with any user ``-vf`` — see :func:`_output_args`).
+    compression.
 
     ``width``/``height`` (the source's frame size, e.g. from the recording
     summary) let a gray H.264 output be written as 4:2:0 (see
@@ -1307,7 +1298,7 @@ def transcode_encoded(
     output = Path(output)
     ffmpeg = find_ffmpeg()
     frame_size = (width, height) if width and height else None
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf, frame_size)
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, frame_size)
     with _atomic_output(output) as tmp:
         args = [
             ffmpeg,
@@ -1336,7 +1327,6 @@ def transcode_file(
     input_path: Path,
     output: Path,
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    vf: str = "",
     *,
     width: int | None = None,
     height: int | None = None,
@@ -1349,18 +1339,17 @@ def transcode_file(
 ) -> Path:
     """Transcode one ``.raw``/``.mkv``/``.mp4`` file to ``output``.
 
-    Dispatches on the input suffix; ``vf`` (if any) bakes a display transform
-    in. The caller picks ``output`` (extension = desired container). A ``.raw``
-    input needs ``width``/``height``/``fps``/``pixel_format``/``frames`` from the
-    recording summary; encoded inputs read their own geometry (``width``/``height``
-    only pick their output pixel format) and ``total_frames`` drives the bar."""
+    Dispatches on the input suffix. The caller picks ``output`` (extension =
+    desired container). A ``.raw`` input needs ``width``/``height``/``fps``/
+    ``pixel_format``/``frames`` from the recording summary; encoded inputs read
+    their own geometry (``width``/``height`` only pick their output pixel format)
+    and ``total_frames`` drives the bar."""
     input_path = Path(input_path)
     if input_path.suffix == ".raw":
         return transcode_raw(
             input_path,
             output=output,
             ffmpeg_params=ffmpeg_params,
-            vf=vf,
             width=width,
             height=height,
             fps=fps,
@@ -1373,7 +1362,6 @@ def transcode_file(
         input_path,
         output,
         ffmpeg_params=ffmpeg_params,
-        vf=vf,
         width=width,
         height=height,
         total_frames=total_frames,

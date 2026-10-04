@@ -1,15 +1,14 @@
-"""Display transforms (rotation + flips) shared by recording and transcoding.
+"""Display transforms (rotation + flips) baked into recorded video.
 
 The web GUI shows each camera through a CSS transform ``scale(sx, sy)
 rotate(deg)`` applied to the raw frame (see ``web/static/js/grid.js``). To bake
-that same orientation into a recorded/transcoded video we must reproduce it
-exactly, in pixels.
+that same orientation into a recorded video we must reproduce it exactly, in
+pixels.
 
 CSS composes the transform list right-to-left, so the matrix is ``S · R``: a
 point is first rotated, then scaled/flipped along the (unrotated) screen axes.
 In pixel terms that means **rotate first, then flip** — and CSS ``rotate(+deg)``
-turns clockwise. Both the numpy path (record-time baking) and the ffmpeg ``-vf``
-path (transcode) implement that ordering so they produce identical pixels.
+turns clockwise. :func:`apply_display_transform` implements that ordering.
 
 Only the transforms the View tab can actually produce are supported: rotation in
 90° steps plus horizontal/vertical flips (a flip is a negative ``scale_x`` /
@@ -209,25 +208,3 @@ def apply_display_transform(array: np.ndarray, t: DisplayTransform) -> np.ndarra
     if t.flip_v:
         out = np.flipud(out)
     return np.ascontiguousarray(out)
-
-
-def display_vf_filter(t: DisplayTransform) -> str:
-    """The ffmpeg ``-vf`` chain equivalent to :func:`apply_display_transform`.
-
-    Empty string when ``t`` is the identity. Rotation filters come first, then
-    flips, matching the numpy ordering (rotate, then flip).
-    """
-    filters: list[str] = []
-    # transpose=1 is 90° clockwise, transpose=2 is 90° counter-clockwise.
-    if t.rotation_deg == 90:
-        filters.append("transpose=1")
-    elif t.rotation_deg == 180:
-        filters.append("transpose=1")
-        filters.append("transpose=1")
-    elif t.rotation_deg == 270:
-        filters.append("transpose=2")
-    if t.flip_h:
-        filters.append("hflip")
-    if t.flip_v:
-        filters.append("vflip")
-    return ",".join(filters)

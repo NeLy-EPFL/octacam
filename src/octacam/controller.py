@@ -421,9 +421,8 @@ def build_recording_summary(
     """Assemble the recording_summary.json payload from finalized camera stats.
 
     Pure (no I/O) so it can be unit-tested without a recording. Each camera's
-    ``transform`` is always recorded (so `octacam transcode --as-displayed` can
-    apply it later); ``transform_applied`` is true only when it was baked into
-    the saved file (display form + non-identity transform)."""
+    ``transform`` is always recorded; ``transform_applied`` is true only when it
+    was baked into the saved file (display form + non-identity transform)."""
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(

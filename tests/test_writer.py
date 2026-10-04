@@ -14,7 +14,7 @@ from octacam.writer import (
     FfmpegVideoWriter,
     RawVideoWriter,
     _color_range_args,
-    _merge_vf,
+    _split_vf,
     build_encode_args,
     default_save_method,
     find_ffmpeg,
@@ -244,25 +244,15 @@ def test_build_encode_args_uses_source_and_input_pix_fmt():
     assert args[args.index("-i") + 1] == "in.raw"
 
 
-def test_merge_vf_transform_first_then_user_filter():
-    # The single -vf ffmpeg allows must merge the octacam transform with any
-    # user -vf inside ffmpeg_params, transform first (rotate/flip) then user.
+def test_split_vf_pulls_the_user_filter():
     tokens = ["-c:v", "libx264", "-vf", "eq=contrast=2", "-crf", "18"]
-    cleaned, merged = _merge_vf("transpose=1", tokens)
-    assert "-vf" not in cleaned
-    assert merged == "transpose=1,eq=contrast=2"
-
+    assert _split_vf(tokens) == (["-c:v", "libx264", "-crf", "18"], "eq=contrast=2")
     # -filter:v is treated the same as -vf.
-    cleaned, merged = _merge_vf("", ["-filter:v", "hflip"])
-    assert cleaned == []
-    assert merged == "hflip"
-
-    # No user filter: just the transform survives.
-    _, merged = _merge_vf("vflip", ["-c:v", "libx264"])
-    assert merged == "vflip"
+    assert _split_vf(["-filter:v", "hflip"]) == ([], "hflip")
+    assert _split_vf(["-c:v", "libx264"]) == (["-c:v", "libx264"], "")
 
 
-def test_build_encode_args_merges_user_vf_after_transform():
+def test_build_encode_args_merges_user_vf():
     args = build_encode_args(
         "ffmpeg",
         "o.mkv",
@@ -270,13 +260,11 @@ def test_build_encode_args_merges_user_vf_after_transform():
         64,
         48,
         "-c:v libx264 -vf eq=contrast=2 -pix_fmt gray",
-        vf="transpose=1",
     )
-    # Transform, then the user's filter, then the full-range conversion of the
-    # yuv420p the gray output is written as.
-    assert (
-        args[args.index("-vf") + 1] == "transpose=1,eq=contrast=2,scale=out_range=full"
-    )
+    # ffmpeg takes one -vf: the user's filter, then the full-range conversion of
+    # the yuv420p the gray output is written as.
+    assert args.count("-vf") == 1
+    assert args[args.index("-vf") + 1] == "eq=contrast=2,scale=out_range=full"
 
 
 def test_color_range_args_only_for_limited_range_yuv():

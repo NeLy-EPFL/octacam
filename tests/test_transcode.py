@@ -124,22 +124,6 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     assert args[args.index("-pix_fmt") + 1] == "gray"
 
 
-def test_transcode_file_applies_vf(tmp_path):
-    raw = tmp_path / "cam.raw"
-    _write_raw(raw, _frame(16, 12))
-    from octacam.transform import display_vf_filter
-
-    out = transcode_file(
-        raw,
-        tmp_path / "cam.mp4",
-        vf=display_vf_filter(DisplayTransform(90)),
-        width=16,
-        height=12,
-        fps=10.0,
-    )
-    assert _dims(out) == (12, 16)  # 90deg swap
-
-
 def test_transcode_raw_without_geometry_raises(tmp_path):
     # A .raw carries no geometry of its own; without width/height/fps (from the
     # recording summary) it cannot be laid out, so the encode refuses rather than
