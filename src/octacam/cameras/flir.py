@@ -22,6 +22,7 @@ Mapping notes vs. the Basler backend:
 """
 
 import atexit
+import gc
 import logging
 import time
 from collections.abc import Callable
@@ -854,6 +855,10 @@ def teardown() -> None:
             pass
         _cam_list = None
     if _system is not None:
+    # A failed start leaves its traceback in a reference cycle that holds the
+    # camera's node maps; uncollected, Clear() refuses, and the CameraList's
+    # destructor then aborts the process (std::terminate) at exit.
+    gc.collect()
         try:
             _system.ReleaseInstance()
         except Exception:
