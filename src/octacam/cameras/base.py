@@ -252,8 +252,9 @@ class CameraBackend(Protocol):
     def start_grab_record(self) -> bool: ...
     def stop_grab(self) -> None: ...
 
-    # The fetches never raise: None on a device error or a stop race, since an
-    # exception would kill the grab thread and orphan its writer.
+    # retrieve, retrieve_freerun and retrieve_external never raise: None on a
+    # device error or a stop race, since an exception would kill the grab thread
+    # and orphan its writer.
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
