@@ -31,6 +31,7 @@ from octacam.writer import (
 log = logging.getLogger("octacam")
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
+_DefaultT = TypeVar("_DefaultT")
 
 
 def _scalar_str(value: object) -> str:
@@ -359,16 +360,6 @@ def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None)
     return _normalize_dir(combined)
 
 
-def _parse_transfer(transfer_src: object) -> TransferConfig | None:
-    """Parse the optional ``[transfer]`` section, returning None on any problem."""
-    if transfer_src is None:
-        return None
-    if not isinstance(transfer_src, dict):
-        log.warning('Ignoring "transfer" in octacam config as it is not a table')
-        return None
-    return _lenient_validate(TransferConfig, transfer_src, "transfer", TransferConfig())
-
-
 def _parse_layout(layout_src: object, context: str) -> list[list[str]] | None:
     """Validate a 2D camera-name grid layout, returning None on any problem."""
     if layout_src is None:
@@ -646,15 +637,18 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
     return cameras
 
 
-def _parse_section(data: dict, key: str, model_cls: type[_ModelT], default: _ModelT):
-    """Parse a single-table section (``[key]``) via lenient validation."""
+def _parse_section(
+    data: dict, key: str, model_cls: type[_ModelT], default: _DefaultT
+) -> _ModelT | _DefaultT:
+    """Parse the optional table ``[key]`` leniently; ``default`` when it is absent
+    or not a table."""
     src = data.get(key)
     if src is None:
         return default
     if not isinstance(src, dict):
         log.warning('Ignoring "%s" in octacam config as it is not a table', key)
         return default
-    return _lenient_validate(model_cls, src, key, default)
+    return _lenient_validate(model_cls, src, key, model_cls())
 
 
 class ConfigError(Exception):
@@ -694,7 +688,7 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
     )
     config.gui = _parse_section(data, "gui", GuiConfig, GuiConfig())
     config.visualization = _parse_visualization(data.get("visualization"))
-    config.transfer = _parse_transfer(data.get("transfer"))
+    config.transfer = _parse_section(data, "transfer", TransferConfig, None)
 
     # Parsed before the cameras block, which has several early returns.
     config.plugins = _parse_plugins(data.get("plugins"))
