@@ -1,27 +1,11 @@
-"""Arduino firmware provisioning for octacam's serial plugins.
+"""Firmware fingerprinting and flashing for the serial plugins' Arduino boards.
 
-Some octacam plugins need a specific sketch running on their Arduino board — the
-``triggerbox`` plugin, for instance, speaks a wire protocol that only its own
-firmware understands. Historically the operator had to flash that sketch by hand
-(``arduino-cli compile --upload …``). This module lets octacam do it: it can tell
-whether the *exact* current sketch is already on the board and, if not, build and
-upload it.
-
-The mechanism is a **build fingerprint**. Each sketch's identify banner carries a
-short hash of its source (``TRIGGERBOX 2 a1b2c3d4``). octacam recomputes the same
-hash from the sketch on disk (:func:`sketch_fingerprint`) and compares
-(:func:`classify`) — so it detects any source drift, not just a bumped protocol
-version. The hash is baked into a generated ``fw_build_info.h`` *in a throwaway
-copy* of the sketch at flash time, so the repo tree is never dirtied and a manual
-``arduino-cli compile`` of the committed sketch still works (it reports the
-committed placeholder, which octacam sees as "not the managed build").
-
-Design notes mirror :mod:`octacam.serial_ports`: everything degrades gracefully.
-Discovery and :func:`flash` never raise — they return structured results, so a
-missing ``arduino-cli``, an absent core, or a compile error surfaces as an
-actionable message rather than a traceback. This module is generic: it knows
-nothing about any specific plugin. A plugin supplies a :class:`FirmwareSpec` built
-from its own constants.
+A sketch's identify banner ends with a short hash of its source
+(``TRIGGERBOX 2 a1b2c3d4``). :func:`sketch_fingerprint` hashes the sketch on disk
+the same way, so :func:`classify` sees any source drift, and :func:`flash` bakes
+the hash into ``fw_build_info.h`` in a throwaway copy of the sketch, never in the
+repo (a manual build reports the committed placeholder). Discovery and flashing
+never raise: a missing arduino-cli or core, or a compile error, is a message.
 """
 
 from __future__ import annotations
@@ -42,33 +26,20 @@ from pathlib import Path
 
 log = logging.getLogger("octacam")
 
-# Source file extensions that go into a sketch's fingerprint and its temp build
-# copy. The generated build-info header is excluded from the hash (it holds the
-# hash — including it would be circular) but IS written into the build copy.
+# Hashed into the fingerprint and copied into a build; the build header is
+# copied but not hashed, since it holds the hash.
 SOURCE_EXTS = frozenset({".ino", ".h", ".hpp", ".c", ".cpp", ".cc", ".cxx", ".S"})
 
-# Environment overrides (documented in the plugin READMEs):
-#   OCTACAM_ARDUINO_CLI  path to (or name of) the arduino-cli binary
-#   OCTACAM_ARDUINO_DIR  dir holding the sketch folders (repo's arduino/)
 _ENV_CLI = "OCTACAM_ARDUINO_CLI"
 _ENV_ARDUINO_DIR = "OCTACAM_ARDUINO_DIR"
 
 _DEFAULT_FLASH_TIMEOUT_S = 300.0
 
 
-# ---------------------------------------------------------------------------
-#  Spec + result types
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class FirmwareSpec:
-    """What a plugin's board should be running, and how to (re)flash it.
-
-    ``sketch_dir`` must contain ``<sketch_dir.name>.ino`` (arduino-cli requires
-    the main sketch file to match the folder name). ``banner_prefix`` /
-    ``protocol_version`` are matched against the board's identify banner.
-    """
+    """What a plugin's board should run, and how to flash it. ``sketch_dir``
+    holds ``<sketch_dir.name>.ino``, as arduino-cli requires."""
 
     name: str
     sketch_dir: Path
@@ -95,7 +66,7 @@ class FirmwareState(str, Enum):
 
 @dataclass(frozen=True)
 class FirmwareCheck:
-    """Verdict from :func:`classify` — the board's firmware vs. the source."""
+    """How the board's banner compares with the sketch source."""
 
     state: FirmwareState
     detail: str
@@ -107,13 +78,9 @@ class FirmwareCheck:
 
     @property
     def safe_to_auto_flash(self) -> bool:
-        """Whether a headless/opt-in path may reflash WITHOUT a human confirming.
-
-        True only when the board is unambiguously *this* board running stale
-        firmware (right name, wrong build/version). A blank/unidentified board or
-        an unknown/foreign banner is never auto-flashed — the operator must
-        confirm it really is the plugin's board first, since flashing overwrites
-        whatever is there."""
+        """Whether a reflash may skip the operator's confirmation: only for this
+        board on stale firmware. A blank or foreign board never may, since a
+        flash overwrites whatever it runs."""
         return self.state in (FirmwareState.OUTDATED, FirmwareState.WRONG_VERSION)
 
     def to_dict(self) -> dict:
@@ -128,7 +95,7 @@ class FirmwareCheck:
 
 @dataclass
 class FlashResult:
-    """Outcome of a :func:`flash` attempt (never raised — always returned)."""
+    """What :func:`flash` did."""
 
     ok: bool
     message: str
@@ -142,20 +109,9 @@ class FlashResult:
         return {"ok": self.ok, "message": self.message, "log": log, "build": self.build}
 
 
-# ---------------------------------------------------------------------------
-#  Fingerprint + banner parsing + classification
-# ---------------------------------------------------------------------------
-
-
 def sketch_fingerprint(sketch_dir: Path, exclude: str = "fw_build_info.h", length: int = 8) -> str:
-    """A short, stable hash of a sketch's compiled source.
-
-    Hashes every :data:`SOURCE_EXTS` file in *sketch_dir* (sorted by name, line
-    endings normalised so CRLF/LF checkouts agree), tagging each with its name so
-    a rename/add/remove changes the hash. The generated build header (*exclude*)
-    is skipped — it carries this very value, so hashing it would be circular. The
-    result is the value baked into that header and reported in the identify
-    banner."""
+    """A short hash of a sketch's source files: names and contents, CRLF read as
+    LF so checkouts agree, without the build header *exclude*."""
     h = hashlib.sha256()
     files = sorted(
         p
@@ -171,11 +127,8 @@ def sketch_fingerprint(sketch_dir: Path, exclude: str = "fw_build_info.h", lengt
 
 
 def parse_banner(banner: str | None) -> tuple[str | None, int | None, str | None]:
-    """Split an identify banner into ``(name, version, build)``.
-
-    ``"TRIGGERBOX 2 a1b2c3d4"`` → ``("TRIGGERBOX", 2, "a1b2c3d4")``. Tolerates the
-    older two-field ``"TRIGGERBOX 2"`` (build → None) and a bare name. The name is
-    upper-cased for case-insensitive comparison; the build is kept verbatim."""
+    """``"TRIGGERBOX 2 a1b2c3d4"`` -> ``("TRIGGERBOX", 2, "a1b2c3d4")``; a missing
+    version or build is None, and the name is upper-cased."""
     if not banner:
         return (None, None, None)
     parts = banner.split()
@@ -228,19 +181,10 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
     )
 
 
-# ---------------------------------------------------------------------------
-#  Sketch + toolchain discovery
-# ---------------------------------------------------------------------------
-
-
 def resolve_sketch_dir(sketch_name: str) -> Path | None:
-    """Locate the ``arduino/<sketch_name>`` folder for a source/editable install.
-
-    octacam's Arduino sketches live at the repo root (``arduino/<name>/``) and are
-    not packaged into the wheel, so this walks up from this module to find them.
-    ``OCTACAM_ARDUINO_DIR`` overrides the search (point it at the ``arduino`` dir).
-    Returns ``None`` when the sketch can't be found — flashing is then
-    unavailable, but firmware *detection* still works from the banner alone."""
+    """The ``arduino/<sketch_name>`` folder of a source checkout
+    (``OCTACAM_ARDUINO_DIR`` names the ``arduino`` dir instead), or None: the
+    wheel does not ship the sketches, and without one only flashing is lost."""
     candidates: list[Path] = []
     env = os.environ.get(_ENV_ARDUINO_DIR)
     if env:
@@ -248,7 +192,6 @@ def resolve_sketch_dir(sketch_name: str) -> Path | None:
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidates.append(parent / "arduino" / sketch_name)
-    # Packaged fallback, if a future build ever bundles the sketch next to the pkg.
     candidates.append(here.parent / "arduino" / sketch_name)
     for c in candidates:
         if (c / f"{sketch_name}.ino").is_file():
@@ -257,11 +200,8 @@ def resolve_sketch_dir(sketch_name: str) -> Path | None:
 
 
 def arduino_cli_path() -> str | None:
-    """Find the ``arduino-cli`` executable, or ``None``.
-
-    Honours ``OCTACAM_ARDUINO_CLI`` (a full path or a name on PATH), then PATH,
-    then a few common install locations (the official installer drops it under
-    ``/opt/arduino-cli*/`` or ``~/bin``)."""
+    """The arduino-cli executable: ``OCTACAM_ARDUINO_CLI`` (a path or a name on
+    PATH), else PATH, else the usual install dirs; None if absent."""
     override = os.environ.get(_ENV_CLI)
     if override:
         if os.path.isfile(override) and os.access(override, os.X_OK):
@@ -271,18 +211,15 @@ def arduino_cli_path() -> str | None:
     if found:
         return found
     patterns = ["/opt/arduino-cli*/arduino-cli", "/usr/local/bin/arduino-cli"]
-    # Path.home() raises (not returns) when HOME is unset and the UID has no passwd
-    # entry — e.g. `docker run --user <unmapped>`. This must never break the
-    # never-raise contract, so the home-based candidates are best-effort.
+    # Path.home() raises without HOME and a passwd entry (docker --user).
     try:
         home = Path.home()
         patterns += [str(home / "bin" / "arduino-cli"), str(home / ".local" / "bin" / "arduino-cli")]
     except (RuntimeError, OSError):
         pass
     for pat in patterns:
-        # Prefer the highest version dir. A numeric key orders 1.10.0 ahead of
-        # 1.9.0 (a plain string sort would pick the older 1.9.0); an unversioned
-        # /opt/arduino-cli has an empty key and so sorts last under reverse=True.
+        # Newest version dir first, compared numerically (1.10 > 1.9); an
+        # unversioned dir sorts last.
         for m in sorted(
             glob.glob(pat),
             key=lambda p: [int(n) for n in re.findall(r"\d+", p)],
@@ -294,10 +231,8 @@ def arduino_cli_path() -> str | None:
 
 
 def core_installed(cli: str, fqbn: str, timeout: float = 20.0) -> bool | None:
-    """Whether the core for *fqbn* (e.g. ``arduino:esp32``) is installed.
-
-    Best-effort: ``None`` when it can't be determined (arduino-cli missing/erroring)
-    so callers don't block a flash on an inconclusive check."""
+    """Whether *fqbn*'s core is installed; None when arduino-cli cannot tell, so
+    an inconclusive check never blocks a flash."""
     core_id = ":".join(fqbn.split(":")[:2])  # arduino:esp32:nano_nora -> arduino:esp32
     try:
         proc = subprocess.run(
@@ -337,11 +272,6 @@ def preflight(spec: FirmwareSpec, cli: str | None) -> tuple[bool, str]:
     return True, "ok"
 
 
-# ---------------------------------------------------------------------------
-#  Flash
-# ---------------------------------------------------------------------------
-
-
 def _render_build_header(spec: FirmwareSpec, build: str) -> str:
     return (
         "// Auto-generated by octacam firmware provisioning — do not edit.\n"
@@ -355,14 +285,11 @@ def _render_build_header(spec: FirmwareSpec, build: str) -> str:
 def _run_streaming(
     cmd: list[str], timeout: float, on_line: Callable[[str], None] | None
 ) -> tuple[int, str]:
-    """Run *cmd*, streaming each output line to *on_line*; ``(returncode, log)``.
-
-    stderr is merged into stdout so the log reads in order. On timeout the process
-    is killed and the timeout is noted in the log (returncode is then nonzero)."""
+    """Run *cmd*, streaming each line of its output (stderr merged) to
+    *on_line*: ``(returncode, log)``. A timeout kills it and is noted in the log."""
     lines: list[str] = []
-    # Run arduino-cli in its own process group so a timeout can kill the whole
-    # tree — arduino-cli forks the compiler and the uploader (dfu-util/esptool),
-    # and just killing the parent would leave a child holding the serial port.
+    # A process group of its own, so a timeout also kills the compiler and the
+    # uploader arduino-cli forked; a surviving uploader holds the serial port.
     posix = os.name == "posix"
     try:
         proc = subprocess.Popen(
@@ -421,13 +348,9 @@ def flash(
     timeout: float = _DEFAULT_FLASH_TIMEOUT_S,
     on_line: Callable[[str], None] | None = None,
 ) -> FlashResult:
-    """Compile *spec*'s sketch with *needed_build* baked in and upload to *port*.
-
-    Copies the sketch's source files to a throwaway dir, writes the build header
-    with the fingerprint, then runs ``arduino-cli compile --upload``. The repo
-    tree is never touched. **The caller must not hold the serial port open** —
-    arduino-cli resets the board (1200-baud touch / DFU) to upload. Never raises;
-    returns a :class:`FlashResult`."""
+    """Build a temp copy of *spec*'s sketch with *needed_build* baked in and
+    upload it to *port*. Never raises. The caller must not hold the port open:
+    arduino-cli resets the board to upload."""
     cli = cli or arduino_cli_path()
     ok, msg = preflight(spec, cli)
     if not ok:
@@ -444,7 +367,6 @@ def flash(
         for p in spec.sketch_dir.iterdir():
             if p.is_file() and p.suffix in SOURCE_EXTS:
                 shutil.copy2(p, build_sketch / p.name)
-        # Overwrite the copied placeholder header with the real fingerprint.
         (build_sketch / spec.build_header).write_text(
             _render_build_header(spec, needed_build)
         )
@@ -477,10 +399,8 @@ def flash(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-# A wire protocol version / firmware name is compatible enough to *use* (arm/command)
-# in these states — the exact source may have drifted (OUTDATED) or be unreadable
-# (UNIDENTIFIED, e.g. a slow link or a board with no identify command), but the host
-# can still talk to it. WRONG_VERSION / WRONG_BOARD are refused.
+# Boards still driven: a drifted source (OUTDATED) or an unread banner
+# (UNIDENTIFIED: a slow link, an old firmware) speaks the same protocol.
 _ARMABLE = frozenset({FirmwareState.CURRENT, FirmwareState.OUTDATED, FirmwareState.UNIDENTIFIED})
 
 
@@ -489,28 +409,14 @@ def arm_compatible(check: FirmwareCheck | None) -> bool:
     return check is None or check.state in _ARMABLE
 
 
-# ---------------------------------------------------------------------------
-#  FirmwareProvisioner — shared detect + flash lifecycle for serial plugins
-# ---------------------------------------------------------------------------
-
-
 class FirmwareProvisioner:
-    """Owns a serial plugin's firmware detection + flash lifecycle.
+    """A serial plugin's firmware check and flash, around the plugin's own link.
 
-    A plugin composes one of these and hands it the plugin-specific bits (each
-    plugin owns its own serial link and (re)open logic) as callbacks:
-
-    * ``resolve_device() -> (device|None, reason)`` — the concrete port to flash.
-    * ``reopen() -> str|None`` — reopen the link and re-read the identity (usually
-      the plugin's ``_open``). It MUST call :meth:`classify` with the new banner.
-    * ``close_link()`` — release the serial port (arduino-cli resets the board).
-    * ``wait_for_device(device, timeout)`` — wait for the port after the reset.
-    * ``is_busy() -> (bool, why)`` — refuse to flash while the board is in use.
-
-    The provisioner owns a single re-entrant ``port_lock``. :meth:`flash` holds it
-    across the whole close→upload→reopen sequence, and the plugin's ``reopen`` /
-    reconnect paths must take the SAME lock, so nothing can seize the port mid-
-    upload. ``classify`` records the latest :class:`FirmwareCheck`.
+    ``reopen`` must reopen the link and :meth:`classify` the new banner;
+    ``is_busy`` refuses a flash while the board is in use. :meth:`flash` holds
+    the re-entrant ``port_lock`` across close -> upload -> reopen, and the
+    plugin's own open and reconnect take it too, so nothing seizes the port
+    mid-upload.
     """
 
     def __init__(
@@ -559,7 +465,7 @@ class FirmwareProvisioner:
         self, *, plugin_name: str, device: str, firmware: str | None,
         firmware_ok: bool, extra: dict | None = None,
     ) -> dict:
-        """The firmware picture for the CLI and GUI (see FirmwareCheck.to_dict)."""
+        """The firmware picture for ``octacam flash`` and the GUI."""
         out: dict = {
             "plugin": plugin_name,
             "device": device,
@@ -582,13 +488,10 @@ class FirmwareProvisioner:
         return out
 
     def flash(self, *, on_line: Callable[[str], None] | None = None) -> FlashResult:
-        """Compile + upload the sketch, then reopen + re-verify. Never raises.
+        """Upload the sketch, then reopen and re-verify. Never raises.
 
-        Refuses when the board is busy or the source is missing. Holds ``port_lock``
-        across the whole sequence so a concurrent reopen/reconnect can't grab the
-        port mid-upload. On a successful upload whose reopen fails, the stale
-        classification is cleared (so the board isn't wrongly shown as still out of
-        date) and the message says the upload landed but couldn't be confirmed."""
+        Refused while busy or without the source. An upload whose reopen fails
+        clears the stale check, so the board does not still read as outdated."""
         if self._is_busy is not None:
             busy, why = self._is_busy()
             if busy:
@@ -610,9 +513,7 @@ class FirmwareProvisioner:
                            cli=arduino_cli_path(), on_line=on_line)
             log.log(logging.INFO if result.ok else logging.ERROR,
                     "firmware: %s", result.message)
-            # The board reboots after an upload; wait for the port, then reopen and
-            # re-read the banner (reopen() calls classify()).
-            try:
+            try:  # the board reboots after an upload
                 self._wait_for_device(device, 8.0)
             except Exception:
                 log.debug("firmware: wait_for_device raised", exc_info=True)
@@ -621,8 +522,6 @@ class FirmwareProvisioner:
                 log.warning("firmware: could not reopen %s after flashing: %s",
                             device, reopen_err)
                 if result.ok:
-                    # Upload landed but we can't confirm the new banner. Drop the
-                    # stale check so needs_flash doesn't falsely stay True.
                     self.check = None
                     result = FlashResult(
                         True,
