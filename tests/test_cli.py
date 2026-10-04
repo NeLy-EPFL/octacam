@@ -353,6 +353,59 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     assert "system.close" not in _FACADE_CALLS  # no bare system teardown race
 
 
+def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
+    tmp_path, monkeypatch
+):
+    # `octacam process` pauses while the marker is live: it must cover the take
+    # and controller.close(), which finalizes it and releases the cameras.
+    import octacam.cli as cli_mod
+    from octacam import session_cache
+    from octacam.controller import RecordingSettings
+
+    cam = SimpleNamespace(serial_number="s1", name="cam1", frames_recorded=1)
+    config = SimpleNamespace(
+        cameras=[cam], backend="fake", record=object(), transcode=None, transfer=None
+    )
+    monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
+    monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
+    settings = RecordingSettings(save_dir=str(tmp_path / "take"), save_method="raw")
+    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
+    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "octacam.plugins.build_plugins",
+        lambda *a, **k: SimpleNamespace(
+            plugins=[],
+            setup_all=lambda: None,
+            teardown_all=lambda: None,
+            default_start_params=lambda *_a: {},
+        ),
+    )
+    marker_live = {}
+
+    class FakeController:
+        recording_active = False
+
+        def __init__(self, *a, **k):
+            pass
+
+        def start_recording(self, *a, **k):
+            marker_live["start"] = session_cache.capture_active()
+            return SimpleNamespace(ok=True, message="")
+
+        def join(self):
+            pass
+
+        def close(self):
+            marker_live["close"] = session_cache.capture_active()
+
+    monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
+
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert marker_live == {"start": True, "close": True}
+    assert not session_cache.capture_active()
+
+
 def test_browser_skip_reason(monkeypatch):
     for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)

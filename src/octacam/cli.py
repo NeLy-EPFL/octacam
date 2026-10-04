@@ -2663,47 +2663,44 @@ def record(
     except BaseException:
         system.close()
         raise
-    capture_stack = contextlib.ExitStack()
-    try:
-        # Hand a controller reference to plugins that read live device state (e.g.
-        # triggerbox's auto strobe duty reads each camera's ExposureTime).
-        # Duck-typed so core stays decoupled from concrete plugin classes;
-        # mirrors create_app.
-        for plugin in plugins.plugins:
-            if hasattr(plugin, "set_controller"):
-                plugin.set_controller(controller)
-        # While this recording owns the cameras, publish a capture-active marker
-        # so a detached `octacam process` on this machine pauses until we are done.
-        capture_stack.enter_context(session_cache.mark_capture_active("recording"))
-        log.info(
-            "Recording %d camera(s) at %g fps for %g s to %s",
-            len(system),
-            settings.fps,
-            settings.duration_s,
-            settings.save_dir,
-        )
-        # Headless record has no GUI to POST plugin_params, so build each enabled
-        # plugin's start slice from the recording's fps/duration (e.g. triggerbox
-        # arms its trigger board — without this the external-trigger cameras wait
-        # forever for a trigger that never fires). Empty -> None (no-op dispatch).
-        plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
-        result = controller.start_recording(
-            confirm_overwrite=True, plugin_params=plugin_params or None
-        )
-        if not result.ok:
-            sys.exit(f"Failed to start recording: {result.message}")
-        _drive_record_progress(controller, settings.duration_s)
-        controller.join()
-    finally:
-        # controller.close() sets abort, joins the daemon recording monitor (so
-        # its finishing block writes recording_summary.json/timestamps.npz into the
-        # recording's octacam_recording subfolder, and the session-cache note),
-        # then closes the camera system exactly once — mirror of the gui shutdown
-        # above. Calling system.close() directly would race the
-        # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
-        controller.close()
-        plugins.teardown_all()
-        capture_stack.close()
+    # Held until the cameras are closed: `octacam process` pauses meanwhile.
+    with session_cache.mark_capture_active("recording"):
+        try:
+            # Hand a controller reference to plugins that read live device state (e.g.
+            # triggerbox's auto strobe duty reads each camera's ExposureTime).
+            # Duck-typed so core stays decoupled from concrete plugin classes;
+            # mirrors create_app.
+            for plugin in plugins.plugins:
+                if hasattr(plugin, "set_controller"):
+                    plugin.set_controller(controller)
+            log.info(
+                "Recording %d camera(s) at %g fps for %g s to %s",
+                len(system),
+                settings.fps,
+                settings.duration_s,
+                settings.save_dir,
+            )
+            # Headless record has no GUI to POST plugin_params, so build each enabled
+            # plugin's start slice from the recording's fps/duration (e.g. triggerbox
+            # arms its trigger board — without this the external-trigger cameras wait
+            # forever for a trigger that never fires). Empty -> None (no-op dispatch).
+            plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
+            result = controller.start_recording(
+                confirm_overwrite=True, plugin_params=plugin_params or None
+            )
+            if not result.ok:
+                sys.exit(f"Failed to start recording: {result.message}")
+            _drive_record_progress(controller, settings.duration_s)
+            controller.join()
+        finally:
+            # controller.close() sets abort, joins the daemon recording monitor (so
+            # its finishing block writes recording_summary.json/timestamps.npz into the
+            # recording's octacam_recording subfolder, and the session-cache note),
+            # then closes the camera system exactly once — mirror of the gui shutdown
+            # above. Calling system.close() directly would race the
+            # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
+            controller.close()
+            plugins.teardown_all()
 
     # stdout lists just the videos (scriptable); they sit in the recording folder
     # itself, while its summary, timestamps and config snapshot are in the
