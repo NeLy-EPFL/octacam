@@ -1593,9 +1593,13 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
             report.add("ok", "no other octacam instance holds this rig")
     if not _port_available("127.0.0.1", 8765):
         report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
-    skip = _browser_skip_reason(no_browser=False)
-    if skip:
-        report.add("info", f"the GUI won't auto-open a browser ({skip})")
+    if _in_ssh_session():
+        report.add(
+            "info",
+            "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel",
+        )
+    elif _browser_skip_reason(no_browser=False):  # past SSH, only no display is left
+        report.add("info", "no local display — the GUI won't auto-open a browser")
 
 
 def _render_doctor(report: _Report) -> None:
