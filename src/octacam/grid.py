@@ -77,12 +77,6 @@ def _fps_value(fps_str: str) -> float:
     return float(num) / den_f if den_f else 0.0
 
 
-def _find_mp4(folder: Path, camera_name: str) -> Path | None:
-    """Return ``folder / <camera_name>.mp4`` if it exists, else None."""
-    p = folder / f"{camera_name}.mp4"
-    return p if p.exists() else None
-
-
 def _probe_video(path: Path, ffprobe: str) -> tuple[int, int, str, float]:
     """Return (width, height, fps_fraction, duration_s) via ffprobe.
 
@@ -118,6 +112,108 @@ def _probe_video(path: Path, ffprobe: str) -> tuple[int, int, str, float]:
     fps = s["r_frame_rate"]  # e.g. "100/1"
     dur = float(data["format"]["duration"])
     return w, h, fps, dur
+
+
+_PROBE_ERRORS = (
+    subprocess.CalledProcessError,
+    subprocess.TimeoutExpired,
+    OSError,
+    KeyError,
+    IndexError,
+    ValueError,
+)
+
+
+def _probe_cells(
+    folder: Path, layout: list[list[str]], ffprobe: str
+) -> tuple[list[Path | None], tuple[int, int, str, float] | None]:
+    """Each cell's mp4 in row-major (xstack input) order, None for a black cell,
+    and the first probed file's (width, height, fps, duration).
+
+    A missing or unprobeable file becomes a black cell, so one bad camera never
+    costs the whole grid.
+    """
+    cells: list[Path | None] = []
+    ref: tuple[int, int, str, float] | None = None
+    for name in (name for row in layout for name in row):
+        path = folder / f"{name}.mp4"
+        if not name or not path.exists():
+            cells.append(None)
+            continue
+        try:
+            probe = _probe_video(path, ffprobe)
+        except _PROBE_ERRORS as e:
+            log.warning("Could not probe %s: %s — treating as a black cell", path, e)
+            cells.append(None)
+            continue
+        cells.append(path)
+        ref = ref or probe
+    return cells, ref
+
+
+def _filtergraph(rows: int, cols: int, width: int, height: int, pix_fmt: str) -> str:
+    """Letterbox every input into a width×height cell, then xstack the cells.
+
+    Each cell is converted to *pix_fmt* before xstack: the camera videos are
+    full range and the lavfi black cells limited range, and xstack's implicit
+    conversion of mixed inputs mis-tags the range (washed out in VLC, a
+    stalling stream in QuickTime). For limited-range YUV the scale keeps 0-255
+    luma (``out_range=full``, tagged by writer._color_range_args), which also
+    keeps the letterbox bars at true black.
+    """
+    scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
+    n_cells = rows * cols
+    parts = [
+        f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease:"
+        f"force_divisible_by=2{scale_range},format={pix_fmt},"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2[c{i}]"
+        for i in range(n_cells)
+    ]
+    inputs = "".join(f"[c{i}]" for i in range(n_cells))
+    positions = "|".join(
+        f"{c * width}_{r * height}" for r in range(rows) for c in range(cols)
+    )
+    parts.append(f"{inputs}xstack=inputs={n_cells}:layout={positions}:shortest=1[grid]")
+    return ";".join(parts)
+
+
+def _grid_command(
+    cells: list[Path | None],
+    rows: int,
+    cols: int,
+    width: int,
+    height: int,
+    fps: str,
+    ffmpeg_params: str,
+    pix_fmt: str,
+) -> list[str]:
+    """The ffmpeg argv composing *cells*, all but the output path."""
+    cmd = [find_ffmpeg(), "-y"]
+    for path in cells:
+        if path is None:
+            # Outlasts any recording: xstack's shortest=1 ends at the first real video.
+            source = f"color=black:size={width}x{height}:duration=86400:rate={fps}"
+            cmd += ["-f", "lavfi", "-i", source]
+        else:
+            cmd += ["-i", str(path)]
+    # The grid owns its pixel format and filters; ffmpeg_params picks the encoder.
+    encoder, _ = _split_opts(
+        shlex.split(ffmpeg_params or DEFAULT_TRANSCODE_FFMPEG_PARAMS),
+        ("-pix_fmt", "-pixel_format", "-vf", "-filter:v"),
+    )
+    return [
+        *cmd,
+        "-filter_complex",
+        _filtergraph(rows, cols, width, height, pix_fmt),
+        "-map",
+        "[grid]",
+        "-r",
+        str(max(1, round(_fps_value(fps)))),  # QuickTime mishandles a fractional rate
+        *encoder,
+        "-pix_fmt",
+        pix_fmt,
+        *_color_range_args(pix_fmt),
+    ]
 
 
 def build_grid_video(
@@ -158,170 +254,42 @@ def build_grid_video(
         return None
     if output is None:
         output = folder / GRID_FILENAME
-
-    rows = len(layout)
-    cols = len(layout[0])
-    n_cells = rows * cols
-
-    # Resolve ffprobe once, before touching any file. It is a separate binary
-    # from ffmpeg and is NOT bundled by imageio-ffmpeg, so a pip install with no
-    # system ffmpeg has an ffmpeg but no ffprobe — which used to surface as a raw
-    # FileNotFoundError escaping every per-cell guard below and aborting the whole
-    # `octacam process` run *after* the transcodes, before the transfer. Skip the
-    # grid with the real reason instead (the transcodes and the transfer still
-    # run), rather than probing every cell only to report the misleading
-    # "no probeable mp4 files found".
+    # imageio-ffmpeg bundles no ffprobe: skip the grid with the real reason
+    # rather than abort `octacam process` before its transfer.
     try:
         ffprobe = find_ffprobe()
     except RuntimeError as e:
         log.error("Cannot build the grid: %s", e)
         return None
-
-    # Resolve each grid slot to a source mp4 (None → black/missing).
-    # Row-major order (left→right, top→bottom) matches xstack input order.
-    # A present-but-unprobeable file is treated as missing (a black lavfi cell)
-    # rather than aborting the whole grid, and the reference geometry/fps is
-    # taken from the first slot that probes successfully — so one bad camera no
-    # longer suppresses the grid for the whole rig.
-    slot_files: list[Path | None] = []
-    ref_probe: tuple[int, int, str, float] | None = None
-    for row in layout:
-        for cell in row:
-            if not cell:  # empty string = explicit black fill
-                slot_files.append(None)
-                continue
-            p = _find_mp4(folder, cell)
-            if p is None:
-                slot_files.append(None)
-                continue
-            try:
-                probe = _probe_video(p, ffprobe)
-            except (
-                subprocess.CalledProcessError,
-                subprocess.TimeoutExpired,
-                OSError,
-                KeyError,
-                IndexError,
-                ValueError,
-            ) as e:
-                log.warning("Could not probe %s: %s — treating as a black cell", p, e)
-                slot_files.append(None)
-                continue
-            slot_files.append(p)
-            if ref_probe is None:
-                ref_probe = probe
-
-    if ref_probe is None:
+    cells, ref = _probe_cells(folder, layout, ffprobe)
+    if ref is None:
         log.warning(
             "No probeable mp4 files matching the grid layout found in %s — skipping grid",
             folder,
         )
         return None
-
-    W, H, fps, dur = ref_probe
-    # Round the cell dimensions up to even. Cells are padded to the exact
-    # reference W×H (below) and xstack composes a cols*W × rows*H frame, but a
-    # chroma-subsampled output (yuv420p) requires even width/height. An
-    # odd-dimension source (sensors with a 1-px size increment) would otherwise
-    # make ffmpeg refuse the grid with "not divisible by 2".
-    W += W & 1
-    H += H & 1
-
-    total_frames = round(dur * _fps_value(fps))
-
-    # Build the ffmpeg command.
-    # One -i per grid cell (real file or lavfi color source), in row-major order.
-    # The black lavfi source uses a long duration; xstack's shortest=1 ends the
-    # output when the first real video finishes.
-    cmd: list[str] = [find_ffmpeg(), "-y"]
-    for p in slot_files:
-        if p is not None:
-            cmd += ["-i", str(p)]
-        else:
-            cmd += [
-                "-f",
-                "lavfi",
-                "-i",
-                f"color=black:size={W}x{H}:duration=86400:rate={fps}",
-            ]
-
-    # filter_complex: scale each input to fit the cell (preserving its aspect
-    # ratio, padding the remainder with black), then normalise to the output
-    # pixel format *before* xstack.  Camera files are encoded as gray
-    # (full-range, 0-255 luma) while lavfi black cells are yuv420p
-    # (limited-range by default).  Without an explicit format= step xstack
-    # receives mixed pixel formats and ffmpeg's implicit conversion mis-tags the
-    # colour range, producing a washed-out image in VLC and a stalling bitstream
-    # in QuickTime / Apple decoders.
-    #
-    # For limited-range YUV outputs we also pin the scale to full range
-    # (out_range=full) so the gray→yuv conversion keeps the 0-255 luma instead
-    # of squeezing it into 16-235; the matching -color_range pc on the output
-    # (below) tags the stream so players expand it back.  See
-    # writer._color_range_args.
-    #
-    # Cells whose native resolution / aspect ratio differs from the reference
-    # W×H are letterboxed, not stretched: force_original_aspect_ratio=decrease
-    # fits the frame inside the cell, force_divisible_by=2 keeps the fitted
-    # dimensions even (required by chroma-subsampled outputs like yuv420p), and
-    # pad centres it with black bars.  The pad respects the full-range tagging,
-    # so the bars come out true black (luma 0) rather than washed-out 16.
-    scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
-    filter_parts: list[str] = []
-    labels: list[str] = []
-    for i in range(n_cells):
-        lbl = f"c{i}"
-        labels.append(lbl)
-        filter_parts.append(
-            f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=decrease:"
-            f"force_divisible_by=2{scale_range},format={pix_fmt},"
-            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2[{lbl}]"
-        )
-
-    xstack_inputs = "".join(f"[{lbl}]" for lbl in labels)
-    xstack_layout = "|".join(
-        f"{c * W}_{r * H}" for r in range(rows) for c in range(cols)
+    width, height, fps, duration = ref
+    # yuv420p needs even dimensions, and some sensors size in 1-px steps.
+    width += width & 1
+    height += height & 1
+    cmd = _grid_command(
+        cells, len(layout), len(layout[0]), width, height, fps, ffmpeg_params, pix_fmt
     )
-    filter_parts.append(
-        f"{xstack_inputs}xstack=inputs={n_cells}:layout={xstack_layout}:shortest=1[grid]"
-    )
-
-    # Encoder args from the config ffmpeg_params, minus the pix_fmt/filter knobs
-    # the grid owns itself (it always outputs pix_fmt via its own filtergraph).
-    encoder, _ = _split_opts(
-        shlex.split(ffmpeg_params or DEFAULT_TRANSCODE_FFMPEG_PARAMS),
-        ("-pix_fmt", "-pixel_format", "-vf", "-filter:v"),
-    )
-    fps_int = max(1, round(_fps_value(fps)))
-    cmd += [
-        "-filter_complex",
-        ";".join(filter_parts),
-        "-map",
-        "[grid]",
-        "-r",
-        str(fps_int),  # pin integer fps — fractional fps confuses QuickTime
-        *encoder,
-        "-pix_fmt",
-        pix_fmt,
-        *_color_range_args(pix_fmt),
-        str(output),
-    ]
-
     if dry_run:
-        log.info("[dry-run] grid: %s", " ".join(cmd))
+        log.info("[dry-run] grid: %s", " ".join([*cmd, str(output)]))
         return output
 
     log.info("Generating grid video → %s", output)
     try:
-        # Encode into a sibling temp promoted onto `output` only once whole, so
-        # an interrupted or failed grid never leaves a partial grid.mp4 at the
-        # final name — which ``octacam process``'s skip-if-exists would otherwise
-        # mistake for a finished grid. Mirrors writer._atomic_output for transcodes.
+        # A partial grid.mp4 must never pass for a finished one.
         with _atomic_output(output) as tmp:
-            cmd[-1] = str(tmp)  # last token is the output path appended above
-            _run_ffmpeg(cmd, folder, on_progress=on_progress, total_frames=total_frames)
+            _run_ffmpeg(
+                [*cmd, str(tmp)],
+                folder,
+                on_progress=on_progress,
+                total_frames=round(duration * _fps_value(fps)),
+            )
     except RuntimeError as e:
         log.error("Grid generation failed: %s", e)
         return None
-
     return output
