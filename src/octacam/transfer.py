@@ -348,12 +348,12 @@ def _target(
 def transfer_folder(
     folder: Path,
     dest: Path,
-    files_only: list[Path] | None = None,
+    files_only: list[Path],
     dry_run: bool = False,
     verify: bool = True,
     on_progress: TransferCallback | None = None,
 ) -> TransferResult:
-    """Copy mp4s plus the recording's metadata from *folder* to *dest*.
+    """Copy *files_only* plus the recording's metadata from *folder* to *dest*.
 
     The metadata (see :func:`_metadata_files`) is recording_summary.json,
     timestamps.npz, the octacam_config.toml snapshot and the camera parameter
@@ -368,8 +368,8 @@ def transfer_folder(
         The exact destination directory to copy into (the caller resolves it,
         e.g. ``transfer.directory / relative_directory``).
     files_only:
-        Explicit list of files to copy; overrides the default (all *.mp4 in
-        *folder*).  The metadata files are always appended.
+        The files to copy (the transcoded videos).  The metadata files are
+        always appended.
     dry_run:
         Log intended operations without touching the filesystem.  A file in
         *files_only* that doesn't exist yet (an output an earlier dry-run step
@@ -385,11 +385,7 @@ def transfer_folder(
     or nothing to copy).
     """
     # --- Decide which files to copy -----------------------------------------
-    if files_only is not None:
-        candidates = list(files_only)
-    else:
-        candidates = sorted(folder.glob("*.mp4"))
-
+    candidates = list(files_only)
     metadata = _metadata_files(folder)
     candidates += [f for f in metadata if f not in candidates]
     by_content = set(metadata)

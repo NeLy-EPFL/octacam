@@ -42,6 +42,11 @@ def _make_recording(
 SUMMARY_NESTED = f"{RECORDING_INFO_DIRNAME}/{RECORDING_SUMMARY_FILENAME}"
 
 
+def _transfer(src: Path, dest: Path, **kwargs) -> TransferResult:
+    """transfer_folder over every video in *src*, as the CLI passes its outputs."""
+    return transfer_folder(src, dest, sorted(src.glob("*.mp4")), **kwargs)
+
+
 def _no_temps(dest: Path) -> bool:
     return not list(dest.glob(TEMP_GLOB))
 
@@ -56,7 +61,7 @@ def test_copy_happy_path_no_temp_left(tmp_path):
     )
     dest_root = tmp_path / "dest"
     dest = dest_root / "rec"
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert result  # truthy on success
     assert set(result.copied) == {
@@ -76,7 +81,7 @@ def test_copy_includes_timestamps_when_present(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
     (src / TIMESTAMPS_FILENAME).write_bytes(b"\x00npz-bytes")
     dest = tmp_path / "dest" / "rec"
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert TIMESTAMPS_FILENAME in set(result.copied)
     assert (dest / TIMESTAMPS_FILENAME).read_bytes() == b"\x00npz-bytes"
@@ -86,7 +91,7 @@ def test_copy_without_timestamps_is_fine(tmp_path):
     # No timestamps.npz (the default) → nothing extra, no error.
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
     dest = tmp_path / "dest" / "rec"
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert TIMESTAMPS_FILENAME not in set(result.copied)
     assert not (dest / TIMESTAMPS_FILENAME).exists()
@@ -105,7 +110,7 @@ def test_copy_carries_the_config_snapshot_and_camera_files(tmp_path):
     (src / "._17475185.txt").write_text("fork")
     dest = tmp_path / "dest" / "rec"
 
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert result
     assert sorted(p.name for p in dest.iterdir()) == sorted(
@@ -128,12 +133,12 @@ def test_metadata_changed_at_the_same_size_is_recopied(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 100})
     (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 80.0\n")
     dest = tmp_path / "dest" / "rec"
-    transfer_folder(src, dest=dest)
+    _transfer(src, dest=dest)
     (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 90.0\n")
     (src / "camera_LF.mp4").write_bytes(b"B" * 100)
 
-    planned = transfer_folder(src, dest=dest, dry_run=True)
-    result = transfer_folder(src, dest=dest)
+    planned = _transfer(src, dest=dest, dry_run=True)
+    result = _transfer(src, dest=dest)
 
     assert planned.copied == [CONFIG_SNAPSHOT_FILENAME]
     assert result.copied == [CONFIG_SNAPSHOT_FILENAME]
@@ -155,7 +160,7 @@ def test_nested_metadata_lands_in_the_destinations_subfolder(tmp_path):
     (info / "._17475185.txt").write_text("fork")  # hidden: not metadata
     dest = tmp_path / "dest" / "rec"
 
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert result
     meta = [
@@ -186,9 +191,9 @@ def test_nested_metadata_skips_and_recopies_by_content_on_a_rerun(tmp_path):
     snapshot = src / RECORDING_INFO_DIRNAME / CONFIG_SNAPSHOT_FILENAME
     snapshot.write_text("[record]\nfps = 80.0\n")
     dest = tmp_path / "dest" / "rec"
-    transfer_folder(src, dest=dest)
+    _transfer(src, dest=dest)
 
-    again = transfer_folder(src, dest=dest, dry_run=True)
+    again = _transfer(src, dest=dest, dry_run=True)
     assert set(again.skipped) == {
         "camera_LF.mp4",
         SUMMARY_NESTED,
@@ -197,8 +202,8 @@ def test_nested_metadata_skips_and_recopies_by_content_on_a_rerun(tmp_path):
     assert not again.copied
 
     snapshot.write_text("[record]\nfps = 90.0\n")  # same size, new content
-    planned = transfer_folder(src, dest=dest, dry_run=True)
-    result = transfer_folder(src, dest=dest)
+    planned = _transfer(src, dest=dest, dry_run=True)
+    result = _transfer(src, dest=dest)
     edited = f"{RECORDING_INFO_DIRNAME}/{CONFIG_SNAPSHOT_FILENAME}"
     assert planned.copied == [edited] and result.copied == [edited]
     assert (dest / edited).read_text() == "[record]\nfps = 90.0\n"
@@ -207,7 +212,7 @@ def test_nested_metadata_skips_and_recopies_by_content_on_a_rerun(tmp_path):
 def test_nested_dry_run_plans_the_subfolder_and_touches_nothing(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 10}, nested=True)
     dest_root = tmp_path / "dest"
-    result = transfer_folder(src, dest=dest_root / "rec", dry_run=True)
+    result = _transfer(src, dest=dest_root / "rec", dry_run=True)
     assert result.copied == ["camera_LF.mp4", SUMMARY_NESTED]
     assert not dest_root.exists()
 
@@ -218,7 +223,7 @@ def test_flat_metadata_stays_flat_at_the_destination(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 10})
     (src / CONFIG_SNAPSHOT_FILENAME).write_text("[gui]\n")
     dest = tmp_path / "dest" / "rec"
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
     assert result.copied == [
         "camera_LF.mp4",
         RECORDING_SUMMARY_FILENAME,
@@ -239,7 +244,7 @@ def test_a_newer_nested_take_carries_its_own_metadata_only(tmp_path):
     (src / RECORDING_INFO_DIRNAME / CONFIG_SNAPSHOT_FILENAME).write_text("# newer\n")
     dest = tmp_path / "dest" / "rec"
 
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
 
     assert result.copied == [
         "camera_LF.mp4",
@@ -265,7 +270,7 @@ def test_an_unwritable_nested_destination_fails_the_metadata(tmp_path, monkeypat
         return real_mkdir(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
     assert not result
     assert result.copied == ["camera_LF.mp4"]
     assert result.failed == [SUMMARY_NESTED]
@@ -278,10 +283,10 @@ def test_skip_on_rerun_size(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"data" * 500})
     dest_root = tmp_path / "dest"
     dest = dest_root / "rec"
-    transfer_folder(src, dest=dest)
+    _transfer(src, dest=dest)
     mtimes = {p.name: p.stat().st_mtime_ns for p in dest.iterdir()}
 
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
     assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
     assert not result.copied
     # Skipped files are not rewritten.
@@ -299,7 +304,7 @@ def test_verify_mismatch_fails_and_cleans_up(tmp_path, monkeypatch):
     monkeypatch.setattr(transfer_mod, "_file_digest", lambda *a, **k: "deadbeef")
 
     dest = dest_root / "rec"
-    result = transfer_folder(src, dest=dest, verify=True)
+    result = _transfer(src, dest=dest, verify=True)
     assert "camera_LF.mp4" in result.failed
     assert not (dest / "camera_LF.mp4").exists()  # never promoted
     assert _no_temps(dest)  # temp cleaned
@@ -315,13 +320,13 @@ def test_atomic_interrupt_then_resume(tmp_path, monkeypatch):
         raise OSError("simulated interruption at rename")
 
     monkeypatch.setattr(transfer_mod.os, "replace", boom)
-    result = transfer_folder(src, dest=dest)
+    result = _transfer(src, dest=dest)
     assert result.failed  # the rename never completed
     assert not (dest / "camera_LF.mp4").exists()  # no complete-looking partial
     assert _no_temps(dest)  # temp removed on the exception path
 
     monkeypatch.undo()  # "next run" with a working filesystem
-    result2 = transfer_folder(src, dest=dest)
+    result2 = _transfer(src, dest=dest)
     assert result2
     assert (dest / "camera_LF.mp4").read_bytes() == b"x" * 5000
 
@@ -337,7 +342,7 @@ def test_copystat_failure_is_best_effort(tmp_path, monkeypatch):
         raise OSError("utime rejected by the share")
 
     monkeypatch.setattr(transfer_mod.shutil, "copystat", boom)
-    result = transfer_folder(src, dest=tmp_path / "dest" / "rec")
+    result = _transfer(src, dest=tmp_path / "dest" / "rec")
     assert result and not result.failed
     assert (tmp_path / "dest" / "rec" / "camera_LF.mp4").read_bytes() == b"x" * 200
 
@@ -356,7 +361,7 @@ def test_sweep_only_reaps_old_temps(tmp_path):
     old_t = _time.time() - transfer_mod._STALE_TEMP_AGE_S - 100
     _os.utime(old, (old_t, old_t))
 
-    transfer_folder(src, dest=dest)
+    _transfer(src, dest=dest)
     assert fresh.exists()  # a live/concurrent temp is never deleted
     assert not old.exists()  # a genuine orphan is reaped
 
@@ -378,7 +383,7 @@ def test_mixed_roots_skip_non_recording(tmp_path):
 def test_no_verify_copies(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"hello" * 100})
     dest_root = tmp_path / "dest"
-    result = transfer_folder(src, dest=dest_root / "rec", verify=False)
+    result = _transfer(src, dest=dest_root / "rec", verify=False)
     assert result
     assert (dest_root / "rec" / "camera_LF.mp4").read_bytes() == b"hello" * 100
 
@@ -386,7 +391,7 @@ def test_no_verify_copies(tmp_path):
 def test_zero_byte_source(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b""})
     dest_root = tmp_path / "dest"
-    result = transfer_folder(src, dest=dest_root / "rec")
+    result = _transfer(src, dest=dest_root / "rec")
     target = dest_root / "rec" / "camera_LF.mp4"
     assert result
     assert target.exists() and target.stat().st_size == 0
@@ -395,7 +400,7 @@ def test_zero_byte_source(tmp_path):
 def test_dry_run_touches_nothing(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 10})
     dest_root = tmp_path / "dest"
-    result = transfer_folder(src, dest=dest_root / "rec", dry_run=True)
+    result = _transfer(src, dest=dest_root / "rec", dry_run=True)
     assert result  # lists intended copies
     assert not dest_root.exists()
 
@@ -405,9 +410,9 @@ def test_dry_run_reports_already_transferred_as_skipped(tmp_path):
     # skipped, not claim it would (re-)copy them.
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"data" * 500})
     dest = tmp_path / "dest" / "rec"
-    transfer_folder(src, dest=dest)  # first, real transfer
+    _transfer(src, dest=dest)  # first, real transfer
 
-    result = transfer_folder(src, dest=dest, dry_run=True)
+    result = _transfer(src, dest=dest, dry_run=True)
     assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
     assert not result.copied
 
@@ -422,7 +427,7 @@ def test_dry_run_plans_a_file_an_earlier_step_has_not_produced(tmp_path):
     (dest / "camera_LF.mp4").write_bytes(b"older")
     planned = src / "camera_LF.mp4"
 
-    result = transfer_folder(src, dest=dest, files_only=[planned], dry_run=True)
+    result = transfer_folder(src, dest, [planned], dry_run=True)
 
     assert result.copied == ["camera_LF.mp4", RECORDING_SUMMARY_FILENAME]
     assert not planned.exists()
@@ -432,7 +437,7 @@ def test_dry_run_plans_a_file_an_earlier_step_has_not_produced(tmp_path):
 def test_nothing_to_copy_is_falsy(tmp_path):
     folder = tmp_path / "empty"
     folder.mkdir()
-    result = transfer_folder(folder, dest=tmp_path / "dest" / "empty")
+    result = _transfer(folder, dest=tmp_path / "dest" / "empty")
     assert isinstance(result, TransferResult)
     assert not result
     assert not result.copied and not result.failed
@@ -441,13 +446,13 @@ def test_nothing_to_copy_is_falsy(tmp_path):
 def test_progress_phases(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"z" * 4096})
     events = []
-    transfer_folder(src, dest=tmp_path / "dest" / "rec", on_progress=events.append)
+    _transfer(src, dest=tmp_path / "dest" / "rec", on_progress=events.append)
     phases = {e.phase for e in events}
     assert "copy" in phases and "verify" in phases
 
     events_off = []
     src2 = _make_recording(tmp_path / "rec2", {"camera_LF.mp4": b"z" * 4096})
-    transfer_folder(
+    _transfer(
         src2,
         dest=tmp_path / "dest2" / "rec2",
         verify=False,
