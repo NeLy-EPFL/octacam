@@ -124,7 +124,7 @@ def test_copy_carries_the_config_snapshot_and_camera_files(tmp_path):
 def test_metadata_changed_at_the_same_size_is_recopied(tmp_path):
     # An edited config is often exactly as long as the copy already there
     # (fps = 80.0 -> 90.0), so metadata is compared by content; a video keeps
-    # the cheap size-only check unless checksum=True.
+    # the cheap size-only check.
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 100})
     (src / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 80.0\n")
     dest = tmp_path / "dest" / "rec"
@@ -287,25 +287,6 @@ def test_skip_on_rerun_size(tmp_path):
     # Skipped files are not rewritten.
     for p in dest.iterdir():
         assert p.stat().st_mtime_ns == mtimes[p.name]
-
-
-def test_checksum_repair(tmp_path):
-    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 1000})
-    dest_root = tmp_path / "dest"
-    dest = dest_root / "rec"
-    dest.mkdir(parents=True)
-    # Same size, different content — size-only can't tell, checksum can.
-    (dest / "camera_LF.mp4").write_bytes(b"B" * 1000)
-    (dest / RECORDING_SUMMARY_FILENAME).write_text("{}")
-
-    r1 = transfer_folder(src, dest=dest, checksum=False)
-    assert "camera_LF.mp4" in r1.skipped
-    assert (dest / "camera_LF.mp4").read_bytes() == b"B" * 1000  # not repaired
-
-    r2 = transfer_folder(src, dest=dest, checksum=True)
-    assert "camera_LF.mp4" in r2.copied
-    assert (dest / "camera_LF.mp4").read_bytes() == b"A" * 1000  # repaired
-    assert _no_temps(dest)
 
 
 # --- integrity / atomicity under failure ------------------------------------

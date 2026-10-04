@@ -22,9 +22,8 @@ Reliability:  each file is streamed to a unique sibling temp in the destination
 directory and only ``os.replace``-d onto its final name once whole and (by
 default) content-verified, mirroring :func:`octacam.writer._atomic_output`.  So
 an interrupted copy never leaves a complete-looking partial at the final name,
-and re-running skips files already present (size match, or full checksum with
-``checksum=True``; the small metadata files always by checksum) — resume is at
-file granularity.
+and re-running skips files already present (videos by size, the small metadata
+files by content) — resume is at file granularity.
 
 Besides the videos, every transfer carries the recording's metadata: the
 summary, the timestamps, and the config snapshot with the camera parameter
@@ -286,21 +285,21 @@ def _copy_one(
         raise
 
 
-def _should_skip(src: Path, final: Path, *, checksum: bool) -> bool:
+def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
     """Whether *final* already matches *src* and can be skipped on a rerun.
 
     Default heuristic is size-only: truncation (the dominant interruption
     failure) changes size, and mtime is unreliable over SMB/CIFS/NFS so it must
-    not gate the decision.  With *checksum*, compare full content digests
-    instead (repair mode — re-copies any final whose bytes differ).
+    not gate the decision.  With *by_content*, compare full content digests
+    too (the small metadata files: an edited config is often the same size).
     """
     if not final.exists():
         return False
     # Size first: a mismatch always means re-copy, and it short-circuits the
-    # (expensive, network-bound) double hash in --checksum mode.
+    # (network-bound) double hash.
     if final.stat().st_size != src.stat().st_size:
         return False
-    if checksum:
+    if by_content:
         return _file_digest(final) == _file_digest(src)
     return True
 
@@ -352,7 +351,6 @@ def transfer_folder(
     files_only: list[Path] | None = None,
     dry_run: bool = False,
     verify: bool = True,
-    checksum: bool = False,
     on_progress: TransferCallback | None = None,
 ) -> TransferResult:
     """Copy mp4s plus the recording's metadata from *folder* to *dest*.
@@ -380,11 +378,6 @@ def transfer_folder(
         Content-verify each freshly-copied file (blake2b of the source vs. the
         written temp) before promoting it to its final name.  Disable for a
         faster size-only check on trusted links.
-    checksum:
-        When deciding whether an already-present file can be skipped, compare
-        full content digests rather than just size (repair mode).  The small
-        metadata files are always compared by content: an edited config or
-        summary is often exactly as long as the copy already there.
     on_progress:
         Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
 
@@ -414,10 +407,9 @@ def transfer_folder(
     # --- Dry run: log intended copies; note files already at the destination -
     if dry_run:
         for f, target, label in plan:
-            exact = checksum or f in by_content
             # A planned output has no bytes to compare yet; a real run would
             # produce it first and then copy it.
-            if f.exists() and _should_skip(f, target, checksum=exact):
+            if f.exists() and _should_skip(f, target, by_content=f in by_content):
                 # Already present (size/checksum match): a real run would skip
                 # it, so the preview must report a skip — not a phantom copy.
                 result.skipped.append(label)
@@ -437,7 +429,7 @@ def transfer_folder(
     n = len(plan)
     for idx, (f, target, label) in enumerate(plan, 1):
         try:
-            if _should_skip(f, target, checksum=checksum or f in by_content):
+            if _should_skip(f, target, by_content=f in by_content):
                 # Present and matching — counted in the run summary rather than
                 # logged per file, so a full re-run doesn't spam one line for
                 # every already-copied output.
