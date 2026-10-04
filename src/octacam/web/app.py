@@ -733,7 +733,9 @@ def _default_shutdown() -> None:
 
 @contextlib.contextmanager
 def _http_errors():
-    """Map a controller error to HTTP: no such camera 404, busy 409, bad value 422."""
+    """Map a controller error to HTTP: no such camera 404, busy 409, bad value 422.
+    A route with a narrower contract maps only its own errors, so an unexpected one
+    stays a logged 500."""
     try:
         yield
     except IndexError as e:
@@ -847,8 +849,12 @@ def create_app(
 
     @app.put("/api/settings")
     def put_settings(patch: SettingsPatch):
-        with _http_errors():
+        try:
             updated = controller.update_settings(**patch.model_dump(exclude_unset=True))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, str(e)) from None
         settings = dataclasses.asdict(updated)
         state.broadcast_threadsafe("settings", settings)
         return settings
@@ -878,10 +884,14 @@ def create_app(
 
     @app.put("/api/cameras/{index}/transform")
     def put_camera_transform(index: int, patch: CameraTransformPatch):
-        with _http_errors():
+        try:
             return controller.set_camera_transform(
                 index, patch.scale_x, patch.scale_y, patch.rotation_deg
             )
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from None
 
     def _require_config_dir() -> Path:
         if not config_dir:
@@ -902,8 +912,10 @@ def create_app(
 
     @app.get("/api/cameras/{index}/features")
     def get_camera_features(index: int):
-        with _http_errors():
+        try:
             return controller.read_camera_features(index)
+        except IndexError:
+            raise HTTPException(404, f"No camera at index {index}") from None
 
     @app.put("/api/cameras/{index}/features")
     def put_camera_feature(index: int, patch: CameraFeaturePatch):
