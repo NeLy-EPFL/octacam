@@ -569,7 +569,8 @@ class _JitterProbe:
 
 
 def _cpu_percent_probe():
-    """Return a (start, read) pair around a psutil CPU sample, or (None, None)."""
+    """This process, primed so its next ``cpu_percent()`` covers the trial; None
+    without psutil."""
     try:
         import psutil
     except ImportError:
