@@ -176,18 +176,6 @@ def nvenc_encoder(ffmpeg_params: str) -> str | None:
     return encoder if encoder and encoder.endswith("_nvenc") else None
 
 
-def _which_all(name: str) -> list[str]:
-    """Every executable ``name`` on $PATH, in PATH order (shutil.which is first-only)."""
-    found: list[str] = []
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        if not directory:
-            continue
-        candidate = os.path.join(directory, name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            found.append(candidate)
-    return found
-
-
 def _ffmpeg_candidates() -> list[str]:
     """Ordered, realpath-deduped ffmpeg executables to probe, most-preferred first.
 
@@ -204,7 +192,10 @@ def _ffmpeg_candidates() -> list[str]:
         cands.append(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as e:  # pragma: no cover - depends on environment
         log.debug("imageio-ffmpeg unavailable: %s", e)
-    cands.extend(_which_all("ffmpeg"))
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        exe = shutil.which("ffmpeg", path=directory) if directory else None
+        if exe:
+            cands.append(exe)
     seen: set[str] = set()
     ordered: list[str] = []
     for exe in cands:
