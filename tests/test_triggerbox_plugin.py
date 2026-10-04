@@ -1147,7 +1147,7 @@ def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
 
 def test_identify_current_build_is_up_to_date():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin._fw_needed_build}")
+    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin._fw.needed_build}")
     assert plugin._firmware_ok
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "current"
@@ -1191,11 +1191,11 @@ def test_identify_unidentified_proceeds_but_flags_flash():
 
 def test_no_source_falls_back_to_banner_compatibility():
     plugin, link = _plugin_with_fake()
-    plugin._fw_spec = None
-    plugin._fw_needed_build = None
+    plugin._fw.spec = None
+    plugin._fw.needed_build = None
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
     assert plugin._firmware_ok  # name+version compatible; no flash offer
-    assert plugin._fw_check is None
+    assert plugin._fw.check is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 1")
     assert plugin._firmware_ok is False
 
@@ -1215,7 +1215,7 @@ def test_flash_firmware_success_updates_state():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # start out of date
     # After the (faked) upload the board reports the current build on re-identify.
-    link.banner = f"TRIGGERBOX 2 {plugin._fw_needed_build}"
+    link.banner = f"TRIGGERBOX 2 {plugin._fw.needed_build}"
     result = plugin.flash_firmware()
     assert result.ok
     assert plugin._firmware_ok
@@ -1233,8 +1233,8 @@ def test_flash_firmware_refused_while_running():
 
 def test_flash_firmware_without_source():
     plugin, link = _plugin_with_fake()
-    plugin._fw_spec = None
-    plugin._fw_needed_build = None
+    plugin._fw.spec = None
+    plugin._fw.needed_build = None
     result = plugin.flash_firmware()
     assert not result.ok
     assert "source" in result.message.lower()
@@ -1259,13 +1259,13 @@ def test_firmware_endpoint():
     assert body["state"] == "outdated"
     assert body["needs_flash"] is True
     assert body["can_flash"] is True
-    assert body["needed_build"] == plugin._fw_needed_build
+    assert body["needed_build"] == plugin._fw.needed_build
 
 
 def test_flash_endpoint():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
-    link.banner = f"TRIGGERBOX 2 {plugin._fw_needed_build}"
+    link.banner = f"TRIGGERBOX 2 {plugin._fw.needed_build}"
     body = _test_client(plugin).post("/api/triggerbox/flash", json={}).json()
     assert body["ok"] is True
     assert body["provisioning"]["needs_flash"] is False

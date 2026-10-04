@@ -854,32 +854,6 @@ class TriggerboxPlugin(Plugin):
 
     # -------------------------------------------------- firmware provisioning glue
 
-    # Thin forwarders so callers/tests can read the provisioner's state on the
-    # plugin (the provisioner is the single source of truth).
-    @property
-    def _fw_spec(self):
-        return self._fw.spec
-
-    @_fw_spec.setter
-    def _fw_spec(self, value):
-        self._fw.spec = value
-
-    @property
-    def _fw_needed_build(self):
-        return self._fw.needed_build
-
-    @_fw_needed_build.setter
-    def _fw_needed_build(self, value):
-        self._fw.needed_build = value
-
-    @property
-    def _fw_check(self):
-        return self._fw.check
-
-    @_fw_check.setter
-    def _fw_check(self, value):
-        self._fw.check = value
-
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash while a recording is live or the board is armed.
 
@@ -1022,7 +996,7 @@ class TriggerboxPlugin(Plugin):
 
     def _broadcast_state(self) -> None:
         if self._broadcast is not None:
-            check = self._fw_check
+            check = self._fw.check
             self._broadcast(
                 "triggerbox_state",
                 {
@@ -1172,7 +1146,7 @@ class TriggerboxPlugin(Plugin):
         return self._link.is_open
 
     def status(self) -> dict:
-        check = self._fw_check
+        check = self._fw.check
         return {
             "device": self.device,
             "arduino_state": self._arduino_state,
@@ -1562,7 +1536,7 @@ class TriggerboxPlugin(Plugin):
             if isinstance(device, str) and device.strip():
                 self._configured_device = device.strip()
             error = self._open()
-            check = self._fw_check
+            check = self._fw.check
             return {
                 "ready": self._link.is_open,
                 "device": self.device,
