@@ -94,10 +94,10 @@ class FeatureInfo:
 
     ``type`` is the widget kind: int, float, bool, enum (``entries`` of
     ``{"value", "display", "available"}``), string, command or category.
-    ``value`` is None for command and category nodes and an enum's symbolic
-    otherwise. ``category`` comes only from a node-map walk: a single-node read
-    leaves it blank, and the client keeps its grouping. ``managed`` marks a node
-    octacam drives (:data:`RUNTIME_MANAGED_FEATURES`).
+    ``value`` is None for command and category nodes; for an enum it is the
+    current symbolic. ``category`` comes only from a node-map walk: a
+    single-node read leaves it blank, and the client keeps its grouping.
+    ``managed`` marks a node octacam drives (:data:`RUNTIME_MANAGED_FEATURES`).
     """
 
     name: str
