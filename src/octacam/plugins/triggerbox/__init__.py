@@ -1121,7 +1121,7 @@ class TriggerboxPlugin(Plugin):
         plan: TrainPlan | None = None
         try:
             arm = self._build_arm_spec(fps, duration_ms or 0, cams, lights)
-            if duration_ms is None:  # the train trigger_train counts
+            if duration_ms is None:  # a recording: plan the train trigger_train counts
                 wanted = pulse_count(fps, self._spec_duration_ms(spec))
                 plan = plan_train(fps, wanted, arm.cameras, arm.lights)
                 arm = replace(arm, duration_ms=min(0xFFFF_FFFF, plan.duration_ms))
