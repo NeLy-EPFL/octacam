@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 from helpers import wait_until
 
-from octacam.config import RecordConfig
 from octacam.writer import (
     DEFAULT_CRF,
     FORMATS,
@@ -16,7 +15,6 @@ from octacam.writer import (
     _color_range_args,
     _split_vf,
     build_encode_args,
-    default_save_method,
     find_ffmpeg,
     transcode_encoded,
     transcode_raw,
@@ -459,22 +457,6 @@ def test_capture_default_crf_is_18():
     assert DEFAULT_CRF == 18
     assert "-crf 18" in FfmpegVideoWriter().ffmpeg_params
     assert "-crf 18" in FORMATS["ffmpeg"].ffmpeg_params
-
-
-def test_default_save_method_resolution():
-    assert default_save_method(RecordConfig()) == "ffmpeg"  # default
-    assert default_save_method(RecordConfig(save_method="raw")) == "raw"
-    assert default_save_method(RecordConfig(save_method="ffmpeg")) == "ffmpeg"
-
-
-def test_default_save_method_unknown_falls_back_to_ffmpeg():
-    # A stray/unknown save_method must never stop a recording; it falls back to
-    # ffmpeg. (RecordConfig's lenient validation coerces a bad Literal back to
-    # the default, so exercise the resolver directly with a bare object too.)
-    class _Bogus:
-        save_method = "bogus"
-
-    assert default_save_method(_Bogus()) == "ffmpeg"
 
 
 def test_transcode_raw_without_geometry_raises(tmp_path):

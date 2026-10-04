@@ -52,9 +52,6 @@ DEFAULT_PRESET = "ultrafast"
 # Full-range 4:2:0, not "gray": monochrome 4:0:0 H.264 decodes as flat gray
 # frames on NVIDIA hardware decoders (see _playable_pix_fmt).
 DEFAULT_PIX_FMT = "yuv420p"
-# Extra libx264 options passed verbatim to ffmpeg's -x264-params (e.g.
-# "keyint=30:scenecut=0"); empty means the flag is omitted entirely.
-DEFAULT_X264_PARAMS = ""
 
 # Encoder output args as a single ffmpeg string — the config's single source of
 # truth (record.ffmpeg_params / transcode.ffmpeg_params), shlex-split and
@@ -1037,19 +1034,6 @@ def resolve_capture_formats(
             "allows more (see `octacam doctor`)."
         )
     return formats, warnings
-
-
-def default_save_method(record_config) -> str:
-    """Resolve the recording save method key from a RecordConfig.
-
-    Falls back to "ffmpeg" for an unknown value so a stray config can never
-    stop a recording.
-    """
-    method = getattr(record_config, "save_method", "") or "ffmpeg"
-    if method in FORMATS:
-        return method
-    log.warning("Unknown save_method %r; using ffmpeg", method)
-    return "ffmpeg"
 
 
 # Infix tagging an in-progress transcode's temp file (see _partial_path). Kept
