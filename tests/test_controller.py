@@ -7,6 +7,7 @@ import pytest
 from helpers import wait_until
 
 from octacam.controller import (
+    DeliveryProfile,
     RecordingController,
     RecordingSettings,
     StartResult,
@@ -84,8 +85,8 @@ def test_build_recording_summary():
 
 
 PERIOD_125_FPS = 8_000_000
-BASLER = ("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 2000)
-GS3 = ("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
+BASLER = DeliveryProfile("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 2000)
+GS3 = DeliveryProfile("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
 
 
 def _sync_camera(name, latency_ns, *, late_pulses=0, frames=16, **extra):
@@ -151,8 +152,8 @@ def test_check_sync_does_not_compare_unlike_cameras():
 def test_check_sync_note_names_what_differs():
     # The capillary rig: two GS3s alike but for their ROI. The note must read as
     # information and say why these two were not compared.
-    top = (*GS3[:2], 1024, 2048, *GS3[4:])
-    bottom = (*GS3[:2], 2048, 1024, *GS3[4:])
+    top = GS3._replace(width=1024, height=2048)
+    bottom = GS3._replace(width=2048, height=1024)
     cams = [_sync_camera("top", 12_700_000), _sync_camera("bottom", 7_500_000)]
     sync = _sync_controller(cams, {"top": top, "bottom": bottom})._check_sync(
         completed=True
@@ -175,7 +176,7 @@ def test_check_sync_note_names_each_differing_field_per_group():
         completed=True
     )
     (note,) = sync["notes"]
-    assert f"model ([b0, b1] {BASLER[1]}, f0 {GS3[1]})" in note, note
+    assert f"model ([b0, b1] {BASLER.model}, f0 {GS3.model})" in note, note
     assert "frame size ([b0, b1] 1920×1200, f0 2048×2048)" in note, note
     assert "exposure (" not in note, note  # both 2000 µs
 

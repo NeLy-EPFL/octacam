@@ -27,6 +27,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -364,32 +365,47 @@ def _writer_skipped(camera) -> tuple[int, list[int]]:
     return int(getattr(camera, "writer_skipped", 0) or len(indices)), indices
 
 
-# The fields of a delivery profile (see RecordingController._read_delivery_profiles)
-# an operator can act on, and how to show each.
-_PROFILE_FIELDS = (
-    ("camera backend", lambda p: p[0]),
-    ("model", lambda p: p[1] or "unknown"),
-    ("frame size", lambda p: f"{p[2]}×{p[3]}"),
-    ("pixel format", lambda p: p[4]),
-    ("exposure", lambda p: f"{p[5]} µs"),
-)
+class DeliveryProfile(NamedTuple):
+    """What a frame's trigger-to-host delay depends on (see
+    RecordingController._check_sync)."""
+
+    backend: str
+    model: str | None
+    width: int
+    height: int
+    pixel_format: str
+    exposure_us: int
 
 
-def _unlike_profiles_note(groups: dict[tuple, list[str]]) -> str:
+# The profile fields an operator can act on, and how the sync note shows each.
+_PROFILE_FIELDS = {
+    "camera backend": lambda p: p.backend,
+    "model": lambda p: p.model or "unknown",
+    "frame size": lambda p: f"{p.width}×{p.height}",
+    "pixel format": lambda p: p.pixel_format,
+    "exposure": lambda p: f"{p.exposure_us} µs",
+}
+
+
+def _unlike_profiles_note(groups: dict[DeliveryProfile | str, list[str]]) -> str:
     """The note for cameras whose start alignment could not be compared.
 
-    *groups* maps a delivery profile — or ``("unread", name)`` for a camera whose
-    profile could not be read — to the cameras that share it. The note names only
-    the fields that differ, so an operator can tell a deliberate difference (two
+    *groups* maps a delivery profile — or the name of a camera whose profile
+    could not be read — to the cameras that share it. The note names only the
+    fields that differ, so an operator can tell a deliberate difference (two
     ROIs) from an accidental one (a mistyped exposure)."""
 
     def label(members: list[str]) -> str:
         return members[0] if len(members) == 1 else f"[{', '.join(members)}]"
 
-    read = [(key, members) for key, members in groups.items() if key[0] != "unread"]
-    unread = [name for key, members in groups.items() if key[0] == "unread" for name in members]
+    read = [
+        (key, members)
+        for key, members in groups.items()
+        if isinstance(key, DeliveryProfile)
+    ]
+    unread = [key for key in groups if isinstance(key, str)]
     differences = []
-    for field, show in _PROFILE_FIELDS:
+    for field, show in _PROFILE_FIELDS.items():
         values = [(members, show(key)) for key, members in read]
         if len({value for _members, value in values}) > 1:
             shown = ", ".join(f"{label(members)} {value}" for members, value in values)
@@ -681,7 +697,7 @@ class RecordingController:
         # profile read as the recording started (by serial; see
         # _read_delivery_profiles), for the sync check.
         self._recording_cameras: list[str] = []
-        self._delivery_profiles: dict[str, tuple | None] = {}
+        self._delivery_profiles: dict[str, DeliveryProfile | None] = {}
         # When the current counted train is over (host monotonic), once started.
         self._train_end: float | None = None
         # Bumped each time a countdown starts so clients can tell one recording
@@ -1250,7 +1266,7 @@ class RecordingController:
         # reject this start anyway). The cameras' delivery profiles (for the
         # sync check) are read here too, for the same reasons.
         pre_params: dict[str, str] | None = None
-        profiles: dict[str, tuple | None] | None = None
+        profiles: dict[str, DeliveryProfile | None] | None = None
         if not self._camera_locked:
             pre_params = self._export_camera_params()
             profiles = self._read_delivery_profiles()
@@ -1322,7 +1338,7 @@ class RecordingController:
         self,
         plugin_params: dict | None,
         pre_params: dict[str, str] | None,
-        profiles: dict[str, tuple | None],
+        profiles: dict[str, DeliveryProfile | None],
     ) -> StartResult:
         """Second half of :meth:`start_recording`, after the admission checks.
 
@@ -2129,13 +2145,13 @@ class RecordingController:
                 delays[camera.name] = float(
                     np.median([arrival - pulse * period for arrival, pulse in rows])
                 )
-        # Group the cameras by delivery profile; one that could not be read is
-        # compared with none.
-        groups: dict[tuple, list[str]] = {}
+        # Group the cameras by delivery profile; one whose profile could not be
+        # read is a group of its own, under its name, and compared with none.
+        groups: dict[DeliveryProfile | str, list[str]] = {}
         for camera in cams:
             if camera.name in delays:
                 profile = self._delivery_profiles.get(camera.serial_number)
-                key = profile if profile is not None else ("unread", camera.name)
+                key = profile if profile is not None else camera.name
                 groups.setdefault(key, []).append(camera.name)
         for members in groups.values():
             if len(members) < 2:
@@ -2170,7 +2186,7 @@ class RecordingController:
             "start_offsets": offsets,
         }
 
-    def _read_delivery_profiles(self) -> dict[str, tuple | None]:
+    def _read_delivery_profiles(self) -> dict[str, DeliveryProfile | None]:
         """Each camera's frame-delivery profile, by serial, for the start check.
 
         The backend, model, frame size, pixel format and exposure: what a frame's
@@ -2182,7 +2198,7 @@ class RecordingController:
         and is compared with no other; the model is left out where the backend
         does not expose it."""
 
-        def profile(camera) -> tuple | None:
+        def profile(camera) -> DeliveryProfile | None:
             try:
                 exposure = float(camera.read_param("exposure")["value"])
                 width = int(camera.read_param("width")["value"])
@@ -2196,7 +2212,7 @@ class RecordingController:
                 model = None
             # Same-model cameras snap a configured exposure identically, so whole
             # microseconds only absorb float noise.
-            return (
+            return DeliveryProfile(
                 type(camera.backend).__name__,
                 model,
                 width,
