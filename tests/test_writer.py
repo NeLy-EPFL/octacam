@@ -86,9 +86,11 @@ def test_ffmpeg_writer_failure_is_reported(tmp_path):
     assert not out.exists()
 
 
-def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch):
-    # A thread that fails to start after Popen (e.g. thread exhaustion) must not
-    # orphan the ffmpeg child: close() skips a writer whose thread never ran.
+@pytest.mark.parametrize("exc", [RuntimeError, KeyboardInterrupt])
+def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch, exc):
+    # A thread that fails to start after Popen (e.g. thread exhaustion, or a
+    # Ctrl-C landing there) must not orphan the ffmpeg child: close() skips a
+    # writer whose thread never ran.
     import octacam.writer as writer_mod
 
     created = []
@@ -106,7 +108,7 @@ def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch)
             pass
 
         def start(self):
-            raise RuntimeError("can't start new thread")
+            raise exc("can't start new thread")
 
     monkeypatch.setattr(writer_mod.threading, "Thread", BoomThread)
 
@@ -114,7 +116,11 @@ def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch)
     writer = FfmpegVideoWriter(
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray"
     )
-    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT)) is False
+    if issubclass(exc, Exception):
+        assert writer.open(str(out), 30.0, (WIDTH, HEIGHT)) is False
+    else:
+        with pytest.raises(exc):
+            writer.open(str(out), 30.0, (WIDTH, HEIGHT))
     assert created, "expected an ffmpeg child to have been spawned"
     assert created[0].poll() is not None  # reaped: killed + waited, not orphaned
     assert writer._proc is None

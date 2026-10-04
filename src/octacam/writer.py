@@ -493,12 +493,14 @@ class AsyncFrameWriter:
             self._queue = queue.Queue(maxsize=self._max_queue_size)
             self._thread = threading.Thread(target=self._writer_loop, daemon=True)
             self._thread.start()
-        except Exception as e:
+        except BaseException as e:
             # close() skips a writer whose thread never started, so the sink
-            # (an ffmpeg child, a file) is released here or it leaks.
-            log.error("Failed to open writer for %s: %s", filename, e)
+            # (an ffmpeg child, a file) is released here, even on Ctrl-C.
             self._thread = self._queue = None
             self._abort_sink()
+            if not isinstance(e, Exception):
+                raise
+            log.error("Failed to open writer for %s: %s", filename, e)
             return False
         self._running = True
         return True
