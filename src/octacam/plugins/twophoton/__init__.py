@@ -57,16 +57,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import serial
+
 from octacam import firmware as fw
 from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
-
-try:
-    import serial
-except ImportError:
-    serial = None  # type: ignore[assignment]
 
 log = logging.getLogger("octacam")
 
@@ -80,11 +77,6 @@ DEFAULT_DURATION_MS = 10_000
 # few ms; the wait runs off the controller lock, so it only delays the start
 # response, never telemetry.
 ACK_TIMEOUT_S = 1.0
-
-_NO_PYSERIAL_MSG = (
-    "pyserial is not importable (it ships with octacam by default, so the "
-    "environment may be broken); reinstall with: pip install pyserial"
-)
 
 # Wire-format constants. The cancel (0xCA) / identify (0x3F) magics live in
 # _serial_link (shared with the triggerbox link).
@@ -176,7 +168,7 @@ class TwoPhotonLink(SerialReaderLink):
                 break
             try:
                 b = s.read(1)
-            except serial.SerialException:  # pyright: ignore[reportOptionalMemberAccess]
+            except serial.SerialException:
                 # Port died under us (e.g. unplugged mid-run). Drop the handle so
                 # is_ready() turns False and the GUI surfaces the reconnect path,
                 # unless we are already shutting down cleanly.
@@ -223,8 +215,6 @@ _STATE_LABELS: dict[str, str] = {
 
 @register("twophoton")
 def _build(options: dict) -> TwoPhotonPlugin:
-    if serial is None:
-        raise RuntimeError(_NO_PYSERIAL_MSG)
     device = str(options.get("device") or DEFAULT_DEVICE)
     try:
         baud = int(options.get("baud", DEFAULT_BAUD))

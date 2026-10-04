@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import serial
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
@@ -493,14 +494,6 @@ def test_build_unknown_camera_pin_falls_back(caplog):
     assert plugin._cameras[0].pin == "D13"
 
 
-def test_build_raises_without_pyserial(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
-    monkeypatch.setattr(m, "serial", None)
-    with pytest.raises(RuntimeError, match="pyserial"):
-        _build({"device": DEVICE})
-
-
 # ===========================================================================
 # on_recording_start / stop
 # ===========================================================================
@@ -948,10 +941,6 @@ def test_reconnect_endpoint_device_override(monkeypatch):
 # ===========================================================================
 
 
-class _FakeSerialError(Exception):
-    pass
-
-
 class _FakeSerial:
     def __init__(self, *args, **kwargs):
         self.is_open = True
@@ -979,15 +968,13 @@ class _FakeSerial:
         self._reads.put(data)
 
 
-def _fake_serial_ns(fake: _FakeSerial) -> SimpleNamespace:
-    return SimpleNamespace(Serial=lambda *a, **k: fake, SerialException=_FakeSerialError)
+def _use_fake_serial(monkeypatch, fake: _FakeSerial) -> None:
+    monkeypatch.setattr(serial, "Serial", lambda *a, **k: fake)
 
 
 def test_link_send_arm_writes_exact_bytes(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     link = TriggerboxLink(on_status=lambda t: None)
     link.open(DEVICE, 115200)
     try:
@@ -999,10 +986,8 @@ def test_link_send_arm_writes_exact_bytes(monkeypatch):
 
 
 def test_link_parses_status_and_reject_tokens(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     states: list[str] = []
     rejects: list[str] = []
     link = TriggerboxLink(on_status=states.append, on_reject=rejects.append)
@@ -1017,10 +1002,8 @@ def test_link_parses_status_and_reject_tokens(monkeypatch):
 
 
 def test_link_reassembles_split_tokens(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     states: list[str] = []
     link = TriggerboxLink(on_status=states.append)
     link.open(DEVICE, 115200)
@@ -1033,11 +1016,9 @@ def test_link_reassembles_split_tokens(monkeypatch):
 
 
 def test_link_read_error_marks_broken(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
     fake = _FakeSerial()
-    fake.raise_on_read = _FakeSerialError("unplugged")
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    fake.raise_on_read = serial.SerialException("unplugged")
+    _use_fake_serial(monkeypatch, fake)
     broken = threading.Event()
     link = TriggerboxLink(on_status=lambda t: None, on_broken=broken.set)
     link.open(DEVICE, 115200)
@@ -1658,10 +1639,8 @@ class _BlockingSerial(_FakeSerial):
 
 
 def test_status_tokens_arrive_without_waiting_for_the_port_timeout(monkeypatch):
-    import octacam.plugins.triggerbox as m
-
     fake = _BlockingSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     seen = []
     link = TriggerboxLink(on_status=lambda t: seen.append((time.monotonic(), t)))
     link.open(DEVICE, 115200)

@@ -4,9 +4,8 @@ import queue
 import struct
 import threading
 import time
-from types import SimpleNamespace
 
-import pytest
+import serial
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
@@ -453,13 +452,6 @@ def test_build_uses_default_device_when_omitted():
     assert plugin.device == DEFAULT_DEVICE
 
 
-def test_build_raises_without_pyserial(monkeypatch):
-    import octacam.plugins.twophoton as m
-    monkeypatch.setattr(m, "serial", None)
-    with pytest.raises(RuntimeError, match="pyserial"):
-        _build({"device": "/dev/arduinoCams"})
-
-
 def test_build_uses_provided_options():
     plugin = _build(
         {"device": "/dev/arduinoCams", "baud": 9600, "default_fps": 50, "default_duration_ms": 3000}
@@ -491,10 +483,6 @@ def test_is_open_safe_when_serial_is_none():
 # ---------------------------------------------------------------------------
 
 
-class _FakeSerialError(Exception):
-    """Stand-in for serial.SerialException."""
-
-
 class _FakeSerial:
     """Minimal pyserial-Serial double: records writes, hands out queued reads."""
 
@@ -524,17 +512,15 @@ class _FakeSerial:
         self._reads.put(data)
 
 
-def _fake_serial_ns(fake: _FakeSerial) -> SimpleNamespace:
-    return SimpleNamespace(
-        Serial=lambda *a, **k: fake, SerialException=_FakeSerialError
-    )
+def _use_fake_serial(monkeypatch, fake: _FakeSerial) -> None:
+    monkeypatch.setattr(serial, "Serial", lambda *a, **k: fake)
 
 
 def test_link_open_starts_reader_and_close_joins(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     link = m.TwoPhotonLink(on_status=lambda s: None)
     link.open("/dev/fake", 115200)
     assert link.is_open is True
@@ -548,7 +534,7 @@ def test_link_send_arm_writes_packet(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     link = m.TwoPhotonLink(on_status=lambda s: None)
     link.open("/dev/fake", 115200)
     params = m.ArmParams(fps=120, duration_ms=5000)
@@ -561,7 +547,7 @@ def test_link_reader_invokes_status_callback(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     got: list[str] = []
     link = m.TwoPhotonLink(on_status=got.append)
     link.open("/dev/fake", 115200)
@@ -577,11 +563,11 @@ def test_link_read_error_marks_broken(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     link = m.TwoPhotonLink(on_status=lambda s: None)
     link.open("/dev/fake", 115200)
     assert link.is_open is True
-    fake.raise_on_read = _FakeSerialError("device disconnected")
+    fake.raise_on_read = serial.SerialException("device disconnected")
     assert wait_until(lambda: link.is_open is False)
     link.close()  # still safe / idempotent after the link broke
 
@@ -591,7 +577,7 @@ def test_link_close_swallows_shutdown_read_error(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     link = m.TwoPhotonLink(on_status=lambda s: None)
     link.open("/dev/fake", 115200)
     # Mimics os.read(None, 1) raising TypeError when the port is nulled under us.
@@ -613,11 +599,7 @@ def test_link_reopen_starts_fresh_reader(monkeypatch):
         created.append(fake)
         return fake
 
-    monkeypatch.setattr(
-        m,
-        "serial",
-        SimpleNamespace(Serial=make_serial, SerialException=_FakeSerialError),
-    )
+    monkeypatch.setattr(serial, "Serial", make_serial)
     got: list[str] = []
     link = m.TwoPhotonLink(on_status=got.append)
     link.open("/dev/fake", 115200)
@@ -636,11 +618,11 @@ def test_link_broken_invokes_on_broken_callback(monkeypatch):
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
-    monkeypatch.setattr(m, "serial", _fake_serial_ns(fake))
+    _use_fake_serial(monkeypatch, fake)
     broken: list[bool] = []
     link = m.TwoPhotonLink(on_status=lambda s: None, on_broken=lambda: broken.append(True))
     link.open("/dev/fake", 115200)
-    fake.raise_on_read = _FakeSerialError("device disconnected")
+    fake.raise_on_read = serial.SerialException("device disconnected")
     assert wait_until(lambda: broken == [True])
     link.close()
 

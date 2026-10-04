@@ -76,6 +76,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import serial
+
 if TYPE_CHECKING:
     from octacam.controller import RecordingController
 
@@ -84,11 +86,6 @@ from octacam import serial_ports
 from octacam.plugins import register
 from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
-
-try:
-    import serial
-except ImportError:
-    serial = None  # type: ignore[assignment]
 
 log = logging.getLogger("octacam")
 
@@ -111,11 +108,6 @@ ACK_TIMEOUT_S = 1.0
 # recording's record grab starts, or a last preview pulse could reach a camera
 # that is already counting.
 CANCEL_ACK_TIMEOUT_S = 0.3
-
-_NO_PYSERIAL_MSG = (
-    "pyserial is not importable (it ships with octacam by default, so the "
-    "environment may be broken); reinstall with: pip install pyserial"
-)
 
 # ---- Wire protocol v2 (must match triggerbox.ino) --------------------------
 # The cancel (0xCA) / identify (0x3F) magics live in _serial_link (shared).
@@ -645,7 +637,7 @@ class TriggerboxLink(SerialReaderLink):
                 break
             try:
                 chunk = self._read_chunk(s)
-            except serial.SerialException:  # pyright: ignore[reportOptionalMemberAccess]
+            except serial.SerialException:
                 if not self._reader_stop.is_set():
                     self._mark_broken()
                 break
@@ -680,9 +672,6 @@ class TriggerboxLink(SerialReaderLink):
 
 @register("triggerbox")
 def _build(options: dict) -> TriggerboxPlugin:
-    if serial is None:
-        raise RuntimeError(_NO_PYSERIAL_MSG)
-
     def _opt_int(key: str, default: int) -> int:
         try:
             return int(options.get(key, default))

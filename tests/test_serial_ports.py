@@ -86,11 +86,6 @@ def test_list_serial_ports_survives_comports_raising(monkeypatch):
     assert sp.list_serial_ports() == []
 
 
-def test_list_serial_ports_without_pyserial(monkeypatch):
-    monkeypatch.setattr(sp, "comports", None)
-    assert sp.list_serial_ports() == []
-
-
 # ---------------------------------------------------------------- resolve_device
 
 

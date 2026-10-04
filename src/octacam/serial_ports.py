@@ -12,8 +12,8 @@ Design notes:
 
 * ``comports`` is imported at module top so tests can monkeypatch
   ``octacam.serial_ports.comports`` without touching pyserial internals.
-* Everything degrades gracefully: a broken/absent pyserial or a raising
-  ``comports()`` yields an empty list plus a warning, never an exception — so
+* Everything degrades gracefully: a raising ``comports()`` yields an empty
+  list plus a warning, never an exception — so
   ``octacam doctor`` can never be taken down by serial enumeration.
 * Enumeration is **passive**: it never opens a port. Only :func:`probe_identity`
   opens a port (to read a firmware banner), and it is strictly opt-in.
@@ -27,12 +27,8 @@ import sys
 import time
 from dataclasses import dataclass
 
-try:
-    import serial
-    from serial.tools.list_ports import comports
-except ImportError:  # pyserial ships by default; guard against a broken env
-    serial = None  # type: ignore[assignment]
-    comports = None  # type: ignore[assignment]
+import serial
+from serial.tools.list_ports import comports
 
 log = logging.getLogger("octacam")
 
@@ -40,11 +36,6 @@ DEFAULT_BAUD = 115200
 # The triggerbox firmware's identify query byte ('?'); the board replies
 # "TRIGGERBOX <version>\n". Shared so probe_identity and the plugin agree.
 IDENTIFY_MAGIC = b"?"
-
-_NO_PYSERIAL_MSG = (
-    "pyserial is not importable (it ships with octacam by default, so the "
-    "environment may be broken); reinstall with: pip install pyserial"
-)
 
 # The bundled plugins that talk to a serial/Arduino device, and the firmware
 # banner each expects from an identify probe (used to flag a wrong board and, in
@@ -164,11 +155,8 @@ def classify_port(
 def list_serial_ports() -> list[SerialPort]:
     """Enumerate connected serial ports, sorted by device path.
 
-    Never raises: a missing pyserial or a ``comports()`` that itself raises
-    (seen on some platforms) yields ``[]`` plus a warning."""
-    if comports is None:
-        log.warning("pyserial not available; cannot enumerate serial ports")
-        return []
+    Never raises: a ``comports()`` that itself raises (seen on some
+    platforms) yields ``[]`` plus a warning."""
     try:
         infos = list(comports())
     except Exception as e:
@@ -229,8 +217,6 @@ def probe_identity(
     Caveat: on Linux a plugin that opened the port without ``O_EXCL`` does not
     block a second open, so a concurrently-held port may not be detected as busy
     there; the ``--probe-serial`` caveat documents this."""
-    if serial is None:
-        return SerialIdentity(device, banner=None, busy=False, error=_NO_PYSERIAL_MSG)
     # Ask for an exclusive open on POSIX so two probes (or an exclusive holder)
     # are correctly seen as busy; Windows ports are exclusive already and the
     # kwarg is unsupported there.

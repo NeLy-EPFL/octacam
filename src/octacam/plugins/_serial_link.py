@@ -8,11 +8,6 @@ This base owns the common open/close/write/identify lifecycle; a subclass suppli
 only its ``_read_loop`` (the token grammar) and ``send_arm`` (the wire packet),
 plus three class attributes: ``log_prefix``, ``reader_name`` and ``expected_banner``.
 
-The pyserial module is resolved from the *concrete subclass's* module
-(:meth:`SerialReaderLink._serial_module`) rather than imported here, so a test that
-stubs ``<plugin>.serial`` is honoured by the shared ``open``/``_write`` too, exactly
-as it was when those methods lived in each plugin module.
-
 The lighter flywheel :class:`~octacam.plugins.flywheel.SerialLink` has no reader
 thread, so it stays separate.
 """
@@ -20,16 +15,12 @@ thread, so it stays separate.
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 from collections.abc import Callable
 
-log = logging.getLogger("octacam")
+import serial
 
-_NO_PYSERIAL_MSG = (
-    "pyserial is not importable (it ships with octacam by default, so the "
-    "environment may be broken); reinstall with: pip install pyserial"
-)
+log = logging.getLogger("octacam")
 
 # Wire magics shared by both trigger firmwares (host -> Arduino).
 _CANCEL_MAGIC = 0xCA
@@ -72,15 +63,7 @@ class SerialReaderLink:
         self._identity: str | None = None
         self._identity_event = threading.Event()
 
-    def _serial_module(self):
-        """The monkeypatchable ``serial`` binding from the concrete subclass's
-        module, so a test that stubs ``<plugin>.serial`` reaches the shared code."""
-        return getattr(sys.modules.get(type(self).__module__), "serial", None)
-
     def open(self, device: str, baud: int) -> None:
-        serial = self._serial_module()
-        if serial is None:
-            raise RuntimeError(_NO_PYSERIAL_MSG)
         with self._lifecycle_lock:
             self._close_locked()
             s = serial.Serial(device, baud, timeout=0.2, write_timeout=1)
@@ -139,7 +122,6 @@ class SerialReaderLink:
         A wedged USB-CDC board can fail here with EPIPE (a plain OSError, which
         pyserial does not always wrap in SerialException), so both are caught and
         reported as a failed write rather than raised."""
-        serial = self._serial_module()
         with self._write_lock:
             s = self._serial
             if s is None or not s.is_open:
@@ -147,7 +129,7 @@ class SerialReaderLink:
             try:
                 s.write(data)
                 return True
-            except (OSError, serial.SerialException) as e:  # pyright: ignore[reportOptionalMemberAccess]
+            except (OSError, serial.SerialException) as e:
                 log.warning("%s: serial write failed: %s", self.log_prefix, e)
                 return False
 

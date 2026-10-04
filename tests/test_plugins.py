@@ -66,11 +66,8 @@ def test_available_plugins_describes_bundled_flywheel():
     # Only in-repo builtins are discoverable; flywheel is one of the bundled plugins.
     assert "flywheel" in infos
     info = infos["flywheel"]
-    assert isinstance(info.available, bool)
+    assert info.available is True
     assert info.summary  # first line of the module docstring
-    # When pyserial is missing (a broken env), the reason is surfaced.
-    if not info.available:
-        assert info.detail
 
 
 def test_dispatch_swallows_plugin_exceptions():
