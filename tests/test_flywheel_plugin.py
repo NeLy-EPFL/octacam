@@ -114,10 +114,8 @@ def test_on_first_frame_without_params_is_noop():
 
 
 def test_on_first_frame_skips_out_of_range_command():
-    # Fix 8: an out-of-range wire field (n_steps beyond int16, etc.) makes
-    # to_bytes() raise struct.error; the recording path must reject it the same
-    # way the /api/serial/command endpoint does, not let struct.error escape
-    # through write_command and silently drop the stepper motion.
+    # An out-of-range wire field is rejected up front, not left to raise
+    # struct.error in write_command and silently drop the motion.
     plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
@@ -289,11 +287,9 @@ def test_jog_restart_switches_direction():
 
 
 def test_jog_finally_release_is_atomic_with_start():
-    # Fix 9: the generation compare + coil-release write in _run's finally happen
-    # together under _lock, so a concurrent start() (which bumps the generation
-    # under the same lock) can't slip in between the compare and the release. We
-    # observe this by blocking inside the release write and asserting start()'s
-    # lock is unavailable while the release is in flight.
+    # The generation compare and the coil release happen together under _lock,
+    # so a concurrent start() cannot slip in between: block inside the release
+    # write and check the lock is held.
     gate = threading.Event()
     in_release = threading.Event()
 
@@ -319,8 +315,8 @@ def test_jog_finally_release_is_atomic_with_start():
 
 
 def test_jog_superseded_thread_suppresses_release():
-    # Fix 9 (guard still honoured under the lock): a thread whose captured
-    # generation is stale must NOT release coils a newer jog now owns.
+    # A thread whose captured generation is stale must not release coils a
+    # newer jog owns.
     writes: list[bytes] = []
     clock = JogClock(write=lambda cmd: writes.append(cmd.to_bytes()))
     clock._generation = 2  # a newer jog has already taken over

@@ -776,10 +776,9 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
 
 
 def test_recover_usb_holds_port_lock(monkeypatch):
-    # Fix 1: _recover_usb must run under the provisioner's port_lock so a
-    # concurrent flash (which holds the same lock across close->upload->reopen)
-    # can't fight over the tty. With another thread holding the (re-entrant) lock,
-    # a _recover_usb on a different thread must block before it resets the device.
+    # _recover_usb runs under the provisioner's port_lock, so a concurrent flash
+    # cannot fight over the tty: while another thread holds the lock, it must
+    # block before it resets the device.
     import octacam.serial_ports as sp
 
     reset_calls: list[str] = []
@@ -809,8 +808,8 @@ def test_recover_usb_holds_port_lock(monkeypatch):
 
 
 def test_arm_and_wait_serialized_by_arm_lock():
-    # Fix 6: the clear+send+wait window must be serialized so two concurrent arms
-    # can't share _armed_event/_last_reject and steal each other's ack/reject.
+    # The clear+send+wait window is serialized, so two concurrent arms cannot
+    # take each other's ack or reject.
     plugin, link = _plugin_with_fake()
     gate = threading.Event()
     in_send = threading.Event()

@@ -471,8 +471,7 @@ def test_build_uses_provided_options():
 # ---------------------------------------------------------------------------
 
 def test_is_open_safe_when_serial_is_none():
-    # Regression: is_open must not raise AttributeError when _serial is nulled
-    # concurrently by close(). Snapshot the attribute to a local first.
+    # is_open must not raise when close() nulls _serial concurrently.
     from octacam.plugins.twophoton import TwoPhotonLink
     link = TwoPhotonLink(on_status=lambda s: None)
     # _serial starts as None; is_open should return False without AttributeError.
