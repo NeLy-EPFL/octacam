@@ -78,8 +78,7 @@ DEFAULT_DURATION_MS = 10_000
 # response, never telemetry.
 ACK_TIMEOUT_S = 1.0
 
-# Wire-format constants. The cancel (0xCA) / identify (0x3F) magics live in
-# _serial_link (shared with the triggerbox link).
+# The cancel and identify bytes are shared with triggerbox (_serial_link).
 _ARM_MAGIC = 0xA5
 # magic (uint8) + fps (uint16 LE) + duration_ms (uint32 LE) = 7 bytes
 _ARM_FORMAT = "<BHI"

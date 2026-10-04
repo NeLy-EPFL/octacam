@@ -33,8 +33,8 @@ from serial.tools.list_ports import comports
 log = logging.getLogger("octacam")
 
 DEFAULT_BAUD = 115200
-# The triggerbox firmware's identify query byte ('?'); the board replies
-# "TRIGGERBOX <version>\n". Shared so probe_identity and the plugin agree.
+# The identify query byte the trigger firmwares (triggerbox, twophoton) answer
+# with their banner line; shared by probe_identity and the plugins' links.
 IDENTIFY_MAGIC = b"?"
 
 # The bundled plugins that talk to a serial/Arduino device, and the firmware

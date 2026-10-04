@@ -20,11 +20,12 @@ from collections.abc import Callable
 
 import serial
 
+from octacam.serial_ports import IDENTIFY_MAGIC
+
 log = logging.getLogger("octacam")
 
-# Wire magics shared by both trigger firmwares (host -> Arduino).
+# The cancel byte both trigger firmwares accept (host -> Arduino).
 _CANCEL_MAGIC = 0xCA
-_IDENTIFY_MAGIC = 0x3F
 
 
 class SerialReaderLink:
@@ -137,7 +138,7 @@ class SerialReaderLink:
         self._write(bytes([_CANCEL_MAGIC]))
 
     def send_identify(self) -> None:
-        self._write(bytes([_IDENTIFY_MAGIC]))
+        self._write(IDENTIFY_MAGIC)
 
     @property
     def identity(self) -> str | None:
