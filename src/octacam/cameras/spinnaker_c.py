@@ -320,14 +320,6 @@ class _Spinnaker:
             return None
         return buf.value.decode("ascii", "replace") or None
 
-    def _cam_string(self, fn, hcam) -> str | None:
-        """A camera-level C string getter (GetDeviceID / GetUniqueID)."""
-        buf = ctypes.create_string_buffer(_MAX_BUFF_LEN)
-        n = ctypes.c_size_t(_MAX_BUFF_LEN)
-        if fn(hcam, buf, ctypes.byref(n)) != SPINNAKER_ERR_SUCCESS:
-            return None
-        return buf.value.decode("ascii", "replace") or None
-
     def _opt_i64(self, fn, handle) -> int | None:
         val = ctypes.c_int64()
         return (
@@ -403,7 +395,7 @@ class _Spinnaker:
         except BackendError:
             pass
         for fn in (self._lib.spinCameraGetDeviceID, self._lib.spinCameraGetUniqueID):
-            got = self._cam_string(fn, hcam)
+            got = self._string_from(fn, hcam)
             if got:
                 return got
         return ""
