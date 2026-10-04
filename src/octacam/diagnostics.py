@@ -745,17 +745,12 @@ def measure_freerun_ceiling(
 
     def loop(camera: Camera) -> None:
         backend = camera.backend
-        begin = getattr(backend, "begin_freerun", None)
-        fetch = getattr(backend, "retrieve_freerun", None)
-        if begin is None or fetch is None:
-            unsupported.append(camera.name)
-            return
         try:
-            if not begin():
-                unsupported.append(camera.name)
-                return
+            armed = backend.begin_freerun()
         except Exception:
             log.debug("free-run arm failed on %s", camera.serial_number, exc_info=True)
+            armed = False
+        if not armed:
             unsupported.append(camera.name)
             return
         try:
@@ -766,11 +761,11 @@ def measure_freerun_ceiling(
             backend.start_grab_record()  # all-frames buffering, like a recording
             warm_deadline = time.perf_counter() + warmup_s
             while time.perf_counter() < warm_deadline and not stop.is_set():
-                fetch(GRAB_TIMEOUT_MS, _wants_array)
+                backend.retrieve_freerun(GRAB_TIMEOUT_MS, _wants_array)
             grabbed = 0
             t0 = time.perf_counter()
             while not stop.is_set():
-                if fetch(GRAB_TIMEOUT_MS, _wants_array) is not None:
+                if backend.retrieve_freerun(GRAB_TIMEOUT_MS, _wants_array) is not None:
                     grabbed += 1
             elapsed = time.perf_counter() - t0
             results[camera.serial_number] = (grabbed, elapsed)

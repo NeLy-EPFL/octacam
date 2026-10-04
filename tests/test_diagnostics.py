@@ -476,9 +476,9 @@ def test_diagnose_freerun_disabled(fake_system):
 
 
 def test_diagnose_freerun_unsupported_backend_noted(fake_system):
-    # A backend without the free-run seam is skipped with a note, never a crash.
+    # A backend that cannot free-run is skipped with a note, never a crash.
     for camera in fake_system:
-        camera.backend.begin_freerun = None  # shadow the method → "unsupported"
+        camera.backend.begin_freerun = lambda fps=None: False
     settings = RecordingSettings(fps=60.0, trigger_source="software")
     report = dg.diagnose(
         fake_system,
