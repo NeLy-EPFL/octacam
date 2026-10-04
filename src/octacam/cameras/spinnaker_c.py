@@ -1,42 +1,14 @@
-"""FLIR / Teledyne Spinnaker backend over the C API via ``ctypes``.
+"""FLIR / Teledyne Spinnaker backend over the SDK's C API via ``ctypes``.
 
-This is the fast, watermark-free, PySpin-free path for FLIR cameras. It drives
-``libSpinnaker_C.so`` (the Spinnaker SDK's flat C ABI) directly through
-:mod:`ctypes`, mirroring the PySpin backend (:mod:`octacam.cameras.flir`)
-node-for-node — same SFNC names, same :data:`PARAM_NODES`, same native GenApi
-persistence TSV config (``extension = "txt"``; see
-:mod:`octacam.cameras._genicam_config`), same session-wide ``spinSystem``
-singleton released in :func:`teardown` — but calling the C functions instead of
-PySpin's C++ wrappers.
+The FLIR tier when PySpin is missing: it needs only ``libSpinnaker_C.so``, and
+mirrors :mod:`octacam.cameras.flir` node for node. A ``CDLL`` releases the GIL
+around every foreign call, so a blocking ``spinCameraGetNextImageEx`` never
+stalls the other cameras' threads. It drives the C API, not the Spinnaker GenTL
+producer, whose ``DevClose`` deadlocks holding the GIL.
 
-Why this backend exists (see ``docs/plan-spinnaker-c-backend.md``):
-
-* **No PySpin wheel required.** The :mod:`~octacam.cameras.flir` tier needs
-  PySpin (Teledyne ships cp310-cp314 wheels with the SDK). This tier needs only
-  the SDK's ``libSpinnaker_C.so`` — ``ctypes.CDLL`` loads it with no Python wheel
-  at all, so it drives the FLIRs even when PySpin is not installed.
-* **No GIL starvation.** The pycameleon floor's ``receive()`` holds the Python
-  GIL for the whole exposure wait, so two FLIRs starve a co-recorded Basler.
-  ``ctypes`` (a ``CDLL``, not a ``PyDLL``) **releases the GIL around every foreign
-  call**, so :func:`_Spinnaker.get_next_image`'s blocking
-  ``spinCameraGetNextImageEx`` does not hold it — other camera threads keep
-  running while this one waits for its triggered frame.
-* **Clean close, no watermark.** This is the SDK C API, not the Spinnaker *GenTL
-  producer* (``Spinnaker_GenTL.cti``) whose ``DevClose`` deadlocks while holding
-  the GIL; and unlike an eval-limited third-party GenTL producer it stamps no
-  watermark. We control the ``DeInit`` / ``ReleaseInstance`` ordering directly.
-
-Structure:
-
-* :class:`_Spinnaker` is the thin binding: it owns the loaded ``ctypes`` library,
-  configures every function's ``argtypes``/``restype`` once (essential on 64-bit,
-  or pointer/handle args truncate to 32 bits), and exposes typed helpers that
-  raise :class:`BackendError` on any non-``SPINNAKER_ERR_SUCCESS`` return.
-* :class:`SpinnakerBackend` is pure orchestration over that binding, structurally
-  identical to :class:`~octacam.cameras.flir.FlirBackend`.
-* The library is loaded lazily by :func:`_spin`; a missing SDK surfaces as a clean
-  :class:`BackendUnavailable` (never a raw ``OSError``), so this tier self-disables
-  on boxes without Spinnaker — exactly like the FLIR/PySpin tier.
+:class:`_Spinnaker` is the binding: typed helpers that raise
+:class:`BackendError` on any failed ``spinError``. :class:`SpinnakerBackend`
+orchestrates it as :class:`~octacam.cameras.flir.FlirBackend` does PySpin.
 """
 
 import atexit
@@ -70,16 +42,13 @@ from octacam.cameras.registry import BackendUnavailable
 
 log = logging.getLogger("octacam")
 
-# The runtime is registered in ldconfig as libSpinnaker_C.so (SDK 4.3.x); loading
-# by soname lets the dynamic linker resolve it from /opt/spinnaker/lib.
+# By soname: the SDK registers /opt/spinnaker/lib with ldconfig.
 _LIB_NAME = "libSpinnaker_C.so"
 
-# Buffer length for the C string getters (serial, unit, enum symbolic). 256 is
-# the length FLIR's own C examples use (MAX_BUFF_LEN).
+# Buffer length for the C string getters, as FLIR's C examples use.
 _MAX_BUFF_LEN = 256
 
-# spinError codes (SpinnakerDefsC.h). SUCCESS is 0; a grab that times out returns
-# TIMEOUT and is treated as "no frame this cycle", never an error.
+# spinError codes (SpinnakerDefsC.h); a grab TIMEOUT is "no frame yet", not an error.
 SPINNAKER_ERR_SUCCESS = 0
 SPINNAKER_ERR_TIMEOUT = -1011
 
@@ -100,20 +69,12 @@ _ERR_NAMES = {
     -2007: "ERR_GENICAM_TIMEOUT",
 }
 
-# Spinnaker node interface types differ per parameter; the rest are floats. Int
-# nodes expose min/max/inc but no unit; float nodes expose min/max/unit but no
-# inc — the Spinnaker C ABI has no spinIntegerGetUnit / spinFloatGetInc (verified
-# absent from libSpinnaker_C.so.4.3), unlike PySpin's C++ node handles. This
-# costs nothing vs the PySpin backend here: octacam's int nodes (Width/Height/
-# Offset*) carry an empty unit the GUI hides either way (camera.js ``if (d.unit)``),
-# and its float nodes (ExposureTime/Gain) are continuous, so PySpin's GetInc
-# yields None on them too. The fields are left None for the respective kind;
-# snap_value and the GUI slider step both tolerate a missing inc.
+# Integer SFNC nodes; the rest of PARAM_NODES are floats. The C ABI has no
+# spinIntegerGetUnit or spinFloatGetInc (SDK 4.4), so an int's unit and a float's
+# increment stay None: unitless and continuous on these nodes anyway.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
-# Transport counters a recording reports, the record grab's buffer pool, and how
-# often a grab's incomplete images are logged — identical to the PySpin tier
-# (see flir.py).
+# As in flir.py.
 STREAM_STATISTICS = (
     "StreamLostFrameCount",
     "StreamDroppedFrameCount",
@@ -122,9 +83,7 @@ STREAM_STATISTICS = (
 )
 INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
-# spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
-# node-map walk (Camera tab). The unmapped types (ValueNode/BaseNode/Register/
-# EnumEntry/Port and UnknownNode=-1) are containers or leaves the browser skips.
+# spinNodeType (SpinnakerGenApiDefsC.h) -> widget kind; unmapped types are skipped.
 _KIND_BY_NODE_TYPE = {
     2: "int",  # IntegerNode
     3: "bool",  # BooleanNode
@@ -134,39 +93,26 @@ _KIND_BY_NODE_TYPE = {
     8: "enum",  # EnumerationNode
     10: "category",  # CategoryNode
 }
-# spinVisibility (SpinnakerGenApiDefsC.h). Beginner/Expert/Guru are shown in the
-# browser; Invisible (and any unknown) is hidden.
+# spinVisibility (SpinnakerGenApiDefsC.h).
 _VIS_NAME = {0: "beginner", 1: "expert", 2: "guru", 3: "invisible"}
 
-# The System singleton and its camera list are held for the whole session and
-# released exactly once in teardown(), after every camera has been de-inited.
+# The System singleton and its camera list, held until teardown().
 _system: Any = None
 _cam_list: Any = None
 
-# Camera handles enumerate_spinnaker() has handed out that are not yet released,
-# keyed by id() (a spinCamera is an opaque ctypes handle, so its identity — not
-# a value — is the key; works for the fake handle in tests too). A handle left
-# outstanding when the System is released makes Spinnaker's USB transport abort
-# the whole process with a libusb ``usbi_mutex_destroy`` pthread assertion (exit
-# 134): the dangling device reference trips libusb's own teardown. In the normal
-# path SpinnakerBackend.close() releases every handle, but an enumerate-only
-# probe (``octacam doctor``, a scratch script) or a killed/hung record never
-# closes — teardown() releases whatever is still here first, so an abnormal
-# shutdown degrades to a clean release instead of SIGABRT.
+# Camera handles handed out and not yet released, by id(). The System released
+# with one outstanding aborts the process (a libusb usbi_mutex_destroy
+# assertion, exit 134), so teardown() releases any a closed camera did not, as
+# after doctor's enumerate-only probe.
 _outstanding: dict[int, Any] = {}
 
-# The loaded binding, created lazily by _spin(). Tests replace it with a fake so
-# the backend orchestration is exercised without the SDK or hardware.
+# The loaded binding (_spin()); tests replace it with a fake.
 _facade: "_Spinnaker | None" = None
 
 
 def _snap_int(value: float, node_min: int | None, node_inc: int | None) -> int:
-    """Round ``value`` to the node's increment grid (offset from its min).
-
-    The firmware rejects an off-grid integer write; snap it here as the Basler
-    backend and base.snap_value do. A node without an increment just rounds to
-    the nearest int.
-    """
+    """Round ``value`` to the node's increment grid from its min (the firmware
+    rejects an off-grid write)."""
     snapped = int(round(float(value)))
     if node_inc:
         base = node_min if node_min is not None else 0
@@ -185,11 +131,10 @@ def _chk(err: int, what: str) -> None:
 
 
 def _configure(lib) -> None:
-    """Set argtypes/restype for every C function we call.
+    """Set argtypes and restype (spinError) for every C function called.
 
-    Mandatory on 64-bit: without argtypes, ctypes passes Python ints as 32-bit
-    ``c_int`` and truncates the opaque 64-bit handles/pointers, corrupting the
-    call. Every Spinnaker C function returns ``spinError`` (an int).
+    Mandatory on 64-bit: without argtypes, ctypes passes a handle as a 32-bit
+    ``c_int`` and truncates it.
     """
     P = ctypes.POINTER
     v = ctypes.c_void_p
@@ -277,13 +222,7 @@ def _configure(lib) -> None:
 
 
 class _Spinnaker:
-    """Thin typed binding over ``libSpinnaker_C.so``.
-
-    Every method wraps one small C call sequence and raises :class:`BackendError`
-    on failure, so :class:`SpinnakerBackend` reads like the PySpin backend. Node
-    operations take a nodemap handle plus the SFNC node name; camera/image
-    operations take the relevant opaque handle.
-    """
+    """Typed binding over ``libSpinnaker_C.so``; failures raise BackendError."""
 
     def __init__(self, lib):
         self._lib = lib
@@ -381,12 +320,8 @@ class _Spinnaker:
         _chk(self._lib.spinCameraListDestroy(hcamlist), "spinCameraListDestroy")
 
     def read_serial(self, hcam) -> str:
-        """DeviceSerialNumber from the TL device nodemap (readable pre-Init).
-
-        Falls back to the GenTL device id, then the camera's unique id — this
-        matches (and extends) the PySpin backend's ``GetUniqueID`` fallback, so
-        the serial is never empty on a device that omits DeviceSerialNumber.
-        """
+        """DeviceSerialNumber from the TL device node map (readable without
+        Init), else the device id, else the unique id."""
         try:
             hmap = self._out_handle(self._lib.spinCameraGetTLDeviceNodeMap, hcam)
             serial = self.read_string(hmap, "DeviceSerialNumber")
@@ -401,12 +336,8 @@ class _Spinnaker:
         return ""
 
     def read_model(self, hcam) -> str | None:
-        """DeviceModelName from the TL device nodemap (readable pre-Init).
-
-        The model-name analogue of :meth:`read_serial`; ``None`` when the node is
-        absent/unreadable. Reads a transport-layer node without initializing the
-        camera, so it is safe during a live session (octacam doctor).
-        """
+        """DeviceModelName from the TL device node map, or None; readable
+        without Init, so doctor can label a camera in a live session."""
         try:
             hmap = self._out_handle(self._lib.spinCameraGetTLDeviceNodeMap, hcam)
             return self.read_string(hmap, "DeviceModelName") or None
@@ -568,11 +499,8 @@ class _Spinnaker:
         _chk(self._lib.spinCommandExecute(node), f"execute {name}")
 
     # ------------------------------------------------------- full node-map walk
-    # A GenApi node handle obtained here is owned by the node map and freed when
-    # the camera handle is released (see the SpinnakerGenApiC.h note on
-    # spinCategoryReleaseNode / spinNodeMapReleaseNode); like the by-name path
-    # above (spinNodeMapGetNode, called every frame for TriggerSoftware) these are
-    # left unreleased — list_features runs only on Camera-tab open / after a write.
+    # Node handles belong to the node map and are freed with the camera handle
+    # (SpinnakerGenApiC.h), so neither the walk nor _node releases them.
     def _node_type(self, handle) -> int:
         t = ctypes.c_int(-1)
         if self._lib.spinNodeGetType(handle, ctypes.byref(t)) != SPINNAKER_ERR_SUCCESS:
@@ -681,13 +609,7 @@ class _Spinnaker:
         return feature
 
     def _walk(self, category, path: str, out: list[FeatureInfo], seen: set) -> None:
-        """Depth-first walk of the GenApi category tree, collecting features.
-
-        Mirrors the Basler backend's ``_walk``: recurse into category nodes
-        (grouping label = the category's display name), classify every other
-        available, non-Invisible feature by its node type, and dedup by name. One
-        bad node is skipped, never aborting the whole walk.
-        """
+        """Depth-first walk of the GenApi category tree, collecting features."""
         n = ctypes.c_size_t()
         if (
             self._lib.spinCategoryGetNumFeatures(category, ctypes.byref(n))
@@ -746,8 +668,6 @@ class _Spinnaker:
         kind = _KIND_BY_NODE_TYPE.get(self._node_type(node))
         if kind is None or kind == "category":
             raise BackendError(f"node {name} is not an editable feature")
-        # Category is only known from the tree walk; leave it blank on a single
-        # re-read (the client keeps the grouping it already has).
         return self._build_feature(node, kind, name)
 
     def write_feature(self, nodemap, name: str, value: object) -> None:
@@ -779,12 +699,9 @@ class _Spinnaker:
                 f"set {name}",
             )
         elif kind == "enum":
-            # Reuse the tested by-name enum setter (GetEntryByName -> SetIntValue).
             self.set_enum(nodemap, name, str(value))
         elif kind == "string":
-            # GenICam strings are ASCII; a non-ASCII value is invalid input, so
-            # surface it as a clean BackendError rather than a raw
-            # UnicodeEncodeError (which base.set_feature would not wrap).
+            # GenICam strings are ASCII: a BackendError, not a UnicodeEncodeError.
             try:
                 encoded = str(value).encode("ascii")
             except UnicodeEncodeError as e:
@@ -795,14 +712,8 @@ class _Spinnaker:
 
     # --------------------------------------------------------------- imaging
     def get_next_image(self, hcam, timeout_ms: int):
-        """Block up to ``timeout_ms`` for the next image; None if none arrives.
-
-        This is the GIL-free grab: ctypes releases the GIL for the whole
-        ``spinCameraGetNextImageEx`` wait, so a slow FLIR here never freezes the
-        other camera threads (the pycameleon failure mode this backend replaces).
-        A timeout — the normal "no triggered frame yet" case — returns None, not
-        an error, so the caller never raises out of the grab loop.
-        """
+        """The next image within ``timeout_ms`` (the wait releases the GIL), or
+        None on a timeout or error."""
         h = ctypes.c_void_p()
         err = self._lib.spinCameraGetNextImageEx(
             hcam, ctypes.c_uint64(int(timeout_ms)), ctypes.byref(h)
@@ -815,8 +726,7 @@ class _Spinnaker:
 
     def image_incomplete(self, himage) -> bool:
         b = ctypes.c_uint8(0)
-        # Treat an unreadable status as incomplete (skip the frame) rather than
-        # trusting a garbage buffer.
+        # An unreadable status counts as incomplete: never trust the buffer.
         if (
             self._lib.spinImageIsIncomplete(himage, ctypes.byref(b))
             != SPINNAKER_ERR_SUCCESS
@@ -834,14 +744,7 @@ class _Spinnaker:
         return 0
 
     def image_bits_per_pixel(self, himage) -> int:
-        """Bits per pixel of the delivered image (8 for Mono8).
-
-        Lets the caller reject a non-Mono8 frame before ``image_array`` reshapes
-        the buffer as one byte per pixel — a Mono16/packed frame has the same
-        2-D shape but a wider stride, so it would otherwise be misread as
-        garbage. Returns 0 if the SDK cannot report it (the caller treats that
-        as a bad frame and skips it).
-        """
+        """Bits per pixel of the image (8 for Mono8), or 0 if unknown."""
         n = ctypes.c_size_t()
         if (
             self._lib.spinImageGetBitsPerPixel(himage, ctypes.byref(n))
@@ -863,8 +766,7 @@ class _Spinnaker:
         _chk(self._lib.spinImageGetData(himage, ctypes.byref(data)), "spinImageGetData")
         if not data.value or width == 0 or height == 0:
             raise BackendError("image has no data")
-        # Honour the row stride so a padded buffer (stride > width) reshapes
-        # correctly; Mono8 from a USB3 FLIR is usually unpadded (stride == width).
+        # Honor the row stride: a padded buffer has stride > width.
         stride = ctypes.c_size_t(0)
         ok = (
             self._lib.spinImageGetStride(himage, ctypes.byref(stride))
@@ -872,8 +774,7 @@ class _Spinnaker:
         )
         row = stride.value if (ok and stride.value >= width) else width
         buffer = (ctypes.c_ubyte * (row * height)).from_address(data.value)
-        # as_array views the SDK buffer in place; .copy() owns the pixels before
-        # the SDK recycles that buffer on Release.
+        # A view of the SDK buffer: copied before Release recycles it.
         flat = np.ctypeslib.as_array(buffer)
         return flat.reshape(height, row)[:, :width].copy()
 
@@ -882,12 +783,8 @@ class _Spinnaker:
 
 
 def _spin() -> _Spinnaker:
-    """Return the loaded binding, or raise a clean BackendUnavailable.
-
-    Loads ``libSpinnaker_C.so`` lazily on first use; a box without the Spinnaker
-    SDK surfaces a :class:`BackendUnavailable` instead of a raw ``OSError``, so
-    the tier self-disables in the cascade exactly like FLIR/PySpin.
-    """
+    """The binding, loading the library on first use; BackendUnavailable
+    without the SDK."""
     global _facade
     if _facade is None:
         try:
@@ -912,26 +809,17 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     extension = "txt"
 
     def __init__(self, cam: Any):
-        # ``cam`` is an opaque spinCamera handle from enumerate_spinnaker(); it is
-        # released in close() and set to None so a second close (or a post-close
-        # query) is a safe no-op. Typed Any so the close()-sets-None lifecycle
-        # does not trip the optional-access checker on every method.
-        self._cam: Any = cam
+        self._cam: Any = cam  # an opaque spinCamera handle; None once closed
         self._nodemap: Any = None
         self._stream_nodemap: Any = None
         self._serial = _spin().read_serial(cam)
         self._original_trigger_source: str | None = None
-        # Images the SDK delivered incomplete (discarded: never corrupt data);
-        # counted so a recording can report them instead of losing them silently.
+        # Incomplete images, as in FlirBackend.
         self._incomplete_images = 0
-        # The current grab's share, for the rate-limited log (_count_incomplete).
         self._grab_is_record = False
         self._grab_incomplete = 0
         self._grab_incomplete_logged = 0
         self._incomplete_logged_at = 0.0
-        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
-        # the device TriggerSoftware execute moves into retrieve() on the grab
-        # thread so the shared trigger timer never blocks on this camera.
         self._init_trigger_handoff()
 
     @property
@@ -949,8 +837,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         except BackendError as e:
             self._stream_nodemap = None
             log.debug("No TL stream nodemap on camera %s: %s", self._serial, e)
-        # Force monochrome so image_array yields a 2-D uint8 array matching the
-        # GRAY8 video writer.
+        # Mono8, so image_array yields the 2-D uint8 array the GRAY8 writer takes.
         try:
             spin.set_enum(self._nodemap, "PixelFormat", "Mono8")
         except BackendError as e:
@@ -958,23 +845,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._maximize_link_throughput()
 
     def _maximize_link_throughput(self) -> None:
-        """Raise DeviceLinkThroughputLimit to the device max (best-effort).
-
-        FLIR ships this node capped below the sensor's real ceiling — on the
-        GS3-U3-41C6NIR it defaults to 350.6 MB/s while DeviceMaxThroughput is
-        384.4 MB/s. At 2048² Mono8 that is the difference between an ~83.6 fps and
-        an ~91.6 fps transfer ceiling, i.e. between missing and hitting the
-        camera's 90 fps spec (measured: software-triggered grab 64 → 90 fps just
-        from raising this limit — the exposure then fully overlaps the readout so
-        the grab loop becomes transfer-bound, no trigger pipelining needed).
-
-        Uncapping the per-camera limit lets each camera use as much USB3 bandwidth
-        as it can; on a rig where several cameras share one bus the *bus* is the
-        ceiling and the producer arbitrates (a saturated bus yields skipped frames,
-        which retrieve() already drops as incomplete — never corrupt data). A model
-        without the node keeps its default. Set once at open so both preview and
-        record benefit.
-        """
+        """See :meth:`octacam.cameras.flir.FlirBackend._maximize_link_throughput`."""
         if self._nodemap is None:
             return
         spin = _spin()
@@ -1007,7 +878,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         if cam is None:
             return
         spin = _spin()
-        # Flip the hand-off flag first (defensive; stop_grab normally did it).
         self._end_grab()
         try:
             if spin.camera_is_streaming(cam):
@@ -1019,15 +889,11 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 spin.camera_deinit(cam)
         except Exception:
             pass
-        # Release the handle obtained from spinCameraListGet (paired 1:1). This
-        # must happen before teardown() clears/destroys the list and releases the
-        # System, mirroring FLIR's C examples.
+        # Pairs spinCameraListGet, before teardown() releases the System.
         try:
             spin.camera_release(cam)
         except Exception:
             pass
-        # Drop it from the outstanding set so teardown() does not release it a
-        # second time (a double spinCameraRelease is itself an error).
         _outstanding.pop(id(cam), None)
         self._cam = None
         self._nodemap = None
@@ -1042,14 +908,10 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return False
 
     def is_grabbing(self) -> bool:
-        # The hand-off flag is authoritative (see FlirBackend.is_grabbing):
-        # stop_grab flips it and wakes a blocked retrieve before EndAcquisition().
         return self._cam is not None and self._grabbing
 
     def grab_locked_features(self) -> frozenset[str]:
-        # Same FLIR cameras as the PySpin tier: only Width/Height are locked
-        # during acquisition; the ROI offsets stay live-writable while grabbing.
-        return GEOMETRY_FEATURES
+        return GEOMETRY_FEATURES  # the ROI offsets stay writable mid-grab
 
     def width(self) -> int:
         return int(_spin().read_number(self._nodemap, "Width", True).value)
@@ -1067,7 +929,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return None
         return _spin().get_enum(self._nodemap, name)
 
-    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
     def _set_bool(self, name: str, value: bool) -> None:
         _spin().set_bool(self._nodemap, name, value)
 
@@ -1103,8 +964,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS
         )
 
-    # Full device node-map browser (Camera tab): walk the GenApi node map over
-    # the C API, exactly like the Basler backend does over pypylon.genicam.
     def list_features(self) -> list[FeatureInfo]:
         if self._nodemap is None:
             return []
@@ -1125,12 +984,8 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             raise BackendError("camera is not open")
         _spin().execute_command(self._nodemap, name)
 
-    # config_values / load_params and the software-trigger chain
-    # (enable_frame_trigger / set_trigger_source / begin_software_trigger_preview
-    # / trigger_once / begin_freerun / _enable_trigger_overlap) are inherited
-    # unchanged from GenICamTriggerConfig; only save_params is overridden here to
-    # stamp the device model name into the dumped config.
     def save_params(self) -> str:
+        """GenICamTriggerConfig's dump, stamped with the device model."""
         model = (
             _spin().read_string(self._nodemap, "DeviceModelName")
             if self._nodemap is not None
@@ -1143,8 +998,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Free-run: the camera acquires continuously, so fetch the next image
-        # without waiting on / firing a software trigger.
         cam = self._cam
         if cam is None or not self._grabbing:
             return None
@@ -1153,8 +1006,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     # ------------------------------------------------------------- grabbing
 
     def stream_statistics(self) -> dict[str, int]:
-        """Spinnaker's transport counters plus the incomplete images discarded
-        (mirrors FlirBackend.stream_statistics)."""
+        """As :meth:`FlirBackend.stream_statistics`."""
         out = {"IncompleteImagesDiscarded": self._incomplete_images}
         if self._stream_nodemap is None:
             return out
@@ -1182,10 +1034,8 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         try:
             spin.set_enum(self._nodemap, "AcquisitionMode", "Continuous")
         except BackendError as e:
-            # FLIR defaults to Continuous; a rejected write is not fatal.
+            # Only BeginAcquisition is fatal, as in FlirBackend.
             log.debug("Could not set AcquisitionMode on camera %s: %s", self._serial, e)
-        # Buffer handling lives on the transport-layer stream nodemap: NewestOnly
-        # for preview (≈ LatestImageOnly), OldestFirst for recording (≈ OneByOne).
         if self._stream_nodemap is not None:
             try:
                 spin.set_enum(
@@ -1212,7 +1062,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 ):
                     buffers = fewer_stream_buffers(buffers, self._serial, e)
                     continue
-                # Name the camera (mirrors the Basler "insufficient resources" hint).
                 log.error("Failed to start streaming on camera %s: %s", self._serial, e)
                 raise
         self._begin_grab()
@@ -1222,10 +1071,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
-        # Spinnaker has no WaitForFrameTriggerReady; the camera arms on the first
-        # software trigger, so report ready once acquisition has begun. (A GS3
-        # still ignores its first two hardware triggers after this — the recording
-        # primes the cameras before its train.) Deep buffer pool: see flir.py.
         self._begin_incomplete_log(record=True)
         self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
@@ -1237,9 +1082,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._grab_incomplete_logged = 0
 
     def _count_incomplete(self) -> None:
-        """Count a discarded incomplete image, logging it rate-limited as
-        FlirBackend._count_incomplete does (the grab's first, then its running
-        total at most every INCOMPLETE_REPORT_INTERVAL_S; debug in a preview)."""
+        """As :meth:`FlirBackend._count_incomplete`."""
         self._incomplete_images += 1
         self._grab_incomplete += 1
         now = time.monotonic()
@@ -1266,8 +1109,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
-        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
-        # stop, so the grab loop sees "not grabbing" immediately.
         self._end_grab()
         cam = self._cam
         if cam is None:
@@ -1282,10 +1123,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread —
-        # or, while a fired trigger's image is still due, only fetch (see
-        # _trigger_handoff: a late image must answer its own trigger).
         fire = self._claim_trigger(timeout_ms)
         if fire is None:
             return None
@@ -1293,10 +1130,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         if cam is None or not self._grabbing:
             return None
         spin = _spin()
-        # Fire the device trigger here (not on the caught _trigger_all path). The
-        # grab loop does not wrap retrieve() in try/except, so a stop-race or a
-        # trigger failure must return None, never raise — a lost trigger is one
-        # lost frame, the same as the GetNextImageEx timeout below.
         if fire:
             try:
                 spin.execute_command(self._nodemap, "TriggerSoftware")
@@ -1310,17 +1143,12 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def _fetch_image(
         self, cam, timeout_ms: int, wants_array, answers_trigger: bool = False
     ) -> Frame | None:
-        # Fetch exactly one image; never raises (a timeout, incomplete or bad
-        # frame is one lost frame, as the grab loop expects). ``answers_trigger``:
-        # the software-trigger path, where any image the SDK hands over answers
-        # the oldest fired trigger.
+        # One image, or None; ``answers_trigger`` as in FlirBackend._fetch_image.
         spin = _spin()
-        image = spin.get_next_image(cam, timeout_ms)  # None on timeout — GIL-free
+        image = spin.get_next_image(cam, timeout_ms)
         if image is None:
             return None
         if answers_trigger:
-            # A complete image is checked against the camera clock (ns), so a
-            # late one cannot answer a later trigger.
             try:
                 stamp = None if spin.image_incomplete(image) else int(spin.image_timestamp(image))
             except Exception:
@@ -1333,12 +1161,8 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             timestamp = spin.image_timestamp(image)
             array = None
             if wants_array():
-                # Reject a non-Mono8 frame before reshaping the buffer as one
-                # byte per pixel. A Mono16/packed frame is still 2-D but has a
-                # wider stride, so image_array would silently return garbage.
-                # (PySpin's ndim!=2 guard misses this — a Mono16 frame is 2-D —
-                # so this format check is stricter than the PySpin path. We force
-                # Mono8 at open, so this only fires if that best-effort set fails.)
+                # Mono8 only: image_array reads one byte per pixel, and a Mono16
+                # frame has the same shape (Mono8 is set at open, best-effort).
                 bits = spin.image_bits_per_pixel(image)
                 if bits != 8:
                     log.warning(
@@ -1357,36 +1181,20 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
 
 def read_model(hcam) -> str | None:
-    """Module-level model reader used by the doctor enumeration (see the class method)."""
+    """See :meth:`_Spinnaker.read_model`."""
     return _spin().read_model(hcam)
 
 
 def enumerate_spinnaker(
     requested_serials: list[str] | None = None, *, warn_missing: bool = True
 ):
-    """Return ``[(serial, spinCamera), ...]`` for the requested FLIR cameras.
-
-    Holds the System singleton and camera list for the session (released in
-    :func:`teardown`). Mirrors the FLIR/PySpin enumeration: all detected cameras
-    (sorted) when nothing is requested, else the listed serials in order with a
-    warning for any not connected. Camera handles that are *not* handed to a
-    backend are released here (each spinCameraListGet is paired 1:1 with
-    spinCameraRelease) so unselected cameras do not leak.
-
-    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
-    auto cascade offers the whole rig's serial list to every tier, so most of
-    those serials legitimately belong to another backend and must not be
-    reported missing here (``CameraSystem._enumerate`` warns once for a serial
-    that no tier claimed).
-    """
+    """``[(serial, spinCamera)]``: every camera sorted by serial, or the requested
+    ones in order. Holds the System until :func:`teardown`; the handles not
+    handed out are released here (each spinCameraListGet pairs a release)."""
     spin = _spin()
     global _system, _cam_list
-    # Release any prior session first. Re-enumerating without this (e.g. octacam
-    # doctor sweeps the backend list AND the cascade, so it enumerates twice)
-    # would overwrite _system/_cam_list and orphan the previous System with its
-    # camera handles still referenced; releasing that stale System late — at
-    # process exit — aborts via a libusb assertion. teardown() is idempotent and
-    # clears the outstanding-handle set, so a fresh enumeration starts clean.
+    # Release a previous enumeration's System (doctor enumerates twice): released
+    # late, at exit, it aborts the process (see _outstanding).
     if _system is not None or _cam_list is not None:
         teardown()
     _system = spin.get_system()
@@ -1396,8 +1204,6 @@ def enumerate_spinnaker(
     if count == 0:
         teardown()
         return []
-    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
-    # logs the single attributed "Detected N" summary (see basler backend).
     log.debug("spinnaker enumerated %d camera(s)", count)
 
     all_cams: list[tuple[str, Any]] = []
@@ -1418,10 +1224,7 @@ def enumerate_spinnaker(
             continue
         out.append((serial, hcam))
         used.add(serial)
-        # Track the handed-out handle so teardown() can release it if the caller
-        # never close()s the camera (see _outstanding); close() removes it again.
         _outstanding[id(hcam)] = hcam
-    # Release the handles we will not open, so they do not leak until teardown.
     for serial, hcam in all_cams:
         if serial not in used:
             try:
@@ -1432,21 +1235,10 @@ def enumerate_spinnaker(
 
 
 def teardown() -> None:
-    """Release the Spinnaker System singleton, once, after cameras are closed.
-
-    Called by CameraSystem.close() through the registry. The camera list is
-    cleared and destroyed and the System instance released only after every
-    SpinnakerBackend.close() has de-inited and released its camera handle, or
-    Spinnaker reports cameras still in use.
-    """
+    """Release the System singleton, after every camera was closed, and any
+    handle no camera closed (see _outstanding). Idempotent."""
     global _system, _cam_list
     spin = _facade
-    # Release any handles enumerate handed out that were never close()d, so the
-    # System is not released with a dangling device reference (which aborts the
-    # process via a libusb pthread assertion — see _outstanding). Best-effort and
-    # idempotent: close() already dropped the handles it released, so in the
-    # normal CameraSystem.close() path (every camera closes before teardown) this
-    # loop is empty; it only fires for a leaked handle (probe / abnormal exit).
     if spin is not None and _outstanding:
         for handle in list(_outstanding.values()):
             try:
@@ -1474,11 +1266,5 @@ def teardown() -> None:
         _system = None
 
 
-# Safety net: guarantee the System (and any handle enumerate handed out) is
-# released at interpreter shutdown even for a caller that enumerates but never
-# runs teardown() — notably ``octacam doctor``/``benchmark``, which read serials
-# and drop the handles. Without this such a path leaves a dangling device
-# reference that aborts the whole process with a libusb ``usbi_mutex_destroy``
-# assertion at exit. teardown() is idempotent and a no-op when the SDK was never
-# loaded, so this composes with CameraSystem.close() already calling it.
+# For paths that enumerate without a CameraSystem (doctor, an aborted run).
 atexit.register(teardown)
