@@ -40,9 +40,8 @@ def _fake_backends(monkeypatch, layout: dict[str, list[str]]):
 
 
 def _enumerate(selector="auto", requested=None):
-    # Drive _enumerate without opening cameras (no __init__).
-    obj = CameraSystem.__new__(CameraSystem)
-    return obj._enumerate(selector, requested)
+    # Drive _enumerate on a hardware-free shell: pending() opens nothing.
+    return CameraSystem.pending()._enumerate(selector, requested)
 
 
 def test_highest_tier_claims_each_serial(monkeypatch):
@@ -87,9 +86,18 @@ def test_requested_order_and_dedup(monkeypatch):
     assert claimed["D"] is factories["floor"]
 
 
-def test_single_tier_passes_requested_straight_through(monkeypatch):
-    # With one active backend, requested serials go straight to its enumeration
-    # (preserving its own ordering / not-found warnings).
+def test_single_tier_keeps_requested_order_and_reports_the_absent(monkeypatch, caplog):
+    # One active backend runs the same claiming loop as the cascade: requested
+    # order, and one warning (from CameraSystem) for a serial nobody found.
     _fake_backends(monkeypatch, {"solo": ["X", "Y", "Z"]})
-    entries = _enumerate(requested=["Z", "X"])
+    system = CameraSystem.pending()
+    entries = system._enumerate("auto", ["Z", "Q", "X"])
     assert [serial for serial, _h, _f in entries] == ["Z", "X"]
+    assert system.missing == {"Q": "not found"}
+    assert sum("Q" in m and "not found" in m for m in caplog.messages) == 1
+
+
+def test_a_serial_requested_twice_is_opened_once(monkeypatch):
+    _fake_backends(monkeypatch, {"vendor": ["A"], "floor": ["A", "B"]})
+    entries = _enumerate(requested=["A", "B", "A"])
+    assert [serial for serial, _h, _f in entries] == ["A", "B"]

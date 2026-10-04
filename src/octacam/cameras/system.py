@@ -9,6 +9,7 @@ rest of the system only ever sees :class:`~octacam.cameras.base.Camera`.
 
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -146,15 +147,13 @@ class CameraSystem:
     ) -> list[tuple[str, object, "Callable"]]:
         """Resolve the selector to ``[(serial, handle, backend_factory), ...]``.
 
-        With a single active backend (a concrete selector, or "auto" resolving to
-        one available tier) the requested serials are passed straight to that
-        backend's enumeration, preserving its ordering and its "not found"
-        warnings. With several active backends (the cascade) each is enumerated
-        in priority order over the *requested* serials (never the whole bus —
-        see the comment below), and a camera is claimed by the *first* backend
-        that reports its serial — a lower tier that also sees an already-claimed
-        serial is skipped, so a camera served by a vendor SDK is never
-        double-opened by the pycameleon floor.
+        Each active tier, in cascade order, is offered the requested serials,
+        never the whole bus: enumeration is a device access (the Basler tier's
+        CreateDevice downloads each camera's XML), so a sweep made a rig pay for
+        cameras it never opens. The first tier that reports a serial claims it, so
+        no camera is opened twice; a None handle (present but unusable, logged by
+        the tier) claims the serial without being opened. Requested serials come
+        back in the requested order.
         """
         active = []  # (name, enumerate_fn, factory), in cascade priority order
         unavailable: list[BackendUnavailable] = []
@@ -177,102 +176,40 @@ class CameraSystem:
         # enumerate (as a set — teardown order is not significant among them).
         self._backends_used = {name for name, _fn, _mk in active}
 
-        if len(active) == 1:
-            name, enumerate_fn, make_backend = active[0]
-            enumerated = list(enumerate_fn(requested_serial_numbers))
-            entries = [
-                (serial, handle, make_backend)
-                for serial, handle in enumerated
-                if handle is not None  # None = present but unusable (already logged)
-            ]
-            # Record the shortfall here too, not only on the cascade path below:
-            # a rig with one concrete backend is the common case, and it is what
-            # made a missing camera visible as nothing but a smaller grid.
-            if requested_serial_numbers:
-                claimed = {serial for serial, _handle, _mk in entries}
-                unusable = {serial for serial, handle in enumerated if handle is None}
-                for serial in requested_serial_numbers:
-                    if serial in claimed:
-                        continue
-                    self.missing[serial] = (
-                        "detected but unusable"
-                        if serial in unusable
-                        else "not found"
-                    )
-            if entries:
-                log.info("Detected %d camera(s) via %s", len(entries), name)
-            return entries
-
-        # The cascade: enumerate every active tier in priority order and let the
-        # highest one claim each serial. Lower tiers still enumerate (so a camera
-        # a vendor tier missed can fall through) but skip serials already claimed.
-        #
-        # Every tier is offered the rig's *whole* requested serial list, not
-        # None. Enumeration is not free — the Basler tier's CreateDevice
-        # downloads each camera's XML over USB — so enumerating the full bus made
-        # a rig pay for cameras it would never open (a 2-camera FLIR rig paid the
-        # cost of six attached Baslers, and inherited the stall when one of them
-        # was sick). Passing the list also stops the discarded surplus handles
-        # from leaking, since they are never created. warn_missing=False because
-        # most of those serials belong to another tier; the loop below warns once
-        # for a serial that no tier claimed.
-        claimed: set[str] = set()
-        claimed_by: dict[str, str] = {}  # serial -> winning backend name (for logs)
-        collected: list[tuple[str, object, Callable]] = []
+        claimed_by: dict[str, str] = {}  # serial -> the tier that claimed it
+        found: dict[str, tuple[str, object, Callable]] = {}
         for name, enumerate_fn, make_backend in active:
+            # Quiet about absent serials: most belong to another tier, and one no
+            # tier claims is warned about below.
             for serial, handle in enumerate_fn(
                 requested_serial_numbers, warn_missing=False
             ):
-                if serial in claimed:
+                if serial in claimed_by:
                     continue  # a higher-priority tier already owns this camera
-                claimed.add(serial)
-                if handle is None:
-                    # Present but unusable (e.g. a USB3 link that fell back to USB
-                    # 2.0); the backend already logged why. Claim the serial so no
-                    # lower tier pointlessly retries the same broken device, but
-                    # don't collect it for opening.
-                    continue
                 claimed_by[serial] = name
-                collected.append((serial, handle, make_backend))
+                if handle is not None:
+                    found[serial] = (serial, handle, make_backend)
         if not requested_serial_numbers:
-            self._log_detected(collected, claimed_by)
-            return collected
-        by_serial = {entry[0]: entry for entry in collected}
-        ordered: list[tuple[str, object, Callable]] = []
-        for serial in requested_serial_numbers:
-            entry = by_serial.get(serial)
-            if entry is None:
-                # A claimed-but-unusable serial already logged its real reason;
-                # only warn for one that no tier detected at all.
-                if serial not in claimed:
+            entries = list(found.values())
+        else:
+            entries = []
+            for serial in dict.fromkeys(requested_serial_numbers):
+                if serial in found:
+                    entries.append(found[serial])
+                elif serial in claimed_by:
+                    self.missing[serial] = "detected but unusable"
+                else:
                     log.warning("Camera with serial number %s not found", serial)
                     self.missing[serial] = "not found"
-                else:
-                    self.missing[serial] = "detected but unusable"
-                continue
-            ordered.append(entry)
-        self._log_detected(ordered, claimed_by)
-        return ordered
-
-    @staticmethod
-    def _log_detected(
-        entries: list[tuple[str, object, "Callable"]], claimed_by: dict[str, str]
-    ) -> None:
-        """Log one attributed "Detected N camera(s)" line for the cascade.
-
-        Rolls the per-tier enumeration (each tier logs only at debug) into a
-        single summary that also says which backend won each camera, e.g.
-        ``Detected 3 camera(s): 2 via spinnaker, 1 via basler`` — instead of
-        the several overlapping per-tier counts that confused operators.
-        """
-        if not entries:
-            return
-        counts: dict[str, int] = {}
-        for serial, _handle, _make in entries:
-            name = claimed_by.get(serial, "?")
-            counts[name] = counts.get(name, 0) + 1
-        breakdown = ", ".join(f"{n} via {name}" for name, n in counts.items())
-        log.info("Detected %d camera(s): %s", len(entries), breakdown)
+        if entries and len(active) == 1:
+            log.info("Detected %d camera(s) via %s", len(entries), active[0][0])
+        elif entries:
+            # One line naming the tier that won each camera; the tiers' own
+            # enumeration logs only at debug.
+            counts = Counter(claimed_by[serial] for serial, _h, _mk in entries)
+            breakdown = ", ".join(f"{n} via {name}" for name, n in counts.items())
+            log.info("Detected %d camera(s): %s", len(entries), breakdown)
+        return entries
 
     def _teardown_backends(self) -> None:
         """Release session resources for every backend we enumerated."""
