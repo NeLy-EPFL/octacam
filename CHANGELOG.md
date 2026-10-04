@@ -77,6 +77,15 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Two full-sensor FLIR Grasshopper3s could not record together**: each asked
+  for 128 stream buffers, more than the kernel's default 1000 MB of USB memory
+  holds, and both failed to start ("Could not start acquisition"). A pool that
+  does not fit is now halved (down to 16) with a warning naming
+  `usbcore.usbfs_memory_mb`.
+- **octacam aborted at exit after a FLIR camera failed to start** (exit code
+  134, "something still holds a reference to the camera").
+- **A take that lost a camera at start still read as synchronized**: a camera
+  whose recording did not start now fails the summary's `sync` verdict.
 - **`octacam flash` could reset a board the GUI was using** when the config
   directory was given as a relative path: the rig instance lock is now keyed on
   the resolved path, so every spelling of one rig shares one lock.
