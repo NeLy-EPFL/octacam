@@ -99,11 +99,7 @@ class FirmwareCheck:
 
     state: FirmwareState
     detail: str
-    board_name: str | None
-    board_version: int | None
-    board_build: str | None
     needed_build: str
-    needed_version: int
 
     @property
     def needs_flash(self) -> bool:
@@ -124,11 +120,7 @@ class FirmwareCheck:
         return {
             "state": self.state.value,
             "detail": self.detail,
-            "board_name": self.board_name,
-            "board_version": self.board_version,
-            "board_build": self.board_build,
             "needed_build": self.needed_build,
-            "needed_version": self.needed_version,
             "needs_flash": self.needs_flash,
             "safe_to_auto_flash": self.safe_to_auto_flash,
         }
@@ -209,7 +201,7 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
     prefix = spec.banner_prefix.upper()
 
     def check(state: FirmwareState, detail: str) -> FirmwareCheck:
-        return FirmwareCheck(state, detail, name, version, build, needed_build, nv)
+        return FirmwareCheck(state, detail, needed_build)
 
     if name is None:
         return check(

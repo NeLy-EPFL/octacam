@@ -160,7 +160,7 @@ def test_check_to_dict_roundtrip(spec):
     assert d["state"] == "outdated"
     assert d["needs_flash"] is True
     assert d["needed_build"] == "abc12345"
-    assert set(d) >= {"state", "detail", "board_build", "needs_flash", "safe_to_auto_flash"}
+    assert set(d) >= {"state", "detail", "needs_flash", "safe_to_auto_flash"}
 
 
 # ---------------------------------------------------------------------------
