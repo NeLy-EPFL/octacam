@@ -179,7 +179,7 @@ def probe_identity(
 
     It writes to the board, so callers make it opt-in. A port another process
     holds reads as ``busy``, except on Linux when the holder opened it without
-    ``O_EXCL`` (the ``--probe-serial`` help says so)."""
+    ``O_EXCL``: the plugins do, so a port a live session holds is probed."""
     # Windows ports are always exclusive and do not take the kwarg.
     kwargs: dict[str, Any] = {"exclusive": True} if os.name == "posix" else {}
     try:
