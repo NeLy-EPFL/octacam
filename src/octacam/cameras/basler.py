@@ -1,9 +1,7 @@
-"""Basler / pypylon camera backend.
+"""Basler backend over pypylon, the only module that imports it.
 
-The only module that imports pypylon. Implements the :class:`CameraBackend`
-seam over a pylon ``InstantCamera`` and enumerates devices through the pylon
-transport-layer factory. Per-camera parameters persist as Basler ``.pfs``
-feature-stream files.
+A pylon ``InstantCamera`` per camera, enumerated through :func:`tl_factory`;
+parameters persist as ``.pfs`` feature-stream files.
 """
 
 import logging
@@ -33,8 +31,7 @@ from octacam.cameras.base import (
 log = logging.getLogger("octacam")
 
 TRIGGER_READY_TIMEOUT_MS = 1000
-# pylon stream-grabber counters a recording reports, where the transport layer
-# has them (names differ between transport layers; absent ones are skipped).
+# Stream-grabber counters a recording reports, where the transport layer has them.
 _STREAM_STATISTICS = (
     "Statistic_Total_Buffer_Count",
     "Statistic_Failed_Buffer_Count",
@@ -45,9 +42,8 @@ _STREAM_STATISTICS = (
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
 
-# pypylon.genicam interface-type int -> FeatureInfo widget kind. GetNode() nodes
-# come back already downcast to the typed interface (IInteger/IEnumeration/...),
-# so no CxxxPtr cast is needed; only INode-level metadata goes through .GetNode().
+# Interface type -> widget kind. pypylon hands nodes back already downcast to
+# their typed interface; only INode metadata needs .GetNode().
 _IFACE_KIND = {
     genicam.intfIInteger: "int",
     genicam.intfIFloat: "float",
@@ -57,7 +53,6 @@ _IFACE_KIND = {
     genicam.intfICommand: "command",
     genicam.intfICategory: "category",
 }
-# GetVisibility() int -> name; Beginner/Expert/Guru are shown in the browser.
 _VIS_NAME = {
     genicam.Beginner: "beginner",
     genicam.Expert: "expert",
@@ -136,14 +131,10 @@ def _basler_enum_entries(node) -> list[dict] | None:
 
 
 def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
-    """Undo the live preview's trigger overrides in a saved .pfs.
-
-    start_preview forces the FrameStart selector to TriggerMode On /
-    TriggerSource Software; a saved snapshot would bake those in, so a later
-    headless/external recording would misread the rig's intended source. Reset
-    the FrameStart context to the shipped convention (TriggerMode Off,
-    TriggerSource = the value load_params captured). Other selectors (e.g.
-    FrameBurstStart) and context-qualified lines are left untouched.
+    """Undo a live preview's FrameStart trigger overrides in a saved .pfs:
+    TriggerMode back to Off (the shipped convention), TriggerSource to the one
+    load_params captured. Other selectors are left alone. The TSV counterpart is
+    :func:`octacam.cameras._genicam_config.normalize_trigger_source`.
     """
     out = []
     for line in content.splitlines():
@@ -168,11 +159,8 @@ def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
 
 
 def _drop_empty_pfs_values(content: str) -> str:
-    """Remove .pfs entries with empty values (e.g. "ImageFilename\\t").
-
-    Older pylon versions wrote such no-op entries; current GenICam
-    persistence parsers reject the whole stream over them.
-    """
+    """Drop .pfs entries with an empty value ("ImageFilename\\t"): current
+    parsers reject the whole stream over them."""
     lines = []
     for line in content.splitlines():
         if not line.startswith("#") and "\t" in line:
@@ -190,21 +178,14 @@ class BaslerBackend(SoftwareTriggerHandoff):
     extension = "pfs"
 
     def __init__(self, device):
-        # Set to None by close() once the device is destroyed; the is_open/
-        # is_grabbing guards below tolerate that so a second close() is a no-op.
-        self.raw: Any = pylon.InstantCamera(device)
+        self.raw: Any = pylon.InstantCamera(device)  # None once closed
         info = self.raw.GetDeviceInfo()
         self._serial = str(info.GetSerialNumber())
         # Whether grab timestamps count ns (USB3 Vision; a GigE camera's count ticks).
         self._stamps_ns = info.GetDeviceClass() == "BaslerUsb"
         self._original_trigger_source: str | None = None
-        # Count grabs that pylon flagged as incomplete/failed (USB bandwidth
-        # gaps, packet loss) so a rig delivering partial frames can be spotted.
+        # Grabs pylon flagged failed (bandwidth gaps, packet loss).
         self._incomplete_grabs = 0
-        # Software-trigger hand-off (shared mixin): trigger_once only bumps a
-        # counter; the device ExecuteSoftwareTrigger moves into retrieve() on the
-        # grab thread so the shared trigger timer never blocks on this camera and
-        # cannot throttle the others.
         self._init_trigger_handoff()
 
     @property
@@ -215,21 +196,13 @@ class BaslerBackend(SoftwareTriggerHandoff):
         try:
             self.raw.Open()
         except genicam.GenericException as e:
-            # Usually the device is already opened exclusively by another
-            # process (a second `octacam gui` on the rig). Surface it as a
-            # BackendError so the caller reports it cleanly instead of letting
-            # a raw pylon traceback escape.
             raise BackendError(str(e)) from e
 
     def close(self) -> None:
-        # Tear the device down while the pylon runtime is still alive. pypylon
-        # runs PylonTerminate() from a Py_AtExit hook during interpreter
-        # shutdown; an InstantCamera (or the TlFactory) left for the garbage
-        # collector to destroy *after* that point touches freed runtime state
-        # and segfaults — the crash that appears right after "octacam stopped".
-        # Close() alone does not detach the device, so DestroyDevice() here (and
-        # dropping the reference) makes the wrapper collectable before exit.
-        if self.raw is None:  # idempotent: a second close() must not raise
+        # Destroy the device while the pylon runtime lives: pypylon runs
+        # PylonTerminate() from a Py_AtExit hook, and a device the GC destroys
+        # after it segfaults. Close() alone does not detach the device.
+        if self.raw is None:  # a second close() is a no-op
             return
         try:
             if self.raw.IsGrabbing():
@@ -246,18 +219,10 @@ class BaslerBackend(SoftwareTriggerHandoff):
         return self.raw is not None and self.raw.IsOpen()
 
     def is_grabbing(self) -> bool:
-        # The hand-off flag (set under the cond by start/stop) is authoritative,
-        # not the native IsGrabbing(): stop_grab flips the flag and wakes a blocked
-        # retrieve *before* the native StopGrabbing(), so the grab loop must see
-        # "not grabbing" from the same instant, and the shared trigger timer must
-        # never make a native call on the wait path.
         return self.raw is not None and self._grabbing
 
     def grab_locked_features(self) -> frozenset[str]:
-        # Basler locks the whole ROI — Width/Height *and* the offsets — while
-        # grabbing (pylon sets TLParamsLocked on StartGrabbing), so IsWritable is
-        # False for all four mid-preview. The offsets join the size nodes on the
-        # grab-cycle path so the Camera tab can still edit them.
+        # pylon locks the whole ROI while grabbing (TLParamsLocked), offsets too.
         return GEOMETRY_FEATURES | {"OffsetX", "OffsetY"}
 
     def width(self) -> int:
@@ -343,8 +308,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
         feature = _basler_feature(typed)
         if feature is None:
             raise BackendError(f"node {name} is not an editable feature")
-        # Category is only known from the tree walk; leave it blank on a
-        # single-node re-read (the client keeps the grouping it already has).
         return feature
 
     def write_feature(self, name: str, value: object) -> None:
@@ -383,11 +346,8 @@ class BaslerBackend(SoftwareTriggerHandoff):
             raise BackendError(str(e)) from e
 
     def config_values(self, config_str: str) -> dict[str, str]:
-        """Parse a Basler ``.pfs`` (``Name<TAB>...<TAB>value``) into name->value.
-
-        The value is the last tab-separated field; context-qualified selector
-        lines (``TriggerMode\\t{TriggerSelector=...}\\tOff``) collapse to the base
-        node, which is good enough for the per-field reset fallback."""
+        """``.pfs`` lines as {name: last field}; selector-qualified lines collapse
+        to the base node, enough for the per-field reset."""
         out: dict[str, str] = {}
         for line in config_str.splitlines():
             if line.startswith("#") or "\t" not in line:
@@ -420,12 +380,11 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
     # ----------------------------------------------------------- triggering
 
-    # The trigger setup guards on is_open(), not raw.IsOpen(): close() sets raw to
-    # None, and a closed camera must no-op like the other backends.
+    # Guarded by is_open(), not raw.IsOpen(): raw is None once closed.
     def enable_frame_trigger(self) -> None:
         if not self.is_open():
             return
-        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
+        self._clear_freerun_cap()
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
 
@@ -443,15 +402,13 @@ class BaslerBackend(SoftwareTriggerHandoff):
             )
 
     def begin_software_trigger_preview(self) -> None:
-        self._clear_freerun_cap()  # drop any free-run preview cap before triggering
+        self._clear_freerun_cap()
         self.raw.TriggerSelector.Value = "FrameStart"
         self.raw.TriggerMode.Value = "On"
         self.raw.TriggerSource.Value = "Software"
 
     def trigger_once(self) -> None:
-        # Only bump the pending counter; retrieve() fires the device trigger on
-        # the grab thread. Keeps the shared trigger timer off this device.
-        self._bump_trigger()
+        self._bump_trigger()  # no device call: retrieve() fires it (_trigger_handoff)
 
     def _apply_freerun_cap(self, fps: float) -> None:
         """Best-effort: cap the free-run rate at ``fps`` (SFNC nodes on the ace)."""
@@ -465,9 +422,8 @@ class BaslerBackend(SoftwareTriggerHandoff):
             )
 
     def _clear_freerun_cap(self) -> None:
-        """Best-effort: disable the manual frame-rate cap so it can't clip a
-        subsequent triggered recording (the enable node applies even while
-        triggered on Basler). No-op on a model without the node."""
+        """Best-effort removal of the free-run cap, which on Basler applies even
+        while triggered and would clip a recording."""
         raw = self.raw
         if raw is None:
             return
@@ -477,16 +433,8 @@ class BaslerBackend(SoftwareTriggerHandoff):
             pass
 
     def begin_freerun(self, fps: float | None = None) -> bool:
-        """Switch to continuous free-run (TriggerMode Off).
-
-        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
-        by free-run *preview* (``fps`` set, so the rate is capped at the target and
-        the preview draws the same bandwidth as an fps-matched recording).
-        Best-effort: any failure returns False so the caller skips free-run for this
-        camera rather than aborting. A subsequent ``begin_software_trigger_preview``
-        re-arms the FrameStart trigger (and clears the cap), so no explicit restore
-        is needed.
-        """
+        """TriggerMode Off, capped at ``fps`` when given; False if refused. Arming
+        a triggered mode later clears the cap."""
         raw = self.raw
         if raw is None:
             return False
@@ -495,7 +443,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             try:
                 raw.AcquisitionMode.Value = "Continuous"
             except genicam.GenericException:
-                pass  # Continuous is the grabbing default; a rejected write is fine
+                pass  # Continuous is the default
             if fps is not None:
                 self._apply_freerun_cap(fps)
             return True
@@ -506,9 +454,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Like retrieve(), but the camera free-runs so no software trigger is
-        # fired: just fetch the next frame it pushed. Never raises (mirrors
-        # retrieve): a stop-race or bad grab is one lost frame.
         raw = self.raw
         if raw is None or not self._grabbing:
             return None
@@ -520,9 +465,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
             if not result.IsValid():
                 return None
             if not result.GrabSucceeded():
-                # A failed grab of a hardware-triggered frame is a lost pulse:
-                # count it (the recording's pulse accounting reports it) rather
-                # than dropping it silently.
                 self._count_incomplete(result)
                 return None
             return (result.Array if wants_array() else None, result.TimeStamp)
@@ -532,8 +474,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             result.Release()
 
     def _count_incomplete(self, result) -> None:
-        """Count a failed grab, surfacing its cause periodically (rate-limited to
-        avoid flooding at the trigger rate)."""
+        """Count a failed grab, logging its cause rate-limited."""
         self._incomplete_grabs += 1
         if self._incomplete_grabs % 100 == 1:
             log.warning(
@@ -570,8 +511,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
         try:
             self.raw.StartGrabbing(strategy)
         except genicam.GenericException as e:
-            # The pylon error does not identify the camera (only an opaque
-            # USB address), so name it before propagating.
+            # pylon's error names only a USB address.
             log.error(
                 "Failed to start streaming on camera %s. For 'insufficient "
                 "system resources' errors, raise the open file limit "
@@ -587,15 +527,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
     def start_grab_record(self) -> bool:
         self._start_grabbing(pylon.GrabStrategy_OneByOne)
-        # One-time ready gate: covers the first software trigger. retrieve()
-        # serializes execute→RetrieveResult on the single grab thread thereafter,
-        # so at most one exposure is ever in flight and OneByOne's bounded output
-        # queue can never overflow.
-        #
-        # base.start_record does NOT call stop_grab on a False/raising return, so
-        # a failed gate must leave the camera NOT grabbing itself — otherwise the
-        # native grab (and _grabbing) stays on with no record thread, wedging the
-        # camera against the next StartGrabbing. stop_grab() is idempotent.
+        # A ready gate for the first software trigger. Camera.start_record does
+        # not stop the grab on failure, so a failed gate stops it here, or the
+        # next StartGrabbing finds the camera wedged.
         try:
             ready = self.raw.WaitForFrameTriggerReady(
                 TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
@@ -608,8 +542,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
         return ready
 
     def stop_grab(self) -> None:
-        # Flip the hand-off flag and wake any blocked retrieve BEFORE the native
-        # stop, so the grab loop sees "not grabbing" at once (no full-timeout stall).
         self._end_grab()
         if self.raw is not None:
             self.raw.StopGrabbing()
@@ -617,18 +549,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Wait for a pending software trigger, then fire exactly one device
-        # trigger and fetch exactly one frame on this camera's own grab thread —
-        # or, while a fired trigger's image is still due, only fetch (see
-        # _trigger_handoff: a late image must answer its own trigger).
         fire = self._claim_trigger(timeout_ms)
         if fire is None:
             return None
-        # The device call now lives here (not on the caught _trigger_all path), and
-        # the grab loop does not wrap retrieve() in a try/except — so a stop-race
-        # or trigger failure must return None, never raise, or the grab thread dies
-        # uncaught and the ffmpeg writer child is orphaned. A trigger lost to such
-        # an error is one lost frame, the same as a grab timeout.
         raw = self.raw
         if raw is None or not self._grabbing:
             return None
@@ -638,10 +561,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             except genicam.GenericException:
                 self._trigger_unfired()
                 return None
-        # RetrieveResult can raise (not just time out) on a device-level error
-        # — device removed/unplugged mid-record, grab-engine/transport failure —
-        # so guard it too, returning None (one lost frame) to uphold the
-        # never-raises contract the grab loop relies on for its post-loop cleanup.
+        # RetrieveResult raises, not just times out, on an unplug or a transport error.
         try:
             result = raw.RetrieveResult(
                 self._fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
@@ -649,22 +569,14 @@ class BaslerBackend(SoftwareTriggerHandoff):
         except genicam.GenericException:
             return None
         try:
-            # IsValid is the pypylon equivalent of C++'s `if (grab_result)`:
-            # a timed-out RetrieveResult returns an empty result whose other
-            # accessors throw, so bail before touching them.
+            # A timed-out RetrieveResult is an empty result whose accessors throw.
             if not result.IsValid():
                 return None
             succeeded = result.GrabSucceeded()
-            # A failed grab answers its trigger too; a good one is checked against
-            # the camera clock, when that clock counts ns (USB3 Vision; a GigE
-            # camera's ticks are not), so a late image cannot answer a later one.
+            # A failed grab answers its trigger too; the clock check needs ns.
             self._trigger_answered(
                 int(result.TimeStamp) if succeeded and self._stamps_ns else None
             )
-            # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
-            # packet loss): pylon already drops it for us, but partial frames are
-            # a prime suspect for corrupt previews, so surface the cause
-            # periodically (rate-limited to avoid flooding at the trigger rate).
             if not succeeded:
                 self._count_incomplete(result)
                 return None
@@ -678,15 +590,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
 
 def _describe_open_failure(serial: str, exc: Exception) -> str:
-    """An actionable, operator-facing reason a Basler camera cannot be opened.
-
-    The frequent gotcha is a USB3 camera whose SuperSpeed link fails to train and
-    falls back to USB 2.0: it is physically in a USB 3 port, yet pylon refuses it
-    with "The device cannot be operated on an USB 2.0 port." That wording reads
-    like a wrong-port mistake when the real cause is the cable/connector/port
-    link, so translate it into something the operator can act on. Any other
-    open error is passed through verbatim.
-    """
+    """An actionable reason a Basler camera cannot be opened: pylon's "USB 2.0
+    port" error reads like a wrong port when a USB3 link that failed to train
+    fell back to USB 2.0 (the cable or connector)."""
     text = str(exc)
     if "USB 2.0" in text or "USB 3.0 compatible port" in text:
         return (
@@ -711,32 +617,22 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
     return f"Camera {serial} could not be opened and will be skipped: {text}"
 
 
-# pylon's GenTL-consumer transport layer loads every GenTL producer on
-# GENICAM_GENTL64_PATH when the factory first loads its transport layers. A
-# system pylon install puts its own producers there (/etc/profile.d/
-# basler-gentl-path.sh), and its ProducerU3V.cti pulls /opt/pylon's
-# libuxapi.so.15 into the process under the same soname as pypylon's bundled
-# copy. pypylon's USB transport layer then binds whichever copy loaded first,
-# and the producers' unload segfaulted every process at interpreter exit (each
-# `octacam record` on such a rig exited 139 after writing its outputs). octacam
-# drives Basler cameras through pylon's native transport layers only — it has
-# no GenTL path — so the path is hidden while the factory loads its transport
-# layers, then restored for the rest of the process. pylon reads it only then:
-# later enumerations and device opens load no producer (measured). Mutating the
-# environment is not thread-safe against a concurrent C getenv, so it happens
-# once, on the first factory use, before any other SDK starts: the auto cascade
-# enumerates its tiers one at a time with basler first, and doctor's parallel
-# scan loads the factory on its main thread before starting its workers.
+# pylon loads every GenTL producer on GENICAM_GENTL64_PATH when the factory first
+# loads its transport layers, and only then. A system pylon puts its producers
+# there (/etc/profile.d/basler-gentl-path.sh); their libuxapi shadows pypylon's
+# bundled copy, and their unload segfaulted every process at exit. octacam uses
+# only pylon's native transport layers, so the path is hidden for that load.
+# Mutating the environment races a C getenv, so it happens once, before any other
+# SDK starts: the cascade enumerates basler first, and doctor loads the factory
+# before starting its workers.
 _tl_factory_lock = threading.Lock()
 _tl_factory_ready = False
 
 
 def tl_factory():
-    """pylon's transport-layer factory, loaded without any GenTL producer.
-
-    Every octacam path into pylon goes through here, so the first one loads the
-    factory's transport layers with ``GENICAM_GENTL64_PATH`` hidden (see above).
-    A process that used pylon before octacam did has already loaded them."""
+    """pylon's transport-layer factory, loaded without GenTL producers. Every
+    path into pylon goes through it; a process that used pylon first has already
+    loaded them."""
     global _tl_factory_ready
     with _tl_factory_lock:
         if _tl_factory_ready:
@@ -752,29 +648,18 @@ def tl_factory():
         return factory
 
 
-# `TlFactory.CreateDevice` downloads the camera's XML over USB, so it is a real
-# device access that a sick camera can stall for *minutes*: a camera whose link
-# trains at full SuperSpeed but whose control transfers time out held one test
-# rig's startup for 271 s inside a single call while pylon retried the first
-# register read (a healthy camera returns in ~0.16 s). pylon exposes no timeout
-# for this — its ReadTimeout/WriteTimeout are GigE-only — so bound it here.
+# CreateDevice downloads the camera's XML over USB, with no pylon timeout (its
+# Read/WriteTimeout are GigE-only): a camera whose link trained but whose control
+# transfers time out held a rig's startup for 271 s in one call (healthy: 0.16 s).
 _CREATE_DEVICE_TIMEOUT_S = 15.0
-# How long to wait before telling the operator which cameras we are still
-# waiting on; also the poll slice of the deadline loop below.
+# When to name the cameras still awaited; also the deadline loop's poll slice.
 _CREATE_PROGRESS_INTERVAL_S = 3.0
 
 
 def _create_device_timeout() -> float:
-    """The per-camera ``CreateDevice`` deadline, in seconds.
-
-    ``OCTACAM_BASLER_CREATE_TIMEOUT`` raises (or lowers) it for a rig with a
-    genuinely slow camera. A value that is not a finite positive number is
-    ignored so a typo cannot silently disable the guard — note that ``float()``
-    happily accepts ``inf`` and ``nan``, and neither is caught by a ``<= 0``
-    test: ``inf`` would restore the unbounded stall this exists to prevent, and
-    ``nan`` compares False against everything, which would turn the deadline loop
-    into a spin that never exits.
-    """
+    """The CreateDevice deadline: ``OCTACAM_BASLER_CREATE_TIMEOUT`` if it is a
+    finite positive number (``float()`` accepts ``inf``, which would remove the
+    guard, and ``nan``, which would spin the deadline loop), else the default."""
     raw = os.environ.get("OCTACAM_BASLER_CREATE_TIMEOUT", "").strip()
     if not raw:
         return _CREATE_DEVICE_TIMEOUT_S
@@ -794,15 +679,10 @@ def _create_device_timeout() -> float:
 
 
 def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
-    """A done-callback that destroys a handle which arrived after the deadline.
-
-    We abandoned the camera and reported it as unusable, but the worker thread is
-    still inside pylon and will eventually return a real device. Nothing owns it
-    at that point, and a pylon device left for the garbage collector to destroy
-    after ``PylonTerminate()`` runs from pypylon's ``Py_AtExit`` hook touches
-    freed runtime state and segfaults (see :meth:`BaslerBackend.close`) — so
-    release it here rather than leaking it for the life of the process.
-    """
+    """A done-callback destroying a handle that arrives after the deadline:
+    nothing owns it, and left to the GC it would segfault at exit (see
+    :meth:`BaslerBackend.close`). This is the factory's DestroyDevice, not the
+    InstantCamera's."""
 
     def _callback(future: "Future") -> None:
         try:
@@ -826,35 +706,17 @@ def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
 def enumerate_basler(
     requested_serials: list[str] | None = None, *, warn_missing: bool = True
 ):
-    """Return ``[(serial, device_handle), ...]`` for the requested cameras.
-
-    With no requested serials, every detected camera is returned (sorted by
-    serial); otherwise the listed serials are returned in order. A camera that is
-    present but cannot be brought up (a USB3 link that trained down to USB 2.0,
-    or one that never answers its first register read) is reported with a
-    ``None`` handle and a loud, actionable message rather than aborting the whole
-    rig. ``CameraSystem._enumerate`` reads that ``None`` as "present but
-    unusable": it claims the serial (so the auto cascade's lower tiers don't
-    pointlessly retry the same broken device) but never opens it.
-
-    ``warn_missing=False`` suppresses the per-serial "not found" warning. The
-    auto cascade passes the *whole* rig's serial list to every tier, so most of
-    them legitimately belong to another backend and must not be reported missing
-    here; :meth:`CameraSystem._enumerate` warns once for a serial no tier
-    claimed.
-
-    The ``CreateDevice`` calls run concurrently under a shared deadline
-    (:func:`_create_device_timeout`), so one unresponsive camera costs that
-    deadline once instead of stalling the whole rig for as long as pylon cares to
-    retry.
+    """``[(serial, device)]``: every camera sorted by serial, or the requested
+    ones in order. A camera present but unusable (a USB 2.0 fallback, no answer
+    to its first register read) gets a None handle and a loud message: the
+    cascade claims it without opening it, so no lower tier retries it. The
+    CreateDevice calls run concurrently under one deadline
+    (:func:`_create_device_timeout`).
     """
     factory = tl_factory()
     devices = factory.EnumerateDevices()
     if not devices:
         return []
-    # Debug, not info: in the auto cascade every tier enumerates in turn, so
-    # per-tier info lines would print several confusing, overlapping counts.
-    # CameraSystem logs one attributed "Detected N" summary instead.
     log.debug("basler enumerated %d camera(s)", len(devices))
 
     detected = [str(device.GetSerialNumber()) for device in devices]
@@ -863,11 +725,7 @@ def enumerate_basler(
     wanted: list[tuple[str, object]] = []
     seen: set[str] = set()
     for serial in final:
-        if serial in seen:
-            # A serial listed twice in the rig config would otherwise submit two
-            # CreateDevice calls for the same device and create two real handles,
-            # of which only one can be returned (results is keyed by serial) —
-            # orphaning the other with no DestroyDevice.
+        if serial in seen:  # a second handle would never be destroyed
             continue
         try:
             index = detected.index(serial)
@@ -881,12 +739,9 @@ def enumerate_basler(
         return []
 
     timeout = _create_device_timeout()
-    # NOT a `with` block: ThreadPoolExecutor.__exit__ is shutdown(wait=True),
-    # which would re-block for pylon's full retry and silently undo the deadline
-    # below. shutdown(wait=False) only stops new submissions. The workers are
-    # deliberately non-daemon — an abandoned one is still inside pylon, and
-    # letting the interpreter finalize under a live native call is exactly the
-    # teardown segfault BaslerBackend.close() documents.
+    # Not a `with` block: its __exit__ waits out pylon's whole retry, undoing the
+    # deadline. Non-daemon workers: an abandoned one is still inside pylon, and
+    # finalizing the interpreter under it is the segfault close() avoids.
     pool = ThreadPoolExecutor(
         max_workers=len(wanted), thread_name_prefix="pylon-create"
     )
@@ -913,10 +768,7 @@ def enumerate_basler(
             try:
                 results[serial] = future.result()
             except Exception as e:
-                # Not only GenericException: pypylon is SWIG over a USB transport
-                # and also raises RuntimeError, OSError or MemoryError here. One
-                # escaping would abort the whole rig's enumeration and skip the
-                # stragglers' release below.
+                # pypylon also raises RuntimeError, OSError or MemoryError here.
                 log.error("%s", _describe_open_failure(serial, e))
                 results[serial] = None
         if not left:
@@ -926,8 +778,7 @@ def enumerate_basler(
             and not announced
             and time.monotonic() - started >= _CREATE_PROGRESS_INTERVAL_S
         ):
-            # Name the cameras still being waited on. Time-gated: a healthy rig
-            # finishes inside the interval and must stay quiet.
+            # Time-gated: a healthy rig finishes inside the interval, quietly.
             announced = True
             log.info(
                 "Waiting up to %gs for %d Basler camera(s) to respond: %s",
