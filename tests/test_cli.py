@@ -160,6 +160,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error, expected):
     # background init calls controller.fail_init with a clean message (not a raw
     # SDK traceback), the server stays up, and the browser shows the reason.
     import octacam.cameras as cameras_mod
+    from octacam.config import CameraConfig, OctacamConfig
     from octacam.controller import RecordingSettings
 
     error_type = getattr(cameras_mod, error, None) or ValueError
@@ -180,12 +181,8 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error, expected):
 
     monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
 
-    config = SimpleNamespace(
-        cameras=[SimpleNamespace(serial_number="0815-0000", name="cam0")],
-        backend="fake",
-        record=None,
-        transcode=None,
-        transfer=None,
+    config = OctacamConfig(
+        cameras=[CameraConfig(serial_number="0815-0000", name="cam0")], backend="fake"
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
