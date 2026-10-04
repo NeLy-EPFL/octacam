@@ -792,6 +792,27 @@ class RecordingController:
         cameras a fresh trigger clock right before the recording's own arm."""
         return self.recording_active or self.diagnosing or self._starting
 
+    def _busy_reason(self, *, benchmark: bool = False) -> str | None:
+        """Why a recording (or a benchmark) cannot claim the cameras now, else
+        None. Caller holds the lock."""
+        if self.recording_active:
+            return "Recording in progress"
+        if self.diagnosing:
+            if benchmark:
+                return "A benchmark is already running"
+            return "A benchmark is in progress"
+        if self._reconfiguring:
+            return "Camera reconfiguration in progress"
+        if self._tearing_down:
+            # The previous take's off-lock tail still disarms and re-arms the
+            # trigger plugin.
+            return "Previous recording is still finishing"
+        if self._starting:
+            if benchmark:
+                return "A recording is starting"
+            return "Recording is already starting"
+        return None
+
     def get_settings(self) -> RecordingSettings:
         with self._lock:
             return dataclasses.replace(self._settings)
@@ -1226,25 +1247,9 @@ class RecordingController:
             pre_params = self._export_camera_params()
             profiles = self._read_delivery_profiles()
         with self._lock:
-            if self.recording_active:
-                return StartResult(StartResult.BUSY, "Recording in progress")
-            if self.diagnosing:
-                return StartResult(StartResult.BUSY, "A benchmark is in progress")
-            if self._reconfiguring:
-                return StartResult(
-                    StartResult.BUSY, "Camera reconfiguration in progress"
-                )
-            if self._tearing_down:
-                # The previous recording's teardown tail (disarm + preview re-arm)
-                # is still running off-lock; starting now would race it over the
-                # shared trigger plugin.
-                return StartResult(
-                    StartResult.BUSY, "Previous recording is still finishing"
-                )
-            if self._starting:
-                # Another start has passed these checks and is canceling the
-                # managed preview's trigger arm off the lock (below).
-                return StartResult(StartResult.BUSY, "Recording is already starting")
+            busy = self._busy_reason()
+            if busy:
+                return StartResult(StartResult.BUSY, busy)
             settings = self._settings
             save_dir = Path(settings.save_dir)
             if save_dir.exists() and not confirm_overwrite:
@@ -1619,22 +1624,9 @@ class RecordingController:
         under the ``"diagnostics"`` kind and cached for :meth:`get_last_diagnostic`.
         """
         with self._lock:
-            if self.recording_active:
-                return StartResult(StartResult.BUSY, "Recording in progress")
-            if self.diagnosing:
-                return StartResult(StartResult.BUSY, "A benchmark is already running")
-            if self._reconfiguring:
-                return StartResult(
-                    StartResult.BUSY, "Camera reconfiguration in progress"
-                )
-            if self._tearing_down:
-                # The previous recording's off-lock tail still disarms and re-arms
-                # the trigger plugin, which the benchmark disarms too.
-                return StartResult(
-                    StartResult.BUSY, "Previous recording is still finishing"
-                )
-            if self._starting:
-                return StartResult(StartResult.BUSY, "A recording is starting")
+            busy = self._busy_reason(benchmark=True)
+            if busy:
+                return StartResult(StartResult.BUSY, busy)
             # Snapshot the settings so a concurrent edit can't shift the target
             # mid-run, and flip to the diagnosing state (which locks camera
             # control) before releasing the lock.
