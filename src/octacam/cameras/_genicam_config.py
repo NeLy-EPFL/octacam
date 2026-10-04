@@ -1,37 +1,12 @@
-"""Native GenApi feature-persistence (TSV) config for GenICam camera backends.
+"""The GenApi persistence TSV and the trigger chain shared by the GenICam backends.
 
-Replaces the old hand-rolled ``{"params": ..., "trigger_source": ...}`` JSON with
-the camera's *native* export format — the GenApi ``CFeatureBag`` persistence file
-that SpinView / Spinnaker write and read: a ``#``-commented, tab-separated
-``<FeatureName>\\t<Value>`` list (see the ``# GenApi persistence file`` header).
-
-Why not the SDK's own ``CFeatureBag`` round-trip? On the Grasshopper3
-GS3-U3-41C6NIR firmware here, ``StoreToBag`` persists only ~18 "streamable"
-nodes (Gain/Exposure/Trigger/... are *not* among them) and the
-``DeviceFeaturePersistenceStart/End`` scope-expansion commands SpinView relies on
-are absent, so the SDK export cannot carry the settings we care about. Instead we
-persist/apply the full writable capture feature set ourselves — the node list in
-:data:`CONFIG_NODES`, derived from a live node-map walk — while keeping the exact
-same on-disk text format, so the files stay recognisable and portable.
-
-Design:
-
-* :func:`apply_config` reads every ``name\\tvalue`` line and writes it to the
-  camera **best-effort, in file order** (so selector features like
-  ``LineSelector`` and auto-off-before-dependent-value ordering both work), via
-  the small typed-setter seam each backend implements
-  (``_set_enum``/``_set_bool``/``_set_number``). Nodes in
-  :data:`CONFIG_SKIP_NODES` are never applied — octacam owns them at runtime
-  (``DeviceLinkThroughputLimit`` is maximised at ``open()``; ``PixelFormat`` is
-  forced to Mono8 for the GRAY8 writer) — and transport/data-flash lock state is
-  left to the SDK.
-* :func:`dump_config` walks :data:`CONFIG_NODES` and reads each back through the
-  matching typed getter, emitting the native TSV so a GUI "Save…" round-trips.
-
-The value *type* per node (enum/bool/int/float) comes from :data:`CONFIG_NODES`
-(a live-hardware-derived registry), so the untyped TSV strings are coerced
-correctly without every backend needing GenApi type introspection. A node absent
-on a given model is simply skipped.
+The file is SpinView's ``#``-commented ``<Feature>\\t<Value>`` format, written
+by octacam from :data:`CONFIG_NODES` because the GS3's own ``StoreToBag`` keeps
+only ~18 streamable nodes (not Gain, Exposure or the trigger chain).
+:func:`apply_config` writes each line best-effort through the backend's typed
+setters (``_set_enum``/``_set_bool``/``_set_number``), which must raise
+:class:`BackendError`, never a raw SDK exception: a leak turns one refused value
+into a dead rig.
 """
 
 import logging
@@ -41,12 +16,11 @@ from octacam.cameras.base import BackendError, coerce_bool
 
 log = logging.getLogger("octacam")
 
-# Stream buffers for a FLIR record grab (capped by StreamBufferCountMax): ~1 s of
-# frames at 125 fps against the SDK default of 9, so a grab thread stalled for a
-# GC pause or a disk hiccup delays frames instead of losing them. The pool comes
-# out of the kernel's USB memory (usbcore.usbfs_memory_mb, shared by every
-# camera: two full-sensor GS3s need ~1.1 GB at 128), so a pool that cannot start
-# is halved, down to MIN_STREAM_BUFFERS, before the start fails.
+# FLIR record-grab stream buffers (capped by StreamBufferCountMax): ~1 s at 125 fps
+# instead of the SDK's 9, so a grab thread stalled by a GC pause or a disk hiccup
+# delays frames rather than losing them. They come out of the kernel's shared USB
+# memory (usbcore.usbfs_memory_mb: two full-sensor GS3s need ~1.1 GB at 128), so
+# a pool that cannot start is halved, down to MIN_STREAM_BUFFERS.
 RECORD_STREAM_BUFFERS = 128
 MIN_STREAM_BUFFERS = 16
 
@@ -65,11 +39,10 @@ def fewer_stream_buffers(buffers: int, serial: str, error: object) -> int:
     )
     return buffers // 2
 
-# Nodes octacam controls itself; never written from a config file even if the
-# file lists them. DeviceLinkThroughputLimit is raised to the device max at
-# open() (writing the shipped default would undo that throughput win); PixelFormat
-# is forced to Mono8 (the video writer requires GRAY8); TLParamsLocked and the
-# DataFlash page registers are transport/flash state the SDK manages.
+
+# Nodes octacam owns, never applied from a file: the link throughput (maxed at
+# open; the file's value would undo it), PixelFormat (Mono8 for the GRAY8 writer),
+# and transport and data-flash state the SDK manages.
 CONFIG_SKIP_NODES = frozenset({
     "DeviceLinkThroughputLimit",
     "PixelFormat",
@@ -79,13 +52,10 @@ CONFIG_SKIP_NODES = frozenset({
     "ActivePageValue",
 })
 
-# The writable capture feature set octacam persists, in native-export order, with
-# each node's GenApi value type. Derived from a live Grasshopper3 GS3-U3-41C6NIR
-# node-map walk at factory defaults; the four params that are read-only at default
-# (Gain/ExposureTime/pgrExposureCompensation/AcquisitionFrameRate) are listed right
-# after the Auto that unlocks them, so apply order satisfies the dependency. A
-# model that lacks a node just skips it. (name, type) pairs grouped by category
-# purely for the export's ``# --- category ---`` section comments.
+# The capture features octacam persists, with their GenApi types, in apply order:
+# from a GS3-U3-41C6NIR node-map walk at factory defaults, each value after the
+# Auto or Enable node that unlocks it. A model lacking a node skips it; the
+# category only labels the export's sections.
 CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     # AnalogControl
     ("AnalogControl", "GainAuto", "enum"),
@@ -106,8 +76,7 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("AcquisitionControl", "TriggerMode", "enum"),
     ("AcquisitionControl", "TriggerSource", "enum"),
     ("AcquisitionControl", "TriggerActivation", "enum"),
-    # TriggerDelayEnabled before TriggerDelay: the delay node is read-only until
-    # it is enabled (spin_utils.cpp enables first, then sets the value).
+    # The delay is read-only until enabled.
     ("AcquisitionControl", "TriggerDelayEnabled", "bool"),
     ("AcquisitionControl", "TriggerDelay", "float"),
     ("AcquisitionControl", "ExposureMode", "enum"),
@@ -194,48 +163,30 @@ _HEADER = (
 
 
 def _fmt_float(value: float) -> str:
-    # 6 significant figures, matching the GenApi persistence text (e.g. 5.07812);
-    # integral floats render without a trailing ".0" (2000.0 -> "2000").
+    # 6 significant figures, as GenApi writes them (5.07812; 2000.0 -> "2000").
     return format(float(value), ".6g")
 
 
-# The AcquisitionFrameRate control differs across firmware: SFNC spells the gate
-# ``AcquisitionFrameRateEnable``, while the Point Grey / Grasshopper3 feature set
-# uses ``AcquisitionFrameRateEnabled`` plus an ``AcquisitionFrameRateAuto`` enum.
-# Both spellings are written best-effort so one call covers every GenICam vendor.
+# SFNC spells the rate gate AcquisitionFrameRateEnable, the GS3 ...Enabled (plus an
+# Auto enum); both are written.
 _FRAMERATE_ENABLE_NODES = ("AcquisitionFrameRateEnable", "AcquisitionFrameRateEnabled")
 
-# (size node, the ROI origin that clamps it). SFNC defines a size node's max as
-# (sensor - offset), so the origin must be programmed *after* the size — see
-# _clear_roi_offsets.
+# (size node, the ROI origin that clamps it: a size's max is sensor - origin).
 _ROI_PAIRS = (("Width", "OffsetX"), ("Height", "OffsetY"))
-
-
 _ROI_OFFSET_NODES = frozenset(offset for _size, offset in _ROI_PAIRS)
 
-# Geometry decides what the camera actually records, so a rejected write here is
-# not the harmless "unknown node on another model" case the debug log is for: the
-# camera silently keeps the previous session's ROI and the whole recording comes
-# out at the wrong size. Report these at warning level.
+# A refused geometry write keeps the previous ROI, so the recording comes out the
+# wrong size: a warning, not the debug line of an absent node.
 _LOUD_NODES = frozenset({"Width", "Height", "OffsetX", "OffsetY"})
 
 
 def _roi_offsets_last(
     pairs: "list[tuple[str, str]]",
 ) -> "list[tuple[str, str]]":
-    """Reorder so every ROI origin is written after every size node.
+    """Move the ROI origins after every size node; the rest keeps file order.
 
-    A size node's max is ``sensor - offset``, so an origin programmed first
-    clamps the size that follows. :func:`_clear_roi_offsets` zeroes the origins up
-    front, but that only helps if the file's own origin lines come *after* its
-    size lines — true for :func:`dump_config`'s CONFIG_NODES order, and not
-    something a vendor-exported or hand-edited file guarantees. Given
-    ``OffsetY`` before ``Height``, the zeroed origin was immediately overwritten
-    with 278 and the following ``Height = 2048`` was rejected against a max of
-    1770, leaving the camera on the previous session's ROI.
-
-    Nothing depends on an origin being set early, so moving the origins to the end
-    is enough; every other node keeps file order.
+    :func:`dump_config` lists sizes first, but a vendor-exported or hand-edited
+    file may not, and an origin written first clamps the size after it.
     """
     head = [(n, v) for n, v in pairs if n not in _ROI_OFFSET_NODES]
     tail = [(n, v) for n, v in pairs if n in _ROI_OFFSET_NODES]
@@ -243,27 +194,12 @@ def _roi_offsets_last(
 
 
 def _clear_roi_offsets(backend, names: set[str], serial: str) -> None:
-    """Zero the ROI origins that the incoming config's Width/Height must clear.
+    """Zero each ROI origin whose size node the file sets, before applying it.
 
-    A size node's valid range depends on the origin currently on the device:
-    ``Width`` maxes out at ``WidthMax - OffsetX`` (likewise Height/OffsetY). A
-    camera keeps its ROI until it is power-cycled, so a *previous* session that
-    left a cropped, offset ROI clamps the size nodes for the next one — and the
-    file's own (larger) size is then rejected outright. Concretely: previewing a
-    rig whose config crops to ``Height=1408, OffsetY=278``, then launching a rig
-    whose config wants the full ``Height=2048``, made the applier write 2048
-    against a max of 2048-278=1770.
-
-    So zero each origin whose size node this file sets, before applying anything.
-    The size write then sees the full sensor, and the file's own ``OffsetX``/
-    ``OffsetY`` lines — which follow the size lines in :data:`CONFIG_NODES` order
-    — put the real origin back. A file that sets a size but no matching origin
-    (a hand-trimmed one; :func:`dump_config` always emits both) lands at origin 0
-    rather than on whatever the last session happened to leave, which is the
-    deterministic reading of "this file is the camera's state".
-
-    Best-effort per node, like the rest of the applier: a model without the
-    offset node just skips it.
+    A camera keeps its ROI until power-cycled, so the previous session's origin
+    clamps this file's size: a rig cropped to OffsetY=278 put the next rig's
+    Height=2048 out of range (max 1770). The file's own origin is applied last; a
+    size without one lands at origin 0. Best-effort.
     """
     for size, offset in _ROI_PAIRS:
         if size not in names:
@@ -275,15 +211,8 @@ def _clear_roi_offsets(backend, names: set[str], serial: str) -> None:
 
 
 def apply_freerun_rate_cap(backend, fps: float) -> None:
-    """Best-effort: cap a free-running camera's rate at ``fps``.
-
-    Used by ``begin_freerun(fps)`` so a free-run *preview* draws the same bus
-    bandwidth as an fps-matched recording (and reports the true target rate)
-    instead of the uncapped sensor ceiling. Every write is independent and
-    swallowed: a model missing a node (or a node not writable in free-run) simply
-    keeps running uncapped. Requires the caller to have already set
-    ``TriggerMode=Off`` (the manual-rate nodes are inert/hidden while triggered).
-    """
+    """Best-effort cap of a free-running camera at ``fps`` (TriggerMode must be
+    Off), so a free-run preview draws an fps-matched recording's bandwidth."""
     for name in _FRAMERATE_ENABLE_NODES:
         try:
             backend._set_bool(name, True)
@@ -300,13 +229,8 @@ def apply_freerun_rate_cap(backend, fps: float) -> None:
 
 
 def clear_freerun_rate_cap(backend) -> None:
-    """Best-effort: disable the manual frame-rate cap set by :func:`apply_freerun_rate_cap`.
-
-    Called when arming a triggered mode (software or hardware) so a cap left over
-    from a free-run preview cannot clip a subsequent externally-triggered
-    recording (notably on Basler, where the enable node applies even while
-    triggered). No-op on a model that never had the node.
-    """
+    """Best-effort removal of the free-run cap before a triggered mode, which it
+    would clip (on Basler the enable applies even while triggered)."""
     for name in _FRAMERATE_ENABLE_NODES:
         try:
             backend._set_bool(name, False)
@@ -315,11 +239,7 @@ def clear_freerun_rate_cap(backend) -> None:
 
 
 def parse_config(text: str) -> list[tuple[str, str]]:
-    """Parse a native persistence TSV into ordered ``(name, value)`` pairs.
-
-    ``#`` comment lines (the header and the ``# --- category ---`` markers) and
-    blank lines are skipped, as GenApi's own reader does.
-    """
+    """The TSV's ``(name, value)`` pairs in order, without comments and blanks."""
     out: list[tuple[str, str]] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -331,35 +251,19 @@ def parse_config(text: str) -> list[tuple[str, str]]:
 
 
 def apply_config(backend, text: str) -> None:
-    """Apply every ``name\\tvalue`` line to *backend*, best-effort, in file order.
-
-    Nodes in :data:`CONFIG_SKIP_NODES` are left to octacam's runtime management.
-    Unknown/absent nodes and failed writes are logged at debug and skipped, so a
-    partial or cross-model file still applies what it can (mirrors how the FLIR C
-    config tool guards each node with an availability check). This best-effort
-    guarantee needs every backend's typed setters to raise
-    :class:`~octacam.cameras.base.BackendError` rather than a raw SDK exception —
-    a leak there turns one rejected node into a failed rig init.
-
-    Two writes are *not* in file order: the ROI origins are zeroed up front, since
-    a stale origin from a previous session clamps the size nodes (see
-    :func:`_clear_roi_offsets`), and they are then re-applied last (see
-    :func:`_roi_offsets_last`) so a file that lists an origin before its size
-    still programs the size against the full sensor.
+    """Apply each ``name\\tvalue`` line, best-effort, in file order (selectors
+    and Auto-before-value rely on it), except the ROI origins: zeroed first and
+    applied last (see :func:`_clear_roi_offsets`). A refused or absent node is
+    logged and skipped; :data:`CONFIG_SKIP_NODES` are never applied.
     """
     serial = getattr(backend, "serial_number", "?")
     pairs = parse_config(text)
     if not pairs and any(
         ln.strip() and not ln.strip().startswith("#") for ln in text.splitlines()
     ):
-        # Non-empty content but not a single `name<TAB>value` line: this is a
-        # malformed config (stray text, or leftover JSON), not a legitimately
-        # empty one — reject it so callers like the web reset endpoint still fail
-        # loudly instead of silently applying nothing.
+        # Content without one feature line is malformed (stray text, old JSON):
+        # fail loudly rather than apply nothing.
         raise BackendError("no GenApi feature lines found in configuration")
-    # Before anything else, clear the ROI origins this file's Width/Height have to
-    # grow into (see _clear_roi_offsets) — otherwise a cropped ROI left on the
-    # device by an earlier session makes the file's own size out of range.
     _clear_roi_offsets(backend, {name for name, _ in pairs}, serial)
     for name, value in _roi_offsets_last(pairs):
         if name in CONFIG_SKIP_NODES:
@@ -394,12 +298,7 @@ def apply_config(backend, text: str) -> None:
 
 
 def dump_config(backend, model: str | None = None) -> str:
-    """Serialise the current camera state to native persistence TSV.
-
-    Walks :data:`CONFIG_NODES` and reads each back through the backend's typed
-    getters; nodes that are absent/unreadable are omitted. Grouped by category
-    with ``# --- category ---`` comment markers for readability.
-    """
+    """The camera's :data:`CONFIG_NODES` as TSV; unreadable nodes are omitted."""
     serial = getattr(backend, "serial_number", None)
     device = " ".join(filter(None, (model, f"({serial})" if serial else "")))
     lines: list[str] = list(_HEADER)
@@ -435,20 +334,12 @@ def dump_config(backend, model: str | None = None) -> str:
 
 
 def normalize_trigger_source(text: str, original_source: str | None) -> str:
-    """Undo a live software-trigger preview's ``TriggerSource=Software`` override.
+    """Rewrite a dumped ``TriggerSource\\tSoftware`` to ``original_source``.
 
-    ``begin_software_trigger_preview`` forces ``TriggerSource=Software`` on the
-    live camera; a config saved (GUI "Save") while previewing would bake that in,
-    so a later external-trigger recording would wait for a software trigger that
-    never fires — the cameras just never start, silently (this is exactly how the
-    triggerbox FLIR ``.txt`` files ended up unrecordable). Rewrite a dumped
-    ``TriggerSource\\tSoftware`` line back to *original_source* — the hardware line
-    :meth:`load_params` captured when the config was loaded. Mirrors
-    :func:`octacam.cameras.basler._normalize_pfs_triggers`.
-
-    No-op when there is nothing to undo (the value is not ``Software``) or no
-    hardware source to restore to (``original_source`` is unknown or itself
-    ``Software``), so a genuinely software-triggered rig is left untouched.
+    A software-trigger preview sets the camera's TriggerSource to Software; saved
+    into the file, a later hardware-triggered recording would wait forever for a
+    software trigger. A no-op without a hardware source to restore. Basler's
+    counterpart is :func:`octacam.cameras.basler._normalize_pfs_triggers`.
     """
     if not original_source or original_source == "Software":
         return text
@@ -463,31 +354,19 @@ def normalize_trigger_source(text: str, original_source: str | None) -> str:
 
 
 class GenICamTriggerConfig:
-    """Shared software-trigger + config lifecycle for the GenICam backends.
-
-    The FLIR/PySpin, Spinnaker-C and pycameleon backends drive the same SFNC
-    trigger chain and persist the same native GenApi persistence TSV, so
-    the nine trigger/config methods below are byte-for-byte identical across them
-    and live here once. A backend mixes this in alongside
-    :class:`~octacam.cameras._trigger_handoff.SoftwareTriggerHandoff` and supplies
-    only its genuine per-SDK seam: the typed
-    ``_set_enum``/``_get_enum``/``_set_bool``/``_set_number`` setters, ``is_open``,
-    and the fetch/grab bodies. The Spinnaker-C backend overrides
-    :meth:`save_params` to stamp the device model name into the dump.
+    """The SFNC trigger chain and TSV persistence of the flir, spinnaker and
+    pycameleon backends, mixed in beside
+    :class:`~octacam.cameras._trigger_handoff.SoftwareTriggerHandoff`. The backend
+    supplies ``_serial``, ``is_open`` and the typed getters and setters.
     """
 
-    # Seam supplied by the concrete backend (``_serial``, ``is_open`` and the typed
-    # setters) and by :class:`SoftwareTriggerHandoff` (``_bump_trigger``). Declared
-    # for the type checker only — ``_serial``/``_original_trigger_source`` are bare
-    # annotations and the method stubs are ``TYPE_CHECKING``-guarded, so nothing is
-    # created at runtime and the MRO resolves each name to its real implementation.
+    # For the type checker only: nothing is created at runtime, so the MRO finds
+    # the backend's and the hand-off's implementations.
     _serial: str
     _original_trigger_source: str | None
 
     if TYPE_CHECKING:
-        # Positional-only (``/``) so a backend that names the node parameter
-        # differently (pycameleon uses ``node``) is not flagged as an incompatible
-        # override — only the type of the seam matters here, not the parameter name.
+        # Positional-only: pycameleon names the parameter ``node``.
         def _set_enum(self, name: str, value: str, /) -> None: ...
         def _get_enum(self, name: str, /) -> str | None: ...
         def is_open(self) -> bool: ...
@@ -496,18 +375,9 @@ class GenICamTriggerConfig:
     # ----------------------------------------------------------- triggering
 
     def _enable_trigger_overlap(self) -> None:
-        """Let a trigger be accepted during the previous frame's readout.
-
-        Without this (``TriggerOverlap=Off``, the FLIR default) a FrameStart
-        software trigger fired while the sensor is still reading out the previous
-        frame is silently ignored, so the camera accepts only ~every other trigger
-        — roughly halving the software-triggered frame rate and adding a full
-        grab-timeout stall on each dropped one. ``ReadOut`` pipelines back-to-back
-        triggers and restores the sensor's real rate (measured on the Spinnaker
-        backends: ~4.7 -> ~64 fps at 4 ms exposure; see
-        ``docs/plan-spinnaker-c-backend.md``). Best-effort: a model without the
-        node keeps its default.
-        """
+        """Best-effort TriggerOverlap=ReadOut. With the FLIR default Off, a trigger
+        fired during the previous frame's readout is silently ignored, halving the
+        rate with a stall per miss (GS3 at 4 ms exposure: ~4.7 -> ~64 fps)."""
         try:
             self._set_enum("TriggerOverlap", "ReadOut")
         except BackendError as e:
@@ -516,7 +386,7 @@ class GenICamTriggerConfig:
     def enable_frame_trigger(self) -> None:
         if not self.is_open():
             return
-        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
+        clear_freerun_rate_cap(self)
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._enable_trigger_overlap()
@@ -535,27 +405,18 @@ class GenICamTriggerConfig:
             )
 
     def begin_software_trigger_preview(self) -> None:
-        clear_freerun_rate_cap(self)  # drop any free-run preview cap before triggering
+        clear_freerun_rate_cap(self)
         self._set_enum("TriggerSelector", "FrameStart")
         self._set_enum("TriggerMode", "On")
         self._set_enum("TriggerSource", "Software")
         self._enable_trigger_overlap()
 
     def trigger_once(self) -> None:
-        # Only bump the pending counter; retrieve() fires the device trigger on
-        # the grab thread so the shared trigger timer never blocks on this camera.
-        self._bump_trigger()
+        self._bump_trigger()  # no device call: retrieve() fires it (_trigger_handoff)
 
     def begin_freerun(self, fps: float | None = None) -> bool:
-        """Switch to continuous free-run (TriggerMode Off).
-
-        Used by the benchmark (``fps=None``, uncapped, to measure the ceiling) and
-        by free-run *preview* (``fps`` set, so the rate is capped at the target and
-        the preview draws the same bandwidth as an fps-matched recording).
-        Best-effort: a failure returns False so the caller skips free-run for this
-        camera. A later ``begin_software_trigger_preview`` re-arms the FrameStart
-        trigger (and clears the cap), so no explicit restore is needed.
-        """
+        """TriggerMode Off, capped at ``fps`` when given; False if refused. Arming
+        a triggered mode later clears the cap."""
         if not self.is_open():
             return False
         try:
@@ -577,17 +438,11 @@ class GenICamTriggerConfig:
         return dict(parse_config(config_str))
 
     def load_params(self, config_str: str) -> None:
-        # Native GenApi persistence TSV, applied best-effort in file order (see
-        # apply_config). Runs after open(), so open()'s Mono8/throughput setup
-        # stays authoritative (both are in the applier's skip set).
         if config_str:
             apply_config(self, config_str)
         self._original_trigger_source = self._get_enum("TriggerSource")
 
     def save_params(self) -> str:
-        # Undo any live TriggerSource=Software override (from a software-trigger
-        # preview) so a config saved mid-preview does not bake an unrecordable
-        # Software trigger (see normalize_trigger_source).
         return normalize_trigger_source(
             dump_config(self), self._original_trigger_source
         )
