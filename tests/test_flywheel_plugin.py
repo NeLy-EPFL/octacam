@@ -5,6 +5,7 @@ import time
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from helpers import wait_until
 
 from octacam.plugins.flywheel import (
     COMMAND_FIELDS,
@@ -48,16 +49,6 @@ class FakeLink:
     def snapshot(self) -> list[bytes]:
         with self._lock:
             return list(self.written)
-
-
-def _wait(predicate, timeout=1.0):
-    """Poll until predicate() is true (jog start/stop are non-blocking)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.005)
-    return False
 
 
 # ------------------------------------------------------------- wire format
@@ -164,7 +155,7 @@ def _stop_jog(plugin, client_id=1):
 
 def _released(link):
     """True once the clock has stopped and written its coil-release."""
-    return _wait(lambda: link.snapshot()[-1:] == [RELEASE])
+    return wait_until(lambda: link.snapshot()[-1:] == [RELEASE])
 
 
 # --- the configured loop command (config <-> snapshot) -----------------------
@@ -245,7 +236,7 @@ def test_jog_direction_sign():
     plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, -1)
-    assert _wait(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
+    assert wait_until(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
     _stop_jog(plugin)
 
 
@@ -360,7 +351,7 @@ def test_jog_other_client_disconnect_keeps_it_running():
     time.sleep(0.02)
     assert RELEASE not in link.snapshot()
     n = len(link.snapshot())
-    assert _wait(lambda: len(link.snapshot()) > n)  # A still being pulsed
+    assert wait_until(lambda: len(link.snapshot()) > n)  # A still being pulsed
     plugin.on_ws_disconnect(1)  # the owner drops -> stops
     assert _released(link)
 

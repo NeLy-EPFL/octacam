@@ -5,11 +5,11 @@ import logging
 import os
 import socket
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from helpers import wait_until
 from typer.testing import CliRunner
 
 import octacam
@@ -189,10 +189,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
         # background init to finish (fail), then "shut down" by returning.
         ctrl = app_obj.state.app_state.controller
         captured["controller"] = ctrl
-        for _ in range(500):
-            if ctrl.ready or ctrl.init_error:
-                break
-            time.sleep(0.01)
+        wait_until(lambda: ctrl.ready or ctrl.init_error, timeout=5.0, interval=0.01)
 
     monkeypatch.setattr("uvicorn.run", fake_run)
 

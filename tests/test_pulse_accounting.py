@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from helpers import wait_until
 
 import octacam.cameras._trigger_handoff as handoff
 import octacam.controller as controller_module
@@ -608,9 +609,7 @@ def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monke
         target=controller.start_recording, kwargs={"plugin_params": {"board": {}}}
     )
     starter.start()
-    deadline = time.monotonic() + 5
-    while controller.state != "waiting" and time.monotonic() < deadline:
-        time.sleep(0.01)
+    wait_until(lambda: controller.state == "waiting", interval=0.01)
     time.sleep(0.05)  # into the 0.8 s priming burst
     controller.stop_recording(abort=True)
     starter.join(timeout=10)
@@ -862,13 +861,6 @@ def _direct_camera(serial):
     return backend, Camera(backend)
 
 
-def _wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        assert time.monotonic() < deadline, "timed out"
-        time.sleep(0.001)
-
-
 def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
     # The last priming trigger's image is still on its way when counting starts.
     # It must be discarded as a priming answer — not recorded as pulse 0, which
@@ -884,15 +876,17 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
         for _ in range(4):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
-        _wait_for(lambda: backend._pending == 0 and bool(backend._outstanding))
+        assert wait_until(
+            lambda: backend._pending == 0 and bool(backend._outstanding), interval=0.001
+        )
         assert camera.primed_frames == 3
         backend.late_triggers = {}
         camera.arm_counting()
-        _wait_for(lambda: camera.primed_frames == 4)
+        assert wait_until(lambda: camera.primed_frames == 4, interval=0.001)
         for _ in range(10):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
-        _wait_for(lambda: camera.pulses_complete)
+        assert wait_until(lambda: camera.pulses_complete, interval=0.001)
     finally:
         camera.stop(fill_to=10)
         camera.join()
@@ -930,17 +924,17 @@ def test_a_buffered_priming_frame_is_a_straggler_at_low_fps(tmp_path):
         for _ in range(3):
             camera.trigger_once()
             time.sleep(0.01)
-        _wait_for(lambda: camera.primed_frames == 3)
+        assert wait_until(lambda: camera.primed_frames == 3, interval=0.001)
         # The fourth priming pulse's frame: exposed a period after the third,
         # still in the SDK's buffer when counting starts.
         stamp = backend._clock_t0 + 3 * period
         camera.arm_counting()
         buffered.append((np.full((H, W), 3, dtype=np.uint8), stamp))
-        _wait_for(lambda: camera.primed_frames == 4)
+        assert wait_until(lambda: camera.primed_frames == 4, interval=0.001)
         for _ in range(5):
             camera.trigger_once()
             time.sleep(0.01)
-        _wait_for(lambda: camera.pulses_complete)
+        assert wait_until(lambda: camera.pulses_complete, interval=0.001)
     finally:
         camera.stop(fill_to=5)
         camera.join()

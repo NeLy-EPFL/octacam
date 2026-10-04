@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from helpers import wait_until
 
 from octacam.camera import CameraSystem
 from octacam.config import OctacamConfig
@@ -506,9 +507,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             # WS messages are dispatched to the plugin with the client id
             with client.websocket_connect("/api/ws") as ws:
                 ws.send_text(json.dumps({"type": "stubjog", "n": 5}))
-                deadline = time.monotonic() + 3
-                while not stub.jogs and time.monotonic() < deadline:
-                    time.sleep(0.05)
+                wait_until(lambda: stub.jogs, timeout=3, interval=0.05)
             assert len(stub.jogs) == 1
             n, client_id = stub.jogs[0]
             assert n == 5
@@ -611,6 +610,18 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
         controller.close()
 
 
+def _wait_for_take(client):
+    """Poll /api/state until the take is over and counted; return the last state."""
+    states = []
+
+    def done():
+        states.append(client.get("/api/state").json())
+        return states[-1]["state"] == "preview" and states[-1]["cameras"][0]["frames"]
+
+    wait_until(done, timeout=25, interval=0.2)
+    return states[-1]
+
+
 def test_recording_cycle_over_rest(client, tmp_path):
     save_dir = tmp_path / "rec" / "001"
     response = client.post("/api/recording/start", json={"confirm_overwrite": False})
@@ -620,13 +631,7 @@ def test_recording_cycle_over_rest(client, tmp_path):
     assert busy.status_code == 409
     assert busy.json()["status"] == "busy"
 
-    deadline = time.monotonic() + 25
-    state = None
-    while time.monotonic() < deadline:
-        state = client.get("/api/state").json()
-        if state["state"] == "preview" and state["cameras"][0]["frames"]:
-            break
-        time.sleep(0.2)
+    state = _wait_for_take(client)
     assert state is not None and state["state"] == "preview"
 
     videos = sorted(save_dir.glob("*.mkv"))
@@ -662,13 +667,7 @@ def test_recording_with_split_directory(client, tmp_path):
     response = client.post("/api/recording/start", json={"confirm_overwrite": False})
     assert response.status_code == 202, response.text
 
-    deadline = time.monotonic() + 25
-    state = None
-    while time.monotonic() < deadline:
-        state = client.get("/api/state").json()
-        if state["state"] == "preview" and state["cameras"][0]["frames"]:
-            break
-        time.sleep(0.2)
+    state = _wait_for_take(client)
     assert state is not None and state["state"] == "preview"
 
     # Videos land under base/relative, and the summary records the relative part
@@ -695,13 +694,7 @@ def test_recording_writes_timestamps_when_enabled(client, tmp_path):
     response = client.post("/api/recording/start", json={"confirm_overwrite": False})
     assert response.status_code == 202, response.text
 
-    deadline = time.monotonic() + 25
-    state = None
-    while time.monotonic() < deadline:
-        state = client.get("/api/state").json()
-        if state["state"] == "preview" and state["cameras"][0]["frames"]:
-            break
-        time.sleep(0.2)
+    state = _wait_for_take(client)
     assert state is not None and state["state"] == "preview"
 
     videos = sorted(save_dir.glob("*.mkv"))
@@ -729,13 +722,7 @@ def test_live_transform_is_baked_into_display_recording(client, tmp_path):
 
     response = client.post("/api/recording/start", json={"confirm_overwrite": False})
     assert response.status_code == 202, response.text
-    deadline = time.monotonic() + 25
-    state = None
-    while time.monotonic() < deadline:
-        state = client.get("/api/state").json()
-        if state["state"] == "preview" and state["cameras"][0]["frames"]:
-            break
-        time.sleep(0.2)
+    state = _wait_for_take(client)
     assert state is not None and state["state"] == "preview"
 
     summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
@@ -750,11 +737,11 @@ def test_live_transform_is_baked_into_display_recording(client, tmp_path):
 
 def test_transform_endpoint_locked_while_recording(client):
     client.post("/api/recording/start", json={"confirm_overwrite": False})
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        if client.get("/api/state").json()["state"] in ("waiting", "recording"):
-            break
-        time.sleep(0.05)
+    wait_until(
+        lambda: client.get("/api/state").json()["state"] in ("waiting", "recording"),
+        timeout=10,
+        interval=0.05,
+    )
     blocked = client.put("/api/cameras/0/transform", json={"rotation_deg": 90})
     assert blocked.status_code == 409
 
@@ -894,11 +881,11 @@ def test_camera_name_used_for_recording_file(client, tmp_path):
     response = client.post("/api/recording/start", json={"confirm_overwrite": True})
     assert response.status_code == 202, response.text
 
-    deadline = time.monotonic() + 25
-    while time.monotonic() < deadline:
-        if client.get("/api/state").json()["state"] == "preview":
-            break
-        time.sleep(0.2)
+    wait_until(
+        lambda: client.get("/api/state").json()["state"] == "preview",
+        timeout=25,
+        interval=0.2,
+    )
 
     # the per-camera video files are named after the renamed cameras
     assert (save_dir / "cam-left.mkv").exists()

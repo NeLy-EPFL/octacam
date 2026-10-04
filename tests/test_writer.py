@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 import pytest
+from helpers import wait_until
 
 from octacam.config import RecordConfig
 from octacam.writer import (
@@ -652,9 +653,7 @@ def test_backlog_counts_the_fills_riding_on_each_queued_frame():
     assert writer.backlog == 5
     for _ in range(3):
         writer.gate.release()
-    deadline = time.monotonic() + 2.0
-    while writer.frames_written < 3 and time.monotonic() < deadline:
-        time.sleep(0.001)
+    wait_until(lambda: writer.frames_written >= 3, timeout=2.0, interval=0.001)
     assert writer.backlog == 2
     for _ in range(2):
         writer.gate.release()

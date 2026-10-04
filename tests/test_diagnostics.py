@@ -12,6 +12,7 @@ import math
 import time
 
 import pytest
+from helpers import wait_until
 
 from octacam import diagnostics as dg
 from octacam.cameras import CameraSystem
@@ -688,9 +689,7 @@ def test_run_diagnostic_via_controller(fake_system):
     with pytest.raises(RuntimeError):
         controller.set_camera_param(0, "exposure", 2000.0)
 
-    deadline = time.time() + 30
-    while controller.diagnosing and time.time() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
     assert controller.state == "preview"  # preview resumed cleanly
     assert controller.get_last_diagnostic() is not None
     assert got and got[0]["backend"] == "fake"
@@ -711,9 +710,7 @@ def test_benchmark_preview_rearm_failure_leaves_idle(fake_system, monkeypatch):
     monkeypatch.setattr(fake_system, "start_preview", boom)
 
     assert controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null").ok
-    deadline = time.time() + 30
-    while controller.diagnosing and time.time() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
 
     assert controller.state == "idle"  # not wedged in "diagnosing"
     assert not controller._camera_locked
@@ -734,9 +731,7 @@ def test_run_diagnostic_emits_progress_notifications(fake_system):
     )
 
     controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null")
-    deadline = time.time() + 30
-    while controller.diagnosing and time.time() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
 
     assert progress  # the Benchmark tab's determinate bar is fed these
     assert all({"phase", "fraction", "target", "eta_s"} <= set(p) for p in progress)
@@ -787,9 +782,7 @@ def test_diagnostics_rest_endpoints(fake_system, tmp_path):
             assert client.post("/api/diagnostics/run", json={}).status_code == 409
             assert client.post("/api/shutdown").status_code == 409
 
-            deadline = time.time() + 30
-            while controller.diagnosing and time.time() < deadline:
-                time.sleep(0.05)
+            wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
             last = client.get("/api/diagnostics/last").json()
             assert last.get("backend") == "fake"
             assert "trials" in last

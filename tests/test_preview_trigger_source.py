@@ -8,9 +8,9 @@ No hardware/SDK — a fake camera system + a stub driving plugin.
 """
 
 import threading
-import time
 
 import pytest
+from helpers import wait_until
 
 from octacam.cameras import CameraSystem
 from octacam.controller import RecordingController, RecordingSettings, StartResult
@@ -147,11 +147,9 @@ def test_free_running_preview_caps_the_backend_and_flows_frames(make_controller)
         assert getattr(camera.backend, "_freerun_fps", None) == 50.0
     # retrieve_freerun actually delivers frames — timestamps accumulate even with
     # no display consumer popping the single-slot handoff.
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and not any(
-        c.frames_recorded > 1 for c in system
-    ):
-        time.sleep(0.05)
+    wait_until(
+        lambda: any(c.frames_recorded > 1 for c in system), timeout=3.0, interval=0.05
+    )
     assert any(c.frames_recorded > 1 for c in system)
 
 

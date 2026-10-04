@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from helpers import wait_until
 
 from octacam.plugins import _BUILTINS, build_plugins
 from octacam.plugins.triggerbox import (
@@ -686,11 +687,8 @@ def test_arm_and_wait_classifies_outcomes():
     base = len(link.snapshot())
 
     def reject():
-        for _ in range(1000):
-            if len(link.snapshot()) > base:
-                plugin._on_arduino_reject("d")
-                return
-            time.sleep(0.001)
+        if wait_until(lambda: len(link.snapshot()) > base, timeout=1.0, interval=0.001):
+            plugin._on_arduino_reject("d")
 
     t = threading.Thread(target=reject)
     t.start()
@@ -740,11 +738,8 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
     # Ack only the SECOND arm (after the USB-reset recovery), simulating a board
     # that comes back to life once its link is reset.
     def ack():
-        for _ in range(2000):
-            if len(link.snapshot()) >= 2:
-                plugin._on_arduino_status("R")
-                return
-            time.sleep(0.001)
+        if wait_until(lambda: len(link.snapshot()) >= 2, timeout=2.0, interval=0.001):
+            plugin._on_arduino_status("R")
 
     t = threading.Thread(target=ack)
     t.start()
@@ -763,11 +758,8 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     plugin._ack_timeout_s = 1.0
 
     def reject():
-        for _ in range(1000):
-            if link.snapshot():
-                plugin._on_arduino_reject("r")  # reserved pin
-                return
-            time.sleep(0.001)
+        if wait_until(link.snapshot, timeout=1.0, interval=0.001):
+            plugin._on_arduino_reject("r")  # reserved pin
 
     t = threading.Thread(target=reject)
     t.start()
@@ -843,11 +835,8 @@ def test_on_recording_start_no_warning_when_ack_arrives(caplog):
     plugin._ack_timeout_s = 1.0
 
     def ack():
-        for _ in range(500):
-            if link.snapshot():
-                plugin._on_arduino_status("R")
-                return
-            time.sleep(0.001)
+        if wait_until(link.snapshot, timeout=0.5, interval=0.001):
+            plugin._on_arduino_status("R")
 
     t = threading.Thread(target=ack)
     t.start()
@@ -863,11 +852,8 @@ def test_on_recording_start_logs_firmware_reject(caplog):
     plugin._ack_timeout_s = 1.0
 
     def reject():
-        for _ in range(500):
-            if link.snapshot():
-                plugin._on_arduino_reject("p")  # unknown pin id
-                return
-            time.sleep(0.001)
+        if wait_until(link.snapshot, timeout=0.5, interval=0.001):
+            plugin._on_arduino_reject("p")  # unknown pin id
 
     t = threading.Thread(target=reject)
     t.start()
@@ -1004,15 +990,6 @@ def _fake_serial_ns(fake: _FakeSerial) -> SimpleNamespace:
     return SimpleNamespace(Serial=lambda *a, **k: fake, SerialException=_FakeSerialError)
 
 
-def _wait(pred, timeout=1.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return True
-        time.sleep(0.005)
-    return pred()
-
-
 def test_link_send_arm_writes_exact_bytes(monkeypatch):
     import octacam.plugins.triggerbox as m
 
@@ -1023,7 +1000,7 @@ def test_link_send_arm_writes_exact_bytes(monkeypatch):
     try:
         arm = ArmSpec(80, 5000, [(11, 500, 0)], [(3, 1, 0, 2500, 0, 0)])
         link.send_arm(arm)
-        assert _wait(lambda: bytes(fake.written) == arm.to_bytes())
+        assert wait_until(lambda: bytes(fake.written) == arm.to_bytes())
     finally:
         link.close()
 
@@ -1039,7 +1016,7 @@ def test_link_parses_status_and_reject_tokens(monkeypatch):
     link.open(DEVICE, 115200)
     try:
         fake.feed(b"R\nTRIGGERBOX 2\nEp\nD\nC\n")
-        assert _wait(lambda: states == ["R", "D", "C"])
+        assert wait_until(lambda: states == ["R", "D", "C"])
         assert rejects == ["p"]
         assert link.identity == "TRIGGERBOX 2"
     finally:
@@ -1057,7 +1034,7 @@ def test_link_reassembles_split_tokens(monkeypatch):
     try:
         fake.feed(b"R")
         fake.feed(b"\nD\n")
-        assert _wait(lambda: states == ["R", "D"])
+        assert wait_until(lambda: states == ["R", "D"])
     finally:
         link.close()
 
@@ -1700,7 +1677,7 @@ def test_status_tokens_arrive_without_waiting_for_the_port_timeout(monkeypatch):
         time.sleep(0.05)
         sent = time.monotonic()
         fake.feed(b"R\n")
-        assert _wait(lambda: seen, timeout=1.0)
+        assert wait_until(lambda: seen, timeout=1.0)
         # A read(64) would have held the 2-byte token for the full 0.2 s timeout.
         assert seen[0][1] == "R" and seen[0][0] - sent < 0.1
     finally:

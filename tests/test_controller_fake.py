@@ -7,6 +7,7 @@ without PYLON_CAMEMU, driven by the same software-trigger timer as the real rig.
 import json
 
 import pytest
+from helpers import wait_until
 
 from octacam.cameras import CameraSystem
 from octacam.controller import RecordingController, RecordingSettings, StartResult
@@ -706,16 +707,12 @@ def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
 
 
 def test_fake_abort_recording(fake_system, tmp_path):
-    import time
-
     save_dir = tmp_path / "abort" / "001"
     settings = RecordingSettings(fps=50.0, duration_s=60.0, save_dir=str(save_dir))
     controller = RecordingController(fake_system, settings, auto_preview=False)
     assert controller.start_recording().ok
 
-    deadline = time.monotonic() + 10
-    while controller.state != "recording" and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: controller.state == "recording", timeout=10, interval=0.05)
     assert controller.state == "recording"
 
     controller.stop_recording(abort=True)

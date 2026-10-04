@@ -2,9 +2,9 @@
 
 import json
 import os
-import time
 
 import pytest
+from helpers import wait_until
 
 from octacam.controller import (
     RecordingController,
@@ -616,9 +616,7 @@ def test_abort_recording(camera_system, tmp_path):
     controller = RecordingController(camera_system, settings, auto_preview=False)
     assert controller.start_recording().ok
 
-    deadline = time.monotonic() + 10
-    while controller.state != "recording" and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: controller.state == "recording", timeout=10, interval=0.05)
     assert controller.state == "recording"
 
     controller.stop_recording(abort=True)

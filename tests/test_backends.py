@@ -12,6 +12,7 @@ import sys
 import time
 
 import pytest
+from helpers import wait_until
 
 from octacam.cameras import select_backend
 from octacam.cameras.registry import (
@@ -795,9 +796,7 @@ def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch, caplog
     # The abandoned worker is still inside pylon; when it finally hands over a
     # device nothing owns it, so it must be released rather than left for the GC
     # to destroy after PylonTerminate() (that is the documented teardown crash).
-    deadline = time.monotonic() + 20.0
-    while "40018632" not in factory.destroyed and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: "40018632" in factory.destroyed, timeout=20.0, interval=0.05)
     assert factory.destroyed == ["40018632"]
 
 

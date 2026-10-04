@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from helpers import wait_until
 
 from octacam.plugins.twophoton import (
     DEFAULT_DURATION_MS,
@@ -426,11 +427,8 @@ def test_on_recording_start_no_warning_when_ack_arrives(caplog):
 
     def ack():
         # Deliver the firmware 'A' as soon as the arm packet is written.
-        for _ in range(500):
-            if link.snapshot():
-                plugin._on_arduino_status("A")
-                return
-            time.sleep(0.001)
+        if wait_until(link.snapshot, timeout=0.5, interval=0.001):
+            plugin._on_arduino_status("A")
 
     t = threading.Thread(target=ack)
     t.start()
@@ -543,15 +541,6 @@ def _fake_serial_ns(fake: _FakeSerial) -> SimpleNamespace:
     )
 
 
-def _wait(pred, timeout=1.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return True
-        time.sleep(0.005)
-    return pred()
-
-
 def test_link_open_starts_reader_and_close_joins(monkeypatch):
     import octacam.plugins.twophoton as m
 
@@ -590,7 +579,7 @@ def test_link_reader_invokes_status_callback(monkeypatch):
     fake.feed(b"A")
     fake.feed(b"T")
     fake.feed(b"Z")  # not a status byte -> ignored
-    assert _wait(lambda: got == ["A", "T"])
+    assert wait_until(lambda: got == ["A", "T"])
     link.close()
 
 
@@ -604,7 +593,7 @@ def test_link_read_error_marks_broken(monkeypatch):
     link.open("/dev/fake", 115200)
     assert link.is_open is True
     fake.raise_on_read = _FakeSerialError("device disconnected")
-    assert _wait(lambda: link.is_open is False)
+    assert wait_until(lambda: link.is_open is False)
     link.close()  # still safe / idempotent after the link broke
 
 
@@ -648,7 +637,7 @@ def test_link_reopen_starts_fresh_reader(monkeypatch):
     assert link.is_open is True
     assert link._reader is not None and link._reader.is_alive()
     created[-1].feed(b"A")  # the second port's reader must still process bytes
-    assert _wait(lambda: got == ["A"])
+    assert wait_until(lambda: got == ["A"])
     link.close()
 
 
@@ -663,7 +652,7 @@ def test_link_broken_invokes_on_broken_callback(monkeypatch):
     link = m.TwoPhotonLink(on_status=lambda s: None, on_broken=lambda: broken.append(True))
     link.open("/dev/fake", 115200)
     fake.raise_on_read = _FakeSerialError("device disconnected")
-    assert _wait(lambda: broken == [True])
+    assert wait_until(lambda: broken == [True])
     link.close()
 
 
@@ -754,9 +743,7 @@ def test_reader_distinguishes_bare_status_from_banner():
     t = threading.Thread(target=link._read_loop, daemon=True)
     t.start()
     try:
-        deadline = time.monotonic() + 2.0
-        while link.identity is None and time.monotonic() < deadline:
-            time.sleep(0.01)
+        wait_until(lambda: link.identity is not None, timeout=2.0, interval=0.01)
         time.sleep(0.05)  # let the trailing 'T' status flush
     finally:
         link._reader_stop.set()
