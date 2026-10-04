@@ -333,24 +333,15 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
     binary, then every ffmpeg on $PATH. The bundled imageio build has no NVENC, so
     this is how a GPU recording reaches a system ffmpeg. Raises RuntimeError if
     none qualifies (the caller can then fall back to CPU)."""
-    if require_encoder is None:
-        exe = os.environ.get("OCTACAM_FFMPEG")
-        if exe:
-            return exe
-        try:
-            import imageio_ffmpeg
-
-            return imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception as e:  # pragma: no cover - depends on environment
-            log.debug("imageio-ffmpeg unavailable: %s", e)
-        exe = shutil.which("ffmpeg")
-        if exe:
-            return exe
+    if require_encoder is not None:
+        return _ffmpeg_for_encoder(require_encoder)
+    candidates = _ffmpeg_candidates()
+    if not candidates:
         raise RuntimeError(
             "No ffmpeg executable found: install the imageio-ffmpeg package or "
             "a system ffmpeg, or set OCTACAM_FFMPEG."
         )
-    return _ffmpeg_for_encoder(require_encoder)
+    return candidates[0]
 
 
 @functools.cache
