@@ -44,7 +44,8 @@ log = logging.getLogger("octacam")
 _SENTINEL = None
 FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 
-# Capture: near-visually-lossless at a preset fast enough to keep up.
+# Capture: near-visually-lossless at a preset fast enough to keep up (on the rig,
+# 8 parallel ultrafast encoders sustain >1200 fps in total at 1080p).
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
 # Not "gray": 4:0:0 H.264 decodes as flat gray on NVIDIA hardware decoders
@@ -59,8 +60,9 @@ DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
 )
 
 # GPU capture (record.save_method = "nvenc", or any *_nvenc encoder). NVENC
-# rejects 4:0:0, so yuv420p, kept full range like any limited-range YUV; it
-# ignores -crf, and -cq 16 matches libx264's -crf 18; -bf 0 buffers no B-frames.
+# rejects 4:0:0, so yuv420p, which the full-range helpers (_full_range_vf,
+# _color_range_args) keep at 0-255 luma. NVENC ignores -crf, and -cq 16 matches
+# libx264's -crf 18; -bf 0 buffers no B-frames.
 # Cameras past the GPU's session limit fall back to libx264
 # (resolve_capture_formats).
 NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
@@ -197,7 +199,8 @@ def probe_nvenc_max_sessions(
 
     Counts which of *ceiling* overlapping encodes initialize (*ceiling* means at
     least that many; GeForce drivers allow 8 to 12). It loads the GPU briefly,
-    and under-counts while a recording holds sessions.
+    and under-counts, but never disturbs, the sessions a live recording holds
+    (``octacam doctor`` runs it).
     """
     try:
         exe = find_ffmpeg(require_encoder=encoder)
@@ -261,7 +264,8 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
 
 @functools.cache
 def _ffmpeg_for_encoder(encoder: str) -> str:
-    """The first candidate ffmpeg that runs ``encoder``; only a find is cached."""
+    """The first candidate ffmpeg that runs ``encoder`` (cached); a failure
+    (RuntimeError) is not cached, so a later call searches again."""
     for exe in _ffmpeg_candidates():
         if ffmpeg_encoder_works(exe, encoder):
             return exe
