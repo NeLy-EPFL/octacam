@@ -732,7 +732,7 @@ class TriggerboxPlugin(Plugin):
             _firmware_spec(),
             resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
             reopen=lambda: self._open(allow_recovery=False),
-            close_link=lambda: self._link.close(),  # late-bound: link may be replaced
+            close_link=lambda: self._link.close(),
             wait_for_device=serial_ports.wait_for_device,
             is_busy=self._fw_is_busy,
         )

@@ -350,7 +350,6 @@ class FlywheelPlugin(Plugin):
             wait_for_device=serial_ports.wait_for_device,
             is_busy=self._fw_is_busy,
         )
-        # Through self._write, so a jog follows a replaced link.
         self._jog = JogClock(self._write)
         # One motor, many clients: a jog belongs to the connection that started
         # it, and only that one (or its disconnect) stops it.
