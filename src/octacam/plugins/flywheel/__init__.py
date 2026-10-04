@@ -1,8 +1,6 @@
 """Flywheel stepper-motor controller plugin (opt-in).
 
-Drives the Arduino stepper over a serial link. Enable it with a ``[[plugins]]``
-entry in ``octacam_config.toml`` (settings go under a ``[plugins.options]``
-sub-table)::
+::
 
     [[plugins]]
     name = "flywheel"
@@ -10,25 +8,12 @@ sub-table)::
     [plugins.options]
     device = "/dev/ttyACM0"
     baud = 115200
-    fqbn = "arduino:avr:uno"  # stepper board for firmware flashing (Nano: arduino:avr:nano)
-    auto_flash = false        # headless: reflash a stale board without prompting
+    fqbn = "arduino:avr:uno"  # the board, for flashing (a Nano: arduino:avr:nano)
+    auto_flash = false        # headless: reflash a stale board without asking
 
-or with ``octacam gui --plugin flywheel``. Its serial dependency (pyserial)
-ships with octacam by default, so no extra install is needed.
-
-**Firmware provisioning.** The firmware reports a banner ``"FLYWHEEL <ver> <build>"``
-in reply to a *backward-compatible identify sentinel* (an 8-byte command with
-``n_steps=0`` and a marker in ``step_interval_us`` — old firmware just releases the
-coils and stays silent, so the command wire format is unchanged and no reflash is
-forced). octacam compares ``<build>`` to the ``arduino/stepper_motor`` source and
-offers to compile + upload (arduino-cli, ``fqbn`` above) from the GUI's *Flash
-firmware* button or ``octacam flash``. See :mod:`octacam.firmware`.
-
-It contributes:
-  * an ``on_first_frame`` hook that fires an armed loop command at the first
-    captured frame (so the stepper motion is synchronised to actual capture),
-  * a ``POST /api/serial/command`` endpoint to run a loop on demand,
-  * a "jog" WebSocket handler for hold-to-step position adjustment.
+It fires the armed loop command at the recording's first frame, runs one on
+demand (``POST /api/serial/command``), and steps the motor while a GUI jog
+button is held.
 """
 
 from __future__ import annotations
@@ -52,21 +37,16 @@ log = logging.getLogger("octacam")
 DEFAULT_DEVICE = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
 
-# Hold-to-jog pulse timing. The jog clock writes one single-half-step command
-# per tick, so the step interval is bounded below by the time it takes to send
-# an 8-byte command at the serial baud rate (~0.7 ms at 115200) — going faster
-# just saturates the link. 65535 µs is the wire-format ceiling for the field.
+# A jog writes one half-step command per tick, so its interval is bounded by an
+# 8-byte write at the baud rate (~0.7 ms at 115200); 65535 µs is the field's max.
 JOG_MIN_INTERVAL_US = 1000
 JOG_MAX_INTERVAL_US = 65535
 JOG_DEFAULT_INTERVAL_US = 2000
-# Safety backstop: stop a jog after this many half-steps even if the release
-# message never arrives (lost message, frozen tab). The primary stop is the
-# button release or a WebSocket disconnect; this only bounds a runaway
-# (~24 revolutions of a 4096-half-step motor).
+# Ends a jog whose release never arrives (a lost message, a frozen tab): ~24
+# turns of a 4096-half-step motor.
 JOG_MAX_STEPS = 100_000
 
-# Wire format of the packed C++ Command struct (and the matching struct in
-# arduino/stepper_motor): little-endian int16, uint16, uint16, uint8, uint8.
+# arduino/stepper_motor's packed Command struct.
 _COMMAND_FORMAT = "<hHHBB"
 COMMAND_FIELDS = (
     "n_steps",
@@ -76,22 +56,18 @@ COMMAND_FIELDS = (
     "init_wait_duration_s",
 )
 
-# Firmware identity + provisioning (see octacam.firmware). The stepper protocol is
-# frameless (raw 8-byte Command structs), so identify is a *sentinel command*:
-# n_steps == 0 (a harmless coil release on any firmware) with step_interval_us set
-# to this marker. Firmware that understands it replies "FLYWHEEL <ver> <build>\n";
-# older firmware just releases the coils and stays silent. This keeps the command
-# wire format unchanged — no reflash is forced, and a board that doesn't answer is
-# reported as "no identity" so octacam can offer a (backward-compatible) reflash.
+# The protocol is bare 8-byte commands, so identify is a sentinel: n_steps = 0
+# (a coil release on any firmware) with this marker as the interval. Current
+# firmware answers "FLYWHEEL <version> <build>"; older firmware just releases the
+# coils, so the wire format is unchanged and no reflash is forced.
 _IDENTIFY_MARKER = 0xFFFF
 _EXPECTED_BANNER = "FLYWHEEL"
-_DEFAULT_FQBN = "arduino:avr:uno"  # override with the `fqbn` option for a Nano etc.
+_DEFAULT_FQBN = "arduino:avr:uno"  # the `fqbn` option overrides it
 _PROTOCOL_VERSION = 1
 
 
 def _firmware_spec(fqbn: str) -> fw.FirmwareSpec | None:
-    """The stepper firmware spec for :mod:`octacam.firmware`, or None when the
-    sketch source can't be located (a wheel install without a checkout)."""
+    """The firmware spec, or None without the sketch source (a wheel install)."""
     sketch = fw.resolve_sketch_dir("stepper_motor")
     if sketch is None:
         return None
@@ -136,14 +112,8 @@ class Command:
 
 
 def _command_from_options(options: dict) -> Command | None:
-    """The rig's configured loop command, or None when it names none.
-
-    Lets a rig persist its loop program (and a recording's config snapshot
-    restore it) instead of it living only in the GUI tab. Tolerant like the rest
-    of the config layer: a malformed or out-of-range table is warned about and
-    ignored, never raised. Fields left out keep their Command default, and a
-    negative ``n_steps`` starts the sweep counter-clockwise.
-    """
+    """The rig's loop command (``options.command``), or None. A missing field
+    keeps its default; an invalid table is warned about and ignored."""
     raw = options.get("command")
     if raw is None:
         return None
@@ -157,19 +127,13 @@ def _command_from_options(options: dict) -> Command | None:
 
 
 class SerialLink:
-    """Thread-safe transport to the Arduino over a serial port.
-
-    ``write_command`` may be called concurrently from the controller's monitor
-    thread (first-frame) and a web executor thread (jog), so writes are
-    serialised by a lock.
-    """
+    """The serial link to the stepper. Commands come from the monitor thread
+    (first frame) and web threads (jog), so writes share a lock."""
 
     def __init__(self):
         self._serial = None
         self._lock = threading.Lock()
-        # Serializes open/close/reconnect so two concurrent reconnects (e.g. a
-        # double-clicked Reconnect button) cannot both create a port and leak
-        # the loser's file descriptor.
+        # Serializes open/close, so concurrent reconnects cannot leak a port.
         self._lifecycle_lock = threading.Lock()
 
     def open(self, device: str, baud: int) -> None:
@@ -202,12 +166,9 @@ class SerialLink:
                 log.warning("Serial write failed: %s", e)
 
     def identify(self, banner_prefix: str, timeout: float = 0.5) -> str | None:
-        """Send the identify sentinel and read the banner line it triggers.
-
-        Synchronous (there is no background reader): sends the sentinel command,
-        then reads a newline-terminated banner. Returns None on a silent board
-        (older firmware) or any error. Holds the write lock briefly; only called
-        at open, before any jog/loop, so it never contends with motion."""
+        """Send the identify sentinel and read the banner line it triggers; None
+        from a silent (older) board or on any error. Called at open, before any
+        motion."""
         sentinel = Command(n_steps=0, step_interval_us=_IDENTIFY_MARKER)
         with self._lock:
             s = self._serial
@@ -228,7 +189,7 @@ class SerialLink:
                         if buf:
                             break
                         continue
-                    if b[0] == 0x0A:  # newline terminates the banner
+                    if b[0] == 0x0A:
                         break
                     buf.append(b[0])
                     if len(buf) > 64:
@@ -240,11 +201,8 @@ class SerialLink:
 
 
 def _clamp_jog_interval_us(value) -> int:
-    """Clamp a requested jog step interval into the supported µs range.
-
-    Falls back to the default for missing or non-numeric input so a malformed
-    jog message still produces a usable (rather than zero/blocking) tick rate.
-    """
+    """A jog interval clamped to the supported µs range; the default for a
+    missing or non-numeric one."""
     try:
         us = int(value)
     except (TypeError, ValueError):
@@ -253,26 +211,16 @@ def _clamp_jog_interval_us(value) -> int:
 
 
 class JogClock:
-    """Backend pulse clock for hold-to-jog position adjustment.
+    """Steps the motor at a fixed interval while a jog button is held.
 
-    Pressing a CCW/CW button starts the clock; releasing it stops the clock.
-    While running, a dedicated thread writes one single-half-step command per
-    tick at a fixed interval, so the step frequency is set by a real clock in
-    the backend rather than by the rate of inbound WebSocket messages (which is
-    coarse, jittery, and capped by round-trip latency). Stopping releases the
-    motor coils with a final ``n_steps=0`` command.
-
-    ``start``/``stop`` never block on the serial link: a stalled write must not
-    wedge the caller (a web executor thread). Instead of joining the outgoing
-    thread, ``start`` bumps a generation counter so a superseded thread skips
-    its coil-release (the new thread now owns the coils) and exits on its own.
-
-    ``write`` must be a callable taking a :class:`Command`; it is shared with
-    the loop/first-frame writers, which serialise on the link's own lock.
+    A thread writes one half-step command per tick, so the step rate comes from
+    a clock, not from the (jittery) WebSocket messages; stopping releases the
+    coils (``n_steps = 0``). ``start`` and ``stop`` never block on the serial
+    link: a new start bumps a generation counter instead of joining the old
+    thread, which then skips its coil release (the new thread owns the coils).
     """
 
-    # How long teardown waits for a stopping thread's coil-release to flush
-    # before giving up (a class attribute so tests can shorten it).
+    # How long teardown waits for a stopping jog's coil release to flush.
     JOIN_TIMEOUT_S = 1.0
 
     def __init__(self, write, max_steps: int = JOG_MAX_STEPS):
@@ -281,17 +229,11 @@ class JogClock:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        # Bumped on every start; the running thread releases the coils only
-        # while its captured generation is still current (see _run's finally).
         self._generation = 0
 
     def start(self, direction: int, interval_us: object) -> None:
         interval_s = _clamp_jog_interval_us(interval_us) / 1_000_000
         with self._lock:
-            # Supersede any running jog: a higher generation makes the outgoing
-            # thread suppress its release, and signalling its stop event makes
-            # it exit promptly. No join — the generation guard keeps a lingering
-            # (e.g. write-stalled) thread from clobbering the new direction.
             self._generation += 1
             generation = self._generation
             self._stop.set()
@@ -305,17 +247,9 @@ class JogClock:
             self._thread.start()
 
     def stop(self, join: bool = False) -> bool:
-        """Stop the running jog, releasing the coils.
-
-        The generation is left unchanged, so the outgoing thread releases the
-        coils in its finally. ``join=True`` (teardown) waits for that release to
-        flush before the caller closes the serial port.
-
-        Returns True once the clock is fully stopped (nothing was running, or
-        the thread was joined). Returns False only when ``join=True`` and the
-        thread did not exit within ``JOIN_TIMEOUT_S`` (e.g. wedged on a serial
-        write) — the caller should then release the coils itself before closing.
-        """
+        """Stop the jog; its thread releases the coils. ``join=True`` (teardown)
+        waits for that release and returns False when the thread did not exit
+        in time (a wedged write): the caller must then release the coils."""
         with self._lock:
             thread = self._thread
             if thread is None:
@@ -344,9 +278,7 @@ class JogClock:
                 if delay > 0:
                     if stop.wait(delay):
                         break
-                else:
-                    # Falling behind (link saturated): re-anchor and keep the
-                    # stop check responsive instead of accumulating drift.
+                else:  # behind (a saturated link): re-anchor, no backlog
                     next_tick = now
             else:
                 if steps >= self._max_steps:
@@ -355,13 +287,9 @@ class JogClock:
                         self._max_steps,
                     )
         finally:
-            # Release the coils only if a newer jog has not superseded us, so a
-            # restart's pulses are not clobbered by this thread's stray release.
-            # The compare + release must be atomic w.r.t. start() (which bumps the
-            # generation under _lock), or a superseded thread could read its own
-            # generation and then release coils a newer thread has already taken
-            # over. No deadlock: no caller joins a worker while holding _lock
-            # (stop's join is outside its `with`).
+            # Release the coils unless a newer jog took them over: under the lock
+            # start() bumps the generation with, so check and release are atomic.
+            # No caller joins a jog thread while holding it.
             with self._lock:
                 if generation == self._generation:
                     self._write(release)
@@ -403,21 +331,19 @@ class FlywheelPlugin(Plugin):
         auto_flash: bool = False,
         command: Command | None = None,
     ):
-        # _configured_device is what the config asked for (a path, or "auto");
-        # self.device is the currently-active/display device, resolved on open.
+        # What the config names (a path or "auto"), and the port it resolved to.
         self._configured_device = device
         self.device = device
         self.baud = baud
         self._auto_flash = bool(auto_flash)
-        # The config's loop command (None = the tab keeps its own defaults). Only
-        # read: the tab edits its copy client-side, so this stays the config's.
+        # The configured loop; the tab edits its own copy, so this stays the config's.
         self._command = command
         self._firmware: str | None = None
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = SerialLink()
-        # Firmware detection + flash lifecycle (shared with the other serial
-        # plugins). Owns the port lock; _open takes it too. See octacam.firmware.
+        # Its port lock is shared with _open, so a flash and a reopen never
+        # fight over the port.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(fqbn),
             resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
@@ -426,12 +352,10 @@ class FlywheelPlugin(Plugin):
             wait_for_device=serial_ports.wait_for_device,
             is_busy=self._fw_is_busy,
         )
-        # Bound method (not self._link.write_command) so the clock always
-        # writes through the current link, even after a reconnect swaps it.
+        # Through self._write, so a jog follows a replaced link.
         self._jog = JogClock(self._write)
-        # The jog is one shared motor but the rig is multi-client, so the jog
-        # is scoped to the connection that started it: only its owner (or that
-        # owner disconnecting) may stop it. Guards owner + clock transitions.
+        # One motor, many clients: a jog belongs to the connection that started
+        # it, and only that one (or its disconnect) stops it.
         self._jog_lock = threading.Lock()
         self._jog_owner: int | None = None
         self._closing = False  # set in teardown to refuse jogs racing shutdown
@@ -440,8 +364,7 @@ class FlywheelPlugin(Plugin):
         self._link.write_command(command)
 
     def _fw_is_busy(self) -> tuple[bool, str]:
-        """Refuse to flash while the motor is jogging (a reset mid-jog would drop
-        the coil state)."""
+        """Refuse to flash mid-jog: the board's reset would drop the coil state."""
         if getattr(self, "_jog_owner", None) is not None:
             return True, "refusing to flash while the motor is jogging — release it first"
         return False, ""
@@ -452,15 +375,10 @@ class FlywheelPlugin(Plugin):
         self._open()
 
     def _open(self) -> str | None:
-        """(Re)open the serial link, returning an error message on failure (else
-        None). Never raises: a missing board must not stop the GUI launching,
-        and it can be retried at runtime via the reconnect endpoint once the
-        board is plugged in.
+        """(Re)open the link and read the banner; the error message, or None.
 
-        Resolves ``device="auto"`` to a single detected board, reads the firmware
-        identity, and enriches an open failure with the detected candidate ports.
-        Held under the provisioner's port lock so a concurrent flash can't fight
-        over the port (re-entrant: flash's reopen calls this on the same thread)."""
+        Never raises, so a missing board does not stop the GUI (reconnect
+        retries it). Holds the port lock (re-entrant: a flash's reopen runs this)."""
         with self._fw.port_lock:
             self._firmware = None
             self._firmware_ok = True
@@ -483,11 +401,8 @@ class FlywheelPlugin(Plugin):
             return None
 
     def _verify_identity(self) -> None:
-        """Read the firmware banner (via the identify sentinel) and classify it.
-
-        The stepper command protocol is unchanged, so an OUTDATED or UNIDENTIFIED
-        board still accepts commands; only a foreign banner or wrong version
-        disables driving and offers a reflash."""
+        """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
+        takes commands, a foreign or wrong-version one does not."""
         banner = self._link.identify(_EXPECTED_BANNER)
         self._firmware = banner
         check = self._fw.classify(banner)
@@ -506,7 +421,7 @@ class FlywheelPlugin(Plugin):
                         self.device, check.detail)
 
     def firmware_provisioning(self) -> dict:
-        """Firmware picture for `octacam flash` and the GUI."""
+        """The firmware picture for ``octacam flash`` and the GUI."""
         return self._fw.provisioning(
             plugin_name=self.name,
             device=self.device,
@@ -516,9 +431,7 @@ class FlywheelPlugin(Plugin):
         )
 
     def flash_firmware(self, on_line=None) -> fw.FlashResult:
-        """Compile + upload the current stepper firmware. Delegates the
-        close→upload→reopen→re-verify lifecycle to the shared provisioner. Never
-        raises."""
+        """Upload the current firmware (FirmwareProvisioner.flash). Never raises."""
         result = self._fw.flash(on_line=on_line)
         if not result.ok:
             self._last_error = result.message
@@ -526,14 +439,11 @@ class FlywheelPlugin(Plugin):
 
     def teardown(self) -> None:
         with self._jog_lock:
-            # Refuse any jog start that races shutdown: once closing, a start
-            # that slipped past _jog.stop() below would spawn a thread nothing
-            # ever stops. _start_jog checks this flag under the same lock.
+            # A jog started after the stop below would run forever.
             self._closing = True
             self._jog_owner = None
-        # Stop unconditionally and wait for the coil-release to flush before the
-        # port closes (a released write no-ops once closed). If the thread is
-        # wedged past the join timeout, release the coils here ourselves.
+        # The coil release must flush before the port closes; a wedged jog
+        # thread leaves it to us.
         if not self._jog.stop(join=True):
             self._write(Command(n_steps=0))
         self._link.close()
@@ -552,40 +462,24 @@ class FlywheelPlugin(Plugin):
             "error": self._last_error,
         }
         if self._command is not None:
-            # Seeds the tab's loop fields, so a configured (or snapshot-restored)
-            # loop program is what the operator sees on load.
+            # Seeds the tab's loop fields with the configured program.
             status["command"] = asdict(self._command)
         return status
 
     # -------------------------------------------------- recording lifecycle
 
     def snapshot_options(self, params: dict | None) -> dict | None:
-        """The loop command a recording armed, as config options.
-
-        The tab's loop program is set in the GUI and fired at the first frame, so
-        the recording's config snapshot must carry it to reproduce the motion.
-        None when the recording armed none ("with recording" unchecked) or armed
-        exactly what the config already says.
-        """
+        """The loop command a recording armed, as config options; None when it
+        armed none or the configured one."""
         command = self._command_from(params)
         if command is None or command == self._command:
             return None
         return {"command": asdict(command)}
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
-        """Headless (CLI) arm slice for ``octacam record`` — the configured loop.
-
-        Without this the CLI builds no slice for this plugin, so ``on_first_frame``
-        found nothing in ``params`` and the motor silently never turned on a
-        headless run: the per-rig ``options.command`` seeded only the GUI tab. That
-        also broke relaunching a recording from its own config snapshot with
-        ``octacam record`` — the snapshot preserves the motion precisely so it can
-        be reproduced, and only a GUI relaunch actually did.
-
-        ``None`` when the rig configured no command: the tab's own defaults are a
-        GUI affordance, and spinning an unconfigured motor from the CLI would be a
-        surprise, not a default.
-        """
+        """The configured loop for headless ``octacam record`` (and a relaunch
+        from a recording's snapshot); None without one, so the CLI never spins an
+        unconfigured motor."""
         if self._command is None:
             return None
         return asdict(self._command)
@@ -609,7 +503,6 @@ class FlywheelPlugin(Plugin):
     # --------------------------------------------------------- web contrib
 
     def web_assets(self) -> Path:
-        """The plugin's co-located JS/CSS folder, served at /plugins/flywheel/."""
         return Path(__file__).parent / "web"
 
     def api_router(self):
@@ -619,15 +512,7 @@ class FlywheelPlugin(Plugin):
 
         @router.post("/api/serial/reconnect")
         def serial_reconnect(payload: dict = Body(default={})):
-            """Re-attempt opening the serial port.
-
-            Lets the operator recover from a board that was unplugged or absent
-            at launch (and is now connected) without restarting the server. An
-            optional ``{"device": "/dev/…"}`` body switches to a different port
-            (e.g. picked from the GUI dropdown) before reopening. The response
-            carries the resulting ``ready`` state so the GUI can flip the
-            Flywheel tab from its "serial unavailable" notice to usable.
-            """
+            """Reopen the port, switching to ``{"device": ...}`` when given."""
             device = payload.get("device") if isinstance(payload, dict) else None
             if isinstance(device, str) and device.strip():
                 self._configured_device = device.strip()
@@ -673,44 +558,35 @@ class FlywheelPlugin(Plugin):
         return router
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """Handle hold-to-jog start/stop messages.
-
-        ``{"type": "jog", "action": "start", "direction": -1|1,
-        "interval_us": N}`` starts the backend pulse clock in that direction;
-        ``{"type": "jog", "action": "stop"}`` stops it. The clock — not these
-        messages — paces the steps, so the client sends exactly one of each per
-        hold. The jog is scoped to ``client_id`` so concurrent operators don't
-        cancel each other (only the owner may stop it).
-        """
+        """Hold-to-jog: ``{"type": "jog", "action": "start", "direction": -1|1,
+        "interval_us": N}`` starts the clock and any other jog action stops it,
+        one of each per hold. Only the client that started a jog stops it."""
         if message.get("type") != "jog":
             return False
         if message.get("action") == "start":
             self._start_jog(message, client_id)
-        else:  # "stop" (or any non-start jog message) halts the clock
+        else:
             self._stop_jog(client_id)
         return True
 
     def on_ws_disconnect(self, client_id: int) -> None:
-        # A dropped control socket must not leave the motor spinning, but only
-        # if this client owned the jog — another operator's hold is untouched.
         self._stop_jog(client_id)
 
     def _start_jog(self, message: dict, client_id: int) -> None:
         direction = message.get("direction")
         if direction not in (-1, 1) or not self._link.is_open:
-            return  # nothing to drive (covered client-side by the ready gate)
+            return
         with self._jog_lock:
             if self._closing:
-                return  # shutting down — don't spawn a jog nothing will stop
-            # Latest press owns the motor; a previous owner's later release is
-            # then ignored (it is no longer the owner) and its hold's stray
-            # pulses are superseded by the clock's generation guard.
+                return
+            # The latest press owns the motor; an earlier owner's release is
+            # then ignored.
             self._jog_owner = client_id
             self._jog.start(direction, message.get("interval_us"))
 
     def _stop_jog(self, client_id: int) -> None:
         with self._jog_lock:
             if client_id != self._jog_owner:
-                return  # not the owner — leave the active jog (if any) running
+                return
             self._jog_owner = None
             self._jog.stop()
