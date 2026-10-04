@@ -41,7 +41,7 @@ def test_normalize_pfs_triggers_keeps_source_when_unknown():
 
 @pytest.fixture
 def previewing_system(tmp_path):
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
     system.load_config(tmp_path)  # no .pfs: emulator defaults
     system.start_preview()

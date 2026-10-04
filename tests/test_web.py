@@ -22,7 +22,7 @@ EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 
 @pytest.fixture
 def client(tmp_path):
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
     system.load_config(tmp_path)
     config = OctacamConfig()
@@ -44,7 +44,7 @@ def client(tmp_path):
 def shutdown_client(tmp_path):
     # Same as `client`, but with an injected shutdown callback so POSTing
     # /api/shutdown invokes a mock instead of signalling the test process.
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)
     config = OctacamConfig()
     settings = RecordingSettings(
@@ -179,7 +179,7 @@ def test_deferred_startup_serves_then_fills_in(tmp_path):
 
                 # Attach the real (emulated) system as the init thread does, then
                 # broadcast; the connected client receives a ready `system`.
-                real = CameraSystem(EMULATED_SERIALS)
+                real = CameraSystem(EMULATED_SERIALS, backend="basler")
                 real.load_config(tmp_path)
                 controller.attach_system(real)
                 app.state.app_state.broadcast_system()
@@ -486,7 +486,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             self.jogs.append((message.get("n"), client_id))
             return True
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
@@ -526,7 +526,7 @@ def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
         def on_ws_message(self, message, client_id):
             raise ValueError("boom: malformed jog value")
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
@@ -574,7 +574,7 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
         def web_assets(self):
             return assets
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
@@ -1114,7 +1114,7 @@ def test_camera_features_locked_while_recording(client):
 def _save_client(tmp_path, config_dir):
     from octacam.config import parse_config
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(config_dir)
     config = parse_config(config_dir / "octacam_config.toml")
     settings = RecordingSettings(

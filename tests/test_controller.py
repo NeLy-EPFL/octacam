@@ -514,7 +514,7 @@ def test_recording_settings_default_ffmpeg_params():
 def camera_system(tmp_path):
     from octacam.camera import CameraSystem
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
     system.load_config(tmp_path)  # no .pfs files: emulator defaults
     yield system
