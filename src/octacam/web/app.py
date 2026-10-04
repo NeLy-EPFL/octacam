@@ -1143,10 +1143,7 @@ def create_app(
                             None, plugin.on_ws_message, message, client.id
                         )
                     except Exception:
-                        log.exception(
-                            "Plugin %s.on_ws_message failed",
-                            getattr(plugin, "name", repr(plugin)),
-                        )
+                        log.exception("Plugin %s.on_ws_message failed", plugin.name)
                         handled = True  # swallow: a bad message must not kill the socket
                     if handled:
                         break
