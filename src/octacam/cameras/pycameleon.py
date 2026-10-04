@@ -1,36 +1,10 @@
-"""pycameleon camera backend (the always-available cascade floor).
+"""pycameleon backend: USB3 Vision over libusb, the cascade's always-present floor.
 
-``pycameleon`` (PyPI, MIT) is a PyO3 binding over the Rust ``cameleon`` crate,
-which speaks USB3 Vision directly through ``libusb`` — no GenTL ``.cti``
-producer, no vendor SDK, no EULA. Its wheel is ``cp39-abi3``, so ``uv add
-pycameleon`` installs on modern Python (3.14 today), which is why this backend is
-a **core dependency** and the guaranteed final tier of the backend cascade: when
-no vendor SDK and no GenTL producer are available, pycameleon still drives any
-USB3-Vision camera.
-
-Mapping notes vs. the other backends:
-
-* Node names are the standard SFNC ones, so :data:`PARAM_NODES` is reused;
-  Width/Height/Offset* are integer nodes, ExposureTime/Gain are float nodes
-  (:func:`read_integer` / :func:`read_float`).
-* pycameleon 0.2.x exposes **only node values** — no bounds/increment/unit or
-  writability. :class:`NodeInfo` therefore leaves ``min/inc/unit`` ``None`` and
-  reports ``writable`` from the open state (as the fake backend does for
-  geometry); ``snap_value`` already tolerates ``None`` bounds. Width/Height fill
-  ``max`` from the readable SFNC ``WidthMax``/``HeightMax`` when present.
-* There is no per-frame hardware timestamp, so :meth:`retrieve` returns a ``0``
-  timestamp and :class:`~octacam.cameras.base.Camera` falls back to host time.
-* Parameters persist in the camera's native GenApi feature-persistence TSV
-  (``extension = "txt"``; see :mod:`octacam.cameras._genicam_config`), shared
-  with the FLIR/Spinnaker backends.
-* pycameleon takes an **exclusive borrow** of the camera object: calling
-  ``execute()`` (the software trigger) from one thread while ``receive()`` runs on
-  another raises "Already borrowed". octacam's shared trigger timer and grab loop
-  are different threads, so — like the *fake* backend — :meth:`trigger_once` only
-  bumps a pending counter (no device access) and the grab loop's :meth:`retrieve`
-  does the ``TriggerSoftware`` execute *and* the ``receive`` back-to-back under a
-  single lock. All other device access (node reads/writes) takes the same lock,
-  so the camera is only ever touched by one thread at a time.
+pycameleon (a PyO3 binding of the Rust ``cameleon`` crate) needs no vendor SDK,
+so it is a core dependency. It exposes node values only (no bounds, units or
+writability) and no frame timestamp, so its frames are host-clocked. It borrows
+the camera exclusively: ``execute`` on one thread while ``receive`` runs on
+another raises "Already borrowed", so every device call holds ``_lock``.
 """
 
 import asyncio
@@ -63,11 +37,10 @@ except ImportError:  # pragma: no cover - pycameleon ships in core
 
 log = logging.getLogger("octacam")
 
-# Spinnaker/Basler-style integer nodes; the rest of PARAM_NODES are floats.
+# Integer SFNC nodes; the rest of PARAM_NODES are floats.
 _INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
-# In-flight payload buffers handed to start_streaming. Software triggering means
-# one frame is produced per trigger, so a small pool is plenty.
+# Payload buffers: one frame per software trigger, so a small pool is plenty.
 _STREAM_CAPACITY = 8
 
 
@@ -91,29 +64,17 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     extension = "txt"
 
     def __init__(self, cam):
-        # The PyCameleonCamera handle from enumerate_cameras(); set to None by
-        # close() so a second close() (or a post-close query) is a safe no-op.
-        # Typed Any (like the FLIR CameraPtr) so the close()-sets-None lifecycle
-        # does not trip the optional-access checker on every method.
-        self._cam: Any = cam
+        self._cam: Any = cam  # a PyCameleonCamera; None once closed
         self._serial = _read_serial(cam)
         self._open = False
         self._original_trigger_source: str | None = None
-        # Cached GenApi XML: fetched once from the camera on the first open so a
-        # later re-open can use the faster/safer load_context_from_xml.
+        # The GenApi XML, read from the camera on the first open; a re-open loads it.
         self._context_xml: str | None = None
-        # Streaming state, owned by start_grab_* / stop_grab.
         self._receiver = None
-        # Event loop that drives the timeout-bounded receive_async (see
-        # _receive_bounded); created lazily on the grab thread, closed by close().
+        # Drives the bounded receive_async (_receive_bounded); closed by close().
         self._recv_loop: asyncio.AbstractEventLoop | None = None
-        # Serializes every device call (pycameleon allows only one at a time).
-        # Reentrant: open() sets Mono8 through _set_enum while holding it.
+        # Every device call holds it. Reentrant: open() sets Mono8 through _set_enum.
         self._lock = threading.RLock()
-        # Software-trigger hand-off (shared mixin): trigger_once bumps a counter;
-        # retrieve consumes it and does the execute+receive under _lock. pycameleon
-        # *requires* this — an exclusive borrow forbids execute() on one thread
-        # while receive() runs on another.
         self._init_trigger_handoff()
 
     @property
@@ -131,21 +92,18 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 else:
                     self._cam.load_context_from_xml(self._context_xml)
             except Exception as e:
-                # Usually the device is already in use by another process (a
-                # second octacam on the rig). Surface it as a BackendError so the
-                # caller reports it cleanly instead of a raw pycameleon traceback.
                 raise BackendError(str(e)) from e
             self._open = True
-            # Force Mono8 so receive() yields a 2-D uint8 array matching the writer.
+            # Mono8, so receive() yields the 2-D uint8 array the GRAY8 writer takes.
             try:
                 self._set_enum("PixelFormat", "Mono8")
             except BackendError as e:
                 log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
 
     def close(self) -> None:
-        if self._cam is None:  # idempotent: a second close() must not raise
+        if self._cam is None:  # a second close() is a no-op
             return
-        self.stop_grab()  # sets _grabbing False and stops streaming under the lock
+        self.stop_grab()
         with self._lock:
             try:
                 self._cam.close()  # auto-stops streaming and closes cleanly
@@ -167,8 +125,6 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         return self._grabbing
 
     def grab_locked_features(self) -> frozenset[str]:
-        # libusb FLIR floor: only Width/Height are locked during acquisition;
-        # the ROI offsets stay live-writable while grabbing.
         return GEOMETRY_FEATURES
 
     def width(self) -> int:
@@ -195,7 +151,6 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except Exception:
                 return None
 
-    # Typed-setter seam used by the native-TSV config applier (_genicam_config).
     def _set_bool(self, node: str, value: bool) -> None:
         with self._lock:
             try:
@@ -243,8 +198,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     value = float(self._cam.read_float(sfnc))
             except Exception as e:
                 raise BackendError(str(e)) from e
-        # Only the sensor bound is available (WidthMax/HeightMax); pycameleon
-        # exposes no min/inc/unit or per-node writability.
+        # The only bounds pycameleon can read: WidthMax/HeightMax.
         maximum: float | None = None
         if name == "width":
             maximum = self._get_number("WidthMax", True)
@@ -270,8 +224,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except Exception as e:
                 raise BackendError(str(e)) from e
 
-    # pycameleon exposes only a small typed accessor set, not a full node-map
-    # walk; the Camera tab falls back to the six curated PARAM_NODES.
+    # No node-map walk: the six curated PARAM_NODES.
     def list_features(self) -> list[FeatureInfo]:
         if not self.is_open():
             return []
@@ -286,18 +239,9 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def execute_command(self, name: str) -> None:
         raise BackendError("command execution is not supported on this backend")
 
-    # config_values / load_params / save_params and the software-trigger chain
-    # (enable_frame_trigger / set_trigger_source / begin_software_trigger_preview
-    # / trigger_once / begin_freerun / _enable_trigger_overlap) are inherited
-    # unchanged from GenICamTriggerConfig.
-
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Free-run: the camera streams continuously, so receive the next frame
-        # without waiting on / executing a software trigger. The receive is
-        # timeout_ms-bounded so a free-run source that stops (or a mid-record
-        # unplug) can't park the grab thread — and _lock — forever.
         with self._lock:
             if not self._grabbing or self._receiver is None or self._cam is None:
                 return None
@@ -330,7 +274,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         return True
 
     def stop_grab(self) -> None:
-        if not self._end_grab():  # flips _grabbing + wakes any blocked retrieve
+        if not self._end_grab():
             return
         with self._lock:
             if self._receiver is not None:
@@ -343,11 +287,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Wait (like the fake backend) for a software trigger, then do the
-        # execute+receive back-to-back under the device lock so nothing else
-        # touches the camera in between. A 0 timestamp makes Camera fall back to
-        # host time. While a fired trigger's frame is still due, only receive (see
-        # _trigger_handoff: a late frame must answer its own trigger).
+        # Fire and receive under one hold of the device lock (exclusive borrow).
         fire = self._claim_trigger(timeout_ms)
         if fire is None:
             return None
@@ -364,32 +304,24 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             try:
                 array = self._receive_bounded(self._fetch_timeout_ms(timeout_ms))
             except Exception as e:
-                # A payload cameleon rejected (short, or a trailer error): this
-                # backend's incomplete image. It answers its trigger like one, or
-                # the camera would wait out the answer deadline for an image
-                # that has already been consumed.
+                # A payload cameleon rejected (short, a trailer error) is this
+                # backend's incomplete image: it answers its trigger.
                 log.debug("receive failed on camera %s: %s", self._serial, e)
                 self._trigger_answered()
                 return None
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
         self._trigger_answered()
-        # Own the frame; skip the copy when the display slot is full (preview).
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)
 
     def _receive_bounded(self, timeout_ms: int):
-        """Receive the next frame, or return None after *timeout_ms*.
+        """The next frame, or None after ``timeout_ms``.
 
-        pycameleon's ``receive()`` is a blocking call with **no timeout**: a lost
-        software-triggered frame, a mid-record USB unplug, or a free-run source
-        that stops would park the grab thread inside ``receive()`` forever — with
-        ``_lock`` held — wedging ``stop_grab``/``join``/``close`` and any
-        concurrent node access. Instead await the non-blocking ``receive_async``
-        under a ``timeout_ms`` deadline (:func:`asyncio.wait_for`) and return None
-        on timeout, so the grab loop re-checks :meth:`is_grabbing` / the stop flag
-        and can exit. Called only under ``_lock`` from the grab thread, so the
-        reused event loop is single-threaded.
+        pycameleon's ``receive()`` has no timeout: a lost frame or an unplug
+        would park the grab thread in it forever, holding ``_lock`` and wedging
+        stop and close. Grab thread only, under ``_lock``, so the reused event
+        loop is single-threaded.
         """
         loop = self._recv_loop
         if loop is None:
@@ -417,12 +349,7 @@ def _read_serial(cam) -> str:
 
 
 def read_model(cam) -> str | None:
-    """Best-effort model name from a PyCameleonCamera's ``info()`` descriptor.
-
-    The model-name analogue of :func:`_read_serial` (``info()`` is read without
-    opening the device). ``None`` when the descriptor omits ``model_name``.
-    Consumed by the doctor enumeration to label cameras.
-    """
+    """Best-effort model name from ``info()``, read without opening (for doctor)."""
     try:
         info = cam.info()
         model = info.get("model_name") if isinstance(info, dict) else None
@@ -434,24 +361,12 @@ def read_model(cam) -> str | None:
 def enumerate_pycameleon(
     requested_serials: list[str] | None = None, *, warn_missing: bool = True
 ):
-    """Return ``[(serial, PyCameleonCamera), ...]`` for the requested cameras.
-
-    Mirrors :func:`octacam.cameras.basler.enumerate_basler`: with no requested
-    serials, every detected camera is returned (sorted by serial); otherwise the
-    listed serials are returned in order, warning about any not connected.
-
-    ``warn_missing=False`` suppresses the per-serial "not found" warning: the
-    auto cascade offers the whole rig's serial list to every tier, so most of
-    those serials legitimately belong to another backend and must not be
-    reported missing here (``CameraSystem._enumerate`` warns once for a serial
-    that no tier claimed).
-    """
+    """``[(serial, PyCameleonCamera)]``: every camera sorted by serial, or the
+    requested ones in order."""
     p = _pycameleon()
     cams = p.enumerate_cameras()
     if not cams:
         return []
-    # Debug, not info: the auto cascade enumerates every tier, so CameraSystem
-    # logs the single attributed "Detected N" summary (see basler backend).
     log.debug("pycameleon enumerated %d camera(s)", len(cams))
 
     by_serial: dict[str, object] = {}
