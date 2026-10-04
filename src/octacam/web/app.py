@@ -226,7 +226,6 @@ class RecordingStartRequest(BaseModel):
 
 
 class ShutdownRequest(BaseModel):
-    # "Shut down & process": cli.gui starts a detached processing job on the way out.
     process_after: bool = False
 
 
@@ -463,7 +462,8 @@ class _AppState:
         self.plugins = plugins
         # {name: assets dir} of the plugins with a web UI, set once by create_app.
         self.plugin_web: dict[str, Path] = {}
-        # Set by POST /api/shutdown; read by cli.gui's teardown.
+        # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then
+        # starts a detached processing job.
         self.process_after = False
         self.clients: set[_Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -805,7 +805,7 @@ def create_app(
 
     app = FastAPI(title="octacam", version=octacam.__version__, lifespan=lifespan)
 
-    app.state.app_state = state  # cli.gui pushes `system` and reads process_after
+    app.state.app_state = state  # read by cli.gui
     # GUI load never waits on the PyPI check.
     threading.Thread(
         target=state.refresh_update_notice,
