@@ -131,10 +131,8 @@ def list_serial_ports() -> list[SerialPort]:
         return []
     ports: list[SerialPort] = []
     for info in infos:
-        vid = getattr(info, "vid", None)
-        pid = getattr(info, "pid", None)
-        description = getattr(info, "description", None) or ""
-        manufacturer = getattr(info, "manufacturer", None)
+        vid, pid, manufacturer = info.vid, info.pid, info.manufacturer
+        description = info.description or ""
         board_name, likely_mc, likely_ard = classify_port(
             vid, pid, description, manufacturer
         )
@@ -143,11 +141,11 @@ def list_serial_ports() -> list[SerialPort]:
                 device=info.device,
                 description=description,
                 manufacturer=manufacturer,
-                product=getattr(info, "product", None),
+                product=info.product,
                 vid=vid,
                 pid=pid,
-                serial_number=getattr(info, "serial_number", None),
-                hwid=getattr(info, "hwid", "") or "",
+                serial_number=info.serial_number,
+                hwid=info.hwid or "",
                 board_name=board_name,
                 likely_microcontroller=likely_mc,
                 likely_arduino=likely_ard,
