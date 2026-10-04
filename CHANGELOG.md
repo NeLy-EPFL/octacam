@@ -50,6 +50,20 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- **A recording folder now shows just its videos; everything else goes into an
+  `octacam_recording/` subfolder** — the `recording_summary.json`, the opt-in
+  `timestamps.npz`, the `octacam_config.toml` config snapshot and every camera
+  and auxiliary parameter file used to sit flat beside the videos. The per-camera
+  videos (`.mkv`/`.raw`, then `.mp4`) and `grid.mp4` stay in the recording
+  folder, and the summary's per-camera `file` entries still name them relative to
+  it. The subfolder is a complete config directory, and
+  `octacam gui <recording folder>` still relaunches the recording's setup from
+  it. `octacam process` transfers the subfolder with the videos. **Older flat
+  recordings keep working with every command** (`check`, `process` — transcode,
+  grid, transfer — and relaunching): readers accept both layouts, and a
+  recursive search never takes an `octacam_recording/` subfolder for a recording
+  of its own. Recording into a folder that holds an older flat take leaves that
+  take's files in place; the new take's subfolder is what gets read.
 - **triggerbox firmware: a re-arm at the same fps keeps the frame clock's phase
   and takes effect at the next frame edge** — outputs that stay in the spec
   carry their level across the edge, so no output gets an early, late or extra

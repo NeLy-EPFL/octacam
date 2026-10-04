@@ -29,6 +29,9 @@ from octacam.pulses import PulseClock
 from octacam.writer import FORMATS
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
+# Where a recording writes everything but its videos (transform.
+# RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
+INFO_DIR = "octacam_recording"
 W, H = 64, 48
 FPS = 50.0
 PERIOD_NS = int(1e9 / FPS)
@@ -67,8 +70,8 @@ def _record(system, tmp_path, *, plugins=None, **overrides):
     )
     assert result.ok, result.message
     controller.join(timeout=30)
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
-    with np.load(save_dir / "timestamps.npz") as data:
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
+    with np.load(save_dir / INFO_DIR / "timestamps.npz") as data:
         arrays = {k: data[k] for k in data.files}
     return save_dir, summary, arrays, controller
 
@@ -719,11 +722,11 @@ def test_external_trigger_misses_are_reported_not_filled(fake_system, tmp_path):
     time.sleep(0.3)
     controller.stop_recording()
     controller.join(timeout=30)
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert _cam(summary, "FAKE-0")["frames"] == 19  # not filled
     assert _cam(summary, "FAKE-0")["missed_pulse_indices"] == [4]
     assert not summary["sync"]["ok"]
-    with np.load(save_dir / "timestamps.npz") as data:
+    with np.load(save_dir / INFO_DIR / "timestamps.npz") as data:
         pulses = data["FAKE-0/pulse_index"].tolist()
     assert pulses == [p for p in range(20) if p != 4]
 

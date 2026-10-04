@@ -96,7 +96,8 @@ octacam check [PATHS...]
 ```
 
 Screen recording folders — or whole directory trees, searched for
-`recording_summary.json` — for missed trigger pulses, unequal frame counts, a
+`recording_summary.json` (in each recording's `octacam_recording/` subfolder, or
+flat beside the videos in an older recording) — for missed trigger pulses, unequal frame counts, a
 start offset between cameras, late exposures and camera-clock jumps. Reads each
 recording's summary and `timestamps.npz` and never modifies anything: new
 recordings are checked from the recorder's own accounting (the summary alone

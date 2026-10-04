@@ -29,6 +29,9 @@ file granularity.
 Besides the videos, every transfer carries the recording's metadata: the
 summary, the timestamps, and the config snapshot with the camera parameter
 files beside it, so the destination copy can relaunch the same recording setup.
+The copy keeps the source's layout: a recording that keeps its metadata in the
+``octacam_recording`` subfolder gets one at the destination, and an older flat
+recording stays flat, so every reader finds it there as it did here.
 """
 
 from __future__ import annotations
@@ -48,6 +51,7 @@ from octacam.transform import (
     PARAM_FILE_EXTENSIONS,
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
+    recording_info_dir,
 )
 
 log = logging.getLogger("octacam")
@@ -302,17 +306,22 @@ def _should_skip(src: Path, final: Path, *, checksum: bool) -> bool:
 
 
 def _metadata_files(folder: Path) -> list[Path]:
-    """The recording's metadata files present in *folder*, always transferred.
+    """The recording's metadata files in *folder*, always transferred.
 
     The summary and per-frame timestamps, plus the config snapshot and the
-    camera parameter files written beside it: together they make the folder a
-    config directory, so the copy at the destination can relaunch the same
-    recording setup (``octacam gui <folder>``).
+    camera parameter files written beside it: together they make a config
+    directory, so the copy at the destination can relaunch the same recording
+    setup (``octacam gui <folder>``). They are read from wherever the recording
+    keeps them (:func:`octacam.transform.recording_info_dir`): its
+    ``octacam_recording`` subfolder, or *folder* itself for a flat recording.
+    Only that one directory counts, so a folder recorded into again carries the
+    new take's metadata and not the older flat take's leftovers beside it.
     """
+    info = recording_info_dir(folder)
     names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]
-    files = [folder / name for name in names]
+    files = [info / name for name in names]
     for ext in PARAM_FILE_EXTENSIONS:
-        files.extend(sorted(folder.glob(f"*.{ext}")))
+        files.extend(sorted(info.glob(f"*.{ext}")))
     # Hidden files (e.g. the macOS "._name" forks a Mac leaves on a share) are
     # not recording metadata.
     return [f for f in files if f.is_file() and not f.name.startswith(".")]
@@ -340,6 +349,25 @@ def transfer_destination(
     return dest_root / rel if rel is not None else dest_root / folder.name
 
 
+def _target(
+    folder: Path, dest: Path, src: Path, *, metadata: bool
+) -> tuple[Path, str]:
+    """Where *src* lands under *dest*, and the name the result reports it by.
+
+    A metadata file keeps its path relative to *folder*, so one in the
+    ``octacam_recording`` subfolder lands in the destination's own subfolder
+    (reported as ``octacam_recording/<name>``) and a flat one stays flat. Every
+    other file (the videos) lands directly in *dest* under its own name, as it
+    always has."""
+    rel = Path(src.name)
+    if metadata:
+        try:
+            rel = src.relative_to(folder)
+        except ValueError:
+            pass
+    return dest / rel, rel.as_posix()
+
+
 def transfer_folder(
     folder: Path,
     dest: Path,
@@ -353,7 +381,8 @@ def transfer_folder(
 
     The metadata (see :func:`_metadata_files`) is recording_summary.json,
     timestamps.npz, the octacam_config.toml snapshot and the camera parameter
-    files beside it, each when present.
+    files beside it, each when present, copied into the same layout it has in
+    *folder* (the ``octacam_recording`` subfolder, or flat).
 
     Parameters
     ----------
@@ -399,21 +428,24 @@ def transfer_folder(
     if not candidates:
         log.warning("Nothing to transfer from %s", folder)
         return result
+    # (source, destination path, the name the result reports it by)
+    plan = [
+        (f, *_target(folder, dest, f, metadata=f in by_content)) for f in candidates
+    ]
 
     # --- Dry run: log intended copies; note files already at the destination -
     if dry_run:
-        for f in candidates:
-            target = dest / f.name
+        for f, target, label in plan:
             exact = checksum or f in by_content
             # A planned output has no bytes to compare yet; a real run would
             # produce it first and then copy it.
             if f.exists() and _should_skip(f, target, checksum=exact):
                 # Already present (size/checksum match): a real run would skip
                 # it, so the preview must report a skip — not a phantom copy.
-                result.skipped.append(f.name)
+                result.skipped.append(label)
             else:
                 log.info("[dry-run] transfer: %s → %s", f, target)
-                result.copied.append(f.name)
+                result.copied.append(label)
         return result
 
     # --- Real copy ----------------------------------------------------------
@@ -421,27 +453,28 @@ def transfer_folder(
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         log.error("Could not create destination directory %s: %s", dest, e)
-        result.failed.extend(f.name for f in candidates)
+        result.failed.extend(label for _f, _target_path, label in plan)
         return result
 
-    n = len(candidates)
-    for idx, f in enumerate(candidates, 1):
-        target = dest / f.name
+    n = len(plan)
+    for idx, (f, target, label) in enumerate(plan, 1):
         try:
             if _should_skip(f, target, checksum=checksum or f in by_content):
                 # Present and matching — counted in the run summary rather than
                 # logged per file, so a full re-run doesn't spam one line for
                 # every already-copied output.
-                result.skipped.append(f.name)
+                result.skipped.append(label)
                 continue
+            # The metadata subfolder, when the recording has one.
+            target.parent.mkdir(parents=True, exist_ok=True)
             if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):
-                log.info("Transfer: %s → %s", f.name, dest)
-                result.copied.append(f.name)
+                log.info("Transfer: %s → %s", label, dest)
+                result.copied.append(label)
             else:
-                log.error("Transfer: %s failed verification — not copied", f.name)
-                result.failed.append(f.name)
+                log.error("Transfer: %s failed verification — not copied", label)
+                result.failed.append(label)
         except OSError as e:
             log.error("Failed to transfer %s: %s", f, e)
-            result.failed.append(f.name)
+            result.failed.append(label)
 
     return result

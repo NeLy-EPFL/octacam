@@ -22,20 +22,32 @@ from octacam.transfer import (
 )
 from octacam.transform import (
     CONFIG_SNAPSHOT_FILENAME,
+    RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
+    recording_info_dir,
 )
 
 TEMP_GLOB = f".*{transfer_mod._TEMP_INFIX}*"
 
 
-def _make_recording(folder: Path, files: dict[str, bytes]) -> Path:
-    """Create a recording dir with the given ``name -> bytes`` files + summary."""
+def _make_recording(
+    folder: Path, files: dict[str, bytes], *, nested: bool = False
+) -> Path:
+    """Create a recording dir with the given ``name -> bytes`` files + summary.
+
+    The summary sits flat beside the videos (a recording made before the
+    ``octacam_recording`` subfolder), or in that subfolder with ``nested``."""
     folder.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
         (folder / name).write_bytes(data)
-    (folder / RECORDING_SUMMARY_FILENAME).write_text("{}")
+    info = folder / RECORDING_INFO_DIRNAME if nested else folder
+    info.mkdir(exist_ok=True)
+    (info / RECORDING_SUMMARY_FILENAME).write_text("{}")
     return folder
+
+
+SUMMARY_NESTED = f"{RECORDING_INFO_DIRNAME}/{RECORDING_SUMMARY_FILENAME}"
 
 
 def _no_temps(dest: Path) -> bool:
@@ -154,6 +166,135 @@ def test_metadata_changed_at_the_same_size_is_recopied(tmp_path):
     assert set(result.skipped) == {"camera_LF.mp4", RECORDING_SUMMARY_FILENAME}
     assert (dest / CONFIG_SNAPSHOT_FILENAME).read_text() == "[record]\nfps = 90.0\n"
     assert (dest / "camera_LF.mp4").read_bytes() == b"A" * 100
+
+
+# --- the recording layout: metadata subfolder, or flat ------------------------
+
+
+def test_nested_metadata_lands_in_the_destinations_subfolder(tmp_path):
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 100}, nested=True)
+    info = src / RECORDING_INFO_DIRNAME
+    (info / TIMESTAMPS_FILENAME).write_bytes(b"npz")
+    (info / CONFIG_SNAPSHOT_FILENAME).write_text("[record]\nfps = 80.0\n")
+    (info / "40018631.pfs").write_text("basler")
+    (info / "17475185.txt").write_text("flir")
+    (info / "._17475185.txt").write_text("fork")  # hidden: not metadata
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+
+    result = transfer_folder(src, dest=dest)
+
+    assert result
+    meta = [
+        RECORDING_SUMMARY_FILENAME,
+        TIMESTAMPS_FILENAME,
+        CONFIG_SNAPSHOT_FILENAME,
+        "40018631.pfs",
+        "17475185.txt",
+    ]
+    assert result.copied == ["camera_LF.mp4"] + [
+        f"{RECORDING_INFO_DIRNAME}/{name}" for name in meta
+    ]
+    # The destination is laid out as the source: only the video at the top...
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "camera_LF.mp4",
+        RECORDING_INFO_DIRNAME,
+    ]
+    # ...and the camera files beside the snapshot, so it is a config dir.
+    dest_info = dest / RECORDING_INFO_DIRNAME
+    assert sorted(p.name for p in dest_info.iterdir()) == sorted(meta)
+    assert (dest_info / "17475185.txt").read_text() == "flir"
+    assert recording_info_dir(dest) == dest_info
+    assert _no_temps(dest) and _no_temps(dest_info)
+
+
+def test_nested_metadata_skips_and_recopies_by_content_on_a_rerun(tmp_path):
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"A" * 100}, nested=True)
+    snapshot = src / RECORDING_INFO_DIRNAME / CONFIG_SNAPSHOT_FILENAME
+    snapshot.write_text("[record]\nfps = 80.0\n")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    transfer_folder(src, dest=dest)
+
+    again = transfer_folder(src, dest=dest, dry_run=True)
+    assert set(again.skipped) == {
+        "camera_LF.mp4",
+        SUMMARY_NESTED,
+        f"{RECORDING_INFO_DIRNAME}/{CONFIG_SNAPSHOT_FILENAME}",
+    }
+    assert not again.copied
+
+    snapshot.write_text("[record]\nfps = 90.0\n")  # same size, new content
+    planned = transfer_folder(src, dest=dest, dry_run=True)
+    result = transfer_folder(src, dest=dest)
+    edited = f"{RECORDING_INFO_DIRNAME}/{CONFIG_SNAPSHOT_FILENAME}"
+    assert planned.copied == [edited] and result.copied == [edited]
+    assert (dest / edited).read_text() == "[record]\nfps = 90.0\n"
+
+
+def test_nested_dry_run_plans_the_subfolder_and_touches_nothing(tmp_path):
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 10}, nested=True)
+    dest_root = tmp_path / "dest"
+    result = transfer_folder(src, dest=dest_root / "rec", dry_run=True)
+    assert result.copied == ["camera_LF.mp4", SUMMARY_NESTED]
+    assert not dest_root.exists()
+
+
+def test_flat_metadata_stays_flat_at_the_destination(tmp_path):
+    # An archive made before the subfolder is copied as it is: no subfolder
+    # appears at the destination, so every reader finds it there as it did here.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 10})
+    (src / CONFIG_SNAPSHOT_FILENAME).write_text("[gui]\n")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+    result = transfer_folder(src, dest=dest)
+    assert result.copied == [
+        "camera_LF.mp4",
+        RECORDING_SUMMARY_FILENAME,
+        CONFIG_SNAPSHOT_FILENAME,
+    ]
+    assert not (dest / RECORDING_INFO_DIRNAME).exists()
+    assert recording_info_dir(dest) == dest
+
+
+def test_a_newer_nested_take_carries_its_own_metadata_only(tmp_path):
+    # Recorded into again: the older flat take's metadata stays at the source
+    # (never deleted), but only the take the folder's readers see is carried,
+    # so the destination never holds a second, stale config.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 10})
+    (src / CONFIG_SNAPSHOT_FILENAME).write_text("# older take\n")
+    (src / "40018631.pfs").write_text("older")
+    _make_recording(src, {}, nested=True)
+    (src / RECORDING_INFO_DIRNAME / CONFIG_SNAPSHOT_FILENAME).write_text("# newer\n")
+    dest = transfer_destination(src, tmp_path / "dest", tmp_path)
+
+    result = transfer_folder(src, dest=dest)
+
+    assert result.copied == [
+        "camera_LF.mp4",
+        SUMMARY_NESTED,
+        f"{RECORDING_INFO_DIRNAME}/{CONFIG_SNAPSHOT_FILENAME}",
+    ]
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "camera_LF.mp4",
+        RECORDING_INFO_DIRNAME,
+    ]
+    assert (src / CONFIG_SNAPSHOT_FILENAME).read_text() == "# older take\n"
+
+
+def test_an_unwritable_nested_destination_fails_the_metadata(tmp_path, monkeypatch):
+    # A subfolder the destination refuses fails its files, not the whole run.
+    src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"v" * 10}, nested=True)
+    dest = tmp_path / "dest" / "rec"
+    real_mkdir = Path.mkdir
+
+    def mkdir(self, *args, **kwargs):
+        if self.name == RECORDING_INFO_DIRNAME:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    result = transfer_folder(src, dest=dest)
+    assert not result
+    assert result.copied == ["camera_LF.mp4"]
+    assert result.failed == [SUMMARY_NESTED]
 
 
 def test_copy_bare_name_without_base(tmp_path):
@@ -387,3 +528,17 @@ def test_discovery_hint(tmp_path):
     assert rec.resolve() in found
     # Pointing directly at a recording works non-recursively.
     assert _find_recording_dirs([rec], recursive=False) == [rec]
+
+
+def test_discovery_finds_nested_recordings_never_their_subfolder(tmp_path):
+    from octacam.cli import _find_recording_dirs
+
+    flat = _make_recording(tmp_path / "parent" / "001", {})
+    nested = _make_recording(tmp_path / "parent" / "002", {}, nested=True)
+
+    found = _find_recording_dirs([tmp_path / "parent"], True)
+    assert sorted(p.resolve() for p in found) == [flat.resolve(), nested.resolve()]
+    assert _find_recording_dirs([nested], recursive=False) == [nested]
+    # Naming the subfolder means the recording around it.
+    info = nested / RECORDING_INFO_DIRNAME
+    assert _find_recording_dirs([info], recursive=False) == [nested]

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -52,6 +53,72 @@ CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
 # here so the transfer step can carry a snapshot's camera files without importing
 # a vendor SDK; tests/test_backends.py keeps it in step with the backends.
 PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
+
+# The subfolder of a recording folder that holds everything above — the summary,
+# the timestamps, the config snapshot and the camera parameter files — so the
+# recording folder itself shows just the videos. Recordings made before it keep
+# those files flat beside the videos; readers go through recording_info_dir(),
+# which answers for either layout.
+RECORDING_INFO_DIRNAME = "octacam_recording"
+
+
+def recording_info_dir(folder: str | Path) -> Path:
+    """The directory holding the recording in *folder*'s summary, timestamps,
+    config snapshot and camera parameter files.
+
+    That is the ``octacam_recording`` subfolder, or *folder* itself for a
+    recording made before the subfolder existed. The summary decides: it is
+    written as the cameras start, together with the snapshot, so whichever
+    directory has it is the recording's. A folder recorded into again in the new
+    layout keeps the older take's flat files; the subfolder's summary wins, as
+    it is the newer take. With no summary in either, the subfolder is answered
+    if it exists (a take killed before its summary), else *folder*.
+    """
+    folder = Path(folder)
+    nested = folder / RECORDING_INFO_DIRNAME
+    if (nested / RECORDING_SUMMARY_FILENAME).is_file():
+        return nested
+    if (folder / RECORDING_SUMMARY_FILENAME).is_file():
+        return folder
+    return nested if nested.is_dir() else folder
+
+
+def recording_summary_path(folder: str | Path) -> Path:
+    """Where the recording in *folder* keeps its summary (either layout)."""
+    return recording_info_dir(folder) / RECORDING_SUMMARY_FILENAME
+
+
+def is_recording_dir(folder: str | Path) -> bool:
+    """Whether *folder* is a recording folder: it has a summary (either layout).
+
+    The ``octacam_recording`` subfolder itself is not one — it is part of the
+    recording folder around it."""
+    folder = Path(folder)
+    if folder.name == RECORDING_INFO_DIRNAME:
+        return False
+    return recording_summary_path(folder).is_file()
+
+
+def recording_folder_of(summary_path: str | Path) -> Path:
+    """The recording folder a summary file belongs to: its directory, or that
+    directory's parent when the summary sits in the ``octacam_recording``
+    subfolder."""
+    parent = Path(summary_path).parent
+    return parent.parent if parent.name == RECORDING_INFO_DIRNAME else parent
+
+
+def find_recording_dirs(root: str | Path) -> list[Path]:
+    """Every recording folder at or under *root*, in either layout, sorted.
+
+    Found by their summaries, each mapped to the recording folder it belongs to
+    (:func:`recording_folder_of`), so an ``octacam_recording`` subfolder is
+    never reported as a recording of its own."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        {recording_folder_of(p) for p in root.rglob(RECORDING_SUMMARY_FILENAME)}
+    )
 
 
 @dataclass(frozen=True)

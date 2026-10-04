@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from octacam.camera import CameraSystem
 from octacam.config import OctacamConfig
 from octacam.controller import RecordingController, RecordingSettings
+from octacam.transform import RECORDING_INFO_DIRNAME
 from octacam.web.app import FRAME_HEADER, create_app
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
@@ -634,8 +635,8 @@ def test_recording_cycle_over_rest(client, tmp_path):
     videos = sorted(save_dir.glob("*.mkv"))
     assert len(videos) == 2
     # Per-frame timestamps are opt-in now; by default only the compact summary lands.
-    assert not (save_dir / "timestamps.npz").exists()
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    assert not (save_dir / RECORDING_INFO_DIRNAME / "timestamps.npz").exists()
+    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
     assert all(c["frames"] > 0 for c in summary["cameras"])
@@ -676,7 +677,7 @@ def test_recording_with_split_directory(client, tmp_path):
     # Videos land under base/relative, and the summary records the relative part
     # verbatim (what the transfer step mirrors onto the destination).
     assert len(sorted(save_dir.glob("*.mkv"))) == 2
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
     assert summary["relative_directory"] == "day/001"
 
     # Both halves increment together; the base stays fixed.
@@ -710,7 +711,7 @@ def test_recording_writes_timestamps_when_enabled(client, tmp_path):
     assert len(videos) == 2
     # A single compressed file for all cameras (no per-camera CSVs).
     assert not any(save_dir.glob("*.csv"))
-    with np.load(save_dir / "timestamps.npz") as data:
+    with np.load(save_dir / RECORDING_INFO_DIRNAME / "timestamps.npz") as data:
         for video in videos:
             name = video.stem
             timestamps = data[f"{name}/timestamp_ns"]
@@ -740,7 +741,7 @@ def test_live_transform_is_baked_into_display_recording(client, tmp_path):
         time.sleep(0.2)
     assert state is not None and state["state"] == "preview"
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
     cams = {c["serial"]: c for c in summary["cameras"]}
     rotated = cams["0815-0000"]
     plain = cams["0815-0001"]
@@ -1249,6 +1250,77 @@ def test_config_save_refused_while_recording(tmp_path):
             )
             assert refused.status_code == 409
             controller.stop_recording(abort=True)
+    finally:
+        controller.close()
+
+
+def _config_dir(path, text="[gui]\n"):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "octacam_config.toml").write_text(text)
+    return path
+
+
+def test_list_configs_lists_every_launchable_sibling(tmp_path):
+
+    rigs = tmp_path / "rigs"
+    active = _config_dir(rigs / "active")
+    _config_dir(rigs / "other")
+    (rigs / "notes").mkdir()  # no config: not listed
+    flat = _config_dir(rigs / "take_flat")  # a flat recording's snapshot
+    (flat / "recording_summary.json").write_text("{}")
+    _config_dir(rigs / "take_nested" / RECORDING_INFO_DIRNAME)  # a nested one
+    controller, app = _save_client(tmp_path, active)
+    try:
+        with TestClient(app) as client:
+            r = client.get("/api/config/configs")
+            assert r.status_code == 200, r.text
+            assert r.json() == {
+                "active": "active",
+                "configs": ["active", "other", "take_flat", "take_nested"],
+            }
+    finally:
+        controller.close()
+
+
+def test_a_session_relaunched_from_a_recording_stands_for_the_recording(tmp_path):
+    # `octacam gui <recording>` runs from the recording's octacam_recording
+    # subfolder. Its siblings are the recording's videos, so the recording
+    # folder stands for it: that is the active name, its siblings are listed,
+    # and a config saved as new lands beside the recording, not inside it.
+
+    fly = tmp_path / "data" / "Fly1"
+    info = _config_dir(fly / "001" / RECORDING_INFO_DIRNAME)
+    (info / "recording_summary.json").write_text("{}")
+    (info / "fictrac_camera_config.pfs").write_text("aux\n")
+    (fly / "001" / "camera_0.mp4").write_bytes(b"v")
+    _config_dir(fly / "002" / RECORDING_INFO_DIRNAME)
+    _config_dir(fly / "rig")
+    controller, app = _save_client(tmp_path, info)
+    cams = [{"serial": s} for s in EMULATED_SERIALS]
+    try:
+        with TestClient(app) as client:
+            listed = client.get("/api/config/configs").json()
+            assert listed == {"active": "001", "configs": ["001", "002", "rig"]}
+
+            r = client.post(
+                "/api/config/save",
+                json={"target": "new", "name": "variant", "cameras": cams},
+            )
+            assert r.status_code == 200, r.text
+            variant = fly / "variant"
+            assert r.json()["config_dir"] == str(variant)
+            assert (variant / "octacam_config.toml").exists()
+            assert (variant / "fictrac_camera_config.pfs").exists()  # aux copied
+            assert not (fly / "001" / "variant").exists()
+            assert "variant" in client.get("/api/config/configs").json()["configs"]
+
+            # Saving to the active config still writes the recording's own.
+            r = client.post(
+                "/api/config/save",
+                json={"target": "active", "save_sensor": False, "cameras": cams},
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["config_dir"] == str(info)
     finally:
         controller.close()
 

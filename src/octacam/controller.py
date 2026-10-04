@@ -36,6 +36,7 @@ from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (
     CONFIG_SNAPSHOT_FILENAME,
+    RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
     DisplayTransform,
@@ -941,7 +942,9 @@ class RecordingController:
         picker. A blank path opens at the current save directory; a partially
         typed or not-yet-created path falls back to its nearest existing
         ancestor, so the picker always lands somewhere it can list. Hidden
-        directories (``.``-prefixed) are omitted.
+        directories (``.``-prefixed) are omitted, and so is a recording's
+        ``octacam_recording`` subfolder: it holds that recording's summary and
+        config, and is never a place to record into.
         """
         raw = (path_str or "").strip() or (self._settings.save_dir or "")
         base = Path(normalize_save_dir(raw)) if raw.strip() else Path.home()
@@ -954,7 +957,9 @@ class RecordingController:
                 (
                     child.name
                     for child in current.iterdir()
-                    if not child.name.startswith(".") and child.is_dir()
+                    if not child.name.startswith(".")
+                    and child.name != RECORDING_INFO_DIRNAME
+                    and child.is_dir()
                 ),
                 key=str.lower,
             )
@@ -2328,11 +2333,24 @@ class RecordingController:
         if self._config_dir is None:
             return None
         src = self._config_dir / CONFIG_SNAPSHOT_FILENAME
-        dst = Path(self._settings.save_dir) / CONFIG_SNAPSHOT_FILENAME
-        # Recording into the config dir itself must never rewrite the rig's files.
+        dst = self._recording_info_dir() / CONFIG_SNAPSHOT_FILENAME
+        # Recording over the config dir itself must never rewrite the rig's
+        # files. With the snapshot in the recording's subfolder that is a rig
+        # relaunched from a recording (`octacam gui <recording>` runs from its
+        # octacam_recording subfolder) recording into that same folder again.
         if not src.exists() or src.resolve() == dst.resolve():
             return None
         return src
+
+    def _recording_info_dir(self) -> Path:
+        """Where this recording writes everything but its videos: the summary,
+        the timestamps, the config snapshot and the camera parameter files.
+
+        Always the ``octacam_recording`` subfolder of the save directory, even
+        when the folder holds an older take's flat files (which are left alone;
+        readers prefer the subfolder, see transform.recording_info_dir). Not
+        created here: each writer creates it on its first write."""
+        return Path(self._settings.save_dir) / RECORDING_INFO_DIRNAME
 
     def _export_camera_params(self) -> dict[str, str]:
         """Each camera's current parameter text, for the recording's snapshot.
@@ -2361,7 +2379,8 @@ class RecordingController:
     def _snapshot_config(
         self, plugin_params: dict | None, camera_params: dict[str, str]
     ) -> None:
-        """Save the recording's full config into its folder.
+        """Save the recording's full config into its ``octacam_recording``
+        subfolder.
 
         The rig's octacam_config.toml is copied with every live change patched
         in: the Record-tab settings, each plugin's live options (e.g. the
@@ -2370,8 +2389,9 @@ class RecordingController:
         which `octacam process` reads. Each camera's parameter file
         (``camera_params``, read just before the cameras started) is written
         beside it, with the rig's other parameter files (auxiliary configs,
-        cameras that did not open). The folder is then itself a config
-        directory, so `octacam gui <folder>` sets the rig up the same way again.
+        cameras that did not open). The subfolder is then itself a config
+        directory, so `octacam gui <folder>` (which resolves a recording folder
+        to it, config.resolve_config_dir) sets the rig up the same way again.
 
         When nothing changed live the TOML is a byte-verbatim copy, comments
         included. The directory/relative_directory templates are never patched,
@@ -2382,10 +2402,11 @@ class RecordingController:
         if src is None:
             return
         config_dir = src.parent
-        save_dir = Path(self._settings.save_dir)
-        dst = save_dir / CONFIG_SNAPSHOT_FILENAME
+        info_dir = self._recording_info_dir()
+        dst = info_dir / CONFIG_SNAPSHOT_FILENAME
         s = self._settings
         try:
+            info_dir.mkdir(parents=True, exist_ok=True)
             raw = config_writer.load_raw_config(config_dir)
             patched = config_writer.with_process_params(
                 raw,
@@ -2404,7 +2425,7 @@ class RecordingController:
                 {c.serial_number: c.display_transform.to_dict() for c in self.camera_system},
             )
             if raw and patched != raw:
-                config_writer.write_config(save_dir, patched)
+                config_writer.write_config(info_dir, patched)
             else:
                 shutil.copyfile(src, dst)
         except Exception:
@@ -2414,22 +2435,27 @@ class RecordingController:
             with contextlib.suppress(Exception):
                 shutil.copyfile(src, dst)
         try:
+            # Beside the snapshot: together they are the config directory a
+            # relaunch loads, so the parameter files must never be split off.
             config_writer.write_pfs_files(
-                save_dir, camera_params, self.camera_system.extension_by_serial()
+                info_dir, camera_params, self.camera_system.extension_by_serial()
             )
             config_writer.copy_auxiliary_pfs(
                 config_dir,
-                save_dir,
+                info_dir,
                 set(camera_params),
                 self.camera_system.extensions,
             )
         except Exception:
-            log.exception("Failed to save the camera parameter files to %s", save_dir)
+            log.exception("Failed to save the camera parameter files to %s", info_dir)
 
     def _write_recording_summary(self, aborted: bool) -> None:
-        """Write recording_summary.json into the recording's save directory."""
-        path = Path(self._settings.save_dir) / RECORDING_SUMMARY_FILENAME
+        """Write recording_summary.json into the recording's
+        ``octacam_recording`` subfolder (its per-camera ``file`` entries stay
+        names in the recording folder, where the videos are)."""
+        path = self._recording_info_dir() / RECORDING_SUMMARY_FILENAME
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             summary = build_recording_summary(
                 self._settings,
                 list(self.camera_system),
@@ -2447,13 +2473,15 @@ class RecordingController:
 
     def _write_timestamps(self) -> None:
         """Write the per-frame timestamp series for every camera into one
-        compressed ``timestamps.npz`` in the recording's save directory.
+        compressed ``timestamps.npz`` in the recording's ``octacam_recording``
+        subfolder, beside the summary.
 
         Called only when save_timestamps is on, after every grab thread is
         joined (so the series are final). Best-effort like the summary: a
         failure is logged, never allowed to abort teardown."""
-        path = Path(self._settings.save_dir) / TIMESTAMPS_FILENAME
+        path = self._recording_info_dir() / TIMESTAMPS_FILENAME
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             arrays = build_timestamps_arrays(list(self.camera_system))
             np.savez_compressed(path, **arrays)
             log.info("Wrote frame timestamps: %s", path)

@@ -19,6 +19,9 @@ from octacam.controller import (
 )
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
+# Where a recording writes everything but its videos (transform.
+# RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
+INFO_DIR = "octacam_recording"
 
 
 # ------------------------------------------------------------------- units
@@ -462,6 +465,8 @@ def test_browse_directory(tmp_path):
     (tmp_path / "b").mkdir()
     (tmp_path / "a").mkdir()
     (tmp_path / ".hidden").mkdir()
+    # A recording's metadata subfolder is never a place to record into.
+    (tmp_path / "octacam_recording").mkdir()
     (tmp_path / "f.txt").write_text("x")
 
     controller = RecordingController.__new__(RecordingController)
@@ -470,7 +475,7 @@ def test_browse_directory(tmp_path):
 
     listing = controller.browse_directory(str(tmp_path))
     assert listing["path"] == str(tmp_path)
-    assert listing["entries"] == ["a", "b"]  # sorted, dirs only, no dotfiles
+    assert listing["entries"] == ["a", "b"]  # sorted, dirs only, no dotfiles/info dir
     assert listing["parent"] == str(tmp_path.parent)
     assert listing["writable"] is True
 
@@ -587,9 +592,10 @@ def test_full_recording_cycle(camera_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-    assert not (save_dir / "timestamps.npz").exists()  # timestamps are opt-in
+    # Timestamps are opt-in.
+    assert not (save_dir / INFO_DIR / "timestamps.npz").exists()
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
     for cam in summary["cameras"]:

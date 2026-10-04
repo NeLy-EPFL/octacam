@@ -238,6 +238,27 @@ def _resolve_enabled(enabled_plugins, no_plugins):
     return list(enabled_plugins) if enabled_plugins else None
 
 
+def _resolve_config_dir(config_dir: Path) -> Path:
+    """The config dir a command's CONFIG_DIR argument names, allowing a recording.
+
+    A recording folder keeps its config snapshot and camera parameter files in
+    its ``octacam_recording`` subfolder, which is a complete config dir, so
+    `octacam gui <recording>` relaunches the setup that recording ran with. Every
+    command that opens a rig from a config dir goes through here once, where it
+    first takes the path. A redirect is logged, since the operator named a
+    different folder than the one whose config is used."""
+    from octacam.config import resolve_config_dir
+
+    resolved = resolve_config_dir(config_dir)
+    if resolved != config_dir:
+        log.info(
+            "%s is a recording folder; using its config snapshot in %s",
+            config_dir,
+            resolved,
+        )
+    return resolved
+
+
 def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
     """Build RecordingSettings from the config's record/transcode/transfer sections.
 
@@ -527,7 +548,7 @@ def gui(
     # 0.0.0.0 or :: is not connectable, so point at localhost in that case).
     browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
 
-    config_dir = config_dir.resolve()
+    config_dir = _resolve_config_dir(config_dir).resolve()
     log.info("Using config directory: %s", config_dir)
 
     # One octacam process must own a rig's cameras at a time. The guard is keyed
@@ -1897,6 +1918,8 @@ def doctor(
     Exits 0 when no errors are found (nonzero on errors, or on warnings too with
     --check), so it is usable as a pre-flight check in scripts.
     """
+    if config_dir is not None:
+        config_dir = _resolve_config_dir(config_dir)
     report = _Report()
     # The only slow part of doctor is camera enumeration; do it ONCE, up front, in
     # parallel across backends, behind a live progress spinner (suppressed under
@@ -2522,6 +2545,7 @@ def record(
     from octacam.controller import RecordingController, normalize_save_dir
     from octacam.plugins import build_plugins
 
+    config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
 
     # Apply the fps override to the [record] section before resolving the
@@ -2668,17 +2692,27 @@ def record(
         controller.join()
     finally:
         # controller.close() sets abort, joins the daemon recording monitor (so
-        # its finishing block writes recording-summary.json/timestamps.npz and the
-        # session-cache note), then closes the camera system exactly once — mirror
-        # of the gui shutdown above. Calling system.close() directly would race the
+        # its finishing block writes recording_summary.json/timestamps.npz into the
+        # recording's octacam_recording subfolder, and the session-cache note),
+        # then closes the camera system exactly once — mirror of the gui shutdown
+        # above. Calling system.close() directly would race the
         # still-running monitor on a Ctrl-C/exception stop and lose that metadata.
         controller.close()
         plugins.teardown_all()
         capture_stack.close()
 
+    # stdout lists just the videos (scriptable); they sit in the recording folder
+    # itself, while its summary, timestamps and config snapshot are in the
+    # octacam_recording subfolder, named on stderr.
+    from octacam.transform import recording_info_dir
+
     extension = settings.video_format().extension
     for camera in system:
         typer.echo(f"{Path(settings.save_dir) / camera.name}.{extension}")
+    log.info(
+        "Recording summary and config snapshot: %s",
+        recording_info_dir(settings.save_dir),
+    )
 
     # A camera that captured 0 frames wrote only a header (no video) — usually an
     # external trigger that never fired during the window. Fail the exit code so a
@@ -2898,6 +2932,8 @@ def flash(
     from octacam.plugins import build_plugins
 
     console = Console()
+    if config_dir is not None:
+        config_dir = _resolve_config_dir(config_dir)
     config = _load_config_or_empty(config_dir)
     if config_dir is None and not plugin and not getattr(config, "plugins", []):
         raise typer.BadParameter(
@@ -3323,6 +3359,7 @@ def benchmark(
             "expected 'display' or 'sensor'", param_hint="--record-form"
         )
 
+    config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
     record_cfg = (
         config.record.model_copy(update={"fps": fps})
@@ -3456,8 +3493,19 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     geometry threaded onto the job); one without has its loose .mkv/.raw
     transcoded with a warning. A file is matched against a summary in its own
     folder, else transcoded plainly. Recordings are reproduced as-saved (the
-    display transform, if any, was baked in at record time)."""
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
+    display transform, if any, was baked in at record time).
+
+    The summary is found in either layout (:func:`recording_summary_path`): in
+    the recording's ``octacam_recording`` subfolder, or flat beside the videos
+    for a recording made before it. Its camera ``file`` names are relative to the
+    recording folder either way. That subfolder holds no videos, so a recursive
+    walk never descends into it, and naming it directly means the recording
+    around it."""
+    from octacam.transform import (
+        RECORDING_INFO_DIRNAME,
+        RECORDING_SUMMARY_FILENAME,
+        recording_summary_path,
+    )
     from octacam.writer import is_partial_transcode
 
     jobs: dict[Path, TranscodeJob] = {}
@@ -3488,7 +3536,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
         )
 
     def handle_dir(directory: Path) -> None:
-        summary_path = directory / RECORDING_SUMMARY_FILENAME
+        summary_path = recording_summary_path(directory)
         if summary_path.exists():
             data = _read_summary(summary_path)
             if data is not None:
@@ -3521,11 +3569,18 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
             add(TranscodeJob(input_path=video))
 
     for path in paths:
+        if path.is_dir() and path.name == RECORDING_INFO_DIRNAME:
+            log.info("%s is part of the recording in %s", path, path.parent)
+            path = path.parent
         if path.is_dir():
             handle_dir(path)
             if recursive:
                 for sub in sorted(path.rglob("*")):
-                    if sub.is_dir():
+                    # Skip every octacam_recording subfolder and anything under
+                    # one: it is a recording's metadata, never a folder of videos.
+                    if sub.is_dir() and RECORDING_INFO_DIRNAME not in (
+                        sub.relative_to(path).parts
+                    ):
                         handle_dir(sub)
         elif is_partial_transcode(path):
             # An orphaned in-progress temp (left by a hard kill) named directly
@@ -3535,7 +3590,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
         else:
             entry = None
             fps_target = None
-            summary_path = path.parent / RECORDING_SUMMARY_FILENAME
+            summary_path = recording_summary_path(path.parent)
             if summary_path.exists():
                 data = _read_summary(summary_path)
                 if data is not None:
@@ -3856,17 +3911,24 @@ class _TransferProgressBar:
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     """Collect recording directories from *roots*.
 
-    A directory is considered a recording if it contains a
-    ``recording_summary.json``.  In non-recursive mode each *root* must itself be
-    a recording directory; a root that is not one is warned about and skipped
-    (so a stray folder mixed in with valid recordings never aborts the batch).
-    If that leaves *nothing* to do, this exits with a hint — suggesting ``-r``
-    when recordings exist beneath the given path(s).  In recursive mode every
-    subdirectory that contains a summary is collected, including *roots*
-    themselves if they qualify.  Results are deduped and returned in sorted
-    order so the output is deterministic.
+    A directory is considered a recording if it has a
+    ``recording_summary.json``, in either layout: in its ``octacam_recording``
+    subfolder, or flat beside the videos for a recording made before that
+    subfolder existed. The subfolder itself is never a recording of its own (a
+    root naming it means the recording around it).  In non-recursive mode each
+    *root* must itself be a recording directory; a root that is not one is
+    warned about and skipped (so a stray folder mixed in with valid recordings
+    never aborts the batch). If that leaves *nothing* to do, this exits with a
+    hint — suggesting ``-r`` when recordings exist beneath the given path(s).  In
+    recursive mode every recording at or under *roots* is collected.  Results are
+    deduped and returned in sorted order so the output is deterministic.
     """
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
+    from octacam.transform import (
+        RECORDING_INFO_DIRNAME,
+        RECORDING_SUMMARY_FILENAME,
+        find_recording_dirs,
+        is_recording_dir,
+    )
 
     seen: set[Path] = set()
     result: list[Path] = []
@@ -3878,23 +3940,24 @@ def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
             result.append(p)
 
     def _nested_recordings(root: Path) -> list[Path]:
-        if not root.is_dir():
-            return []
-        return [
-            sub
-            for sub in sorted(root.rglob("*"))
-            if sub.is_dir() and (sub / RECORDING_SUMMARY_FILENAME).exists()
-        ]
+        return [sub for sub in find_recording_dirs(root) if sub != root]
+
+    def _recording_root(root: Path) -> Path:
+        if root.name == RECORDING_INFO_DIRNAME and is_recording_dir(root.parent):
+            log.info("%s is part of the recording in %s", root, root.parent)
+            return root.parent
+        return root
 
     saw_nested = False
     for root in roots:
+        root = _recording_root(root)
         if recursive:
-            if (root / RECORDING_SUMMARY_FILENAME).exists():
+            if is_recording_dir(root):
                 _add(root)
             for sub in _nested_recordings(root):
                 _add(sub)
             continue
-        if (root / RECORDING_SUMMARY_FILENAME).exists():
+        if is_recording_dir(root):
             _add(root)
             continue
         # Not itself a recording: warn and skip rather than abort, so valid
@@ -3931,12 +3994,16 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
     Precedence: the octacam_config.toml snapshot saved into the folder at record
     time > a --config dir passed on the command line > built-in defaults. This is
     what lets `octacam process` run with no --config for anything recorded after
-    the snapshot feature landed.
+    the snapshot feature landed. The snapshot is looked up with the recording's
+    summary (:func:`recording_info_dir`): in its ``octacam_recording`` subfolder,
+    or flat in the folder for a recording made before that subfolder existed.
     """
-    from octacam.config import OctacamConfig, load_config_dir
+    from octacam.config import OctacamConfig, find_config_file, load_config_dir
+    from octacam.transform import recording_info_dir
 
-    if (folder / "octacam_config.toml").exists():
-        return load_config_dir(folder)
+    info_dir = recording_info_dir(folder)
+    if find_config_file(info_dir).exists():
+        return load_config_dir(info_dir)
     if cli_config_dir is not None:
         log.warning(
             "%s has no embedded config; falling back to --config %s",
@@ -3969,7 +4036,7 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
     stored in the summary) under the resolved ``transfer.directory``.
     """
     from octacam.config import resolve_dir_template
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
+    from octacam.transform import recording_summary_path
 
     transfer = cfg.transfer
     if transfer is None or not transfer.directory:
@@ -3978,7 +4045,7 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
         )
         return None
     base = resolve_dir_template(transfer.directory)
-    summary = _read_summary(folder / RECORDING_SUMMARY_FILENAME) or {}
+    summary = _read_summary(recording_summary_path(folder)) or {}
     rel = summary.get("relative_directory") or folder.name
     return Path(base) / rel
 
@@ -4482,7 +4549,7 @@ def process(
             "--delete-source",
             "-d",
             help="Delete each source .mkv/.raw once it transcodes successfully. "
-            "The recording_summary.json is kept.",
+            "The recording's summary, timestamps and config snapshot are kept.",
         ),
     ] = False,
     progress_style: Annotated[
@@ -4552,6 +4619,9 @@ def process(
     folders = _resolve_transcode_paths(
         list(paths or []), last, session_id, all_
     )
+    # Resolved before a --detach re-exec so the child is handed the same dir.
+    if config_dir is not None:
+        config_dir = _resolve_config_dir(config_dir)
 
     # --detach: re-exec this same, already-resolved pipeline as a background job
     # that survives an SSH disconnect, then return its id. (The re-exec'd child
@@ -4836,7 +4906,9 @@ def process(
 def _delete_source_files(input_path: Path) -> None:
     """Delete a transcoded source (.mkv/.raw) once it has been transcoded.
 
-    Never removes the recording_summary.json. Deletion failures are logged but
+    Never removes the recording's summary, timestamps or config snapshot (its
+    ``octacam_recording`` subfolder, or the flat files of an older recording):
+    only the video named here is unlinked. Deletion failures are logged but
     never fail the run (the transcode already succeeded)."""
     try:
         input_path.unlink(missing_ok=True)

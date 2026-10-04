@@ -16,6 +16,7 @@ import pytest
 from octacam import writer as w
 from octacam.config import RecordConfig
 from octacam.controller import RecordingController, RecordingSettings
+from octacam.transform import recording_summary_path
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     FORMATS,
@@ -409,7 +410,7 @@ def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(tmp_path, monke
             e["level"] == "warning" and "unavailable" in e["message"]
             for e in controller.events
         )
-        summary = json.loads((save_dir / "recording_summary.json").read_text())
+        summary = json.loads(recording_summary_path(save_dir).read_text())
         assert summary["save_method"] == "nvenc"
         assert summary["max_nvenc_sessions"] is None  # probe raised -> None
         assert all(c["frames"] > 0 for c in summary["cameras"])  # recorded on CPU
@@ -429,7 +430,7 @@ def test_fake_recording_with_nvenc(tmp_path):
     try:
         assert controller.start_recording().ok
         controller.join(timeout=30)
-        summary = json.loads((save_dir / "recording_summary.json").read_text())
+        summary = json.loads(recording_summary_path(save_dir).read_text())
         assert summary["save_method"] == "nvenc"
         # The summary records the encoder actually used (the nvenc_params preset).
         assert "h264_nvenc" in summary["ffmpeg_params"]
@@ -465,7 +466,7 @@ def test_fake_recording_nvenc_overflow_splits(tmp_path):
             e["level"] == "warning" and "session limit" in e["message"]
             for e in controller.events
         )
-        summary = json.loads((save_dir / "recording_summary.json").read_text())
+        summary = json.loads(recording_summary_path(save_dir).read_text())
         assert all(c["frames"] > 0 for c in summary["cameras"])  # GPU + CPU both wrote
     finally:
         system.close()

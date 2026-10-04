@@ -144,8 +144,8 @@ preview/idle → waiting → recording → finishing → preview/idle
 A **monitor thread** replaces the old Qt timers: it polls for the first frame on
 every camera (firing plugin `on_first_frame` hooks at that t0), enforces the
 recording deadline, then runs teardown in a fixed order (stop trigger → grab
-loops exit → writers drain → `recording_summary.json` + `timestamps.npz` +
-session-cache note). Two subtleties that are easy to break:
+loops exit → writers drain → `octacam_recording/recording_summary.json` +
+`timestamps.npz` + session-cache note). Two subtleties that are easy to break:
 
 - **Plugin hooks dispatch OFF the controller lock** (a plugin's serial write can
   block on an ack), guarded by a `_start_hooks_done` event so a stop/abort can
@@ -454,8 +454,23 @@ defaults — every detected camera, save dir `./`, no plugins, no `[transfer]`
 destination — which reads to an operator as "octacam ignored my config" rather
 than "line 48 is malformed".
 
+**Recording folder layout.** A recording folder holds only the videos
+(`<camera>.mkv`/`.raw`/`.mp4`, `grid.mp4`); the summary, `timestamps.npz`, the
+config snapshot and every camera/auxiliary parameter file go into its
+`octacam_recording/` subfolder (`transform.RECORDING_INFO_DIRNAME`; the summary's
+per-camera `file` names stay relative to the recording folder). Older archives
+are flat and must keep working forever, so **writers always write the subfolder
+and readers accept both**: every read goes through `transform.recording_info_dir`
+(the subfolder's summary wins over a stale flat one from an earlier take in the
+same folder, which is never deleted), recordings are found with
+`find_recording_dirs`/`is_recording_dir`, and `config.resolve_config_dir` lets
+`octacam gui <recording>` relaunch from the subfolder. Trap: any recursive walk
+(`rglob("*")`, `iterdir`) now meets `octacam_recording/` dirs — never treat one as
+a recording or as a folder of loose videos to transcode.
+
 **The recording's config snapshot** (`controller._snapshot_config`) makes each
-recording folder a relaunchable config dir, and `octacam process` transfers it
+recording's `octacam_recording/` subfolder a relaunchable config dir (camera
+parameter files must stay beside the TOML), and `octacam process` transfers it
 with the videos. Its rules:
 - The rig TOML is re-emitted with the **live** values patched in: the Record tab
   (`config_writer.with_record_settings` ← `controller.record_config_values`, the

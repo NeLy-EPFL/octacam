@@ -8,8 +8,9 @@ A **config directory** describes one rig. It holds:
   `<serial>.txt` (the native GenApi feature-persistence TSV) for FLIR/GenICam,
   written by the GUI's *Save…* dialog.
 
-Every recording folder is also a config directory: it holds a snapshot of the
-setup it was recorded with (see
+Every recording folder also holds a config directory: its `octacam_recording/`
+subfolder is a snapshot of the setup it was recorded with, and
+`octacam gui <recording folder>` launches from it (see
 [Recording](recording.md#the-embedded-config-snapshot)).
 
 Everything below is optional and has a sensible default — an empty or missing
@@ -90,7 +91,7 @@ save_timestamps = false
 | `save_method` | `"ffmpeg"` | `ffmpeg` (encoded video) or `raw` (a `.raw` byte dump per camera). |
 | `ffmpeg_params` | ultrafast x264, see above | Encoder args used at record time. octacam writes Mono8 frames as full-range 4:2:0 (`yuv420p`, neutral chroma), so the pixel values are unchanged. An older `-pix_fmt gray` (monochrome 4:0:0) is also written as `yuv420p` for libx264/libx265, because NVIDIA hardware decoders (VLC's default on an NVIDIA machine) show 4:0:0 H.264 as flat gray frames. Frames with an odd width or height stay 4:0:0, since 4:2:0 can't encode them. |
 | `save_transformed` | `true` | Bake each camera's rotation/flips into the file (see [Recording](recording.md#transformed-vs-raw-frames)). |
-| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`) covering all cameras. |
+| `save_timestamps` | `false` | Also write a single compressed per-frame timestamp file (`timestamps.npz`, in the recording's `octacam_recording/` subfolder) covering all cameras. |
 
 ## `[transcode]`
 

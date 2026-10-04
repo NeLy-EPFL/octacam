@@ -17,6 +17,11 @@ from typing import Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from octacam._compat import tomllib
+from octacam.transform import (
+    RECORDING_INFO_DIRNAME,
+    RECORDING_SUMMARY_FILENAME,
+    recording_info_dir,
+)
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
@@ -716,6 +721,29 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
 
 def find_config_file(config_dir: str | Path) -> Path:
     return Path(config_dir) / "octacam_config.toml"
+
+
+def resolve_config_dir(config_dir: str | Path) -> Path:
+    """The config directory *config_dir* names, allowing a recording folder.
+
+    A recording keeps its config snapshot and camera parameter files in its
+    ``octacam_recording`` subfolder, which is a complete config directory; so
+    `octacam gui <recording>` relaunches from that subfolder when the folder
+    itself has no config. It does too when the folder's own config is an older
+    flat take's snapshot (a flat summary beside it) that the subfolder's take
+    superseded, as :func:`octacam.transform.recording_info_dir` decides. A rig
+    config directory that was recorded into keeps its own config: it has no
+    flat summary. Anything else is returned unchanged."""
+    config_dir = Path(config_dir)
+    nested = config_dir / RECORDING_INFO_DIRNAME
+    if not find_config_file(nested).exists():
+        return config_dir
+    if not find_config_file(config_dir).exists():
+        return nested
+    flat_take = (config_dir / RECORDING_SUMMARY_FILENAME).is_file()
+    if flat_take and recording_info_dir(config_dir) == nested:
+        return nested
+    return config_dir
 
 
 def load_config_dir(config_dir: str | Path) -> OctacamConfig:

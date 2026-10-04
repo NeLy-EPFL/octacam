@@ -1,7 +1,9 @@
 """Screen recordings for missed trigger pulses and desynchronized cameras.
 
 Backs ``octacam check``. A recording folder (one holding
-``recording_summary.json``) is checked camera by camera:
+``recording_summary.json``, in its ``octacam_recording`` subfolder or, for a
+recording made before that subfolder existed, beside the videos) is checked
+camera by camera:
 
 * **Missed pulses.** A recording made since octacam counts pulses (summary
   schema >= 4) carries the recorder's own accounting: per frame in
@@ -48,7 +50,15 @@ from pathlib import Path
 import numpy as np
 
 from octacam.pulses import TimestampReport, analyze_timestamps, estimate_offset
-from octacam.transform import RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME
+from octacam.transform import (
+    RECORDING_INFO_DIRNAME,
+    RECORDING_SUMMARY_FILENAME,
+    TIMESTAMPS_FILENAME,
+    find_recording_dirs,
+    is_recording_dir,
+    recording_folder_of,
+    recording_info_dir,
+)
 
 log = logging.getLogger("octacam")
 
@@ -135,17 +145,32 @@ def _natural_key(path: Path) -> list:
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(path))]
 
 
+def _recording_folder(path: Path) -> Path:
+    """The recording folder *path* names: a summary file or a recording's
+    ``octacam_recording`` subfolder stands for the recording folder around it,
+    anything else for itself."""
+    if path.name == RECORDING_SUMMARY_FILENAME and path.is_file():
+        return recording_folder_of(path)
+    if path.name == RECORDING_INFO_DIRNAME and (
+        path / RECORDING_SUMMARY_FILENAME
+    ).is_file():
+        return path.parent
+    return path
+
+
 def find_recordings(paths) -> list[Path]:
-    """Every recording folder at or under ``paths`` (sorted naturally)."""
+    """Every recording folder at or under ``paths`` (sorted naturally).
+
+    A path may name a recording folder (either layout), its summary file or its
+    ``octacam_recording`` subfolder, each reported as the recording folder; any
+    other directory is searched. A subfolder is never a recording of its own."""
     found: set[Path] = set()
     for raw in paths:
-        path = Path(raw)
-        if path.is_file() and path.name == RECORDING_SUMMARY_FILENAME:
-            found.add(path.parent)
-        elif (path / RECORDING_SUMMARY_FILENAME).is_file():
+        path = _recording_folder(Path(raw))
+        if is_recording_dir(path):
             found.add(path)
         elif path.is_dir():
-            found.update(p.parent for p in path.rglob(RECORDING_SUMMARY_FILENAME))
+            found.update(find_recording_dirs(path))
     return sorted(found, key=_natural_key)
 
 
@@ -191,13 +216,17 @@ def _unreadable(folder: Path, fps: float | None, what: str) -> RecordingCheck:
 def check_recording(folder: str | Path, fps: float | None = None) -> RecordingCheck:
     """Check one recording folder (see the module docstring).
 
+    *folder* may be the recording folder (either layout), its summary file or
+    its ``octacam_recording`` subfolder; the result names the recording folder.
     Never raises for a damaged recording: a summary that cannot be read or
     interpreted, or a ``timestamps.npz`` that cannot be read, is reported as a
     problem ("unreadable: ..."), so it still fails the check.
     """
-    folder = Path(folder)
+    folder = _recording_folder(Path(folder))
     try:
-        summary = json.loads((folder / RECORDING_SUMMARY_FILENAME).read_text())
+        summary = json.loads(
+            (recording_info_dir(folder) / RECORDING_SUMMARY_FILENAME).read_text()
+        )
         if not isinstance(summary, dict):
             raise ValueError("not a JSON object")
     except Exception as e:
@@ -216,7 +245,9 @@ def _check_summary(folder: Path, summary: dict, fps: float | None) -> RecordingC
     schema = summary.get("schema_version")
     fps = fps or summary.get("fps_target")
     result = RecordingCheck(folder, schema, fps, [])
-    npz_path = folder / TIMESTAMPS_FILENAME
+    # The timestamps are the take's whose summary was read: a folder recorded
+    # into again keeps the older flat take's files beside the new subfolder.
+    npz_path = recording_info_dir(folder) / TIMESTAMPS_FILENAME
     arrays: dict[str, np.ndarray] = {}
     npz_failed = False
     if npz_path.is_file():

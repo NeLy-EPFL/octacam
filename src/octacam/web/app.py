@@ -50,6 +50,7 @@ from octacam.config import (
     OctacamConfig,
     find_config_file,
     parse_config,
+    resolve_config_dir,
 )
 from octacam.controller import (
     RecordingController,
@@ -57,6 +58,7 @@ from octacam.controller import (
     sanitize_camera_name,
 )
 from octacam.plugins.base import PluginManager
+from octacam.transform import RECORDING_INFO_DIRNAME
 from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
 
 log = logging.getLogger("octacam")
@@ -1234,18 +1236,36 @@ def create_app(
         _broadcast_features_dirty(result)
         return result
 
+    def _preset_anchor() -> Path:
+        """The directory standing for this session's config among its siblings.
+
+        That is the config directory itself, except for a session relaunched
+        from a recording (``octacam gui <recording>``): its config is the
+        recording's ``octacam_recording`` subfolder, whose siblings are the
+        recording's videos, so the recording folder stands for it instead. Its
+        name is the one the operator knows the setup by, its siblings are the
+        other recordings and rig configs, and a config saved as new lands among
+        them rather than inside the recording."""
+        active = Path(config_dir)
+        return active.parent if active.name == RECORDING_INFO_DIRNAME else active
+
     @app.get("/api/config/configs")
     def list_configs():
         if not config_dir:
             return {"active": "", "configs": []}
-        parent = Path(config_dir).parent
+        anchor = _preset_anchor()
         try:
+            # Every sibling octacam can launch from: a rig config, or a
+            # recording (either layout) through its config snapshot.
             names = sorted(
-                p.name for p in parent.iterdir() if (p / "octacam_config.toml").exists()
+                p.name
+                for p in anchor.parent.iterdir()
+                if p.name != RECORDING_INFO_DIRNAME
+                and find_config_file(resolve_config_dir(p)).exists()
             )
         except OSError:
             names = []
-        return {"active": Path(config_dir).name, "configs": names}
+        return {"active": anchor.name, "configs": names}
 
     @app.post("/api/config/save")
     def save_config(req: SaveConfigRequest):
@@ -1272,7 +1292,7 @@ def create_app(
                 target = active
             else:
                 target = config_writer.resolve_new_config_dir(
-                    active, req.name or "", overwrite=req.overwrite
+                    _preset_anchor(), req.name or "", overwrite=req.overwrite
                 )
                 target.mkdir(parents=True, exist_ok=True)
                 config_writer.copy_auxiliary_pfs(

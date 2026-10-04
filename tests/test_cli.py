@@ -1589,3 +1589,231 @@ def test_doctor_update_line_skipped_for_dev_install(monkeypatch):
         UpdateNotice("0.3.1.dev0", None, False, "editable", "", "development install"),
     )
     assert status == "info" and "development install" in text
+
+
+# --- recording layout: summary/snapshot in an octacam_recording subfolder -----
+#
+# A recording keeps its summary, timestamps, config snapshot and camera
+# parameter files in an ``octacam_recording`` subfolder; one made before that
+# keeps them flat beside the videos. Both must be found everywhere, and the
+# subfolder must never pass for a recording of its own.
+
+
+def _layout_recording(folder, *, nested, toml=None):
+    """A recording folder in either layout: a summary and, when *toml* is
+    given, a config snapshot, both flat or in the ``octacam_recording``
+    subfolder (*nested*). Returns the directory holding them."""
+    from octacam.transform import RECORDING_INFO_DIRNAME, RECORDING_SUMMARY_FILENAME
+
+    info = folder / RECORDING_INFO_DIRNAME if nested else folder
+    info.mkdir(parents=True, exist_ok=True)
+    (folder / "cam.mkv").write_bytes(b"source-bytes")
+    (info / RECORDING_SUMMARY_FILENAME).write_text(
+        json.dumps({"cameras": [{"name": "cam", "file": "cam.mkv", "frames": 1}]})
+    )
+    if toml is not None:
+        (info / "octacam_config.toml").write_text(toml)
+    return info
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_find_recording_dirs_accepts_a_recording_in_either_layout(tmp_path, nested):
+    from octacam.cli import _find_recording_dirs
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=nested)
+    assert _find_recording_dirs([rec], recursive=False) == [rec]
+    assert _find_recording_dirs([rec], recursive=True) == [rec]
+
+
+def test_find_recording_dirs_recursive_mixed_tree_never_lists_the_info_dir(tmp_path):
+    from octacam.cli import _find_recording_dirs
+
+    flat = tmp_path / "day1" / "fly1"
+    nested = tmp_path / "day1" / "fly2"
+    deep = tmp_path / "day2" / "session" / "fly3"
+    _layout_recording(flat, nested=False)
+    _layout_recording(nested, nested=True)
+    _layout_recording(deep, nested=True)
+    # Recorded into again after the layout change: the folder holds both an
+    # older take's flat summary and the new take's nested one; still one recording.
+    _layout_recording(flat, nested=True)
+    found = _find_recording_dirs([tmp_path], recursive=True)
+    assert found == [flat, nested, deep]
+
+
+def test_find_recording_dirs_hints_recursive_for_nested_layout(tmp_path):
+    # Non-recursive on a parent: the nested-layout recordings beneath it are
+    # counted for the -r hint (never their subfolders), then it exits.
+    from octacam.cli import _find_recording_dirs
+
+    _layout_recording(tmp_path / "a", nested=True)
+    _layout_recording(tmp_path / "b", nested=False)
+    with pytest.raises(SystemExit) as exc:
+        _find_recording_dirs([tmp_path], recursive=False)
+    assert "-r/--recursive" in str(exc.value)
+
+
+def test_find_recording_dirs_info_dir_named_directly_means_its_recording(tmp_path):
+    from octacam.cli import _find_recording_dirs
+    from octacam.transform import RECORDING_INFO_DIRNAME
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True)
+    info = rec / RECORDING_INFO_DIRNAME
+    assert _find_recording_dirs([info], recursive=False) == [rec]
+    assert _find_recording_dirs([info, rec], recursive=True) == [rec]
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_config_for_recording_reads_the_snapshot_in_either_layout(tmp_path, nested):
+    from octacam.cli import _config_for_recording
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=nested, toml='[record]\nfps = 42\n')
+    # The fallback must not be consulted when the recording has its own snapshot.
+    fallback = tmp_path / "rig"
+    fallback.mkdir()
+    (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
+    assert _config_for_recording(rec, fallback).record.fps == 42
+
+
+def test_config_for_recording_nested_snapshot_beats_an_older_flat_one(tmp_path):
+    from octacam.cli import _config_for_recording
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=False, toml='[record]\nfps = 11\n')
+    _layout_recording(rec, nested=True, toml='[record]\nfps = 22\n')
+    assert _config_for_recording(rec, None).record.fps == 22
+
+
+def test_config_for_recording_without_snapshot_falls_back(tmp_path):
+    from octacam.cli import _config_for_recording
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True)
+    fallback = tmp_path / "rig"
+    fallback.mkdir()
+    (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
+    assert _config_for_recording(rec, fallback).record.fps == 7
+
+
+def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
+    tmp_path, monkeypatch
+):
+    # The no-transcode path discovers recordings via _find_recording_dirs and
+    # reads the summary's relative_directory for the transfer destination.
+    from octacam.transform import RECORDING_INFO_DIRNAME, RECORDING_SUMMARY_FILENAME
+
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    rec = tmp_path / "data" / "rec"
+    dest = tmp_path / "archive"
+    info = _layout_recording(
+        rec, nested=True, toml=f'[transfer]\ndirectory = "{dest}"\n'
+    )
+    summary = json.loads((info / RECORDING_SUMMARY_FILENAME).read_text())
+    summary["relative_directory"] = "2026/rec"
+    (info / RECORDING_SUMMARY_FILENAME).write_text(json.dumps(summary))
+    (rec / "cam.mp4").write_bytes(b"finished")
+    seen = {}
+
+    def fake_transfer(folder, destination, **kwargs):
+        seen["folder"], seen["destination"] = folder, destination
+        return SimpleNamespace(copied=[], skipped=[], failed=[])
+
+    monkeypatch.setattr("octacam.transfer.transfer_folder", fake_transfer)
+    result = runner.invoke(
+        app, ["--log-level", "error", "process", "-r", str(tmp_path / "data"),
+              "--no-transcode", "--no-grid"],
+    )
+    assert result.exit_code == 0, result.output
+    assert seen["folder"] == rec
+    assert seen["destination"] == dest / "2026" / "rec"
+    assert RECORDING_INFO_DIRNAME not in str(seen["folder"])
+
+
+# --- CONFIG_DIR may name a recording folder (relaunch from its snapshot) ------
+
+
+def test_resolve_config_dir_redirects_a_recording_folder(tmp_path):
+    from octacam.cli import _resolve_config_dir
+    from octacam.transform import RECORDING_INFO_DIRNAME
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True, toml="")
+    assert _resolve_config_dir(rec) == rec / RECORDING_INFO_DIRNAME
+    # A rig dir, and a flat (older) recording, are config dirs of their own.
+    flat = tmp_path / "flat"
+    _layout_recording(flat, nested=False, toml="")
+    assert _resolve_config_dir(flat) == flat
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "octacam_config.toml").write_text("")
+    assert _resolve_config_dir(rig) == rig
+
+
+def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch):
+    # The instance lock is the first thing keyed on the resolved dir; refusing it
+    # stops the launch before any hardware is touched.
+    from octacam.transform import RECORDING_INFO_DIRNAME
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True, toml="")
+    seen = []
+
+    def refuse(config_dir):
+        seen.append(config_dir)
+        return None
+
+    monkeypatch.setattr("octacam.cli._acquire_instance_lock", refuse)
+    result = runner.invoke(app, ["--log-level", "error", "gui", str(rec), "--no-browser"])
+    assert result.exit_code != 0
+    assert seen == [(rec / RECORDING_INFO_DIRNAME).resolve()]
+
+
+@pytest.mark.parametrize("command", ["record", "benchmark"])
+def test_record_and_benchmark_load_a_recording_folders_snapshot(
+    tmp_path, monkeypatch, command
+):
+    from octacam.transform import RECORDING_INFO_DIRNAME
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True, toml="")
+    seen = []
+
+    def stop(config_dir):
+        seen.append(Path(config_dir))
+        raise SystemExit("stop")
+
+    monkeypatch.setattr("octacam.config.load_config_dir", stop)
+    result = runner.invoke(app, ["--log-level", "error", command, str(rec)])
+    assert result.exit_code != 0
+    assert seen == [rec / RECORDING_INFO_DIRNAME]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["doctor", "{rec}"], ["flash", "{rec}"], ["process", "{rec}", "--config", "{rec}"]],
+    ids=["doctor", "flash", "process-config"],
+)
+def test_other_config_dir_commands_resolve_a_recording_folder(
+    tmp_path, monkeypatch, argv
+):
+    # Each goes through the one resolver where it first takes the path.
+    from octacam import cli
+
+    rec = tmp_path / "rec"
+    _layout_recording(rec, nested=True, toml="")
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    seen = []
+    real = cli._resolve_config_dir
+
+    def spy(config_dir):
+        seen.append(real(config_dir))
+        raise SystemExit("stop")
+
+    monkeypatch.setattr("octacam.cli._resolve_config_dir", spy)
+    args = [a.format(rec=rec) for a in argv]
+    result = runner.invoke(app, ["--log-level", "error", *args])
+    assert result.exit_code != 0
+    assert seen == [rec / "octacam_recording"]

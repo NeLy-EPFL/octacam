@@ -71,9 +71,10 @@ Prefer no browser (a script, or a remote box)? Record headlessly:
 octacam record <config_dir> --duration 10 --fps 100
 ```
 
-Either way, each recording writes its videos, a `recording_summary.json`, and a
-snapshot of its config (with each camera's parameters) into its own folder, so
-the same setup can be relaunched later. See [Recording](guide/recording.md).
+Either way, each recording writes its videos into its own folder, with a
+`recording_summary.json` and a snapshot of its config (with each camera's
+parameters) in that folder's `octacam_recording/` subfolder, so the same setup
+can be relaunched later. See [Recording](guide/recording.md#recording-outputs).
 
 ## 5. Archive everything
 

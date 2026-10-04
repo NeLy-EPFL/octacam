@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from octacam.cli import app
-from octacam.transform import DisplayTransform
+from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
 from octacam.writer import (
     TranscodeProgress,
     _parse_progress,
@@ -76,8 +76,12 @@ def _camera_entry(file, frame, *, fps=10.0, transform=None, transform_applied=Fa
     return entry
 
 
-def _summary(folder, cameras, fps_target=10.0):
-    (folder / "recording_summary.json").write_text(
+def _summary(folder, cameras, fps_target=10.0, *, nested=False):
+    """Write *folder*'s summary: flat beside the videos (a recording made before
+    the ``octacam_recording`` subfolder), or in that subfolder (*nested*)."""
+    info = folder / RECORDING_INFO_DIRNAME if nested else folder
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "recording_summary.json").write_text(
         json.dumps({"schema_version": 2, "fps_target": fps_target, "cameras": cameras})
     )
 
@@ -1002,3 +1006,103 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
         assert not own.exists()
         tmp.write_bytes(b"ok2")
     assert bracket.read_bytes() == b"ok2"
+
+
+# ------------------------------------------- recording layout (either kind)
+#
+# A recording keeps its summary in an ``octacam_recording`` subfolder; one made
+# before that keeps it flat beside the videos. Discovery must read both, and a
+# walk must never treat the subfolder as a folder of videos of its own.
+
+
+def _capture_logs():
+    handler = _ListHandler()
+    logging.getLogger("octacam").addHandler(handler)
+    return handler
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_folder_summary_drives_jobs_in_either_layout(tmp_path, nested):
+    from octacam.cli import _transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame, fps=25.0)], nested=nested)
+    jobs = _transcode_jobs([tmp_path], recursive=False)
+    # The summary's file names are relative to the recording folder either way.
+    assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
+    assert (jobs[0].width, jobs[0].height, jobs[0].fps) == (16, 12, 25.0)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_single_file_finds_summary_in_either_layout(tmp_path, nested):
+    from octacam.cli import _transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=nested)
+    jobs = _transcode_jobs([tmp_path / "cam0.raw"], recursive=False)
+    assert len(jobs) == 1
+    assert (jobs[0].width, jobs[0].height) == (16, 12)
+
+
+def test_nested_summary_wins_over_an_older_flat_take(tmp_path):
+    # Recorded into again after the layout change: the older take's flat summary
+    # (and its video) stay behind, but the newer take's nested one is the word.
+    from octacam.cli import _transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "old.raw", frame)
+    _write_raw(tmp_path / "new.raw", frame)
+    _summary(tmp_path, [_camera_entry("old.raw", frame)])
+    _summary(tmp_path, [_camera_entry("new.raw", frame)], nested=True)
+    jobs = _transcode_jobs([tmp_path], recursive=False)
+    assert [j.input_path.name for j in jobs] == ["new.raw"]
+
+
+def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path):
+    # A mixed tree: a flat (older) recording and a nested one. The nested one's
+    # octacam_recording subfolder holds no videos; even a stray .mkv in it must
+    # not be transcoded, nor warned about as a folder of loose files.
+    from octacam.cli import _transcode_jobs
+
+    frame = _frame(16, 12)
+    flat = tmp_path / "day" / "flat"
+    nested = tmp_path / "day" / "nested"
+    for folder in (flat, nested):
+        folder.mkdir(parents=True)
+        _write_raw(folder / "cam.raw", frame)
+    _summary(flat, [_camera_entry("cam.raw", frame)])
+    _summary(nested, [_camera_entry("cam.raw", frame)], nested=True)
+    _make_mkv(nested / RECORDING_INFO_DIRNAME / "stray.mkv", frame)
+    handler = _capture_logs()
+    try:
+        jobs = _transcode_jobs([tmp_path], recursive=True)
+    finally:
+        logging.getLogger("octacam").removeHandler(handler)
+    assert sorted(j.input_path for j in jobs) == [flat / "cam.raw", nested / "cam.raw"]
+    assert not any(RECORDING_INFO_DIRNAME in m for m in handler.messages)
+
+
+def test_naming_the_info_dir_means_the_recording_around_it(tmp_path):
+    from octacam.cli import _transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=True)
+    jobs = _transcode_jobs([tmp_path / RECORDING_INFO_DIRNAME], recursive=False)
+    assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
+
+
+def test_process_nested_recording_end_to_end_keeps_its_metadata(tmp_path):
+    # A real (not mocked) transcode of a nested-layout .raw recording: the .mp4
+    # lands beside the source, and --delete-source removes only the video.
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=True)
+    result = _run(str(tmp_path), "-d", "--no-grid", "--no-transfer")
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (16, 12)
+    assert not (tmp_path / "cam0.raw").exists()
+    assert (tmp_path / RECORDING_INFO_DIRNAME / "recording_summary.json").exists()
+    assert not (tmp_path / RECORDING_INFO_DIRNAME / "cam0.mp4").exists()

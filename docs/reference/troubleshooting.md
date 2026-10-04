@@ -65,7 +65,9 @@ octacam doctor --backend flir
 ## Dropped frames and missed trigger pulses
 
 Run `octacam check <recording or directory>` — it lists every camera's missed
-pulses, unequal frame counts and start offsets. In `recording_summary.json`:
+pulses, unequal frame counts and start offsets. In the recording's
+`octacam_recording/recording_summary.json` (flat beside the videos in a recording
+made before that subfolder existed):
 
 - `writer_dropped` counts frames the **encoder/writer queue** could not accept.
   If you see these, the machine is CPU-bound — check whether an `octacam process`
