@@ -950,13 +950,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     def open(self) -> None:
         spin = _spin()
-        try:
-            spin.camera_init(self._cam)
-        except BackendError as e:
-            # Usually the camera is already in use by another process (a second
-            # `octacam gui` on the rig). It is already a BackendError; re-raise so
-            # the caller reports it cleanly instead of a raw traceback.
-            raise BackendError(str(e)) from e
+        spin.camera_init(self._cam)
         self._nodemap = spin.camera_get_nodemap(self._cam)
         try:
             self._stream_nodemap = spin.camera_get_tl_stream_nodemap(self._cam)
