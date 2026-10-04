@@ -782,13 +782,10 @@ def _make_progress(console: Console):
 
 
 def _bar_description(status: JobStatus) -> str:
-    if status.paused and status.state == RUNNING:
-        return f"paused ({status.paused_reason or 'paused'})"
-    if status.phase:
-        if status.current_file:
-            return f"{status.phase}: {status.current_file}"
-        return status.phase
-    return status.state
+    state = render_state(status)
+    if state != status.state or not status.phase:  # paused, or between phases
+        return state
+    return f"{status.phase}: {status.current_file}" if status.current_file else status.phase
 
 
 def _bar_counts(status: JobStatus) -> str:
