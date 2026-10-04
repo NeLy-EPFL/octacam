@@ -1,12 +1,13 @@
 """Copy processed recordings to a destination directory, often a network share.
 
 The caller resolves the destination (``octacam process``: ``transfer.directory``
-joined with the summary's ``relative_directory``). Each file is streamed to a
-unique sibling temp, fsynced, checked and only then renamed onto its name, so
-an interrupted copy never leaves a complete-looking partial, and a rerun skips
-what is already there (videos by size, metadata by content). The recording's
-metadata always goes along, in the layout it has here (the ``octacam_recording``
-subfolder, or flat), so the copy can relaunch the same setup.
+joined with the summary's ``relative_directory``). Each file is copied to a
+unique sibling temp, checked (by digest, or by size) and only then renamed onto
+its name, so an interrupted copy never leaves a complete-looking partial, and a
+rerun skips what is already there (videos by size, metadata by content). The
+recording's metadata always goes along, in the layout it has here (the
+``octacam_recording`` subfolder, or flat), so the copy can relaunch the same
+setup.
 """
 
 from __future__ import annotations
