@@ -653,9 +653,7 @@ class _AppState:
             # like a smaller grid.
             "missing_cameras": [
                 {"serial": serial, "reason": reason}
-                for serial, reason in sorted(
-                    getattr(controller.camera_system, "missing", {}).items()
-                )
+                for serial, reason in sorted(controller.camera_system.missing.items())
             ],
             "config_dir": self.config_dir,
             "plugins": plugins_status,
