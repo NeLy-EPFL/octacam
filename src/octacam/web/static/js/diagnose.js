@@ -298,7 +298,7 @@ export class BenchmarkTab {
         fmt(c?.encode_fps?.[s]),
         fmt(t.achieved_fps, 1),
         fmt(100 * t.drop_rate, 2),
-        `${t.max_queue_depth} of 20`,
+        `${t.max_queue_depth} of ${rep.writer_queue_size}`,
         acq ? `${fmt(acq.p50_ms, 1)}/${fmt(acq.p99_ms, 1)} ms` : "–",
         enc && enc.samples ? `${fmt(enc.p50_ms, 2)}/${fmt(enc.p99_ms, 2)} ms` : "–",
       ];
@@ -340,7 +340,7 @@ export class BenchmarkTab {
           t.name,
           fmt(t.achieved_fps, 1),
           fmt(100 * t.drop_rate, 2),
-          `${t.max_queue_depth} of 20`,
+          `${t.max_queue_depth} of ${rep.writer_queue_size}`,
         ];
         cells.forEach((cell, i) =>
           row.append(el("td", i === 0 ? "bench-cam" : null, cell))

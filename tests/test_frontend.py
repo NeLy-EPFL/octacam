@@ -1209,3 +1209,69 @@ def test_incomplete_rig_warning_names_each_missing_camera(static_server, browser
         assert page.is_visible("#rig-alert")
     finally:
         page.close()
+
+
+# --- benchmark report (diagnose.js) ----------------------------------------- #
+
+
+def _bench_trial(name, achieved_fps, max_queue_depth):
+    return {
+        "serial": name.upper(),
+        "name": name,
+        "width": 160,
+        "height": 120,
+        "target_fps": 60.0,
+        "achieved_fps": achieved_fps,
+        "grabbed": 300,
+        "dropped": 0,
+        "drop_rate": 0.0,
+        "max_queue_depth": max_queue_depth,
+        "stages": {},
+    }
+
+
+def test_benchmark_queue_peaks_are_of_the_benchmarked_writer_queue(page):
+    """Each queue peak is shown against the writer queue the benchmark ran
+    with (the rig's record.writer_queue_size), not a hard-coded bound."""
+    report = {
+        "backend": "fake",
+        "n_cameras": 1,
+        "target_fps": 60.0,
+        "trigger_source": "software",
+        "save_method": "ffmpeg",
+        "ffmpeg_params": "-c:v libx264",
+        "writer_queue_size": 7,
+        "duration_s": 5.0,
+        "trials": [_bench_trial("cam0", 60.0, 3)],
+        "achieved_fps": 60.0,
+        "drop_rate": 0.0,
+        "achievable": True,
+        "bottleneck": "none",
+        "ceilings": None,
+        "predicted_max_fps": 90.0,
+        "measured_max_fps": None,
+        "max_confirmed": False,
+        "freerun_max_fps": None,
+        "hardware_max_fps": 85.0,
+        "transfer_bound": False,
+        "throughput_mbps": {},
+        "throughput_mbps_total": None,
+        "freerun_trials": [_bench_trial("cam0", 85.0, 5)],
+        "system_cpu_percent": None,
+        "load_per_core": None,
+        "recommendations": [],
+        "jitter_p99_ms": None,
+        "cpu_percent": None,
+        "notes": [],
+    }
+    cells = page.evaluate(
+        """async (report) => {
+            const m = await import('./js/diagnose.js');
+            new m.BenchmarkTab({ notify: () => {} }).applyReport(report);
+            return [...document.querySelectorAll('#bench-results td')]
+                .map((td) => td.textContent);
+        }""",
+        report,
+    )
+    assert "3 of 7" in cells  # the end-to-end trial
+    assert "5 of 7" in cells  # the free-run trial

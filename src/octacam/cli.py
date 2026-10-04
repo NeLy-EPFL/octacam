@@ -3232,7 +3232,7 @@ def _render_benchmark(report) -> None:
             _fps(c.encode_fps.get(s)) if c and c.encode_fps else "–",
             f"{t.achieved_fps:.1f}",
             f"{100 * t.drop_rate:.2f}",
-            f"{t.max_queue_depth} of {diag.WRITER_QUEUE_SIZE}",
+            f"{t.max_queue_depth} of {r.writer_queue_size}",
             f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "–",
             f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}" if enc and enc.samples else "–",
         )
@@ -3264,7 +3264,7 @@ def _render_benchmark(report) -> None:
                 f"  {t.name}",
                 f"{t.achieved_fps:.1f}",
                 f"{100 * t.drop_rate:.2f}",
-                f"{t.max_queue_depth} of {diag.WRITER_QUEUE_SIZE}",
+                f"{t.max_queue_depth} of {r.writer_queue_size}",
             )
         console.print(ft)
 

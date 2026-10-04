@@ -62,19 +62,17 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from octacam.cameras.base import GRAB_TIMEOUT_MS, WRITER_QUEUE_SIZE, Camera
 from octacam.transform import apply_display_transform
 from octacam.trigger import PreciseTimer
 from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_formats
 
 if TYPE_CHECKING:
-    from octacam.cameras.base import Camera
     from octacam.cameras.system import CameraSystem
     from octacam.controller import RecordingSettings
 
 log = logging.getLogger("octacam")
 
-GRAB_TIMEOUT_MS = 100  # matches Camera.GRAB_TIMEOUT_MS
-WRITER_QUEUE_SIZE = 64  # matches Camera.WRITER_QUEUE_SIZE (record.writer_queue_size default)
 WARMUP_S = 0.5  # discarded settle time before every measurement window
 # A trial "passes" (target achievable) when it delivers at least this fraction of
 # the requested fps with no more than this drop rate. The drop bar matches the
@@ -378,6 +376,7 @@ class DiagnosticReport:
     trigger_source: str
     save_method: str
     ffmpeg_params: str
+    writer_queue_size: int
     duration_s: float
     trials: list[CameraTrial]
     achieved_fps: float  # slowest camera at target (the synchronized rate)
@@ -417,6 +416,7 @@ class DiagnosticReport:
             "trigger_source": self.trigger_source,
             "save_method": self.save_method,
             "ffmpeg_params": self.ffmpeg_params,
+            "writer_queue_size": self.writer_queue_size,
             "duration_s": self.duration_s,
             "trials": [t.to_dict() for t in self.trials],
             "achieved_fps": round(self.achieved_fps, 2),
@@ -553,12 +553,12 @@ class _NullWriter(AsyncFrameWriter):
 
 
 def _make_writer(
-    video_format: VideoFormat | None, *, profile: bool
+    video_format: VideoFormat | None, queue_size: int, *, profile: bool
 ) -> AsyncFrameWriter:
     """A real writer for ``video_format``, or the null sink when it is None."""
     if video_format is None:
-        return _NullWriter(WRITER_QUEUE_SIZE, profile=profile)
-    return video_format.create_writer(WRITER_QUEUE_SIZE, profile=profile)
+        return _NullWriter(queue_size, profile=profile)
+    return video_format.create_writer(queue_size, profile=profile)
 
 
 # ---------------------------------------------------------------------------
@@ -840,6 +840,7 @@ def measure_encode_ceiling(
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
     formats_by_serial: dict[str, VideoFormat] | None = None,
+    queue_size: int = WRITER_QUEUE_SIZE,
 ) -> dict[str, float]:
     """Max encode fps per camera, one real writer per camera running concurrently.
 
@@ -854,6 +855,7 @@ def measure_encode_ceiling(
     session-cap split — see :func:`octacam.writer.resolve_capture_formats`), so
     the benchmark measures exactly what the record path would run instead of
     handing every camera an NVENC session and failing the ones past the cap.
+    ``queue_size`` bounds each writer's queue, as record.writer_queue_size does.
     """
     results: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
@@ -865,7 +867,7 @@ def measure_encode_ceiling(
             # it, and the content is irrelevant to encoder throughput.
             frame = np.zeros((height, width), dtype=np.uint8)
             fmt = (formats_by_serial or {}).get(serial, video_format)
-            writer = fmt.create_writer(WRITER_QUEUE_SIZE, profile=True)
+            writer = fmt.create_writer(queue_size, profile=True)
             path = tmpdir / f"{serial}.{fmt.extension}"
             if not writer.open(str(path), fps, size):
                 results[serial] = 0.0
@@ -923,6 +925,7 @@ class TrialOutcome:
     trials: list[CameraTrial]
     jitter_p99_ms: float | None
     cpu_percent: float | None
+    queue_size: int = WRITER_QUEUE_SIZE  # each writer's queue bound
 
     @property
     def achieved_fps(self) -> float:
@@ -959,7 +962,7 @@ class TrialOutcome:
         """
         if not self.passed:
             return False
-        guard = WRITER_QUEUE_SIZE * QUEUE_SATURATION_FRACTION
+        guard = self.queue_size * QUEUE_SATURATION_FRACTION
         return all(
             t.drop_rate <= STABLE_DROP_THRESHOLD and t.max_queue_depth < guard
             for t in self.trials
@@ -976,6 +979,7 @@ def run_target_trial(
     cancel: threading.Event | None = None,
     free_run: bool = False,
     formats_by_serial: dict[str, VideoFormat] | None = None,
+    queue_size: int = WRITER_QUEUE_SIZE,
 ) -> TrialOutcome:
     """Run the full instrumented pipeline at ``target_fps`` for ``duration_s``.
 
@@ -1003,6 +1007,7 @@ def run_target_trial(
     writers = [
         _make_writer(
             (formats_by_serial or {}).get(c.serial_number, video_format),
+            queue_size,
             profile=True,
         )
         for c in cameras
@@ -1205,7 +1210,9 @@ def run_target_trial(
             encoded,
             dropped,
         )
-    return TrialOutcome(trials=trials, jitter_p99_ms=jitter_p99, cpu_percent=cpu)
+    return TrialOutcome(
+        trials=trials, jitter_p99_ms=jitter_p99, cpu_percent=cpu, queue_size=queue_size
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1391,6 +1398,7 @@ def diagnose(
     target_fps = target_fps if target_fps is not None else settings.fps
     record_form = settings.record_form
     external = settings.trigger_source == "external"
+    queue_size = settings.writer_queue_size  # as the record path's writers
 
     video_format = None if sink == "null" else settings.video_format()
     # Per-camera formats honouring the GPU NVENC session cap, so the benchmark
@@ -1458,7 +1466,14 @@ def diagnose(
         target_fps=target_fps,
         trigger_source=settings.trigger_source,
         save_method="null" if sink == "null" else settings.save_method,
-        ffmpeg_params=settings.ffmpeg_params if video_format else "",
+        # The args the encoder runs with (nvenc_params for "nvenc"); VideoFormat's
+        # save_method is the writer kind, and a raw writer encodes nothing.
+        ffmpeg_params=(
+            video_format.ffmpeg_params
+            if video_format is not None and video_format.save_method == "ffmpeg"
+            else ""
+        ),
+        writer_queue_size=queue_size,
         duration_s=duration_s,
         trials=[],
         achieved_fps=0.0,
@@ -1540,6 +1555,7 @@ def diagnose(
             duration_s,
             cancel=cancel,
             formats_by_serial=formats_by_serial,
+            queue_size=queue_size,
         )
     ceilings = Ceilings(
         grab_fps=grab_fps,
@@ -1566,6 +1582,7 @@ def diagnose(
         record_form,
         cancel=cancel,
         formats_by_serial=formats_by_serial,
+        queue_size=queue_size,
     )
     report.trials = outcome.trials
     report.achieved_fps = outcome.achieved_fps
@@ -1623,6 +1640,7 @@ def diagnose(
             cancel=cancel,
             free_run=True,
             formats_by_serial=formats_by_serial,
+            queue_size=queue_size,
         )
         report.freerun_trials = fr.trials
         if fr.trials:
@@ -1657,6 +1675,7 @@ def diagnose(
                 record_form,
                 cancel=cancel,
                 formats_by_serial=formats_by_serial,
+                queue_size=queue_size,
             )
             return result.stable_passed
 
@@ -1676,6 +1695,7 @@ def diagnose(
                 record_form,
                 cancel=cancel,
                 formats_by_serial=formats_by_serial,
+                queue_size=queue_size,
             )
             report.measured_max_fps, report.max_confirmed = _reconcile_stable_max(
                 candidate, confirm, lo, ceiling_cap

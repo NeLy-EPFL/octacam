@@ -556,7 +556,7 @@ def test_run_target_trial_aborts_when_writer_open_fails(fake_system, monkeypatch
         def close(self):
             closed.append(self)
 
-    monkeypatch.setattr(dg, "_make_writer", lambda vf, *, profile: BadWriter())
+    monkeypatch.setattr(dg, "_make_writer", lambda vf, queue_size, *, profile: BadWriter())
 
     with pytest.raises(RuntimeError, match="writer failed to open"):
         dg.run_target_trial(
@@ -798,3 +798,76 @@ def test_diagnostics_rest_endpoints(fake_system, tmp_path):
             assert "trials" in last
     finally:
         controller.close()
+
+
+# ------------------------------------ the rig's writer queue and encoder args
+
+
+def test_benchmark_writers_use_the_rigs_writer_queue_size(fake_system, monkeypatch):
+    # The benchmark measures the queue a recording runs with
+    # (record.writer_queue_size) and reports the bound its queue depths are of.
+    from octacam.writer import AsyncFrameWriter
+
+    sizes = []
+    init = AsyncFrameWriter.__init__
+
+    def spy(self, max_queue_size=20, *, profile=False):
+        sizes.append(max_queue_size)
+        init(self, max_queue_size, profile=profile)
+
+    monkeypatch.setattr(AsyncFrameWriter, "__init__", spy)
+    settings = RecordingSettings(fps=60.0, save_method="raw", writer_queue_size=7)
+    report = dg.diagnose(
+        fake_system, settings, duration_s=0.3, find_max=False, measure_freerun=False
+    )
+    assert sizes and set(sizes) == {7}  # encode-ceiling and end-to-end writers
+    assert report.writer_queue_size == 7
+    assert report.to_dict()["writer_queue_size"] == 7
+
+
+def test_stable_bar_measures_saturation_against_the_trials_queue():
+    # A depth of 6 saturates an 8-frame queue but is headroom in a 64-frame one.
+    def outcome(queue_size):
+        return dg.TrialOutcome(
+            trials=[_trial(100.0, 100.0, qmax=6)],
+            jitter_p99_ms=None,
+            cpu_percent=None,
+            queue_size=queue_size,
+        )
+
+    assert outcome(8).passed and not outcome(8).stable_passed
+    assert outcome(64).stable_passed
+
+
+@pytest.mark.parametrize(
+    ("save_method", "args_field"),
+    [("ffmpeg", "ffmpeg_params"), ("nvenc", "nvenc_params"), ("raw", None)],
+)
+def test_benchmark_reports_the_encoder_args_it_runs(save_method, args_field):
+    # NVENC encodes with nvenc_params, not the CPU ffmpeg_params; raw encodes
+    # nothing. No camera is needed: the report states its setup up front.
+    settings = RecordingSettings(save_method=save_method)
+    report = dg.diagnose(CameraSystem.pending("fake"), settings, find_max=False)
+    expected = getattr(settings, args_field) if args_field else ""
+    assert report.ffmpeg_params == expected
+
+
+def test_cli_benchmark_report_shows_queue_peaks_of_the_rigs_queue(
+    fake_system, capsys, monkeypatch
+):
+    from octacam.cli import _render_benchmark
+
+    monkeypatch.setenv("COLUMNS", "200")  # keep rich from wrapping the table
+    settings = RecordingSettings(fps=60.0, writer_queue_size=7)
+    report = dg.diagnose(
+        fake_system,
+        settings,
+        duration_s=0.2,
+        find_max=False,
+        measure_freerun=False,
+        sink="null",
+    )
+    _render_benchmark(report)
+    out = capsys.readouterr().out
+    assert " of 7" in out
+    assert " of 64" not in out
