@@ -40,23 +40,14 @@ export class FirmwareFlash {
     this.render();
   }
 
-  // Fold a WS <name>_state message (firmware / firmware_state / needs_flash / ready).
+  // Fold a WS <name>_state message or a reconnect response body (firmware /
+  // firmware_state / needs_flash / ready).
   applyState(msg) {
     if (!msg) return;
     if ("firmware" in msg) this.state.firmware = msg.firmware || null;
     if ("firmware_state" in msg) this.state.firmwareState = msg.firmware_state || null;
     if ("needs_flash" in msg) this.state.needsFlash = Boolean(msg.needs_flash);
     if (typeof msg.ready === "boolean") this.state.ready = msg.ready;
-    this.render();
-  }
-
-  // Fold a reconnect/flash response body that carries the same fields.
-  applyResponse(d) {
-    if (!d) return;
-    if ("firmware" in d) this.state.firmware = d.firmware || null;
-    if ("firmware_state" in d) this.state.firmwareState = d.firmware_state || null;
-    if ("needs_flash" in d) this.state.needsFlash = Boolean(d.needs_flash);
-    if (typeof d.ready === "boolean") this.state.ready = d.ready;
     this.render();
   }
 

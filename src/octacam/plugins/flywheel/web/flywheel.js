@@ -173,7 +173,7 @@ export default class FlywheelTab {
     }
     this.ready = Boolean(r.data?.ready);
     if (r.data?.device) this.device = r.data.device;
-    this.fw.applyResponse(r.data);
+    this.fw.applyState(r.data);
     this.fw.load();
     this._refresh();
     this._loadPorts(); // refresh the list + selection after the attempt

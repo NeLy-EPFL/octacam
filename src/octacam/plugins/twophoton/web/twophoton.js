@@ -172,7 +172,7 @@ export default class TwoPhotonTab {
       this.arduinoState = r.data.arduino_state;
       this._renderState();
     }
-    this.fw.applyResponse(r.data);
+    this.fw.applyState(r.data);
     this.fw.load();
     this._refresh();
     this._loadPorts(); // refresh the list + selection after the attempt
