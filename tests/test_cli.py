@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -509,7 +510,43 @@ def test_resolve_enabled():
     assert _resolve_enabled(None, True) == []
 
 
-def test_doctor_lists_cameras_plugins_and_toolchain():
+@pytest.fixture
+def emulated_rig(monkeypatch):
+    """What doctor sees: pylon's two emulated cameras and nothing on the USB bus.
+
+    The FLIR tiers report not installed, pycameleon finds no camera, pylon
+    enumerates its emulator alone, and no USB link or serial port is read, so a
+    report never depends on what is plugged into the machine running the tests."""
+    from octacam.cameras import basler, pycameleon, registry
+
+    select_backend = registry.select_backend
+
+    def select_installed(name):
+        if (name or "").strip().lower() in ("flir", "spinnaker"):
+            raise registry.BackendUnavailable(name, "not installed")
+        return select_backend(name)
+
+    factory = basler.tl_factory()
+
+    class Emulator:
+        def EnumerateDevices(self):
+            tl = factory.CreateTl("BaslerCamEmu")
+            try:
+                return tl.EnumerateDevices()
+            finally:
+                factory.ReleaseTl(tl)
+
+    monkeypatch.setattr(registry, "select_backend", select_installed)
+    monkeypatch.setattr("octacam.cameras.select_backend", select_installed)
+    monkeypatch.setattr(basler, "tl_factory", Emulator)
+    monkeypatch.setattr(
+        pycameleon, "pycameleon", SimpleNamespace(enumerate_cameras=lambda: [])
+    )
+    monkeypatch.setattr("octacam.cli._usb_camera_links", lambda detected: [])
+    monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: [])
+
+
+def test_doctor_lists_cameras_plugins_and_toolchain(emulated_rig):
     # `doctor` lists cameras + plugins and adds diagnostics.
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
@@ -521,7 +558,7 @@ def test_doctor_lists_cameras_plugins_and_toolchain():
     assert "flywheel" in result.output
 
 
-def test_doctor_json_is_machine_readable():
+def test_doctor_json_is_machine_readable(emulated_rig):
     import json
 
     result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
@@ -540,7 +577,7 @@ def test_doctor_help_documents_config_dir():
     assert "CONFIG_DIR" in result.output
 
 
-def test_doctor_flags_undetected_camera_and_exits_nonzero(tmp_path):
+def test_doctor_flags_undetected_camera_and_exits_nonzero(emulated_rig, tmp_path):
     # A rig config declaring a serial that isn't among the emulated cameras is a
     # hard error: doctor lists it and exits nonzero so scripts can pre-flight.
     (tmp_path / "octacam_config.toml").write_text(
@@ -573,7 +610,7 @@ def _count_enumerations(monkeypatch):
     return counter
 
 
-def test_doctor_enumerates_each_backend_at_most_once(monkeypatch):
+def test_doctor_enumerates_each_backend_at_most_once(emulated_rig, monkeypatch):
     # The dedup invariant: one parallel scan, so no backend is enumerated twice —
     # even though the report has three consumers (the tier list, the cascade line,
     # and the cameras-vs-config cross-check). basler is always present (emulated).
@@ -584,7 +621,7 @@ def test_doctor_enumerates_each_backend_at_most_once(monkeypatch):
     assert max(counter.values()) <= 1, dict(counter)
 
 
-def test_doctor_backend_filter_scans_only_that_backend(monkeypatch):
+def test_doctor_backend_filter_scans_only_that_backend(emulated_rig, monkeypatch):
     # `--backend X` must scan only X (no full-cascade sweep), so the other tiers
     # are never touched.
     counter = _count_enumerations(monkeypatch)
@@ -593,7 +630,7 @@ def test_doctor_backend_filter_scans_only_that_backend(monkeypatch):
     assert set(counter) == {"basler"}, dict(counter)
 
 
-def test_doctor_backend_filter_is_case_insensitive():
+def test_doctor_backend_filter_is_case_insensitive(emulated_rig):
     # --backend is normalized like select_backend/_enumerate_backend, so an
     # upper/mixed-case tier name still resolves to its cached scan (regression:
     # the scan cache is keyed by the lowercased name).
@@ -603,7 +640,7 @@ def test_doctor_backend_filter_is_case_insensitive():
     assert "enumeration failed" not in result.output
 
 
-def test_doctor_json_has_no_progress_noise():
+def test_doctor_json_has_no_progress_noise(emulated_rig):
     # The scan's live spinner renders on stderr and is suppressed for --json / when
     # output is not a terminal, so machine-readable output is never corrupted.
     result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
@@ -612,9 +649,12 @@ def test_doctor_json_has_no_progress_noise():
     json.loads(result.output)  # still valid JSON
 
 
-def test_doctor_report_order_is_deterministic():
+def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
     # Parallel enumeration must not leak completion order into the report: the
-    # Camera-backends section is assembled in a fixed backend order both times.
+    # Camera-backends section is assembled in a fixed backend order both times,
+    # though basler's scan finishes last in the first run and first in the second.
+    from octacam import cli
+
     def backends_section(output: str) -> str:
         lines = output.splitlines()
         start = next(i for i, ln in enumerate(lines) if ln.strip() == "Camera backends")
@@ -624,7 +664,18 @@ def test_doctor_report_order_is_deterministic():
         )
         return "\n".join(lines[start:end])
 
+    enumerate_backend = cli._enumerate_backend
+    slow = []
+
+    def enumerate_slowly(name):
+        if name in slow:
+            time.sleep(0.2)
+        return enumerate_backend(name)
+
+    monkeypatch.setattr("octacam.cli._enumerate_backend", enumerate_slowly)
+    slow[:] = ["basler"]
     first = runner.invoke(app, ["--log-level", "error", "doctor"])
+    slow[:] = ["pycameleon"]
     second = runner.invoke(app, ["--log-level", "error", "doctor"])
     assert first.exit_code == 0 and second.exit_code == 0
     assert backends_section(first.output) == backends_section(second.output)
@@ -732,7 +783,7 @@ def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     ]
 
 
-def test_doctor_groups_cameras_by_model_including_non_basler(monkeypatch):
+def test_doctor_groups_cameras_by_model_including_non_basler(emulated_rig, monkeypatch):
     # The grouping half of the change: same-model cameras (including a non-basler
     # tier's, now that every backend surfaces a model) render as a single grouped
     # line. This stubs _enumerate_backend, so it covers _camera_lines + doctor
@@ -753,7 +804,7 @@ def test_doctor_groups_cameras_by_model_including_non_basler(monkeypatch):
     assert "acA1920-150um: 40018619" in result.output
 
 
-def test_doctor_omits_free_gui_port_line():
+def test_doctor_omits_free_gui_port_line(emulated_rig):
     # The "GUI port is free" happy-path line was pruned — the port is reported only
     # when in use. Port 8765 is normally free under test, so the old code would
     # have printed this line; its absence proves the removal (not a vacuous check).
@@ -799,7 +850,7 @@ def _fake_serial_port(device, *, vid=0x2341, pid=0x0070, sn="SN123", arduino=Tru
     )
 
 
-def test_doctor_lists_serial_devices(monkeypatch):
+def test_doctor_lists_serial_devices(emulated_rig, monkeypatch):
     ports = [
         _fake_serial_port("/dev/ttyACM0"),
         _fake_serial_port("/dev/ttyS0", vid=None, pid=None, sn=None,
@@ -815,7 +866,7 @@ def test_doctor_lists_serial_devices(monkeypatch):
     assert "other/generic serial port" in result.output
 
 
-def test_doctor_serial_flags_missing_configured_device(monkeypatch, tmp_path):
+def test_doctor_serial_flags_missing_configured_device(emulated_rig, monkeypatch, tmp_path):
     monkeypatch.setattr(
         "octacam.serial_ports.list_serial_ports",
         lambda: [_fake_serial_port("/dev/ttyACM0")],
@@ -833,7 +884,7 @@ def test_doctor_serial_flags_missing_configured_device(monkeypatch, tmp_path):
     assert "detected but not used by any plugin" in flat
 
 
-def test_doctor_serial_section_in_json(monkeypatch):
+def test_doctor_serial_section_in_json(emulated_rig, monkeypatch):
     monkeypatch.setattr(
         "octacam.serial_ports.list_serial_ports",
         lambda: [_fake_serial_port("/dev/ttyACM0")],
@@ -845,7 +896,7 @@ def test_doctor_serial_section_in_json(monkeypatch):
     assert "Serial devices" in titles
 
 
-def test_doctor_probe_serial_reports_firmware(monkeypatch):
+def test_doctor_probe_serial_reports_firmware(emulated_rig, monkeypatch):
     from octacam.serial_ports import SerialIdentity
 
     monkeypatch.setattr(
@@ -861,7 +912,7 @@ def test_doctor_probe_serial_reports_firmware(monkeypatch):
     assert "TRIGGERBOX 1" in result.output
 
 
-def test_doctor_probe_serial_skips_busy_port(monkeypatch):
+def test_doctor_probe_serial_skips_busy_port(emulated_rig, monkeypatch):
     from octacam.serial_ports import SerialIdentity
 
     monkeypatch.setattr(
