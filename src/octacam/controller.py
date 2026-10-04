@@ -178,7 +178,6 @@ class RecordingSettings:
     # deeper queue absorbs transient encoder stalls without dropping frames, at
     # the cost of peak RAM. See config.RecordConfig.writer_queue_size.
     writer_queue_size: int = 64
-    remux_mp4: bool = False
     # "display" bakes each camera's display transform into the video; "sensor"
     # saves the raw, untransformed image. save_frame_timestamps writes the
     # per-frame timestamp file (timestamps.npz; debugging; off by default).
@@ -204,11 +203,7 @@ class RecordingSettings:
             params = self.nvenc_params
         else:
             return video_format
-        return dataclasses.replace(
-            video_format,
-            ffmpeg_params=params,
-            remux_mp4=self.remux_mp4,
-        )
+        return dataclasses.replace(video_format, ffmpeg_params=params)
 
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:

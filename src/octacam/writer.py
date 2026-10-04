@@ -789,14 +789,12 @@ class FfmpegVideoWriter(AsyncFrameWriter):
     def __init__(
         self,
         ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS,
-        remux_mp4: bool = False,
         max_queue_size: int = 20,
         *,
         profile: bool = False,
     ):
         super().__init__(max_queue_size, profile=profile)
         self.ffmpeg_params = ffmpeg_params
-        self.remux_mp4 = remux_mp4
         self._proc: subprocess.Popen | None = None
         self._filename: str | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
@@ -898,40 +896,6 @@ class FfmpegVideoWriter(AsyncFrameWriter):
                 self._filename,
                 ("\nffmpeg output:\n" + self.error_tail) if self._stderr_tail else "",
             )
-        elif self.remux_mp4:
-            self._remux()
-
-    def _remux(self):
-        source = Path(self._filename)  # pyright: ignore[reportArgumentType]
-        target = source.with_suffix(".mp4")
-        result = subprocess.run(
-            [
-                find_ffmpeg(),
-                # -nostdin (+ stdin=DEVNULL): keep ffmpeg off the controlling
-                # tty so it can never leave the terminal in no-echo mode.
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "warning",
-                "-y",
-                "-i",
-                str(source),
-                "-c",
-                "copy",
-                str(target),
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-        )
-        if result.returncode == 0:
-            source.unlink()
-            log.info("Remuxed %s -> %s", source, target)
-        else:
-            log.error(
-                "Remux of %s failed (kept the MKV): %s",
-                source,
-                result.stderr.decode(errors="replace").strip(),
-            )
 
 
 class RawVideoWriter(AsyncFrameWriter):
@@ -970,7 +934,6 @@ class VideoFormat:
     extension: str
     label: str
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    remux_mp4: bool = False
 
     def create_writer(
         self, max_queue_size: int = 20, *, profile: bool = False
@@ -978,7 +941,6 @@ class VideoFormat:
         if self.save_method == "ffmpeg":
             return FfmpegVideoWriter(
                 ffmpeg_params=self.ffmpeg_params,
-                remux_mp4=self.remux_mp4,
                 max_queue_size=max_queue_size,
                 profile=profile,
             )
@@ -1002,14 +964,14 @@ FORMATS: dict[str, VideoFormat] = {
 
 
 def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
-    """A libx264/CPU VideoFormat mirroring *base*'s container/remux/pixel format.
+    """A libx264/CPU VideoFormat mirroring *base*'s container and pixel format.
 
     Used for cameras that can't get a GPU NVENC session (see
     :func:`resolve_capture_formats`). It keeps *base*'s ``-pix_fmt`` (NVENC uses
     yuv420p) so a mixed GPU+CPU recording is uniform — e.g. every file stays
-    yuv420p (browser-playable after an mp4 remux) instead of the fallback cameras
-    emitting monochrome 4:0:0. The full-range filter/flag still applies to
-    yuv420p via :func:`build_encode_args`, so 0-255 luma survives on both paths."""
+    yuv420p instead of the fallback cameras emitting monochrome 4:0:0. The
+    full-range filter/flag still applies to yuv420p via
+    :func:`build_encode_args`, so 0-255 luma survives on both paths."""
     try:
         tokens = shlex.split(base.ffmpeg_params)
     except ValueError:
@@ -1023,7 +985,6 @@ def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
             f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} "
             f"-pix_fmt {pix_fmt}"
         ),
-        remux_mp4=base.remux_mp4,
     )
 
 

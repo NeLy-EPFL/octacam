@@ -194,11 +194,9 @@ def test_nvenc_max_sessions_is_cached(monkeypatch):
 
 
 def test_cpu_fallback_mirrors_container():
-    base = w.VideoFormat(
-        "ffmpeg", "mp4", "x", ffmpeg_params=NVENC_H264_PARAMS, remux_mp4=True
-    )
+    base = w.VideoFormat("ffmpeg", "mp4", "x", ffmpeg_params=NVENC_H264_PARAMS)
     cpu = cpu_fallback_format(base)
-    assert cpu.extension == "mp4" and cpu.remux_mp4 is True
+    assert cpu.extension == "mp4"
     assert "libx264" in cpu.ffmpeg_params and not is_nvenc_params(cpu.ffmpeg_params)
     # Preserves the base pixel format (yuv420p), so a mixed GPU+CPU recording is
     # uniform (all yuv420p) rather than the fallback emitting monochrome 4:0:0.

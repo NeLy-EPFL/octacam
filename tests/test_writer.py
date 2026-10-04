@@ -72,18 +72,6 @@ def test_ffmpeg_writer_lossless_roundtrip(tmp_path):
         assert np.array_equal(dec[:, :, 0], src)
 
 
-def test_ffmpeg_writer_remux_mp4(tmp_path):
-    out = tmp_path / "test.mkv"
-    writer = FfmpegVideoWriter(remux_mp4=True)
-    assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
-    for frame in synthetic_frames(10):
-        writer.write(frame)
-        time.sleep(0.002)
-    writer.close()
-    assert not out.exists()
-    assert len(read_all_frames(tmp_path / "test.mp4")) == 10
-
-
 def test_ffmpeg_writer_failure_is_reported(tmp_path):
     # Output directory does not exist: ffmpeg exits immediately, the pipe
     # breaks, and the writer must flag failure instead of hanging.
