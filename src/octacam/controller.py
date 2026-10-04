@@ -1484,12 +1484,13 @@ class RecordingController:
         hooks_done: threading.Event,
         hooks_timeout_s: float,
     ) -> None:
-        # Wait for every started camera's first frame. Under an octacam-driven
+        # Wait for every started camera's first frame. Under the software
         # trigger, give up after STARTED_FAIL_AFTER_S and record with what
-        # started, so one stalled camera cannot hang the take; an external
-        # source may fire arbitrarily late, so wait for it until stopped. Both
-        # thresholds count from the end of the start sequence: no counted frame
-        # comes before it, and at a low fps priming alone outlasts them.
+        # started, so one stalled camera cannot hang the take; under a hardware
+        # trigger (managed or external: ``external_trigger``) the first pulse
+        # may come arbitrarily late, so wait until stopped. Both thresholds
+        # count from the end of the start sequence: no counted frame comes
+        # before it, and at a low fps priming alone outlasts them.
         start = time.monotonic()
         armed_at: float | None = None
         warned = False
