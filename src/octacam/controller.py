@@ -1,16 +1,18 @@
 """Recording orchestration shared by the web UI and the headless CLI.
 
-Extracts the start/stop/abort lifecycle that previously lived in the Qt
-MainWindow (timer-driven) and cli.py (sleep-driven) into a framework-free
-state machine:
+A framework-free state machine on top of a CameraSystem:
 
     preview/idle -> waiting -> recording -> finishing -> preview/idle
 
-A monitor thread replaces the Qt timers: it polls for the first frame on
-every camera (dispatching plugin hooks at that moment — e.g. a flywheel
-stepper command), enforces the recording deadline, and runs the teardown
-sequence in the same order as the original code (stop trigger -> grab loops
-exit -> writers drain -> summary + timestamps).
+Each recording's monitor thread waits for every camera's first frame (plugin
+``on_first_frame`` hooks fire then), enforces the deadline and tears down in a
+fixed order: trigger off -> grab loops exit -> writers drain -> summary.
+
+``RecordingController._lock`` guards the state and settings, and snapshot(),
+stop_recording() and the telemetry take it too. So nothing that can block runs
+under it: plugin hooks (serial writes awaiting an ack), node-map reads over USB
+and the NVENC probe all run off the lock, or one stalled device would wedge the
+GUI's status and its Stop button.
 """
 
 import contextlib
@@ -58,37 +60,26 @@ log = logging.getLogger("octacam")
 STARTED_POLL_INTERVAL_S = 0.1
 STARTED_WARN_AFTER_S = 3.0
 STARTED_FAIL_AFTER_S = 10.0  # then record with whatever cameras started
-STOP_GRACE_S = 0.5  # matches cli.py's in-flight frame grace period
-# Upper bound on how long the monitor waits for the off-lock on_recording_start
-# hooks to finish before firing on_first_frame / on_recording_stop. Bounds a
-# wedged start hook (e.g. a plugin serial write stalled on its write_timeout) so
-# it can never block recording teardown indefinitely. A primed recording's wait
-# also allows for its priming (see start_sequence_timeout_s), which at a low fps
-# can take longer than this on its own.
+STOP_GRACE_S = 0.5  # past the duration, for frames still in flight
+# Bounds the monitor's wait for the start hooks, so a wedged arm (a serial write
+# stalled on its write_timeout) never blocks teardown; a primed recording adds
+# its priming (start_sequence_timeout_s).
 START_HOOKS_TIMEOUT_S = 5.0
-# Sacrificial triggers sent per priming round before a recording's train
-# (octacam-driven trigger sources only). A camera may ignore the first triggers
-# after its acquisition starts — a FLIR Grasshopper3 ignores two, measured, and
-# more on its first acquisition after a power-up — so without them the train's
-# first pulses produce no frame, and two cameras that start either side of a
-# pulse end up a frame apart. Their frames are discarded.
+# Sacrificial triggers per priming round (octacam-driven trigger sources only):
+# a GS3 ignores its first triggers after an acquisition start (CLAUDE.md,
+# hardware quirks). Their frames are discarded.
 PRIME_PULSES = 4
-# Priming repeats its round until every camera has answered one of the pulses
-# (two freshly powered GS3s answered none of the first four), but starts no new
-# round once this long has passed; a camera still silent then is warned about.
-# The monitor allows for the priming this bounds on top of START_HOOKS_TIMEOUT_S,
-# which is left for the arm and the board's acknowledgements.
+# Priming repeats rounds until every camera has answered one, but starts none
+# after this long; a camera still silent then is warned about.
 PRIME_BUDGET_S = 1.0
-# Wait after the priming pulses for their frames to land (and be discarded)
-# before counting starts: well above a frame's trigger-to-delivery latency, and
-# at a low fps at least PRIME_SETTLE_PERIODS periods (a long exposure delivers a
-# long time after its pulse, and the cameras drop a priming straggler only
-# within a few periods of the last priming frame).
+# Settle after a priming round before counting starts: above a frame's
+# trigger-to-delivery latency and, at a low fps, PRIME_SETTLE_PERIODS periods (a
+# long exposure delivers late; a priming straggler is dropped only within a few
+# periods of the last primed frame).
 PRIME_SETTLE_S = 0.15
 PRIME_SETTLE_PERIODS = 4
-# A counted train is over this long after its last pulse was due: time for the
-# last frames to arrive (a GS3 delivers ~10-30 ms after its pulse). The recording
-# then stops on the train's end instead of waiting out the duration's deadline.
+# A counted train is over this long after its last pulse was due (a GS3
+# delivers ~10-30 ms after its pulse); the take then stops on the train's end.
 TRAIN_END_MARGIN_S = 0.3
 # Summary lists of per-pulse indices are capped at this length (the full series
 # is in timestamps.npz); the counts next to them are never capped.
@@ -108,7 +99,7 @@ def increment_trailing_number(text: str) -> str:
 
 
 def normalize_save_dir(text: str) -> str:
-    """Mirror DirectoryEdit's normalization: strip, expand ~, absolute, /."""
+    """Strip, expand ``~``, make absolute, use forward slashes."""
     path = Path(text.strip()).expanduser()
     return str(path.absolute()).replace("\\", "/")
 
@@ -125,14 +116,8 @@ def compose_save_dir(record_directory: str, relative_directory: str) -> str:
 
 
 def sanitize_camera_name(name: str) -> str:
-    """Validate a camera name as a safe, single-segment video filename stem.
-
-    ``camera.name`` becomes the per-camera output filename (CameraSystem.
-    start_record writes ``<name>.<ext>``), so a name must be non-blank and
-    contain no path separators or ``.``/``..`` traversal. Mirrors
-    config_writer.safe_config_name, kept separate to give a camera-specific
-    error message.
-    """
+    """Validate a camera name as its video's filename stem (``<name>.<ext>``):
+    non-blank, a single path segment, no ``.``/``..``. Raises ValueError."""
     clean = (name or "").strip()
     if (
         not clean
@@ -152,52 +137,31 @@ class RecordingSettings:
     fps: float = 100.0
     duration_s: float = 20.0
     save_dir: str = "./"
-    # Resolved base directory (config record.directory) the save_dir sits under,
-    # and the relative sub-path (config record.relative_directory) under it. When
-    # either is edited, save_dir is recomposed as record_directory/
-    # relative_directory. relative_directory is what the transfer step mirrors
-    # onto the destination; empty falls back to the save_dir's own basename.
+    # save_dir is record_directory/relative_directory once either is set; the
+    # transfer mirrors relative_directory (else save_dir's basename).
     record_directory: str = ""
     relative_directory: str = ""
     trigger_source: str = "software"  # "software" | "managed" | "external"
-    # How preview is triggered. "auto" mirrors trigger_source (software->software,
-    # managed->drive the plugin, external->free-run approximation); "software" and
-    # "free_running" force that mode regardless of the recording trigger source.
+    # "auto" mirrors trigger_source (see _effective_preview_mode).
     preview_trigger_source: str = "auto"  # "auto" | "software" | "free_running"
     save_method: str = "ffmpeg"  # "ffmpeg" (CPU) | "nvenc" (GPU) | "raw"
-    # Verbatim ffmpeg output/encoder args for the CPU encoder (save_method="ffmpeg").
+    # Encoder args per method, kept apart so switching keeps both presets.
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    # Verbatim ffmpeg args for the GPU encoder (save_method="nvenc"); a dedicated
-    # field so the CPU and GPU presets persist independently and switching methods
-    # never clobbers the other. Defaults to the curated NVENC H.264 preset.
     nvenc_params: str = NVENC_H264_PARAMS
-    # Max concurrent GPU NVENC sessions when save_method == "nvenc"; cameras beyond
-    # this encode on CPU (see writer.resolve_capture_formats). None = auto-detect
-    # the GPU/driver session cap (writer.nvenc_max_sessions); an int caps it lower.
+    # None = the GPU's detected session cap; cameras beyond it encode on CPU.
     max_nvenc_sessions: int | None = None
-    # Depth of each camera's writer queue (frames buffered to the encoder). A
-    # deeper queue absorbs transient encoder stalls without dropping frames, at
-    # the cost of peak RAM. See config.RecordConfig.writer_queue_size.
     writer_queue_size: int = 64
-    # "display" bakes each camera's display transform into the video; "sensor"
-    # saves the raw, untransformed image. save_frame_timestamps writes the
-    # per-frame timestamp file (timestamps.npz; debugging; off by default).
+    # "display" bakes the display transform into the video; "sensor" does not.
     record_form: str = "display"
     save_frame_timestamps: bool = False
-    # Post-recording (`octacam process`) params. Not used during capture; they
-    # are patched into the recording folder's octacam_config.toml snapshot
-    # (_snapshot_config) so a later `octacam process` transcodes and transfers
-    # with exactly the values shown in the GUI. Sourced from the config's
-    # [transcode]/[transfer] sections at startup; empty transfer_directory
-    # disables the transfer step.
+    # `octacam process` params: unused during capture, patched into each
+    # recording's config snapshot. An empty transfer_directory skips the transfer.
     transcode_ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
     transfer_directory: str = ""
     transfer_checksum: bool = True
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
-        # Each encoder method draws from its own params field, so the CPU and GPU
-        # presets are independent (raw takes neither).
         if self.save_method == "ffmpeg":
             params = self.ffmpeg_params
         elif self.save_method == "nvenc":
@@ -208,18 +172,11 @@ class RecordingSettings:
 
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:
-    """The fixed number of frames each camera should capture, or None to leave it
-    uncapped.
+    """``round(fps * duration)``, the pulses an octacam-driven trigger emits, so
+    no camera's grab loop takes a trailing pulse the others miss at teardown.
 
-    octacam clocks the ``software`` and ``managed`` (triggerbox) trigger sources
-    for a known number of pulses over the recording — ``round(fps * duration)`` —
-    so every camera should capture exactly that many frames. Capping each
-    independent grab loop at this count keeps the cameras from ending a frame
-    apart when the teardown race lets one retrieve a trailing pulse the others
-    don't. A truly ``external`` trigger (a source octacam does not drive) has an
-    unknown pulse count, so it stays uncapped — bounded only by the recording
-    deadline. Non-positive fps/duration also returns None (defensive: never cap a
-    recording to zero frames)."""
+    None (uncapped, bounded by the deadline) for an ``external`` trigger, whose
+    pulse count is unknown, and for a non-positive fps or duration."""
     if settings.trigger_source == "external":
         return None
     if settings.fps <= 0 or settings.duration_s <= 0:
@@ -234,14 +191,11 @@ def resolve_pulse_clock(
 ) -> PulseClock:
     """The trigger train a recording's frames are counted against.
 
-    ``managed``: the train the driving plugin will actually emit (its integer
-    period and exact pulse count — see the ``trigger_train`` plugin hook), else
-    one derived from the settings. ``software``: octacam's own timer, one tick per
-    ``round(fps * duration)``. Both are filled: a camera that misses a pulse gets
-    the previous frame repeated in its place, so video frame k is pulse k in
-    every camera. ``external``: a source octacam does not drive, so its length is
-    unknown and a missed pulse is only reported (in the per-frame pulse map),
-    never filled — an external clock may be irregular by design.
+    ``managed``: the train the driving plugin will emit (``trigger_train``), else
+    one derived from the settings; ``software``: octacam's own timer. Both are
+    filled (a missed pulse repeats the previous frame, so video frame k is pulse
+    k in every camera). ``external`` has no known length and is never filled: an
+    external clock may be irregular by design.
     """
     period = int(round(1e9 / settings.fps)) if settings.fps > 0 else 0
     if settings.trigger_source == "external":
@@ -260,14 +214,10 @@ def prime_settle_s(period_ns: int) -> float:
 
 
 def start_sequence_timeout_s(period_ns: int, primed: bool) -> float:
-    """How long the monitor waits for a recording's start sequence (priming, then
-    the arm) before it gives up on it, for a train of this period.
-
-    START_HOOKS_TIMEOUT_S for the arm, plus, when the recording is primed, an
-    upper bound on the priming: rounds start until PRIME_BUDGET_S has passed, and
-    the last one sends PRIME_PULSES pulses a period apart and then settles. At
-    1 fps that round alone is 8 s, so a fixed bound let on_first_frame and the
-    teardown run before the arm."""
+    """How long the monitor waits for a recording's start sequence (priming,
+    then the arm): START_HOOKS_TIMEOUT_S plus, when primed, the priming's upper
+    bound (rounds start until PRIME_BUDGET_S, and the last sends PRIME_PULSES a
+    period apart and settles; at 1 fps that round alone is 8 s)."""
     if not primed:
         return START_HOOKS_TIMEOUT_S
     priming = PRIME_BUDGET_S + PRIME_PULSES * period_ns / 1e9 + prime_settle_s(period_ns)
@@ -340,11 +290,8 @@ _TIMESTAMP_NOTE = (
 
 
 def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
-    """Where a camera's per-frame timestamps came from, from the fallback count.
-
-    ``None`` when no frames were recorded; ``"hardware"`` when none fell back;
-    ``"host"`` when all did (a host-only backend like pycameleon);
-    ``"mixed"`` when only some did (a stray-zero anomaly, surfaced honestly)."""
+    """``"hardware"``, ``"host"`` (a backend without timestamps, e.g.
+    pycameleon) or ``"mixed"`` (stray zero timestamps); None without frames."""
     if frames <= 0:
         return None
     if host_fallback_count <= 0:
@@ -427,11 +374,10 @@ def build_recording_summary(
     primed_pulses: int = 0,
     completed: bool | None = None,
 ) -> dict:
-    """Assemble the recording_summary.json payload from finalized camera stats.
+    """The recording_summary.json payload, from finished camera stats (no I/O).
 
-    Pure (no I/O) so it can be unit-tested without a recording. Each camera's
-    ``transform`` is always recorded; ``transform_applied`` is true only when it
-    was baked into the saved file (display form + non-identity transform)."""
+    ``transform_applied`` is true only when the transform was baked into the
+    video (display form and a non-identity transform)."""
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
@@ -489,21 +435,17 @@ def build_recording_summary(
         "start_time": start_iso,
         "start_time_ns": start_wall_ns or None,
         "aborted": aborted,
-        # Ran to its end (train or duration), not stopped: octacam check relies
-        # on it to tell a take stopped early from one whose cameras disagree.
+        # Ran to its end, not stopped: octacam check tells an early stop from
+        # cameras that disagree by it.
         "completed": completed,
         "fps_target": settings.fps,
         "duration_s": settings.duration_s,
         "trigger_source": settings.trigger_source,
         "save_method": settings.save_method,
-        # The encoder args actually used, not the raw config string: for
-        # save_method="nvenc" with default params this is the curated NVENC
-        # params (h264_nvenc), so the summary never mislabels the codec.
+        # The args of the encoder used (nvenc's for save_method="nvenc").
         "ffmpeg_params": settings.video_format().ffmpeg_params,
         "record_form": settings.record_form,
-        # The sub-path (under record.directory) the transfer step mirrors onto
-        # the destination; resolved once here so a later transfer never
-        # re-templates the date on a different day.
+        # Resolved now, so a transfer on a later day never re-templates the date.
         "relative_directory": _relative_directory(settings),
         "pulse_train": (
             {**pulse_clock.to_dict(), "primed": primed_pulses}
@@ -520,11 +462,8 @@ def build_recording_summary(
         "cameras": cams,
     }
     if settings.save_method == "nvenc":
-        # Cameras beyond this many used the CPU (libx264) fallback — see the
-        # per-recording warning; recorded here so the split is auditable. Resolve
-        # None (auto) to the detected cap actually used, keyed by the encoder the
-        # nvenc_params names (the same key the off-lock warm-up cached), so this is
-        # a cache lookup — never a fresh GPU probe under the caller's lock.
+        # Cameras beyond the cap encoded on CPU. Auto (None) resolves to the cap
+        # the off-lock warm-up cached for this encoder: never a fresh GPU probe.
         cap = settings.max_nvenc_sessions
         if cap is None:
             encoder = encoder_of(settings.video_format().ffmpeg_params) or "h264_nvenc"
@@ -534,18 +473,14 @@ def build_recording_summary(
 
 
 def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
-    """Assemble the {key: array} payload for ``timestamps.npz`` from finalized
-    camera stats.
+    """The ``timestamps.npz`` arrays, from finished camera stats (no I/O).
 
-    Pure (no I/O) so it can be unit-tested without a recording. Per camera,
-    parallel arrays with one entry per video frame (``frame_index`` is implicit:
-    the array position): ``"<name>/timestamp_ns"`` (int64; a filled frame carries
-    the time its pulse was due), ``"<name>/dropped"`` (bool: a fill, not an image
-    of its own pulse), ``"<name>/missed"`` (bool: of those, a pulse the camera
-    never delivered), ``"<name>/pulse_index"`` (int64: the trigger pulse the frame
-    stands for) and ``"<name>/arrival_ns"`` (int64: host wall-clock delivery, 0
-    for a fill). Lengths are truncated to the shared minimum so a rare skew
-    truncates rather than raises; a zero-frame camera contributes empty arrays."""
+    Per camera, one entry per video frame: ``"<name>/timestamp_ns"`` (int64; a
+    fill carries the time its pulse was due), ``"<name>/dropped"`` (bool: a
+    fill), ``"<name>/missed"`` (bool: of those, a pulse the camera never
+    delivered), ``"<name>/pulse_index"`` (int64) and ``"<name>/arrival_ns"``
+    (int64: host wall-clock delivery, 0 for a fill). A camera's series are
+    truncated to their shortest."""
     arrays: dict[str, np.ndarray] = {}
     for camera in cameras:
         series = {
@@ -562,12 +497,9 @@ def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
 
 
 def _relative_directory(settings: RecordingSettings) -> str:
-    """The recording folder's path relative to the configured base directory.
-
-    Prefers the explicit ``relative_directory`` (the value save_dir was composed
-    from), then falls back to computing it from save_dir, and finally to the
-    folder's own basename when no base is known or the folder lives outside it
-    (e.g. an ad-hoc --output override)."""
+    """The recording folder relative to the base directory: the explicit
+    ``relative_directory``, else save_dir relative to the base, else (no base, or
+    a folder outside it such as an --output override) the folder's name."""
     if settings.relative_directory.strip():
         return settings.relative_directory
     base = settings.record_directory
@@ -601,25 +533,16 @@ class RecordingController:
         ready: bool = True,
     ):
         self.camera_system = camera_system
-        # False while the GUI's background init thread is still opening the
-        # cameras (the controller was handed a hardware-free placeholder system;
-        # see :meth:`attach_system`). Surfaced in :meth:`snapshot` so the web UI
-        # can render a "connecting to cameras" placeholder and gate camera-only
-        # controls until the real system is swapped in. Headless `octacam record`
-        # and unit tests build the real system up front and stay ready.
+        # False while the GUI's init thread opens the cameras behind a
+        # placeholder system (attach_system).
         self._ready = ready
-        # Set (via fail_init) if the GUI's background init could not open the
-        # cameras, so the web UI shows the reason instead of an endless spinner.
         self._init_error: str | None = None
         self.plugins = plugins if plugins is not None else PluginManager([])
         self._settings = settings
         self._auto_preview = auto_preview
-        # Back-compat: a rig that predates the "managed" trigger source declares
-        # trigger_source="external" plus a trigger-driving plugin (the shipped
-        # triggerbox configs). octacam already drives that trigger, so promote it
-        # to "managed" — the recording behaves identically, but `auto` preview now
-        # resolves to the plugin-driven (synchronized, strobe-lit) preview instead
-        # of the free-run approximation reserved for a truly external source.
+        # A config predating "managed" says "external" with a trigger-driving
+        # plugin. octacam drives that trigger, so it is managed: the recording is
+        # the same, and auto preview drives the plugin instead of free-running.
         if (
             self._settings.trigger_source == "external"
             and self._preview_trigger_plugin() is not None
@@ -629,74 +552,45 @@ class RecordingController:
                 "trigger_source 'external' with a trigger-driving plugin loaded; "
                 "treating it as 'managed' (octacam drives the trigger)."
             )
-        # The rig config dir whose octacam_config.toml is copied into each
-        # recording folder (so `octacam process` needs no --config later). None
-        # skips the snapshot (e.g. unit tests constructing a controller directly).
+        # Its octacam_config.toml is snapshotted into each recording; None (as
+        # in tests) records without a snapshot.
         self._config_dir = Path(config_dir) if config_dir is not None else None
-        # Each finished recording's folder is noted in the session cache under
-        # this id, so `octacam process --last session` finds the whole batch.
+        # Finished recordings are noted in the session cache under this id.
         self._session_id = session_id or session_cache.new_session_id()
         self._record_kind = record_kind
-        # How many recordings this session has finished — surfaced in snapshot()
-        # so the GUI can offer "shut down & process" only when there is work.
         self._recordings_made = 0
         self._lock = threading.RLock()
         self._state = "idle"
-        # True while a camera's geometry is being changed (preview stopped and
-        # restarted off-lock); blocks a recording from starting mid-cycle.
+        # Gates that refuse a recording start while set (see _busy_reason):
+        # a camera reconfiguration is running off the lock;
         self._reconfiguring = False
-        # True while a finished recording's teardown is still running its off-lock
-        # tail (on_recording_stop disarm + preview re-arm) after the state has
-        # already left the recording-active set; blocks a new recording from
-        # racing that tail over the shared trigger plugin.
+        # a finished take's off-lock tail (plugin disarm, preview re-arm) still
+        # runs over the shared trigger plugin;
         self._tearing_down = False
-        # True from the moment start_recording has admitted a start (checks passed,
-        # save dir created, preview grab stopped) until its record grab is running
-        # or the start has failed. Held across the off-lock cancel of a managed
-        # preview's trigger arm, so nothing can hand the cameras a fresh trigger
-        # clock (a concurrent start, a settings-driven preview re-arm, a benchmark,
-        # a grab-cycling parameter write) in that window. See start_recording.
+        # a start is claiming the cameras (see start_recording).
         self._starting = False
         self._aborted = False
         self._stop_event = threading.Event()
-        # Set once the off-lock on_recording_start plugin hooks have finished
-        # dispatching. The monitor waits on it before on_first_frame and
-        # on_recording_stop, so the start -> first_frame -> stop hook order holds
-        # even though the arm runs on the caller thread — closing the race where
-        # an abort's cancel could overtake a not-yet-sent hardware arm. A fresh
-        # Event is minted per recording in start_recording (and captured by that
-        # recording's monitor), so an old monitor can never be released early by —
-        # or block on — a subsequent recording's hooks.
+        # Set when a recording's start sequence (priming, arm) is done. Minted per
+        # recording and captured by its monitor, which waits on it before any
+        # later hook or teardown: a stop never overtakes the arm.
         self._start_hooks_done = threading.Event()
         self._monitor: threading.Thread | None = None
         self._deadline: float | None = None
-        # Host wall-clock (ns) captured when the current/last recording started,
-        # written into recording_summary.json as the real-world start time.
+        # The current or last recording's start time and results, for its summary.
         self._recording_start_wall_ns = 0
-        # The trigger train the current/last recording is counted against, how
-        # many sacrificial pulses primed its cameras, and the cross-camera sync
-        # verdict written into its summary (see _check_sync).
         self._pulse_clock: PulseClock | None = None
         self._primed_pulses = 0
         self._sync: dict | None = None
-        # Whether the last recording ran to its end (its train, or its duration)
-        # rather than being stopped or aborted; None until one has finished.
-        self._completed: bool | None = None
-        # The cameras whose record grab started, and each camera's frame-delivery
-        # profile read as the recording started (by serial; see
-        # _read_delivery_profiles), for the sync check.
-        self._recording_cameras: list[str] = []
-        self._delivery_profiles: dict[str, DeliveryProfile | None] = {}
-        # When the current counted train is over (host monotonic), once started.
-        self._train_end: float | None = None
-        # Bumped each time a countdown starts so clients can tell one recording
-        # from the next even if they miss the intervening non-recording states.
+        self._completed: bool | None = None  # ran to its end (None: no take yet)
+        self._recording_cameras: list[str] = []  # whose record grab started
+        self._delivery_profiles: dict[str, DeliveryProfile | None] = {}  # by serial
+        self._train_end: float | None = None  # monotonic, once the train started
+        # Bumped per countdown, so a client that missed the states between two
+        # recordings can still tell them apart.
         self._recording_seq = 0
         self._listeners: list = []
         self.events: deque = deque(maxlen=100)
-        # Benchmark (octacam.diagnostics): the last report (as a dict, for the
-        # GUI's Benchmark tab and the last-diagnostic endpoint) plus the
-        # background thread that runs it and the flag that cancels it on shutdown.
         self._last_diagnostic: dict | None = None
         self._diag_thread: threading.Thread | None = None
         self._diag_cancel = threading.Event()
@@ -744,12 +638,9 @@ class RecordingController:
     def attach_system(self, camera_system: CameraSystem) -> None:
         """Swap the hardware-free placeholder for the real, opened system.
 
-        Called once by the GUI's background init thread after the cameras are
-        open and their parameters loaded. The reference swap is atomic under the
-        GIL and the loops that read ``camera_system`` (preview/telemetry) re-read
-        it every tick, so a concurrent reader sees either the empty placeholder
-        (no cameras -> no work) or the real system, never a torn state. Flips
-        ``ready`` so the next snapshot/broadcast reports the live rig.
+        The swap is atomic and the preview and telemetry loops re-read
+        ``camera_system`` every tick, so a reader sees the empty placeholder or
+        the real system, never a torn state.
         """
         with self._lock:
             self.camera_system = camera_system
@@ -757,22 +648,14 @@ class RecordingController:
             self._init_error = None
 
     def fail_init(self, message: str) -> None:
-        """Record that the GUI's background camera init failed.
-
-        Leaves ``ready`` False (no cameras were attached) but sets
-        :attr:`init_error` so the web UI can show *why* instead of spinning
-        forever, and emits an error event so it lands in the log panel too."""
+        """Record why the GUI's background camera init failed (``ready`` stays
+        False), for the web UI and the event log."""
         with self._lock:
             self._init_error = message
         self._event("error", message)
 
     def notify_state(self) -> None:
-        """Broadcast the current snapshot to listeners.
-
-        Used by the GUI's background init thread to push a fresh ``state`` (with
-        ``ready`` now true) after the real system is attached and preview armed,
-        so an already-connected browser fills in without waiting for the next
-        telemetry tick."""
+        """Broadcast the current snapshot to listeners."""
         self._notify("state", self.snapshot())
 
     @property
@@ -786,17 +669,10 @@ class RecordingController:
 
     @property
     def _camera_locked(self) -> bool:
-        """Camera control is locked while recording, benchmarking, or while a
-        recording start is claiming the cameras.
-
-        A benchmark drives the cameras directly (its own grab loops + trigger
-        timer), so any device-touching operation — starting a recording/preview,
-        writing sensor parameters, snapshotting the nodemap — must be refused
-        until it finishes, exactly as during a recording. The same holds for the
-        window in which start_recording has stopped the preview grab and is
-        canceling a managed preview's trigger arm off the lock (``_starting``):
-        a preview re-arm or a grab-cycling parameter write there would hand the
-        cameras a fresh trigger clock right before the recording's own arm."""
+        """Device-touching operations are refused while recording, while a
+        benchmark drives the cameras itself, and while a start claims them (a
+        preview re-arm or grab-cycling write then would hand the cameras a fresh
+        trigger clock just before the recording's arm)."""
         return self.recording_active or self.diagnosing or self._starting
 
     def _require_camera_control(
@@ -820,8 +696,6 @@ class RecordingController:
         if self._reconfiguring:
             return "Camera reconfiguration in progress"
         if self._tearing_down:
-            # The previous take's off-lock tail still disarms and re-arms the
-            # trigger plugin.
             return "Previous recording is still finishing"
         if self._starting:
             if benchmark:
@@ -839,8 +713,7 @@ class RecordingController:
             if self.recording_active:
                 raise RuntimeError("Settings are locked while recording")
             if self._starting:
-                # A start is claiming the cameras (see start_recording); a change
-                # here could re-arm the preview under the recording's feet.
+                # A change could re-arm the preview under the starting recording.
                 raise RuntimeError("Settings are locked while a recording is starting")
             unknown = set(changes) - {
                 f.name for f in dataclasses.fields(RecordingSettings)
@@ -863,8 +736,6 @@ class RecordingController:
                     "max_nvenc_sessions must be a non-negative integer or None"
                 )
             if "nvenc_params" in changes:
-                # Reject args ffmpeg could never parse (bad quoting) up front, as
-                # for transcode_ffmpeg_params below.
                 try:
                     shlex.split(changes["nvenc_params"])
                 except ValueError as e:
@@ -897,9 +768,8 @@ class RecordingController:
             ):
                 raise ValueError("writer_queue_size must be an integer >= 1")
             if "transcode_ffmpeg_params" in changes:
-                # Reject args ffmpeg could never parse (bad quoting) up front:
-                # the config loader would otherwise silently drop them back to
-                # the default when `octacam process` reads the snapshot.
+                # Unparseable args would silently fall back to the default when
+                # `octacam process` loads the snapshot.
                 try:
                     shlex.split(changes["transcode_ffmpeg_params"])
                 except ValueError as e:
@@ -911,9 +781,6 @@ class RecordingController:
             if "save_dir" in changes:
                 changes["save_dir"] = normalize_save_dir(changes["save_dir"])
             merged = dataclasses.replace(self._settings, **changes)
-            # Editing either half of the split path re-derives the combined
-            # save_dir the recording machinery uses (config.resolve_save_dir does
-            # the same join at record time).
             if "record_directory" in changes or "relative_directory" in changes:
                 merged = dataclasses.replace(
                     merged,
@@ -922,23 +789,17 @@ class RecordingController:
                     ),
                 )
             elif "save_dir" in changes:
-                # A lone save_dir edit (no split-path change) clears the stale
-                # split halves, mirroring the CLI --output precedent: otherwise
-                # _relative_directory would keep preferring the old
-                # relative_directory (mirroring to the wrong sub-path) and the
-                # post-recording increment would recompose save_dir from it,
-                # discarding the explicitly set path.
+                # A lone save_dir edit clears the split halves, as --output does:
+                # the transfer and the post-recording increment would otherwise
+                # recompose the old path from them.
                 merged = dataclasses.replace(
                     merged, record_directory="", relative_directory=""
                 )
             self._settings = merged
-            if "fps" in changes:  # live-updates the software-trigger rate
+            if "fps" in changes:
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
-            # Re-arm live preview when a change alters how it should be triggered:
-            # the trigger source, the preview override, or (for a non-software
-            # preview, whose rate is baked into the arm) the fps. A software
-            # preview absorbs an fps change through set_software_trigger_frequency
-            # above, so it needs no restart (keeps the fps slider smooth).
+            # Re-arm the preview when its trigger changes; a software preview
+            # takes a new fps live, so only another mode re-arms for one.
             rearm = (
                 "trigger_source" in changes or "preview_trigger_source" in changes
             ) or ("fps" in changes and self._effective_preview_mode() != "software")
@@ -948,8 +809,6 @@ class RecordingController:
                 else None
             )
             new_settings = dataclasses.replace(self._settings)
-        # Arm the driving plugin (managed preview only) off the lock — a plugin
-        # arm can block on a serial write + ack; no-op for software/free-run.
         if arm_mode is not None:
             self._dispatch_preview_arm(arm_mode)
         return new_settings
@@ -966,16 +825,13 @@ class RecordingController:
         }
 
     def browse_directory(self, path_str: str = "") -> dict:
-        """List the immediate subdirectories of a server-side path.
+        """List the subdirectories of a path on the rig, for the GUI's save
+        directory picker.
 
-        Recording happens on the rig, so the save directory is a *server-side*
-        path the browser cannot pick natively; this backs an in-app directory
-        picker. A blank path opens at the current save directory; a partially
-        typed or not-yet-created path falls back to its nearest existing
-        ancestor, so the picker always lands somewhere it can list. Hidden
-        directories (``.``-prefixed) are omitted, and so is a recording's
-        ``octacam_recording`` subfolder: it holds that recording's summary and
-        config, and is never a place to record into.
+        A blank path opens at the save directory, and one that does not exist yet
+        at its nearest existing ancestor. Hidden directories and recordings'
+        ``octacam_recording`` subfolders (never a place to record into) are left
+        out.
         """
         raw = (path_str or "").strip() or (self._settings.save_dir or "")
         base = Path(normalize_save_dir(raw)) if raw.strip() else Path.home()
@@ -1025,13 +881,8 @@ class RecordingController:
         return self._features_payload(index, camera)
 
     def _reconfigure(self, index: int, scope: str, apply) -> dict:
-        """Run ``apply(camera)`` on one camera or all, off the controller lock.
-
-        Shared by the feature write/reset/command/center paths: it refuses while
-        the cameras are locked or another reconfiguration runs, resolves the
-        scope, then runs the (possibly grab-cycling) work under
-        ``_reconfiguring`` so a recording cannot start mid-change. Returns the
-        refreshed feature payload for every camera it touched."""
+        """Run ``apply(camera)`` on one camera or all, off the lock under
+        ``_reconfiguring``; return the touched cameras' refreshed features."""
         with self._lock:
             self._require_camera_control(
                 "Camera parameters are locked while recording or benchmarking"
@@ -1057,11 +908,9 @@ class RecordingController:
     def set_camera_feature(
         self, index: int, name: str, value, scope: str = "selected"
     ) -> dict:
-        """Write one node-map feature on one camera or all; refreshes the list.
-
-        A write can change other nodes (an Auto mode locking its value, a ROI
-        resize shifting the offsets), so every touched camera's full feature
-        list is re-read and returned. Rejected while recording/benchmarking."""
+        """Write one node-map feature on one camera or all. The whole feature
+        list is returned: a write can change other nodes (a ROI resize moves the
+        offsets)."""
         return self._reconfigure(index, scope, lambda camera: camera.set_feature(name, value))
 
     def reset_camera_feature(
@@ -1096,14 +945,8 @@ class RecordingController:
         return self.camera_system.save_all_params()
 
     def set_camera_name(self, index: int, name: str) -> dict:
-        """Rename one camera live; rejected while recording or on a clash.
-
-        ``camera.name`` is the per-camera output filename, so the name must be
-        a safe single segment (``sanitize_camera_name``) and unique across the
-        rig — two cameras sharing a name would write to the same video file.
-        The change is in-memory only; it is persisted to the config solely by
-        an explicit save (the GUI sends each camera's name with the layout).
-        """
+        """Rename one camera, in memory (a GUI save persists it). The name is
+        its video's filename, so it must be safe and unique across the rig."""
         clean = sanitize_camera_name(name)
         with self._lock:
             self._require_camera_control(
@@ -1119,11 +962,8 @@ class RecordingController:
     def set_camera_transform(
         self, index: int, scale_x: float, scale_y: float, rotation_deg: float
     ) -> dict:
-        """Set one camera's display transform live; rejected while recording.
-
-        This is what gets baked into a "display"-form recording, so the GUI's
-        View-tab rotate/flip pushes here as the operator works — keeping "what
-        you see" and "what is recorded" in sync without a config save."""
+        """Set one camera's display transform, which a "display"-form recording
+        bakes in, so what is recorded matches the View tab without a save."""
         with self._lock:
             self._require_camera_control(
                 "Camera transforms are locked while recording", recording_only=True
@@ -1141,12 +981,8 @@ class RecordingController:
     # -------------------------------------------------------------- preview
 
     def _preview_trigger_plugin(self):
-        """First loaded plugin that can drive the trigger during preview, else None.
-
-        Duck-typed (like ``set_controller``/``set_broadcast`` probing in the web
-        app): a trigger-generating plugin (triggerbox) exposes
-        ``drives_preview_trigger() -> True``; relay/other plugins (twophoton,
-        flywheel) do not, so a ``managed`` preview falls back to free-run."""
+        """The first loaded plugin that generates the trigger (triggerbox), else
+        None; without one a ``managed`` preview free-runs."""
         for plugin in self.plugins.plugins:
             drives = getattr(plugin, "drives_preview_trigger", None)
             try:
@@ -1158,17 +994,14 @@ class RecordingController:
 
     @property
     def managed_trigger_available(self) -> bool:
-        """True when a loaded plugin can drive the trigger during preview, so the
-        ``managed`` trigger source is usable (surfaced to the GUI to enable it)."""
+        """Whether a loaded plugin can drive the trigger (``managed`` is usable)."""
         return self._preview_trigger_plugin() is not None
 
     def _effective_preview_mode(self) -> str:
-        """Resolve the preview trigger mode: software | free_running | managed.
+        """The preview trigger mode: software | free_running | managed.
 
-        ``preview_trigger_source`` forces ``software``/``free_running``; ``auto``
-        mirrors the recording ``trigger_source`` — software→software,
-        managed→managed (drive the plugin) when a driving plugin is present, and
-        external (or managed with no driving plugin) → free-run approximation."""
+        ``auto`` mirrors ``trigger_source``; external, or managed without a
+        driving plugin, free-runs."""
         pref = self._settings.preview_trigger_source
         if pref == "software":
             return "software"
@@ -1182,9 +1015,8 @@ class RecordingController:
         return "free_running"
 
     def _arm_preview_locked(self) -> str:
-        """Arm the cameras for live preview in the resolved mode; caller holds the
-        lock. Returns the mode. For ``managed`` the driving plugin is armed
-        separately, OFF the lock, via :meth:`_dispatch_preview_arm`."""
+        """Arm the cameras for preview and return the mode; caller holds the lock
+        and then arms the plugin with :meth:`_dispatch_preview_arm`."""
         mode = self._effective_preview_mode()
         fps = self._settings.fps
         self.camera_system.stop_software_trigger()
@@ -1196,20 +1028,16 @@ class RecordingController:
         return mode
 
     def _dispatch_preview_arm(self, mode: str | None) -> None:
-        """Arm/disarm the driving plugin for a preview mode, OFF the controller
-        lock. Managed preview arms the plugin (indefinite, strobe-as-recording);
-        any other mode (or None/idle) cancels a preview arm that may be running."""
+        """Arm the driving plugin for a managed preview; any other mode (or None,
+        idle) cancels a preview arm that may be running. Off the lock."""
         if mode == "managed":
             self.plugins.dispatch("on_preview_start", self._preview_arm_params())
         else:
             self.plugins.dispatch("on_preview_stop")
 
     def _preview_arm_params(self) -> dict:
-        """The recording-start plugin slice reused for an indefinite preview arm.
-
-        Same fps + light spec the recording would use (so preview strobes exactly
-        as the recording will); the plugin substitutes an indefinite duration for
-        preview."""
+        """The recording's arm parameters, so preview strobes as the recording
+        will (the plugin makes the preview arm indefinite)."""
         return self.plugins.default_start_params(
             self._settings.fps, self._settings.duration_s
         )
@@ -1230,12 +1058,7 @@ class RecordingController:
         confirm_overwrite: bool = False,
         plugin_params: dict | None = None,
     ) -> StartResult:
-        # Warm the NVENC capability probe OFF the lock. resolve_capture_formats
-        # (called under the lock below) runs an ffmpeg probe subprocess on the
-        # first GPU recording of the process; doing it here first means the
-        # cached result is reused under the lock, so a slow/hung probe can never
-        # stall status/stop/preview (all of which take the same lock). Best-effort
-        # and side-effect-free: the authoritative resolve still runs under the lock.
+        # Warm the NVENC probe off the lock: the resolve under it reuses the cache.
         pre = self._settings
         if pre.save_method == "nvenc":
             with contextlib.suppress(Exception):
@@ -1244,18 +1067,10 @@ class RecordingController:
                     len(self.camera_system),
                     pre.max_nvenc_sessions,
                 )
-        # Read each camera's parameters for the config snapshot OFF the lock, for
-        # the same reason as the NVENC warm-up above: save_all_params() walks every
-        # camera's full node map over USB (~60 ms per Basler) with no timeout, and
-        # snapshot(), stop_recording(), notify_state() and _resume_preview() all
-        # take self._lock — so doing it under the lock made every recording start
-        # block /api/state, the telemetry loop and the Stop button for the duration,
-        # and let one camera stalled on a control transfer wedge them indefinitely.
-        # The precondition is the same here as below: the cameras must still be
-        # previewing, so skip it if a recording, benchmark or in-flight start
-        # already owns them (the authoritative BUSY checks under the lock will
-        # reject this start anyway). The cameras' delivery profiles (for the
-        # sync check) are read here too, for the same reasons.
+        # The parameter export (a node-map walk over USB with no timeout) and the
+        # delivery profiles are read off the lock while the cameras still
+        # preview; skipped when something already owns the cameras (the
+        # admission checks below then refuse this start).
         pre_params: dict[str, str] | None = None
         profiles: dict[str, DeliveryProfile | None] | None = None
         if not self._camera_locked:
@@ -1280,31 +1095,14 @@ class RecordingController:
                     StartResult.ERROR, f"Could not create directory: {e}"
                 )
 
-            # The start is admitted: claim the cameras.
-            #
-            # Under a managed preview the trigger plugin is pulsing the cameras
-            # (and strobing the lights) from its indefinite preview arm right now.
-            # That arm is canceled BEFORE the record grab begins — off the lock,
-            # below — rather than superseded by the recording arm once the
-            # cameras are already grabbing. A re-arm restarts the board's frame
-            # clock at an arbitrary phase, and a camera that takes that trigger
-            # mid-pipeline (TriggerOverlap=ReadOut) delays its exposure to the end
-            # of the previous readout while the strobe stays locked to the trigger
-            # edge: on the GS3 at 125 fps every GUI recording opened with a dark
-            # ramp over frames 1–7 (up to ~20), the exposures sliding back under
-            # the strobe by one period-minus-readout (~0.3 ms) per frame — the
-            # hexaview "IR lights flash once at record start". Headless `octacam
-            # record` never showed it because it has no preview arm: its recording
-            # arm starts the trigger clock against an idle camera. So does this
-            # now — the recording's frame 0 is the board's run start (pulse-train
-            # t0, duration_ms), exactly as on the CLI.
-            #
-            # The preview grab is stopped here, while the pulses still flow, so
-            # every grab loop exits within a frame instead of waiting out a grab
-            # timeout on a trigger that has just gone quiet. `_starting` refuses a
-            # concurrent start, a settings-driven preview re-arm, a benchmark and a
-            # grab-cycling parameter write until the record grab is running (or
-            # the start has failed and the preview is re-armed).
+            # The start is admitted: claim the cameras. A managed preview's
+            # trigger arm is canceled before the record grab starts, never
+            # superseded by the recording's arm once the cameras grab: a re-arm
+            # restarts the board's frame clock at an arbitrary phase, and a camera
+            # in overlapped readout then opens the take with a dark ramp (CLAUDE.md,
+            # recording pipeline). The preview grab stops here, while pulses still
+            # flow, so every grab loop exits within a frame. `_starting` holds off
+            # anything that could re-arm the cameras until the record grab runs.
             disarm_preview = (
                 self._state == "preview"
                 and self._effective_preview_mode() == "managed"
@@ -1314,11 +1112,8 @@ class RecordingController:
             self._starting = True
         try:
             if disarm_preview:
-                # Off the lock, like every plugin hook: the cancel is a serial write.
                 self.plugins.dispatch("on_preview_stop")
-            if profiles is None:
-                # Skipped above in the same narrow race as the parameter export;
-                # still off the lock, and the `_starting` gate now holds.
+            if profiles is None:  # skipped above; `_starting` now holds the cameras
                 profiles = self._read_delivery_profiles()
             return self._start_recording_admitted(plugin_params, pre_params, profiles)
         finally:
@@ -1331,19 +1126,10 @@ class RecordingController:
         pre_params: dict[str, str] | None,
         profiles: dict[str, DeliveryProfile | None],
     ) -> StartResult:
-        """Second half of :meth:`start_recording`, after the admission checks.
-
-        Starts the record grab under the lock, then arms the plugins off it. Runs
-        with the ``_starting`` gate held by the caller — which has also stopped
-        the preview grab and canceled a managed preview's trigger arm, if there
-        was one — so no concurrent start, preview re-arm or camera
-        reconfiguration can interleave. ``pre_params`` is the camera-parameter
-        export the caller took off the lock (None if it could not), ``profiles``
-        the cameras' delivery profiles it read (see _read_delivery_profiles).
+        """Second half of :meth:`start_recording`, under the caller's
+        ``_starting`` gate: start the record grab under the lock, then prime and
+        arm off it. ``pre_params`` is the caller's parameter export, or None.
         """
-        # Bound up front so the off-lock tail below is provably assigned on every
-        # path (they are only *read* on the matching branch, but pyright can't
-        # connect the two `if not started` blocks / the early return).
         failed_resume_mode: str | None = None
         hooks_done: threading.Event | None = None
         with self._lock:
@@ -1351,8 +1137,6 @@ class RecordingController:
             save_dir = Path(settings.save_dir)
 
             use_software_trigger = settings.trigger_source == "software"
-            # Count every frame against the train octacam will clock, and hold the
-            # cameras' frames until they are primed (octacam-driven trains only).
             clock = resolve_pulse_clock(settings, self.plugins, plugin_params)
             prime = settings.trigger_source in ("software", "managed")
             self._pulse_clock = clock
@@ -1363,11 +1147,7 @@ class RecordingController:
             self._recording_cameras = []
             self._delivery_profiles = profiles
             hooks_timeout_s = start_sequence_timeout_s(clock.period_ns, prime)
-            # Normally already read off the lock by start_recording. The fallback
-            # covers the narrow race where a recording was still active at that
-            # point but finished before the admission checks — rare, and
-            # correctness (a snapshot with its camera parameters) beats holding
-            # the lock for it.
+            # Under the lock only in the rare race where the export was skipped.
             camera_params = (
                 pre_params if pre_params is not None else self._export_camera_params()
             )
@@ -1378,12 +1158,8 @@ class RecordingController:
                 self.camera_system.set_trigger_source(use_software_trigger)
                 self.camera_system.set_software_trigger_frequency(settings.fps)
                 self._recording_start_wall_ns = time.time_ns()
-                # Resolve one encode format per camera, honouring the GPU NVENC
-                # session limit: for save_method="nvenc" the first
-                # max_nvenc_sessions cameras encode on the GPU and any overflow
-                # (or the whole set, if NVENC is unavailable) falls back to CPU.
-                # Non-NVENC methods pass through unchanged. Warnings surface to the
-                # operator so a silent CPU fallback never looks like GPU success.
+                # One format per camera: cameras past the NVENC session cap (or
+                # all, without NVENC) encode on CPU, and the operator is told.
                 formats, fmt_warnings = resolve_capture_formats(
                     settings.video_format(),
                     len(self.camera_system),
@@ -1402,12 +1178,8 @@ class RecordingController:
                     hold=prime,
                 )
             except Exception as e:
-                # A non-BackendError escaping the trigger-config or start_record
-                # (CameraSystem only log-and-skips per-camera failures) can leave
-                # some cameras already grabbing to disk with live ffmpeg writers
-                # and no monitor. Tear them all down and fall into the `not
-                # started` re-arm path below, so no orphaned recording cameras
-                # are left behind and the state never stays half-advanced.
+                # Some cameras may already be writing with no monitor to stop
+                # them: stop them all and fall into the preview re-arm below.
                 log.exception("Recording failed to start")
                 with contextlib.suppress(Exception):
                     self.camera_system.stop()
@@ -1417,8 +1189,6 @@ class RecordingController:
             if not started:
                 if start_error is None:
                     self._event("error", "No camera could start recording")
-                # Re-arm the preview cameras under the lock; the (possibly
-                # blocking) driving-plugin arm is dispatched off the lock below.
                 failed_resume_mode = self._resume_preview()
             else:
                 self._recording_cameras = list(started)
@@ -1434,20 +1204,14 @@ class RecordingController:
                         f"recording (missing: {', '.join(missing)})",
                     )
 
-                # Snapshot the config and write an initial summary (pessimistically
-                # marked aborted, frames=0) as soon as the cameras start, so a raw
-                # recording keeps its geometry — and stays transcodable — even if
-                # the process is hard-killed before the final summary is written at
-                # teardown. Both are overwritten with final data when recording ends.
+                # A provisional summary (aborted, no frames) now, so a raw take
+                # keeps its geometry and stays transcodable if the process dies
+                # before teardown rewrites it.
                 self._snapshot_config(plugin_params, camera_params)
                 self._write_recording_summary(aborted=True)
 
                 self._aborted = False
                 self._stop_event.clear()
-                # Mint a fresh per-recording hooks-done event and capture it (both
-                # as the current attribute and in a local this monitor closes over)
-                # so an old monitor can never be released early by — or block on —
-                # a later recording's hooks.
                 hooks_done = threading.Event()
                 self._start_hooks_done = hooks_done
                 self._deadline = None
@@ -1466,27 +1230,14 @@ class RecordingController:
                 )
                 self._monitor.start()
         if not started:
-            # No camera recorded: dispatch the preview re-arm OFF the lock (a
-            # driving-plugin arm can block on a serial write + ack), then bail.
             self._dispatch_preview_arm(failed_resume_mode)
             return StartResult(
                 StartResult.ERROR, start_error or "No camera could start recording"
             )
-        # Arm plugins off the controller lock — like on_first_frame below — so a
-        # plugin's blocking serial write (e.g. the twophoton arm, write_timeout=1
-        # s) can't stall snapshot()/telemetry while self._lock is held. The
-        # monitor only fires on_first_frame once cameras deliver a frame, which on
-        # an external-trigger rig cannot happen until this arm runs.
-        #
-        # Skip the arm if the recording was already stopped/aborted in the window
-        # between releasing the lock and reaching here: otherwise an abort's
-        # teardown (which dispatches on_recording_stop — e.g. the twophoton
-        # cancel) could race ahead of this arm and leave the hardware armed after
-        # the cameras have already stopped.
+        # Prime, then count, then start the train, all before hooks_done. Each
+        # step is skipped once a stop came in, so the hardware is never armed
+        # after the cameras stopped.
         try:
-            # Prime, then count, then start the train — all before hooks_done,
-            # which the monitor waits on before any teardown, so a stop can never
-            # overtake the arm (or the software timer's start).
             if prime and not self._stop_event.is_set():
                 self._prime_cameras(settings, plugin_params, started, clock.period_ns)
                 self.camera_system.arm_counting()
@@ -1494,10 +1245,8 @@ class RecordingController:
                 if use_software_trigger:
                     self.camera_system.start_software_trigger(settings.duration_s)
                 self.plugins.dispatch("on_recording_start", plugin_params)
-                # Anchor the train's end once it has started: the arm can take
-                # seconds (a board's USB-reset recovery and re-arm), and a train
-                # end counted from before it stopped the recording that much
-                # early and filled the rest of the train with repeats.
+                # Anchored after the arm returns: it can take seconds (a board's
+                # USB-reset recovery), which an earlier anchor cuts from the take.
                 if clock.count and clock.fill:
                     self._train_end = (
                         time.monotonic()
@@ -1505,12 +1254,7 @@ class RecordingController:
                         + TRAIN_END_MARGIN_S
                     )
         finally:
-            # Unblock the monitor's on_first_frame / on_recording_stop regardless
-            # of whether the arm ran or raised — the event guards ordering, not
-            # success. The monitor waits on it so a cancel can never overtake the
-            # arm even when this dispatch is slow (e.g. the bounded ack wait).
-            # Set this recording's own event (captured locally) rather than
-            # self._start_hooks_done, which a later recording may have replaced.
+            # Ordering, not success: set this recording's own event regardless.
             if hooks_done is not None:
                 hooks_done.set()
         return StartResult(StartResult.OK)
@@ -1522,19 +1266,12 @@ class RecordingController:
         recording: list[str],
         period_ns: int,
     ) -> None:
-        """Send the cameras sacrificial triggers before the recording's train.
+        """Send sacrificial triggers until every camera in ``recording`` has
+        answered one, so the triggers a camera ignores after its acquisition
+        start (see PRIME_PULSES) are behind it when the train starts.
 
-        A camera may ignore the first triggers after its acquisition starts (a
-        FLIR Grasshopper3 ignores two, and more on its first acquisition after a
-        power-up), so without this the train's first pulses expose nothing —
-        every camera's frame 0 would be a later pulse, and cameras starting
-        either side of a pulse would disagree by a frame. A round of
-        PRIME_PULSES repeats until every camera in ``recording`` (the ones whose
-        record grab started) has answered one (the triggers it ignores are then
-        behind it), within PRIME_BUDGET_S. The record grabs discard what the
-        priming triggers produce (their ``hold``). Each round settles for
-        :func:`prime_settle_s` of the train's ``period_ns`` (a stop cuts it
-        short: nothing is counted after one)."""
+        Rounds of PRIME_PULSES repeat within PRIME_BUDGET_S, each settling for
+        :func:`prime_settle_s`; the record grabs discard what they produce."""
         deadline = time.monotonic() + PRIME_BUDGET_S
         settle = prime_settle_s(period_ns)
         sent = 0
@@ -1582,12 +1319,8 @@ class RecordingController:
         ]
 
     def _resume_preview(self) -> str | None:
-        """Arm preview (or go idle) after a recording/benchmark ends; caller holds
-        the lock.
-
-        Returns the resolved preview mode so the caller can arm the driving plugin
-        OFF the lock via :meth:`_dispatch_preview_arm` (None = went idle, which
-        still disarms any preview arm)."""
+        """Arm preview (or go idle) after a recording or benchmark; caller holds
+        the lock. Returns the mode for :meth:`_dispatch_preview_arm` (None: idle)."""
         if self._auto_preview:
             return self._arm_preview_locked()
         self._set_state("idle")
@@ -1610,10 +1343,8 @@ class RecordingController:
     def close(self) -> None:
         self.stop_recording(abort=True)
         self.join()
-        # Cancel a running benchmark and wait for it to unwind (it drives the
-        # cameras directly, so it must finish before we close them). Cancellation
-        # is checked at every measurement-window boundary, so this returns
-        # quickly; the timeout is a backstop against a wedged SDK call.
+        # A benchmark drives the cameras itself: it must unwind before they close
+        # (the timeout only guards a wedged SDK call).
         self._diag_cancel.set()
         diag = self._diag_thread
         if diag is not None and diag.is_alive():
@@ -1630,21 +1361,12 @@ class RecordingController:
         find_max: bool = True,
         sink: str = "config",
     ) -> StartResult:
-        """Start a background benchmark (:mod:`octacam.diagnostics`).
-
-        Pauses live preview, runs the diagnostic on its own thread, then resumes
-        preview. Returns immediately with ``StartResult.OK`` once launched, or
-        ``BUSY`` if a recording, reconfiguration, or another benchmark is active.
-        Progress is emitted as events; the final report is broadcast to listeners
-        under the ``"diagnostics"`` kind and cached for :meth:`get_last_diagnostic`.
-        """
+        """Start a benchmark (:mod:`octacam.diagnostics`) on its own thread, in
+        place of the preview. The report is broadcast as ``"diagnostics"``."""
         with self._lock:
             busy = self._busy_reason(benchmark=True)
             if busy:
                 return StartResult(StartResult.BUSY, busy)
-            # Snapshot the settings so a concurrent edit can't shift the target
-            # mid-run, and flip to the diagnosing state (which locks camera
-            # control) before releasing the lock.
             settings = dataclasses.replace(self._settings)
             self._diag_cancel.clear()
             self._set_state("diagnosing")
@@ -1663,19 +1385,13 @@ class RecordingController:
         from octacam import diagnostics
 
         try:
-            # Stop live preview (and its trigger) off the lock — the diagnostic
-            # owns the cameras for its duration via its own grab loops + timer.
-            # Also disarm any managed preview arm: the benchmark drives cameras via
-            # begin_freerun (TriggerMode Off), which would ignore — and be fought by
-            # — a plugin still pulsing the external trigger line.
+            # The benchmark free-runs the cameras: stop the preview and disarm a
+            # plugin that would keep pulsing the trigger line.
             self.camera_system.stop_software_trigger()
             self.plugins.dispatch("on_preview_stop")
             self.camera_system.stop()
 
             def progress(p) -> None:
-                # Structured progress for the Benchmark tab's determinate bar
-                # (broadcast newest-only, so intermediate updates collapse). The
-                # bar replaces the per-phase log spam; start/finish still log.
                 self._notify("diagnostics_progress", p.to_dict())
 
             report = diagnostics.diagnose(
@@ -1706,10 +1422,8 @@ class RecordingController:
             log.exception("Benchmark failed")
             self._event("error", "Benchmark failed (see the log for details)")
         finally:
-            # Always leave the "diagnosing" state, even on failure or cancel — a
-            # camera dropping out during the benchmark can make the preview re-arm
-            # raise BackendError, which would otherwise wedge the controller in
-            # "diagnosing" (camera control locked) for the rest of the process.
+            # Always leave "diagnosing" (it locks camera control), even when a
+            # camera that dropped out makes the preview re-arm raise.
             try:
                 with self._lock:
                     resume_mode = self._resume_preview()
@@ -1719,8 +1433,6 @@ class RecordingController:
                 with self._lock:
                     self._set_state("idle")
                 resume_mode = None
-            # re-arm managed preview off-lock; a plugin dispatch error here must
-            # not leak out of the thread either (the state is already terminal).
             try:
                 self._dispatch_preview_arm(resume_mode)
             except Exception:
@@ -1743,12 +1455,8 @@ class RecordingController:
         hooks_done: threading.Event,
         hooks_timeout_s: float,
     ) -> None:
-        """Run the recording monitor, guaranteeing a terminal, non-active state.
-
-        Wraps :meth:`_run_monitor_loop` so that ANY unexpected exception (which in
-        a daemon thread would otherwise die silently, leaking recording_active=True
-        and wedging the whole controller) still leaves it idle, the trigger plugin
-        disarmed, and the teardown gate cleared."""
+        """Run the recording monitor; on any exception still disarm the trigger
+        plugin and go idle, or the controller would stay recording forever."""
         try:
             self._run_monitor_loop(
                 duration_s,
@@ -1776,19 +1484,12 @@ class RecordingController:
         hooks_done: threading.Event,
         hooks_timeout_s: float,
     ) -> None:
-        # --- wait for the first frame from the cameras that started (Qt's
-        # check_record_started_timer). Warn after 3 s. With the software
-        # trigger - unlike the unbounded Qt/headless wait - give up after
-        # STARTED_FAIL_AFTER_S and record with whatever started, so a single
-        # stalled camera cannot hang the whole recording (and the deadline)
-        # indefinitely. With an external trigger the frames only arrive once
-        # the external source fires, which may be arbitrarily far in the
-        # future, so there is no such deadline: wait indefinitely (until the
-        # first frame, or the user stops the recording).
-        #
-        # Both thresholds count from the end of the start sequence (priming and
-        # the arm; or its timeout), since no counted frame can arrive before it:
-        # at a low fps priming alone outlasts them.
+        # Wait for every started camera's first frame. Under an octacam-driven
+        # trigger, give up after STARTED_FAIL_AFTER_S and record with what
+        # started, so one stalled camera cannot hang the take; an external
+        # source may fire arbitrarily late, so wait for it until stopped. Both
+        # thresholds count from the end of the start sequence: no counted frame
+        # comes before it, and at a low fps priming alone outlasts them.
         start = time.monotonic()
         armed_at: float | None = None
         warned = False
@@ -1826,15 +1527,9 @@ class RecordingController:
             self._stop_event.wait(STARTED_POLL_INTERVAL_S)
 
         if not self._stop_event.is_set():
-            # Let the off-lock on_recording_start hooks finish first (normally
-            # done long before a frame arrives; only blocks in the rare case a
-            # frame lands mid-arm) so first-frame motion can't precede the arm.
-            # Wait on this recording's own captured event (not the attribute,
-            # which a later recording may have replaced).
+            # First-frame hooks (flywheel motion) start the countdown, never
+            # before the arm.
             hooks_done.wait(hooks_timeout_s)
-            # Fire plugin first-frame hooks at the t0 of the countdown, in the
-            # same place the inline flywheel write used to live, so stepper
-            # motion (or any plugin) stays synchronised to actual capture.
             self.plugins.dispatch("on_first_frame", plugin_params)
             with self._lock:
                 deadline = time.monotonic() + duration_s + STOP_GRACE_S
@@ -1858,19 +1553,18 @@ class RecordingController:
                 self._report_missed_pulses(reported)
                 self._stop_event.wait(min(remaining, 0.2))
 
-        # --- finishing: same teardown order as MainWindow._stop_record and
-        # cli.record: trigger off -> grab loops exit -> writers drain -> CSVs.
-        # First let the start sequence (priming, counting, the arm) finish, so
-        # this stop can never overtake it and leave a trigger running.
+        # Teardown: trigger off -> grab loops exit -> writers drain -> summary.
+        # The start sequence finishes first, so a stop never leaves a trigger
+        # running.
         completed = not self._stop_event.is_set()
         self._completed = completed
         hooks_done.wait(hooks_timeout_s)
         with self._lock:
             self._set_state("finishing")
         self.camera_system.stop_software_trigger()
-        # A train that ran to its end pads each camera's video to the train's
-        # pulse count (a camera that missed the last pulses still ends on the
-        # same pulse as the others); a stopped/aborted one ends where it was.
+        # A completed train pads every video to its pulse count (a camera that
+        # missed the last pulses still ends on the last pulse); a stopped take
+        # ends where it was.
         clock = self._pulse_clock
         fill_to = clock.count if completed and clock is not None and clock.fill else None
         self.camera_system.stop(fill_to)
@@ -1887,13 +1581,8 @@ class RecordingController:
                     "recording (see log for ffmpeg output)",
                 )
 
-        # A camera that captured 0 frames produced only a header-only file (no
-        # video). The writer never fails for this - it opened fine and just got
-        # no frames - so without this check the recording is reported as a
-        # normal success. The usual cause is an external trigger that never
-        # fired during the window; flag it loudly here, while frames_recorded is
-        # final, rather than letting it surface later as a cryptic transcode
-        # error on the empty file.
+        # A camera without frames wrote an empty file and its writer did not
+        # fail, so say it here (usually an external trigger that never fired).
         empty = [c.name for c in self.camera_system if c.frames_recorded == 0]
         if empty:
             self._event(
@@ -1908,19 +1597,15 @@ class RecordingController:
                 ),
             )
 
-        # All camera threads are joined now (stats/timestamps final) and save_dir
-        # is still the recording's own directory (it is incremented below). Write
-        # the session summary here so both the duration-elapsed and manual-stop
-        # paths produce exactly one; never let a summary error abort teardown.
+        # The grab threads are joined (stats final) and save_dir is still this
+        # recording's (it is incremented below).
         self._write_recording_summary(self._aborted)
         if self._settings.save_frame_timestamps:
             self._write_timestamps()
         self._note_in_session_cache()
 
-        # From here the recording leaves the active set (state -> preview/idle),
-        # but the off-lock disarm + preview re-arm below are still pending. Hold a
-        # `_tearing_down` gate across them so a new start cannot race this tail
-        # over the shared trigger plugin, and clear it in the finally.
+        # The state leaves the active set below, before the off-lock disarm and
+        # preview re-arm: `_tearing_down` covers that tail.
         with self._lock:
             self._tearing_down = True
         try:
@@ -1928,11 +1613,8 @@ class RecordingController:
                 self._deadline = None
                 aborted = self._aborted
                 if not aborted:
-                    # Bump the trailing 3-digit run so the next recording lands in
-                    # a fresh folder. Increment the relative sub-path (keeping the
-                    # base fixed) and recompose so both halves stay consistent;
-                    # fall back to bumping save_dir directly when there is no
-                    # relative part.
+                    # The next recording gets a fresh folder: bump the trailing
+                    # number of the relative part, else of save_dir.
                     if self._settings.relative_directory.strip():
                         next_rel = increment_trailing_number(
                             self._settings.relative_directory
@@ -1951,12 +1633,8 @@ class RecordingController:
                                 self._settings.save_dir
                             ),
                         )
-                # Guard the preview re-arm: a camera dropped mid-recording can make
-                # start_preview raise BackendError, which — since _set_state runs
-                # only after it succeeds — would otherwise wedge the controller in
-                # "finishing". On failure go idle (recording_active False) and
-                # still run on_recording_stop below so the trigger plugin is
-                # disarmed.
+                # A camera dropped mid-recording can make the re-arm raise: go
+                # idle rather than stay "finishing", and still disarm below.
                 try:
                     resume_mode = self._resume_preview()
                 except Exception:
@@ -1968,15 +1646,9 @@ class RecordingController:
                     )
                     self._set_state("idle")
                     resume_mode = None
-            # Wait out the on_recording_start hooks so a stop/abort cancel can never
-            # overtake a not-yet-sent arm (e.g. the twophoton hardware trigger) when
-            # the recording is stopped in the window right after it starts. Wait on
-            # this recording's own captured event, not the attribute.
             hooks_done.wait(hooks_timeout_s)
             self.plugins.dispatch("on_recording_stop", aborted)
-            # Re-arm the driving plugin for preview (managed only) AFTER the
-            # recording cancel, off the lock, so the record arm is fully torn down
-            # first.
+            # After the recording's cancel, so the record arm is torn down first.
             self._dispatch_preview_arm(resume_mode)
             self._event(
                 "info", "Recording aborted" if aborted else "Recording finished"
@@ -2008,23 +1680,17 @@ class RecordingController:
     def _check_sync(self, completed: bool) -> dict:
         """Whether frame k is the same trigger pulse in every camera, and why not.
 
-        Fills keep the cameras aligned through missed pulses and writer drops, so
-        those are reported but do not break sync. What does: a camera whose frames
-        did not follow the trigger clock, frames that could not be placed on it
-        (no hardware timestamps), pulses an external trigger's camera missed (not
-        filled), frames the writer skipped instead of filling, a camera that
-        recorded nothing, cameras ending on different pulses after a completed
-        train, and a camera that started late.
+        Fills keep the cameras aligned, so missed pulses and writer drops are
+        reported without breaking sync. What breaks it: frames off the trigger
+        clock or without timestamps, unfilled misses (external trigger), writer
+        skips, a camera without frames, unequal ends after a completed train,
+        and a camera that started late.
 
-        The last is caught by comparing when each camera's first frames arrived on
-        the host, which only works between cameras that deliver a pulse equally
-        fast: a frame arrives after its exposure, readout and USB transfer, which
-        depend on the model, frame size, pixel format and exposure (a 2048² GS3
-        takes ~4.5 ms longer than an acA1920, most of a period at 125 fps). So
-        cameras are compared only within a group alike in all of these (their
-        delivery profile, read as the recording started); such cameras deliver
-        the same pulse within ~0.5 ms of each other, a pulse later is a whole
-        period. Between groups the start is not checked, and a note says so.
+        A late start shows in when the first frames reached the host, which is
+        comparable only between cameras of one delivery profile (a 2048² GS3
+        lands ~4.5 ms after an acA1920): those deliver a pulse within ~0.5 ms of
+        each other, so a pulse late is a whole period. Across profiles a note
+        says the start was not checked.
         """
         clock = self._pulse_clock
         warnings: list[str] = []
@@ -2130,10 +1796,8 @@ class RecordingController:
                 )
         period = clock.period_ns if clock is not None else 0
         if clock is not None and clock.source == "software":
-            # Each frame's pulse is its own trigger's sequence number, and frame
-            # 0 answers trigger 0 in every camera by construction: nothing to
-            # verify, and a camera that merely delivers later (a busier USB lane)
-            # must not read as having started late.
+            # Frame 0 answers trigger 0 in every camera by construction; a camera
+            # that merely delivers later must not read as late.
             for camera in cams:
                 offsets[camera.name] = 0
             return {"ok": ok, "warnings": warnings, "notes": notes, "start_offsets": offsets}
@@ -2192,16 +1856,12 @@ class RecordingController:
         }
 
     def _read_delivery_profiles(self) -> dict[str, DeliveryProfile | None]:
-        """Each camera's frame-delivery profile, by serial, for the start check.
+        """Each camera's :class:`DeliveryProfile`, by serial, for
+        :meth:`_check_sync`.
 
-        The backend, model, frame size, pixel format and exposure: what a frame's
-        trigger-to-host delay depends on, so cameras with equal profiles deliver
-        a pulse equally fast (see :meth:`_check_sync`). Read as the recording
-        starts, off the lock and before the record grab, like the parameter
-        export, never at teardown (the Camera tab is unlocked again by then).
-        Best-effort: a camera whose exposure or size cannot be read gets None
-        and is compared with no other; the model is left out where the backend
-        does not expose it."""
+        Read before the record grab, never at teardown (the Camera tab is
+        unlocked again by then). A camera whose exposure or size cannot be read
+        gets None and is compared with no other."""
 
         def profile(camera) -> DeliveryProfile | None:
             try:
@@ -2238,38 +1898,26 @@ class RecordingController:
 
     def _snapshot_source(self) -> Path | None:
         """The rig config file each recording's snapshot is made from, or None
-        when recordings get no snapshot (no config dir, as in tests, or no config
-        file in it)."""
+        (no config dir or file)."""
         if self._config_dir is None:
             return None
         src = self._config_dir / CONFIG_SNAPSHOT_FILENAME
         dst = self._recording_info_dir() / CONFIG_SNAPSHOT_FILENAME
-        # Recording over the config dir itself must never rewrite the rig's
-        # files. With the snapshot in the recording's subfolder that is a rig
-        # relaunched from a recording (`octacam gui <recording>` runs from its
-        # octacam_recording subfolder) recording into that same folder again.
+        # A rig relaunched from a recording that records into that same folder
+        # must not rewrite its own config.
         if not src.exists() or src.resolve() == dst.resolve():
             return None
         return src
 
     def _recording_info_dir(self) -> Path:
-        """Where this recording writes everything but its videos: the summary,
-        the timestamps, the config snapshot and the camera parameter files.
-
-        Always the ``octacam_recording`` subfolder of the save directory, even
-        when the folder holds an older take's flat files (which are left alone;
-        readers prefer the subfolder, see transform.recording_info_dir). Not
-        created here: each writer creates it on its first write."""
+        """The ``octacam_recording`` subfolder, where everything but the videos
+        goes, even beside an older take's flat files (readers prefer it). Each
+        writer creates it."""
         return Path(self._settings.save_dir) / RECORDING_INFO_DIRNAME
 
     def _export_camera_params(self) -> dict[str, str]:
-        """Each camera's current parameter text, for the recording's snapshot.
-
-        Called just before the cameras start recording, so the files hold what
-        the recording used, including Camera-tab edits that were never saved.
-        Cheap: the cameras are read in parallel (a Basler takes ~60 ms, a FLIR a
-        few ms). Best-effort: a camera that cannot be read is logged and left
-        out; it never stops the recording from starting."""
+        """Each camera's current parameter text (unsaved Camera-tab edits
+        included), for the snapshot. A camera that cannot be read is left out."""
         if self._snapshot_source() is None:
             return {}
         try:
@@ -2289,25 +1937,14 @@ class RecordingController:
     def _snapshot_config(
         self, plugin_params: dict | None, camera_params: dict[str, str]
     ) -> None:
-        """Save the recording's full config into its ``octacam_recording``
-        subfolder.
+        """Save the recording's config into its ``octacam_recording`` subfolder,
+        a config directory `octacam gui <recording>` relaunches the rig from.
 
-        The rig's octacam_config.toml is copied with every live change patched
-        in: the Record-tab settings, each plugin's live options (e.g. the
-        triggerbox lights), each camera's View-tab rotation/flips (baked into a
-        display-form recording), and the Process section's [transcode]/[transfer],
-        which `octacam process` reads. Each camera's parameter file
-        (``camera_params``, read just before the cameras started) is written
-        beside it, with the rig's other parameter files (auxiliary configs,
-        cameras that did not open). The subfolder is then itself a config
-        directory, so `octacam gui <folder>` (which resolves a recording folder
-        to it, config.resolve_config_dir) sets the rig up the same way again.
-
-        When nothing changed live the TOML is a byte-verbatim copy, comments
-        included. The directory/relative_directory templates are never patched,
-        so a relaunch still resolves a fresh dated folder. Best-effort: a failed
-        re-emit falls back to the verbatim copy and nothing here disturbs the
-        recording; no-op when :meth:`_snapshot_source` finds no config."""
+        The rig TOML gets the live Record-tab settings, plugin options, View-tab
+        transforms and Process params patched in, beside every camera's
+        parameter file. Unchanged, it stays a byte-verbatim copy; the directory
+        templates are never patched, so a relaunch resolves a fresh folder. A
+        failed re-emit falls back to the verbatim copy."""
         src = self._snapshot_source()
         if src is None:
             return
@@ -2339,14 +1976,11 @@ class RecordingController:
             else:
                 shutil.copyfile(src, dst)
         except Exception:
-            # A re-emit edge (e.g. an exotic value the writer can't serialize)
-            # must not lose the snapshot: fall back to the verbatim copy.
             log.exception("Failed to write patched config snapshot to %s", dst)
             with contextlib.suppress(Exception):
                 shutil.copyfile(src, dst)
         try:
-            # Beside the snapshot: together they are the config directory a
-            # relaunch loads, so the parameter files must never be split off.
+            # Beside the TOML: a relaunch loads them as one config directory.
             config_writer.write_pfs_files(
                 info_dir, camera_params, self.camera_system.extension_by_serial()
             )
@@ -2360,9 +1994,8 @@ class RecordingController:
             log.exception("Failed to save the camera parameter files to %s", info_dir)
 
     def _write_recording_summary(self, aborted: bool) -> None:
-        """Write recording_summary.json into the recording's
-        ``octacam_recording`` subfolder (its per-camera ``file`` entries stay
-        names in the recording folder, where the videos are)."""
+        """Write recording_summary.json (its ``file`` entries name videos in the
+        recording folder)."""
         path = self._recording_info_dir() / RECORDING_SUMMARY_FILENAME
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2382,13 +2015,7 @@ class RecordingController:
             log.exception("Failed to write recording summary to %s", path)
 
     def _write_timestamps(self) -> None:
-        """Write the per-frame timestamp series for every camera into one
-        compressed ``timestamps.npz`` in the recording's ``octacam_recording``
-        subfolder, beside the summary.
-
-        Called only when save_timestamps is on, after every grab thread is
-        joined (so the series are final). Best-effort like the summary: a
-        failure is logged, never allowed to abort teardown."""
+        """Write every camera's per-frame series into ``timestamps.npz``."""
         path = self._recording_info_dir() / TIMESTAMPS_FILENAME
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2399,8 +2026,8 @@ class RecordingController:
             log.exception("Failed to write frame timestamps to %s", path)
 
     def _note_in_session_cache(self) -> None:
-        """Note the just-written folder in the session cache, for `octacam process
-        --last/--all`; runs before save_dir is incremented. Best-effort."""
+        """Note the recording's folder in the session cache (`octacam process
+        --last`), before save_dir is incremented."""
         self._recordings_made += 1
         folder = Path(self._settings.save_dir)
         try:
