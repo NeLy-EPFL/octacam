@@ -57,7 +57,6 @@ CONFIG_SKIP_NODES = frozenset({
 # Auto or Enable node that unlocks it. A model lacking a node skips it; the
 # category only labels the export's sections.
 CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
-    # AnalogControl
     ("AnalogControl", "GainAuto", "enum"),
     ("AnalogControl", "Gain", "float"),
     ("AnalogControl", "AutoGainLowerLimit", "float"),
@@ -65,13 +64,11 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("AnalogControl", "BlackLevel", "float"),
     ("AnalogControl", "Gamma", "float"),
     ("AnalogControl", "GammaEnabled", "bool"),
-    # DeviceControl
     ("DeviceControl", "DeviceUserID", "string"),
     ("DeviceControl", "AutoFunctionAOIsControl", "enum"),
     ("DeviceControl", "pgrDevicePowerSupplySelector", "enum"),
     ("DeviceControl", "DeviceLinkThroughputLimit", "int"),
     ("DeviceControl", "TestPendingAck", "int"),
-    # AcquisitionControl
     ("AcquisitionControl", "TriggerSelector", "enum"),
     ("AcquisitionControl", "TriggerMode", "enum"),
     ("AcquisitionControl", "TriggerSource", "enum"),
@@ -95,7 +92,6 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("AcquisitionControl", "AcquisitionStatusSelector", "enum"),
     ("AcquisitionControl", "SingleFrameAcquisitionMode", "enum"),
     ("AcquisitionControl", "pgrHDRModeEnabled", "bool"),
-    # ImageFormatControl
     ("ImageFormatControl", "PixelFormat", "enum"),
     ("ImageFormatControl", "OnBoardColorProcessEnabled", "bool"),
     ("ImageFormatControl", "Width", "int"),
@@ -107,30 +103,24 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("ImageFormatControl", "ReverseX", "bool"),
     ("ImageFormatControl", "TestImageSelector", "enum"),
     ("ImageFormatControl", "TestPattern", "enum"),
-    # ImageFormatControl/PixelDefectControl
     ("ImageFormatControl/PixelDefectControl", "pgrDefectPixelCorrectionEnable", "bool"),
     ("ImageFormatControl/PixelDefectControl", "pgrDefectPixelCorrectionTestMode", "enum"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelCount", "int"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelIndex", "int"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelOffsetX", "int"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelOffsetY", "int"),
-    # UserSetControl
     ("UserSetControl", "UserSetSelector", "enum"),
     ("UserSetControl", "UserSetDefault", "enum"),
     ("UserSetControl", "UserSetDefaultSelector", "enum"),
-    # DataFlashControl
     ("DataFlashControl", "ActivePageNumber", "int"),
     ("DataFlashControl", "ActivePageOffset", "int"),
     ("DataFlashControl", "ActivePageValue", "int"),
-    # DigitalIOControl
     ("DigitalIOControl", "LineSelector", "enum"),
     ("DigitalIOControl", "LineMode", "enum"),
     ("DigitalIOControl", "LineDebouncerTimeRaw", "int"),
     ("DigitalIOControl", "UserOutputSelector", "enum"),
-    # LUTControl
     ("LUTControl", "LUTSelector", "enum"),
     ("LUTControl", "LUTEnable", "bool"),
-    # TransportLayerControl
     ("TransportLayerControl", "U3VDeviceConfigurationHigh", "int"),
     ("TransportLayerControl", "U3VDeviceConfigurationLow", "int"),
     ("TransportLayerControl", "U3VMessageChannelID", "int"),
@@ -138,17 +128,13 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("TransportLayerControl", "U3VCPConfigurationHigh", "int"),
     ("TransportLayerControl", "U3VCPConfigurationLow", "int"),
     ("TransportLayerControl", "TLParamsLocked", "int"),
-    # ChunkDataControl
     ("ChunkDataControl", "ChunkModeActive", "bool"),
     ("ChunkDataControl", "ChunkSelector", "enum"),
     ("ChunkDataControl", "ChunkEnable", "bool"),
-    # EventControl
     ("EventControl", "EventSelector", "enum"),
     ("EventControl", "EventNotification", "enum"),
-    # RemoveParameterLimits
     ("RemoveParameterLimits", "ParameterSelector", "enum"),
     ("RemoveParameterLimits", "RemoveLimits", "bool"),
-    # UserDefinedValues
     ("UserDefinedValues", "UserDefinedValueSelector", "enum"),
     ("UserDefinedValues", "UserDefinedValue", "int"),
 )
