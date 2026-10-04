@@ -136,7 +136,7 @@ class SerialReaderLink:
         delivers a token within USB latency and still wakes every timeout to
         check for shutdown."""
         chunk = s.read(1)
-        waiting = getattr(s, "in_waiting", 0) if chunk else 0
+        waiting = s.in_waiting if chunk else 0
         if waiting:
             chunk += s.read(waiting)
         return chunk

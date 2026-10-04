@@ -942,6 +942,8 @@ def test_reconnect_endpoint_device_override(monkeypatch):
 
 
 class _FakeSerial:
+    in_waiting = 0  # each read hands out one queued chunk
+
     def __init__(self, *args, **kwargs):
         self.is_open = True
         self.written = bytearray()
