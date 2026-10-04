@@ -30,7 +30,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,35 +131,38 @@ def nvenc_encoder(ffmpeg_params: str) -> str | None:
     return encoder if encoder and encoder.endswith("_nvenc") else None
 
 
-def _ffmpeg_candidates() -> list[str]:
+def _ffmpeg_candidates() -> Iterator[str]:
     """ffmpeg executables, most preferred first, realpath-deduped:
     $OCTACAM_FFMPEG, the bundled imageio binary, then every ffmpeg on $PATH
-    (where a working NVENC lives: the bundled one has none)."""
-    cands: list[str] = []
-    env = os.environ.get("OCTACAM_FFMPEG")
-    if env:
-        cands.append(env)
-    try:
-        import imageio_ffmpeg
+    (where a working NVENC lives: the bundled one has none). Lazy, so taking
+    the first never runs the bundled binary's validation behind an override."""
 
-        cands.append(imageio_ffmpeg.get_ffmpeg_exe())
-    except Exception as e:  # pragma: no cover - depends on environment
-        log.debug("imageio-ffmpeg unavailable: %s", e)
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        exe = shutil.which("ffmpeg", path=directory) if directory else None
-        if exe:
-            cands.append(exe)
+    def found() -> Iterator[str]:
+        env = os.environ.get("OCTACAM_FFMPEG")
+        if env:
+            yield env
+        try:
+            import imageio_ffmpeg
+
+            bundled = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:  # pragma: no cover - depends on environment
+            log.debug("imageio-ffmpeg unavailable: %s", e)
+        else:
+            yield bundled
+        for directory in os.get_exec_path():  # os.defpath without $PATH
+            exe = shutil.which("ffmpeg", path=directory) if directory else None
+            if exe:
+                yield exe
+
     seen: set[str] = set()
-    ordered: list[str] = []
-    for exe in cands:
+    for exe in found():
         try:
             key = os.path.realpath(exe)
         except OSError:
             key = exe
         if key not in seen:
             seen.add(key)
-            ordered.append(exe)
-    return ordered
+            yield exe
 
 
 @functools.cache
@@ -247,13 +250,13 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
     """
     if require_encoder is not None:
         return _ffmpeg_for_encoder(require_encoder)
-    candidates = _ffmpeg_candidates()
-    if not candidates:
+    exe = next(iter(_ffmpeg_candidates()), None)
+    if exe is None:
         raise RuntimeError(
             "No ffmpeg executable found: install the imageio-ffmpeg package or "
             "a system ffmpeg, or set OCTACAM_FFMPEG."
         )
-    return candidates[0]
+    return exe
 
 
 @functools.cache

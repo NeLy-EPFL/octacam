@@ -83,6 +83,17 @@ def test_find_ffmpeg_default_needs_no_probe(monkeypatch):
     assert w.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
 
 
+def test_find_ffmpeg_override_skips_the_search(monkeypatch):
+    # imageio validates its binary by running it: an override must not pay that.
+    import imageio_ffmpeg
+
+    monkeypatch.setenv("OCTACAM_FFMPEG", "/pinned/ffmpeg")
+    monkeypatch.setattr(
+        imageio_ffmpeg, "get_ffmpeg_exe", lambda: pytest.fail("searched")
+    )
+    assert w.find_ffmpeg() == "/pinned/ffmpeg"
+
+
 def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
     monkeypatch.setattr(
         w, "_ffmpeg_candidates", lambda: ["/no/nvenc", "/has/nvenc", "/also"]
