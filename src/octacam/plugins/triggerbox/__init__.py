@@ -72,7 +72,7 @@ import math
 import struct
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -444,9 +444,6 @@ class CameraLine:
     def record(self) -> tuple[int, int, int]:
         return (pin_id(self.pin), _u16(self.pulse_us), _u16(self.delay_us))
 
-    def to_dict(self) -> dict:
-        return {"pin": self.pin, "pulse_us": self.pulse_us, "delay_us": self.delay_us}
-
 
 @dataclass
 class LightChannel:
@@ -500,20 +497,6 @@ class LightChannel:
                 _u32(int(round(self.train_ms * 1000))),
             )
         return (pid, 0, 0, 0, 0, 0)  # off
-
-    def to_dict(self) -> dict:
-        return {
-            "channel": self.channel,
-            "pin": self.pin,
-            "mode": self.mode,
-            "duty_mode": self.duty_mode,
-            "duty_percent": self.duty_percent,
-            "delay_us": self.delay_us,
-            "freq_hz": self.freq_hz,
-            "pulse_us": self.pulse_us,
-            "start_delay_ms": self.start_delay_ms,
-            "train_ms": self.train_ms,
-        }
 
 
 @dataclass
@@ -1145,8 +1128,8 @@ class TriggerboxPlugin(Plugin):
             "needs_flash": bool(check and check.needs_flash),
             "error": self._last_error,
             "guard_us": self._strobe_guard_us,
-            "cameras": [c.to_dict() for c in self._cameras],
-            "lights": [lt.to_dict() for lt in self._lights],
+            "cameras": [asdict(c) for c in self._cameras],
+            "lights": [asdict(lt) for lt in self._lights],
         }
 
     # -------------------------------------------------- firmware provisioning
@@ -1183,8 +1166,8 @@ class TriggerboxPlugin(Plugin):
         return {
             "fps": int(round(fps)),
             "duration_ms": max(1, int(round(duration_s * 1000))),
-            "cameras": [c.to_dict() for c in self._cameras],
-            "lights": [lt.to_dict() for lt in self._lights],
+            "cameras": [asdict(c) for c in self._cameras],
+            "lights": [asdict(lt) for lt in self._lights],
         }
 
     @staticmethod
@@ -1213,8 +1196,8 @@ class TriggerboxPlugin(Plugin):
         if cameras == self._configured_cameras and lights == configured:
             return None
         return {
-            "cameras": [c.to_dict() for c in cameras],
-            "lights": [lt.to_dict() for lt in lights],
+            "cameras": [asdict(c) for c in cameras],
+            "lights": [asdict(lt) for lt in lights],
         }
 
     def on_recording_start(self, params: dict | None) -> None:
@@ -1492,11 +1475,7 @@ class TriggerboxPlugin(Plugin):
             return True  # ours, but malformed — swallow it
         new_cams = self._cameras_from_spec(spec)
         new_lights = self._lights_from_spec(spec)
-        changed = [c.to_dict() for c in new_cams] != [
-            c.to_dict() for c in self._cameras
-        ] or [lt.to_dict() for lt in new_lights] != [
-            lt.to_dict() for lt in self._lights
-        ]
+        changed = new_cams != self._cameras or new_lights != self._lights
         self._cameras = new_cams
         self._lights = new_lights
         # Re-arm a live preview only on a real change (the tab pushes on redraws

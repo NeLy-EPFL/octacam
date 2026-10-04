@@ -6,6 +6,7 @@ import re
 import struct
 import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -614,7 +615,7 @@ def _tab_spec(plugin: TriggerboxPlugin, **light_changes) -> dict:
     by_channel = {lt["channel"]: dict(lt) for lt in status["lights"]}
     for key, change in light_changes.items():
         channel = int(key.removeprefix("ch"))
-        base = by_channel.get(channel, LightChannel(channel=channel).to_dict())
+        base = by_channel.get(channel, asdict(LightChannel(channel=channel)))
         by_channel[channel] = {**base, **change}
     lights = [by_channel[ch] for ch in sorted(by_channel) if by_channel[ch]["mode"] != "off"]
     return {"fps": 80, "duration_ms": 5000, "cameras": status["cameras"], "lights": lights}
