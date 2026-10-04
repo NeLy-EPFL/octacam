@@ -3379,9 +3379,9 @@ def benchmark(
             settings.trigger_source,
             sink.value,
         )
-
-        if json_output:
-            # JSON mode: no progress bar (keep stdout clean for the machine reader).
+        # No progress bar under --json: stdout stays clean for the machine reader.
+        bar = None if json_output else _BenchmarkProgressBar()
+        with bar or contextlib.nullcontext():
             report = diag.diagnose(
                 system,
                 settings,
@@ -3389,18 +3389,8 @@ def benchmark(
                 find_max=find_max,
                 measure_freerun=freerun,
                 sink=sink.value,
+                progress_cb=bar.update if bar else None,
             )
-        else:
-            with _BenchmarkProgressBar() as bar:
-                report = diag.diagnose(
-                    system,
-                    settings,
-                    duration_s=duration,
-                    find_max=find_max,
-                    measure_freerun=freerun,
-                    sink=sink.value,
-                    progress_cb=bar.update,
-                )
     finally:
         system.close()
 
