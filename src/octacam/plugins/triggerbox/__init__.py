@@ -986,17 +986,7 @@ class TriggerboxPlugin(Plugin):
                 if lc is not None:
                     out.append(lc)
             return out
-        # Legacy v1 GUI/config shape (duty_percent/duty_auto, no lights[]): keep the
-        # configured channels but apply the legacy duty override to strobe ones.
-        lights = [replace(lt) for lt in self._lights]
-        if "duty_percent" in spec or "duty_auto" in spec:
-            auto = bool(spec.get("duty_auto", self._default_duty_auto))
-            duty = _coerce_float(spec.get("duty_percent"), self._default_duty_percent)
-            for lt in lights:
-                if lt.mode == "strobe":
-                    lt.duty_mode = "auto" if auto else "manual"
-                    lt.duty_percent = duty
-        return lights
+        return [replace(lt) for lt in self._lights]
 
     # -------------------------------------------------- state / broadcast
 

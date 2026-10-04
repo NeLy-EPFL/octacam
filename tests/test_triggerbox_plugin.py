@@ -531,15 +531,6 @@ def test_on_recording_start_uses_configured_spec_when_only_fps_given():
     assert len(dec["lights"]) == 2  # ch1 + ch2
 
 
-def test_on_recording_start_legacy_duty_overrides_strobe_channels():
-    plugin, link = _plugin_with_fake()
-    plugin.on_recording_start(
-        {"triggerbox": {"fps": 80, "duration_ms": 1000, "duty_percent": 50}}
-    )
-    # both classic strobe channels get 50% of 12500 = 6250 µs
-    assert all(lt[3] == 6250 for lt in _last_arm(link)["lights"])
-
-
 def test_on_recording_start_ignored_without_spec():
     plugin, link = _plugin_with_fake()
     plugin.on_recording_start({})
