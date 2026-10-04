@@ -1,42 +1,21 @@
-"""Screen recordings for missed trigger pulses and desynchronized cameras.
+"""Screen recordings for missed trigger pulses and desynchronized cameras
+(``octacam check``; read-only).
 
-Backs ``octacam check``. A recording folder (one holding
-``recording_summary.json``, in its ``octacam_recording`` subfolder or, for a
-recording made before that subfolder existed, beside the videos) is checked
-camera by camera:
+* **Missed pulses.** A schema-4 recording carries the recorder's accounting:
+  per frame in ``timestamps.npz``, else the summary's counts (never its index
+  lists, which are capped), and its ``sync`` verdict is honored. An older one
+  is re-derived from its hardware timestamps with the recorder's tracker
+  (:func:`octacam.pulses.analyze_timestamps`); host-clock timestamps are not,
+  as their delivery jitter would read as misses.
+* **Unequal frame counts**, a problem only for a take that ran to its end.
+* **A start offset** (frame 0 not the same pulse everywhere): a schema-4
+  recording's own, never re-derived; an older one's from the trigger timing
+  events every camera shares (:func:`octacam.pulses.estimate_offset`). An
+  offset n means the camera's frame k shows the earliest camera's frame k+n.
+* Late exposures, writer-queue fills and corrected clock jumps are noted.
 
-* **Missed pulses.** A recording made since octacam counts pulses (summary
-  schema >= 4) carries the recorder's own accounting: per frame in
-  ``timestamps.npz`` when that was saved, and otherwise the per-camera counts in
-  the summary, which are then authoritative (its index lists are capped, the
-  counts are not). Its cross-camera ``sync`` verdict is honored too. There a
-  missed pulse on an octacam-driven train was filled, so it no longer shifts
-  anything. For older recordings the misses are re-derived from the hardware
-  timestamps in ``timestamps.npz`` with the same tracker the recorder now runs
-  live (:func:`octacam.pulses.analyze_timestamps`): an interval of k periods is
-  k-1 missed pulses, and each one shifts every later frame of that camera by one
-  pulse against a camera that did not miss it. Host-clock timestamps (a backend
-  with no hardware timestamp) are not re-derived: their delivery jitter would
-  read as missed pulses.
-* **Frame counts** that differ between cameras. Only a take that ran to its end
-  must end every camera on the same pulse; a stopped or aborted one may
-  legitimately end them a pulse or two apart.
-* **A start offset**: two cameras whose frame 0 is not the same pulse (the
-  pre-fix start-up race). Newer recordings record the recorder's own
-  arrival-time check. For older ones: timestamps carry no common clock, but the
-  trigger source's own timing events (the start of a train, a late pulse) reach
-  every camera at the same pulse, so lining those up reveals the offset when
-  there are enough of them (:func:`octacam.pulses.estimate_offset`). Either way
-  an offset follows the recorder's convention: the pulses a camera started after
-  the earliest camera, so a positive offset n means its frame k shows the moment
-  of that camera's frame k+n.
-* Late exposures (e.g. a camera triggering on the pulse's falling edge), frames
-  the writer queue refused and corrected camera-clock jumps are noted.
-
-A recording that cannot be read (a malformed summary, a truncated
-``timestamps.npz``) is reported as a problem rather than raised, so a scan of a
-tree still covers every other recording. Pure file reading; nothing here
-touches hardware or modifies a recording.
+A recording that cannot be read is reported as a problem, never raised, so a
+scan still covers the others.
 """
 
 from __future__ import annotations
@@ -62,10 +41,7 @@ from octacam.transform import (
 
 log = logging.getLogger("octacam")
 
-# Host wall-clock nanoseconds (time.time_ns()) have been at least this large
-# since 2001; a camera's own clock counts from its power-up and would need
-# decades to get here. Tells a host-clocked series from a hardware one in a
-# summary that does not say which it is.
+# Host wall-clock ns since 2001; a camera clock counts from its power-up.
 _WALL_CLOCK_NS = 10**18
 
 
@@ -73,10 +49,9 @@ _WALL_CLOCK_NS = 10**18
 class CameraCheck:
     name: str
     frames: int
-    # Pulses with no frame of their own. ``missed_count`` is the total: the list
-    # may be the summary's, which is capped. When they were not filled,
-    # ``missed_after_frame`` is where they fall in the video: the index of the
-    # video frame right before each gap.
+    # Pulses without a frame; the list may be the summary's capped one, so
+    # missed_count is the total. Unfilled, missed_after_frame is the video frame
+    # before each gap.
     missed: list[int] = field(default_factory=list)
     missed_count: int = 0
     missed_after_frame: list[int] = field(default_factory=list)
@@ -87,14 +62,10 @@ class CameraCheck:
     unclocked_frames: int = 0  # frames that had no hardware timestamp
     glitches: list[tuple] = field(default_factory=list)
     clock_mismatch: bool = False
-    # "recorded" (the recorder's per-frame accounting in timestamps.npz),
-    # "summary" (its per-camera counts: no timestamps.npz), "timestamps"
-    # (re-derived from a pre-schema-4 recording's timestamps) or "none" (nothing
-    # to check: no timestamps, or host-clock ones)
+    # "recorded" (timestamps.npz accounting), "summary" (its counts),
+    # "timestamps" (re-derived, pre-schema-4) or "none" (nothing to check).
     source: str = "none"
-    # Pulses this camera started after the earliest camera (positive = late; the
-    # recorder's convention); None when unknown.
-    start_offset: int | None = None
+    start_offset: int | None = None  # pulses after the earliest camera, if known
 
     def to_dict(self) -> dict:
         # The keys follow recording_summary.json's per-camera fields.
@@ -159,11 +130,8 @@ def _recording_folder(path: Path) -> Path:
 
 
 def find_recordings(paths) -> list[Path]:
-    """Every recording folder at or under ``paths`` (sorted naturally).
-
-    A path may name a recording folder (either layout), its summary file or its
-    ``octacam_recording`` subfolder, each reported as the recording folder; any
-    other directory is searched. A subfolder is never a recording of its own."""
+    """Every recording folder at or under ``paths``, sorted naturally. A path
+    may also name a summary file or an ``octacam_recording`` subfolder."""
     found: set[Path] = set()
     for raw in paths:
         path = _recording_folder(Path(raw))
@@ -192,8 +160,8 @@ def _error(exc: BaseException) -> str:
 
 
 def _count(meta: dict, count_key: str, list_key: str) -> int:
-    """A schema-4 per-camera count. Its index list is capped (at the recorder's
-    SUMMARY_INDEX_LIMIT), so it only stands in when the count is absent."""
+    """A schema-4 per-camera count; its capped index list stands in only when
+    the count is absent."""
     value = meta.get(count_key)
     if value is None:
         return len(meta.get(list_key) or [])
@@ -214,14 +182,8 @@ def _unreadable(folder: Path, fps: float | None, what: str) -> RecordingCheck:
 
 
 def check_recording(folder: str | Path, fps: float | None = None) -> RecordingCheck:
-    """Check one recording folder (see the module docstring).
-
-    *folder* may be the recording folder (either layout), its summary file or
-    its ``octacam_recording`` subfolder; the result names the recording folder.
-    Never raises for a damaged recording: a summary that cannot be read or
-    interpreted, or a ``timestamps.npz`` that cannot be read, is reported as a
-    problem ("unreadable: ..."), so it still fails the check.
-    """
+    """Check one recording folder (or its summary file or subfolder). A damaged
+    recording is reported as an "unreadable: ..." problem, never raised."""
     folder = _recording_folder(Path(folder))
     try:
         summary = json.loads(
@@ -245,8 +207,7 @@ def _check_summary(folder: Path, summary: dict, fps: float | None) -> RecordingC
     schema = summary.get("schema_version")
     fps = fps or summary.get("fps_target")
     result = RecordingCheck(folder, schema, fps, [])
-    # The timestamps are the take's whose summary was read: a folder recorded
-    # into again keeps the older flat take's files beside the new subfolder.
+    # Beside the summary that was read, not an older flat take's.
     npz_path = recording_info_dir(folder) / TIMESTAMPS_FILENAME
     arrays: dict[str, np.ndarray] = {}
     npz_failed = False
@@ -339,9 +300,7 @@ def _from_accounting(cam: CameraCheck, missed_flags, pulse_index) -> None:
     if cam.filled:
         missed = pulse_index[np.asarray(missed_flags, dtype=bool)]
     else:
-        # Nothing was filled: the misses are the gaps between the frames' pulses
-        # (pulse_index never decreases; a frame the external clock could not
-        # place repeats the previous frame's pulse).
+        # Unfilled: the misses are the gaps in pulse_index (never decreasing).
         span = int(pulse_index.max()) + 1 if len(pulse_index) else 0
         missed = np.setdiff1d(np.arange(span), pulse_index)
         cam.missed_after_frame = [
@@ -375,15 +334,12 @@ def _ended_early(summary: dict, cams: list[CameraCheck]) -> str | None:
         return "the recording was stopped before its train ended"
     if completed is True:
         return None
-    # Older schema-4 summaries do not say: infer it from the frame counts.
+    # An early schema-4 summary does not say: infer it from the frame counts.
+    # Before schema 4 an unequal count may be the only trace of a start-up
+    # race, so it stays a problem.
     schema = summary.get("schema_version")
     if not (isinstance(schema, int) and schema >= 4) or not cams:
-        # Before schema 4 nothing but ``aborted`` says so, and an unequal count
-        # may be the only trace of the start-up race; keep it a problem there.
         return None
-    # A completed octacam-driven train pads every camera to its pulse count (the
-    # recorder's sync check says so when it could not); an external one ends on
-    # the duration's deadline, after its grace period.
     expected = (summary.get("pulse_train") or {}).get("count")
     if expected is None:
         rate, duration = summary.get("fps_target"), summary.get("duration_s")
@@ -482,10 +438,8 @@ def _start_offsets(
                 )
         return
     if isinstance(result.schema, int) and result.schema >= 4:
-        # The recorder checked start alignment itself, between cameras that
-        # deliver alike, and left the rest unchecked on purpose (its sync notes
-        # say so). Timing events are no substitute for its per-frame pulse index:
-        # re-derived here they fabricated offsets from jitter.
+        # The recorder's pulse_index is the word: re-derived from timing events,
+        # offsets come out of jitter.
         return
     cands = [c for c in checked if c.name in reports or c.name in series]
     if len(cands) < 2:
@@ -497,9 +451,7 @@ def _start_offsets(
         return reports[name]
 
     ref = cands[0]
-    # Pulses each camera started after ``ref``: estimate_offset's lag is where
-    # ref's pulse p sits in the other camera, so a camera that started late has
-    # a negative lag.
+    # A camera that started after ``ref`` has a negative lag.
     after_ref: dict[str, int] = {ref.name: 0}
     events: dict[str, int] = {}
     for cam in cands[1:]:

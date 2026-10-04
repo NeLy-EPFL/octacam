@@ -1,24 +1,11 @@
-"""Recording-session cache for ``octacam transcode``.
+"""The recording cache behind ``octacam process --last/--all``, and the
+cross-process activity markers.
 
-Each finished recording's save directory is appended to a small JSONL under the
-user cache dir (``~/.cache/octacam/recordings.jsonl`` by default) so that, later,
-``octacam transcode`` can target the *last* recording, the *last GUI session*, or
-*every* recording without the operator re-typing paths.
-
-Design notes:
-
-- One line per recording: ``{"folder", "time", "session", "kind"}``. ``time`` is a
-  timezone-aware local ISO timestamp; ``session`` groups every recording made by a
-  single ``octacam gui``/``record`` process; ``kind`` is informational
-  ("gui"/"record").
-- The file is rewritten atomically on every write, dropping entries older than
-  :data:`RETENTION_DAYS`, so it never grows without bound ("clear the cache when it
-  is no longer needed"). Concurrent writers are serialized with an flock — the
-  rig's instance lock already stops two GUIs sharing one config, but two different
-  rigs may run at once.
-- Queries skip folders that have since been deleted (recordings are routinely
-  moved or cleaned up between capture and transcoding), so a stale entry is simply
-  ignored, never an error.
+Each finished recording is one line of ``recordings.jsonl`` in the cache dir:
+``{"folder", "time", "session", "kind"}``, where ``session`` groups one
+``gui``/``record`` process. Every write rewrites the file atomically under an
+flock (two rigs may record at once) and drops entries past
+:data:`RETENTION_DAYS`. Queries skip folders deleted since.
 """
 
 from __future__ import annotations
@@ -37,25 +24,16 @@ log = logging.getLogger("octacam")
 
 CACHE_FILENAME = "recordings.jsonl"
 LOCK_FILENAME = "recordings.lock"
-# Keep a month of history: enough to still find "the last session" after a gap,
-# while bounding the file to a few hundred tiny lines even on a busy rig.
 RETENTION_DAYS = 30
-# A running `octacam transcode` publishes an flock-held marker here so a `gui`/
-# `record` launch can warn about the CPU contention. A marker the checker can
-# lock is orphaned (the transcode crashed); once clearly old it is swept away.
+# Activity marker directories (see "Activity markers" below).
 TRANSCODE_DIR_NAME = "transcode-active"
-# A `gui`/`record` publishes an flock-held marker here while it owns the cameras;
-# `octacam process` pauses between work units while one is live.
 CAPTURE_DIR_NAME = "capture-active"
 _STALE_MARKER_AGE_S = 60.0
 
 
 def cache_dir() -> Path:
-    """The octacam cache directory.
-
-    Honors ``OCTACAM_CACHE_DIR`` (used by tests and to relocate it), then
-    ``XDG_CACHE_HOME``, falling back to ``~/.cache/octacam``.
-    """
+    """``OCTACAM_CACHE_DIR``, else ``$XDG_CACHE_HOME/octacam``, else
+    ``~/.cache/octacam``."""
     override = os.environ.get("OCTACAM_CACHE_DIR")
     if override:
         return Path(override).expanduser()
@@ -81,12 +59,8 @@ def _now() -> datetime.datetime:
 
 @contextmanager
 def _locked() -> Iterator[None]:
-    """Hold an exclusive flock for the duration of a read-modify-write.
-
-    Best-effort: if the lock file cannot be opened (e.g. an unwritable cache
-    dir) we proceed without locking rather than failing — the cache is a
-    convenience, never a hard dependency.
-    """
+    """Hold the cache's flock for a read-modify-write; without a lock file (an
+    unwritable cache dir) proceed unlocked: the cache is a convenience."""
     directory = cache_dir()
     handle = None
     try:
@@ -118,11 +92,8 @@ def _parse_time(value: object) -> datetime.datetime | None:
 
 
 def _read_entries() -> list[dict]:
-    """All valid entries in file (chronological) order; bad lines are skipped.
-
-    Tolerant by design: a half-written final line from a crashed writer, or a
-    line from a future schema, is ignored rather than raising.
-    """
+    """All valid entries in recorded order; a malformed line (a crashed writer's
+    partial line) is skipped."""
     try:
         text = _cache_file().read_text()
     except OSError:
@@ -142,12 +113,8 @@ def _read_entries() -> list[dict]:
 
 
 def _write_entries(entries: list[dict]) -> None:
-    """Atomically replace the cache file with ``entries`` (temp + os.replace).
-
-    The temp file name is unique per writer (pid + random) so that even on the
-    degraded unlocked path (lock file unopenable) two concurrent writers never
-    rename the same temp out from under each other.
-    """
+    """Atomically replace the cache file with ``entries``. The temp name is
+    unique per writer, so even unlocked two writers never share one."""
     path = _cache_file()
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
@@ -155,19 +122,15 @@ def _write_entries(entries: list[dict]) -> None:
         os.replace(tmp, path)
     except OSError:
         try:
-            tmp.unlink(missing_ok=True)  # don't leave a half-written temp behind
+            tmp.unlink(missing_ok=True)
         except OSError:
             pass
         raise
 
 
 def record_recording(folder: str | Path, session_id: str, kind: str = "gui") -> None:
-    """Note that ``folder`` was just recorded, pruning anything past retention.
-
-    Best-effort: a cache failure is logged but never raised, so it cannot
-    disturb recording teardown. The whole file is rewritten under the lock, so
-    the prune and the append are one atomic update.
-    """
+    """Note that ``folder`` was just recorded, pruning entries past retention.
+    Never raises: a cache failure must not disturb recording teardown."""
     entry = {
         "folder": str(Path(folder).resolve()),
         "time": _now().isoformat(),
@@ -185,9 +148,6 @@ def record_recording(folder: str | Path, session_id: str, kind: str = "gui") -> 
             kept.append(entry)
             _write_entries(kept)
     except Exception as e:
-        # Best-effort by contract: a cache failure (I/O, a clock that makes
-        # timedelta overflow, anything) must never propagate into recording
-        # teardown.
         log.warning("Could not update the recording cache: %s", e)
 
 
@@ -226,11 +186,8 @@ def last_folder() -> Path | None:
 
 
 def session_folders(session_id: str | None = None) -> list[Path]:
-    """Existing folders from one session (the most recent one when ``None``).
-
-    Folders are returned in the order they were recorded, deduplicated, with any
-    since-deleted ones dropped.
-    """
+    """Existing folders of one session (the latest when ``None``), in recorded
+    order."""
     entries = _read_entries()
     if session_id is None:
         session_id = _latest_session_id(entries)
@@ -241,12 +198,7 @@ def session_folders(session_id: str | None = None) -> list[Path]:
 
 
 def all_folders() -> list[Path]:
-    """Every existing recording folder in the cache, in record order.
-
-    Spans every session and day the cache still holds (pruned to the last
-    :data:`RETENTION_DAYS` on each write). Deduplicated, with any since-deleted
-    folders dropped, so a stale entry is silently ignored, never an error.
-    """
+    """Every existing recording folder in the cache, in recorded order."""
     return _existing([Path(entry["folder"]) for entry in _read_entries()])
 
 
@@ -256,11 +208,8 @@ def all_folders() -> list[Path]:
 
 
 def dir_size(path: Path) -> int:
-    """Total size in bytes of a file or directory tree (best-effort; 0 on error).
-
-    Does not follow directory symlinks (``os.walk`` default), so a marker or log
-    pointing outside the tree can't inflate the total.
-    """
+    """Total size in bytes of a file or directory tree, not following directory
+    symlinks; 0 on error."""
     try:
         if path.is_file():
             return path.stat().st_size
@@ -284,11 +233,10 @@ def recordings_count() -> int:
 
 
 def clear_recordings() -> bool:
-    """Delete the recording list (and any crashed-writer temp). Returns True if it existed.
+    """Delete the recording list and crashed writers' temps; True if it existed.
 
-    Held under the recordings lock so a concurrent writer isn't caught mid-rewrite.
-    The now-idle lock file is removed afterwards, outside the lock (best-effort; it
-    self-recreates on the next write) — so the fd we hold is never the one unlinked.
+    The lock file is removed after releasing it, so the held fd is never the one
+    unlinked (the next write recreates it).
     """
     path = _cache_file()
     directory = cache_dir()
@@ -313,17 +261,13 @@ def clear_recordings() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Activity markers (transcode + capture)
+# Activity markers
 #
-# Two flock-held marker namespaces under the cache dir signal cross-process
-# liveness with no PID bookkeeping — the OS drops an flock on exit or crash, so a
-# marker whose lock we *can* take is dead (and, once clearly old, swept away):
-#
-# - ``transcode-active`` is published by a running ``octacam process`` and read
-#   by a ``gui``/``record`` launch, which warns about the CPU contention.
-# - ``capture-active`` is published by ``gui``/``record`` while they own the
-#   cameras and read by ``octacam process``, which parks between work units until
-#   it clears — so a detached job never fights a live recording for CPU/GPU/disk.
+# flock-held files signal liveness across processes without PID bookkeeping: the
+# OS drops an flock on exit or crash, so a marker whose lock can be taken is dead.
+# ``transcode-active``: a running ``octacam process``; a ``gui``/``record``
+# launch warns about the CPU contention. ``capture-active``: a ``gui``/``record``
+# owning the cameras; ``octacam process`` pauses between work units meanwhile.
 # ---------------------------------------------------------------------------
 
 
@@ -337,11 +281,8 @@ def _capture_dir() -> Path:
 
 @contextmanager
 def _mark_active(directory: Path, detail: str) -> Iterator[None]:
-    """Publish an flock-held marker under ``directory`` for the block's lifetime.
-
-    Best-effort: if the marker cannot be created (e.g. an unwritable cache dir)
-    the block runs without it rather than failing.
-    """
+    """Publish an flock-held marker under ``directory`` for the block's lifetime
+    (best-effort: without one if it cannot be created)."""
     handle = None
     path = None
     try:
@@ -388,12 +329,11 @@ def mark_capture_active(detail: str = "") -> Iterator[None]:
 
 
 def _scan(directory: Path) -> tuple[int, int]:
-    """Check the flock-held markers in ``directory``; return (live, swept).
+    """Count the live markers in ``directory`` and sweep the orphaned ones;
+    return (live, swept).
 
-    A marker whose flock is still held has a live publisher. One whose flock we
-    can take is orphaned (its publisher exited or crashed) and is removed once
-    past the mid-publish window (:data:`_STALE_MARKER_AGE_S`), so a marker that
-    is created but not yet locked is never swept.
+    An orphan is swept only past :data:`_STALE_MARKER_AGE_S`, so a marker created
+    but not yet locked is never taken for one.
     """
     try:
         markers = [p for p in directory.iterdir() if p.suffix == ".lock"]
@@ -402,9 +342,8 @@ def _scan(directory: Path) -> tuple[int, int]:
     live = swept = 0
     for marker in markers:
         try:
-            # Read-only: flock is advisory and works on any open mode, so a
-            # marker another user owns is still checkable; and "r" never
-            # creates, so a marker unlinked since iterdir is skipped.
+            # Read-only, so another user's marker is still checkable and one
+            # unlinked since iterdir is not recreated.
             handle = open(marker)
         except OSError:
             continue
@@ -424,12 +363,7 @@ def _scan(directory: Path) -> tuple[int, int]:
 
 
 def sweep_orphan_markers() -> tuple[int, int]:
-    """Sweep clearly-orphaned transcode/capture markers; return (removed, live_kept).
-
-    Summed across both marker namespaces. Used by ``octacam cache clear`` to tidy
-    markers left by crashed runs while never disturbing a currently-live capture
-    or transcode.
-    """
+    """Sweep orphaned transcode and capture markers; return (removed, live)."""
     removed = live = 0
     for directory in (_transcode_dir(), _capture_dir()):
         held, swept = _scan(directory)
@@ -444,18 +378,10 @@ def transcode_running() -> int:
 
 
 def capture_running() -> int:
-    """How many gui/record captures currently own cameras on this machine.
-
-    Usually 0 or 1, but two different rigs can capture at once (the instance lock
-    only stops two octacams sharing one config), so this is a count, not a flag.
-    """
+    """How many gui/record captures own cameras on this machine (two rigs can)."""
     return _scan(_capture_dir())[0]
 
 
 def capture_active() -> bool:
-    """True while a gui/record on this machine currently owns the cameras.
-
-    ``octacam process`` polls this at each work-unit boundary and pauses while it
-    holds, so a detached job never contends with a live recording.
-    """
+    """True while a gui/record on this machine owns cameras."""
     return capture_running() > 0

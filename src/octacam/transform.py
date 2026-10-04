@@ -1,20 +1,11 @@
-"""Display transforms (rotation + flips) baked into recorded video.
+"""Display transforms (rotation + flips) baked into recorded video, and the
+recording folder's on-disk vocabulary.
 
-The web GUI shows each camera through a CSS transform ``scale(sx, sy)
-rotate(deg)`` applied to the raw frame (see ``web/static/js/grid.js``). To bake
-that same orientation into a recorded video we must reproduce it exactly, in
-pixels.
-
-CSS composes the transform list right-to-left, so the matrix is ``S · R``: a
-point is first rotated, then scaled/flipped along the (unrotated) screen axes.
-In pixel terms that means **rotate first, then flip** — and CSS ``rotate(+deg)``
-turns clockwise. :func:`apply_display_transform` implements that ordering.
-
-Only the transforms the View tab can actually produce are supported: rotation in
-90° steps plus horizontal/vertical flips (a flip is a negative ``scale_x`` /
-``scale_y`` in the config; the scale magnitude is always 1 and is ignored). A
-``rotation_deg`` that is not a multiple of 90 is dropped with a warning rather
-than approximated.
+The GUI shows each camera through the CSS transform ``scale(sx, sy)
+rotate(deg)`` (``web/static/js/grid.js``). CSS composes right-to-left, so a
+video reproduces it by rotating first (clockwise for a positive angle), then
+flipping along the screen axes. Only what the View tab produces is supported:
+90° steps, and flips (a negative scale; its magnitude is ignored).
 """
 
 from __future__ import annotations
@@ -31,20 +22,11 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("octacam")
 
-# Per-recording metadata file written into each recording's save directory and
-# consumed by `octacam transcode`. The shared on-disk vocabulary lives here,
-# next to DisplayTransform, so the recording and transcode sides never drift.
 RECORDING_SUMMARY_FILENAME = "recording_summary.json"
-
-# Optional per-frame timestamp store (opt-in via record.save_timestamps). One
-# compressed NumPy archive for the whole recording, holding every camera's
-# per-frame timestamp/dropped series — replacing the old per-camera CSVs.
+# Every camera's per-frame series (opt-in: record.save_timestamps).
 TIMESTAMPS_FILENAME = "timestamps.npz"
-
-# The rig config snapshot written into each recording's save directory
-# (RecordingController._snapshot_config). It carries the live recording settings,
-# and each camera's parameter file (``<serial>.<ext>``) is written beside it, so
-# the recording folder is itself a config directory a new session can launch from.
+# The rig config with the live settings, beside each camera's parameter file
+# (``<serial>.<ext>``): a config directory a session can relaunch from.
 CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
 
 # Every camera backend's parameter-file suffix (``CameraBackend.extension``):
@@ -53,25 +35,19 @@ CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
 # a vendor SDK; tests/test_backends.py keeps it in step with the backends.
 PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
 
-# The subfolder of a recording folder that holds everything above — the summary,
-# the timestamps, the config snapshot and the camera parameter files — so the
-# recording folder itself shows just the videos. Recordings made before it keep
-# those files flat beside the videos; readers go through recording_info_dir(),
-# which answers for either layout.
+# The subfolder holding all of the above, so a recording folder shows just its
+# videos. Older recordings keep them flat beside the videos; readers go through
+# recording_info_dir(), which answers for either layout.
 RECORDING_INFO_DIRNAME = "octacam_recording"
 
 
 def recording_info_dir(folder: str | Path) -> Path:
-    """The directory holding the recording in *folder*'s summary, timestamps,
-    config snapshot and camera parameter files.
+    """The directory holding *folder*'s summary, timestamps, config snapshot and
+    camera parameter files: the ``octacam_recording`` subfolder, or *folder* for
+    an older flat recording.
 
-    That is the ``octacam_recording`` subfolder, or *folder* itself for a
-    recording made before the subfolder existed. The summary decides: it is
-    written as the cameras start, together with the snapshot, so whichever
-    directory has it is the recording's. A folder recorded into again in the new
-    layout keeps the older take's flat files; the subfolder's summary wins, as
-    it is the newer take. With no summary in either, the subfolder is answered
-    if it exists (a take killed before its summary), else *folder*.
+    The summary decides, and the subfolder's wins over a flat one (an older take
+    in the same folder). Without a summary, the subfolder if it exists.
     """
     folder = Path(folder)
     nested = folder / RECORDING_INFO_DIRNAME
@@ -88,10 +64,8 @@ def recording_summary_path(folder: str | Path) -> Path:
 
 
 def is_recording_dir(folder: str | Path) -> bool:
-    """Whether *folder* is a recording folder: it has a summary (either layout).
-
-    The ``octacam_recording`` subfolder itself is not one — it is part of the
-    recording folder around it."""
+    """Whether *folder* has a summary (either layout); an ``octacam_recording``
+    subfolder is never a recording folder itself."""
     folder = Path(folder)
     if folder.name == RECORDING_INFO_DIRNAME:
         return False
@@ -107,11 +81,7 @@ def recording_folder_of(summary_path: str | Path) -> Path:
 
 
 def find_recording_dirs(root: str | Path) -> list[Path]:
-    """Every recording folder at or under *root*, in either layout, sorted.
-
-    Found by their summaries, each mapped to the recording folder it belongs to
-    (:func:`recording_folder_of`), so an ``octacam_recording`` subfolder is
-    never reported as a recording of its own."""
+    """Every recording folder at or under *root*, in either layout, sorted."""
     root = Path(root)
     if not root.is_dir():
         return []
@@ -122,11 +92,8 @@ def find_recording_dirs(root: str | Path) -> list[Path]:
 
 @dataclass(frozen=True)
 class DisplayTransform:
-    """A bakeable display orientation: a 90° rotation step plus flips.
-
-    ``rotation_deg`` is one of 0/90/180/270 and is interpreted clockwise (to
-    match CSS). Flips are applied *after* the rotation, along the screen axes.
-    """
+    """A bakeable display orientation: a clockwise 0/90/180/270° rotation, then
+    flips along the screen axes."""
 
     rotation_deg: int = 0
     flip_h: bool = False
@@ -183,22 +150,15 @@ def _normalize_rotation(rotation_deg: float) -> int:
 
 
 def from_camera_config(cfg: CameraConfig) -> DisplayTransform:
-    """Derive the bakeable transform from a camera's persisted display config.
-
-    A negative ``scale_x`` / ``scale_y`` is a horizontal / vertical flip; the
-    magnitude is ignored (the View tab only ever flips, never scales).
-    """
+    """The bakeable transform of a camera's configured display."""
     return DisplayTransform.from_scale_rotation(
         cfg.scale_x, cfg.scale_y, cfg.rotation_deg
     )
 
 
 def apply_display_transform(array: np.ndarray, t: DisplayTransform) -> np.ndarray:
-    """Return ``array`` rotated then flipped per ``t`` (a fresh C-contiguous copy).
-
-    The result is passed to the video writer, whose ``_write_all`` casts it to
-    raw bytes and therefore needs C-contiguous memory.
-    """
+    """``array`` rotated then flipped per ``t``, C-contiguous (the writer casts
+    it to raw bytes)."""
     if t.is_identity:
         return array
     # CSS rotate(+deg) is clockwise; np.rot90's positive k is counter-clockwise.
