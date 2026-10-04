@@ -882,6 +882,19 @@ def _default_shutdown() -> None:
     os.kill(os.getpid(), signal.SIGINT)
 
 
+@contextlib.contextmanager
+def _http_errors():
+    """Map a controller error to HTTP: no such camera 404, busy 409, bad value 422."""
+    try:
+        yield
+    except IndexError as e:
+        raise HTTPException(404, str(e)) from None
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from None
+    except (ValueError, TypeError) as e:
+        raise HTTPException(422, str(e)) from None
+
+
 def create_app(
     controller: RecordingController,
     config: OctacamConfig,
@@ -998,12 +1011,8 @@ def create_app(
 
     @app.put("/api/settings")
     def put_settings(patch: SettingsPatch):
-        try:
+        with _http_errors():
             updated = controller.update_settings(**patch.model_dump(exclude_unset=True))
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         settings = dataclasses.asdict(updated)
         state.broadcast_threadsafe("settings", settings)
         return settings
@@ -1027,14 +1036,8 @@ def create_app(
 
     @app.put("/api/cameras/{index}/name")
     def put_camera_name(index: int, patch: CameraNamePatch):
-        try:
+        with _http_errors():
             result = controller.set_camera_name(index, patch.name)
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         # Broadcast so every browser's grid tile and camera picker relabel; the
         # `:index` suffix dedups per camera in the newest-only send queue.
         state.broadcast_threadsafe(
@@ -1044,14 +1047,15 @@ def create_app(
 
     @app.put("/api/cameras/{index}/transform")
     def put_camera_transform(index: int, patch: CameraTransformPatch):
-        try:
+        with _http_errors():
             return controller.set_camera_transform(
                 index, patch.scale_x, patch.scale_y, patch.rotation_deg
             )
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
+
+    def _require_config_dir() -> Path:
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        return Path(config_dir)
 
     # ---------------------------------------------- full device node map (tab)
 
@@ -1071,71 +1075,43 @@ def create_app(
 
     @app.get("/api/cameras/{index}/features")
     def get_camera_features(index: int):
-        try:
+        with _http_errors():
             return controller.read_camera_features(index)
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
 
     @app.put("/api/cameras/{index}/features")
     def put_camera_feature(index: int, patch: CameraFeaturePatch):
-        try:
+        with _http_errors():
             result = controller.set_camera_feature(
                 index, patch.name, patch.value, patch.scope
             )
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         _broadcast_features_dirty(result)
         return result
 
     @app.post("/api/cameras/{index}/features/reset")
     def reset_camera_feature(index: int, payload: CameraFeatureReset):
-        if not config_dir:
-            raise HTTPException(400, "No config directory is set for this session")
         pfs_by_serial = config_writer.read_pfs_files(
-            config_dir, controller.camera_system.extensions
+            _require_config_dir(), controller.camera_system.extensions
         )
-        try:
+        with _http_errors():
             result = controller.reset_camera_feature(
                 index, payload.name, pfs_by_serial, payload.scope
             )
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         _broadcast_features_dirty(result)
         return result
 
     @app.post("/api/cameras/{index}/commands")
     def run_camera_command(index: int, payload: CameraCommandRequest):
-        try:
+        with _http_errors():
             result = controller.execute_camera_command(index, payload.name)
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         _broadcast_features_dirty(result)
         return result
 
     @app.put("/api/cameras/{index}/center")
     def put_camera_center(index: int, patch: CameraCenterPatch):
-        try:
+        with _http_errors():
             result = controller.set_camera_center(
                 index, patch.axis, patch.enabled, patch.scope
             )
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
         _broadcast_features_dirty(result)
         return result
 
@@ -1172,8 +1148,7 @@ def create_app(
 
     @app.post("/api/config/save")
     def save_config(req: SaveConfigRequest):
-        if not config_dir:
-            raise HTTPException(400, "No config directory is set for this session")
+        active = _require_config_dir()
         if not req.save_sensor and not req.save_display:
             raise HTTPException(422, "Nothing to save: enable sensor and/or display")
         # Refuse while recording: a full nodemap snapshot would contend with the
@@ -1181,7 +1156,6 @@ def create_app(
         if controller.recording_active:
             raise HTTPException(409, "Cannot save the config while recording")
 
-        active = Path(config_dir)
         try:
             pfs = controller.export_camera_params() if req.save_sensor else {}
             doc = (
