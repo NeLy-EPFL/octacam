@@ -596,20 +596,24 @@ class AsyncFrameWriter:
     def open(self, filename: str, fps: float, frame_size: tuple[int, int]) -> bool:
         """Open `filename` for writing. frame_size is (width, height)."""
         self.close()
-        try:
-            self._open_sink(str(filename), fps, frame_size)
-        except Exception as e:
-            log.error("Failed to open writer for %s: %s", filename, e)
-            return False
         self.failed = False
         self._accepted = 0
         self.frames_written = 0
         self.encode_ns_samples = []
         self.max_queue_depth = 0
-        self._queue = queue.Queue(maxsize=self._max_queue_size)
+        try:
+            self._open_sink(str(filename), fps, frame_size)
+            self._queue = queue.Queue(maxsize=self._max_queue_size)
+            self._thread = threading.Thread(target=self._writer_loop, daemon=True)
+            self._thread.start()
+        except Exception as e:
+            # close() skips a writer whose thread never started, so the sink
+            # (an ffmpeg child, a file) is released here or it leaks.
+            log.error("Failed to open writer for %s: %s", filename, e)
+            self._thread = self._queue = None
+            self._abort_sink()
+            return False
         self._running = True
-        self._thread = threading.Thread(target=self._writer_loop, daemon=True)
-        self._thread.start()
         return True
 
     def write(self, frame, fill_before: int = 0) -> bool:
@@ -681,6 +685,10 @@ class AsyncFrameWriter:
     def _close_sink(self) -> None:
         raise NotImplementedError
 
+    def _abort_sink(self) -> None:
+        """Release a sink that never received a frame."""
+        self._close_sink()
+
     def _on_sink_failure(self, exc: Exception) -> None:
         log.error("Writer failed (%s); subsequent frames will be dropped", exc)
 
@@ -733,24 +741,10 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             stderr=subprocess.PIPE,
             bufsize=0,
         )
-        # Reap the child if anything after Popen fails (e.g. thread exhaustion
-        # raising from .start()) — otherwise AsyncFrameWriter.open catches, returns
-        # False, and close() short-circuits on _thread is None, orphaning ffmpeg.
-        # BaseException so no post-Popen failure can leak the process/pipes.
-        try:
-            self._stderr_thread = threading.Thread(
-                target=self._drain_stderr, args=(self._proc,), daemon=True
-            )
-            self._stderr_thread.start()
-        except BaseException:
-            try:
-                self._proc.stdin.close()
-                self._proc.kill()
-                self._proc.wait()
-            finally:
-                self._proc = None
-                self._stderr_thread = None
-            raise
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, args=(self._proc,), daemon=True
+        )
+        self._stderr_thread.start()
 
     def _drain_stderr(self, proc):
         with proc.stderr:
@@ -770,6 +764,14 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             exc,
             ("\nffmpeg output:\n" + tail) if tail else "",
         )
+
+    def _abort_sink(self):
+        # Killed, not finalized: a graceful close would leave an empty video.
+        proc, self._proc = self._proc, None
+        if proc is not None:
+            proc.stdin.close()
+            proc.kill()
+            proc.wait()
 
     def _close_sink(self):
         proc = self._proc
