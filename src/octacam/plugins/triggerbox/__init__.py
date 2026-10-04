@@ -1498,11 +1498,10 @@ class TriggerboxPlugin(Plugin):
 
         Same fps + light spec the recording would use (so preview strobes exactly
         as the recording will), but with an indefinite duration (``duration_ms=0``
-        = run until cancel) since preview has no fixed length. Falls back to the
-        plugin's configured spec when the controller sends no slice."""
+        = run until cancel) since preview has no fixed length."""
         spec = self._spec_from_params(params)
         if spec is None:
-            spec = self.default_start_params(self._default_fps, 0.0)
+            return
         self._preview_armed = True
         self._arm_from_spec(spec, duration_ms=0, context="preview")
 

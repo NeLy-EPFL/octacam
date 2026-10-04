@@ -363,17 +363,21 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
     assert prev["lights"] == rec["lights"]
 
 
-def test_on_preview_start_without_slice_uses_configured_spec():
-    plugin, link = _plugin_with_fake(cameras=[{"pin": "D13", "pulse_us": 500}])
-    plugin.on_preview_start(None)  # controller sent no slice
-    arm = _last_arm(link)
-    assert arm["duration_ms"] == 0
-    assert arm["fps"] == plugin._default_fps
+def test_on_preview_start_without_slice_does_not_arm():
+    plugin, link = _plugin_with_fake()
+    plugin.on_preview_start(None)
+    plugin.on_preview_start({"flywheel": {}})
+    assert not link.snapshot()
+
+
+def _preview_params(plugin: TriggerboxPlugin) -> dict:
+    """What the controller passes on_preview_start: the headless start slices."""
+    return {"triggerbox": plugin.default_start_params(80.0, 10.0)}
 
 
 def test_on_preview_stop_cancels():
     plugin, link = _plugin_with_fake()
-    plugin.on_preview_start({"triggerbox": plugin.default_start_params(80.0, 10.0)})
+    plugin.on_preview_start(_preview_params(plugin))
     plugin.on_preview_stop()
     assert link.snapshot()[-1] == bytes([CANCEL_MAGIC])
 
@@ -415,7 +419,7 @@ def test_ws_spec_edit_rearms_a_running_managed_preview():
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
     )
-    plugin.on_preview_start(None)  # managed preview armed from the config spec
+    plugin.on_preview_start(_preview_params(plugin))  # managed preview, config spec
     before = len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC])
     plugin.on_ws_message(_spec_msg(50.0), 1)  # operator drags duty to 50%
     arms = [f for f in link.snapshot() if f and f[0] == ARM_MAGIC]
@@ -429,7 +433,7 @@ def test_ws_spec_edit_no_rearm_when_unchanged():
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
     )
-    plugin.on_preview_start(None)
+    plugin.on_preview_start(_preview_params(plugin))
     plugin.on_ws_message(_spec_msg(20.0), 1)  # first push adopts the spec (may re-arm)
     n = len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC])
     plugin.on_ws_message(_spec_msg(20.0), 1)  # identical spec (a redraw push) -> no-op
