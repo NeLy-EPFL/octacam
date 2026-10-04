@@ -26,6 +26,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import serial
 from serial.tools.list_ports import comports
@@ -61,7 +62,7 @@ _CH34X_VID = 0x1A86  # WCH CH340/CH341
 _CP210X_VID = 0x10C4  # Silicon Labs CP210x
 
 # Known official-Arduino boards by (vid, pid).
-_ARDUINO_BOARDS: dict[tuple[int, int], str] = {
+_ARDUINO_BOARDS: dict[tuple[int, int | None], str] = {
     (0x2341, 0x0042): "Arduino Mega 2560",
     (0x2341, 0x0010): "Arduino Mega 2560",
     (0x2341, 0x003F): "Arduino Mega ADK",
@@ -220,7 +221,7 @@ def probe_identity(
     # Ask for an exclusive open on POSIX so two probes (or an exclusive holder)
     # are correctly seen as busy; Windows ports are exclusive already and the
     # kwarg is unsupported there.
-    kwargs = {"exclusive": True} if os.name == "posix" else {}
+    kwargs: dict[str, Any] = {"exclusive": True} if os.name == "posix" else {}
     try:
         port = serial.Serial(device, baud, timeout=timeout, write_timeout=timeout, **kwargs)
     except Exception as e:
