@@ -1310,6 +1310,40 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log.messages
 
 
+# --- process: the progress bar (transcode, grid and transfer) ----------------
+
+
+def test_progress_bar_labels_a_grid_encode(tmp_path):
+    from octacam.cli import _FileProgressBar
+    from octacam.writer import TranscodeProgress
+
+    bar = _FileProgressBar(2)
+    on_progress = bar.file(2, tmp_path / "run1", "grid: ")
+    on_progress(TranscodeProgress(5, 10.0, 0.5, 1.0, total_frames=None, done=True))
+    (task,) = bar._progress.tasks
+    assert task.description == "[2/2] grid: run1"
+    assert task.total == 5 and task.finished
+
+
+def test_progress_bar_shows_one_task_per_file_copy_and_verify():
+    from octacam.cli import _FileProgressBar
+    from octacam.transfer import TransferProgress
+
+    bar = _FileProgressBar()
+    on_progress = bar.transfer_callback()
+    seen = []
+    for index, phase, done in [(1, "copy", 50), (1, "copy", 100), (1, "verify", 100), (2, "copy", 10)]:
+        on_progress(TransferProgress(index, 2, f"cam{index}.mp4", done, 100, 1.0, phase))
+        (task,) = bar._progress.tasks  # only the current file's task is kept
+        seen.append((task.description, task.completed, task.total))
+    assert seen == [
+        ("[1/2] copy: cam1.mp4", 50, 100),
+        ("[1/2] copy: cam1.mp4", 100, 100),
+        ("[1/2] verify: cam1.mp4", 100, 100),
+        ("[2/2] copy: cam2.mp4", 10, 100),
+    ]
+
+
 # --- config: the interactive first-run wizard -------------------------------
 
 

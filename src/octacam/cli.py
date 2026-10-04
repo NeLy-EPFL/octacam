@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from octacam.config import RecordConfig
     from octacam.controller import RecordingSettings
     from octacam.process_jobs import JobReporter
+    from octacam.transfer import TransferCallback
     from octacam.writer import ProgressCallback
 
 import typer
@@ -3701,17 +3702,14 @@ def _resolve_transcode_paths(
     return folders
 
 
-class _TranscodeProgressBar:
-    """An octacam-styled rich progress bar fed by writer progress callbacks.
+class _FileProgressBar:
+    """`process`'s progress bar on the stderr console, one rich task per file.
 
-    One bar walks the batch, each file labelled ``[i/N] name``. A fresh task is
-    started per file (the previous one removed) so a file with no known frame
-    total stays genuinely indeterminate — rich's reset/update treat ``total=None``
-    as "keep the current total", so reusing one task would leak a prior file's
-    total. It draws on the shared stderr console so octacam log lines (and the
-    stdout result paths) render cleanly above the live bar."""
+    Each file gets a fresh task: rich keeps a task's total when updated with
+    ``total=None``, so a reused task would give a file of unknown length the
+    previous file's total."""
 
-    def __init__(self, total_jobs: int):
+    def __init__(self, total_files: int = 0) -> None:
         from rich.progress import (
             BarColumn,
             Progress,
@@ -3721,7 +3719,7 @@ class _TranscodeProgressBar:
             TimeElapsedColumn,
         )
 
-        self._total_jobs = total_jobs
+        self._total_files = total_files
         self._progress = Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -3734,100 +3732,24 @@ class _TranscodeProgressBar:
         )
         self._task: TaskID | None = None
 
-    def __enter__(self):
+    def __enter__(self) -> "_FileProgressBar":
         self._progress.start()
         return self
 
     def __exit__(self, *exc) -> None:
         self._progress.stop()
 
-    def file(self, index: int, path: Path) -> "ProgressCallback":
-        """Start a fresh bar for one file and return its progress callback."""
-        from octacam.writer import TranscodeProgress
-
-        if self._task is not None:
-            self._progress.remove_task(self._task)  # keep only one bar visible
-        desc = f"[{index}/{self._total_jobs}] {path.name}"
-        task = self._progress.add_task(desc, total=None, stats="")
-        self._task = task
-
-        def on_progress(p: TranscodeProgress) -> None:
-            stats = [f"{p.frame} frames"]
-            if p.fps:
-                stats.append(f"{p.fps:.0f} fps")
-            if p.speed:
-                stats.append(f"{p.speed:.3g}x")
-            # On the final block, snap the bar to a clean 100%. The frame total
-            # is only a hint and may over- or undershoot the frames actually
-            # encoded (e.g. a recording with dropped frames), and a file with no
-            # known total has been drawing an indeterminate bar — so adopt the
-            # final frame count as the total whenever it would otherwise leave
-            # the bar shy of (or past) full, or mid indeterminate-pulse.
-            completed = p.frame
-            total = p.total_frames
-            if p.done:
-                total = max(p.frame, total or 0) or None
-                completed = p.frame if total is None else total
-            self._progress.update(
-                task,
-                total=total,
-                completed=completed,
-                stats="  ".join(stats),
-                # Paint the full bar now: rich's auto-refresh runs on a timer and
-                # may not tick before this task is removed (next file) or the
-                # batch stops (transient bar is wiped), leaving the last painted
-                # frame short of 100%. refresh() no-ops until the live is started.
-                refresh=p.done,
-            )
-
-        return on_progress
-
-
-class _GridProgressBar:
-    """Rich progress bar for grid video generation, driven by TranscodeProgress callbacks.
-
-    Mirrors ``_TranscodeProgressBar`` but labels each job as ``grid: <folder>``
-    to distinguish it from the transcode phase."""
-
-    def __init__(self, total_jobs: int):
-        from rich.progress import (
-            BarColumn,
-            Progress,
-            SpinnerColumn,
-            TaskProgressColumn,
-            TextColumn,
-            TimeElapsedColumn,
-        )
-
-        self._total_jobs = total_jobs
-        self._progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.fields[stats]}"),
-            TimeElapsedColumn(),
-            console=_stderr_console(),
-            transient=True,
-        )
-        self._task: TaskID | None = None
-
-    def __enter__(self):
-        self._progress.start()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._progress.stop()
-
-    def folder(self, index: int, path: Path) -> "ProgressCallback":
-        """Start a fresh bar for one grid encode and return its progress callback."""
-        from octacam.writer import TranscodeProgress
-
+    def _start(self, description: str, total: float | None) -> "TaskID":
         if self._task is not None:
             self._progress.remove_task(self._task)
-        desc = f"[{index}/{self._total_jobs}] grid: {path.name}"
-        task = self._progress.add_task(desc, total=None, stats="")
-        self._task = task
+        self._task = self._progress.add_task(description, total=total, stats="")
+        return self._task
+
+    def file(self, index: int, path: Path, label: str = "") -> "ProgressCallback":
+        """Start the bar for one ffmpeg encode and return its progress callback."""
+        from octacam.writer import TranscodeProgress
+
+        task = self._start(f"[{index}/{self._total_files}] {label}{path.name}", None)
 
         def on_progress(p: TranscodeProgress) -> None:
             stats = [f"{p.frame} frames"]
@@ -3835,6 +3757,8 @@ class _GridProgressBar:
                 stats.append(f"{p.fps:.0f} fps")
             if p.speed:
                 stats.append(f"{p.speed:.3g}x")
+            # The frame total is only a hint (dropped frames, or none at all): the
+            # final block adopts the frame count, so the bar ends on a clean 100%.
             completed = p.frame
             total = p.total_frames
             if p.done:
@@ -3845,75 +3769,37 @@ class _GridProgressBar:
                 total=total,
                 completed=completed,
                 stats="  ".join(stats),
+                # rich repaints on a timer that may not tick before the task is
+                # removed or the transient bar wiped, leaving it short of 100%.
                 refresh=p.done,
             )
 
         return on_progress
 
-
-class _TransferProgressBar:
-    """Rich progress bar for file transfers, driven by TransferCallback events.
-
-    Shows one file at a time with byte-level progress and transfer speed.
-    A new task is created each time the (file index, phase) changes, so the bar
-    cycles through each file's copy then its verify read-back without needing to
-    know the list upfront."""
-
-    def __init__(self) -> None:
-        from rich.progress import (
-            BarColumn,
-            Progress,
-            SpinnerColumn,
-            TaskProgressColumn,
-            TextColumn,
-            TimeElapsedColumn,
-        )
-
-        self._progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.fields[speed]}"),
-            TimeElapsedColumn(),
-            console=_stderr_console(),
-            transient=True,
-        )
-        self._task: TaskID | None = None
-        self._current_key: tuple[int, str] = (-1, "")
-
-    def __enter__(self):
-        self._progress.start()
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self._progress.stop()
-
-    def make_callback(self):
-        """Return a TransferCallback that updates this bar as files are copied."""
+    def transfer_callback(self) -> "TransferCallback":
+        """A transfer_folder callback: a fresh task for each file's copy and verify."""
         from octacam.transfer import TransferProgress
 
+        current: tuple[int, str] | None = None
+
         def on_progress(p: TransferProgress) -> None:
-            key = (p.file_index, p.phase)
-            if key != self._current_key:
-                if self._task is not None:
-                    self._progress.remove_task(self._task)
-                self._current_key = key
+            nonlocal current
+            if (p.file_index, p.phase) != current:
+                current = (p.file_index, p.phase)
                 verb = "verify" if p.phase == "verify" else "copy"
                 desc = f"[{p.file_index}/{p.file_count}] {verb}: {p.filename}"
-                self._task = self._progress.add_task(
-                    desc, total=p.file_size, speed="", completed=0
-                )
-            assert self._task is not None  # set on the first event for each key
-            speed_str = f"{p.speed_mbs:.1f} MB/s" if p.speed_mbs > 0 else ""
+                self._start(desc, p.file_size)
+            assert self._task is not None  # started above for the first event
+            speed = f"{p.speed_mbs:.1f} MB/s" if p.speed_mbs > 0 else ""
             self._progress.update(
-                self._task,
-                completed=p.bytes_done,
-                speed=speed_str,
-                refresh=p.done,
+                self._task, completed=p.bytes_done, stats=speed, refresh=p.done
             )
 
         return on_progress
+
+
+# tests/test_transcode.py imports the bar by this name.
+_TranscodeProgressBar = _FileProgressBar
 
 
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
@@ -4108,7 +3994,7 @@ def _grid_and_transfer(
         )
     if grid_targets:
         grid_bar = (
-            _GridProgressBar(len(grid_targets)) if (show_bar and not dry_run) else None
+            _FileProgressBar(len(grid_targets)) if (show_bar and not dry_run) else None
         )
         grid_skipped = grid_todo = 0
         if reporter is not None:
@@ -4175,7 +4061,7 @@ def _grid_and_transfer(
                         grid_todo += 1
                         built.append(out_path)
                         continue
-                    on_prog = grid_bar.folder(i, folder) if grid_bar else None
+                    on_prog = grid_bar.file(i, folder, "grid: ") if grid_bar else None
                     out = build_grid_video(
                         folder,
                         layout=layout,
@@ -4206,11 +4092,11 @@ def _grid_and_transfer(
     transfer_failed = 0
     if do_transfer:
         n_copied = n_skipped = 0
-        transfer_bar = _TransferProgressBar() if (show_bar and not dry_run) else None
+        transfer_bar = _FileProgressBar() if (show_bar and not dry_run) else None
         if reporter is not None:
             reporter.begin_phase("transfer", len(folder_outputs))
         with transfer_bar or contextlib.nullcontext():
-            transfer_cb = transfer_bar.make_callback() if transfer_bar else None
+            transfer_cb = transfer_bar.transfer_callback() if transfer_bar else None
             for i, (folder, outputs) in enumerate(folder_outputs.items(), 1):
                 if not dry_run:
                     _pause_gate(reporter, job_dir, unit="folder", ignore_capture=ignore_capture)
@@ -4702,7 +4588,7 @@ def process(
             if not jobs:
                 log.warning("No videos to transcode in: %s", ", ".join(map(str, folders)))
             else:
-                bar = _TranscodeProgressBar(len(jobs)) if show_bar else None
+                bar = _FileProgressBar(len(jobs)) if show_bar else None
                 if reporter is not None:
                     reporter.begin_phase("transcode", len(jobs))
                 with (
