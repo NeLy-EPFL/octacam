@@ -3394,25 +3394,25 @@ def benchmark(
             "They may already be in use by another octacam instance on this rig, "
             "or disconnected — only one process can open them at a time."
         )
-    if len(system) == 0:
-        log.warning("No cameras opened. Exiting.")
-        sys.exit(1)
+    try:  # the cameras are open: every exit closes them
+        if len(system) == 0:
+            log.warning("No cameras opened. Exiting.")
+            sys.exit(1)
 
-    names = {c.serial_number: c.name for c in config.cameras if c.name}
-    for camera in system:
-        camera.name = names.get(camera.serial_number, camera.name)
-    system.load_config(config_dir)
-    system.apply_display_config(config.cameras)
+        names = {c.serial_number: c.name for c in config.cameras if c.name}
+        for camera in system:
+            camera.name = names.get(camera.serial_number, camera.name)
+        system.load_config(config_dir)
+        system.apply_display_config(config.cameras)
 
-    log.info(
-        "Benchmarking %d camera(s) at %g fps (%s trigger, sink=%s)…",
-        len(system),
-        settings.fps,
-        settings.trigger_source,
-        sink,
-    )
+        log.info(
+            "Benchmarking %d camera(s) at %g fps (%s trigger, sink=%s)…",
+            len(system),
+            settings.fps,
+            settings.trigger_source,
+            sink,
+        )
 
-    try:
         if json_output:
             # JSON mode: no progress bar (keep stdout clean for the machine reader).
             report = diag.diagnose(

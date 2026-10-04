@@ -1906,3 +1906,32 @@ def test_record_closes_the_cameras_when_it_exits_before_recording(
     with pytest.raises((SystemExit, RuntimeError)):  # typer.Exit is a RuntimeError
         cli.record(rig, output=save_dir)
     assert len(closed) == 1
+
+
+@pytest.mark.parametrize(
+    ("serial", "failure"),
+    [("NOT-PRESENT", None), ("FAKE-0", "load_config"), ("FAKE-0", "apply_display_config")],
+    ids=["no-camera", "load", "display"],
+)
+def test_benchmark_closes_the_cameras_when_it_exits_before_measuring(
+    tmp_path, monkeypatch, serial, failure
+):
+    from octacam.cameras import CameraSystem
+
+    (tmp_path / "octacam_config.toml").write_text(
+        f'backend = "fake"\n[[cameras]]\nserial_number = "{serial}"\n'
+    )
+    closed = []
+    close = CameraSystem.close
+    monkeypatch.setattr(
+        CameraSystem, "close", lambda self: (closed.append(self), close(self))
+    )
+    if failure is not None:
+
+        def fail(*_a, **_k):
+            raise RuntimeError(failure)
+
+        monkeypatch.setattr(CameraSystem, failure, fail)
+    result = runner.invoke(app, ["--log-level", "error", "benchmark", str(tmp_path)])
+    assert result.exit_code != 0
+    assert len(closed) == 1
