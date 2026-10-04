@@ -527,9 +527,11 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
     def start_grab_record(self) -> bool:
         self._start_grabbing(pylon.GrabStrategy_OneByOne)
-        # A ready gate for the first software trigger. Camera.start_record does
-        # not stop the grab on failure, so a failed gate stops it here, or the
-        # next StartGrabbing finds the camera wedged.
+        # A ready gate for the first software trigger only: retrieve fires the
+        # next trigger once the previous one is answered or given up, so
+        # exposures never pile up in OneByOne's bounded queue.
+        # Camera.start_record does not stop the grab on failure, so a failed
+        # gate stops it here, or the next StartGrabbing finds the camera wedged.
         try:
             ready = self.raw.WaitForFrameTriggerReady(
                 TRIGGER_READY_TIMEOUT_MS, pylon.TimeoutHandling_Return
