@@ -41,7 +41,9 @@ from octacam.transform import (
 
 log = logging.getLogger("octacam")
 
-# Host wall-clock ns since 2001; a camera clock counts from its power-up.
+# time.time_ns() has exceeded this since 2001 and a camera clock (from
+# power-up) never will: tells host-clocked timestamps from hardware ones
+# when the summary does not say.
 _WALL_CLOCK_NS = 10**18
 
 
@@ -340,6 +342,9 @@ def _ended_early(summary: dict, cams: list[CameraCheck]) -> str | None:
     schema = summary.get("schema_version")
     if not (isinstance(schema, int) and schema >= 4) or not cams:
         return None
+    # A completed driven train pads every camera to its count (fill_to) and an
+    # external take runs to its duration, so even the fullest camera short of
+    # it means the take was stopped.
     expected = (summary.get("pulse_train") or {}).get("count")
     if expected is None:
         rate, duration = summary.get("fps_target"), summary.get("duration_s")
