@@ -225,17 +225,15 @@ class _ProgressPlan:
 # ---------------------------------------------------------------------------
 
 
-def _finite(value: float, ndigits: int = 1) -> float | None:
-    """Round a float, or return None if it is inf/nan.
+def _finite(value: float | None, ndigits: int = 1) -> float | None:
+    """Round a float, or return None if it is None, inf or nan.
 
     ``float('inf')`` (an empty stage's implied fps, or a missing ceiling) would
     serialize to a bare ``Infinity`` token — invalid JSON that breaks the browser's
     ``JSON.parse`` — so it is normalized to ``null`` for both the CLI ``--json``
     output and the GUI payload.
     """
-    import math
-
-    if not math.isfinite(value):
+    if value is None or not math.isfinite(value):
         return None
     return round(value, ndigits)
 
@@ -425,43 +423,21 @@ class DiagnosticReport:
             "bottleneck": self.bottleneck,
             "ceilings": self.ceilings.to_dict() if self.ceilings else None,
             "predicted_max_fps": _finite(self.predicted_max_fps),
-            "measured_max_fps": (
-                _finite(self.measured_max_fps)
-                if self.measured_max_fps is not None
-                else None
-            ),
+            "measured_max_fps": _finite(self.measured_max_fps),
             "max_confirmed": self.max_confirmed,
-            "freerun_max_fps": (
-                _finite(self.freerun_max_fps)
-                if self.freerun_max_fps is not None
-                else None
-            ),
-            "hardware_max_fps": (
-                _finite(self.hardware_max_fps)
-                if self.hardware_max_fps is not None
-                else None
-            ),
+            "freerun_max_fps": _finite(self.freerun_max_fps),
+            "hardware_max_fps": _finite(self.hardware_max_fps),
             "transfer_bound": self.transfer_bound,
             "throughput_mbps": {
                 s: _finite(v) for s, v in self.throughput_mbps.items()
             },
             "throughput_mbps_total": _finite(self.throughput_mbps_total),
             "freerun_trials": [t.to_dict() for t in self.freerun_trials],
-            "system_cpu_percent": (
-                round(self.system_cpu_percent, 1)
-                if self.system_cpu_percent is not None
-                else None
-            ),
-            "load_per_core": (
-                round(self.load_per_core, 2) if self.load_per_core is not None else None
-            ),
+            "system_cpu_percent": _finite(self.system_cpu_percent),
+            "load_per_core": _finite(self.load_per_core, 2),
             "recommendations": self.recommendations,
-            "jitter_p99_ms": (
-                round(self.jitter_p99_ms, 3) if self.jitter_p99_ms is not None else None
-            ),
-            "cpu_percent": (
-                round(self.cpu_percent, 1) if self.cpu_percent is not None else None
-            ),
+            "jitter_p99_ms": _finite(self.jitter_p99_ms, 3),
+            "cpu_percent": _finite(self.cpu_percent),
             "notes": self.notes,
         }
 
