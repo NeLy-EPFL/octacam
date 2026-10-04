@@ -242,7 +242,7 @@ def apply_config(backend, text: str) -> None:
     applied last (see :func:`_clear_roi_offsets`). A refused or absent node is
     logged and skipped; :data:`CONFIG_SKIP_NODES` are never applied.
     """
-    serial = getattr(backend, "serial_number", "?")
+    serial = backend.serial_number
     pairs = parse_config(text)
     if not pairs and any(
         ln.strip() and not ln.strip().startswith("#") for ln in text.splitlines()
@@ -285,7 +285,7 @@ def apply_config(backend, text: str) -> None:
 
 def dump_config(backend, model: str | None = None) -> str:
     """The camera's :data:`CONFIG_NODES` as TSV; unreadable nodes are omitted."""
-    serial = getattr(backend, "serial_number", None)
+    serial = backend.serial_number
     device = " ".join(filter(None, (model, f"({serial})" if serial else "")))
     lines: list[str] = list(_HEADER)
     if device:
