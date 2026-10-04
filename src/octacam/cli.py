@@ -108,8 +108,10 @@ def _raise_fd_limit() -> None:
 def _port_available(host: str, port: int) -> bool:
     """Return False if a server is already bound to ``host:port``.
 
-    SO_REUSEADDR mirrors uvicorn, so a socket lingering in TIME_WAIT (which
-    uvicorn could rebind) is not reported as in use; a listening server is."""
+    gui checks it before touching hardware: its init thread opens the cameras
+    and arms the plugins before uvicorn binds. SO_REUSEADDR mirrors uvicorn, so
+    a socket lingering in TIME_WAIT (which uvicorn could rebind) is not reported
+    as in use; a listening server is."""
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -778,7 +780,8 @@ class _CameraScan:
 
         key = (only_backend or "").strip().lower()
         self.only = key if key and key not in ("auto", "all") else None
-        # fake is synthetic: scanned only when named.
+        # The backends _doctor_backends reports on (fake, being synthetic, only
+        # when named): it calls get() for each, and a miss reads as a failed scan.
         display = [self.only] if self.only else [b for b in BACKENDS if b != "fake"]
         # select_backend imports the SDK here, on the calling thread. An
         # unavailable tier is dropped (_doctor_backends reports it).
@@ -3074,7 +3077,7 @@ def benchmark(
             settings.trigger_source,
             sink.value,
         )
-        # No progress bar under --json: stdout stays clean for the machine reader.
+        # No live bar for a machine-readable --json run.
         bar = None if json_output else _BenchmarkProgressBar()
         with bar or contextlib.nullcontext():
             report = diag.diagnose(
