@@ -41,22 +41,10 @@ export class ShutdownDialog {
       others > 0
         ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`
         : "";
-    // While recording, "& process" is meaningless (the server refuses a shutdown
-    // mid-trial), so keep the plain binary confirm as a speed-bump.
-    if (recordingActive) {
-      const ok = window.confirm(
-        "Shut down the octacam server on the rig? This releases all cameras " +
-          "and disconnects every client." +
-          extra
-      );
-      return Promise.resolve(ok ? "shutdown" : "cancel");
-    }
-    // Nothing recorded this session. This is the path that actually shuts the
-    // server down, and it is reached from a bare icon button sitting next to
-    // save-config — so it still confirms. (It previously returned "shutdown"
-    // immediately; the comment claiming that matched main was wrong, main ran an
-    // unconditional window.confirm here.)
-    if (!hasWork) {
+    // A plain confirm while recording (the server refuses the shutdown, so
+    // "& process" is moot) or with nothing to process: one click on an icon
+    // button must not shut the rig down.
+    if (recordingActive || !hasWork) {
       const ok = window.confirm(
         "Shut down the octacam server on the rig? This releases all cameras " +
           "and disconnects every client." +
