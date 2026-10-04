@@ -1,22 +1,7 @@
-"""Serial-port enumeration, classification, and helpers for octacam.
+"""Serial-port discovery, naming and USB recovery for the Arduino plugins.
 
-Arduino boards (Nano ESP32, Mega 2560, stepper controllers) are commonly used
-with octacam as hardware triggers and LED-strobe controllers, driven through the
-opt-in plugins (``triggerbox``, ``twophoton``, ``flywheel``). This module is the
-serial analogue of :mod:`octacam.cameras.registry`: it enumerates the connected
-serial ports, gives each a best-effort friendly board name from its USB VID/PID,
-and provides the small helpers the CLI (``octacam doctor``/``octacam config``),
-the plugins, and the web app share.
-
-Design notes:
-
-* ``comports`` is imported at module top so tests can monkeypatch
-  ``octacam.serial_ports.comports`` without touching pyserial internals.
-* Everything degrades gracefully: a raising ``comports()`` yields an empty
-  list plus a warning, never an exception — so
-  ``octacam doctor`` can never be taken down by serial enumeration.
-* Enumeration is **passive**: it never opens a port. Only :func:`probe_identity`
-  opens a port (to read a firmware banner), and it is strictly opt-in.
+Enumeration never opens a port and never raises, so ``octacam doctor`` is safe
+beside a live session; only :func:`probe_identity` opens one, on request.
 """
 
 from __future__ import annotations
@@ -38,21 +23,14 @@ DEFAULT_BAUD = 115200
 # with their banner line; shared by probe_identity and the plugins' links.
 IDENTIFY_MAGIC = b"?"
 
-# The bundled plugins that talk to a serial/Arduino device, and the firmware
-# banner each expects from an identify probe (used to flag a wrong board and, in
-# `octacam doctor`, an out-of-date firmware). triggerbox and twophoton answer the
-# `?` identify byte with a "<NAME> <ver> <build>" banner. flywheel's firmware also
-# reports a banner, but only to an 8-byte sentinel command (its protocol is
-# frameless), so the passive `?` probe won't elicit it — `octacam flash` reads it
-# through the plugin instead; flywheel is kept here only for the wrong-board
-# cross-check.
+# The serial plugins and their firmware banners. Only triggerbox and twophoton
+# answer the `?` probe; flywheel answers an 8-byte sentinel command instead (see
+# plugins.flywheel), so here it serves the wrong-board check only.
 SERIAL_PLUGINS = frozenset({"triggerbox", "twophoton", "flywheel"})
 EXPECTED_BANNER = {"triggerbox": "TRIGGERBOX", "twophoton": "2PHOTON", "flywheel": "FLYWHEEL"}
 
-# --- USB VID/PID classification --------------------------------------------
-# Names are driven primarily by VID, refined by PID. PIDs for the same board
-# vary by revision and by bootloader/DFU mode, so a name is best-effort — the
-# raw VID:PID is always shown alongside it so an operator can verify.
+# Board names are best-effort (a board's PID varies by revision and bootloader
+# mode), so the raw VID:PID is always shown beside them.
 
 _ARDUINO_VID = 0x2341  # Arduino LLC
 _ARDUINO_ORG_VID = 0x2A03  # Arduino.org / Genuino
@@ -61,7 +39,6 @@ _FTDI_VID = 0x0403
 _CH34X_VID = 0x1A86  # WCH CH340/CH341
 _CP210X_VID = 0x10C4  # Silicon Labs CP210x
 
-# Known official-Arduino boards by (vid, pid).
 _ARDUINO_BOARDS: dict[tuple[int, int | None], str] = {
     (0x2341, 0x0042): "Arduino Mega 2560",
     (0x2341, 0x0010): "Arduino Mega 2560",
@@ -71,9 +48,8 @@ _ARDUINO_BOARDS: dict[tuple[int, int | None], str] = {
     (0x2341, 0x0070): "Arduino Nano ESP32",  # Arduino-mode enumeration
 }
 
-# USB-serial bridge chips: in this domain almost always an Arduino clone or an
-# ESP dev board. likely_microcontroller is set, but not the stricter
-# likely_arduino (we can't be sure it's an Arduino vs. any other serial gadget).
+# USB-serial bridges: likely a microcontroller (a clone or an ESP board), but
+# not surely an Arduino.
 _BRIDGE_CHIPS: dict[int, str] = {
     _FTDI_VID: "FTDI serial (clone/adapter)",
     _CH34X_VID: "CH340/CH341 (clone)",
@@ -83,8 +59,7 @@ _BRIDGE_CHIPS: dict[int, str] = {
 
 @dataclass(frozen=True)
 class SerialPort:
-    """A connected serial port. Every USB field is optional — macOS and Windows
-    frequently return ``None`` for manufacturer/product/serial_number."""
+    """A connected serial port (macOS and Windows often leave the USB strings None)."""
 
     device: str
     description: str
@@ -100,7 +75,7 @@ class SerialPort:
 
     @property
     def vid_pid(self) -> str:
-        """``"2341:0070"`` style id, or ``"?:?"`` when the VID/PID is unknown."""
+        """``"2341:0070"``, with ``?`` for an unknown half."""
         v = f"{self.vid:04X}" if self.vid is not None else "?"
         p = f"{self.pid:04X}" if self.pid is not None else "?"
         return f"{v}:{p}"
@@ -108,10 +83,7 @@ class SerialPort:
 
 @dataclass(frozen=True)
 class SerialIdentity:
-    """Result of the opt-in firmware identity probe (:func:`probe_identity`).
-
-    ``busy`` is True when the port could not be opened because something already
-    holds it (a running plugin); the probe returns rather than raising."""
+    """What :func:`probe_identity` read; ``busy`` when another process holds the port."""
 
     device: str
     banner: str | None
@@ -125,11 +97,10 @@ def classify_port(
     description: str | None = None,
     manufacturer: str | None = None,
 ) -> tuple[str, bool, bool]:
-    """Map a USB VID/PID to ``(board_name, likely_microcontroller, likely_arduino)``.
+    """``(board_name, likely_microcontroller, likely_arduino)`` for a USB VID/PID.
 
-    Pure function (no I/O) so it is trivially unit-testable. Classification is
-    VID/PID-driven; the description/manufacturer strings are a last-resort
-    refinement only, because their text is unreliable across platforms."""
+    The description and manufacturer are a last resort: their text varies by
+    platform."""
     if vid is not None:
         if (vid, pid) in _ARDUINO_BOARDS:
             return _ARDUINO_BOARDS[(vid, pid)], True, True
@@ -138,14 +109,11 @@ def classify_port(
         if vid == _ARDUINO_ORG_VID:
             return "Arduino.org / Genuino", True, True
         if vid == _ESPRESSIF_VID:
-            # The Arduino Nano ESP32 enumerates here in native-USB/JTAG mode; a
-            # bare ESP32-S3 dev board does too. Treat as likely-Arduino in this
-            # domain but keep the name honest.
+            # The Nano ESP32 in native-USB mode, or a bare ESP32-S3 board.
             return "Espressif ESP32-S3 (e.g. Arduino Nano ESP32)", True, True
         if vid in _BRIDGE_CHIPS:
             return _BRIDGE_CHIPS[vid], True, False
 
-    # Last-resort text refinement for otherwise-unknown ports.
     text = f"{description or ''} {manufacturer or ''}".lower()
     if "arduino" in text:
         return "Arduino (unrecognized VID)", True, True
@@ -154,10 +122,8 @@ def classify_port(
 
 
 def list_serial_ports() -> list[SerialPort]:
-    """Enumerate connected serial ports, sorted by device path.
-
-    Never raises: a ``comports()`` that itself raises (seen on some
-    platforms) yields ``[]`` plus a warning."""
+    """The connected serial ports by device path; ``[]`` and a warning if
+    ``comports()`` raises (it does on some platforms)."""
     try:
         infos = list(comports())
     except Exception as e:
@@ -209,18 +175,12 @@ def probe_identity(
     magic: bytes = IDENTIFY_MAGIC,
     timeout: float = 1.0,
 ) -> SerialIdentity:
-    """Open *device* briefly, send the identify byte, read one line back.
+    """Send the identify byte to *device* and read one line back. Never raises.
 
-    Opt-in and mildly invasive (it writes one query byte), so callers gate it
-    behind an explicit flag. A port already held by a running plugin fails to
-    open and is reported as ``busy=True`` rather than raising.
-
-    Caveat: on Linux a plugin that opened the port without ``O_EXCL`` does not
-    block a second open, so a concurrently-held port may not be detected as busy
-    there; the ``--probe-serial`` caveat documents this."""
-    # Ask for an exclusive open on POSIX so two probes (or an exclusive holder)
-    # are correctly seen as busy; Windows ports are exclusive already and the
-    # kwarg is unsupported there.
+    It writes to the board, so callers make it opt-in. A port another process
+    holds reads as ``busy``, except on Linux when the holder opened it without
+    ``O_EXCL`` (the ``--probe-serial`` help says so)."""
+    # Windows ports are always exclusive and do not take the kwarg.
     kwargs: dict[str, Any] = {"exclusive": True} if os.name == "posix" else {}
     try:
         port = serial.Serial(device, baud, timeout=timeout, write_timeout=timeout, **kwargs)
@@ -245,16 +205,13 @@ def probe_identity(
             pass
 
 
-# USBDEVFS_RESET ioctl = _IO('U', 20): re-initialise a USB device's link from
-# the host without a physical unplug (the tty path is preserved).
+# USBDEVFS_RESET = _IO('U', 20)
 _USBDEVFS_RESET = (ord("U") << 8) | 20
 
 
 def _usb_device_dir(tty_device: str) -> str | None:
-    """The sysfs USB *device* dir backing a tty (has busnum/devnum), or None.
-
-    Walks up from ``/sys/class/tty/<name>/device`` (the USB *interface*) to the
-    parent USB device node. Linux-only; returns None for a non-USB tty."""
+    """The sysfs dir of the USB device behind a tty (it holds busnum/devnum), or
+    None for a non-USB tty. Linux only."""
     name = os.path.basename(os.path.realpath(tty_device))
     start = f"/sys/class/tty/{name}/device"
     if not os.path.exists(start):
@@ -273,20 +230,12 @@ def _usb_device_dir(tty_device: str) -> str | None:
 
 
 def reset_usb_device(device: str) -> tuple[bool, str]:
-    """Issue a host-side USB bus reset to the USB device backing *device*.
+    """Reset the USB device behind *device* from the host: ``(ok, message)``.
 
-    Some USB-CDC microcontrollers — notably the ESP32-S3 on the Arduino Nano
-    ESP32 — can *wedge*: the port stays enumerated but every write/control
-    transfer stalls with ``EPIPE``, so the board is unreachable (arm packets
-    never land; cameras then hang waiting for a trigger that never fires). A
-    ``USBDEVFS_RESET`` ioctl re-initialises the link and clears the stall without
-    a physical unplug; the tty path is preserved.
-
-    Returns ``(ok, message)``. It is a best-effort recovery: returns
-    ``(False, reason)`` — never raises — on non-Linux, when the backing USB node
-    can't be located, or when the usbfs node can't be opened (needs write access,
-    e.g. root or the ``plugdev`` group). **The caller must not hold the tty open.**
-    """
+    Clears a wedged USB-CDC board (the Nano ESP32 can stall every transfer with
+    EPIPE while staying enumerated) without an unplug; the tty path survives.
+    Never raises: ``(False, reason)`` off Linux, for a non-USB tty, or without
+    write access to the usbfs node. The caller must not hold the tty open."""
     if not sys.platform.startswith("linux"):
         return False, "USB bus reset is only implemented on Linux"
     try:
@@ -336,13 +285,11 @@ def wait_for_device(device: str, timeout: float = 3.0) -> bool:
 
 
 def resolve_device(configured: str | None) -> tuple[str | None, str]:
-    """Resolve a plugin's configured ``device`` to a concrete port.
+    """The port a plugin's configured ``device`` names: ``(device | None, reason)``.
 
-    Returns ``(device|None, reason)``. Precedence: an explicit concrete path is
-    returned unchanged (config always wins); ``"auto"`` / empty auto-selects the
-    single microcontroller-class port. On zero or multiple candidates it returns
-    ``(None, reason)`` — deliberately *not* guessing — so the caller surfaces a
-    clear error (auto-select only fires when unambiguous)."""
+    A concrete path is returned as is. ``"auto"`` (or empty) takes the one
+    microcontroller-class port, and with none or several returns None: it never
+    guesses."""
     text = (configured or "").strip()
     if text and text.lower() != "auto":
         return text, f"using configured device {text}"
@@ -364,11 +311,8 @@ def resolve_device(configured: str | None) -> tuple[str | None, str]:
 
 
 def format_candidates(ports: list[SerialPort], limit: int = 8) -> str:
-    """One-line human summary of detected ports, for error messages.
-
-    Shows only microcontroller-class ports (the plausible Arduino candidates); a
-    host's dozens of legacy ``/dev/ttyS*`` are summarized as a count so the
-    message stays useful."""
+    """The detected ports in one line for an error message: the
+    microcontroller-class ones, else a count of the generic ones."""
     mcus = [p for p in ports if p.likely_microcontroller]
     if mcus:
         items = [f"{p.device} ({p.board_name})" for p in mcus[:limit]]
@@ -383,11 +327,8 @@ def format_candidates(ports: list[SerialPort], limit: int = 8) -> str:
 
 
 def udev_rule_for(port: SerialPort, symlink: str = "arduino0") -> str:
-    """A udev rule line that pins *port* to a stable ``/dev/<symlink>`` path.
-
-    Keyed on the USB VID/PID and (when present) the board's serial number, so it
-    survives re-enumeration order changes — the stable-device-path approach the
-    plugin READMEs recommend."""
+    """A udev rule pinning *port* to ``/dev/<symlink>``, keyed on VID/PID and
+    serial number so it survives re-enumeration."""
     parts = ['SUBSYSTEM=="tty"']
     if port.vid is not None:
         parts.append(f'ATTRS{{idVendor}}=="{port.vid:04x}"')
@@ -400,12 +341,8 @@ def udev_rule_for(port: SerialPort, symlink: str = "arduino0") -> str:
 
 
 def explain_open_failure(device: str, exc: Exception) -> str:
-    """Turn a bare serial open error into an actionable message.
-
-    When *device* is not among the connected ports (the common "unplugged /
-    wrong path" case), append the detected candidates and how to fix it. When
-    the device *is* present (so the failure is permissions/busy/etc.), return the
-    plain error unembellished."""
+    """A serial open error, plus the detected ports and the fix when *device* is
+    not among them (unplugged, or the wrong path)."""
     base = f"failed to open {device}: {exc}"
     try:
         ports = list_serial_ports()
