@@ -512,7 +512,7 @@ def test_recording_settings_default_ffmpeg_params():
 
 @pytest.fixture
 def camera_system(tmp_path):
-    from octacam.camera import CameraSystem
+    from octacam.cameras import CameraSystem
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
@@ -532,7 +532,7 @@ def collect_states(controller):
 
 
 def test_deferred_startup_ready_attach_and_fail(camera_system):
-    from octacam.camera import CameraSystem
+    from octacam.cameras import CameraSystem
 
     # The GUI starts the controller against a hardware-free placeholder so the
     # web server can serve before the cameras open.

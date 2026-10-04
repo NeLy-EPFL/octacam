@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from octacam import config_writer
-from octacam.camera import CameraSystem
+from octacam.cameras import CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (

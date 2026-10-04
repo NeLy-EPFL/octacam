@@ -3,7 +3,8 @@
 
 import pytest
 
-from octacam.camera import CameraSystem, _normalize_pfs_triggers
+from octacam.cameras import CameraSystem
+from octacam.cameras.basler import _normalize_pfs_triggers
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 

@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
-from octacam.camera import CameraSystem
+from octacam.cameras import CameraSystem
 from octacam.config import OctacamConfig
 from octacam.controller import RecordingController, RecordingSettings
 from octacam.transform import RECORDING_INFO_DIRNAME
