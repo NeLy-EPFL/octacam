@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 
 import octacam.cameras.flir as flir
-from octacam.cameras._genicam_config import parse_config
+from octacam.cameras._genicam_config import (
+    MIN_STREAM_BUFFERS,
+    RECORD_STREAM_BUFFERS,
+    parse_config,
+)
 from octacam.cameras.base import BackendError
 
 SENSOR = 2048
@@ -373,7 +377,45 @@ def test_record_starts_although_its_mode_and_buffer_handling_are_refused(backend
     started = _count_starts(backend)
     assert backend.start_grab_record() is True
     assert started == [True] and backend.is_grabbing()
-    assert stream["StreamBufferCountManual"].value == flir.RECORD_STREAM_BUFFERS
+    assert stream["StreamBufferCountManual"].value == RECORD_STREAM_BUFFERS
+
+
+def _record_stream(backend):
+    stream = {
+        "StreamBufferHandlingMode": EnumNode("NewestOnly", ["NewestOnly", "OldestFirst"]),
+        "StreamBufferCountMode": EnumNode("Auto", ["Auto", "Manual"]),
+        "StreamBufferCountManual": IntNode(10, lambda: 1000),
+    }
+    backend._cam.GetTLStreamNodeMap = lambda: SimpleNamespace(GetNode=stream.get)
+    return stream["StreamBufferCountManual"]
+
+
+def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(backend, caplog):
+    """Two full-sensor GS3s need more usbfs memory at 128 buffers than the
+    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts."""
+    count = _record_stream(backend)
+
+    def begin():
+        if count.value > 32:
+            raise FakeSpinnakerException("Could not start acquisition. [-1001]")
+
+    backend._cam.BeginAcquisition = begin
+    assert backend.start_grab_record() is True
+    assert count.value == 32 and backend.is_grabbing()
+    retries = [r for r in caplog.records if "usbfs_memory_mb" in r.getMessage()]
+    assert [r.levelno for r in retries] == [logging.WARNING] * 2  # 128 -> 64 -> 32
+
+
+def test_a_record_start_refused_at_every_pool_size_fails(backend):
+    count = _record_stream(backend)
+
+    def refuse():
+        raise FakeSpinnakerException("Could not start acquisition. [-1001]")
+
+    backend._cam.BeginAcquisition = refuse
+    with pytest.raises(BackendError, match="Could not start acquisition"):
+        backend.start_grab_record()
+    assert count.value == MIN_STREAM_BUFFERS and not backend.is_grabbing()
 
 
 def test_preview_starts_without_a_stream_node_map(backend):

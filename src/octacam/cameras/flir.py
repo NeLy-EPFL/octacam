@@ -28,7 +28,12 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from octacam.cameras._genicam_config import GenICamTriggerConfig
+from octacam.cameras._genicam_config import (
+    MIN_STREAM_BUFFERS,
+    RECORD_STREAM_BUFFERS,
+    GenICamTriggerConfig,
+    fewer_stream_buffers,
+)
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     GEOMETRY_FEATURES,
@@ -58,10 +63,6 @@ STREAM_STATISTICS = (
     "StreamIncompleteFrameCount",
     "StreamDeliveredFrameCount",
 )
-# Stream buffers for a record grab (capped by StreamBufferCountMax): ~1 s of
-# frames at 125 fps against the SDK default of 9, so a grab thread stalled for a
-# GC pause or a disk hiccup delays frames instead of losing them.
-RECORD_STREAM_BUFFERS = 128
 # A camera on a saturated USB bus delivers incomplete images continuously, so
 # only a grab's first is logged, then its running total at most this often (a
 # preview's at debug: dropped frames of a live view). The count itself is exact.
@@ -605,16 +606,22 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             snodemap = self._cam.GetTLStreamNodeMap()
         except spin.SpinnakerException as e:
             log.debug("No stream node map on camera %s: %s", self._serial, e)
-        else:
+            snodemap = None
+        if snodemap is not None:
             _set_buffer_handling(spin, snodemap, buffer_mode, self._serial)
-            if buffers:
+        while True:
+            if buffers and snodemap is not None:
                 _set_stream_buffers(spin, snodemap, buffers, self._serial)
-        try:
-            self._cam.BeginAcquisition()
-        except spin.SpinnakerException as e:
-            # Name the camera (mirrors the Basler "insufficient resources" hint).
-            log.error("Failed to start streaming on camera %s: %s", self._serial, e)
-            raise BackendError(str(e)) from e
+            try:
+                self._cam.BeginAcquisition()
+                break
+            except spin.SpinnakerException as e:
+                if buffers and snodemap is not None and buffers > MIN_STREAM_BUFFERS:
+                    buffers = fewer_stream_buffers(buffers, self._serial, e)
+                    continue
+                # Name the camera (mirrors the Basler "insufficient resources" hint).
+                log.error("Failed to start streaming on camera %s: %s", self._serial, e)
+                raise BackendError(str(e)) from e
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
@@ -848,6 +855,10 @@ def teardown() -> None:
     Spinnaker reports cameras still in use.
     """
     global _system, _cam_list
+    # A failed start leaves its traceback in a reference cycle that holds the
+    # camera's node maps; uncollected, Clear() refuses, and the CameraList's
+    # destructor then aborts the process (std::terminate) at exit.
+    gc.collect()
     if _cam_list is not None:
         try:
             _cam_list.Clear()
@@ -855,10 +866,6 @@ def teardown() -> None:
             pass
         _cam_list = None
     if _system is not None:
-    # A failed start leaves its traceback in a reference cycle that holds the
-    # camera's node maps; uncollected, Clear() refuses, and the CameraList's
-    # destructor then aborts the process (std::terminate) at exit.
-    gc.collect()
         try:
             _system.ReleaseInstance()
         except Exception:

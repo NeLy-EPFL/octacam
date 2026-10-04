@@ -41,6 +41,30 @@ from octacam.cameras.base import BackendError, coerce_bool
 
 log = logging.getLogger("octacam")
 
+# Stream buffers for a FLIR record grab (capped by StreamBufferCountMax): ~1 s of
+# frames at 125 fps against the SDK default of 9, so a grab thread stalled for a
+# GC pause or a disk hiccup delays frames instead of losing them. The pool comes
+# out of the kernel's USB memory (usbcore.usbfs_memory_mb, shared by every
+# camera: two full-sensor GS3s need ~1.1 GB at 128), so a pool that cannot start
+# is halved, down to MIN_STREAM_BUFFERS, before the start fails.
+RECORD_STREAM_BUFFERS = 128
+MIN_STREAM_BUFFERS = 16
+
+
+def fewer_stream_buffers(buffers: int, serial: str, error: object) -> int:
+    """Half of a stream buffer pool the camera could not start acquisition with."""
+    log.warning(
+        "Camera %s could not start acquisition with %d stream buffers (%s); "
+        "retrying with %d. The pool shares the kernel's USB memory with the other "
+        "cameras: raise usbcore.usbfs_memory_mb to keep the full pool, which "
+        "absorbs longer host stalls.",
+        serial,
+        buffers,
+        error,
+        buffers // 2,
+    )
+    return buffers // 2
+
 # Nodes octacam controls itself; never written from a config file even if the
 # file lists them. DeviceLinkThroughputLimit is raised to the device max at
 # open() (writing the shipped default would undo that throughput win); PixelFormat

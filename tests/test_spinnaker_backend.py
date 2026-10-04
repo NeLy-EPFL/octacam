@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 import octacam.cameras.spinnaker_c as sc
-from octacam.cameras._genicam_config import parse_config
+from octacam.cameras._genicam_config import MIN_STREAM_BUFFERS, parse_config
 from octacam.cameras.base import BackendError, FeatureInfo, NodeInfo
 from octacam.cameras.spinnaker_c import SpinnakerBackend
 
@@ -788,3 +788,40 @@ def test_enumerate_empty_returns_nothing():
     assert sc.enumerate_spinnaker() == []
     # An empty enumeration tears the session down so a later run starts clean.
     assert sc._system is None and sc._cam_list is None
+
+
+def _record_pool(cam):
+    cam.stream_nodemap.StreamBufferCountMode = FakeEnum("Auto")
+    cam.stream_nodemap.StreamBufferCountManual = FakeNode(10, mn=1, mx=1000, inc=1)
+    return cam.stream_nodemap.StreamBufferCountManual
+
+
+def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(fake_facade, monkeypatch, caplog):
+    """Two full-sensor GS3s need more usbfs memory at 128 buffers than the
+    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts."""
+    backend, cam = _open_backend()
+    count = _record_pool(cam)
+
+    def begin(c):
+        if count.value > 32:
+            raise BackendError("Could not start acquisition. [-1001]")
+        c.streaming = True
+
+    monkeypatch.setattr(fake_facade, "begin_acquisition", begin)
+    assert backend.start_grab_record() is True
+    assert count.value == 32 and cam.streaming
+    retries = [r for r in caplog.records if "usbfs_memory_mb" in r.getMessage()]
+    assert len(retries) == 2  # 128 -> 64 -> 32
+
+
+def test_a_record_start_refused_at_every_pool_size_fails(fake_facade, monkeypatch):
+    backend, cam = _open_backend()
+    count = _record_pool(cam)
+
+    def refuse(c):
+        raise BackendError("Could not start acquisition. [-1001]")
+
+    monkeypatch.setattr(fake_facade, "begin_acquisition", refuse)
+    with pytest.raises(BackendError, match="Could not start acquisition"):
+        backend.start_grab_record()
+    assert count.value == MIN_STREAM_BUFFERS and not backend.is_grabbing()

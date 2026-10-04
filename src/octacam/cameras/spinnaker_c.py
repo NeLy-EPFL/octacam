@@ -49,8 +49,11 @@ from typing import Any
 import numpy as np
 
 from octacam.cameras._genicam_config import (
+    MIN_STREAM_BUFFERS,
+    RECORD_STREAM_BUFFERS,
     GenICamTriggerConfig,
     dump_config,
+    fewer_stream_buffers,
     normalize_trigger_source,
 )
 from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
@@ -117,7 +120,6 @@ STREAM_STATISTICS = (
     "StreamIncompleteFrameCount",
     "StreamDeliveredFrameCount",
 )
-RECORD_STREAM_BUFFERS = 128
 INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 # spinNodeType (SpinnakerGenApiDefsC.h) -> FeatureInfo widget kind, for the full
@@ -1210,14 +1212,23 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     self._serial,
                     e,
                 )
-            if buffers:
+        while True:
+            if buffers and self._stream_nodemap is not None:
                 self._set_stream_buffers(buffers)
-        try:
-            spin.begin_acquisition(self._cam)
-        except BackendError as e:
-            # Name the camera (mirrors the Basler "insufficient resources" hint).
-            log.error("Failed to start streaming on camera %s: %s", self._serial, e)
-            raise
+            try:
+                spin.begin_acquisition(self._cam)
+                break
+            except BackendError as e:
+                if (
+                    buffers
+                    and self._stream_nodemap is not None
+                    and buffers > MIN_STREAM_BUFFERS
+                ):
+                    buffers = fewer_stream_buffers(buffers, self._serial, e)
+                    continue
+                # Name the camera (mirrors the Basler "insufficient resources" hint).
+                log.error("Failed to start streaming on camera %s: %s", self._serial, e)
+                raise
         self._begin_grab()
 
     def start_grab_preview(self) -> None:
