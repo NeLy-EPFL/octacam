@@ -342,8 +342,6 @@ class FlywheelPlugin(Plugin):
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = SerialLink()
-        # Its port lock is shared with _open, so a flash and a reopen never
-        # fight over the port.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(fqbn),
             resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
@@ -378,7 +376,7 @@ class FlywheelPlugin(Plugin):
         """(Re)open the link and read the banner; the error message, or None.
 
         Never raises, so a missing board does not stop the GUI (reconnect
-        retries it). Holds the port lock (re-entrant: a flash's reopen runs this)."""
+        retries it)."""
         with self._fw.port_lock:
             self._firmware = None
             self._firmware_ok = True

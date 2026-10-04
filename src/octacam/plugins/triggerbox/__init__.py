@@ -728,8 +728,6 @@ class TriggerboxPlugin(Plugin):
             on_broken=self._on_link_broken,
             on_reject=self._on_arduino_reject,
         )
-        # Its port lock is shared with _open and _recover_usb, so a flash, a
-        # reopen and a USB reset never fight over the port.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(),
             resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
@@ -904,8 +902,7 @@ class TriggerboxPlugin(Plugin):
         self._open()
 
     def _open(self, *, allow_recovery: bool = True) -> str | None:
-        """(Re)open the link and read the banner; the error message, or None.
-        Holds the port lock (re-entrant: a flash's reopen runs this)."""
+        """(Re)open the link and read the banner; the error message, or None."""
         with self._fw.port_lock:
             self._firmware = None
             self._firmware_ok = True
