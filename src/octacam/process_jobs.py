@@ -611,38 +611,31 @@ def _is_finished(jd: Path) -> bool:
     return age >= _STALE_STARTING_AGE_S
 
 
-def clear_finished() -> tuple[int, int]:
-    """Remove every finished job directory now; return (removed, kept).
-
-    Like :func:`prune` but ignores the retention window — used by
-    ``octacam cache clear --all`` to drop finished job logs immediately. A live or
-    still-arming job (see :func:`_is_finished`) is never touched; ``kept`` counts
-    those left in place.
-    """
-    removed = kept = 0
+def _partition() -> tuple[list[Path], list[Path]]:
+    """(live, finished) job directories, judged by :func:`_is_finished`."""
+    live: list[Path] = []
+    finished: list[Path] = []
     for jd in _job_dirs():
-        if _is_finished(jd):
-            _cleanup_dir(jd)
-            removed += 1
-        else:
-            kept += 1
-    return removed, kept
+        (finished if _is_finished(jd) else live).append(jd)
+    return live, finished
+
+
+def clear_finished() -> tuple[int, int]:
+    """Remove every finished job directory regardless of age; return (removed, kept).
+
+    A live or still-arming job (see :func:`_is_finished`) is kept.
+    """
+    live, finished = _partition()
+    for jd in finished:
+        _cleanup_dir(jd)
+    return len(finished), len(live)
 
 
 def job_dir_counts() -> tuple[int, int]:
-    """(live, finished) job-directory counts on disk, without pruning.
-
-    Uses the same predicate as :func:`clear_finished`, so ``finished`` is exactly
-    what a ``cache clear --all`` would remove and ``live`` what it would keep (a
-    still-arming ``starting`` job counts as live).
-    """
-    live = finished = 0
-    for jd in _job_dirs():
-        if _is_finished(jd):
-            finished += 1
-        else:
-            live += 1
-    return live, finished
+    """(live, finished) job-directory counts: what :func:`clear_finished` would
+    keep and remove."""
+    live, finished = _partition()
+    return len(live), len(finished)
 
 
 # ---------------------------------------------------------------------------
