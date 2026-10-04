@@ -443,9 +443,9 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
     # ----------------------------------------------------------- triggering
 
+    # The trigger setup guards on is_open(), not raw.IsOpen(): close() sets raw to
+    # None, and a closed camera must no-op like the other backends.
     def enable_frame_trigger(self) -> None:
-        # is_open() (not raw.IsOpen()) so a closed camera no-ops cleanly instead of
-        # raising AttributeError when self.raw is None (matches the other backends).
         if not self.is_open():
             return
         self._clear_freerun_cap()  # drop any free-run preview cap before triggering
@@ -453,7 +453,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
         self.raw.TriggerMode.Value = "On"
 
     def set_trigger_source(self, use_software: bool) -> None:
-        if not self.raw.IsOpen():
+        if not self.is_open():
             return
         try:
             if use_software:

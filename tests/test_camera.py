@@ -261,3 +261,21 @@ def test_offset_editable_and_written_via_grab_cycle(previewing_system):
     assert cam._camera.IsGrabbing()
     off = cam.read_feature("OffsetX")
     assert abs(off["value"] - 16) <= (off["inc"] or 1)
+
+
+# ------------------------------------------------ a closed camera's triggers
+
+
+@pytest.mark.parametrize(
+    ("backend", "serials"), [("basler", EMULATED_SERIALS), ("fake", ["FAKE-0"])]
+)
+def test_trigger_setup_on_a_closed_camera_is_a_no_op(tmp_path, backend, serials):
+    # close() drops the device handle; a recording start racing a shutdown must
+    # find the trigger setup a no-op, not an AttributeError on that handle.
+    system = CameraSystem(serials, backend=backend)
+    assert len(system) == len(serials)
+    system.load_config(tmp_path)
+    system.close()
+    system.enable_frame_trigger()
+    system.set_trigger_source(True)
+    system.set_trigger_source(False)
