@@ -192,7 +192,6 @@ def resolve_sketch_dir(sketch_name: str) -> Path | None:
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidates.append(parent / "arduino" / sketch_name)
-    candidates.append(here.parent / "arduino" / sketch_name)
     for c in candidates:
         if (c / f"{sketch_name}.ino").is_file():
             return c
