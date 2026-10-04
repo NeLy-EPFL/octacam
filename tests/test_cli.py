@@ -430,6 +430,24 @@ def test_browser_skip_reason(monkeypatch):
         assert _browser_skip_reason(False) is not None
 
 
+def test_doctor_runtime_reports_why_the_browser_stays_closed(monkeypatch):
+    from octacam.cli import _doctor_runtime, _Report
+
+    monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
+    report = _Report()
+    _doctor_runtime(report, None)
+    ((_title, items),) = report.sections
+    reason = _browser_skip_reason(False)
+    assert ("info", f"the GUI won't auto-open a browser ({reason})") in items
+
+    for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    report = _Report()
+    _doctor_runtime(report, None)
+    assert not any("browser" in text for _status, text in report.sections[0][1])
+
+
 def test_launch_browser_prefers_os_opener_on_linux(monkeypatch):
     from octacam import cli
 

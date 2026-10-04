@@ -1800,15 +1800,9 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     # Report the GUI port only by exception — a free port is the unremarkable case.
     if not _port_available("127.0.0.1", 8765):
         report.add("warn", "GUI port 8765 is in use (launch gui with --port to change)")
-    if _in_ssh_session():
-        report.add(
-            "info",
-            "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel",
-        )
-    elif sys.platform.startswith("linux") and not (
-        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    ):
-        report.add("info", "no local display — the GUI won't auto-open a browser")
+    skip = _browser_skip_reason(no_browser=False)
+    if skip:
+        report.add("info", f"the GUI won't auto-open a browser ({skip})")
 
 
 def _render_doctor(report: _Report) -> None:
