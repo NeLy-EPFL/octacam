@@ -1550,7 +1550,7 @@ def _doctor_plugins(report: _Report, cfg) -> None:
     if cfg is None:
         return
     for pc in cfg.plugins:
-        name = plugins_mod._ALIASES.get(pc.name, pc.name)
+        name = plugins_mod.canonical_name(pc.name)
         info = by_name.get(name)
         if info is None:
             report.add("error", f"config enables unknown plugin {pc.name!r}")
@@ -1579,9 +1579,9 @@ def _configured_device(pc) -> tuple[str | None, bool]:
 
     Returns the device string the plugin would use (explicit ``device`` option
     or the plugin's ``DEFAULT_DEVICE``), and whether it is ``"auto"`` (dynamic)."""
-    from octacam import plugins as plugins_mod
+    from octacam.plugins import canonical_name
 
-    name = plugins_mod._ALIASES.get(pc.name, pc.name)
+    name = canonical_name(pc.name)
     raw = pc.options.get("device")
     if isinstance(raw, str) and raw.strip().lower() == "auto":
         return None, True
@@ -1631,8 +1631,8 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
     The serial analogue of :func:`_doctor_cameras_vs_config`: an "error" when a
     configured device is absent (drives a nonzero exit), an "info" for a detected
     board no plugin uses."""
-    from octacam import plugins as plugins_mod
     from octacam import serial_ports as sp
+    from octacam.plugins import canonical_name
 
     if cfg is None:
         return
@@ -1640,7 +1640,7 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
     used_real: set[str] = set()
     any_serial_plugin = False
     for pc in getattr(cfg, "plugins", []):
-        name = plugins_mod._ALIASES.get(pc.name, pc.name)
+        name = canonical_name(pc.name)
         if name not in sp.SERIAL_PLUGINS:
             continue
         any_serial_plugin = True
@@ -1711,13 +1711,13 @@ def _firmware_spec_for(name: str):
 def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
     """Read each microcontroller port's firmware identity (opt-in, invasive)."""
     from octacam import firmware as fw
-    from octacam import plugins as plugins_mod
     from octacam import serial_ports as sp
+    from octacam.plugins import canonical_name
 
     expected: dict[str, tuple[str, str]] = {}
     if cfg is not None:
         for pc in getattr(cfg, "plugins", []):
-            name = plugins_mod._ALIASES.get(pc.name, pc.name)
+            name = canonical_name(pc.name)
             banner = sp.EXPECTED_BANNER.get(name)
             device, is_auto = _configured_device(pc)
             if banner and device and not is_auto:
@@ -2762,7 +2762,7 @@ def _load_config_or_empty(config_dir: Path | None):
 
 def _flashable_plugins(plugins, only: str | None):
     """The plugins that support firmware provisioning, optionally filtered to one."""
-    from octacam import plugins as plugins_mod
+    from octacam.plugins import canonical_name
 
     out = [
         p
@@ -2770,10 +2770,8 @@ def _flashable_plugins(plugins, only: str | None):
         if hasattr(p, "flash_firmware") and hasattr(p, "firmware_provisioning")
     ]
     if only:
-        # build_plugins resolves legacy aliases (e.g. arduino->flywheel), so
-        # match on the canonical name the requested name resolves to.
-        canonical = plugins_mod._ALIASES.get(only, only)
-        out = [p for p in out if p.name == canonical]
+        # build_plugins loaded an alias (arduino) under its current name.
+        out = [p for p in out if p.name == canonical_name(only)]
     return out
 
 
