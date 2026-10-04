@@ -1743,7 +1743,15 @@ class RecordingController:
         """The most recent benchmark report (as a dict), or None if none has run."""
         return self._last_diagnostic
 
-    def _monitor_loop(self, *args) -> None:
+    def _monitor_loop(
+        self,
+        duration_s: float,
+        plugin_params: dict | None,
+        expected_started: int,
+        external_trigger: bool,
+        hooks_done: threading.Event,
+        hooks_timeout_s: float,
+    ) -> None:
         """Run the recording monitor, guaranteeing a terminal, non-active state.
 
         Wraps :meth:`_run_monitor_loop` so that ANY unexpected exception (which in
@@ -1751,7 +1759,14 @@ class RecordingController:
         and wedging the whole controller) still leaves it idle, the trigger plugin
         disarmed, and the teardown gate cleared."""
         try:
-            self._run_monitor_loop(*args)
+            self._run_monitor_loop(
+                duration_s,
+                plugin_params,
+                expected_started,
+                external_trigger,
+                hooks_done,
+                hooks_timeout_s,
+            )
         except Exception:
             log.exception("Recording monitor crashed; forcing idle")
             with contextlib.suppress(Exception):
@@ -1763,12 +1778,12 @@ class RecordingController:
 
     def _run_monitor_loop(
         self,
-        duration_s,
-        plugin_params,
-        expected_started,
-        external_trigger,
-        hooks_done,
-        hooks_timeout_s,
+        duration_s: float,
+        plugin_params: dict | None,
+        expected_started: int,
+        external_trigger: bool,
+        hooks_done: threading.Event,
+        hooks_timeout_s: float,
     ) -> None:
         # --- wait for the first frame from the cameras that started (Qt's
         # check_record_started_timer). Warn after 3 s. With the software
