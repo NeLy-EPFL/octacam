@@ -135,8 +135,10 @@ _LOCK_UNAVAILABLE = _NoLock()
 
 
 def _instance_lock_path(config_dir: Path) -> Path:
-    """Stable per-config-dir lock path under the system temp directory."""
-    key = hashlib.sha1(str(config_dir).encode()).hexdigest()[:16]
+    """Stable per-config-dir lock path under the system temp directory.
+
+    Keyed on the resolved path, so every spelling of one rig shares one lock."""
+    key = hashlib.sha1(str(config_dir.resolve()).encode()).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / f"octacam-{key}.lock"
 
 
@@ -1792,7 +1794,7 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     else:
         report.add("ok", "no transcode running on this machine")
     if config_dir is not None:
-        holder = _instance_lock_holder(config_dir.resolve())
+        holder = _instance_lock_holder(config_dir)
         if holder:
             report.add(
                 "warn",
@@ -2946,7 +2948,7 @@ def flash(
     if config_dir is not None:
         instance_lock = _acquire_instance_lock(config_dir)
         if instance_lock is None:
-            holder = _instance_lock_holder(config_dir.resolve())
+            holder = _instance_lock_holder(config_dir)
             who = f" (pid {holder})" if holder else ""
             console.print(
                 f"[red]Another octacam instance owns this rig{who}[/red] — its board "

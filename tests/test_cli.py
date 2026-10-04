@@ -1829,3 +1829,25 @@ def test_other_config_dir_commands_resolve_a_recording_folder(
     result = runner.invoke(app, ["--log-level", "error", *args])
     assert result.exit_code != 0
     assert seen == [rec / "octacam_recording"]
+
+
+# --- the rig instance lock is keyed on the resolved config dir ---------------
+
+
+def test_flash_refuses_a_rig_the_gui_holds_however_the_path_is_spelled(
+    tmp_path, monkeypatch
+):
+    # The GUI locks the resolved config dir. flash resets the board, so it must
+    # find that lock from a relative path too: the board may be mid-recording.
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    held = _acquire_instance_lock(rig.resolve())
+    assert held is not None and held is not _LOCK_UNAVAILABLE
+    monkeypatch.chdir(tmp_path)
+    try:
+        result = runner.invoke(app, ["flash", "rig"])
+    finally:
+        held.close()
+    assert result.exit_code == 2, result.output
+    assert "Another octacam instance owns this rig" in result.output
+    assert f"(pid {os.getpid()})" in result.output
