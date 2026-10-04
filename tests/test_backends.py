@@ -5,7 +5,6 @@ these assert the cascade *structure* and the missing-SDK → BackendUnavailable
 contract rather than any particular camera being present.
 """
 
-import contextlib
 import logging
 import os
 import subprocess
@@ -682,7 +681,9 @@ def test_real_pylon_loads_no_gentl_producer_and_exits_cleanly():
     assert result.stdout.strip().splitlines()[-1] == "clean"
 
 
-def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(monkeypatch):
+def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(
+    monkeypatch, caplog
+):
     # A camera whose SuperSpeed link fell back to USB 2.0 (CreateDevice raises)
     # is reported with a None handle — the sentinel that lets CameraSystem claim
     # the serial (so no lower cascade tier retries it) without opening it — while
@@ -692,21 +693,11 @@ def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(monkeypatc
     _patch_basler_factory(
         monkeypatch, ["40018619", "40018631", "40018632"], bad={"40018619"}
     )
-    # Capture on the octacam logger directly, not via caplog: another test (the
-    # CLI's _setup_logging) may leave propagate=False, emptying caplog's capture.
-    msgs: list[str] = []
-    handler = logging.Handler()
-    handler.emit = lambda record: msgs.append(record.getMessage())
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        out = enumerate_basler()
-    finally:
-        logger.removeHandler(handler)
+    out = enumerate_basler()
     by_serial = dict(out)
     assert by_serial["40018619"] is None  # present but unusable
     assert by_serial["40018631"] is not None and by_serial["40018632"] is not None
-    assert any("40018619" in m and "USB 2.0" in m for m in msgs)
+    assert any("40018619" in m and "USB 2.0" in m for m in caplog.messages)
 
 
 def test_enumerate_basler_all_uncreatable_have_none_handles(monkeypatch):
@@ -769,30 +760,7 @@ def test_single_backend_filters_declined_camera(monkeypatch):
     assert serials == ["SN2"]
 
 
-def _octacam_log_capture():
-    """Capture on the octacam logger directly, not via caplog.
-
-    Another test (the CLI's _setup_logging) may leave propagate=False, which
-    empties caplog's capture. Returns ``(msgs, restore)``; call ``restore()`` in a
-    finally. The logger level is forced to DEBUG for the duration — the CLI
-    normally leaves it at WARNING, which would drop the INFO progress lines these
-    tests assert on before they ever reach a handler."""
-    msgs: list[str] = []
-    handler = logging.Handler()
-    handler.emit = lambda record: msgs.append(record.getMessage())
-    logger = logging.getLogger("octacam")
-    previous = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-
-    def restore():
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
-
-    return msgs, restore
-
-
-def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch):
+def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch, caplog):
     # Regression: a camera whose link trains at full SuperSpeed but whose control
     # transfers time out kept pylon retrying its first register read for 271 s
     # inside one CreateDevice, stalling the whole rig's startup. Enumeration must
@@ -810,12 +778,9 @@ def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch):
         slow={"40018632"},
         slow_seconds=5.0,
     )
-    msgs, restore = _octacam_log_capture()
+    caplog.set_level(logging.DEBUG, logger="octacam")
     started = time.monotonic()
-    try:
-        out = enumerate_basler()
-    finally:
-        restore()
+    out = enumerate_basler()
     elapsed = time.monotonic() - started
 
     by_serial = dict(out)
@@ -823,9 +788,9 @@ def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch):
     assert by_serial["40018619"] is not None and by_serial["40018631"] is not None
     # Bounded by the deadline, not by the sick camera's 5 s.
     assert elapsed < 3.0, f"enumeration took {elapsed:.1f}s; deadline was 0.6s"
-    assert any("40018632" in m and "did not respond" in m for m in msgs)
+    assert any("40018632" in m and "did not respond" in m for m in caplog.messages)
     # The stall is no longer silent: the operator is told who we are waiting on.
-    assert any("Waiting up to" in m and "40018632" in m for m in msgs)
+    assert any("Waiting up to" in m and "40018632" in m for m in caplog.messages)
 
     # The abandoned worker is still inside pylon; when it finally hands over a
     # device nothing owns it, so it must be released rather than left for the GC
@@ -836,7 +801,7 @@ def test_enumerate_basler_skips_a_camera_that_never_responds(monkeypatch):
     assert factory.destroyed == ["40018632"]
 
 
-def test_enumerate_basler_is_quiet_when_every_camera_is_healthy(monkeypatch):
+def test_enumerate_basler_is_quiet_when_every_camera_is_healthy(monkeypatch, caplog):
     # The progress line is time-gated: a healthy rig finishes well inside the
     # interval and must say nothing, or every normal startup cries wolf. (The
     # first version announced as soon as *any* camera was still outstanding,
@@ -844,14 +809,11 @@ def test_enumerate_basler_is_quiet_when_every_camera_is_healthy(monkeypatch):
     from octacam.cameras.basler import enumerate_basler
 
     _patch_basler_factory(monkeypatch, ["40018619", "40018631", "40023151"], bad=())
-    msgs, restore = _octacam_log_capture()
-    try:
-        out = enumerate_basler()
-    finally:
-        restore()
+    caplog.set_level(logging.DEBUG, logger="octacam")
+    out = enumerate_basler()
     assert all(handle is not None for _serial, handle in out)
-    assert not any("Waiting up to" in m for m in msgs)
-    assert not any("did not respond" in m for m in msgs)
+    assert not any("Waiting up to" in m for m in caplog.messages)
+    assert not any("did not respond" in m for m in caplog.messages)
 
 
 def test_enumerate_basler_deduplicates_a_repeated_serial(monkeypatch):
@@ -883,23 +845,20 @@ def test_enumerate_basler_create_timeout_env_override_is_validated(monkeypatch):
     assert _create_device_timeout() == _CREATE_DEVICE_TIMEOUT_S
 
 
-def test_enumerate_basler_warn_missing_false_is_quiet(monkeypatch):
+def test_enumerate_basler_warn_missing_false_is_quiet(monkeypatch, caplog):
     # The cascade offers every tier the rig's whole serial list, so serials owned
     # by another backend must not be reported missing by this one.
     from octacam.cameras.basler import enumerate_basler
 
     _patch_basler_factory(monkeypatch, ["40018619"], bad=())
-    msgs, restore = _octacam_log_capture()
-    try:
-        quiet = enumerate_basler(["40018619", "17475185"], warn_missing=False)
-        assert not any("17475185" in m for m in msgs)
-        loud = enumerate_basler(["40018619", "17475185"])
-    finally:
-        restore()
+    caplog.set_level(logging.DEBUG, logger="octacam")
+    quiet = enumerate_basler(["40018619", "17475185"], warn_missing=False)
+    assert not any("17475185" in m for m in caplog.messages)
+    loud = enumerate_basler(["40018619", "17475185"])
     # Either way the absent serial is simply not returned.
     assert [s for s, _h in quiet] == ["40018619"]
     assert [s for s, _h in loud] == ["40018619"]
-    assert any("17475185" in m and "not found" in m for m in msgs)
+    assert any("17475185" in m and "not found" in m for m in caplog.messages)
 
 
 def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch):
@@ -1155,38 +1114,7 @@ def test_roi_reorder_is_a_no_op_for_dump_config_order():
     assert _roi_offsets_last(pairs) == pairs
 
 
-class _OctacamLogCapture(logging.Handler):
-    """Collect records straight off the "octacam" logger.
-
-    caplog attaches to the *root* logger, but octacam.cli sets
-    ``logger.propagate = False`` — so once anything in the session has configured
-    CLI logging, records never reach root and caplog silently sees nothing. The
-    repo's own tests capture at the octacam logger for this reason.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.messages: list[str] = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-@contextlib.contextmanager
-def _octacam_warnings():
-    handler = _OctacamLogCapture()
-    logger = logging.getLogger("octacam")
-    previous = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    try:
-        yield handler
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
-
-
-def test_rejected_geometry_write_is_reported_loudly():
+def test_rejected_geometry_write_is_reported_loudly(caplog):
     """A refused Width/Height must not vanish into a debug log.
 
     The applier is deliberately best-effort (an unknown node on another model is
@@ -1210,8 +1138,8 @@ def test_rejected_geometry_write_is_reported_loudly():
         def _set_enum(self, name, value):
             pass
 
-    with _octacam_warnings() as handler:
+    with caplog.at_level(logging.WARNING, logger="octacam"):
         apply_config(Backend(), "Width\t2048\nHeight\t2048\n")
     assert any(
-        "Height" in m and "geometry" in m for m in handler.messages
-    ), handler.messages
+        "Height" in m and "geometry" in m for m in caplog.messages
+    ), caplog.messages

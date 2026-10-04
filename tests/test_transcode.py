@@ -1,7 +1,6 @@
 """`octacam process`: writer dispatch + CLI folder/file/summary resolution."""
 
 import json
-import logging
 
 import numpy as np
 import pytest
@@ -586,33 +585,18 @@ def test_folder_display_form_recording_keeps_baked_orientation(tmp_path):
     assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # unchanged, not re-rotated
 
 
-class _ListHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path):
+def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path, caplog):
     from octacam.cli import _transcode_jobs
 
     _write_raw(tmp_path / "a.raw", _frame(16, 12))
     _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
-    # The CLI callback clears the octacam logger's handlers, so exercise the
+    # The CLI callback stops the octacam logger's propagation, so exercise the
     # resolver directly to capture its warning and inspect the jobs.
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = _transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["a.raw", "b.mkv"]
     # Without a summary the job carries no geometry (defaults apply).
     assert all(j.width is None and j.height is None for j in jobs)
-    assert any("recording_summary.json" in m for m in handler.messages)
+    assert any("recording_summary.json" in m for m in caplog.messages)
 
 
 def test_folder_without_summary_transcodes_encoded_to_mp4(tmp_path):
@@ -624,7 +608,7 @@ def test_folder_without_summary_transcodes_encoded_to_mp4(tmp_path):
     assert (tmp_path / "b.mp4").exists()
 
 
-def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
+def test_summary_skips_zero_frame_cameras_with_warning(tmp_path, caplog):
     from octacam.cli import _transcode_jobs
 
     # A real capture and a 0-frame (header-only) capture in the same folder.
@@ -637,16 +621,10 @@ def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
             {"file": "empty.mkv", "frames": 0},
         ],
     )
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = _transcode_jobs([tmp_path], recursive=False)
     # The frameless file is skipped; the real one is still queued.
     assert [j.input_path.name for j in jobs] == ["good.mkv"]
-    assert any("0 frames" in m for m in handler.messages)
+    assert any("0 frames" in m for m in caplog.messages)
 
 
 def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
@@ -660,22 +638,16 @@ def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
     assert not (tmp_path / "cam0.mp4").exists()
 
 
-def test_single_file_skips_zero_frame_capture_with_warning(tmp_path):
+def test_single_file_skips_zero_frame_capture_with_warning(tmp_path, caplog):
     from octacam.cli import _transcode_jobs
 
     # Naming a 0-frame capture's file directly must skip it (mirror the folder
     # scan) instead of feeding a header-only file to ffmpeg.
     (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)  # header-only stub
     _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = _transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
     assert jobs == []
-    assert any("0 frames" in m for m in handler.messages)
+    assert any("0 frames" in m for m in caplog.messages)
 
 
 def test_single_file_uses_summary_in_its_folder(tmp_path):
@@ -1003,12 +975,6 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
 # walk must never treat the subfolder as a folder of videos of its own.
 
 
-def _capture_logs():
-    handler = _ListHandler()
-    logging.getLogger("octacam").addHandler(handler)
-    return handler
-
-
 @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
 def test_folder_summary_drives_jobs_in_either_layout(tmp_path, nested):
     from octacam.cli import _transcode_jobs
@@ -1048,7 +1014,7 @@ def test_nested_summary_wins_over_an_older_flat_take(tmp_path):
     assert [j.input_path.name for j in jobs] == ["new.raw"]
 
 
-def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path):
+def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path, caplog):
     # A mixed tree: a flat (older) recording and a nested one. The nested one's
     # octacam_recording subfolder holds no videos; even a stray .mkv in it must
     # not be transcoded, nor warned about as a folder of loose files.
@@ -1063,13 +1029,10 @@ def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path):
     _summary(flat, [_camera_entry("cam.raw", frame)])
     _summary(nested, [_camera_entry("cam.raw", frame)], nested=True)
     _make_mkv(nested / RECORDING_INFO_DIRNAME / "stray.mkv", frame)
-    handler = _capture_logs()
-    try:
-        jobs = _transcode_jobs([tmp_path], recursive=True)
-    finally:
-        logging.getLogger("octacam").removeHandler(handler)
+    caplog.clear()
+    jobs = _transcode_jobs([tmp_path], recursive=True)
     assert sorted(j.input_path for j in jobs) == [flat / "cam.raw", nested / "cam.raw"]
-    assert not any(RECORDING_INFO_DIRNAME in m for m in handler.messages)
+    assert not any(RECORDING_INFO_DIRNAME in m for m in caplog.messages)
 
 
 def test_naming_the_info_dir_means_the_recording_around_it(tmp_path):

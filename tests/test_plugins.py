@@ -181,12 +181,10 @@ def test_plugin_summary_falls_back_to_factory_module_doc():
     assert "NoneType" not in summary
 
 
-def test_builtin_import_failure_reports_distinct_warning(monkeypatch):
+def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
     # A known builtin whose module fails to import must NOT be reported as an
     # "Unknown plugin" (which is indistinguishable from a typo); it gets a
     # builtin-specific warning instead.
-    import logging
-
     import octacam.plugins as plugins_mod
 
     # Simulate the module never importing: neutralize the import and drop any
@@ -194,22 +192,13 @@ def test_builtin_import_failure_reports_distinct_warning(monkeypatch):
     monkeypatch.setattr(plugins_mod, "_import_builtin", lambda name: None)
     monkeypatch.delitem(plugins_mod._REGISTRY, "flywheel", raising=False)
 
-    # Capture on the octacam logger directly rather than via caplog: another test
-    # (e.g. the CLI's _setup_logging) may leave propagate=False, which would empty
-    # caplog's root-level capture.
-    msgs: list[str] = []
-    handler = logging.Handler()
-    handler.emit = lambda record: msgs.append(record.getMessage())
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
-        manager = build_plugins(config)
-    finally:
-        logger.removeHandler(handler)
+    config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
+    manager = build_plugins(config)
     assert manager.plugins == []
-    assert any("Builtin plugin 'flywheel' failed to import" in m for m in msgs)
-    assert not any("Unknown plugin" in m for m in msgs)
+    assert any(
+        "Builtin plugin 'flywheel' failed to import" in m for m in caplog.messages
+    )
+    assert not any("Unknown plugin" in m for m in caplog.messages)
 
 
 class _FakeLink:

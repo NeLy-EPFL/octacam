@@ -385,23 +385,11 @@ def test_from_payload_clamps_duration_to_uint32():
     assert len(p.to_bytes()) == 7  # still packs cleanly
 
 
-def test_on_recording_start_warns_and_skips_when_link_closed():
-    import logging
-
-    # Attach directly to the octacam logger rather than via caplog: another test
-    # may leave propagate=False, which would empty caplog's root-level capture.
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        plugin, link = _plugin_with_fake(is_open=False)
-        plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
-    finally:
-        logger.removeHandler(handler)
+def test_on_recording_start_warns_and_skips_when_link_closed(caplog):
+    plugin, link = _plugin_with_fake(is_open=False)
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
     assert link.snapshot() == []  # nothing armed
-    assert any("is not open" in r.getMessage() for r in records)  # warning emitted
+    assert any("is not open" in m for m in caplog.messages)  # warning emitted
 
 
 def test_on_recording_stop_aborted_resets_state_and_broadcasts():
@@ -422,54 +410,34 @@ def test_on_recording_stop_aborted_resets_state_and_broadcasts():
     assert link.snapshot() == [bytes([CANCEL_MAGIC])]
 
 
-def _capture_octacam_logs():
-    """Attach a handler to the octacam logger; returns (records, detach)."""
-    import logging
-
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    return records, lambda: logger.removeHandler(handler)
-
-
-def test_on_recording_start_warns_when_no_arm_ack():
+def test_on_recording_start_warns_when_no_arm_ack(caplog):
     # With no reader to send 'A', the bounded ack wait elapses and warns rather
     # than letting a silently-dropped arm leave the cameras hanging.
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin._ack_timeout_s = 0.05
-        plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
-    finally:
-        detach()
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 0.05
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
     assert link.snapshot()  # the arm packet was still sent
-    assert any("no arm acknowledgement" in r.getMessage() for r in records)
+    assert any("no arm acknowledgement" in m for m in caplog.messages)
 
 
-def test_on_recording_start_no_warning_when_ack_arrives():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin._ack_timeout_s = 1.0
+def test_on_recording_start_no_warning_when_ack_arrives(caplog):
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 1.0
 
-        def ack():
-            # Deliver the firmware 'A' as soon as the arm packet is written.
-            for _ in range(500):
-                if link.snapshot():
-                    plugin._on_arduino_status("A")
-                    return
-                time.sleep(0.001)
+    def ack():
+        # Deliver the firmware 'A' as soon as the arm packet is written.
+        for _ in range(500):
+            if link.snapshot():
+                plugin._on_arduino_status("A")
+                return
+            time.sleep(0.001)
 
-        t = threading.Thread(target=ack)
-        t.start()
-        plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
-        t.join(timeout=2.0)
-    finally:
-        detach()
+    t = threading.Thread(target=ack)
+    t.start()
+    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    t.join(timeout=2.0)
     assert plugin._armed_event.is_set()
-    assert not any("no arm acknowledgement" in r.getMessage() for r in records)
+    assert not any("no arm acknowledgement" in m for m in caplog.messages)
 
 
 def test_link_broken_broadcasts_not_ready():

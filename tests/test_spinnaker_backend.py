@@ -633,28 +633,6 @@ def test_retrieve_skips_incomplete_image_but_releases_it():
     assert image.released  # incomplete frames are still released
 
 
-class _Records(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record):
-        self.records.append(record)
-
-
-@pytest.fixture
-def octacam_log():
-    """Every record the octacam logger emits, debug included."""
-    handler = _Records()
-    logger = logging.getLogger("octacam")
-    level = logger.level
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(handler)
-    yield handler.records
-    logger.removeHandler(handler)
-    logger.setLevel(level)
-
-
 def _incomplete_logs(records):
     return [(r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()]
 
@@ -669,38 +647,41 @@ def _incomplete_grab(record):
     return backend, lambda: backend.retrieve_freerun(100, lambda: True)
 
 
-def test_incomplete_images_are_counted_but_logged_once_per_grab(monkeypatch, octacam_log):
+def test_incomplete_images_are_counted_but_logged_once_per_grab(monkeypatch, caplog):
     # A saturated bus delivers incomplete images continuously: every one is
     # counted, but a record grab logs only its first until the report interval.
+    caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
     backend, fetch = _incomplete_grab(record=True)
     assert all(fetch() is None for _ in range(250))
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 250
-    logs = _incomplete_logs(octacam_log)
+    logs = _incomplete_logs(caplog.records)
     assert len(logs) == 1 and logs[0][0] == logging.WARNING
     backend.stop_grab()
     backend.start_grab_record()  # a new grab logs its own first one again
     assert fetch() is None
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 251
-    assert len(_incomplete_logs(octacam_log)) == 2
+    assert len(_incomplete_logs(caplog.records)) == 2
 
 
-def test_incomplete_images_in_a_preview_log_at_debug(monkeypatch, octacam_log):
+def test_incomplete_images_in_a_preview_log_at_debug(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
     backend, fetch = _incomplete_grab(record=False)
     for _ in range(5):
         fetch()
-    logs = _incomplete_logs(octacam_log)
+    logs = _incomplete_logs(caplog.records)
     assert logs and all(level == logging.DEBUG for level, _ in logs)
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 5
 
 
-def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, octacam_log):
+def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
     _backend, fetch = _incomplete_grab(record=True)
     for _ in range(3):
         fetch()
-    messages = [m for _, m in _incomplete_logs(octacam_log)]
+    messages = [m for _, m in _incomplete_logs(caplog.records)]
     assert "delivered an incomplete image" in messages[0]
     assert "2 incomplete images discarded in this grab (1 since" in messages[1]
     assert "3 incomplete images discarded in this grab (1 since" in messages[2]

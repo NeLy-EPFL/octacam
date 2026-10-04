@@ -464,35 +464,15 @@ def test_process_help_lists_cache_selectors():
     assert "recording|session" in result.output
 
 
-class _MsgHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-def _capture_octacam_logs(level=logging.INFO):
-    handler = _MsgHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    logger.setLevel(level)
-    return logger, handler
-
-
-def test_warn_if_transcoding_logs_only_when_active():
+def test_warn_if_transcoding_logs_only_when_active(caplog):
     from octacam import cli, session_cache
 
-    logger, handler = _capture_octacam_logs(logging.WARNING)
-    try:
-        cli._warn_if_transcoding()  # nothing running -> silent
-        assert not handler.messages
-        with session_cache.mark_transcode_active("3 file(s)"):
-            cli._warn_if_transcoding()
-    finally:
-        logger.removeHandler(handler)
-    blob = "\n".join(handler.messages)
+    caplog.set_level(logging.WARNING, logger="octacam")
+    cli._warn_if_transcoding()  # nothing running -> silent
+    assert not caplog.messages
+    with session_cache.mark_transcode_active("3 file(s)"):
+        cli._warn_if_transcoding()
+    blob = "\n".join(caplog.messages)
     assert "transcod" in blob
     # The warning must describe what _pause_gate actually does. It used to say a
     # foreground `octacam process` does *not* auto-pause, which was the opposite
@@ -502,29 +482,23 @@ def test_warn_if_transcoding_logs_only_when_active():
     assert "--ignore-capture" in blob  # the documented way out
 
 
-def test_print_transcode_hints_lists_session_and_all(tmp_path):
+def test_print_transcode_hints_lists_session_and_all(tmp_path, caplog):
     from octacam import cli, session_cache
 
     rec = tmp_path / "rec" / "001"
     rec.mkdir(parents=True)
     session_cache.record_recording(rec, "sessZ", "gui")
 
-    logger, handler = _capture_octacam_logs(logging.INFO)
-    try:
-        cli._print_transcode_hints("sessZ")
-    finally:
-        logger.removeHandler(handler)
-    blob = "\n".join(handler.messages)
+    caplog.set_level(logging.INFO, logger="octacam")
+    cli._print_transcode_hints("sessZ")
+    blob = "\n".join(caplog.messages)
     # Two ready-to-run selectors: the last session and every cached session.
     assert "--last session" in blob and "--all" in blob
 
     # A session that recorded nothing prints no hint.
-    logger, handler = _capture_octacam_logs(logging.INFO)
-    try:
-        cli._print_transcode_hints("sessNONE")
-    finally:
-        logger.removeHandler(handler)
-    assert not handler.messages
+    caplog.clear()
+    cli._print_transcode_hints("sessNONE")
+    assert not caplog.messages
 
 
 def test_resolve_enabled():
@@ -1033,8 +1007,8 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
 
     assert result.exit_code == 0, result.output
     assert calls == {"transcode": 1, "grid": 1}
-    assert any("left over from an earlier recording" in m for m in process_log)
-    assert any("older than the videos it composites" in m for m in process_log)
+    assert any("left over from an earlier recording" in m for m in process_log.messages)
+    assert any("older than the videos it composites" in m for m in process_log.messages)
 
 
 def test_process_dry_run_lists_leftover_outputs_as_work(
@@ -1051,9 +1025,9 @@ def test_process_dry_run_lists_leftover_outputs_as_work(
     assert result.exit_code == 0, result.output
     # The leftovers are work to redo, not work already done — and the grid is
     # listed as waiting for the video that will be re-transcoded.
-    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
-    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
-    assert any("waits for: camera_LF.mp4" in m for m in process_log)
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log.messages
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log.messages
+    assert any("waits for: camera_LF.mp4" in m for m in process_log.messages)
 
 
 def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
@@ -1147,22 +1121,14 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def process_log(monkeypatch):
-    """The plain messages the octacam logger emits during a CLI invocation.
+def process_log(monkeypatch, caplog):
+    """caplog at INFO for a CLI invocation.
 
-    The CLI callback swaps the logger's handlers for a rich one that wraps lines
-    to the terminal width, so a plain list handler stands in for it."""
-    handler = _MsgHandler()
-    logger = logging.getLogger("octacam")
-
-    def setup_logging(level):
-        logger.handlers.clear()
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-
-    monkeypatch.setattr("octacam.cli._setup_logging", setup_logging)
-    yield handler.messages
-    logger.removeHandler(handler)
+    The CLI callback would install a rich handler that wraps lines to the
+    terminal width and stops propagation, so it is left out."""
+    monkeypatch.setattr("octacam.cli._setup_logging", lambda level: None)
+    caplog.set_level(logging.INFO, logger="octacam")
+    return caplog
 
 
 def _forbid(monkeypatch, *targets):
@@ -1204,15 +1170,19 @@ def test_process_dry_run_plans_every_step_without_running_any(
     assert not dest_root.exists()
     source = folder / "camera_LF.mkv"
     dest = dest_root / folder.name
-    assert f"[dry-run] transcode: {source} → camera_LF.mp4" in process_log
-    assert f"[dry-run] would delete source: {source}" in process_log
+    assert f"[dry-run] transcode: {source} → camera_LF.mp4" in process_log.messages
+    assert f"[dry-run] would delete source: {source}" in process_log.messages
     assert any(
-        m.startswith(f"[dry-run] grid: {folder / 'grid.mp4'}") for m in process_log
+        m.startswith(f"[dry-run] grid: {folder / 'grid.mp4'}")
+        for m in process_log.messages
     )
     for name in ("camera_LF.mp4", "grid.mp4"):
-        assert f"[dry-run] transfer: {folder / name} → {dest / name}" in process_log
-    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
-    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+        assert (
+            f"[dry-run] transfer: {folder / name} → {dest / name}"
+            in process_log.messages
+        )
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log.messages
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log.messages
 
 
 def test_process_dry_run_previews_a_grid_whose_inputs_exist(
@@ -1236,8 +1206,8 @@ def test_process_dry_run_previews_a_grid_whose_inputs_exist(
 
     assert result.exit_code == 0, result.output
     assert dry_runs == [True]
-    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
-    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log.messages
+    assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log.messages
 
 
 def test_process_dry_run_never_waits_on_a_live_capture(
@@ -1261,7 +1231,7 @@ def test_process_dry_run_never_waits_on_a_live_capture(
     result = runner.invoke(app, ["process", str(folder), "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log
+    assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log.messages
 
 
 def test_process_dry_run_lists_no_work_for_a_finished_recording(
@@ -1281,11 +1251,15 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
 
     assert result.exit_code == 0, result.output
     steps = ("transcode:", "would delete", "grid:", "transfer:")
-    assert not [m for m in process_log if m.startswith(tuple(f"[dry-run] {s}" for s in steps))]
-    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log
-    assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log
+    assert not [
+        m
+        for m in process_log.messages
+        if m.startswith(tuple(f"[dry-run] {s}" for s in steps))
+    ]
+    assert "[dry-run] Transcode: 0 to transcode, 1 already done" in process_log.messages
+    assert "[dry-run] Grid: 0 to build, 1 already exist" in process_log.messages
     # The mp4, the grid, the summary and the config snapshot.
-    assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log
+    assert "[dry-run] Transfer: 0 to copy, 4 already up to date" in process_log.messages
 
 
 # --- config: the interactive first-run wizard -------------------------------

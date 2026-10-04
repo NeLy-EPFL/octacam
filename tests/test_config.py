@@ -17,33 +17,6 @@ from octacam.writer import DEFAULT_FFMPEG_PARAMS
 REPO_ROOT = Path(__file__).parent.parent
 
 
-class _LogCapture(logging.Handler):
-    """Capture ``octacam`` logger messages directly.
-
-    Attached to the logger itself rather than via ``caplog`` because another
-    test may leave ``propagate = False``, which would empty caplog's capture.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.messages: list[str] = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-    def __enter__(self):
-        logger = logging.getLogger("octacam")
-        self._prev = logger.level
-        logger.addHandler(self)
-        logger.setLevel(logging.WARNING)
-        return self
-
-    def __exit__(self, *exc):
-        logger = logging.getLogger("octacam")
-        logger.removeHandler(self)
-        logger.setLevel(self._prev)
-
-
 def test_missing_file_returns_defaults(tmp_path):
     config = parse_config(tmp_path / "nope.toml")
     assert config.cameras == []
@@ -301,7 +274,7 @@ def test_transfer_checksum_parsed(tmp_path):
     assert load_config_dir(tmp_path).transfer.checksum is False
 
 
-def test_visualization_layout_unknown_camera_warns(tmp_path):
+def test_visualization_layout_unknown_camera_warns(tmp_path, caplog):
     # A layout cell naming a camera that isn't declared must be reported, not
     # silently rendered black.
     (tmp_path / "octacam_config.toml").write_text(
@@ -309,19 +282,19 @@ def test_visualization_layout_unknown_camera_warns(tmp_path):
         '[[cameras]]\nserial_number = "b"\nname = "camera_RF"\n'
         '[[visualization]]\nlayout = [["camera_LF", "camera_TYPO"]]\n'
     )
-    with _LogCapture() as cap:
+    with caplog.at_level(logging.WARNING, logger="octacam"):
         load_config_dir(tmp_path)
-    assert any("camera_TYPO" in m for m in cap.messages)
+    assert any("camera_TYPO" in m for m in caplog.messages)
 
 
-def test_visualization_layout_known_cameras_no_unknown_warning(tmp_path):
+def test_visualization_layout_known_cameras_no_unknown_warning(tmp_path, caplog):
     (tmp_path / "octacam_config.toml").write_text(
         '[[cameras]]\nserial_number = "a"\nname = "camera_LF"\n'
         '[[visualization]]\nlayout = [["camera_LF", ""]]\n'
     )
-    with _LogCapture() as cap:
+    with caplog.at_level(logging.WARNING, logger="octacam"):
         load_config_dir(tmp_path)
-    assert not any("unknown camera" in m for m in cap.messages)
+    assert not any("unknown camera" in m for m in caplog.messages)
 
 
 # --- a config that does not parse at all ------------------------------------ #

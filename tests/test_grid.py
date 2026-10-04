@@ -65,47 +65,30 @@ def _gray_mp4_sized(folder, name, w, h, value):
     return out
 
 
-class _ListHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-def _dry_run_cmd(folder, layout, pix_fmt):
+def _dry_run_cmd(caplog, folder, layout, pix_fmt):
     """Return the joined ffmpeg command build_grid_video would run."""
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    prev_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    try:
+    with caplog.at_level(logging.INFO, logger="octacam"):
         build_grid_video(folder, layout=layout, pix_fmt=pix_fmt, dry_run=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(prev_level)
-    cmd = next((m for m in handler.messages if "[dry-run] grid:" in m), None)
-    assert cmd is not None, handler.messages
+    cmd = next((m for m in caplog.messages if "[dry-run] grid:" in m), None)
+    assert cmd is not None, caplog.messages
     return cmd
 
 
-def test_grid_yuv420p_forces_full_range(tmp_path):
+def test_grid_yuv420p_forces_full_range(tmp_path, caplog):
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     # Output stream is tagged full range, and the in-graph gray→yuv conversion
     # is pinned to full range so the luma is never squeezed into 16-235.
     assert "-color_range pc" in cmd
     assert "out_range=full" in cmd
 
 
-def test_grid_gray_adds_no_range_flags(tmp_path):
+def test_grid_gray_adds_no_range_flags(tmp_path, caplog):
     # gray (4:0:0) is already full range — no -color_range / out_range churn.
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "gray")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "gray")
     assert "-color_range" not in cmd
     assert "out_range" not in cmd
 
@@ -255,12 +238,12 @@ def test_fps_value_handles_degenerate_zero_denominator():
     assert _fps_value("30") == 30.0  # bare numerator fallback preserved
 
 
-def test_grid_treats_unprobeable_file_as_black_cell(tmp_path):
+def test_grid_treats_unprobeable_file_as_black_cell(tmp_path, caplog):
     # A present-but-unprobeable mp4 must become a black cell, not abort the whole
     # grid, and the reference geometry/fps comes from the first file that probes.
     _gray_mp4(tmp_path, "a")
     (tmp_path / "b.mp4").write_bytes(b"not a real video")  # present but unprobeable
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     # b is fed as a lavfi black source at the reference size, not as -i b.mp4.
     assert "b.mp4" not in cmd
     assert f"color=black:size={W}x{H}" in cmd
@@ -333,7 +316,7 @@ def test_auto_layout_shapes():
 # transfer.
 
 
-def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch):
+def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch, caplog):
     from octacam import grid as grid_mod
 
     def _no_ffprobe():
@@ -341,24 +324,14 @@ def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch):
 
     monkeypatch.setattr("octacam.writer.find_ffprobe", _no_ffprobe)
     _gray_mp4(tmp_path, "a")
-    # A direct handler, not caplog: another test (the CLI's _setup_logging) may
-    # leave propagate=False on the octacam logger, which empties caplog.
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    prev_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.ERROR)
-    try:
+    with caplog.at_level(logging.ERROR, logger="octacam"):
         out = grid_mod.build_grid_video(tmp_path, layout=[["a", ""]], dry_run=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(prev_level)
     assert out is None  # skipped, not raised
     # ...and the operator is told the real reason, not "no probeable mp4 files".
-    assert any("ffprobe" in m for m in handler.messages), handler.messages
+    assert any("ffprobe" in m for m in caplog.messages), caplog.messages
 
 
-def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch):
+def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch, caplog):
     # A per-file OSError (e.g. the probe binary vanishing mid-run) must degrade
     # that one cell to black, not abort the grid.
     from octacam import grid as grid_mod
@@ -373,7 +346,7 @@ def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch):
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
     monkeypatch.setattr(grid_mod, "_probe_video", flaky)
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     assert "b.mp4" not in cmd
     assert f"color=black:size={W}x{H}" in cmd
 

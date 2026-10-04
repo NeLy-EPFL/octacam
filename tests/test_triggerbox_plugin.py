@@ -319,17 +319,13 @@ def test_auto_duty_reads_trigger_delay_zero_when_unavailable():
     assert _last_arm(link)["lights"][0][3] == 1000  # delay treated as 0
 
 
-def test_auto_duty_without_controller_falls_back_to_manual():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake(
-            lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto", "duty_percent": 30}]
-        )
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    finally:
-        detach()
+def test_auto_duty_without_controller_falls_back_to_manual(caplog):
+    plugin, link = _plugin_with_fake(
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto", "duty_percent": 30}]
+    )
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert _last_arm(link)["lights"][0][3] == round(0.30 * PERIOD_80)
-    assert any("no camera exposure could be read" in r.getMessage() for r in records)
+    assert any("no camera exposure could be read" in m for m in caplog.messages)
 
 
 # ===========================================================================
@@ -674,15 +670,6 @@ def test_snapshot_options_all_lights_off_reloads_as_off():
 # ===========================================================================
 
 
-def _capture_octacam_logs():
-    records: list[logging.LogRecord] = []
-    handler = logging.Handler()
-    handler.emit = records.append
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    return records, lambda: logger.removeHandler(handler)
-
-
 def test_arm_and_wait_classifies_outcomes():
     plugin, link = _plugin_with_fake()
     plugin._ack_timeout_s = 0.0
@@ -711,24 +698,20 @@ def test_arm_and_wait_classifies_outcomes():
     t.join(timeout=2.0)
 
 
-def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch):
+def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     import octacam.serial_ports as sp
 
     calls: list[str] = []
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1])
-    records, detach = _capture_octacam_logs()
     bc = _Broadcasts()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin.set_broadcast(bc)
-        plugin._ack_timeout_s = 0.03  # nothing acks
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    finally:
-        detach()
+    plugin, link = _plugin_with_fake()
+    plugin.set_broadcast(bc)
+    plugin._ack_timeout_s = 0.03  # nothing acks
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert calls == [DEVICE]  # a USB-reset recovery was attempted
     assert link.opens >= 1 and link.closes >= 1  # link was cycled
     assert len(link.snapshot()) == 2  # armed, then re-armed after the reset
-    assert any("did not arm" in r.getMessage() for r in records)
+    assert any("did not arm" in m for m in caplog.messages)
     assert bc.last_error() and "did not arm" in bc.last_error()
 
 
@@ -855,50 +838,42 @@ def test_arm_and_wait_serialized_by_arm_lock():
     plugin._arm_lock.release()
 
 
-def test_on_recording_start_no_warning_when_ack_arrives():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin._ack_timeout_s = 1.0
+def test_on_recording_start_no_warning_when_ack_arrives(caplog):
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 1.0
 
-        def ack():
-            for _ in range(500):
-                if link.snapshot():
-                    plugin._on_arduino_status("R")
-                    return
-                time.sleep(0.001)
+    def ack():
+        for _ in range(500):
+            if link.snapshot():
+                plugin._on_arduino_status("R")
+                return
+            time.sleep(0.001)
 
-        t = threading.Thread(target=ack)
-        t.start()
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-        t.join(timeout=2.0)
-    finally:
-        detach()
+    t = threading.Thread(target=ack)
+    t.start()
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    t.join(timeout=2.0)
     assert plugin._armed_event.is_set()
     assert plugin._last_error is None  # a clean ack reports no failure
-    assert not any(r.levelno >= logging.ERROR for r in records)
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
-def test_on_recording_start_logs_firmware_reject():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        plugin._ack_timeout_s = 1.0
+def test_on_recording_start_logs_firmware_reject(caplog):
+    plugin, link = _plugin_with_fake()
+    plugin._ack_timeout_s = 1.0
 
-        def reject():
-            for _ in range(500):
-                if link.snapshot():
-                    plugin._on_arduino_reject("p")  # unknown pin id
-                    return
-                time.sleep(0.001)
+    def reject():
+        for _ in range(500):
+            if link.snapshot():
+                plugin._on_arduino_reject("p")  # unknown pin id
+                return
+            time.sleep(0.001)
 
-        t = threading.Thread(target=reject)
-        t.start()
-        plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-        t.join(timeout=2.0)
-    finally:
-        detach()
-    assert any("REJECTED" in r.getMessage() and "unknown pin" in r.getMessage() for r in records)
+    t = threading.Thread(target=reject)
+    t.start()
+    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    t.join(timeout=2.0)
+    assert any("REJECTED" in m and "unknown pin" in m for m in caplog.messages)
 
 
 # ===========================================================================
@@ -1120,31 +1095,23 @@ def test_verify_identity_accepts_triggerbox_v2():
     assert plugin._firmware == "TRIGGERBOX 2" and plugin._firmware_ok is True
 
 
-def test_verify_identity_refuses_foreign_board():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        link.banner = "OTHERBOARD 1"
-        plugin._verify_identity()
-    finally:
-        detach()
+def test_verify_identity_refuses_foreign_board(caplog):
+    plugin, link = _plugin_with_fake()
+    link.banner = "OTHERBOARD 1"
+    plugin._verify_identity()
     assert plugin._firmware_ok is False
-    assert any("reflash to TRIGGERBOX" in r.getMessage() for r in records)
+    assert any("reflash to TRIGGERBOX" in m for m in caplog.messages)
 
 
-def test_verify_identity_warns_on_version_mismatch():
-    records, detach = _capture_octacam_logs()
-    try:
-        plugin, link = _plugin_with_fake()
-        link.banner = "TRIGGERBOX 1"
-        plugin._verify_identity()
-    finally:
-        detach()
+def test_verify_identity_warns_on_version_mismatch(caplog):
+    plugin, link = _plugin_with_fake()
+    link.banner = "TRIGGERBOX 1"
+    plugin._verify_identity()
     # A v1 board can't parse a v2 arm packet, so arming is disabled and a reflash
     # is offered (better than arming and getting a guaranteed protocol reject).
     assert plugin._firmware_ok is False
     assert plugin.firmware_provisioning()["state"] == "wrong_version"
-    assert any("reflash" in r.getMessage() for r in records)
+    assert any("reflash" in m for m in caplog.messages)
 
 
 def test_verify_identity_proceeds_without_banner():
@@ -1589,25 +1556,18 @@ def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
     assert _fw_strobe_done(period_us(fps), arm["lights"][0], count, arm["duration_ms"]), arm
 
 
-def test_arm_warns_when_the_train_cannot_end_cleanly():
-    logger = logging.getLogger("octacam")
-    level = logger.level
-    logger.setLevel(logging.INFO)
-    records, detach = _capture_octacam_logs()
-    try:
-        # 1000 fps: no millisecond end separates the last pulse from the next
-        # frame edge; 450 fps: one does, a pulse later; 95 % duty: the last strobe
-        # cannot finish first.
-        for fps, duty in ((1000, 20), (450, 20), (80, 95)):
-            plugin, _link = _plugin_with_fake(
-                cameras=[{"pin": "D13", "pulse_us": 500}],
-                lights=[{"channel": 1, "mode": "strobe", "duty_percent": duty}],
-            )
-            plugin.on_recording_start({"triggerbox": {"fps": fps, "duration_ms": 10_000}})
-    finally:
-        detach()
-        logger.setLevel(level)
-    messages = [(r.levelno, r.getMessage()) for r in records]
+def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
+    caplog.set_level(logging.INFO, logger="octacam")
+    # 1000 fps: no millisecond end separates the last pulse from the next
+    # frame edge; 450 fps: one does, a pulse later; 95 % duty: the last strobe
+    # cannot finish first.
+    for fps, duty in ((1000, 20), (450, 20), (80, 95)):
+        plugin, _link = _plugin_with_fake(
+            cameras=[{"pin": "D13", "pulse_us": 500}],
+            lights=[{"channel": 1, "mode": "strobe", "duty_percent": duty}],
+        )
+        plugin.on_recording_start({"triggerbox": {"fps": fps, "duration_ms": 10_000}})
+    messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert any(
         level == logging.WARNING and "at 1000 fps" in m and "cannot end the train" in m
         for level, m in messages
