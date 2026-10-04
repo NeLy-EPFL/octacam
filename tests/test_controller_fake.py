@@ -508,9 +508,9 @@ def test_fake_recording_notes_folder_in_session_cache(fake_system, tmp_path):
     assert session_cache.session_folders("sess-test") == [save_dir.resolve()]
 
 
-def test_fake_recording_without_session_id_skips_cache(fake_system, tmp_path):
-    # No session id (the default for a directly-built controller) -> the cache
-    # is untouched, so unit tests never write to the user cache dir.
+def test_fake_recording_without_session_id_gets_its_own_session(fake_system, tmp_path):
+    # A controller given no session id makes its own: its recordings are still
+    # noted, as one session.
     from octacam import session_cache
 
     save_dir = tmp_path / "rec" / "001"
@@ -518,7 +518,7 @@ def test_fake_recording_without_session_id_skips_cache(fake_system, tmp_path):
     controller = RecordingController(fake_system, settings, auto_preview=False)
     assert controller.start_recording().ok
     controller.join(timeout=20)
-    assert session_cache.last_folder() is None
+    assert session_cache.session_folders() == [save_dir.resolve()]
 
 
 def test_fake_external_trigger_waits_indefinitely(fake_system, tmp_path, monkeypatch):

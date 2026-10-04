@@ -31,7 +31,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from octacam import config_writer
+from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
@@ -633,11 +633,9 @@ class RecordingController:
         # recording folder (so `octacam process` needs no --config later). None
         # skips the snapshot (e.g. unit tests constructing a controller directly).
         self._config_dir = Path(config_dir) if config_dir is not None else None
-        # When set, each finished recording's folder is noted in the session
-        # cache (octacam.session_cache) under this id so `octacam process
-        # --last/--last session/--all` can find it later. None disables the cache
-        # (e.g. in unit tests that construct a controller directly).
-        self._session_id = session_id
+        # Each finished recording's folder is noted in the session cache under
+        # this id, so `octacam process --last session` finds the whole batch.
+        self._session_id = session_id or session_cache.new_session_id()
         self._record_kind = record_kind
         # How many recordings this session has finished — surfaced in snapshot()
         # so the GUI can offer "shut down & process" only when there is work.
@@ -2401,22 +2399,11 @@ class RecordingController:
             log.exception("Failed to write frame timestamps to %s", path)
 
     def _note_in_session_cache(self) -> None:
-        """Record this recording's folder in the session cache for `transcode`.
-
-        Lets `octacam process --last/--last session/--all` rediscover it later.
-        No-ops without a session id (direct controller construction in tests);
-        best-effort, so a cache failure never disturbs recording teardown. Runs
-        before save_dir is incremented, so it captures the just-written folder.
-        """
-        # Count every finished recording (even without a session id) so the GUI's
-        # "shut down & process" offer reflects real work made this run.
+        """Note the just-written folder in the session cache, for `octacam process
+        --last/--all`; runs before save_dir is incremented. Best-effort."""
         self._recordings_made += 1
-        if not self._session_id:
-            return
         folder = Path(self._settings.save_dir)
         try:
-            from octacam import session_cache
-
             session_cache.record_recording(folder, self._session_id, self._record_kind)
         except Exception:
             log.exception("Failed to note %s in the recording cache", folder)
