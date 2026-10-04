@@ -1287,13 +1287,12 @@ def test_build_reads_auto_flash_option():
 def test_trigger_train_describes_the_exact_train():
     plugin, _link = _plugin_with_fake()
     assert plugin.trigger_train({"triggerbox": {"fps": 125, "duration_ms": 900_000}}) == {
-        "fps": 125,
         "period_ns": 8_000_000,
         "count": 112_500,
     }
     # 90 fps: the board's integer period, and round(fps * duration) pulses.
     train = plugin.trigger_train({"triggerbox": {"fps": 90, "duration_ms": 10_000}})
-    assert train == {"fps": 90, "period_ns": 11_111_000, "count": 900}
+    assert train == {"period_ns": 11_111_000, "count": 900}
     assert plugin.trigger_train(None) is None
 
 

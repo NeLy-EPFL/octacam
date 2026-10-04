@@ -1373,7 +1373,7 @@ class TriggerboxPlugin(Plugin):
         fps = self._spec_fps(spec)
         cameras = [c.record() for c in self._cameras_from_spec(spec)[:_MAX_CAM]]
         plan = plan_train(fps, pulse_count(fps, self._spec_duration_ms(spec)), cameras)
-        return {"fps": fps, "period_ns": period_us(fps) * 1000, "count": plan.count}
+        return {"period_ns": period_us(fps) * 1000, "count": plan.count}
 
     def _report_train_plan(
         self, fps: int, wanted: int, plan: TrainPlan, arm: ArmSpec
