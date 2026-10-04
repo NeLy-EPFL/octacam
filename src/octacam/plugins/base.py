@@ -1,17 +1,9 @@
-"""Plugin contract for octacam.
+"""The plugin contract and the manager that fans hooks out to the plugins.
 
-A plugin is any object implementing (a subset of) the ``OctacamPlugin``
-Protocol. Hooks are called synchronously and must be thread-safe and fast.
-``on_first_frame`` and ``on_recording_stop`` fire from the controller's monitor
-thread; ``on_recording_start`` fires on the caller's thread (the web executor or
-the CLI thread) just after a recording starts, off the controller lock.
-``on_first_frame`` in particular runs at the t0 of the recording countdown, so
-it must not block.
-
-Plugins are bundled in-repo under ``octacam.plugins.<name>`` and registered via
-the ``@register`` decorator (see :mod:`octacam.plugins`). They are opt-in: the
-default launch loads none. A user enables them through the ``[[plugins]]``
-section of ``octacam_config.toml`` or the ``--plugin`` CLI flag.
+Hooks run synchronously and must be thread-safe. ``on_first_frame`` and
+``on_recording_stop`` run on the controller's monitor thread, ``on_first_frame``
+at the countdown's t0, so it must not block. The start and preview hooks run on
+the caller's thread, off the controller lock.
 """
 
 from __future__ import annotations
@@ -29,94 +21,67 @@ log = logging.getLogger("octacam")
 
 @runtime_checkable
 class OctacamPlugin(Protocol):
-    """Structural contract for an octacam plugin.
-
-    Implementations typically subclass :class:`Plugin` (which supplies no-op
-    defaults) and override only the hooks they need.
-    """
+    """Structural contract for a plugin; :class:`Plugin` gives each hook a no-op."""
 
     name: str
 
-    # ---- process lifecycle (octacam gui/record startup & shutdown) ----
+    # ---- process lifecycle ----
     def setup(self) -> None: ...
     def teardown(self) -> None: ...
     def is_ready(self) -> bool: ...
     def status(self) -> dict: ...
 
     # ---- recording lifecycle ----
-    # on_first_frame/on_recording_stop run on the controller monitor thread;
-    # on_recording_start runs on the caller's thread just after start.
-    # params is this plugin's slice of the recording-start request, keyed by
-    # plugin name (e.g. {"flywheel": {...}}).
+    # params is the start request's {plugin name: slice} dict.
     def on_recording_start(self, params: dict | None) -> None: ...
     def on_first_frame(self, params: dict | None) -> None: ...
     def on_recording_stop(self, aborted: bool) -> None: ...
 
-    # Headless-record (CLI) start params. The GUI supplies each plugin's
-    # start-time slice from its tab; `octacam record` has no UI, so a plugin that
-    # must act at record start (e.g. arm a hardware trigger) contributes its slice
-    # here, built from the recording's fps/duration. None = nothing to contribute.
-    # See PluginManager.default_start_params.
+    # The slice headless `octacam record` starts with (the GUI sends its tab's);
+    # a plugin that must act at record start, such as arming a board, needs it.
+    # None = nothing to contribute.
     def default_start_params(self, fps: float, duration_s: float) -> dict | None: ...
 
-    # Config snapshot. The [[plugins]] options that reproduce this plugin's live
-    # state for a recording, given the same {name: slice} params its start hook
-    # receives; None = the configured options already do. Written into the
-    # recording folder's octacam_config.toml so a relaunch from it behaves the
-    # same. Called under the controller lock: build a dict, no I/O.
+    # The [[plugins]] options that reproduce this plugin's live state in the
+    # recording's config snapshot; None = the configured ones already do.
+    # Called under the controller lock: no I/O.
     def snapshot_options(self, params: dict | None) -> dict | None: ...
 
-    # ---- preview lifecycle (optional; only a trigger-DRIVING plugin acts) ----
-    # A plugin that can generate the trigger (e.g. triggerbox) can drive it during
-    # idle preview too, so the preview approximates the recording. It advertises
-    # this with drives_preview_trigger() -> True; the controller then arms the
-    # cameras in hardware-trigger mode and dispatches on_preview_start (arm the
-    # board indefinitely, strobing as the recording will) and on_preview_stop
-    # (disarm). Both fire OFF the controller lock, like on_recording_start, since a
-    # plugin arm can block on a serial write + ack. params is the same
-    # {name: slice} shape as default_start_params / the recording hooks.
-    # on_preview_stop also fires right before a recording's record grab starts
-    # (after the preview grab has stopped), so on_recording_start always arms the
-    # trigger against idle cameras instead of re-phasing a running clock under
-    # them — see RecordingController.start_recording.
+    # ---- preview (a plugin that generates the trigger) ----
+    # drives_preview_trigger() -> True: the preview runs on this plugin's trigger,
+    # armed indefinitely by on_preview_start and disarmed by on_preview_stop, so
+    # it looks like the recording. on_preview_stop also runs before a recording's
+    # record grab starts, so on_recording_start arms against idle cameras (see
+    # RecordingController.start_recording).
     def drives_preview_trigger(self) -> bool: ...
     def on_preview_start(self, params: dict | None) -> None: ...
     def on_preview_stop(self) -> None: ...
 
-    # ---- trigger train (optional; only a trigger-GENERATING plugin acts) ----
-    # trigger_train(params) describes the train on_recording_start will emit for
-    # these params — {"period_ns": int, "count": int}, the exact period and pulse
-    # count — so the recording can assign every frame to its pulse and stop on
-    # the pulse count (pure computation; called under the controller lock).
-    # prime_trigger(params, pulses) emits that many sacrificial pulses on the
-    # camera lines (no lights) and returns once they are out, True if it did:
-    # a camera may ignore its first triggers after acquisition start (a FLIR
-    # Grasshopper3 ignores two), so the recording spends a few before its train
-    # and discards their frames. Called off the lock, before on_recording_start.
+    # ---- trigger train (a plugin that generates the trigger) ----
+    # trigger_train: the exact {"period_ns", "count"} on_recording_start emits
+    # for these params, which the recording counts frames against (pure; called
+    # under the controller lock). prime_trigger: emit `pulses` sacrificial pulses
+    # on the camera lines, lights dark, and return once they are out; True if it
+    # did (called off the lock, before on_recording_start; see CLAUDE.md).
     def trigger_train(self, params: dict | None) -> dict | None: ...
     def prime_trigger(self, params: dict | None, pulses: int) -> bool: ...
 
-    # ---- web contribution (optional) ----
-    # client_id identifies the WebSocket connection a message/disconnect came
-    # from, so a plugin can scope per-connection state (e.g. a hold-to-jog) to
-    # the socket that owns it.
+    # ---- web ----
+    # client_id names the WebSocket a message or disconnect came from, so
+    # per-connection state (a hold-to-jog) stays with its socket.
     def api_router(self) -> APIRouter | None: ...
     def on_ws_message(
         self, message: dict, client_id: int
     ) -> bool: ...  # True = handled
     def on_ws_disconnect(self, client_id: int) -> None: ...  # a control socket closed
 
-    # Directory of static web assets (JS/CSS) the plugin ships alongside its
-    # Python. Served under /plugins/<name>/; the entry module is <name>.js and
-    # an optional stylesheet is <name>.css. None means the plugin has no UI.
+    # JS/CSS served under /plugins/<name>/ (<name>.js, optional <name>.css);
+    # None = no UI.
     def web_assets(self) -> Path | None: ...
 
 
 class Plugin:
-    """Base class with safe no-op defaults for every hook.
-
-    Subclass it and override only the hooks a given plugin actually needs.
-    """
+    """No-op defaults for every hook."""
 
     name: str = "plugin"
 
@@ -176,11 +141,7 @@ class Plugin:
 
 
 class PluginManager:
-    """Holds the active plugins and fans hooks out to them.
-
-    Every call is wrapped so a misbehaving plugin logs and is skipped rather
-    than crashing the caller (mirrors ``RecordingController._notify``).
-    """
+    """The active plugins; a hook that raises is logged and skipped, never fatal."""
 
     def __init__(self, plugins: list[OctacamPlugin] | None = None):
         self.plugins: list[OctacamPlugin] = list(plugins or [])
@@ -210,14 +171,8 @@ class PluginManager:
                 log.exception("Plugin %s.%s failed", self._name(plugin), hook)
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
-        """Collect each plugin's headless-record start slice, keyed by name.
-
-        ``octacam record`` has no GUI to POST ``plugin_params``, so a plugin that
-        must act at record start (e.g. triggerbox arming the trigger board)
-        contributes its slice via :meth:`Plugin.default_start_params`. Plugins
-        returning ``None`` are omitted. The result mirrors the ``{name: params}``
-        shape the GUI sends, so it can be passed straight to ``start_recording``.
-        """
+        """Each plugin's headless start slice, keyed by name as the GUI sends
+        them; plugins returning None are left out."""
         params: dict = {}
         for plugin in self.plugins:
             try:
@@ -232,8 +187,7 @@ class PluginManager:
         return params
 
     def trigger_train(self, params: dict | None) -> dict | None:
-        """The trigger train the recording arm will emit, from the first plugin
-        that generates one (see :meth:`Plugin.trigger_train`), else None."""
+        """The train of the first plugin that generates one, else None."""
         for plugin in self.plugins:
             hook = getattr(plugin, "trigger_train", None)
             if hook is None:
@@ -248,8 +202,8 @@ class PluginManager:
         return None
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
-        """Have the trigger-generating plugin emit ``pulses`` priming pulses;
-        True if one did (see :meth:`Plugin.prime_trigger`)."""
+        """Have the trigger-generating plugin emit *pulses* priming pulses; True
+        if one did."""
         for plugin in self.plugins:
             hook = getattr(plugin, "prime_trigger", None)
             if hook is None:
@@ -262,17 +216,12 @@ class PluginManager:
         return False
 
     def snapshot_options(self, params: dict | None) -> dict[str, dict]:
-        """Each loaded plugin's live options for a recording's config snapshot.
-
-        Keyed by name for *every* plugin (empty when its configured options
-        already reproduce it), so the snapshot also lists a plugin that was
-        enabled only with ``--plugin``. A plugin whose hook fails contributes no
-        options rather than failing the recording.
-        """
+        """Each plugin's snapshot options, keyed by name for every plugin (empty
+        when its config already reproduces it) so one enabled with ``--plugin``
+        is listed too. A failing hook contributes nothing."""
         result: dict[str, dict] = {}
         for plugin in self.plugins:
             name = self._name(plugin)
-            # Optional: a plugin written before this hook existed may lack it.
             hook = getattr(plugin, "snapshot_options", None)
             try:
                 options = hook(params) if hook is not None else None
@@ -292,9 +241,8 @@ class PluginManager:
                 log.exception("Plugin %s is_ready failed", name)
                 result[name] = {"ready": False}
                 continue
-            # Isolate the details call so its failure can't flip a known-ready
-            # plugin to not-ready, and put "ready" last so a plugin-supplied
-            # "ready" in status() can't shadow the authoritative is_ready().
+            # A failing status() must not flip a ready plugin, and is_ready()
+            # wins over a "ready" key in status().
             try:
                 extra = plugin.status()
             except Exception:
