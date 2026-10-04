@@ -117,7 +117,8 @@ def compose_save_dir(record_directory: str, relative_directory: str) -> str:
 
 def sanitize_camera_name(name: str) -> str:
     """Validate a camera name as its video's filename stem (``<name>.<ext>``):
-    non-blank, a single path segment, no ``.``/``..``. Raises ValueError."""
+    non-blank, a single path segment, no ``.``/``..``. Raises ValueError (kept
+    apart from config_writer.safe_config_name for its camera-specific message)."""
     clean = (name or "").strip()
     if (
         not clean

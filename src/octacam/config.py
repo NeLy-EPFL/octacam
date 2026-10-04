@@ -468,7 +468,9 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
 
 def _is_safe_camera_name(name: str) -> bool:
     """Whether ``name`` is usable as a video filename stem: one path segment,
-    no traversal (as ``controller.sanitize_camera_name`` checks)."""
+    no traversal (as ``controller.sanitize_camera_name`` checks; duplicated so
+    config imports neither the controller nor the camera layer, which import
+    it)."""
     return (
         name not in (".", "..")
         and "/" not in name
