@@ -94,19 +94,12 @@ TransferCallback = Callable[[TransferProgress], None]
 
 @dataclasses.dataclass
 class TransferResult:
-    """Outcome of transferring one folder to its destination.
-
-    Truthy iff nothing failed *and* at least one file was copied or skipped, so
-    callers can keep using ``if not result:`` to detect a hard failure.
-    """
+    """Outcome of transferring one folder to its destination."""
 
     dest: Path
     copied: list[str] = dataclasses.field(default_factory=list)
     skipped: list[str] = dataclasses.field(default_factory=list)
     failed: list[str] = dataclasses.field(default_factory=list)
-
-    def __bool__(self) -> bool:
-        return not self.failed and bool(self.copied or self.skipped)
 
 
 def _temp_path(final: Path) -> Path:
@@ -381,8 +374,7 @@ def transfer_folder(
     on_progress:
         Optional callback invoked after each ``_CHUNK_SIZE`` chunk is written.
 
-    Returns a :class:`TransferResult` (truthy on success, falsy on hard failure
-    or nothing to copy).
+    Returns a :class:`TransferResult` naming each file copied, skipped or failed.
     """
     # --- Decide which files to copy -----------------------------------------
     candidates = list(files_only)
