@@ -193,10 +193,6 @@ _HEADER = (
 )
 
 
-def _to_bool(value: str) -> bool:
-    return coerce_bool(value)
-
-
 def _fmt_float(value: float) -> str:
     # 6 significant figures, matching the GenApi persistence text (e.g. 5.07812);
     # integral floats render without a trailing ".0" (2000.0 -> "2000").
@@ -373,7 +369,7 @@ def apply_config(backend, text: str) -> None:
             if kind == "string":
                 continue  # not a capture parameter (e.g. DeviceUserID)
             elif kind == "bool":
-                backend._set_bool(name, _to_bool(value))
+                backend._set_bool(name, coerce_bool(value))
             elif kind == "int":
                 backend._set_number(name, int(float(value)), True)
             elif kind == "float":

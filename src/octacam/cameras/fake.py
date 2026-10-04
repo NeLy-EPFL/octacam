@@ -45,12 +45,6 @@ _SENSOR_W, _SENSOR_H = 1920, 1200
 # one fetch late is still well inside a test's trigger period.
 _FETCH_WAIT_S = 0.002
 
-# The fake's node model is keyed by SFNC name (matching real GenICam backends);
-# the six legacy snake_case params (read_node/write_node) map onto it via
-# PARAM_NODES. Nodes the fake does not model are skipped by the config
-# applier/serialiser and never appear in the feature browser.
-_PARAM_TO_SFNC = dict(PARAM_NODES)
-
 
 def _default_nodes() -> dict[str, dict]:
     """A fresh SFNC-keyed node table spanning every widget kind.
@@ -255,7 +249,7 @@ class FakeBackend(SoftwareTriggerHandoff):
 
     def read_node(self, name: str) -> NodeInfo:
         """One of the six legacy snake_case params (maps to its SFNC node)."""
-        sfnc = _PARAM_TO_SFNC.get(name, name)
+        sfnc = PARAM_NODES.get(name, name)
         try:
             node = self._nodes[sfnc]
         except KeyError as e:
@@ -273,7 +267,7 @@ class FakeBackend(SoftwareTriggerHandoff):
         )
 
     def write_node(self, name: str, value: float) -> None:
-        sfnc = _PARAM_TO_SFNC.get(name, name)
+        sfnc = PARAM_NODES.get(name, name)
         if sfnc not in self._nodes:
             raise BackendError(f"unknown node: {name}")
         self._nodes[sfnc]["value"] = value
