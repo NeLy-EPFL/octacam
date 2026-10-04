@@ -54,7 +54,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("octacam")
 
 WARMUP_S = 0.5  # discarded settle time before every measurement window
-# A trial passes at this fraction of its target fps and at most this drop rate.
+# A trial passes at this fraction of its target fps and at most this drop rate
+# (drops under 1% are encoder noise).
 ACHIEVE_FRACTION = 0.97
 DROP_THRESHOLD = 0.01
 
@@ -825,7 +826,6 @@ def run_target_trial(
         proc = _cpu_percent_probe()
         jitter_p99: float | None = None
         cpu: float | None = None
-        # Snapshotted when the window closes, before the producers stop.
         end_grabbed: list[int] = []
         end_dropped: list[int] = []
         end_grab_ns: list[int] = []
@@ -922,7 +922,8 @@ def run_target_trial(
 
             _wait(duration_s, cancel)
 
-            # The counters and the window close together, producers still running.
+            # Snapshot before the producers stop, so the counts span exactly
+            # `window`, not the stop+join tail.
             window = time.perf_counter() - t_measure
             end_grabbed = [a.grabbed for a in accums]
             end_dropped = [a.dropped for a in accums]
