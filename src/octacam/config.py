@@ -204,13 +204,22 @@ class VisualizationConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str = "grid.mp4"
-    layout: list[list[str]] = Field(default_factory=list)
+    layout: list[list[str]]
     ffmpeg_params: str = ""
 
     @field_validator("name", "ffmpeg_params", mode="before")
     @classmethod
     def _as_scalar_str(cls, value: object) -> str:
         return _scalar_str(value)
+
+    @field_validator("layout")
+    @classmethod
+    def _rectangular(cls, layout: list[list[str]]) -> list[list[str]]:
+        if not layout:
+            raise ValueError("the layout is empty")
+        if len({len(row) for row in layout}) > 1:
+            raise ValueError("the layout's rows differ in length")
+        return layout
 
 
 class TransferConfig(BaseModel):
@@ -360,49 +369,11 @@ def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None)
     return _normalize_dir(combined)
 
 
-def _parse_layout(layout_src: object, context: str) -> list[list[str]] | None:
-    """Validate a 2D camera-name grid layout, returning None on any problem."""
-    if layout_src is None:
-        log.warning('%s is missing a "layout" key; ignoring it', context)
-        return None
-    if not isinstance(layout_src, list):
-        log.warning('%s "layout" must be an array of arrays; ignoring it', context)
-        return None
-    layout: list[list[str]] = []
-    expected_cols: int | None = None
-    for row_i, row in enumerate(layout_src):
-        if not isinstance(row, list):
-            log.warning(
-                '%s "layout" row %d is not an array; ignoring it', context, row_i
-            )
-            return None
-        if not all(isinstance(cell, str) for cell in row):
-            log.warning(
-                '%s "layout" row %d has non-string cells; ignoring it', context, row_i
-            )
-            return None
-        if expected_cols is None:
-            expected_cols = len(row)
-        elif len(row) != expected_cols:
-            log.warning(
-                '%s "layout" rows have inconsistent lengths (%d vs %d); ignoring it',
-                context,
-                expected_cols,
-                len(row),
-            )
-            return None
-        layout.append([str(cell) for cell in row])
-    if not layout:
-        log.warning('%s "layout" is empty; ignoring it', context)
-        return None
-    return layout
-
-
 def _parse_visualization(src: object) -> list[VisualizationConfig]:
-    """Parse the optional ``[[visualization]]`` array; each entry is generated.
+    """Parse the optional ``[[visualization]]`` array.
 
-    Malformed entries (missing/invalid layout, duplicate output name) are warned
-    about and skipped, never raised."""
+    An entry without a valid layout, or reusing an earlier entry's output name,
+    is warned about and skipped; another invalid field keeps its default."""
     if src is None:
         return []
     if not isinstance(src, list):
@@ -415,28 +386,16 @@ def _parse_visualization(src: object) -> list[VisualizationConfig]:
         if not isinstance(entry, dict):
             log.warning("Ignoring %s as it is not a table", context)
             continue
-        layout = _parse_layout(entry.get("layout"), context)
-        if layout is None:
+        viz = _lenient_validate(VisualizationConfig, entry, context, None)
+        if viz is None:
             continue
-        try:
-            name = _scalar_str(entry.get("name", "grid.mp4"))
-        except ValueError:
-            log.warning('Ignoring invalid "name" in %s; using "grid.mp4"', context)
-            name = "grid.mp4"
-        try:
-            ffmpeg_params = _scalar_str(entry.get("ffmpeg_params", ""))
-        except ValueError:
-            log.warning('Ignoring invalid "ffmpeg_params" in %s', context)
-            ffmpeg_params = ""
-        if name in seen_names:
+        if viz.name in seen_names:
             log.warning(
-                "Ignoring %s as its output name %r is already used", context, name
+                "Ignoring %s as its output name %r is already used", context, viz.name
             )
             continue
-        seen_names.add(name)
-        result.append(
-            VisualizationConfig(name=name, layout=layout, ffmpeg_params=ffmpeg_params)
-        )
+        seen_names.add(viz.name)
+        result.append(viz)
     return result
 
 
@@ -486,18 +445,24 @@ def _parse_backend(value: object) -> str:
 
 
 def _lenient_validate(
-    model_cls: type[_ModelT], data: dict, context: str, fallback: _ModelT
-) -> _ModelT:
-    """Validate ``data`` against ``model_cls``, dropping invalid fields.
+    model_cls: type[_ModelT], data: dict, context: str, fallback: _DefaultT
+) -> _ModelT | _DefaultT:
+    """Validate ``data`` against ``model_cls``, warning about and dropping each
+    invalid field so its default applies.
 
-    Each field that fails validation is warned about and removed (so its model
-    default applies), then validation is retried. This reproduces the original
-    "a bad field keeps its default" behavior on top of pydantic."""
+    ``fallback`` when that cannot help: a required field is missing or invalid,
+    or an error names no field."""
     data = dict(data)
+    fields = model_cls.model_fields
     while True:
         try:
             return model_cls.model_validate(data)
         except ValidationError as exc:
+            for err in exc.errors():
+                key = err["loc"][0] if err["loc"] else None
+                if isinstance(key, str) and key in fields and fields[key].is_required():
+                    log.warning('Ignoring %s: invalid "%s" (%s)', context, key, err["msg"])
+                    return fallback
             removable = {
                 err["loc"][0]
                 for err in exc.errors()
