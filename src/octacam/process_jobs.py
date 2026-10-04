@@ -42,8 +42,8 @@ from octacam import session_cache
 if TYPE_CHECKING:
     from rich.console import Console
 
-    from octacam.transfer import TransferCallback
-    from octacam.writer import ProgressCallback
+    from octacam.transfer import TransferCallback, TransferProgress
+    from octacam.writer import ProgressCallback, TranscodeProgress
 
 log = logging.getLogger("octacam")
 
@@ -390,12 +390,8 @@ class JobReporter:
         """A writer.ProgressCallback refining within-file transcode percent."""
         base = index - 1
 
-        def _cb(prog: object) -> None:
-            frac = 0.0
-            frames = getattr(prog, "frame", 0)
-            tf = getattr(prog, "total_frames", None)
-            if tf:
-                frac = min(1.0, frames / tf)
+        def _cb(prog: TranscodeProgress) -> None:
+            frac = min(1.0, prog.frame / prog.total_frames) if prog.total_frames else 0.0
             self._set_percent(base + frac, total)
             self._flush()
 
@@ -405,13 +401,10 @@ class JobReporter:
         """A transfer.TransferCallback tracking the current file + folder percent."""
         base = index - 1
 
-        def _cb(prog: object) -> None:
-            self._status.current_file = getattr(prog, "filename", None)
-            count = max(getattr(prog, "file_count", 1), 1)
-            fi = getattr(prog, "file_index", 1)
-            size = getattr(prog, "file_size", 0) or 0
-            done = getattr(prog, "bytes_done", 0)
-            within = (fi - 1 + (done / size if size else 0.0)) / count
+        def _cb(prog: TransferProgress) -> None:
+            self._status.current_file = prog.filename
+            file_frac = prog.bytes_done / prog.file_size if prog.file_size else 0.0
+            within = (prog.file_index - 1 + file_frac) / max(prog.file_count, 1)
             self._set_percent(base + within, total)
             self._flush()
 
