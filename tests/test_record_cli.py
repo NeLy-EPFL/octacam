@@ -153,5 +153,9 @@ def test_record_fails_when_a_camera_records_nothing(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "1 camera(s) recorded 0 frames (FAKE-1)" in _text(result)
-    frames = {c["serial"]: c["frames"] for c in _summary(save_dir)["cameras"]}
+    summary = _summary(save_dir)
+    frames = {c["serial"]: c["frames"] for c in summary["cameras"]}
     assert frames == {"FAKE-0": PULSES, "FAKE-1": 0}
+    # A camera that never started is a take short a camera, not a synced one.
+    assert summary["sync"]["ok"] is False
+    assert any("FAKE-1 did not start recording" in w for w in summary["sync"]["warnings"])

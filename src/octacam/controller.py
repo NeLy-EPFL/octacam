@@ -2129,6 +2129,15 @@ class RecordingController:
         notes: list[str] = []
         offsets: dict[str, int | None] = {}
         ok = True
+        not_started = [
+            c.name for c in self.camera_system if c.name not in self._recording_cameras
+        ]
+        if not_started:
+            ok = False
+            warnings.append(
+                f"Camera(s) {', '.join(not_started)} did not start recording: the take "
+                "has no video from them"
+            )
         silent = [
             c.name
             for c in self.camera_system
