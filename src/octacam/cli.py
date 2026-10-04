@@ -2983,7 +2983,7 @@ def flash(
                     pass
         raise typer.Exit(exit_code)
     finally:
-        if instance_lock is not None and instance_lock is not _LOCK_UNAVAILABLE:
+        if instance_lock is not None:
             instance_lock.close()
 
 
