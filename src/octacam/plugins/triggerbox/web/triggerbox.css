@@ -1,5 +1,4 @@
-/* triggerbox plugin styles. Served from /plugins/triggerbox/ and injected by the
-   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+/* triggerbox tab styles; the colors are core style.css's :root variables. */
 
 /* Arduino state chip */
 .triggerbox-state {

@@ -1,15 +1,10 @@
-// Directory picker modal: browse the rig's filesystem to choose a save dir.
-//
-// Recording happens on the server, so the save directory is a server-side path
-// the browser cannot pick natively. This walks /api/browse one level at a time
-// and hands the chosen path back to the Record tab.
+// Directory picker: the save directory is a path on the server, so browse it
+// through /api/browse one level at a time.
 
 import { api, ModalFocus } from "./util.js";
 
 export class DirPicker {
-  // `onPick(path)` receives the chosen directory; `getStart()` returns the
-  // path to open at (the current base-directory text, possibly uncommitted/blank
-  // — the server falls back to the active save directory when it is blank).
+  // `getStart()` is the path to open at; blank opens the save directory.
   constructor({ notify, onPick, getStart }) {
     this.notify = notify;
     this.onPick = onPick;
@@ -47,9 +42,7 @@ export class DirPicker {
   }
 
   setConnected(connected) {
-    // The Browse button lives inside #record-fields, which the Record tab
-    // already disables on disconnect; just dismiss the modal so a dead socket
-    // can't leave a stale browser open.
+    // The Record tab disables the Browse button itself.
     if (!connected) this.close();
   }
 

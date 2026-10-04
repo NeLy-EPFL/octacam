@@ -39,10 +39,8 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Focus management for a modal dialog: on activate() remember the opener and
-// move focus into the card; trap Tab within it (wrapping last<->first); on
-// deactivate() restore focus to the opener. Keeps the save-config and
-// directory-picker modals keyboard-usable and screen-reader-correct.
+// Modal focus: activate() moves focus into the card and traps Tab there;
+// deactivate() gives focus back to the opener.
 export class ModalFocus {
   constructor(card) {
     this.card = card;
@@ -53,7 +51,6 @@ export class ModalFocus {
       if (!items.length) return;
       const first = items[0];
       const last = items[items.length - 1];
-      // Wrap around the ends so focus can never leave the open dialog.
       if (e.shiftKey && document.activeElement === first) {
         e.preventDefault();
         last.focus();

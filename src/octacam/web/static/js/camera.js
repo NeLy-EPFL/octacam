@@ -1,16 +1,8 @@
-// Camera tab: full device node-map browser.
-//
-// The set of parameters is model-dependent — the server walks each camera's
-// GenApi node map (GET /api/cameras/{i}/features) and returns every readable
-// feature, grouped by category, typed as int/float/bool/enum/string/command.
-// Writable ones are editable with per-node validation (min/max/inc, enum
-// entries); octacam-managed nodes (PixelFormat, TriggerMode, …) are shown
-// locked; ROI offsets can be auto-centered. Every field has a "reset to config"
-// (else factory default) button, and command nodes run behind a confirm.
-//
-// Width/Height are applied server-side by cycling the preview grab; other nodes
-// are written live. A write can change other nodes' state, so the whole list is
-// re-read from the server response. Everything is locked while recording.
+// Camera tab: a browser for each camera's full GenApi node map
+// (GET /api/cameras/{i}/features), grouped by category, with typed widgets,
+// octacam-managed nodes locked, ROI auto-centering, a per-field reset and
+// confirmed commands. A write can change other nodes, so the list is re-read
+// from each response. Everything is locked while recording.
 
 import { api } from "./util.js";
 
@@ -19,9 +11,8 @@ const trimNum = (v) => {
   return String(Math.round(v * 1000) / 1000);
 };
 
-// GenICam visibility levels, least to most advanced. The level selector shows
-// every feature at or below the chosen level (Guru includes all). The server
-// walk never sends Invisible nodes, so only these three reach the browser.
+// GenICam visibility levels; the selector shows every feature at or below the
+// chosen one. The server never sends Invisible nodes.
 const VIS_RANK = { beginner: 0, expert: 1, guru: 2 };
 
 // A short "min–max, inc X, unit" hint for a numeric node.
@@ -52,19 +43,14 @@ export class CameraTab {
     this.busy = false;
     this.selected = cameras.length ? 0 : -1;
 
-    // Per-camera feature payloads, fetched lazily and invalidated on a dirty
-    // ping or disconnect. Categories the user collapsed persist across renders.
+    // Per-camera feature payloads, fetched lazily and dropped on a dirty ping
+    // or disconnect.
     this.featuresByIndex = {};
     this.collapsed = new Set();
     this.filter = "";
     this.visLevel = "beginner"; // max GenICam visibility shown (see VIS_RANK)
-    // A write broadcasts camera_features_dirty to every client, including this
-    // one. We already applied the authoritative response locally, so ignore the
-    // echo (per camera index) for a short window instead of refetching. The
-    // last focused feature name is restored across re-renders so committing a
-    // field doesn't lose keyboard position.
-    this._suppressDirtyUntil = {};
-    this._lastFocusedFeature = null;
+    this._suppressDirtyUntil = {}; // per camera, see _applyUpdated
+    this._lastFocusedFeature = null; // refocused after a re-render
 
     this.fields = document.getElementById("camera-fields");
     this.target = document.getElementById("cam-target");
@@ -96,8 +82,6 @@ export class CameraTab {
       this.visLevel = this.visInput.value;
       this._renderParams();
     });
-    // Track the focused feature so a re-render (commit / soft refresh) can put
-    // keyboard focus back where it was.
     this.params.addEventListener("focusin", (e) => {
       const row = e.target.closest?.(".cam-feat");
       this._lastFocusedFeature = row ? row.dataset.feature : null;
@@ -144,11 +128,8 @@ export class CameraTab {
     this._updateDisabled();
   }
 
-  // A camera_features_dirty ping (this or another client changed a feature):
-  // update the cached center flags and refresh if it's the selected camera.
-  // The server broadcasts to every client including the one that made the
-  // change, which already applied the authoritative response — so ignore the
-  // echo of our own recent write instead of doing a redundant full refetch.
+  // A client changed a camera's features: refresh it if selected, unless this
+  // is the echo of our own write (see _applyUpdated).
   applyFeaturesDirty(entry) {
     const cam = this.cameras[entry.index];
     if (cam) {
@@ -192,9 +173,8 @@ export class CameraTab {
     this._updateDisabled();
   }
 
-  // `soft` refreshes an already-shown camera without flashing "Loading…" and,
-  // on a transient failure, keeps the current (valid) panel rather than blanking
-  // it — so a background dirty-ping refresh never destroys good on-screen state.
+  // `soft` refreshes a shown camera without "Loading…", and keeps the panel
+  // on a failed fetch.
   async _loadFeatures(soft = false) {
     const index = this.selected;
     const hadCache = !!this.featuresByIndex[index];
@@ -283,8 +263,7 @@ export class CameraTab {
     this._restoreFocus();
   }
 
-  // Put keyboard focus back on the widget of the last-focused feature (if it is
-  // still present and enabled) so a commit / refresh doesn't drop tab position.
+  // A commit or refresh re-renders the list; keep the keyboard position.
   _restoreFocus() {
     const name = this._lastFocusedFeature;
     if (!name) return;
@@ -293,8 +272,6 @@ export class CameraTab {
     if (widget && !widget.disabled) widget.focus();
   }
 
-  // Whether a feature passes the current filter + visibility-level selector.
-  // Features above the chosen level (Beginner < Expert < Guru) are hidden.
   _visible(f) {
     if ((VIS_RANK[f.visibility] ?? 0) > (VIS_RANK[this.visLevel] ?? 0)) return false;
     if (this.filter) {
@@ -322,11 +299,9 @@ export class CameraTab {
     const widget = this._widget(f, locked);
     if (widget) control.appendChild(widget);
 
-    // ROI offsets get an inline center toggle.
     const axis = CENTER_AXIS[f.name];
     if (axis) control.appendChild(this._centerToggle(axis));
 
-    // Reset-to-default for editable value nodes (not commands/managed/read-only).
     if (f.type !== "command" && !f.managed && f.writable) {
       const reset = document.createElement("button");
       reset.type = "button";
@@ -437,8 +412,8 @@ export class CameraTab {
 
   // -------------------------------------------------------------- helpers
 
-  // A node is locked if the tab is locked, or the node is managed/read-only, or
-  // it's an offset whose axis is auto-centered.
+  // Locked: the tab is locked, the node is managed, or it is an auto-centered
+  // offset.
   _locked(f) {
     if (!this.connected || this.recording || this.busy) return true;
     if (f.managed) return true;
@@ -451,9 +426,8 @@ export class CameraTab {
   }
 
   _updateDisabled() {
-    // Keep the fieldset live while connected (even recording) so the picker,
-    // filter, and browsing stay usable; per-widget locking (_locked) disables
-    // the editable controls. Only a request in flight freezes the whole tab.
+    // While recording the picker and filter stay usable; _locked disables the
+    // editable widgets. Only a request in flight freezes the whole tab.
     this.fields.disabled = !this.connected || this.busy;
     const editLocked = !this.connected || this.recording || this.busy;
     this.nameInput.disabled = editLocked;
@@ -464,8 +438,8 @@ export class CameraTab {
     const now = Date.now();
     for (const entry of data.updated || []) {
       this.featuresByIndex[entry.index] = entry;
-      // We now hold the authoritative post-write state; ignore the matching
-      // camera_features_dirty echo for a short window so we don't refetch it.
+      // This is the post-write state; ignore the server's camera_features_dirty
+      // echo of our own write for a moment instead of refetching.
       this._suppressDirtyUntil[entry.index] = now + 1200;
       const cam = this.cameras[entry.index];
       if (cam) {
@@ -516,8 +490,8 @@ export class CameraTab {
     );
   }
 
-  // Shared request wrapper: lock the tab, run `call`, apply the refreshed
-  // feature payload on success or re-render (snapping back) on failure.
+  // Lock the tab, run `call`, then apply the refreshed features, or re-render
+  // (snapping back to the device values) on failure.
   async _request(call, action) {
     this.busy = true;
     this._updateDisabled();
@@ -539,8 +513,7 @@ export class CameraTab {
     }
   }
 
-  // Rename shares with the grid's inline editor (see the original doc): PUT the
-  // new name, then relabel the picker/grid tile via applyName.
+  // Also the grid's inline rename. Returns the canonical name, or null.
   async renameCamera(index, name) {
     const cam = this.cameras[index];
     if (!cam) return null;

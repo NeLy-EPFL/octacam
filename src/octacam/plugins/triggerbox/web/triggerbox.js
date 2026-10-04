@@ -1,10 +1,7 @@
-// triggerbox tab: configure any number of camera trigger lines + 3 independent
-// CCS light channels (off / strobe / continuous / pulse-train), arm-with-recording,
-// and a frame-timing visualization driven by the live camera exposures.
-//
-// Served from /plugins/triggerbox/, so it can't import core "./util.js" (that would
-// 404). The shared fetch helper (api) and clampInput are passed in via ctx from the
-// host (app.js). Serial helpers live at /js/ (absolute path).
+// triggerbox tab: camera trigger lines, 3 light channels (off / strobe /
+// continuous / pulse train), arm-with-recording, and a frame-timing diagram of
+// the live camera exposures. Served from /plugins/triggerbox/, so core helpers
+// come in the ctx or by absolute /js/ path.
 import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
 
 const STATE_LABELS = {
@@ -103,17 +100,12 @@ export default class TriggerboxTab {
     document.addEventListener("tab-shown", (e) => {
       if (e.detail?.tab === "triggerbox") this._renderTiming();
     });
-    // Auto-refresh the timing diagram whenever a camera feature changes anywhere
-    // (this or another client): exposure time, trigger delay, frame rate, ROI,
-    // auto-exposure mode … any of these can move the exposure/delay it draws.
-    // Debounced so a burst of edits coalesces into one re-read — this replaces
-    // the old manual refresh button.
+    // Any camera feature change (from any client) may move an exposure or delay.
     document.addEventListener("camera-features-changed", () =>
       this._scheduleExposureReload()
     );
-    // The timing diagram is drawn 1 SVG user-unit = 1 CSS px (not scaled down to
-    // fit), so its text stays legible. That means it must be re-rendered at the
-    // sidebar's live width — e.g. when the sidebar-resizer is dragged.
+    // The diagram is drawn at 1 SVG unit = 1 CSS px so its text stays legible,
+    // so it is redrawn whenever its width changes.
     this._lastVizW = 0;
     this._exposureReloadTimer = null;
     if (this.timingViz && typeof ResizeObserver !== "undefined") {
@@ -188,8 +180,7 @@ export default class TriggerboxTab {
     const became = connected && !this.connected;
     this.connected = connected;
     this._refresh();
-    // Debounced (not immediate) so this connect edge and the handshake's `system`
-    // push coalesce into one exposure read instead of two.
+    // Debounced: coalesces with the handshake's `system` push.
     if (became) this._scheduleExposureReload();
   }
 
@@ -212,19 +203,13 @@ export default class TriggerboxTab {
     this._renderState();
   }
 
-  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
-  // server's background init finishes arming the board after the page loaded, or
-  // on a reconnect). The status shape names the state field `arduino_state`;
-  // map it to the `state` key applyState expects and reuse that path.
+  // A /api/system plugin status (the init's push or a reconnect), whose state
+  // field is `arduino_state`.
   applyStatus(info) {
     if (!info) return;
     this.applyState({ ...info, state: info.arduino_state });
-    // That same push is also how this page learns the cameras finally opened:
-    // with serve-first startup the constructor's exposure read ran against the
-    // empty placeholder system and saw zero cameras. Re-read them, or an Auto
-    // (cover exposure) strobe would keep drawing its manual-duty fallback for
-    // the rest of the session while the board is armed with the real
-    // exposure+guard on-time.
+    // This push is also the only sign that the cameras opened: the
+    // constructor's exposure read may have seen the empty placeholder system.
     this._scheduleExposureReload();
   }
 
@@ -380,9 +365,8 @@ export default class TriggerboxTab {
 
   _refresh() {
     if (this.ready && this.firmwareOk && this.armError) {
-      // Link + firmware are fine, but the board failed to arm (e.g. a wedged
-      // USB link that a bus reset couldn't clear). Surface it — the recording
-      // won't be hardware-triggered.
+      // The board failed to arm (e.g. a wedged USB link a bus reset couldn't
+      // clear): the recording won't be hardware-triggered.
       this.statusMsg.textContent = this.armError;
       this.statusBox.classList.remove("hidden");
     } else if (this.ready && this.firmwareOk) {
@@ -434,8 +418,7 @@ export default class TriggerboxTab {
     this._renderFlashBanner();
   }
 
-  // A prompt to (re)flash appears whenever the board's firmware doesn't match the
-  // sketch source: out of date, incompatible, or no identity (possibly blank).
+  // Prompt a flash when the board's firmware doesn't match the sketch.
   _renderFlashBanner() {
     if (!this.fwFlash) return;
     const show = this.ready && this.needsFlash && this.arduinoState !== "running";
@@ -528,10 +511,7 @@ export default class TriggerboxTab {
 
   // --------------------------------------------------- exposures + timing
 
-  // Debounced re-read of the live camera exposures, driven by
-  // camera-features-changed events so the diagram tracks parameter edits without
-  // a manual refresh. Coalesces a burst of edits (or multi-camera dirty pings)
-  // into a single fetch.
+  // Re-read the live camera exposures once per burst of changes.
   _scheduleExposureReload() {
     clearTimeout(this._exposureReloadTimer);
     this._exposureReloadTimer = setTimeout(() => this._loadExposures(), 250);
@@ -619,10 +599,9 @@ export default class TriggerboxTab {
     return { fps, periodUs, rows, maxCoverage, guardUs: this.guardUs, exps };
   }
 
-  // Push the current camera/light spec to the server (debounced) so the plugin's
-  // own spec — the source the managed preview arm reads — tracks live tab edits,
-  // and a running managed preview re-strobes to match. Independent of the
-  // arm-with-recording checkbox (that gates only the recording arm).
+  // Push the camera/light spec to the server (debounced): the managed preview
+  // arms from it and re-strobes to match. The arm-with-recording checkbox
+  // gates only the recording arm.
   _pushSpec() {
     if (!this.send) return;
     clearTimeout(this._pushTimer);
@@ -641,8 +620,7 @@ export default class TriggerboxTab {
     this._pushSpec(); // every camera/light edit funnels through here
     if (!this.timingViz) return;
     const m = this._timingModel();
-    // Measure the container so the SVG is drawn at real pixel size; fall back to
-    // the last known width while the tab is hidden (clientWidth is 0 then).
+    // A hidden tab measures 0: keep the last known width.
     const cw = Math.round(this.timingViz.clientWidth) || this._lastVizW || 240;
     this._lastVizW = cw;
     this.timingViz.innerHTML = this._buildSvg(m, cw);
@@ -671,10 +649,8 @@ export default class TriggerboxTab {
   }
 
   _buildSvg(m, cw) {
-    // Drawn at real pixel size (1 user-unit = 1 CSS px, `cw` = live container
-    // width) so the labels stay legible in the narrow sidebar, rather than being
-    // scaled down with a fixed 1000-wide viewBox. Row labels sit *above* each
-    // bar so the bars get the full panel width.
+    // 1 SVG unit = 1 CSS px of the container width `cw`. Row labels sit above
+    // the bars so the bars get the full width.
     const width = Math.max(200, Math.round(cw) || 240);
     const PAD_L = 1, PAD_R = 7, TOP = 6;
     const labelH = 15, barH = 13, rowGap = 9;
@@ -683,9 +659,8 @@ export default class TriggerboxTab {
     const n = Math.max(1, m.rows.length);
     const H = TOP + n * stride + axisH;
 
-    // X-axis limit: cap to the active window unless something spans the whole
-    // frame (a continuous light or an independent pulse train), so short
-    // exposures aren't squished into a sliver at the far left.
+    // The axis ends after the last activity unless something spans the frame,
+    // so short exposures aren't squeezed into a sliver.
     let activity = 0, spansFrame = false;
     for (const r of m.rows) {
       if (r.kind === "trigger") activity = Math.max(activity, r.delayUs + r.pulseUs);
@@ -719,15 +694,14 @@ export default class TriggerboxTab {
     const g = [];        // background: gridlines, guide, lanes, bars
     const labels = [];   // drawn last, so each label's halo knocks out any line behind it
 
-    // Vertical time gridlines, dropped near the right end so they can't collide
-    // with the end (period) tick label.
+    // No gridline near the right end, where the end tick label sits.
     const step = niceNum(axisMax / 4);
     const ticks = [];
     for (let t = step; t < axisMax * 0.75; t += step) ticks.push(t);
     for (const t of ticks)
       g.push(`<line x1="${X(t)}" y1="${barY(0) - 2}" x2="${X(t)}" y2="${plotBottom}" class="tb-grid"/>`);
 
-    // Guide at the longest-exposure end (before the bars, so labels can mask it).
+    // Guide at the longest exposure's end, drawn under the labels.
     if (m.maxCoverage != null && m.maxCoverage < axisMax)
       g.push(
         `<line x1="${X(m.maxCoverage)}" y1="${barY(0) - 2}" x2="${X(m.maxCoverage)}" ` +
@@ -788,7 +762,6 @@ export default class TriggerboxTab {
       );
     });
 
-    // Note that the axis is zoomed in on a longer frame period.
     if (truncated)
       labels.push(
         `<text x="${PAD_L + plotW}" y="${labelBaseY(0)}" class="tb-trunc" ` +
@@ -831,7 +804,7 @@ export default class TriggerboxTab {
     this.ready = Boolean(r.data?.ready);
     if (r.data?.device) this.device = r.data.device;
     this.firmware = r.data?.firmware || null;
-    this.armError = null; // a fresh (re)connect clears any stale arm failure
+    this.armError = null; // a reconnect clears a stale arm failure
     if (typeof r.data?.firmware_ok === "boolean") this.firmwareOk = r.data.firmware_ok;
     if ("firmware_state" in (r.data || {})) this.firmwareState = r.data.firmware_state || null;
     if ("needs_flash" in (r.data || {})) this.needsFlash = Boolean(r.data.needs_flash);

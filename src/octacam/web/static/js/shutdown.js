@@ -1,7 +1,6 @@
-// Shutdown dialog: a three-way choice shown when the operator shuts down the
-// server after recording — Cancel / Shut down / Shut down & process. The last
-// one asks the server to start a detached processing job for this session on the
-// way out (reattach from a terminal with `octacam jobs attach`).
+// Shutdown dialog. After recordings it offers Cancel / Shut down / Shut down &
+// process; the last asks the server to start a detached processing job for this
+// session on the way out.
 
 import { ModalFocus } from "./util.js";
 
@@ -34,9 +33,7 @@ export class ShutdownDialog {
   // Resolves to "cancel" | "shutdown" | "process".
   confirm({ recordingActive, hasWork, peerCount }) {
     const others = (peerCount || 1) - 1;
-    // Every operator on this rig loses their cameras and their socket, so say how
-    // many. This warning used to live only in the recordingActive branch — the one
-    // path /api/shutdown rejects with 409 — so in practice nobody ever saw it.
+    // Every other browser loses its cameras and socket too: say so on every path.
     const extra =
       others > 0
         ? ` ${others} other browser${others === 1 ? " is" : "s are"} connected and will be disconnected.`

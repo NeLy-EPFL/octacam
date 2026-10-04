@@ -1,9 +1,5 @@
-// Flywheel tab: stepper loop command + hold-to-jog position adjustment.
-//
-// Served from /plugins/flywheel/, so it cannot import core "./util.js" (that
-// would 404). Shared helpers (api, clampInput) are passed in via the ctx the
-// host (app.js) constructs. The serial helpers live at /js/ (absolute path,
-// since a relative import would resolve under /plugins/flywheel/ and 404).
+// Flywheel tab: stepper loop command and hold-to-jog. Served from
+// /plugins/flywheel/, so core helpers come in the ctx or by absolute /js/ path.
 import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
 import { FirmwareFlash } from "/js/firmware-flash.js";
 
@@ -13,12 +9,10 @@ export default class FlywheelTab {
   constructor({ send, notify, status, api, clampInput }) {
     this.send = send; // sends a JSON message over the WS
     this.notify = notify;
-    this.api = api; // shared fetch helper (from util.js, injected by app.js)
-    this.clampInput = clampInput; // shared input clamp helper
+    this.api = api;
+    this.clampInput = clampInput;
     this.jogging = false;
-    // Whether the serial port is open (from /api/system, updated by reconnect),
-    // and whether the control WebSocket is up. Both must hold for the controls
-    // to be usable.
+    // The controls need both the serial port (ready) and the socket (connected).
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
     this.connected = false;
@@ -30,8 +24,7 @@ export default class FlywheelTab {
     this.portSelect = document.getElementById("flywheel-port");
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
-    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
-    // while jogging so a flash (which resets the board) can't interrupt motion.
+    // Hidden while jogging: a flash resets the board.
     this.fw = new FirmwareFlash({
       api: this.api,
       notify: this.notify,
@@ -84,11 +77,9 @@ export default class FlywheelTab {
     this.fw.load();
   }
 
-  // Seed the loop program from the rig's configured command
-  // ([[plugins]] options.command), so a configured loop — or one restored from a
-  // recording's config snapshot — is what the operator sees on load. Absent, the
-  // fields keep the markup's defaults. Only at construction: a later status push
-  // (a reconnect) must never overwrite what the operator is editing.
+  // Seed the loop from the configured command (options.command, also restored
+  // from a recording's snapshot). Only at construction: a later status push
+  // must never overwrite what the operator is editing.
   _seedCommand(command) {
     if (!command) return;
     const steps = Number(command.n_steps);
@@ -112,8 +103,6 @@ export default class FlywheelTab {
     }
   }
 
-  // Populate the port dropdown with the currently detected serial ports,
-  // keeping the active device selected.
   async _loadPorts() {
     populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
@@ -126,10 +115,7 @@ export default class FlywheelTab {
     this._refresh();
   }
 
-  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
-  // server's background init finishes opening the serial port after the page
-  // loaded, or on a reconnect), so the controls flip from "not open" to ready
-  // without the operator clicking Reconnect.
+  // A /api/system plugin status (the init's push or a reconnect).
   applyStatus(info) {
     if (!info) return;
     this.ready = Boolean(info.ready);
@@ -137,8 +123,6 @@ export default class FlywheelTab {
     this._refresh();
   }
 
-  // Reflect the current (websocket, serial) state in the UI: the loop/jog
-  // controls are usable only when both are up; otherwise show why.
   _refresh() {
     this.fields.disabled = !this.connected || !this.ready;
     this.fw?.setReady(this.ready);
@@ -155,8 +139,7 @@ export default class FlywheelTab {
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
-    // Connect to the port picked in the dropdown (device override); with no
-    // selection the backend reopens the configured device.
+    // No selection reopens the configured device.
     const device = this.portSelect?.value || "";
     let r;
     try {
@@ -222,9 +205,8 @@ export default class FlywheelTab {
     };
   }
 
-  // Params to attach to /api/recording/start under plugin_params.flywheel, or
-  // null. Skipped when the serial port isn't open — there is no board to drive.
-  // Named getStartParams() to match the generic record.js plugin loop.
+  // The recording start's plugin_params.flywheel, or null (also when the port
+  // isn't open: there is no board to drive).
   getStartParams() {
     if (!this.ready) return null;
     return this.withRecording.checked ? this.command() : null;
@@ -267,16 +249,13 @@ export default class FlywheelTab {
 
   // --------------------------------------------------------------- jog
 
-  // Pressing a button starts the backend pulse clock; releasing stops it. The
-  // clock (not these messages) paces the steps, so we send exactly one start
-  // and one stop per hold — the wrong-frequency creep of the old per-step
-  // setInterval is gone.
+  // A hold sends one start and one stop; the server's pulse clock paces the
+  // steps.
   _setupJog(button, direction) {
     button.addEventListener("pointerdown", (e) => {
       if (this.jogging) return;
-      // Capture the pointer so the hold survives the cursor leaving the
-      // button (no spurious pointerleave stop) and a second jog button
-      // cannot steal events mid-hold.
+      // Capture so the hold survives the cursor leaving the button and the
+      // other jog button can't steal events mid-hold.
       try {
         button.setPointerCapture(e.pointerId);
       } catch {

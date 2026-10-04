@@ -1,14 +1,6 @@
-// Dismissible "a newer octacam is available" banner.
-//
-// Read-only: octacam never updates itself from the browser (rewriting a running
-// server with camera SDKs + Arduino links loaded is fragile — see the project's
-// versioning notes). This just surfaces the notice the server computed in
-// /api/system.update and shows the exact upgrade command for that install; the
-// user runs it from a clean shell.
-//
-// Dismissal persists in localStorage keyed to the offered version, so a dismissed
-// banner reappears only when a *newer* release ships (mirrors the theme/resize
-// localStorage idiom). Usage: initUpdateBanner(system.update) once in app.js.
+// Dismissible "a newer octacam is available" banner showing the upgrade
+// command from /api/system.update. octacam never updates itself. A dismissal is
+// stored per offered version, so the banner returns for a newer release.
 
 const DISMISS_KEY = "octacam.updateDismissed";
 
@@ -28,9 +20,8 @@ function storeDismissed(version) {
   }
 }
 
-// `update` is /api/system's `update` object: {available, current, latest, command}
-// (or null when the check was skipped / found nothing). Returns true if the banner
-// was shown, so it is testable without inspecting the DOM.
+// `update`: {available, current, latest, command}, or null. Returns whether the
+// banner is shown.
 export function initUpdateBanner(update) {
   const banner = document.getElementById("update-banner");
   if (!banner) return false;

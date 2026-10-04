@@ -1,9 +1,5 @@
-// 2-Photon tab: Arduino hardware trigger status and arm-with-recording control.
-//
-// Served from /plugins/twophoton/, so it cannot import core "./util.js" (that
-// would 404). The shared fetch helper (api) is passed in via the ctx the host
-// (app.js) constructs. The serial helpers live at /js/ (absolute path, since a
-// relative import would resolve under /plugins/twophoton/ and 404).
+// 2-Photon tab: Arduino trigger status and arm-with-recording. Served from
+// /plugins/twophoton/, so core helpers come in the ctx or by absolute /js/ path.
 import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
 import { FirmwareFlash } from "/js/firmware-flash.js";
 
@@ -17,7 +13,7 @@ const STATE_LABELS = {
 export default class TwoPhotonTab {
   constructor({ notify, status, getRecordSettings, api }) {
     this.notify = notify;
-    this.api = api; // shared fetch helper (from util.js, injected by app.js)
+    this.api = api;
     this._getRecordSettings = getRecordSettings;
     this.ready = Boolean(status?.ready);
     this.device = status?.device || "";
@@ -34,8 +30,7 @@ export default class TwoPhotonTab {
 
     this.reconnectBtn.addEventListener("click", () => this._reconnect());
 
-    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
-    // while the trigger is armed/running so a flash can't interrupt a capture.
+    // Hidden while armed or triggered: a flash would interrupt a capture.
     this.fw = new FirmwareFlash({
       api: this.api,
       notify: this.notify,
@@ -57,8 +52,6 @@ export default class TwoPhotonTab {
     this.fw.load();
   }
 
-  // Populate the port dropdown with the currently detected serial ports,
-  // keeping the active device selected.
   async _loadPorts() {
     populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
   }
@@ -70,22 +63,18 @@ export default class TwoPhotonTab {
     this._refresh();
   }
 
-  // Called by app.js when a "twophoton_state" WS message arrives.
+  // A "twophoton_state" WS message.
   applyState(msg) {
     this.arduinoState = msg.state || "idle";
     if (msg.device) this.device = msg.device;
-    // The backend reports link readiness with every state push, so a serial
-    // port that dies mid-session disables the arm gate (and shows the reconnect
-    // notice) instead of leaving a stale "ready" that would arm a dead link.
+    // Every push carries link readiness, so a port that dies mid-session
+    // disables arming instead of arming a dead link.
     if (typeof msg.ready === "boolean") {
       this.ready = msg.ready;
       this._refresh();
     }
-    // Surface a backend arm failure (wedged/closed link, no ACK) to the operator —
-    // otherwise the checkbox keeps showing "armed" while the cameras wait on a
-    // trigger that never fires. Only notify on a change so a repeated state push
-    // carrying the same error doesn't spam. A cleared error (a later good arm)
-    // resets the guard so the next failure notifies again.
+    // An arm failure means the cameras wait on a trigger that never fires:
+    // notify once per distinct error.
     if (msg.error) {
       if (msg.error !== this._lastShownError) {
         this._lastShownError = msg.error;
@@ -98,10 +87,8 @@ export default class TwoPhotonTab {
     this._renderState();
   }
 
-  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
-  // server's background init finishes arming the board after the page loaded, or
-  // on a reconnect). The status shape names the state field `arduino_state`;
-  // map it to the `state` key applyState expects and reuse that path.
+  // A /api/system plugin status (the init's push or a reconnect), whose state
+  // field is `arduino_state`.
   applyStatus(info) {
     if (!info) return;
     this.applyState({ ...info, state: info.arduino_state });
@@ -109,8 +96,7 @@ export default class TwoPhotonTab {
 
   // --------------------------------------------------------- start params
 
-  // Returns {fps, duration_ms} to include in the recording start request, or
-  // null when "arm with recording" is unchecked or the serial port is not open.
+  // {fps, duration_ms} for the recording start, or null when not arming.
   getStartParams() {
     if (!this.ready || !this.armWithRec?.checked) return null;
     const s = this._getRecordSettings?.();
@@ -132,7 +118,6 @@ export default class TwoPhotonTab {
         `and the device path matches the plugin config, then reconnect.`;
       this.statusBox.classList.remove("hidden");
     }
-    // Gate the checkbox on serial being open (state display is always visible).
     if (this.armWithRec) {
       this.armWithRec.disabled = !this.ready || !this.connected;
     }
@@ -150,8 +135,7 @@ export default class TwoPhotonTab {
 
   async _reconnect() {
     this.reconnectBtn.disabled = true;
-    // Connect to the port picked in the dropdown (device override); with no
-    // selection the backend reopens the configured device.
+    // No selection reopens the configured device.
     const device = this.portSelect?.value || "";
     let r;
     try {

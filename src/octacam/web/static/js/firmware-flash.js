@@ -1,17 +1,7 @@
-// Reusable "firmware out of date — Flash firmware" banner for serial-plugin tabs.
-//
-// A serial plugin whose board carries a firmware fingerprint (triggerbox,
-// twophoton, flywheel) exposes GET/POST /api/<name>/firmware|flash. This controller
-// drives a small banner + button from that: it shows when the board needs
-// (re)flashing, runs the compile+upload, and reflects the result. Import it from a
-// plugin tab (served at /plugins/<name>/, so use the absolute /js/ path):
-//
-//   import { FirmwareFlash } from "/js/firmware-flash.js";
-//   this.fw = new FirmwareFlash({ api, notify, prefix: "twophoton",
-//       ids: { banner: "twophoton-fw-flash", msg: "twophoton-fw-flash-msg",
-//              btn: "twophoton-fw-flash-btn", log: "twophoton-fw-flash-log" },
-//       isActive: () => this.arduinoState === "armed" || this.arduinoState === "triggered" });
-//   // then: fw.load() on init/reconnect, fw.applyState(msg) on WS, fw.setReady(bool)
+// "Firmware out of date — Flash firmware" banner for a serial-plugin tab, driven
+// by GET /api/<prefix>/firmware and POST /api/<prefix>/flash. Plugin tabs import
+// it as "/js/firmware-flash.js"; call load() on init and reconnect, applyState()
+// on each state message. isActive() hides the banner while the board is busy.
 
 export class FirmwareFlash {
   constructor({ api, notify, prefix, ids, isActive }) {

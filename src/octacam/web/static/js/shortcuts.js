@@ -1,24 +1,16 @@
-// Central keyboard-shortcut layer. ONE document-level keydown listener, ONE
-// table that defines every binding, and a "?" help overlay + button-title hints
-// generated from that same table, so the docs can never drift from behaviour.
-//
-// Design rules (each binding's comment adds specifics):
-//  - Single-key shortcuts are suppressed while a text field, <select>, or
-//    contenteditable holds focus, and while any modal (save / dir picker) is
-//    open — the GUI is edit-heavy, so a bare key must never corrupt typing.
-//  - No binding uses a bare Enter / Escape / Tab: those belong to the existing
-//    field- and modal-level handlers. Our only combos on Enter/S still run
-//    through the same suppress() guard.
-//  - Actions map to the REAL control (click the button / call the grid method)
-//    so state-aware labels, gating (disabled), and confirms are reused, never
-//    duplicated. Recording/connection lockouts are expressed as `disabled`, so
-//    respecting `disabled` reproduces the UI's own rules for free.
+// Keyboard shortcuts: one document-level keydown listener and one binding
+// table, from which the "?" help overlay and the button-title hints are also
+// generated, so they can't drift. Invariants:
+//  - Every binding goes through suppressed(): no shortcut fires while a text
+//    field, <select> or contenteditable has focus, or while a modal is open.
+//  - No binding uses a bare Enter / Escape / Tab (the fields and modals own them).
+//  - Actions click the real control or call the real grid method, so its
+//    gating (`disabled`), labels and confirms apply unchanged.
 
 import { ModalFocus } from "./util.js";
 
-// Digit -> tab, in a fixed order independent of the overflow-menu packing, so
-// the same key always reaches the same tab whether it sits in the bar or "⋯".
-// Plugin tabs that aren't loaded are simply absent from the DOM (no-op digit).
+// Digit -> tab in a fixed order, whether the tab sits in the bar or the "⋯"
+// menu. An unloaded plugin's tab is absent, so its digit does nothing.
 const TAB_ORDER = [
   ["record", "Record"],
   ["camera", "Camera"],
@@ -56,17 +48,14 @@ export function keySig(e) {
   return parts.join("+");
 }
 
-// Install the shortcut layer. `grid` is the CameraGrid (preview shortcuts call
-// its methods); everything else is reached by stable id so no other refs are
-// needed. Returns {openHelp, closeHelp, handleKey} for wiring/tests.
+// Install the shortcut layer. `grid` takes the preview shortcuts; everything
+// else is reached by id. Returns {openHelp, closeHelp, handleKey}.
 export function initShortcuts({ grid } = {}) {
   const byId = (id) => document.getElementById(id);
 
-  // Click a control only when it's actionable. `disabled` mirrors the app's own
-  // gating, so honouring it reproduces the UI rules. The globally-intended
-  // buttons (record/theme/save) must work from any tab even while their panel
-  // is display:none, so fire() ignores visibility; controls that live in a
-  // hidden block (plugin status/flash) use fireVisible() instead.
+  // Click a control unless it is disabled. fire() works from any tab (the
+  // record/theme/save buttons may sit in a hidden panel); fireVisible() is for
+  // controls in blocks that are hidden unless relevant (plugin status/flash).
   const fire = (id) => {
     const el = byId(id);
     if (el && !el.disabled) el.click();
@@ -81,13 +70,10 @@ export function initShortcuts({ grid } = {}) {
   const clickTab = (name) =>
     byId("tabs")?.querySelector(`button[data-tab="${name}"]`)?.click();
 
-  // ---- the single source of truth ----
   const bindings = [
-    // Recording — deliberately a modifier combo, never a bare key: a stray
-    // keystroke must never start or (worse) abort a live trial. #record-button
-    // is one control that dispatches start/abort/stop on its own state, and it
-    // is disabled while disconnected/finishing/pending, so fire() is a no-op in
-    // exactly those cases.
+    // A modifier combo, never a bare key: a stray keystroke must never start or
+    // abort a trial. #record-button starts/stops/aborts by state and is
+    // disabled exactly when it must not act.
     {
       section: "Recording",
       caps: ["Ctrl", "Enter"],
@@ -98,7 +84,7 @@ export function initShortcuts({ grid } = {}) {
       run: () => fire("record-button"),
     },
 
-    // Preview — all operate on the selected tile (grid.selected).
+    // Preview: the selected tile.
     { section: "Preview", caps: ["["], sigs: ["["], when: "global",
       desc: "Select previous camera", run: () => grid?.selectPrev() },
     { section: "Preview", caps: ["]"], sigs: ["]"], when: "global",
@@ -114,7 +100,6 @@ export function initShortcuts({ grid } = {}) {
     { section: "Preview", caps: ["0"], sigs: ["0"], when: "global",
       desc: "Reset zoom", run: () => grid?.resetZoomSelected() },
 
-    // View tab.
     { section: "View tab", caps: ["R"], sigs: ["r"], when: "view", hint: "rotate-cw",
       desc: "Rotate 90° clockwise", run: () => grid?.applyView({ rotateDelta: 90 }, "selected") },
     { section: "View tab", caps: ["Shift", "R"], sigs: ["shift+r"], when: "view", hint: "rotate-ccw",
@@ -126,30 +111,27 @@ export function initShortcuts({ grid } = {}) {
     { section: "View tab", caps: ["Backspace"], sigs: ["Backspace"], when: "view", hint: "view-reset",
       desc: "Reset rotation & flips", run: () => grid?.applyView({ reset: true }, "selected") },
 
-    // Camera tab — no batch apply exists (widgets commit on their own change),
-    // so the only useful key is jumping to the parameter filter.
+    // Camera tab widgets commit on their own change; only the filter needs a key.
     { section: "Camera tab", caps: ["/"], sigs: ["/"], when: "camera",
       desc: "Focus the parameter filter", run: () => byId("cam-filter")?.focus() },
 
-    // Benchmark tab — behind Shift because it launches a long device run.
+    // Behind Shift: it launches a long device run.
     { section: "Benchmark tab", caps: ["Shift", "B"], sigs: ["shift+b"], when: "benchmark", hint: "bench-run",
       desc: "Run / cancel benchmark", run: () => fire("bench-run") },
 
-    // Plugin tabs — target whichever plugin tab is active. The status/flash
-    // blocks are hidden unless relevant, so fireVisible() no-ops otherwise.
+    // The active plugin tab's controls, when shown.
     { section: "Plugin tabs", caps: ["C"], sigs: ["c"], when: "plugin",
       desc: "Reconnect serial", run: () => fireVisible(`${activeTab()}-reconnect`) },
     { section: "Plugin tabs", caps: ["Shift", "F"], sigs: ["shift+f"], when: "plugin",
       desc: "Flash firmware", run: () => fireVisible(`${activeTab()}-fw-flash-btn`) },
 
-    // Global.
     { section: "Global", caps: ["T"], sigs: ["t"], when: "global",
       desc: "Toggle light / dark theme", run: () => fire("theme-toggle") },
     { section: "Global", caps: ["Ctrl", "S"], sigs: ["mod+s"], when: "global", hint: "save-config-btn",
       desc: "Save configuration…", run: () => fire("save-config-btn") },
   ];
 
-  // Tab switching 1..N — one dispatch entry per slot, one combined help row.
+  // Tab switching: one binding per digit, one combined help row.
   TAB_ORDER.forEach(([name], i) => {
     bindings.push({
       section: "Global",
@@ -160,8 +142,7 @@ export function initShortcuts({ grid } = {}) {
     });
   });
 
-  // Tab-scoped bindings win over a same-key global one (none overlap today, but
-  // keep the precedence explicit): sort non-global first.
+  // A tab-scoped binding wins over a global one on the same key.
   const ordered = [...bindings].sort(
     (a, b) => (a.when === "global") - (b.when === "global")
   );
@@ -181,15 +162,10 @@ export function initShortcuts({ grid } = {}) {
     ) {
       return true;
     }
-    // Defer entirely while a modal owns the keyboard (each self-guards Escape).
-    // Queried from the DOM rather than a hard-coded id list: #shutdown-dialog was
-    // added without being added here, so with the Shut down / Shut down & process
-    // dialog open and awaiting a choice, every bare key still acted on the app
-    // behind it — and Ctrl+Enter clicked #record-button, starting a recording that
-    // then made the pending shutdown fail with a 409. ModalFocus only traps Tab,
-    // and focus sits on a <button>, which the field test above does not match.
-    // The help overlay is also .modal, but handleKey returns before suppressed()
-    // while it is open, so it never reaches this loop.
+    // An open modal owns the keyboard (each guards its own Escape). Found by
+    // class, not by id, so a new modal can't be missed: with focus on a modal's
+    // <button>, Ctrl+Enter would otherwise start a recording behind it. The
+    // help overlay is handled before this runs.
     for (const m of document.querySelectorAll(".modal")) {
       if (!m.classList.contains("hidden")) return true;
     }
@@ -209,7 +185,7 @@ export function initShortcuts({ grid } = {}) {
     return false;
   }
 
-  // ---- help overlay (rendered from `bindings`, so it can't drift) ----
+  // ---- help overlay ----
   const overlay = document.createElement("div");
   overlay.id = "shortcuts-overlay";
   overlay.className = "modal hidden";
@@ -255,8 +231,6 @@ export function initShortcuts({ grid } = {}) {
     head.append(h, close);
     card.appendChild(head);
 
-    // One combined row for the tab-switch digits (the per-digit bindings are
-    // hidden from help).
     const tabRow = {
       caps: ["1", "–", String(TAB_ORDER.length)],
       desc: "Switch tab (" + TAB_ORDER.map(([, l]) => l).join(", ") + ")",
@@ -304,9 +278,8 @@ export function initShortcuts({ grid } = {}) {
   byId("shortcuts-help-btn")?.addEventListener("click", openHelp);
   buildHelp();
 
-  // Append the shortcut to each anchor button's tooltip. Skip controls whose
-  // title is rewritten dynamically (e.g. the theme toggle) so we don't fight
-  // their own updates — those live only in the overlay.
+  // Append the shortcut to each anchor button's tooltip. Controls that rewrite
+  // their own title (the theme toggle) have no `hint`.
   for (const b of bindings) {
     if (!b.hint) continue;
     const el = byId(b.hint);
@@ -317,8 +290,7 @@ export function initShortcuts({ grid } = {}) {
   }
 
   function handleKey(e) {
-    // Help overlay is modal: '?' / Esc close it and it swallows everything else
-    // (handled first so it works even while the overlay itself holds focus).
+    // The open help overlay swallows every key; '?' or Esc closes it.
     if (helpOpen) {
       if (e.key === "Escape" || e.key === "?") {
         e.preventDefault();

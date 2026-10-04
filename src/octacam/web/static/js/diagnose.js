@@ -86,11 +86,9 @@ export class BenchmarkTab {
     this.progress.hidden = true;
   }
 
-  // A structured progress update (msg.type === "diagnostics_progress"). Animates
-  // the bar from its CURRENT width toward the phase's end target over the phase's
-  // expected duration. The goal is clamped monotonic and the animation is never
-  // reset to the phase start, so the bar keeps moving forward — repeated updates
-  // within a phase (the max-fps probes) no longer snap it backward.
+  // A "diagnostics_progress" message: animate the bar from its current width
+  // toward the phase's target over the phase's expected duration. The goal
+  // only grows, so repeated updates within a phase never move it backward.
   applyProgress(msg) {
     if (this.results.dataset.forThisRun) return; // a report is already shown
     this.progress.hidden = false;
@@ -154,9 +152,8 @@ export class BenchmarkTab {
     try {
       r = await api("POST", "/api/diagnostics/run", body);
     } catch (e) {
-      // The start request never reached the server, so no running-state
-      // transition will ever fire to clear the bar — undo the optimistic UI
-      // here, then rethrow so _onButton's catch still emits the notify.
+      // No running state will come to clear the bar: undo it here, then let
+      // _onButton's catch notify.
       this.status.textContent = "";
       this._hideProgress();
       throw e;

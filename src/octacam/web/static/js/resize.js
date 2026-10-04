@@ -1,7 +1,5 @@
-// Sidebar resizer: drag the gutter between the camera grid and the control
-// panel to widen/narrow the sidebar. The width drives the --sidebar-width CSS
-// variable (read by both #sidebar and the connection banner) and is persisted
-// so it survives a reload.
+// Sidebar resizer: dragging the gutter sets --sidebar-width (read by #sidebar
+// and the connection banner), remembered across reloads.
 
 const MIN = 240;
 const KEY = "octacam.sidebarWidth";
@@ -27,11 +25,9 @@ export function initSidebarResize() {
   const handle = document.getElementById("sidebar-resizer");
   if (!handle) return;
 
-  // Cap the panel so the grid can never be squeezed away entirely.
+  // The grid can never be squeezed away entirely.
   const maxWidth = () => Math.min(680, Math.round(window.innerWidth * 0.6));
-  // Relax the 240px floor on a narrow viewport (where MIN would otherwise exceed
-  // the whole window) so the width math stays sane; the CSS breakpoint stacks
-  // the panel below the grid at phone widths regardless.
+  // A window narrower than MIN relaxes the floor.
   const minWidth = () => Math.min(MIN, Math.max(140, window.innerWidth - 80));
   const clampW = (w) =>
     Math.max(minWidth(), Math.min(maxWidth(), Math.round(w)));

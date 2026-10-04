@@ -4,9 +4,7 @@ import { api, clamp, clampInput, formatBytes, formatHMS } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
-// Per-browser memory of the Advanced-options switch, so a power user who keeps
-// it open doesn't have to re-flip it every load (mirrors the theme/resize
-// localStorage idiom). Off is the default when storage is unavailable/unset.
+// The Advanced-options switch is remembered per browser; off by default.
 const ADV_KEY = "octacam.record.advanced";
 
 function readAdvancedPref() {
@@ -31,23 +29,18 @@ function trimNum(v) {
 
 export class RecordTab {
   constructor({ formats, getPluginParams, notify }) {
-    // Returns {<plugin name>: <start-params slice>} for the loaded plugin tabs;
-    // packed into the recording-start request below. See app.js.
-    this.getPluginParams = getPluginParams;
+    this.getPluginParams = getPluginParams; // () => {name: start-params slice}
     this.notify = notify;
     this.settings = null;
     this.state = "idle";
-    // The countdown is driven by an absolute end time in the client's monotonic
-    // clock (performance.now()), not by mutating a remaining-ms counter, so it
-    // survives jitter between the local tick and server telemetry. See _anchor.
+    // The countdown's end in performance.now() time (see _anchor).
     this.deadline = null;
     this.totalMs = null;
-    // Identity of the recording the deadline belongs to, so a new recording
-    // re-anchors fresh even if we never saw the non-recording states between
-    // them (coalesced sends, or a reconnect spanning a recording boundary).
+    // The recording the deadline belongs to: a new one re-anchors even if the
+    // states between them were never seen (coalesced sends, a reconnect).
     this.recordingId = null;
-    // One-shot flag: skip the progress-bar width transition on the first frame
-    // of a fresh countdown so the bar never sweeps backward to its start.
+    // Skip the bar's width transition once, so a fresh countdown never sweeps
+    // backward to its start.
     this.barJump = false;
     this.lastEvent = null;
     this.connected = false;
@@ -57,20 +50,17 @@ export class RecordTab {
     this.durationValue = document.getElementById("duration-value");
     this.durationUnit = document.getElementById("duration-unit");
     this.fpsInput = document.getElementById("fps");
-    // The save path is split into a base directory (record_directory) and a
-    // relative sub-path (relative_directory); the server recomposes save_dir.
+    // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
     this.diskFree = document.getElementById("disk-free");
-    // The Advanced-options switch and the block of less-common knobs it reveals.
     this.advancedToggle = document.getElementById("record-advanced-toggle");
     this.advancedSection = document.getElementById("record-advanced");
     this.trigger = document.getElementById("trigger-source");
     this.previewTrigger = document.getElementById("preview-trigger-source");
     this.format = document.getElementById("format");
     this.ffmpegParams = document.getElementById("ffmpeg-params");
-    // Encoder-params boxes swap by save method (ffmpeg=CPU / nvenc=GPU), each
-    // bound to its own field; the nvenc block also carries the GPU session cap.
+    // One encoder-params box per save method (see _syncSaveMethodFields).
     this.ffmpegParamsRow = document.getElementById("ffmpeg-params-row");
     this.nvencParams = document.getElementById("nvenc-params");
     this.nvencParamsRow = document.getElementById("nvenc-params-row");
@@ -78,17 +68,13 @@ export class RecordTab {
     this.nvencAuto = document.getElementById("nvenc-auto");
     this.maxNvencSessions = document.getElementById("max-nvenc-sessions");
     this.nvencDetected = document.getElementById("nvenc-detected");
-    // One-shot cache: the detected GPU session cap, fetched lazily the first time
-    // nvenc is selected (the server probe briefly loads the GPU). _pending guards
-    // against a second fetch while one is in flight.
-    this._nvencCaps = null;
+    this._nvencCaps = null; // see _ensureNvencCaps
     this._nvencCapsPending = false;
     this.recordForm = document.getElementById("record-form");
     this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
     this.writerQueueSize = document.getElementById("writer-queue-size");
-    // Process section: post-recording knobs seeded from the config's
-    // [transcode]/[transfer] sections and baked into each recording's config
-    // snapshot for `octacam process`.
+    // Process section: baked into each recording's config snapshot for
+    // `octacam process`.
     this.transcodeFfmpegParams = document.getElementById(
       "transcode-ffmpeg-params"
     );
@@ -145,8 +131,9 @@ export class RecordTab {
     this.nvencParams.addEventListener("change", () =>
       this._put({ nvenc_params: this.nvencParams.value }, [this.nvencParams])
     );
-    // Auto-detect on: send null so the server probes the GPU cap and disable the
-    // manual box. Off: commit the shown number as an explicit cap.
+    // Auto-detect sends null (the server probes the GPU cap); turning it off
+    // commits the box as an explicit cap, seeded from the detected cap when
+    // blank, never 0 (which would put every camera on the CPU).
     this.nvencAuto.addEventListener("change", () => {
       const auto = this.nvencAuto.checked;
       this.maxNvencSessions.disabled = auto;
@@ -154,9 +141,6 @@ export class RecordTab {
         this._put({ max_nvenc_sessions: null }, [this.nvencAuto]);
         return;
       }
-      // Turning auto OFF: seed the cap from the box, or from the detected cap
-      // when the box is blank, so it never silently commits 0 (which forces
-      // every camera onto the CPU).
       const v =
         this.maxNvencSessions.value.trim() === ""
           ? (this._nvencCaps?.max_sessions ?? 1)
@@ -181,8 +165,7 @@ export class RecordTab {
         [this.saveFrameTimestamps]
       )
     );
-    // Round to an integer: the server rejects a non-int writer_queue_size, and
-    // clampInput returns a float (a typed "64.5" would otherwise 422).
+    // The server rejects a non-integer writer_queue_size (422).
     this.writerQueueSize.addEventListener("change", () => {
       const v = Math.round(clampInput(this.writerQueueSize));
       this.writerQueueSize.value = String(v);
@@ -209,10 +192,7 @@ export class RecordTab {
     this.button.addEventListener("click", () => this._onButton());
     this._initAdvancedToggle();
 
-    // Re-render between telemetry updates so the countdown and progress bar
-    // advance smoothly. Both are derived from `this.deadline`, so this only
-    // reads the clock - it never mutates the remaining time, which is what made
-    // the old per-second decrement race with telemetry and tick back up.
+    // Re-render between telemetry updates; this only reads `this.deadline`.
     setInterval(() => {
       if (this.state === "recording" && this.deadline != null) {
         this.renderStatus();
@@ -220,10 +200,7 @@ export class RecordTab {
     }, 250);
   }
 
-  // Wire the Advanced-options switch: restore the remembered state, then
-  // show/hide the advanced block and persist the choice on every flip. The
-  // encoder-param rows inside stay governed by _syncSaveMethodFields — hiding
-  // the whole block doesn't touch their individual `hidden` state.
+  // The rows inside keep their own `hidden` state (_syncSaveMethodFields).
   _initAdvancedToggle() {
     const open = readAdvancedPref();
     this.advancedToggle.checked = open;
@@ -237,8 +214,7 @@ export class RecordTab {
 
   // ------------------------------------------------------ server -> UI
 
-  // The "managed" trigger source needs an octacam-driven trigger plugin; enable
-  // its dropdown option only when the server reports one is loaded.
+  // "managed" needs a loaded trigger-generating plugin (the server says).
   setManagedAvailable(available) {
     this._managedAvailable = available;
     if (available) this._enableManagedOption();
@@ -272,8 +248,7 @@ export class RecordTab {
       this.relativeDir.value = s.relative_directory;
     }
     if (s.trigger_source && canSet(this.trigger)) {
-      // The server promotes external+driving-plugin to "managed", so the option
-      // may need enabling before it can be selected as the current value.
+      // The server may promote external to "managed"; the option must be enabled.
       if (s.trigger_source === "managed") this._enableManagedOption();
       this.trigger.value = s.trigger_source;
     }
@@ -333,10 +308,8 @@ export class RecordTab {
     this._syncSaveMethodFields();
   }
 
-  // Show only the encoder-params block for the selected save method: the CPU
-  // (ffmpeg) box for "ffmpeg", the GPU box + session cap for "nvenc", neither for
-  // "raw". Each method keeps its own params field, so switching never clobbers
-  // the other preset.
+  // Show the selected method's encoder params (none for "raw"); each method
+  // keeps its own field, so switching never clobbers the other preset.
   _syncSaveMethodFields() {
     const method = this.format.value;
     this.ffmpegParamsRow.hidden = method !== "ffmpeg";
@@ -345,17 +318,14 @@ export class RecordTab {
     if (method === "nvenc") this._ensureNvencCaps();
   }
 
-  // Fetch the detected GPU NVENC session cap once (lazily, since the server probe
-  // briefly loads the GPU), then reflect it in the UI. Best-effort: on failure
-  // the manual controls still work, just without the detected-count hint.
+  // Fetch the detected NVENC session cap once, only when nvenc is selected
+  // (the server probe briefly loads the GPU). Best-effort.
   async _ensureNvencCaps() {
     if (this._nvencCaps) {
       this._applyNvencCaps();
       return;
     }
-    // applySettings runs on every telemetry tick, so a plain fetch here would
-    // fire a fresh /api/nvenc/capabilities (and a server-side GPU probe) each
-    // tick until one returns. Guard so at most one request is ever in flight.
+    // applySettings runs on every telemetry tick: one request in flight at most.
     if (this._nvencCapsPending) return;
     this._nvencCapsPending = true;
     let r;
@@ -381,8 +351,7 @@ export class RecordTab {
       return;
     }
     this.nvencDetected.textContent = `GPU: ${caps.max_sessions} concurrent NVENC session(s) detected.`;
-    // When auto-detecting, mirror the detected cap into the (disabled) box so the
-    // operator sees the number that will be used; leave a manual override alone.
+    // Auto-detecting: show the cap that will be used in the disabled box.
     if (this.nvencAuto.checked && document.activeElement !== this.maxNvencSessions) {
       this.maxNvencSessions.value = String(caps.max_sessions);
     }
@@ -410,10 +379,8 @@ export class RecordTab {
     this.updateControls();
   }
 
-  // A failed writer during a trial can silently lose data, so surface it as a
-  // persistent, prominent banner (in addition to the per-tile grid badge) that
-  // stays until the flag clears (the next recording resets it). `failedNames`
-  // is the list of cameras whose writer failed; empty hides the banner.
+  // A persistent banner naming the cameras whose writer failed (data may be
+  // lost); an empty list hides it.
   setWriterFailure(failedNames) {
     const el = this.writerAlert;
     if (!el) return;
@@ -450,8 +417,7 @@ export class RecordTab {
       !this.connected || this.state === "finishing" || this.requestPending;
   }
 
-  // Remaining time derived from the deadline, clamped at zero. Returns null
-  // when no recording is counting down.
+  // null when no recording is counting down.
   _remainingMs() {
     if (this.deadline == null) return null;
     return Math.max(0, this.deadline - performance.now());
@@ -464,9 +430,8 @@ export class RecordTab {
       this.recordingId = null;
       return;
     }
-    // A different recording must not inherit the previous trial's (now stale,
-    // possibly already-elapsed) deadline, which Math.min would latch onto and
-    // pin the countdown at 0:00. Drop the anchor so _anchor starts fresh.
+    // A new recording must not inherit the last one's elapsed deadline, which
+    // Math.min would latch onto at 0:00.
     if (snap.recording_id !== this.recordingId) {
       this.recordingId = snap.recording_id;
       this.deadline = null;
@@ -475,16 +440,13 @@ export class RecordTab {
     this._anchor(snap.remaining_ms);
   }
 
-  // Convert a server-reported remaining time into an absolute deadline. The
-  // deadline for a recording is fixed, so once anchored we only ever pull it
-  // *earlier* (Math.min): jitter between the local tick and telemetry samples
-  // can no longer make the displayed countdown tick back up.
+  // Turn a server-reported remaining time into an absolute deadline. A
+  // recording's deadline is fixed, so once anchored it only moves earlier
+  // (Math.min) and telemetry jitter can't make the countdown tick back up.
   _anchor(ms) {
     const target = performance.now() + ms;
     if (this.deadline == null) {
-      // Fresh recording, or a connect partway through one. Adopt the value as
-      // the total; duration_s covers the mid-recording case, where `ms` is only
-      // the leftover and would otherwise under-size the progress bar.
+      // duration_s sizes the bar when connecting partway through a recording.
       this.deadline = target;
       this.totalMs = Math.max(ms, (this.settings?.duration_s ?? 0) * 1000);
       this.barJump = true;
@@ -522,9 +484,7 @@ export class RecordTab {
     if (this.state === "recording" && this.deadline != null) {
       const frac =
         this.totalMs > 0 ? clamp(1 - remaining / this.totalMs, 0, 1) : 1;
-      // Entering determinate from waiting/hidden, or starting a fresh
-      // countdown, would otherwise animate the bar *backward* from the 35%
-      // indeterminate sweep (or a stale finished width) down to its start.
+      // Jump, don't animate, out of the indeterminate sweep or a stale width.
       const jump =
         this.barJump ||
         prog.classList.contains("hidden") ||
@@ -541,8 +501,7 @@ export class RecordTab {
         bar.style.width = width;
       }
     } else if (this.state === "waiting") {
-      // Armed but no deadline yet: show an indeterminate sweep rather than a
-      // bar stuck at zero. Clear the inline width so the CSS rule drives it.
+      // No deadline yet: an indeterminate sweep (the CSS rule sets the width).
       bar.style.width = "";
       prog.classList.remove("hidden");
       prog.classList.add("indeterminate");
@@ -567,10 +526,8 @@ export class RecordTab {
     ]);
   }
 
-  // Changing the unit must only re-express the SAME recording length in the new
-  // unit, not rescale it (picking "min" after "20 s" must show 0.333, not make
-  // the recording 20 minutes). Recompute the shown number from the unchanged
-  // duration_s and issue no PUT — only editing the value commits a new duration.
+  // A unit change re-expresses the same duration (20 s -> 0.333 min) and sends
+  // nothing; only editing the value commits a new duration.
   _reexpressDuration() {
     const factor = Number(this.durationUnit.value) || 1;
     const seconds = this.settings?.duration_s;
@@ -579,14 +536,12 @@ export class RecordTab {
     }
   }
 
-  // Current base-directory text (possibly uncommitted), so the directory picker
-  // opens near wherever the operator is pointing.
+  // The base-directory text, possibly uncommitted (the picker opens there).
   getRecordDir() {
     return this.recordDir.value;
   }
 
-  // Adopt a base folder chosen in the directory picker and commit it like a
-  // manual edit (PUT + revalidate, updating the disk-free readout).
+  // Commit a folder chosen in the directory picker like a manual edit.
   setRecordDir(path) {
     this.recordDir.value = path;
     this._commitRecordDir();

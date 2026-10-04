@@ -1,8 +1,5 @@
-// Shared serial-port picker helpers for the Arduino plugin tabs.
-//
-// Served from /js/, so plugin modules import it via the ABSOLUTE path
-// "/js/serial.js". A relative "./serial.js" would resolve under
-// /plugins/<name>/ and 404. Kept dependency-free so any plugin can use it.
+// Serial-port picker helpers for the plugin tabs, which import this by the
+// absolute path "/js/serial.js" (a relative one resolves under /plugins/<name>/).
 
 // Fetch the detected serial ports (never throws; returns [] on any error).
 export async function fetchSerialPorts(api) {
@@ -15,13 +12,9 @@ export async function fetchSerialPorts(api) {
   return [];
 }
 
-// Fill `select` with the plausible board ports, keeping `current` selected.
-//
-// Only microcontroller-class ports are listed — a host can expose dozens of
-// legacy /dev/ttyS* that are never an Arduino, and flooding the dropdown with
-// them buries the real candidates. `current` is always added (even if generic
-// or an "auto" sentinel), so the active device is never dropped. Arduino-class
-// ports are floated to the top and flagged.
+// Fill `select` with the microcontroller-class ports, Arduinos first (a host
+// can have dozens of /dev/ttyS* that bury them). `current` is always listed
+// and selected, even when generic or "auto".
 export function populatePortSelect(select, ports, current) {
   if (!select) return;
   const candidates = ports.filter((p) => p.likely_microcontroller);
