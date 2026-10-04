@@ -124,13 +124,15 @@ class Command:
         )
 
     @classmethod
-    def from_payload(cls, payload) -> Command:
-        """Build a Command from a dict of integer fields.
-
-        Raises KeyError/TypeError/ValueError on malformed input; callers map
-        that to the appropriate error (HTTP 422, a warning, ...).
-        """
-        return cls(**{field: int(payload[field]) for field in COMMAND_FIELDS})
+    def parse(cls, payload) -> Command | None:
+        """The Command a dict of its fields describes, or None when a field is
+        missing, not an integer, or outside its wire range."""
+        try:
+            command = cls(**{field: int(payload[field]) for field in COMMAND_FIELDS})
+            command.to_bytes()  # struct.error for an out-of-range field
+        except (KeyError, TypeError, ValueError, struct.error):
+            return None
+        return command
 
 
 def _command_from_options(options: dict) -> Command | None:
@@ -148,12 +150,9 @@ def _command_from_options(options: dict) -> Command | None:
     if not isinstance(raw, dict):
         log.warning("Flywheel plugin: 'command' must be a table; ignoring %r", raw)
         return None
-    try:
-        command = Command.from_payload({**asdict(Command()), **raw})
-        command.to_bytes()  # reject an out-of-range field here, not at arm time
-    except (KeyError, TypeError, ValueError, struct.error):
+    command = Command.parse({**asdict(Command()), **raw})
+    if command is None:
         log.warning("Flywheel plugin: ignoring invalid command %r", raw)
-        return None
     return command
 
 
@@ -602,16 +601,10 @@ class FlywheelPlugin(Plugin):
         spec = params.get(self.name)
         if not spec:
             return None
-        try:
-            cmd = Command.from_payload(spec)
-            cmd.to_bytes()  # force the struct pack so an out-of-range wire field
-            # is rejected here (struct.error is not a ValueError) rather than
-            # escaping later through write_command, matching the serial_command
-            # endpoint's validation.
-            return cmd
-        except (KeyError, TypeError, ValueError, struct.error):
+        command = Command.parse(spec)
+        if command is None:
             log.warning("Flywheel plugin: ignoring invalid command %r", spec)
-            return None
+        return command
 
     # --------------------------------------------------------- web contrib
 
@@ -671,13 +664,9 @@ class FlywheelPlugin(Plugin):
         def serial_command(payload: dict = Body(...)):
             if not self._link.is_open:
                 raise HTTPException(503, "Serial port not available")
-            try:
-                command = Command.from_payload(payload)
-                command.to_bytes()  # range-check the packed wire fields up front
-            except (KeyError, TypeError, ValueError, struct.error):
-                # struct.error (out-of-range field) is not a ValueError, so
-                # without it an out-of-range value would escape as a 500.
-                raise HTTPException(422, "Invalid stepper command") from None
+            command = Command.parse(payload)
+            if command is None:
+                raise HTTPException(422, "Invalid stepper command")
             self._link.write_command(command)
             return {"status": "ok"}
 

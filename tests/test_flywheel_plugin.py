@@ -75,9 +75,12 @@ def test_single_step_commands():
     assert Command(n_steps=0).to_bytes() == b"\x00" * 8
 
 
-def test_command_from_payload():
+def test_command_parse():
     payload = dict.fromkeys(COMMAND_FIELDS, 1)
-    assert Command.from_payload(payload) == Command(*([1] * 5))
+    assert Command.parse(payload) == Command(*([1] * 5))
+    assert Command.parse({**payload, "n_repeats": 300}) is None  # > uint8
+    assert Command.parse({**payload, "n_steps": "spin"}) is None
+    assert Command.parse({"n_steps": 1}) is None  # fields missing
 
 
 # --------------------------------------------------------- recording hooks
@@ -570,7 +573,7 @@ def test_default_start_params_returns_the_configured_command():
     slice_ = plugin.default_start_params(fps=100.0, duration_s=10.0)
     assert slice_ == asdict(command)
     # Round-trips through the same path on_first_frame uses.
-    assert Command.from_payload(slice_) == command
+    assert Command.parse(slice_) == command
 
 
 def test_default_start_params_is_none_without_a_configured_command():
