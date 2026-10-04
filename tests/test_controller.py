@@ -147,6 +147,38 @@ def test_check_sync_does_not_compare_unlike_cameras():
     assert "[b0, b1]" in note and "[f0, f1]" in note, note
 
 
+def test_check_sync_note_names_what_differs():
+    # The capillary rig: two GS3s alike but for their ROI. The note must read as
+    # information and say why these two were not compared.
+    top = (*GS3[:2], 1024, 2048, *GS3[4:])
+    bottom = (*GS3[:2], 2048, 1024, *GS3[4:])
+    cams = [_sync_camera("top", 12_700_000), _sync_camera("bottom", 7_500_000)]
+    sync = _sync_controller(cams, {"top": top, "bottom": bottom})._check_sync(
+        completed=True
+    )
+    assert sync["ok"] and sync["warnings"] == [], sync
+    (note,) = sync["notes"]
+    assert "not an error" in note, note
+    assert "frame size (top 1024×2048, bottom 2048×1024)" in note, note
+    for same in ("model", "pixel format", "exposure", "backend"):
+        assert f"{same} (" not in note, note
+
+
+def test_check_sync_note_names_each_differing_field_per_group():
+    cams = [
+        _sync_camera("b0", 6_700_000),
+        _sync_camera("b1", 6_800_000),
+        _sync_camera("f0", 12_700_000),
+    ]
+    sync = _sync_controller(cams, {"b0": BASLER, "b1": BASLER, "f0": GS3})._check_sync(
+        completed=True
+    )
+    (note,) = sync["notes"]
+    assert f"model ([b0, b1] {BASLER[1]}, f0 {GS3[1]})" in note, note
+    assert "frame size ([b0, b1] 1920×1200, f0 2048×2048)" in note, note
+    assert "exposure (" not in note, note  # both 2000 µs
+
+
 def test_check_sync_still_catches_a_like_camera_a_pulse_late():
     cams = [
         _sync_camera("b0", 6_700_000),

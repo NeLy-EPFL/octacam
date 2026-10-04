@@ -209,7 +209,7 @@ def test_cpu_fallback_mirrors_container():
 
 def test_cpu_fallback_defaults_pix_fmt_when_base_has_none():
     base = w.VideoFormat("ffmpeg", "mkv", "x", ffmpeg_params="-c:v h264_nvenc -cq 20")
-    assert "-pix_fmt gray" in cpu_fallback_format(base).ffmpeg_params
+    assert "-pix_fmt yuv420p" in cpu_fallback_format(base).ffmpeg_params
 
 
 # --- RecordingSettings.video_format -----------------------------------------

@@ -460,3 +460,52 @@ def test_with_plugin_options_noop_when_nothing_to_add():
     raw = {"plugins": [{"name": "triggerbox", "options": {"device": "x"}}]}
     assert cw.with_plugin_options(raw, {"triggerbox": {}}) == raw
     assert cw.with_plugin_options({}, {}) == {}
+
+
+# --------------------------------------------------- with_camera_transforms
+
+
+def _rig_cameras():
+    return {
+        "cameras": [
+            {"serial_number": "A", "name": "top", "scale_x": 2.0, "rotation_deg": 0.0},
+            {"serial_number": "B", "name": "bottom", "scale_y": -1.0},
+        ]
+    }
+
+
+def test_with_camera_transforms_noop_when_nothing_changed():
+    raw = _rig_cameras()
+    live = {
+        "A": {"rotation_deg": 0, "flip_h": False, "flip_v": False},
+        "B": {"rotation_deg": 0, "flip_h": False, "flip_v": True},
+    }
+    assert cw.with_camera_transforms(raw, live) == raw
+
+
+def test_with_camera_transforms_patches_rotation_and_flips():
+    # The capillary rig's PR-test takes: top rotated 90° in the View tab, which
+    # the recording baked in but the snapshot did not carry.
+    raw = _rig_cameras()
+    live = {
+        "A": {"rotation_deg": 90, "flip_h": True, "flip_v": False},
+        "B": {"rotation_deg": 0, "flip_h": False, "flip_v": False},
+    }
+    doc = cw.with_camera_transforms(raw, live)
+    top, bottom = doc["cameras"]
+    assert top == {
+        "serial_number": "A",
+        "name": "top",
+        "scale_x": -2.0,  # the flip is the sign; the magnitude is kept
+        "scale_y": 1.0,
+        "rotation_deg": 90.0,
+    }
+    assert bottom["scale_y"] == 1.0 and bottom["rotation_deg"] == 0.0
+    assert raw == _rig_cameras()  # the input is not mutated
+
+
+def test_with_camera_transforms_never_adds_a_camera():
+    # Listing a camera changes which cameras the rig opens: only patch entries.
+    live = {"C": {"rotation_deg": 180, "flip_h": False, "flip_v": False}}
+    assert cw.with_camera_transforms(_rig_cameras(), live) == _rig_cameras()
+    assert cw.with_camera_transforms({"record": {}}, live) == {"record": {}}

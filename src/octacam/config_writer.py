@@ -28,6 +28,7 @@ from typing import Any
 from octacam._compat import tomllib
 from octacam.config import duration_to_seconds, find_config_file, parse_record_section
 from octacam.plugins import canonical_name
+from octacam.transform import DisplayTransform
 from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
@@ -282,6 +283,42 @@ def with_record_settings(raw: dict, live: Mapping[str, Any]) -> dict:
             section.pop(key, None)
         else:
             section[key] = value
+    return doc
+
+
+def with_camera_transforms(raw: dict, transforms: Mapping[str, Mapping[str, Any]]) -> dict:
+    """Return a copy of ``raw`` whose ``[[cameras]]`` carry the live rotation/flips.
+
+    ``transforms`` maps a serial number to the camera's live
+    :meth:`DisplayTransform.to_dict`: the View tab's rotate/flip, which is baked
+    into a display-form recording and is otherwise only persisted by a GUI Save.
+    A camera is patched only when its transform differs from what the config
+    already loads as (so an untouched config stays byte-verbatim), and only when
+    the config already lists it: adding an entry would change which cameras the
+    rig opens. Flips are written as the sign of ``scale_x``/``scale_y`` (the
+    config's vocabulary; its magnitude is kept).
+    """
+    doc = copy.deepcopy(raw) if raw else {}
+    cameras = doc.get("cameras")
+    if not isinstance(cameras, list):
+        return doc
+    for entry in cameras:
+        if not isinstance(entry, dict) or "serial_number" not in entry:
+            continue
+        live = transforms.get(str(entry["serial_number"]))
+        if live is None:
+            continue
+        want = DisplayTransform.from_dict(dict(live))
+        scale_x = float(entry.get("scale_x", 1.0)) or 1.0
+        scale_y = float(entry.get("scale_y", 1.0)) or 1.0
+        have = DisplayTransform.from_scale_rotation(
+            scale_x, scale_y, float(entry.get("rotation_deg", 0.0))
+        )
+        if want == have:
+            continue
+        entry["rotation_deg"] = float(want.rotation_deg)
+        entry["scale_x"] = -abs(scale_x) if want.flip_h else abs(scale_x)
+        entry["scale_y"] = -abs(scale_y) if want.flip_v else abs(scale_y)
     return doc
 
 

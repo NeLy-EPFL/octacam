@@ -368,6 +368,50 @@ def _writer_skipped(camera) -> tuple[int, list[int]]:
     return int(getattr(camera, "writer_skipped", 0) or len(indices)), indices
 
 
+# The fields of a delivery profile (see RecordingController._read_delivery_profiles)
+# an operator can act on, and how to show each.
+_PROFILE_FIELDS = (
+    ("camera backend", lambda p: p[0]),
+    ("model", lambda p: p[1] or "unknown"),
+    ("frame size", lambda p: f"{p[2]}×{p[3]}"),
+    ("pixel format", lambda p: p[4]),
+    ("exposure", lambda p: f"{p[5]} µs"),
+)
+
+
+def _unlike_profiles_note(groups: dict[tuple, list[str]]) -> str:
+    """The note for cameras whose start alignment could not be compared.
+
+    *groups* maps a delivery profile — or ``("unread", name)`` for a camera whose
+    profile could not be read — to the cameras that share it. The note names only
+    the fields that differ, so an operator can tell a deliberate difference (two
+    ROIs) from an accidental one (a mistyped exposure)."""
+
+    def label(members: list[str]) -> str:
+        return members[0] if len(members) == 1 else f"[{', '.join(members)}]"
+
+    read = [(key, members) for key, members in groups.items() if key[0] != "unread"]
+    unread = [name for key, members in groups.items() if key[0] == "unread" for name in members]
+    differences = []
+    for field, show in _PROFILE_FIELDS:
+        values = [(members, show(key)) for key, members in read]
+        if len({value for _members, value in values}) > 1:
+            shown = ", ".join(f"{label(members)} {value}" for members, value in values)
+            differences.append(f"{field} ({shown})")
+    reasons = []
+    if differences:
+        reasons.append("they differ in " + "; ".join(differences))
+    if unread:
+        reasons.append(f"the delivery profile of {', '.join(unread)} could not be read")
+    listing = " vs ".join(f"[{', '.join(members)}]" for members in groups.values())
+    return (
+        f"Start alignment of {listing} was not checked (informational, not an "
+        f"error): {' and '.join(reasons)}, so their frames reach the host after "
+        "different delays. Only cameras alike in model, frame size, pixel format "
+        "and exposure are compared."
+    )
+
+
 def build_recording_summary(
     settings: RecordingSettings,
     cameras,
@@ -2193,7 +2237,7 @@ class RecordingController:
                 )
         # Group the cameras by delivery profile; one that could not be read is
         # compared with none.
-        groups: dict[object, list[str]] = {}
+        groups: dict[tuple, list[str]] = {}
         for camera in cams:
             if camera.name in delays:
                 profile = self._delivery_profiles.get(camera.serial_number)
@@ -2224,13 +2268,7 @@ class RecordingController:
                             f"i+{nearest} (it missed the train's first pulse(s))"
                         )
         if len(groups) > 1:
-            listing = ", ".join(f"[{', '.join(members)}]" for members in groups.values())
-            notes.append(
-                f"Start alignment was not checked between {listing}: a frame "
-                "reaches the host after a delay that depends on the camera model, "
-                "frame size, pixel format and exposure, so only cameras alike in "
-                "all of them are compared"
-            )
+            notes.append(_unlike_profiles_note(groups))
         return {
             "ok": ok,
             "warnings": warnings,
@@ -2327,7 +2365,8 @@ class RecordingController:
 
         The rig's octacam_config.toml is copied with every live change patched
         in: the Record-tab settings, each plugin's live options (e.g. the
-        triggerbox lights), and the Process section's [transcode]/[transfer],
+        triggerbox lights), each camera's View-tab rotation/flips (baked into a
+        display-form recording), and the Process section's [transcode]/[transfer],
         which `octacam process` reads. Each camera's parameter file
         (``camera_params``, read just before the cameras started) is written
         beside it, with the rig's other parameter files (auxiliary configs,
@@ -2359,6 +2398,10 @@ class RecordingController:
             )
             patched = config_writer.with_plugin_options(
                 patched, self.plugins.snapshot_options(plugin_params)
+            )
+            patched = config_writer.with_camera_transforms(
+                patched,
+                {c.serial_number: c.display_transform.to_dict() for c in self.camera_system},
             )
             if raw and patched != raw:
                 config_writer.write_config(save_dir, patched)

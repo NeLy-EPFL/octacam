@@ -18,12 +18,12 @@ directory = "~/data"
 relative_directory = "%y%m%d/flir/001"
 
 save_method = "ffmpeg"         # ffmpeg | raw
-ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p"
 save_transformed = true
 save_timestamps = false
 
 [transcode]
-ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+ffmpeg_params = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt yuv420p"
 
 # Pin a camera's name and grid placement (optional). Sensor parameters
 # (exposure/gain/ROI, ...) live in <serial>.txt, set from the GUI.

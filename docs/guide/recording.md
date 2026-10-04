@@ -170,6 +170,10 @@ camera's sensor parameter file. That makes the folder a complete
   in the **Record** tab and never saved to the rig config.
 - **`[[plugins]]`** holds each plugin's live settings, e.g. the triggerbox camera
   lines and light channels as set in its tab.
+- **`[[cameras]]`** holds each camera's rotation and flips as set in the
+  **View** tab, which a display-form recording bakes into its video. (Only
+  cameras the rig config already lists are updated. Tile layout is saved only by
+  **Save**.)
 - **`<serial>.pfs` / `<serial>.txt`** are read from each camera just before it
   starts recording, so they include **Camera**-tab edits (exposure, gain, ROI, …)
   that were never saved. The rig's other parameter files are copied too.

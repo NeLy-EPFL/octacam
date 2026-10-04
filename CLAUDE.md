@@ -460,7 +460,10 @@ with the videos. Its rules:
 - The rig TOML is re-emitted with the **live** values patched in: the Record tab
   (`config_writer.with_record_settings` ← `controller.record_config_values`, the
   inverse of `cli._settings_from_record`), plugin tabs (`with_plugin_options` ←
-  the `snapshot_options` hook), and the Process section (`with_process_params`).
+  the `snapshot_options` hook), the View-tab rotate/flip each camera's
+  `display_transform` carries (`with_camera_transforms`, only for cameras the
+  config already lists — adding one would change which cameras the rig opens),
+  and the Process section (`with_process_params`).
   Each patch writes a key only when its value differs from what the config
   already *loads as*, so an untouched recording stays a byte-verbatim copy.
 - `directory`/`relative_directory` are **never** patched. The live values are
@@ -473,6 +476,17 @@ with the videos. Its rules:
 - 19 of 24 real pre-fix snapshots had a `[record]` that disagreed with their
   own summary. GUI Save never writes `[record]`/`[[plugins]]`, so a raw copy of
   the rig file is not a record of what ran.
+
+**Never write 4:0:0 H.264.** `-pix_fmt gray` (the old default) makes
+libx264/libx265 write monochrome 4:0:0. Software decoders read it fine, but
+NVIDIA's hardware decoder (NVDEC/VDPAU — VLC's default on the rig) renders it as
+a uniform 128-gray frame, so every recording "was gray" in VLC. Videos are
+full-range `yuv420p` (neutral chroma, so software decoders return the same pixels
+as before), and `writer._playable_pix_fmt` rewrites a configured `gray` to it at
+the shared `_output_args` seam. That seam is what fixes old configs and every
+recording snapshot `octacam process` transcodes from. Odd-sized frames stay 4:0:0
+(4:2:0 can't encode them; libx264 refuses), and an unknown size is left alone.
+To test a decode the way VLC does here, use `ffmpeg -hwaccel cuda`.
 
 **Trigger normalization on save:** a GUI "Save" taken while previewing with a
 software trigger must not bake `TriggerSource=Software` into the file (it would

@@ -213,6 +213,47 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
     assert load_config_dir(config_dir).record.fps == 80.0
 
 
+def test_fake_recording_snapshot_carries_the_live_view_transforms(fake_system, tmp_path):
+    from octacam.config import load_config_dir
+    from octacam.config_writer import write_config
+    from octacam.transform import from_camera_config
+
+    # The View tab rotates one camera and un-flips the other live, unsaved; the
+    # recording bakes both in, so a relaunch from it must apply them too.
+    config_dir = tmp_path / "cfg"
+    write_config(
+        config_dir,
+        {
+            "record": {"fps": 50.0, "duration": 1.0},
+            "cameras": [
+                {"serial_number": "FAKE-0", "name": "cam0"},
+                {"serial_number": "FAKE-1", "name": "cam1", "scale_x": -1.0},
+            ],
+        },
+    )
+    fake_system.apply_display_config(load_config_dir(config_dir).cameras)
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    controller.set_camera_transform(0, 1.0, 1.0, 90)
+    controller.set_camera_transform(1, 1.0, 1.0, 0)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    recorded = {c["serial"]: c["transform"] for c in summary["cameras"]}
+    reloaded = {
+        c.serial_number: from_camera_config(c).to_dict()
+        for c in load_config_dir(save_dir).cameras
+    }
+    assert reloaded == recorded
+    assert recorded["FAKE-0"]["rotation_deg"] == 90 and not recorded["FAKE-1"]["flip_h"]
+    # The rig's own config is untouched.
+    assert load_config_dir(config_dir).cameras[1].scale_x == -1.0
+
+
 def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, tmp_path):
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()

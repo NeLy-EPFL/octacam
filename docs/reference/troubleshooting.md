@@ -92,6 +92,18 @@ mounted/present or isn't writable (local recording still works either way). Moun
 the share or fix permissions, then re-run — transfers **resume**, redoing at most
 the one in-progress file. See [Processing → Transfer](../guide/processing.md#transfer).
 
+## Videos play as flat gray frames
+
+Videos recorded with `-pix_fmt gray` (the default before 0.3.4) are monochrome
+4:0:0 H.264. NVIDIA's hardware decoder shows these as a uniform gray frame,
+and VLC uses that decoder by default on an NVIDIA machine. Software decoders
+(ffmpeg, OpenCV, analysis tools) read them correctly. octacam now writes
+full-range 4:2:0, even for configs and recording snapshots that still say
+`gray`, so `octacam process` turns an older recording into an MP4 that plays
+everywhere. To view an old `.mkv` directly, turn off hardware decoding in VLC
+(*Tools → Preferences → Input / Codecs → Hardware-accelerated decoding →
+Disable*).
+
 ## Colour looks wrong after transcoding
 
 octacam resolves an ffmpeg binary (bundled `imageio-ffmpeg` by default), and

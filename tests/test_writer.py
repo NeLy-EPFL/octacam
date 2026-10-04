@@ -17,6 +17,7 @@ from octacam.writer import (
     build_encode_args,
     default_save_method,
     find_ffmpeg,
+    transcode_encoded,
     transcode_raw,
 )
 
@@ -282,7 +283,11 @@ def test_build_encode_args_merges_user_vf_after_transform():
         "-c:v libx264 -vf eq=contrast=2 -pix_fmt gray",
         vf="transpose=1",
     )
-    assert args[args.index("-vf") + 1] == "transpose=1,eq=contrast=2"
+    # Transform, then the user's filter, then the full-range conversion of the
+    # yuv420p the gray output is written as.
+    assert (
+        args[args.index("-vf") + 1] == "transpose=1,eq=contrast=2,scale=out_range=full"
+    )
 
 
 def test_color_range_args_only_for_limited_range_yuv():
@@ -306,12 +311,126 @@ def test_build_encode_args_forces_full_range_for_yuv_only():
     assert "scale=out_range=full" in yuv[yuv.index("-vf") + 1]
 
     # gray is already full range: no stray -color_range flag, no injected filter.
+    # (An odd frame keeps libx264's gray; an even one is written as yuv420p.)
     gray = build_encode_args(
         ffmpeg_params="-c:v libx264 -crf 0 -preset ultrafast -pix_fmt gray",
-        **common,
+        **{**common, "width": 63},
     )
+    assert gray[gray.index("-pix_fmt") + 1] == "gray"
     assert "-color_range" not in gray
     assert "-vf" not in gray
+
+
+def _out_pix_fmt(args: list[str]) -> str:
+    return args[args.index("-pix_fmt") + 1]
+
+
+@pytest.mark.parametrize("encoder", ["libx264", "libx265"])
+def test_gray_h264_is_written_as_full_range_yuv420p(encoder):
+    # Monochrome 4:0:0 H.264 decodes as flat gray frames on NVIDIA hardware
+    # decoders (VLC's default there), so a gray output — every older config and
+    # recording snapshot — is written as full-range 4:2:0 instead.
+    args = build_encode_args(
+        "ffmpeg", "o.mkv", 30.0, 64, 48, f"-c:v {encoder} -crf 18 -pix_fmt gray"
+    )
+    assert _out_pix_fmt(args) == "yuv420p"
+    assert args[args.index("-color_range") + 1] == "pc"
+    assert "scale=out_range=full" in args[args.index("-vf") + 1]
+
+
+@pytest.mark.parametrize("size", [(63, 48), (64, 47)])
+def test_odd_frames_stay_monochrome(size):
+    # 4:2:0 cannot code an odd side (libx264: "width not divisible by 2"), so
+    # gray is kept — and a yuv420p default falls back to it — rather than failing.
+    for pix_fmt in ("gray", "yuv420p"):
+        args = build_encode_args(
+            "ffmpeg", "o.mkv", 30.0, *size, f"-c:v libx264 -pix_fmt {pix_fmt}"
+        )
+        assert _out_pix_fmt(args) == "gray"
+        assert "-color_range" not in args
+
+
+def test_gray_is_left_alone_for_other_encoders_and_unknown_sizes(tmp_path, monkeypatch):
+    # FFV1 and friends decode gray in software everywhere: nothing to fix.
+    args = build_encode_args("ffmpeg", "o.mkv", 30.0, 64, 48, "-c:v ffv1 -pix_fmt gray")
+    assert _out_pix_fmt(args) == "gray"
+    # A re-encode with no known frame size cannot rule out an odd side.
+    captured = {}
+    monkeypatch.setattr(
+        "octacam.writer._run_ffmpeg", lambda args, *a, **k: captured.update(args=args)
+    )
+    transcode_encoded(
+        tmp_path / "in.mkv", tmp_path / "out.mp4", "-c:v libx264 -pix_fmt gray"
+    )
+    assert _out_pix_fmt(captured["args"]) == "gray"
+    transcode_encoded(
+        tmp_path / "in.mkv",
+        tmp_path / "out.mp4",
+        "-c:v libx264 -pix_fmt gray",
+        width=64,
+        height=48,
+    )
+    assert _out_pix_fmt(captured["args"]) == "yuv420p"
+
+
+def test_gray_config_encodes_4_2_0_with_exact_luma(tmp_path):
+    # End to end through a real ffmpeg: a lossless "-pix_fmt gray" encode is a
+    # 4:2:0 stream (chroma_format_idc 1, which hardware decoders support) whose
+    # luma decodes bit-exact.
+    import subprocess
+
+    w, h = 256, 16
+    ramp = np.tile(np.arange(256, dtype=np.uint8), (h, 1))
+    raw = tmp_path / "ramp.raw"
+    raw.write_bytes(ramp.tobytes())
+    out = transcode_raw(
+        raw,
+        ffmpeg_params="-c:v libx264 -qp 0 -preset ultrafast -pix_fmt gray",
+        output=tmp_path / "ramp.mkv",
+        width=w,
+        height=h,
+        fps=10.0,
+    )
+    ffmpeg = find_ffmpeg()
+    headers = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-i",
+            str(out),
+            "-c",
+            "copy",
+            "-bsf:v",
+            "trace_headers",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stderr
+    (line,) = [ln for ln in headers.splitlines() if "chroma_format_idc" in ln][:1]
+    assert line.rstrip().endswith("= 1"), line
+    dec = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(out),
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "gray",
+            "pipe:1",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    back = np.frombuffer(dec, dtype=np.uint8)[: w * h].reshape(h, w)
+    assert np.array_equal(back, ramp)
 
 
 def test_yuv420p_transcode_preserves_full_range(tmp_path):

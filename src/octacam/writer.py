@@ -5,7 +5,7 @@ write() never blocks the grab loop and drops the frame when the queue is
 full (or once the sink has failed). Available sinks:
 
 - FfmpegVideoWriter (default): pipes raw GRAY8 frames to an ffmpeg child
-  encoding H.264 with libx264 in true monochrome 4:0:0. Encoding happens
+  encoding H.264 with libx264 as full-range 4:2:0. Encoding happens
   entirely in the child process, outside the GIL. Validated on the rig:
   8 parallel ultrafast encoders sustain >1200 fps aggregate at 1080p.
 - RawVideoWriter: raw Mono8 dump, transcoded later by `octacam process`
@@ -49,7 +49,9 @@ FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 # harder at a slower preset).
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
-DEFAULT_PIX_FMT = "gray"
+# Full-range 4:2:0, not "gray": monochrome 4:0:0 H.264 decodes as flat gray
+# frames on NVIDIA hardware decoders (see _playable_pix_fmt).
+DEFAULT_PIX_FMT = "yuv420p"
 # Extra libx264 options passed verbatim to ffmpeg's -x264-params (e.g.
 # "keyint=30:scenecut=0"); empty means the flag is omitted entirely.
 DEFAULT_X264_PARAMS = ""
@@ -60,7 +62,9 @@ DEFAULT_X264_PARAMS = ""
 # capture default uses a fast preset to keep up with the cameras; the transcode
 # default re-encodes harder offline.
 DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
-DEFAULT_TRANSCODE_FFMPEG_PARAMS = "-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"
+DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
+    f"-c:v libx264 -preset veryslow -crf 20 -pix_fmt {DEFAULT_PIX_FMT}"
+)
 
 # GPU capture params, opt-in via ``record.save_method = "nvenc"`` (or by naming
 # any ``*_nvenc`` encoder in ``ffmpeg_params``). NVENC rejects gray/4:0:0, so we
@@ -468,18 +472,69 @@ def _merge_vf(transform_vf: str, tokens: list[str]) -> tuple[list[str], str]:
     return cleaned, ",".join(p for p in (transform_vf, user_vf) if p)
 
 
-def _output_args(ffmpeg_params: str, vf: str) -> tuple[list[str], str, list[str]]:
+_PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
+_VIDEO_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
+# Software encoders whose monochrome (4:0:0) output hardware decoders mishandle.
+_MONO_UNSAFE_ENCODERS = ("libx264", "libx265")
+_warned_pix_fmt: set[str] = set()
+
+
+def _playable_pix_fmt(tokens: list[str], frame_size: tuple[int, int] | None) -> list[str]:
+    """Swap a 4:0:0 H.264/HEVC output for full-range 4:2:0 where the frame allows.
+
+    ``-pix_fmt gray`` makes libx264/libx265 write monochrome 4:0:0, which
+    software decoders handle but NVIDIA's hardware decoder (NVDEC/VDPAU — what
+    VLC picks by default on an NVIDIA machine) renders as a flat gray frame. So a
+    gray output becomes ``yuv420p``, which the full-range helpers keep at 0-255
+    luma with neutral chroma: software decoders return the same pixels as before
+    (they already decoded 4:0:0 as full-range 4:2:0). This covers every config
+    and recording snapshot that still says ``gray``. 4:2:0 cannot code an odd
+    width or height, so such a frame stays (or, from ``yuv420p``, falls back to)
+    4:0:0; an unknown size is left as configured.
+    """
+    if _extract_opt(tokens, _VIDEO_CODEC_OPTS) not in _MONO_UNSAFE_ENCODERS:
+        return tokens
+    pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS)
+    if frame_size is None or pix_fmt not in ("gray", "yuv420p"):
+        return tokens
+    even = frame_size[0] % 2 == 0 and frame_size[1] % 2 == 0
+    target = "yuv420p" if even else "gray"
+    if pix_fmt == target:
+        return tokens
+    if target not in _warned_pix_fmt:
+        _warned_pix_fmt.add(target)
+        if even:
+            log.info(
+                "Writing -pix_fmt gray as full-range yuv420p: monochrome (4:0:0) "
+                "H.264 shows as flat gray frames in hardware decoders (VLC on "
+                "NVIDIA); the pixel values are unchanged"
+            )
+        else:
+            log.warning(
+                "Writing %dx%d frames as -pix_fmt gray (4:0:0): yuv420p cannot code "
+                "an odd width or height. Hardware decoders (VLC on NVIDIA) may show "
+                "these videos as flat gray; disable hardware decoding to view them",
+                *frame_size,
+            )
+    i = next(i for i, tok in enumerate(tokens) if tok in _PIX_FMT_OPTS)
+    return [*tokens[: i + 1], target, *tokens[i + 2 :]]
+
+
+def _output_args(
+    ffmpeg_params: str, vf: str, frame_size: tuple[int, int] | None = None
+) -> tuple[list[str], str, list[str]]:
     """Split a config ``ffmpeg_params`` string into the pieces ffmpeg needs.
 
     Returns ``(encoder_tokens, merged_vf, color_range_args)``: the verbatim
-    encoder tokens (with any user ``-vf`` removed), the single merged filter
-    chain (transform + user filter + full-range conversion for limited-range
-    YUV), and the ``-color_range`` tag args. Shared by the raw-input encoder
-    (:func:`build_encode_args`) and :func:`transcode_encoded` so both apply the
-    ``-vf`` merge and full-range handling identically.
+    encoder tokens (with any user ``-vf`` removed, and a 4:0:0 H.264/HEVC output
+    made 4:2:0 for an even ``frame_size`` — see :func:`_playable_pix_fmt`), the
+    single merged filter chain (transform + user filter + full-range conversion
+    for limited-range YUV), and the ``-color_range`` tag args. Shared by the
+    raw-input encoder (:func:`build_encode_args`) and :func:`transcode_encoded`
+    so both apply the ``-vf`` merge and full-range handling identically.
     """
-    tokens = shlex.split(ffmpeg_params)
-    out_pix_fmt = _extract_opt(tokens, ("-pix_fmt", "-pixel_format")) or ""
+    tokens = _playable_pix_fmt(shlex.split(ffmpeg_params), frame_size)
+    out_pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS) or ""
     tokens, merged_vf = _merge_vf(vf, tokens)
     merged_vf = _full_range_vf(out_pix_fmt, merged_vf)
     return tokens, merged_vf, _color_range_args(out_pix_fmt)
@@ -502,18 +557,19 @@ def build_encode_args(
     The **input** args (``-f rawvideo -pixel_format … -video_size … -framerate
     …``) are derived from the frame geometry; the **output/encoder** args come
     verbatim from ``ffmpeg_params`` (shlex-split), e.g. ``-c:v libx264 -preset
-    ultrafast -crf 18 -pix_fmt gray``. Any ``-vf`` inside ``ffmpeg_params`` is
+    ultrafast -crf 18 -pix_fmt yuv420p``. Any ``-vf`` inside ``ffmpeg_params`` is
     merged with the caller-owned ``vf`` (display transform) into one filter
     chain (see :func:`_merge_vf`). For a limited-range YUV ``-pix_fmt`` a
     full-range conversion filter + tag is injected so 0-255 luma survives (see
     :func:`_full_range_vf`).
 
-    ``-pix_fmt gray`` produces true monochrome 4:0:0 H.264 (decodes in all
-    ffmpeg-based tools; browsers would need yuv420p). Note: ffprobe shows such
-    streams as yuvj420p because the H.264 decoder synthesizes neutral chroma;
-    the x264 encoder log ("4:0:0, 8-bit") is the source of truth.
+    A libx264/libx265 ``-pix_fmt gray`` is written as full-range ``yuv420p``
+    unless the frame has an odd side (see :func:`_playable_pix_fmt`): 4:0:0
+    H.264 decodes as flat gray on NVIDIA hardware decoders. ffprobe shows both
+    as yuvj420p (the H.264 decoder synthesizes neutral chroma for 4:0:0); the
+    x264 encoder log ("4:0:0" vs "4:2:0") is the source of truth.
     """
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf)
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf, (width, height))
     return [
         ffmpeg,
         "-hide_banner",
@@ -1265,6 +1321,8 @@ def transcode_encoded(
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     vf: str = "",
     *,
+    width: int | None = None,
+    height: int | None = None,
     total_frames: int | None = None,
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
@@ -1277,6 +1335,9 @@ def transcode_encoded(
     compression. ``vf``, when non-empty, additionally bakes a display transform
     in (merged with any user ``-vf`` — see :func:`_output_args`).
 
+    ``width``/``height`` (the source's frame size, e.g. from the recording
+    summary) let a gray H.264 output be written as 4:2:0 (see
+    :func:`_playable_pix_fmt`); unknown, the output format is left as configured.
     ``total_frames`` (e.g. from the recording summary) makes the progress bar
     determinate; without it the bar is indeterminate. ``on_progress``/
     ``raw_output`` control progress reporting (see :func:`_run_ffmpeg`).
@@ -1284,7 +1345,8 @@ def transcode_encoded(
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf)
+    frame_size = (width, height) if width and height else None
+    tokens, merged_vf, color_args = _output_args(ffmpeg_params, vf, frame_size)
     with _atomic_output(output) as tmp:
         args = [
             ffmpeg,
@@ -1329,8 +1391,8 @@ def transcode_file(
     Dispatches on the input suffix; ``vf`` (if any) bakes a display transform
     in. The caller picks ``output`` (extension = desired container). A ``.raw``
     input needs ``width``/``height``/``fps``/``pixel_format``/``frames`` from the
-    recording summary; encoded inputs read their own geometry so those are
-    ignored there and ``total_frames`` drives the bar instead."""
+    recording summary; encoded inputs read their own geometry (``width``/``height``
+    only pick their output pixel format) and ``total_frames`` drives the bar."""
     input_path = Path(input_path)
     if input_path.suffix == ".raw":
         return transcode_raw(
@@ -1351,6 +1413,8 @@ def transcode_file(
         output,
         ffmpeg_params=ffmpeg_params,
         vf=vf,
+        width=width,
+        height=height,
         total_frames=total_frames,
         on_progress=on_progress,
         raw_output=raw_output,

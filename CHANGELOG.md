@@ -63,6 +63,27 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Recorded videos played as flat gray frames in VLC on NVIDIA machines.**
+  The default `-pix_fmt gray` wrote monochrome 4:0:0 H.264. NVIDIA's hardware
+  decoder (NVDEC/VDPAU, which VLC picks by default) decodes it as a uniform
+  gray frame, while software decoders read it correctly. Videos are now written
+  as full-range 4:2:0 (`yuv420p` with neutral chroma), and software decoders
+  return the same pixel values. The defaults and every bundled rig config now
+  say `yuv420p`. A libx264/libx265 `-pix_fmt gray` in an older config or
+  recording snapshot is also written as `yuv420p`, so `octacam process` turns
+  existing recordings into MP4s that play everywhere. Frames with an odd width
+  or height stay 4:0:0, since 4:2:0 cannot encode them.
+- **A recording's config snapshot lost the View tab's rotation and flips.** A
+  display-form recording bakes each camera's live rotate/flip into its video,
+  but the snapshot kept the rig file's values. Relaunching from the recording
+  then showed and recorded the cameras unrotated. The snapshot's `[[cameras]]`
+  now carry the live transform for every camera the rig config lists.
+- **The note about unchecked start alignment read like an error.** Cameras
+  that differ in model, frame size, pixel format or exposure deliver a pulse at
+  different delays, so their start alignment is not compared. On a rig whose
+  cameras differ only in ROI, every take ended with a long, generic "was not
+  checked" message. The note now says plainly that it is informational and
+  names what differs (e.g. `frame size: top 1024×2048, bottom 2048×1024`).
 - **octacam crashed at exit (segmentation fault, exit code 139) on a machine with
   a system pylon install** — every `octacam record`, and pytest, after all outputs
   were written. pylon's GenTL transport layer loaded the system pylon's GenTL
