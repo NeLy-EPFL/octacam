@@ -1448,7 +1448,9 @@ def _quiet_console():
 def test_resolve_backend_defaults_to_auto_without_prompting(monkeypatch):
     # No --backend must not ask which vendor to use: the rig auto-detects every
     # installed backend. (A prompt would block here since no input is provided.)
-    monkeypatch.setattr("octacam.cli._available_backends", lambda: ["basler", "flir"])
+    monkeypatch.setattr(
+        "octacam.cameras.registry.available_backends", lambda: ["basler", "flir"]
+    )
     assert _resolve_backend(_quiet_console(), None) == "auto"
 
 
@@ -1479,7 +1481,9 @@ def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
     # and no backend key is pinned into the file (it stays auto-detecting).
     from octacam.config import load_config_dir
 
-    monkeypatch.setattr("octacam.cli._available_backends", lambda: ["basler", "flir"])
+    monkeypatch.setattr(
+        "octacam.cameras.registry.available_backends", lambda: ["basler", "flir"]
+    )
     monkeypatch.setattr(
         "octacam.cli._enumerate_backend",
         lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],

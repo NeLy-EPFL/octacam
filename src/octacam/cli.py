@@ -1947,18 +1947,6 @@ def doctor(
 # ---------------------------------------------------------------------------
 
 
-def _available_backends() -> list[str]:
-    """The cascade tiers installed here, in priority order.
-
-    Lets the wizard tell the user which backends it will auto-detect through
-    (vendor SDKs, the always-present pycameleon floor). ``fake`` is a synthetic
-    test backend, never auto-detected. Selection imports the SDK but never opens a
-    device, so this is side-effect free."""
-    from octacam.cameras.registry import available_backends
-
-    return available_backends()
-
-
 def _resolve_backend(console, cli_backend: str | None) -> str:
     """Resolve the wizard's backend selector; no interactive prompt.
 
@@ -1966,7 +1954,7 @@ def _resolve_backend(console, cli_backend: str | None) -> str:
     auto-detects every installed backend (Basler, FLIR) and simply uses whatever
     is plugged in, so mixing vendors just works. ``--backend`` still pins the rig
     to one vendor, or selects the synthetic ``fake`` backend for tests/CI."""
-    from octacam.cameras.registry import BACKENDS
+    from octacam.cameras.registry import BACKENDS, available_backends
 
     if cli_backend is not None:
         key = cli_backend.strip().lower()
@@ -1979,7 +1967,7 @@ def _resolve_backend(console, cli_backend: str | None) -> str:
                 param_hint="--backend",
             )
         return key
-    available = _available_backends()
+    available = available_backends()
     if available:
         console.print(
             f"Auto-detecting cameras from: [bold]{', '.join(available)}[/bold]"
@@ -3887,17 +3875,6 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
     return OctacamConfig()
 
 
-def _visualizations_for(cfg) -> list[tuple[str, list[list[str]], str]]:
-    """The (name, layout, ffmpeg_params) grids to build for one folder.
-
-    Grids are **opt-in**: only the rig's explicit ``[[visualization]]`` entries
-    are built. A config without one produces no composite (octacam used to derive
-    a near-square layout from the rig's cameras, which spent minutes of ffmpeg on
-    a video most rigs never opened). ``--no-grid`` skips even the configured ones.
-    """
-    return [(v.name, v.layout, v.ffmpeg_params) for v in cfg.visualization]
-
-
 def _transfer_dest(cfg, folder: Path) -> Path | None:
     """Destination for one folder's transfer, or None to skip it.
 
@@ -3956,11 +3933,12 @@ def _grid_and_transfer(
     # on a rig that configured none the phase vanishes instead of running an empty
     # pass (no progress bar, no job phase) over every folder.
     grid_files: dict[Path, list[Path]] = {}
-    folder_grids = (
-        {f: _visualizations_for(folder_cfgs[f]) for f in folder_outputs}
-        if do_grid
-        else {}
-    )
+    folder_grids = {}
+    if do_grid:
+        folder_grids = {
+            f: [(v.name, v.layout, v.ffmpeg_params) for v in cfg.visualization]
+            for f, cfg in folder_cfgs.items()
+        }
     grid_targets = [f for f in folder_outputs if folder_grids.get(f)]
     if do_grid and not grid_targets:
         log.info(
