@@ -660,12 +660,10 @@ class AsyncFrameWriter:
                     self._write_frame(filler)
                     self.frames_written += 1
                 if frame is not None:
+                    t0 = time.perf_counter_ns() if self._profile else 0
+                    self._write_frame(frame)
                     if self._profile:
-                        t0 = time.perf_counter_ns()
-                        self._write_frame(frame)
                         self.encode_ns_samples.append(time.perf_counter_ns() - t0)
-                    else:
-                        self._write_frame(frame)
                     self.frames_written += 1
                     last = frame
             except Exception as e:
