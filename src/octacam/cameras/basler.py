@@ -134,18 +134,6 @@ def _basler_enum_entries(node) -> list[dict] | None:
         return None
 
 
-def _node_attr(node, attr: str):
-    """Best-effort read of node.Min/.Max/.Inc/.Unit; None when unsupported.
-
-    Float/enum nodes (Gain, PixelFormat) lack some of these and raise rather
-    than return, so a missing attribute is expected, not an error.
-    """
-    try:
-        return getattr(node, attr)
-    except (AttributeError, genicam.GenericException):
-        return None
-
-
 def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
     """Undo the live preview's trigger overrides in a saved .pfs.
 
@@ -299,10 +287,10 @@ class BaslerBackend(SoftwareTriggerHandoff):
             raise BackendError(str(e)) from e
         return NodeInfo(
             value=value,
-            min=_node_attr(node, "Min"),
-            max=_node_attr(node, "Max"),
-            inc=_node_attr(node, "Inc"),
-            unit=_node_attr(node, "Unit"),
+            min=_typed_value_attr(node, "GetMin"),
+            max=_typed_value_attr(node, "GetMax"),
+            inc=_typed_value_attr(node, "GetInc"),
+            unit=_typed_value_attr(node, "GetUnit"),
             writable=genicam.IsWritable(node.Node),
         )
 
