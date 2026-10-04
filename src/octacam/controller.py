@@ -729,7 +729,9 @@ class RecordingController:
         self._notify("state", self.snapshot())
 
     def _event(self, level: str, message: str) -> None:
-        getattr(log, level if level != "error" else "error")(message)
+        """Log an operator-facing message and send it to the listeners; ``level``
+        is ``"info"``, ``"warning"`` or ``"error"``."""
+        getattr(log, level)(message)
         entry = {"time": time.time(), "level": level, "message": message}
         self.events.append(entry)
         self._notify("event", entry)
