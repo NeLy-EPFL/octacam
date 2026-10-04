@@ -1,26 +1,18 @@
 """triggerbox rig trigger + light-controller plugin (opt-in).
 
-Drives the Arduino Nano ESP32 running the ``triggerbox`` firmware (see
-``arduino/triggerbox/``) — the generalized controller for the EPFL
-``common-trigger-circuit`` board. On recording start it arms the board over
-serial with the recording's fps + duration and a full description of every
-output: one or more **camera-trigger lines** and up to **3 CCS light channels**,
-each independently *off / strobe / continuous / pulse-train*. On recording stop
-it cancels the board. All output pins are chosen at run time, so the rig can be
-rewired by editing the config — no reflashing.
-
-Enable it with a ``[[plugins]]`` entry in ``octacam_config.toml`` (options go
-under a ``[plugins.options]`` sub-table). Camera lines and light channels are
-inline-table arrays::
+Drives the Nano ESP32 running ``arduino/triggerbox`` on the EPFL
+common-trigger-circuit board: camera-trigger lines plus three interchangeable
+CCS light channels, each off, strobe, continuous or a pulse train on its own
+clock. Pins are chosen at run time, so rewiring needs only the config::
 
     [[plugins]]
     name = "triggerbox"
 
     [plugins.options]
-    device = "auto"            # udev symlink, /dev/ttyACM0, COM3, or "auto"
+    device = "auto"            # a udev symlink, /dev/ttyACM0, COM3 or "auto"
     baud = 115200
-    auto_flash = false         # headless: reflash a stale board without prompting
-    strobe_guard_us = 100      # guard band added to the longest exposure (auto duty)
+    auto_flash = false         # headless: reflash a stale board without asking
+    strobe_guard_us = 100      # added to the longest exposure by an auto duty
     cameras = [ { pin = "D13", pulse_us = 500 } ]
     lights = [
       { channel = 1, mode = "strobe", duty_mode = "auto" },
@@ -28,41 +20,20 @@ inline-table arrays::
       { channel = 3, mode = "off" },
     ]
 
-If ``cameras`` / ``lights`` are omitted the plugin defaults to the classic rig:
-one D13 camera line + channels 1 and 2 strobing at ``default_duty_percent``.
+Without ``cameras``/``lights`` it drives the classic rig: a D13 camera line and
+channels 1 and 2 strobing at ``default_duty_percent``. An auto-duty strobe stays
+on for ``max(TriggerDelay + ExposureTime) + strobe_guard_us`` over the live
+cameras. Recordings use ``trigger_source = "managed"``.
 
-The three CCS channels are electrically identical, so any channel can be
-illumination, optogenetic stimulation, or anything else — there is no fixed
-role. A ``strobe`` channel with ``duty_mode = "auto"`` sizes its on-time to
-``max(TriggerDelay + ExposureTime over all cameras) + strobe_guard_us`` from the
-live camera exposures, so the LED brackets the longest exposure regardless of
-fps. A ``pulse_train`` channel runs an independent clock (frequency, pulse width,
-start delay, train duration) decoupled from the frame rate.
-
-Enable at launch with ``--plugin triggerbox``. pyserial ships with octacam. The
-cameras must be in external hardware trigger (``trigger_source = "external"``).
-
-**Firmware provisioning.** The board's identify banner carries a short hash of the
-sketch source (``TRIGGERBOX 2 <build>``); octacam recomputes it from
-``arduino/triggerbox`` and, when the board is out of date (or blank), offers to
-compile + upload the current firmware with ``arduino-cli``
-— from the GUI's *Flash firmware* button, the ``octacam flash`` command, or a
-prompt at ``octacam record`` start. Headless runs only warn unless ``--yes`` /
-``auto_flash = true``. See :mod:`octacam.firmware`.
-
-Wire protocol v2 (host → Arduino, little-endian):
-  [0xA5][version u8=2][payload_len u16][payload][checksum u8]  — arm
-  [0xCA]                                                       — cancel
-  [0x3F] '?'                                                   — identify
+Wire protocol v2, host -> Arduino (little-endian):
+  [0xA5][version u8 = 2][payload_len u16][payload][xor u8]  arm
+  [0xCA]                                                    cancel
+  [0x3F] '?'                                                identify
   payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
-            | n_cam×(pin_id u8, pulse_us u16, delay_us u16)
-            | n_light×(pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32)
-Wire protocol (Arduino → host, newline-terminated ASCII tokens):
-  "R" running · "D" done · "C" cancelled/idle · "E<c>" rejected
-  · "TRIGGERBOX <version>" identify reply
-
-Arduino state changes are broadcast over the GUI WebSocket so the operator sees
-real-time feedback without polling.
+            | n_cam x (pin_id u8, pulse_us u16, delay_us u16)
+            | n_light x (pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32)
+Arduino -> host, newline-terminated: "R" running, "D" done, "C" cancelled or
+idle, "E<c>" rejected, "TRIGGERBOX <version> <build>" the identify reply.
 """
 
 from __future__ import annotations
@@ -96,17 +67,14 @@ DEFAULT_DURATION_MS = 10_000
 DEFAULT_DUTY_PERCENT = 20.0
 DEFAULT_CAM_PULSE_US = 0  # 0 → firmware default pulse width
 DEFAULT_DUTY_AUTO = False
-# Guard band (µs) added on top of the longest (TriggerDelay + ExposureTime) when
-# a strobe channel is in auto-duty mode. It covers the camera's trigger-to-
-# exposure latency and exposure jitter so the strobe brackets the exposure's
-# trailing edge; the leading edge is covered by each camera's TriggerDelay.
+# Added to the longest TriggerDelay + ExposureTime by an auto-duty strobe, for
+# trigger latency and jitter at the exposure's end (TriggerDelay covers its start).
 DEFAULT_STROBE_GUARD_US = 100
 
-# How long on_recording_start waits for the firmware's 'R' (or 'E') response.
+# How long an arm waits for the board's 'R' (or 'E').
 ACK_TIMEOUT_S = 1.0
-# How long a cancel waits for the board's 'C': the cancel must be done before a
-# recording's record grab starts, or a last preview pulse could reach a camera
-# that is already counting.
+# How long a cancel waits for 'C'. It must land before a recording's record grab
+# starts, or a last preview pulse reaches a camera that is already counting.
 CANCEL_ACK_TIMEOUT_S = 0.3
 
 # ---- Wire protocol v2 (must match triggerbox.ino) --------------------------
@@ -122,10 +90,9 @@ _FIXED = struct.Struct("<HIBB")   # fps u16, duration_ms u32, n_cam u8, n_light 
 _CAM = struct.Struct("<BHH")      # pin_id u8, pulse_us u16, delay_us u16
 _LIGHT = struct.Struct("<BBIIII")  # pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32
 
-# Canonical pin-label table — the SINGLE SOURCE OF TRUTH on the Python side,
-# mirrored byte-for-byte by kPinTable in triggerbox.ino (a unit test asserts the
-# two stay in sync). Index on the wire. D2/D3/D4 drive the status LED and are
-# rejected by the firmware as trigger/light outputs.
+# The wire's pin ids (by index): the single source of truth, mirrored by kPinTable
+# in triggerbox.ino (a test keeps them equal). D2/D3/D4 drive the status LED and
+# the firmware rejects them as outputs.
 PIN_LABELS = (
     "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11",
     "D12", "D13", "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7",
@@ -138,10 +105,9 @@ LIGHT_PIN_BY_CHANNEL = {1: "D5", 2: "D6", 3: "D7"}
 _LIGHT_MODE_IDS = {"off": 0, "strobe": 1, "continuous": 2, "pulse_train": 3, "pulse": 3}
 _LIGHT_MODE_NAMES = {0: "off", 1: "strobe", 2: "continuous", 3: "pulse_train"}
 
-# Status tokens the firmware emits (newline-terminated); mapped to a UI state.
 _STATE_LABELS: dict[str, str] = {"R": "running", "D": "done", "C": "idle"}
 
-# Firmware 'E<c>' reject reason codes → human text (see triggerbox.ino).
+# The firmware's 'E<c>' reject codes.
 _REJECT_REASONS = {
     "v": "protocol version mismatch",
     "c": "checksum",
@@ -154,19 +120,12 @@ _REJECT_REASONS = {
     "m": "unknown light mode",
 }
 
-# Firmware identity banner prefix (kVersion = "TRIGGERBOX <n>" in the .ino).
-# The full banner is "TRIGGERBOX <version> <build>" where <build> is a short hash
-# of the sketch source — see octacam.firmware and arduino/triggerbox/fw_build_info.h.
 _EXPECTED_BANNER = "TRIGGERBOX"
-# arduino-cli fully-qualified board name for the Nano ESP32 (used to (re)flash).
 _FQBN = "arduino:esp32:nano_nora"
 
 
 def _firmware_spec() -> fw.FirmwareSpec | None:
-    """Describe the triggerbox firmware for :mod:`octacam.firmware`, or None when
-    the sketch source can't be located (a wheel install without a checkout) — in
-    which case firmware detection still works from the banner, but auto-flash is
-    unavailable."""
+    """The firmware spec, or None without the sketch source (a wheel install)."""
     sketch = fw.resolve_sketch_dir("triggerbox")
     if sketch is None:
         return None
@@ -428,9 +387,7 @@ def _place_train_end(period: int, count: int, lo: int, hi: int, lights) -> Train
     )
 
 
-# ============================================================================
-#  Output specifications (config templates + wire serialization)
-# ============================================================================
+# ---- Output specs: config entries and their wire records -------------------
 
 
 @dataclass
@@ -447,11 +404,7 @@ class CameraLine:
 
 @dataclass
 class LightChannel:
-    """One CCS light channel and its mode-specific timing.
-
-    All three channels are interchangeable; ``channel`` only selects the default
-    pin (1→D5, 2→D6, 3→D7). ``mode`` is off/strobe/continuous/pulse_train.
-    """
+    """One CCS light channel; ``channel`` only picks the default pin."""
 
     channel: int = 1
     pin: str = "D5"
@@ -470,11 +423,8 @@ class LightChannel:
         return self.mode == "strobe" and self.duty_mode == "auto"
 
     def resolve(self, period_us: float, auto_led_on_us: float | None) -> tuple:
-        """(pin_id, mode, p0, p1, p2, p3) for the wire, given the frame period.
-
-        ``auto_led_on_us`` is the exposure-derived on-time (None if unreadable);
-        an auto strobe falls back to its manual duty when it is None.
-        """
+        """The wire record ``(pin_id, mode, p0, p1, p2, p3)``. An auto strobe
+        takes ``auto_led_on_us``, or its manual duty when that is None."""
         pid = pin_id(self.pin)
         mode = _LIGHT_MODE_IDS.get(self.mode, 0)
         if mode == 1:  # strobe
@@ -501,7 +451,7 @@ class LightChannel:
 
 @dataclass
 class ArmSpec:
-    """A fully-resolved arm packet: fps + duration + wire-ready output records."""
+    """An arm packet: fps, duration and the outputs' wire records."""
 
     fps: int
     duration_ms: int
@@ -603,20 +553,11 @@ class CameraTiming:
         return self.trigger_delay_us + self.exposure_us
 
 
-# ============================================================================
-#  Serial link
-# ============================================================================
+# ---- Serial link ------------------------------------------------------------
 
 
 class TriggerboxLink(SerialReaderLink):
-    """Serial link to the triggerbox Arduino.
-
-    Inherits the shared open/close/write/identify lifecycle from
-    :class:`~octacam.plugins._serial_link.SerialReaderLink`; only the reader-thread
-    token grammar (:meth:`_read_loop`) and the arm packet (:meth:`send_arm`) are
-    triggerbox-specific. The status/reject callbacks run on the reader thread;
-    callers must be thread-safe.
-    """
+    """The serial link to the triggerbox."""
 
     log_prefix = "triggerbox"
     reader_name = "triggerbox-reader"
@@ -661,9 +602,7 @@ class TriggerboxLink(SerialReaderLink):
                     self._dispatch(self._on_reject, token[1:])
 
 
-# ============================================================================
-#  Plugin factory + class
-# ============================================================================
+# ---- Plugin -----------------------------------------------------------------
 
 
 @register("triggerbox")
@@ -676,8 +615,7 @@ def _build(options: dict) -> TriggerboxPlugin:
             return default
 
     def _opt_float(*keys: str, default: float) -> float:
-        # Accept the first present of several key spellings (fixes the historical
-        # duty_percent vs default_duty_percent mismatch).
+        # The first key present: configs spell some options two ways.
         for key in keys:
             if key in options:
                 try:
@@ -746,12 +684,8 @@ def _build(options: dict) -> TriggerboxPlugin:
 
 
 class TriggerboxPlugin(Plugin):
-    """triggerbox rig trigger + light-controller plugin.
-
-    Arms the Arduino with the recording's fps + duration and a full description
-    of every camera line and light channel, then the board free-runs them for the
-    duration. Board state changes are broadcast over the GUI WebSocket.
-    """
+    """Arms the board with the fps, duration and every camera line and light
+    channel; the board then runs them on its own clock."""
 
     name = "triggerbox"
 
@@ -774,7 +708,6 @@ class TriggerboxPlugin(Plugin):
         self.baud = baud
         self._firmware: str | None = None
         self._firmware_ok = True
-        # Opt-in: let a headless `octacam record` auto-flash a stale board.
         self._auto_flash = bool(auto_flash)
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
@@ -784,13 +717,10 @@ class TriggerboxPlugin(Plugin):
         self._default_cam_pulse_us = default_cam_pulse_us
         self._cameras: list[CameraLine] = cameras or [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
         self._lights: list[LightChannel] = lights or []
-        # The config's own lines/channels. Tab edits replace _cameras/_lights
-        # (on_ws_message), so snapshot_options compares against these instead.
+        # Tab edits replace _cameras/_lights; snapshot_options compares with these.
         self._configured_cameras = [replace(c) for c in self._cameras]
         self._configured_lights = [replace(lt) for lt in self._lights]
-        # True while an indefinite *preview* arm is live (vs a finite recording
-        # arm). A live GUI spec edit re-arms the board only in this state, so the
-        # managed preview strobes exactly as the edited recording will.
+        # A tab edit re-arms the board only during an (indefinite) preview arm.
         self._preview_armed = False
         self._controller: RecordingController | None = None
         self._link = TriggerboxLink(
@@ -798,9 +728,8 @@ class TriggerboxPlugin(Plugin):
             on_broken=self._on_link_broken,
             on_reject=self._on_arduino_reject,
         )
-        # Firmware detection + flash lifecycle (shared with the other serial
-        # plugins). Owns the port lock; _open/reconnect take it too so a flash and
-        # a (re)open can never fight over the port. See octacam.firmware.
+        # Its port lock is shared with _open and _recover_usb, so a flash, a
+        # reopen and a USB reset never fight over the port.
         self._fw = fw.FirmwareProvisioner(
             _firmware_spec(),
             resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
@@ -810,33 +739,26 @@ class TriggerboxPlugin(Plugin):
             is_busy=self._fw_is_busy,
         )
         self._arduino_state = "idle"
-        # Set on the board's 'D' (a run finished) / 'C' (cancelled or idle).
+        # Set by the board's 'D' (run over), 'C' (cancelled), 'R' or 'E' (arm answered).
         self._done_event = threading.Event()
         self._idle_event = threading.Event()
         self._armed_event = threading.Event()
-        self._arm_lock = threading.Lock()  # serialize arms sharing _armed_event/_last_reject
+        self._arm_lock = threading.Lock()  # see _arm_and_wait
         self._last_reject: str | None = None
         self._last_error: str | None = None
         self._ack_timeout_s = ACK_TIMEOUT_S
         self._broadcast: Callable[[str, dict], None] | None = None
 
-    # -------------------------------------------------- injection
-
     def set_broadcast(self, callback: Callable[[str, dict], None]) -> None:
         self._broadcast = callback
 
     def set_controller(self, controller: RecordingController) -> None:
-        """Inject the recording controller so auto-duty can read live exposures."""
+        """The controller, whose cameras give the auto duty its exposures."""
         self._controller = controller
 
-    # -------------------------------------------------- firmware provisioning glue
-
     def _fw_is_busy(self) -> tuple[bool, str]:
-        """Refuse to flash while a recording is live or the board is armed.
-
-        Prefers the controller's authoritative recording state (which flips before
-        the board's 'R' ack, closing the arm/flash race); falls back to the last-
-        seen board state."""
+        """Refuse to flash while a recording runs or the board is armed. The
+        controller's state comes first: it flips before the board's 'R' arrives."""
         controller = self._controller
         if controller is not None and controller.recording_active:
             return True, "refusing to flash while a recording is active — stop it first"
@@ -890,16 +812,14 @@ class TriggerboxPlugin(Plugin):
         return timings
 
     def _auto_led_on_us(self) -> float | None:
-        """On-time (µs) bracketing the longest exposure + guard, or None if no
-        camera exposure can be read."""
+        """The strobe on-time covering the longest exposure plus the guard, or
+        None when no exposure can be read."""
         coverages = [
             c for c in (t.coverage_us for t in self._camera_timings()) if c is not None
         ]
         if not coverages:
             return None
         return max(coverages) + self._strobe_guard_us
-
-    # -------------------------------------------------- arm-spec assembly
 
     def _build_arm_spec(
         self, fps: int, duration_ms: int, cams: list[CameraLine], lights: list[LightChannel]
@@ -943,7 +863,7 @@ class TriggerboxPlugin(Plugin):
 
     def _on_arduino_reject(self, code: str) -> None:
         self._last_reject = code
-        self._armed_event.set()  # unblock the ack wait; on_recording_start reports it
+        self._armed_event.set()  # _arm_and_wait then returns "reject"
 
     def _on_link_broken(self) -> None:
         self._set_arduino_state("idle")
@@ -951,12 +871,12 @@ class TriggerboxPlugin(Plugin):
     def _set_arduino_state(self, state: str) -> None:
         self._arduino_state = state
         if state == "running":
-            self._last_error = None  # a successful arm clears any prior failure
+            self._last_error = None  # an arm took
         self._broadcast_state()
 
     def _report_error(self, msg: str) -> None:
-        """Log an arm/link failure loudly and push it to the GUI so an operator
-        sees *why* a recording will get no triggers instead of a silent hang."""
+        """Log an arm or link failure and show it in the GUI: otherwise the
+        cameras just wait, with no visible cause."""
         log.error("triggerbox: %s", msg)
         self._last_error = msg
         self._broadcast_state()
@@ -984,13 +904,12 @@ class TriggerboxPlugin(Plugin):
         self._open()
 
     def _open(self, *, allow_recovery: bool = True) -> str | None:
-        # Held across the whole open+verify so a concurrent flash (which also holds
-        # this lock across close→upload→reopen) can't fight over the port. Re-
-        # entrant: flash's own reopen() calls this on the same thread.
+        """(Re)open the link and read the banner; the error message, or None.
+        Holds the port lock (re-entrant: a flash's reopen runs this)."""
         with self._fw.port_lock:
             self._firmware = None
             self._firmware_ok = True
-            self._last_error = None  # a fresh connection attempt clears stale failures
+            self._last_error = None
             device, reason = serial_ports.resolve_device(self._configured_device)
             if device is None:
                 log.warning("triggerbox: %s", reason)
@@ -1006,26 +925,16 @@ class TriggerboxPlugin(Plugin):
                 return msg
             log.info("triggerbox: opened %s @ %d", device, self.baud)
             self._verify_identity()
-            # A board that opens but never answers identify may have a wedged USB-CDC
-            # link (every transfer stalls with EPIPE while it stays enumerated); a
-            # healthy triggerbox always replies fast. Try one host bus reset.
+            # A healthy board always answers; a silent one may be wedged.
             if self._firmware is None and allow_recovery:
                 if self._recover_usb("the board did not answer an identity query"):
                     self._verify_identity()
             return None
 
     def _recover_usb(self, why: str) -> bool:
-        """Best-effort clear of a wedged USB link: close, host bus-reset, reopen.
-
-        Returns whether the link is open again afterwards. The ESP32-S3 USB-CDC
-        occasionally wedges (writes/control transfers stall with EPIPE while the
-        port stays enumerated), which strands external-triggered recordings; a
-        ``USBDEVFS_RESET`` re-initialises the link without a physical unplug.
-
-        Held across the whole close→reset→reopen under the same port lock the
-        flash/reconnect scheme relies on, so a concurrent flash (or an off-lock
-        arm-path recovery) can't fight over the tty. Re-entrant: the ``_open()``
-        caller that already holds it on this thread is unaffected."""
+        """Close, reset the USB device (serial_ports.reset_usb_device) and reopen;
+        whether the link is open again. Holds the port lock throughout, so a
+        flash cannot take the tty in between."""
         with self._fw.port_lock:
             device = self.device
             log.warning(
@@ -1049,9 +958,8 @@ class TriggerboxPlugin(Plugin):
             return self._link.is_open
 
     def _banner_arm_compatible(self, banner: str | None) -> bool:
-        """Fallback arm-compatibility check when the sketch source is unavailable
-        (no fingerprint to classify against): compatible unless the banner is a
-        foreign name or a different protocol version."""
+        """Without the sketch source: compatible unless the banner names another
+        firmware or protocol version."""
         if not banner:
             return True
         name, version, _ = fw.parse_banner(banner)
@@ -1060,19 +968,12 @@ class TriggerboxPlugin(Plugin):
         return version is None or version == _PROTOCOL_VERSION
 
     def _verify_identity(self) -> None:
-        """Read the firmware banner and classify it against the sketch source.
-
-        Sets ``firmware_ok`` (whether the board understands our v2 arm packet) and
-        ``_fw_check`` (the flash verdict, when the source is available). An
-        OUTDATED board — same protocol, drifted source — stays arm-compatible; we
-        only *offer* a reflash. A wrong protocol version or a foreign banner
-        disables arming."""
+        """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
+        arms (a reflash is only offered), a foreign or wrong-version one does not."""
         banner = self._link.identify()
         self._firmware = banner
         check = self._fw.classify(banner)
         if check is None:
-            # No source checkout: can't fingerprint, so fall back to a plain
-            # name/version compatibility check (no flash offer).
             self._firmware_ok = self._banner_arm_compatible(banner)
             if banner is None:
                 log.info("triggerbox: no firmware identity from %s; proceeding", self.device)
@@ -1130,7 +1031,7 @@ class TriggerboxPlugin(Plugin):
     # -------------------------------------------------- firmware provisioning
 
     def firmware_provisioning(self) -> dict:
-        """Full firmware picture for the CLI (`octacam flash`) and the GUI."""
+        """The firmware picture for ``octacam flash`` and the GUI."""
         return self._fw.provisioning(
             plugin_name=self.name,
             device=self.device,
@@ -1140,16 +1041,11 @@ class TriggerboxPlugin(Plugin):
         )
 
     def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> fw.FlashResult:
-        """Compile + upload the current triggerbox firmware to the board.
-
-        Delegates the close→upload→reopen→re-verify lifecycle to the shared
-        FirmwareProvisioner (which holds the port lock so a concurrent reconnect
-        can't seize the port, and refuses while a recording is live). Never raises."""
+        """Upload the current firmware (FirmwareProvisioner.flash). Never raises."""
         result = self._fw.flash(on_line=on_line)
         if result.ok:
             self._arduino_state = "idle"  # the board rebooted after the upload
-        else:
-            # reopen() cleared _last_error; restore the failure so the GUI shows it.
+        else:  # the reopen cleared it
             self._last_error = result.message
         self._broadcast_state()
         return result
@@ -1157,7 +1053,7 @@ class TriggerboxPlugin(Plugin):
     # -------------------------------------------------- recording lifecycle
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
-        """Headless (CLI) arm slice for ``octacam record`` — the configured spec."""
+        """The configured spec as the arm slice for headless ``octacam record``."""
         return {
             "fps": int(round(fps)),
             "duration_ms": max(1, int(round(duration_s * 1000))),
@@ -1167,21 +1063,16 @@ class TriggerboxPlugin(Plugin):
 
     @staticmethod
     def _spec_from_params(params: dict | None) -> dict | None:
-        """This plugin's arm slice from a {name: slice} params dict, or None."""
+        """This plugin's slice of the start params, or None."""
         params = params or {}
         spec = params.get("triggerbox")
         return spec if isinstance(spec, dict) else None
 
     def snapshot_options(self, params: dict | None) -> dict | None:
-        """The camera lines and light channels a recording armed, as config options.
-
-        The tab edits both after the config is loaded and the board is armed
-        from the tab's values, so the recording's config snapshot must carry
-        them for a relaunch to trigger and light the rig the same way. None when
-        the recording did not arm the board or armed exactly what the config
-        says. Off channels are left out on both sides: the tab never sends them
-        and they drive nothing, and an empty ``lights`` list reloads as all-off.
-        """
+        """The camera lines and light channels a recording armed, as config
+        options; None when it armed none or what the config says. Off channels
+        are left out on both sides: the tab never sends them, and an empty
+        ``lights`` list reloads as all-off."""
         spec = self._spec_from_params(params)
         if spec is None:
             return None
@@ -1196,8 +1087,8 @@ class TriggerboxPlugin(Plugin):
         }
 
     def on_recording_start(self, params: dict | None) -> None:
-        """Arm the Arduino when a triggerbox arm slice is present in params."""
-        self._preview_armed = False  # a recording arm supersedes any preview arm
+        """Arm the board when the start params hold a triggerbox slice."""
+        self._preview_armed = False
         spec = self._spec_from_params(params)
         if spec is not None:
             self._arm_from_spec(spec, duration_ms=None, context="recording")
@@ -1205,20 +1096,14 @@ class TriggerboxPlugin(Plugin):
     def _arm_from_spec(
         self, spec: dict, *, duration_ms: int | None, context: str
     ) -> None:
-        """Arm the board from an arm slice; shared by recording and preview.
-
-        ``duration_ms=None`` derives the run length from the slice (a finite
-        recording); ``duration_ms=0`` runs until cancel (an indefinite preview
-        arm). ``context`` ("recording" | "preview") only tailors the operator
-        messaging — the packet is identical, so a managed preview strobes exactly
-        as the recording will."""
+        """Arm the board from a slice. ``duration_ms=None`` plans a recording's
+        finite train from the slice, ``0`` runs until cancelled (a preview).
+        ``context`` only words the messages: a preview gets the same packet, so
+        it strobes as the recording will."""
         subject = (
             "external-triggered cameras" if context == "recording" else "preview"
         )
         if not self._link.is_open:
-            # Surface it (not just a log): the cameras are already parked in
-            # hardware-trigger mode, so with no board a managed preview / external
-            # recording just freezes — the operator needs to know why.
             self._report_error(
                 f"the board on {self.device} is not connected; {subject} will not "
                 "be triggered (cameras wait for a trigger that never fires). "
@@ -1239,14 +1124,12 @@ class TriggerboxPlugin(Plugin):
         plan: TrainPlan | None = None
         try:
             arm = self._build_arm_spec(fps, duration_ms or 0, cams, lights)
-            if duration_ms is None:
-                # A recording: the train trigger_train counts, ended after the
-                # last frame's pulses and strobes (see plan_train).
+            if duration_ms is None:  # the train trigger_train counts
                 wanted = pulse_count(fps, self._spec_duration_ms(spec))
                 plan = plan_train(fps, wanted, arm.cameras, arm.lights)
                 arm = replace(arm, duration_ms=min(0xFFFF_FFFF, plan.duration_ms))
                 self._report_train_plan(fps, wanted, plan, arm)
-            arm.to_bytes()  # validate the packet builds before we announce arming
+            arm.to_bytes()  # it must pack before arming is announced
         except Exception:
             log.exception("triggerbox: could not build arm packet; not arming")
             return
@@ -1262,10 +1145,8 @@ class TriggerboxPlugin(Plugin):
             len(arm.cameras), len(arm.lights),
         )
         result = self._arm_and_wait(arm)
-        # A write failure or missing ACK (but not an explicit reject) is the
-        # signature of a wedged USB link — try one host bus reset + re-arm before
-        # giving up, and make any remaining failure loud (GUI + log) so the
-        # operator knows the cameras will get no triggers.
+        # A failed write or a missing ack, never a reject, is a wedged USB link:
+        # one bus reset and re-arm.
         if result in ("write_failed", "timeout"):
             what = (
                 "the serial write failed" if result == "write_failed"
@@ -1302,12 +1183,10 @@ class TriggerboxPlugin(Plugin):
         )
 
     def trigger_train(self, params: dict | None) -> dict | None:
-        """The train on_recording_start emits for ``params`` (exact period and
-        pulse count), so the recording counts every frame against it.
-
-        The count is plan_train's for the camera lines the arm sends; it does not
-        depend on the lights, whose auto duty needs a camera read this pure hook
-        (called under the controller lock) must not make."""
+        """The exact period and pulse count on_recording_start emits for
+        *params*. The count depends on the camera lines only: the lights' auto
+        duty needs a camera read, which this pure hook (called under the
+        controller lock) must not make."""
         spec = self._spec_from_params(params)
         if spec is None:
             return None
@@ -1352,13 +1231,9 @@ class TriggerboxPlugin(Plugin):
             )
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
-        """Emit ``pulses`` sacrificial pulses on the camera lines, lights dark.
-
-        A FLIR Grasshopper3 ignores the first two hardware triggers after its
-        acquisition starts, so the recording spends a few pulses right before its
-        train (the cameras discard their frames). Returns once the board reports
-        the burst done — or has been cancelled — so the train that follows starts
-        on a fresh clock after a clear gap."""
+        """Emit *pulses* sacrificial pulses on the camera lines, lights dark (see
+        "Priming" in CLAUDE.md). Returns once the board reports the burst done,
+        or once it is cancelled, so the train starts on a fresh clock."""
         spec = self._spec_from_params(params)
         if spec is None or not self._link.is_open or not self._firmware_ok:
             return False
@@ -1397,16 +1272,10 @@ class TriggerboxPlugin(Plugin):
         return acked
 
     def _arm_and_wait(self, arm: ArmSpec) -> str:
-        """Send an arm packet and classify the outcome.
-
-        Returns ``"ok"`` (running ack seen), ``"reject"``
-        (board sent E<code>), ``"timeout"`` (no ack in time), or ``"write_failed"``
-        (the bytes never reached the OS — a wedged/closed link).
-
-        Serialized on ``_arm_lock`` so two concurrent arms (a managed-preview re-arm
-        and a recording arm, or two rapid preview re-arms) can't share the single
-        ``_armed_event``/``_last_reject`` and attribute a firmware ack/reject to the
-        wrong caller. Held across the up-to-ack_timeout wait; arms are infrequent."""
+        """Send an arm: ``"ok"`` ('R'), ``"reject"`` ('E<c>'), ``"timeout"`` or
+        ``"write_failed"`` (a wedged or closed link). Arms are serialized, ack wait
+        included, so concurrent ones (a preview re-arm and a recording arm) cannot
+        take each other's answer."""
         with self._arm_lock:
             self._armed_event.clear()
             self._last_reject = None
@@ -1417,25 +1286,16 @@ class TriggerboxPlugin(Plugin):
             return "reject" if self._last_reject is not None else "ok"
 
     def on_recording_stop(self, aborted: bool) -> None:
-        # Cancel on any end (abort, manual stop, clean finish); a cancel to an
-        # already-idle board is a harmless no-op.
-        self._link.send_cancel()
+        self._link.send_cancel()  # on every end; an idle board ignores it
         self._set_arduino_state("idle")
 
     # ----------------------------------------------------------- preview arm
-    # octacam is the trigger master for this board, so it can drive the trigger
-    # during idle preview too — giving a hardware-triggered, cross-camera
-    # synchronized, strobe-lit preview that mirrors the recording.
 
     def drives_preview_trigger(self) -> bool:
         return True
 
     def on_preview_start(self, params: dict | None) -> None:
-        """Arm the board indefinitely for a managed preview.
-
-        Same fps + light spec the recording would use (so preview strobes exactly
-        as the recording will), but with an indefinite duration (``duration_ms=0``
-        = run until cancel) since preview has no fixed length."""
+        """Arm the board until cancelled, with the recording's spec."""
         spec = self._spec_from_params(params)
         if spec is None:
             return
@@ -1443,38 +1303,28 @@ class TriggerboxPlugin(Plugin):
         self._arm_from_spec(spec, duration_ms=0, context="preview")
 
     def on_preview_stop(self) -> None:
-        # Cancel the indefinite preview arm (harmless if already idle) and wait
-        # for the board to confirm: this runs right before a recording's record
-        # grab starts, which must not see a stray preview pulse.
+        # Waits for the 'C': a recording's record grab starts next and must not
+        # see a stray preview pulse.
         self._preview_armed = False
         self._cancel_and_wait()
         self._set_arduino_state("idle")
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """Apply a live camera/light spec edit from the triggerbox tab.
-
-        The tab edits its spec client-side and only sends it as recording
-        ``plugin_params`` at record start; this pushes each edit to the server so
-        the plugin's own ``self._cameras``/``self._lights`` — the source both the
-        managed preview arm (``default_start_params``) and the timing use — track
-        the tab. When a managed preview is currently running, the board is re-armed
-        in place so the live preview strobes exactly as the edited recording will
-        (current firmware keeps the frame clock's phase on a same-fps re-arm and
-        applies the new spec at the next frame edge, so the edit never disturbs
-        the trigger under the exposing cameras).
-        """
+        """Adopt a camera/light edit the tab pushes, so the preview arm and the
+        timing follow the tab. A running preview is re-armed with it: a same-fps
+        re-arm keeps the board's frame clock and takes effect at the next edge,
+        so the exposing cameras never see a stray trigger."""
         if not isinstance(message, dict) or message.get("type") != "triggerbox_spec":
             return False
         spec = message.get("spec")
         if not isinstance(spec, dict):
-            return True  # ours, but malformed — swallow it
+            return True  # ours, but malformed
         new_cams = self._cameras_from_spec(spec)
         new_lights = self._lights_from_spec(spec)
         changed = new_cams != self._cameras or new_lights != self._lights
         self._cameras = new_cams
         self._lights = new_lights
-        # Re-arm a live preview only on a real change (the tab pushes on redraws
-        # too), so switching tabs / resizing never re-strobes the board.
+        # The tab also pushes on redraws: re-arm only on a real change.
         if changed and self._preview_armed and self._link.is_open:
             self._arm_from_spec(spec, duration_ms=0, context="preview")
         return True
@@ -1514,11 +1364,8 @@ class TriggerboxPlugin(Plugin):
 
         @router.post("/api/triggerbox/flash")
         def flash(payload: dict = Body(default={})):
-            """Compile + upload the current firmware, then report the new state.
-
-            Runs synchronously (FastAPI dispatches this sync handler to a thread,
-            so the event loop keeps serving); the whole compile+upload takes tens
-            of seconds and the board reboots at the end."""
+            """Compile and upload the current firmware, then report the new state.
+            A sync handler, so the tens-of-seconds flash runs on a worker thread."""
             result = self.flash_firmware()
             return {
                 **result.to_dict(),
@@ -1530,7 +1377,7 @@ class TriggerboxPlugin(Plugin):
 
         @router.get("/api/triggerbox/exposures")
         def get_exposures():
-            """Live per-camera exposure timings for the tab's timing viz + auto-duty."""
+            """Live per-camera exposure timings for the tab's timing plot."""
             timings = self._camera_timings()
             return {
                 "guard_us": self._strobe_guard_us,
