@@ -327,28 +327,6 @@ def _metadata_files(folder: Path) -> list[Path]:
     return [f for f in files if f.is_file() and not f.name.startswith(".")]
 
 
-def transfer_destination(
-    folder: Path, dest_root: Path, local_base: Path | None = None
-) -> Path:
-    """Destination directory *folder* maps to under *dest_root*.
-
-    When *local_base* is given and *folder* lies under it, the path relative to
-    *local_base* is reproduced under *dest_root*; otherwise only *folder*'s name
-    is used.  Shared with the CLI so its collision check matches the real copy.
-
-    Both paths are resolved before the relative computation so a relative input
-    (e.g. ``data/260624``) or one with ``..``/symlinks still mirrors correctly
-    against the (resolved) auto-derived base.
-    """
-    rel = None
-    if local_base is not None:
-        try:
-            rel = folder.resolve().relative_to(local_base.resolve())
-        except ValueError:
-            rel = None
-    return dest_root / rel if rel is not None else dest_root / folder.name
-
-
 def _target(
     folder: Path, dest: Path, src: Path, *, metadata: bool
 ) -> tuple[Path, str]:
