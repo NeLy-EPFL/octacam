@@ -28,6 +28,10 @@ def fake_system(tmp_path):
     system.load_config(tmp_path)
     for camera in system:  # tiny frames so x264 encodes trivially fast in CI
         camera.set_geometry(width=160, height=120)
+        # A real readout takes time. Without it two fake grab threads spin at
+        # ~160 kfps in pure Python and one can starve the other of the GIL for a
+        # whole measurement window (0 fps → a spurious TRANSFER bottleneck).
+        camera.backend.image_latency_s = 0.001
     yield system
     system.close()
 
