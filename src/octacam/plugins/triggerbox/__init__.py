@@ -574,6 +574,19 @@ def _light_from_dict(d, default_duty_percent: float, default_duty_auto: bool) ->
     )
 
 
+def _cameras_from(raw: list, default_pulse: int) -> list[CameraLine]:
+    lines = (_camera_from_dict(entry, default_pulse) for entry in raw[:_MAX_CAM])
+    return [line for line in lines if line is not None]
+
+
+def _lights_from(raw: list, default_duty_percent: float, default_duty_auto: bool) -> list[LightChannel]:
+    lights = (
+        _light_from_dict(entry, default_duty_percent, default_duty_auto)
+        for entry in raw[:_MAX_LIGHT]
+    )
+    return [light for light in lights if light is not None]
+
+
 @dataclass
 class CameraTiming:
     """One camera's exposure-timing slice, read live for a strobe's auto duty."""
@@ -696,26 +709,17 @@ def _build(options: dict) -> TriggerboxPlugin:
         if "cam_pulse_us" in options else _opt_int("default_cam_pulse_us", DEFAULT_CAM_PULSE_US)
 
     # Camera lines: explicit array, else the classic single D13 line.
-    cameras: list[CameraLine] = []
     raw_cams = options.get("cameras")
-    if isinstance(raw_cams, list):
-        for entry in raw_cams[:_MAX_CAM]:
-            cl = _camera_from_dict(entry, default_cam_pulse_us)
-            if cl is not None:
-                cameras.append(cl)
-    elif raw_cams is not None:
+    if raw_cams is not None and not isinstance(raw_cams, list):
         log.warning("triggerbox plugin: 'cameras' must be an array of tables; ignoring %r", raw_cams)
+    cameras = _cameras_from(raw_cams, default_cam_pulse_us) if isinstance(raw_cams, list) else []
     if not cameras:
         cameras = [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
 
     # Light channels: explicit array, else the classic ch1+ch2 strobe.
-    lights: list[LightChannel] = []
     raw_lights = options.get("lights")
     if isinstance(raw_lights, list):
-        for entry in raw_lights[:_MAX_LIGHT]:
-            lc = _light_from_dict(entry, default_duty_percent, default_duty_auto)
-            if lc is not None:
-                lights.append(lc)
+        lights = _lights_from(raw_lights, default_duty_percent, default_duty_auto)
     elif raw_lights is None:
         dm = "auto" if default_duty_auto else "manual"
         lights = [
@@ -724,6 +728,7 @@ def _build(options: dict) -> TriggerboxPlugin:
         ]
     else:
         log.warning("triggerbox plugin: 'lights' must be an array of tables; ignoring %r", raw_lights)
+        lights = []
 
     return TriggerboxPlugin(
         device=str(options.get("device") or DEFAULT_DEVICE),
@@ -915,23 +920,13 @@ class TriggerboxPlugin(Plugin):
     def _cameras_from_spec(self, spec: dict) -> list[CameraLine]:
         raw = spec.get("cameras")
         if isinstance(raw, list):
-            out: list[CameraLine] = []
-            for entry in raw[:_MAX_CAM]:
-                cl = _camera_from_dict(entry, self._default_cam_pulse_us)
-                if cl is not None:
-                    out.append(cl)
-            return out
+            return _cameras_from(raw, self._default_cam_pulse_us)
         return [replace(c) for c in self._cameras]
 
     def _lights_from_spec(self, spec: dict) -> list[LightChannel]:
         raw = spec.get("lights")
         if isinstance(raw, list):
-            out: list[LightChannel] = []
-            for entry in raw[:_MAX_LIGHT]:
-                lc = _light_from_dict(entry, self._default_duty_percent, self._default_duty_auto)
-                if lc is not None:
-                    out.append(lc)
-            return out
+            return _lights_from(raw, self._default_duty_percent, self._default_duty_auto)
         return [replace(lt) for lt in self._lights]
 
     # -------------------------------------------------- state / broadcast
