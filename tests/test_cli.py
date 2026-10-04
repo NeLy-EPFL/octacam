@@ -361,11 +361,9 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     assert "system.close" not in _FACADE_CALLS  # no bare system teardown race
 
 
-def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
-    tmp_path, monkeypatch
-):
-    # `octacam process` pauses while the marker is live: it must cover the take
-    # and controller.close(), which finalizes it and releases the cameras.
+def _patch_one_camera_record(monkeypatch, tmp_path, events):
+    """Stub `record`'s hardware and controller; each step appends to *events*,
+    with whether the capture marker was live then."""
     import octacam.cli as cli_mod
     from octacam import session_cache
     from octacam.config import CameraConfig, OctacamConfig
@@ -380,16 +378,19 @@ def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
     settings = RecordingSettings(save_dir=str(tmp_path / "take"), save_method="raw")
     monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
     monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+
+    def note(step):
+        events.append((step, session_cache.capture_active()))
+
     monkeypatch.setattr(
         "octacam.plugins.build_plugins",
         lambda *a, **k: SimpleNamespace(
             plugins=[],
             setup_all=lambda: None,
-            teardown_all=lambda: None,
+            teardown_all=lambda: note("teardown_all"),
             default_start_params=lambda *_a: {},
         ),
     )
-    marker_live = {}
 
     class FakeController:
         recording_active = False
@@ -398,21 +399,48 @@ def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
             pass
 
         def start_recording(self, *a, **k):
-            marker_live["start"] = session_cache.capture_active()
+            note("start")
             return SimpleNamespace(ok=True, message="")
 
         def join(self):
             pass
 
         def close(self):
-            marker_live["close"] = session_cache.capture_active()
+            note("close")
 
     monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
 
+
+def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
+    tmp_path, monkeypatch
+):
+    # `octacam process` pauses while the marker is live: it must cover the take
+    # and controller.close(), which finalizes it and releases the cameras.
+    from octacam import session_cache
+
+    events = []
+    _patch_one_camera_record(monkeypatch, tmp_path, events)
     result = runner.invoke(app, ["record", str(tmp_path)])
     assert result.exit_code == 0, result.output
-    assert marker_live == {"start": True, "close": True}
+    assert events == [("start", True), ("close", True), ("teardown_all", True)]
     assert not session_cache.capture_active()
+
+
+def test_record_tears_down_when_the_capture_marker_fails(tmp_path, monkeypatch):
+    # A failure entering the marker must still close the cameras and plugins.
+    import contextlib
+
+    @contextlib.contextmanager
+    def broken_marker(_detail=""):
+        raise RuntimeError("no home directory")
+        yield
+
+    events = []
+    _patch_one_camera_record(monkeypatch, tmp_path, events)
+    monkeypatch.setattr("octacam.session_cache.mark_capture_active", broken_marker)
+    result = runner.invoke(app, ["record", str(tmp_path)])
+    assert isinstance(result.exception, RuntimeError)
+    assert events == [("close", False), ("teardown_all", False)]
 
 
 def test_browser_skip_reason(monkeypatch):

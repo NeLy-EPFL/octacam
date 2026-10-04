@@ -2384,14 +2384,17 @@ def record(
     except BaseException:
         system.close()
         raise
-    # Held until the cameras are closed: `octacam process` pauses meanwhile.
-    with session_cache.mark_capture_active("recording"):
+    # The capture marker pauses `octacam process` until the cameras are closed. It
+    # is entered inside the try, so a failure there still tears down, and released
+    # by the with, after close().
+    with contextlib.ExitStack() as capture:
         try:
             # Plugins reading live device state (triggerbox's auto strobe duty)
             # need the controller, as in create_app.
             for plugin in plugins.plugins:
                 if hasattr(plugin, "set_controller"):
                     plugin.set_controller(controller)
+            capture.enter_context(session_cache.mark_capture_active("recording"))
             log.info(
                 "Recording %d camera(s) at %g fps for %g s to %s",
                 len(system),
