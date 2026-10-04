@@ -1,5 +1,6 @@
 """Writer tests: ffmpeg/raw sinks, transcode roundtrip, failure paths."""
 
+import functools
 import time
 
 import numpy as np
@@ -497,8 +498,10 @@ def test_ffmpeg_probes_and_transcode_never_grab_the_tty(tmp_path, monkeypatch):
             f"{what}: stdin not redirected to DEVNULL (kwargs={kwargs})"
         )
 
-    # 1. ffmpeg_encoder_works — a single real encode via subprocess.run.
-    writer_mod._ENCODER_OK.clear()
+    # 1. ffmpeg_encoder_works — a single real encode via subprocess.run, run
+    #    through a fresh cache so the process's real probe results survive.
+    probe = functools.cache(writer_mod.ffmpeg_encoder_works.__wrapped__)
+    monkeypatch.setattr(writer_mod, "ffmpeg_encoder_works", probe)
     runs: list[tuple[list, dict]] = []
 
     def fake_run(cmd, **kwargs):
@@ -506,7 +509,7 @@ def test_ffmpeg_probes_and_transcode_never_grab_the_tty(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(writer_mod.subprocess, "run", fake_run)
-    assert writer_mod.ffmpeg_encoder_works("/fake/ffmpeg", "h264_nvenc") is True
+    assert probe("/fake/ffmpeg", "h264_nvenc") is True
     assert runs, "encoder probe should have launched ffmpeg"
     assert_off_tty(runs[0][0], runs[0][1], "ffmpeg_encoder_works")
 

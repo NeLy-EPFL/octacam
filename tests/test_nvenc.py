@@ -5,6 +5,7 @@ the ``@requires_nvenc`` integration tests skip unless a working ``h264_nvenc``
 ffmpeg is present on this machine.
 """
 
+import functools
 import json
 
 import numpy as np
@@ -40,6 +41,17 @@ requires_nvenc = pytest.mark.skipif(
 )
 
 
+@pytest.fixture
+def probe_caches(monkeypatch):
+    """Fresh ffmpeg probe caches for a test that fakes the probes.
+
+    The process's real results are swapped back afterwards rather than
+    cleared: a re-probe while another process holds the GPU's NVENC sessions
+    would cache "unavailable" for every later test."""
+    for name in ("ffmpeg_encoder_works", "_ffmpeg_for_encoder", "_nvenc_session_cap"):
+        monkeypatch.setattr(w, name, functools.cache(getattr(w, name).__wrapped__))
+
+
 # --- encoder parsing --------------------------------------------------------
 
 
@@ -71,9 +83,7 @@ def test_find_ffmpeg_default_needs_no_probe(monkeypatch):
     assert w.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
 
 
-def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch):
-    monkeypatch.setattr(w, "_FFMPEG_FOR_ENCODER", {})
-    monkeypatch.setattr(w, "_ENCODER_OK", {})
+def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
     monkeypatch.setattr(
         w, "_ffmpeg_candidates", lambda: ["/no/nvenc", "/has/nvenc", "/also"]
     )
@@ -86,9 +96,7 @@ def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch):
     assert w.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
 
 
-def test_find_ffmpeg_require_encoder_raises_when_none(monkeypatch):
-    monkeypatch.setattr(w, "_FFMPEG_FOR_ENCODER", {})
-    monkeypatch.setattr(w, "_ENCODER_OK", {})
+def test_find_ffmpeg_require_encoder_raises_when_none(monkeypatch, probe_caches):
     monkeypatch.setattr(w, "_ffmpeg_candidates", lambda: ["/a", "/b"])
     monkeypatch.setattr(w, "ffmpeg_encoder_works", lambda exe, enc: False)
     with pytest.raises(RuntimeError, match="h264_nvenc"):
@@ -174,9 +182,8 @@ def test_resolve_auto_inconclusive_probe_does_not_force_cpu(monkeypatch):
     assert warns == []
 
 
-def test_nvenc_max_sessions_is_cached(monkeypatch):
+def test_nvenc_max_sessions_is_cached(monkeypatch, probe_caches):
     calls = []
-    monkeypatch.setattr(w, "_NVENC_MAX_SESSIONS", {})  # fresh per-process cache
     monkeypatch.setattr(
         w,
         "probe_nvenc_max_sessions",
@@ -184,6 +191,7 @@ def test_nvenc_max_sessions_is_cached(monkeypatch):
     )
     assert w.nvenc_max_sessions("h264_nvenc") == 5
     assert w.nvenc_max_sessions("h264_nvenc") == 5  # served from cache
+    assert w.nvenc_max_sessions() == 5  # the default encoder is the same entry
     assert calls == ["h264_nvenc"]  # probed exactly once
 
 
@@ -372,7 +380,9 @@ def _fake_nvenc_system(tmp_path):
     return system
 
 
-def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(tmp_path, monkeypatch):
+def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(
+    tmp_path, monkeypatch, probe_caches
+):
     # No GPU (all of CI): save_method="nvenc" must still record — every camera on
     # libx264 — and warn. Exercises the controller's nvenc path (resolve fallback
     # + summary None-branch) with no real GPU, by mocking NVENC as unavailable
@@ -384,7 +394,6 @@ def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(tmp_path, monke
             raise RuntimeError("no nvenc in this test")
         return real_find(None)  # real ffmpeg for the libx264 path
 
-    monkeypatch.setattr(w, "_NVENC_MAX_SESSIONS", {})  # ignore any cached real probe
     monkeypatch.setattr(w, "find_ffmpeg", _no_nvenc)
     system = _fake_nvenc_system(tmp_path)
     save_dir = tmp_path / "rec"

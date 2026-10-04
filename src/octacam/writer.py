@@ -19,6 +19,7 @@ full (or once the sink has failed). Available sinks:
 
 import contextlib
 import errno
+import functools
 import glob
 import logging
 import os
@@ -217,29 +218,14 @@ def _ffmpeg_candidates() -> list[str]:
     return ordered
 
 
-# Capability-probe caches. A probe runs a real one-frame encode (below), so this
-# is not just a version check: it is the ground truth for "can this binary run
-# this encoder on THIS machine right now". Cleared only by process restart.
-_ENCODER_OK: dict[tuple[str, str], bool] = {}
-_FFMPEG_FOR_ENCODER: dict[str, str] = {}
-# Detected NVENC session cap per encoder, memoized for the process. The probe
-# loads the GPU briefly, so we run it at most once and reuse the count; keyed by
-# encoder so h264 and hevc could differ. A missing key means "not yet probed".
-_NVENC_MAX_SESSIONS: dict[str, int | None] = {}
-
-
+@functools.cache
 def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
     """Whether *exe* can actually initialise *encoder* on this machine (cached).
 
     Runs a real one-frame encode to the null muxer. This is stronger than parsing
     ``-encoders``: a too-new ffmpeg lists ``h264_nvenc`` yet fails at runtime when
     its NVENC API is newer than the installed NVIDIA driver supports, and a broken
-    GPU/driver fails here too. The result is cached per (realpath, encoder)."""
-    real = os.path.realpath(exe) if os.path.exists(exe) else exe
-    key = (real, encoder)
-    cached = _ENCODER_OK.get(key)
-    if cached is not None:
-        return cached
+    GPU/driver fails here too."""
     ok = False
     try:
         proc = subprocess.run(
@@ -262,7 +248,6 @@ def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
         ok = proc.returncode == 0
     except (OSError, subprocess.SubprocessError) as e:
         log.debug("encoder probe failed for %s / %s: %s", exe, encoder, e)
-    _ENCODER_OK[key] = ok
     return ok
 
 
@@ -326,9 +311,14 @@ def nvenc_max_sessions(encoder: str = "h264_nvenc") -> int | None:
     probe under-counts while sessions are held) — :meth:`resolve_capture_formats`
     does exactly that via the controller's off-lock warm-up.
     """
-    if encoder not in _NVENC_MAX_SESSIONS:
-        _NVENC_MAX_SESSIONS[encoder] = probe_nvenc_max_sessions(encoder)
-    return _NVENC_MAX_SESSIONS[encoder]
+    return _nvenc_session_cap(encoder)
+
+
+# Keyed by the resolved encoder: functools.cache would key nvenc_max_sessions()
+# and nvenc_max_sessions("h264_nvenc") apart and probe the GPU twice.
+@functools.cache
+def _nvenc_session_cap(encoder: str) -> int | None:
+    return probe_nvenc_max_sessions(encoder)
 
 
 def find_ffmpeg(require_encoder: str | None = None) -> str:
@@ -360,16 +350,18 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
             "No ffmpeg executable found: install the imageio-ffmpeg package or "
             "a system ffmpeg, or set OCTACAM_FFMPEG."
         )
-    cached = _FFMPEG_FOR_ENCODER.get(require_encoder)
-    if cached is not None:
-        return cached
+    return _ffmpeg_for_encoder(require_encoder)
+
+
+@functools.cache
+def _ffmpeg_for_encoder(encoder: str) -> str:
+    """The first candidate ffmpeg that runs ``encoder``; only a find is cached."""
     for exe in _ffmpeg_candidates():
-        if ffmpeg_encoder_works(exe, require_encoder):
-            _FFMPEG_FOR_ENCODER[require_encoder] = exe
+        if ffmpeg_encoder_works(exe, encoder):
             return exe
     raise RuntimeError(
-        f"no ffmpeg with a working {require_encoder} encoder was found "
-        f"(install a system ffmpeg built with {require_encoder} and a matching "
+        f"no ffmpeg with a working {encoder} encoder was found "
+        f"(install a system ffmpeg built with {encoder} and a matching "
         "NVIDIA driver, or set OCTACAM_FFMPEG to one)."
     )
 
