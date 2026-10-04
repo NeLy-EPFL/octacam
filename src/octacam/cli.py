@@ -2587,92 +2587,98 @@ def record(
             "They may already be in use by another octacam instance on this "
             "rig, or disconnected — only one process can open them at a time."
         )
-    if len(system) == 0:
-        log.warning("No cameras opened. Exiting.")
-        sys.exit(1)
-    log.info(
-        "Opened %d of %d configured camera(s)",
-        len(system),
-        len(system.requested_serial_numbers) or len(system),
-    )
-    if system.incomplete:
-        # CameraSystem already logged the INCOMPLETE RIG warning naming each
-        # missing camera. Recording anyway is a real choice — the take will be
-        # short a camera and nothing downstream can tell that apart from a rig
-        # that only ever had N-1 — so make it an explicit one, exactly like the
-        # save-directory overwrite gate below. --force covers both.
-        if force:
-            log.warning("Recording with an incomplete rig (--force).")
-        elif sys.stdin.isatty() and sys.stderr.isatty():
-            if not typer.confirm(
-                f"Only {len(system)} of {len(system.requested_serial_numbers)} "
-                "configured cameras opened. Record anyway?"
-            ):
-                system.close()
-                raise typer.Exit(1)
-        else:
-            log.warning(
-                "Recording with an incomplete rig (pass --force to silence this)."
-            )
-
-    names = {c.serial_number: c.name for c in config.cameras if c.name}
-    for camera in system:
-        camera.name = names.get(camera.serial_number, camera.name)
-
-    system.load_config(config_dir)
-    system.apply_display_config(config.cameras)
-
-    if Path(settings.save_dir).exists():
-        if force:
-            log.warning("Save directory exists; overwriting: %s", settings.save_dir)
-        elif sys.stdin.isatty() and sys.stderr.isatty():
-            # Interactive: let the operator confirm before clobbering data.
-            if not typer.confirm(
-                f"Save directory already exists and will be overwritten:\n"
-                f"  {settings.save_dir}\nContinue?"
-            ):
-                raise typer.Exit(1)
-        else:
-            # Non-interactive (scripted/cron): keep overwriting for backward
-            # compatibility, but say so loudly. Use --force to silence this.
-            log.warning(
-                "Save directory exists, data may be overwritten: %s "
-                "(pass --force to silence this)",
-                settings.save_dir,
-            )
-
-    plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
-    plugins.setup_all()
-
-    # If a serial plugin's board is running stale/wrong firmware, offer to reflash
-    # it before we start (interactive prompt) — or, headless, warn unless opted in
-    # via --yes / auto_flash. Without this an external-triggered rig would silently
-    # record against the wrong firmware (or, for a wrong protocol version, get no
-    # triggers at all).
-    _preflight_firmware(plugins, assume_yes=yes)
-
-    # Tag this headless run in the session cache so `octacam process --last`
-    # and `--last session` pick it up too (a one-off, single-folder "session").
-    controller = RecordingController(
-        system,
-        settings,
-        plugins,
-        auto_preview=False,
-        session_id=session_cache.new_session_id(),
-        record_kind="record",
-        config_dir=config_dir,
-    )
-    # Hand a controller reference to plugins that read live device state (e.g.
-    # triggerbox's auto strobe duty reads each camera's ExposureTime). Duck-typed
-    # so core stays decoupled from concrete plugin classes; mirrors create_app.
-    for plugin in plugins.plugins:
-        if hasattr(plugin, "set_controller"):
-            plugin.set_controller(controller)
-    # While this recording owns the cameras, publish a capture-active marker so a
-    # detached `octacam process` on this machine pauses until we are done.
-    capture_stack = contextlib.ExitStack()
-    capture_stack.enter_context(session_cache.mark_capture_active("recording"))
+    # Until the controller owns the cameras, every exit closes them (an open
+    # camera left to interpreter teardown can crash it; see BaslerBackend.close).
     try:
+        if len(system) == 0:
+            log.warning("No cameras opened. Exiting.")
+            sys.exit(1)
+        log.info(
+            "Opened %d of %d configured camera(s)",
+            len(system),
+            len(system.requested_serial_numbers) or len(system),
+        )
+        if system.incomplete:
+            # CameraSystem already logged the INCOMPLETE RIG warning naming each
+            # missing camera. Recording anyway is a real choice — the take will be
+            # short a camera and nothing downstream can tell that apart from a rig
+            # that only ever had N-1 — so make it an explicit one, exactly like the
+            # save-directory overwrite gate below. --force covers both.
+            if force:
+                log.warning("Recording with an incomplete rig (--force).")
+            elif sys.stdin.isatty() and sys.stderr.isatty():
+                if not typer.confirm(
+                    f"Only {len(system)} of {len(system.requested_serial_numbers)} "
+                    "configured cameras opened. Record anyway?"
+                ):
+                    raise typer.Exit(1)
+            else:
+                log.warning(
+                    "Recording with an incomplete rig (pass --force to silence this)."
+                )
+
+        names = {c.serial_number: c.name for c in config.cameras if c.name}
+        for camera in system:
+            camera.name = names.get(camera.serial_number, camera.name)
+
+        system.load_config(config_dir)
+        system.apply_display_config(config.cameras)
+
+        if Path(settings.save_dir).exists():
+            if force:
+                log.warning("Save directory exists; overwriting: %s", settings.save_dir)
+            elif sys.stdin.isatty() and sys.stderr.isatty():
+                # Interactive: let the operator confirm before clobbering data.
+                if not typer.confirm(
+                    f"Save directory already exists and will be overwritten:\n"
+                    f"  {settings.save_dir}\nContinue?"
+                ):
+                    raise typer.Exit(1)
+            else:
+                # Non-interactive (scripted/cron): keep overwriting for backward
+                # compatibility, but say so loudly. Use --force to silence this.
+                log.warning(
+                    "Save directory exists, data may be overwritten: %s "
+                    "(pass --force to silence this)",
+                    settings.save_dir,
+                )
+
+        plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
+        plugins.setup_all()
+
+        # If a serial plugin's board is running stale/wrong firmware, offer to reflash
+        # it before we start (interactive prompt) — or, headless, warn unless opted in
+        # via --yes / auto_flash. Without this an external-triggered rig would silently
+        # record against the wrong firmware (or, for a wrong protocol version, get no
+        # triggers at all).
+        _preflight_firmware(plugins, assume_yes=yes)
+
+        # Tag this headless run in the session cache so `octacam process --last`
+        # and `--last session` pick it up too (a one-off, single-folder "session").
+        controller = RecordingController(
+            system,
+            settings,
+            plugins,
+            auto_preview=False,
+            session_id=session_cache.new_session_id(),
+            record_kind="record",
+            config_dir=config_dir,
+        )
+    except BaseException:
+        system.close()
+        raise
+    capture_stack = contextlib.ExitStack()
+    try:
+        # Hand a controller reference to plugins that read live device state (e.g.
+        # triggerbox's auto strobe duty reads each camera's ExposureTime).
+        # Duck-typed so core stays decoupled from concrete plugin classes;
+        # mirrors create_app.
+        for plugin in plugins.plugins:
+            if hasattr(plugin, "set_controller"):
+                plugin.set_controller(controller)
+        # While this recording owns the cameras, publish a capture-active marker
+        # so a detached `octacam process` on this machine pauses until we are done.
+        capture_stack.enter_context(session_cache.mark_capture_active("recording"))
         log.info(
             "Recording %d camera(s) at %g fps for %g s to %s",
             len(system),

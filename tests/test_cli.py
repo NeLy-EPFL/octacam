@@ -1851,3 +1851,58 @@ def test_flash_refuses_a_rig_the_gui_holds_however_the_path_is_spelled(
     assert result.exit_code == 2, result.output
     assert "Another octacam instance owns this rig" in result.output
     assert f"(pid {os.getpid()})" in result.output
+
+
+# --- record closes the cameras on every exit before the controller owns them --
+
+
+@pytest.mark.parametrize(
+    ("serials", "failure"),
+    [
+        (["NOT-PRESENT"], None),  # nothing opened
+        (["FAKE-0", "NOT-PRESENT"], "decline"),  # the incomplete-rig prompt
+        (["FAKE-0"], "decline"),  # the overwrite prompt
+        (["FAKE-0"], "load_config"),
+        (["FAKE-0"], "apply_display_config"),
+    ],
+    ids=["no-camera", "incomplete-declined", "overwrite-declined", "load", "display"],
+)
+def test_record_closes_the_cameras_when_it_exits_before_recording(
+    tmp_path, monkeypatch, serials, failure
+):
+    import io
+
+    from octacam import cli
+    from octacam.cameras import CameraSystem
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "octacam_config.toml").write_text(
+        'backend = "fake"\n'
+        + "".join(f'[[cameras]]\nserial_number = "{s}"\n' for s in serials)
+    )
+    save_dir = tmp_path / "take"
+    save_dir.mkdir()  # exists, so an interactive run asks before overwriting it
+    closed = []
+    close = CameraSystem.close
+    monkeypatch.setattr(
+        CameraSystem, "close", lambda self: (closed.append(self), close(self))
+    )
+    if failure == "decline":
+        monkeypatch.setattr(sys, "stdin", Tty())
+        monkeypatch.setattr(sys, "stderr", Tty())
+        monkeypatch.setattr("typer.confirm", lambda *_a, **_k: False)
+    elif failure is not None:
+
+        def fail(*_a, **_k):
+            raise RuntimeError(failure)
+
+        monkeypatch.setattr(CameraSystem, failure, fail)
+    # Called directly: CliRunner's streams are never a tty, so it cannot prompt.
+    with pytest.raises((SystemExit, RuntimeError)):  # typer.Exit is a RuntimeError
+        cli.record(rig, output=save_dir)
+    assert len(closed) == 1
