@@ -596,7 +596,7 @@ def test_a_truncated_npz_still_reports_the_schema4_summary(tmp_path):
 
 @pytest.mark.parametrize("save_timestamps", [True, False])
 def test_a_fake_recording_checks_the_same_with_or_without_timestamps(
-    tmp_path, monkeypatch, save_timestamps
+    tmp_path, save_timestamps
 ):
     # The summary and timestamps.npz the recorder really writes, not hand-built
     # ones: a filled miss is a warning either way.
@@ -604,7 +604,6 @@ def test_a_fake_recording_checks_the_same_with_or_without_timestamps(
     from octacam.cameras.fake import FakeBackend
     from octacam.controller import RecordingController, RecordingSettings
 
-    monkeypatch.setenv("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
     system = CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
     try:
         system.load_config(tmp_path)

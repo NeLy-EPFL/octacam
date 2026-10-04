@@ -3,17 +3,7 @@
 import datetime
 import os
 
-import pytest
-
 from octacam import session_cache
-
-
-@pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    """Point the cache at a throwaway directory for the duration of a test."""
-    target = tmp_path / "cache"
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(target))
-    return target
 
 
 def _make(tmp_path, name):

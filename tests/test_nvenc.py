@@ -6,9 +6,6 @@ ffmpeg is present on this machine.
 """
 
 import json
-import os
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import numpy as np
 import pytest

@@ -13,12 +13,6 @@ from octacam.cli import app
 runner = CliRunner()
 
 
-@pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
-    return tmp_path / "cache"
-
-
 # ------------------------------------------------------------- process --detach
 
 

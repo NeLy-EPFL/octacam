@@ -3,11 +3,8 @@
 import asyncio
 import json
 import math
-import os
 import time
 from unittest.mock import Mock
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
 
 import numpy as np
 import pytest

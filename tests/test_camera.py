@@ -1,8 +1,5 @@
 """Camera sensor-parameter read/set/save tests (pure-unit + emulator)."""
 
-import os
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
 
 import pytest
 

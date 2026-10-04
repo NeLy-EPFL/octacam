@@ -10,9 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
-
 from typer.testing import CliRunner
 
 import octacam
@@ -28,18 +25,6 @@ from octacam.cli import (
 )
 
 runner = CliRunner()
-
-
-@pytest.fixture(autouse=True)
-def _restore_octacam_logger():
-    # `--log-level` reconfigures the process-wide octacam logger; restore it so a
-    # later test's warnings still reach its handlers.
-    logger = logging.getLogger("octacam")
-    saved = (logger.level, list(logger.handlers), logger.propagate)
-    yield
-    logger.setLevel(saved[0])
-    logger.handlers[:] = saved[1]
-    logger.propagate = saved[2]
 
 
 def test_version():
@@ -496,10 +481,9 @@ def _capture_octacam_logs(level=logging.INFO):
     return logger, handler
 
 
-def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
+def test_warn_if_transcoding_logs_only_when_active():
     from octacam import cli, session_cache
 
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     logger, handler = _capture_octacam_logs(logging.WARNING)
     try:
         cli._warn_if_transcoding()  # nothing running -> silent
@@ -518,10 +502,9 @@ def test_warn_if_transcoding_logs_only_when_active(tmp_path, monkeypatch):
     assert "--ignore-capture" in blob  # the documented way out
 
 
-def test_print_transcode_hints_lists_session_and_all(tmp_path, monkeypatch):
+def test_print_transcode_hints_lists_session_and_all(tmp_path):
     from octacam import cli, session_cache
 
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     rec = tmp_path / "rec" / "001"
     rec.mkdir(parents=True)
     session_cache.record_recording(rec, "sessZ", "gui")
@@ -987,7 +970,6 @@ def _make_recording(folder, *, with_outputs, extra_toml="", visualization=True):
 
 
 def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
 
@@ -1029,7 +1011,6 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
     # files the new take writes, so the previous take's mp4/grid stay behind.
     # They must not pass as this recording's finished outputs — that is how a
     # video from a different take ended up transferred as if it were this one's.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
     _age(folder / "camera_LF.mp4", 10)  # older than the new take's source...
@@ -1059,7 +1040,6 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
 def test_process_dry_run_lists_leftover_outputs_as_work(
     tmp_path, monkeypatch, process_log
 ):
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
     _age(folder / "camera_LF.mp4", 10)
@@ -1077,7 +1057,6 @@ def test_process_dry_run_lists_leftover_outputs_as_work(
 
 
 def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
 
@@ -1106,7 +1085,6 @@ def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypat
     # no composite at all (octacam used to derive one from the camera names and
     # spend minutes of ffmpeg on a video the rig never asked for). The transcode
     # step still runs.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=False, visualization=False)
 
@@ -1139,7 +1117,6 @@ def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypat
 def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     # A skipped transcode/grid must still flow to the transfer step, so a
     # re-run finishes the pipeline for a partially-transferred recording.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(
@@ -1208,7 +1185,6 @@ def test_process_dry_run_plans_every_step_without_running_any(
     # Nothing is encoded, composited, copied or deleted, yet every step lists
     # what a real run would do, including the grid and the transfer of outputs
     # the transcode step has only planned.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=False, extra_toml=_transfer_toml(dest_root))
@@ -1244,7 +1220,6 @@ def test_process_dry_run_previews_a_grid_whose_inputs_exist(
 ):
     # With its inputs on disk the grid's exact ffmpeg call can be previewed, so
     # the dry run hands the grid to the builder, in dry-run mode.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
     (folder / "grid.mp4").unlink()
@@ -1271,7 +1246,6 @@ def test_process_dry_run_never_waits_on_a_live_capture(
     # The plan is often wanted mid-session. A dry run does no heavy work, so it
     # must not park behind a live capture the way a real run does, nor tell a
     # gui launch that a transcode is competing for the CPU.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     folder = tmp_path / "rec"
     _make_recording(
         folder, with_outputs=False, extra_toml=_transfer_toml(tmp_path / "dest")
@@ -1295,7 +1269,6 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
 ):
     # `process --all --dry-run` doubles as "what is left to process?", so a
     # recording that is fully processed lists no work, only the counts.
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
@@ -1717,7 +1690,6 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
     # reads the summary's relative_directory for the transfer destination.
     from octacam.transform import RECORDING_INFO_DIRNAME, RECORDING_SUMMARY_FILENAME
 
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     rec = tmp_path / "data" / "rec"
     dest = tmp_path / "archive"
     info = _layout_recording(
@@ -1816,7 +1788,6 @@ def test_other_config_dir_commands_resolve_a_recording_folder(
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     seen = []
     real = cli._resolve_config_dir
 

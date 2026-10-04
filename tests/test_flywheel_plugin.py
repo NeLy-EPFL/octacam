@@ -477,25 +477,7 @@ def test_serial_command_endpoint_422_on_bad_payload():
 # Firmware provisioning: identity (sentinel), classification, flash, endpoints
 # ---------------------------------------------------------------------------
 
-import pytest  # noqa: E402
-
-import octacam.firmware as fw_mod  # noqa: E402
 from octacam.plugins.flywheel import _IDENTIFY_MARKER, _build  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _no_real_flash(monkeypatch):
-    """Never shell out to arduino-cli or poll a real /dev node; deterministic can_flash."""
-    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
-    monkeypatch.setattr("octacam.serial_ports.wait_for_device", lambda device, timeout=3.0: True)
-
-    def _fake_flash(spec, port, needed_build, **kwargs):
-        return fw_mod.FlashResult(
-            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
-            build=needed_build,
-        )
-
-    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
 
 
 def _plugin_with_fake(is_open=True):

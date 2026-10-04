@@ -7,11 +7,8 @@ back-compat promotion of a legacy external+driving-plugin rig to ``managed``.
 No hardware/SDK — a fake camera system + a stub driving plugin.
 """
 
-import os
 import threading
 import time
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import pytest
 

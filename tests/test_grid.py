@@ -9,8 +9,6 @@ import logging
 import os
 import subprocess
 
-os.environ.setdefault("PYLON_CAMEMU", "2")
-
 import numpy as np
 import pytest
 

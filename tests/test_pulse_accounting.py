@@ -9,12 +9,9 @@ sequence number — so both the sequence and the timestamp paths are exercised.
 """
 
 import json
-import os
 import threading
 import time
 from typing import Any
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import numpy as np
 import pytest

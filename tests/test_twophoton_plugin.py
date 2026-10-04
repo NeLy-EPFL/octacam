@@ -744,25 +744,7 @@ def test_builtin_not_overridden_by_entry_point(monkeypatch):
 # Firmware provisioning: identity classification, reader, flash, endpoints
 # ---------------------------------------------------------------------------
 
-import octacam.firmware as fw_mod  # noqa: E402
 from octacam.plugins.twophoton import TwoPhotonLink  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _no_real_flash(monkeypatch):
-    """Never shell out to arduino-cli or poll for a real /dev node; make can_flash
-    deterministic. Runs before the plugin is built, so the provisioner captures the
-    stubbed wait_for_device."""
-    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
-    monkeypatch.setattr("octacam.serial_ports.wait_for_device", lambda device, timeout=3.0: True)
-
-    def _fake_flash(spec, port, needed_build, **kwargs):
-        return fw_mod.FlashResult(
-            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
-            build=needed_build,
-        )
-
-    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
 
 
 def _verify_with_banner(plugin, link, banner):

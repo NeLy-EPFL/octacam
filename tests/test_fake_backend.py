@@ -6,9 +6,6 @@ round-tripping through load_config), and deterministic node behaviour — all in
 pure Python with no hardware.
 """
 
-import os
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import contextlib
 import logging

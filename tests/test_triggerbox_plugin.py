@@ -39,17 +39,6 @@ _CAM = struct.Struct("<BHH")
 _LIGHT = struct.Struct("<BBIIII")
 
 
-@pytest.fixture(autouse=True)
-def _no_real_usb_reset(monkeypatch):
-    """Never issue a real USBDEVFS_RESET from the suite — it would reset a board
-    actually plugged into the dev machine. Default to an inert failure; a test
-    that exercises recovery re-monkeypatches these to simulate an outcome."""
-    import octacam.serial_ports as sp
-
-    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (False, "test: suppressed"))
-    monkeypatch.setattr(sp, "wait_for_device", lambda device, timeout=3.0: True)
-
-
 class _Broadcasts:
     """Capture set_broadcast() calls so a test can assert what the GUI is told."""
 
@@ -1209,21 +1198,6 @@ def test_default_start_params_via_manager():
 # ===========================================================================
 
 import octacam.firmware as fw_mod  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _no_real_flash(monkeypatch):
-    """Never shell out to arduino-cli from the suite, and make can_flash
-    deterministic regardless of whether the dev box has arduino-cli installed."""
-    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
-
-    def _fake_flash(spec, port, needed_build, **kwargs):
-        return fw_mod.FlashResult(
-            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
-            build=needed_build,
-        )
-
-    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
 
 
 def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):

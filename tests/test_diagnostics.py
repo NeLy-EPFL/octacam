@@ -9,10 +9,7 @@ acquisition-bound.
 
 import json
 import math
-import os
 import time
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import pytest
 

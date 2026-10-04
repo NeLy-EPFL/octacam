@@ -2,9 +2,6 @@
 
 import json
 import logging
-import os
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
 
 import numpy as np
 import pytest
@@ -420,15 +417,6 @@ def _run(*args):
 # ----------------------------------------------- cache-driven selectors
 
 
-@pytest.fixture(autouse=True)
-def cache_env(tmp_path, monkeypatch):
-    """Isolate the recording cache (session_cache) under a throwaway dir.
-
-    Autouse so even plain-path processing (which publishes a transcode-activity
-    marker) never writes to the real ~/.cache/octacam during tests."""
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
-
-
 def _recording_folder(tmp_path, name, session="s1"):
     """Create a one-camera recording folder and note it in the cache."""
     from octacam import session_cache
@@ -445,7 +433,7 @@ def _recording_folder(tmp_path, name, session="s1"):
     return folder
 
 
-def test_transcode_last_uses_cache(tmp_path, cache_env):
+def test_transcode_last_uses_cache(tmp_path, cache_dir):
     f1 = _recording_folder(tmp_path, "rec1")
     f2 = _recording_folder(tmp_path, "rec2")
     result = _run("--last", "--no-grid", "--no-transfer")
@@ -454,7 +442,7 @@ def test_transcode_last_uses_cache(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_env):
+def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_dir):
     # `--last recording` is the explicit spelling of a bare `--last`.
     f1 = _recording_folder(tmp_path, "rec1")
     f2 = _recording_folder(tmp_path, "rec2")
@@ -464,7 +452,7 @@ def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_last_session_uses_cache(tmp_path, cache_env):
+def test_transcode_last_session_uses_cache(tmp_path, cache_dir):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s2")
@@ -475,14 +463,14 @@ def test_transcode_last_session_uses_cache(tmp_path, cache_env):
     assert not (f_old / "cam0.mp4").exists()  # an earlier session is excluded
 
 
-def test_transcode_last_rejects_bad_value(tmp_path, cache_env):
+def test_transcode_last_rejects_bad_value(tmp_path, cache_dir):
     _recording_folder(tmp_path, "rec1")
     result = _run("--last", "bogus", "--no-grid", "--no-transfer")
     assert result.exit_code != 0
     assert "recording" in result.output and "session" in result.output
 
 
-def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
+def test_transcode_session_ignores_deleted_folder(tmp_path, cache_dir):
     import shutil
 
     f1 = _recording_folder(tmp_path, "rec1", session="s1")
@@ -493,7 +481,7 @@ def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
     assert (f2 / "cam0.mp4").exists()
 
 
-def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
+def test_transcode_session_id_targets_exact_session(tmp_path, cache_dir):
     # --session-id names one exact session, unaffected by a later recording that
     # would steal the "latest session" out from under bare --last session.
     f1 = _recording_folder(tmp_path, "rec1", session="guiA")
@@ -512,7 +500,7 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
+def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_dir):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s3")
@@ -524,13 +512,13 @@ def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
     assert (f2 / "cam0.mp4").exists()
 
 
-def test_transcode_all_empty_cache_errors(tmp_path, cache_env):
+def test_transcode_all_empty_cache_errors(tmp_path, cache_dir):
     result = _run("--all")
     assert result.exit_code != 0
     assert "No recordings found" in result.output
 
 
-def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
+def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_dir):
     _recording_folder(tmp_path, "rec1")
     result = _run("--last", "--all")
     assert result.exit_code != 0
@@ -541,14 +529,14 @@ def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
     assert "at most one" in result.output
 
 
-def test_transcode_selector_rejects_explicit_paths(tmp_path, cache_env):
+def test_transcode_selector_rejects_explicit_paths(tmp_path, cache_dir):
     f1 = _recording_folder(tmp_path, "rec1")
     result = _run(str(f1), "--last")
     assert result.exit_code != 0
     assert "cannot be combined" in result.output
 
 
-def test_transcode_selector_empty_cache_errors(tmp_path, cache_env):
+def test_transcode_selector_empty_cache_errors(tmp_path, cache_dir):
     result = _run("--last")
     assert result.exit_code != 0
     assert "No recordings found" in result.output

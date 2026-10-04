@@ -4,8 +4,6 @@ import json
 import os
 import time
 
-os.environ.setdefault("PYLON_CAMEMU", "2")
-
 import pytest
 
 from octacam.controller import (

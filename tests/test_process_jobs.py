@@ -17,14 +17,6 @@ from octacam.cli import app
 runner = CliRunner()
 
 
-@pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    """Point the cache (and so the jobs dir) at a throwaway directory."""
-    target = tmp_path / "cache"
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(target))
-    return target
-
-
 def _job(job_id="20260101T000000-1", **kw):
     return pj.JobStatus(job_id=job_id, **kw)
 
