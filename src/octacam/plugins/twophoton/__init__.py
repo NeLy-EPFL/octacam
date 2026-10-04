@@ -513,7 +513,7 @@ class TwoPhotonPlugin(Plugin):
         # garbled arm packet (or one whose payload arrives too late for the
         # firmware's parse window) otherwise fails silently and the cameras wait
         # on an external trigger that never fires; surface it so the operator knows.
-        if self._ack_timeout_s > 0 and not self._armed_event.wait(self._ack_timeout_s):
+        if not self._armed_event.wait(self._ack_timeout_s):
             self._last_error = (
                 f"no arm ack from {self.device} within {self._ack_timeout_s:.1f}s"
             )

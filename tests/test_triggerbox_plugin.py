@@ -96,13 +96,33 @@ def _decode_frame(raw: bytes) -> dict:
 
 
 class FakeLink:
-    def __init__(self, is_open: bool = True):
+    """Records writes and answers like the board: 'R' to an arm (``E<reject>``
+    when ``reject`` is set), 'D' once a finite run is over, 'C' to a cancel.
+    Answers come at once, or from a timer ``delay_s`` later ('D' after the run's
+    real duration); ``acks = False`` silences the board."""
+
+    def __init__(self, on_status, on_reject, is_open: bool = True, delay_s: float | None = None):
+        self._on_status = on_status
+        self._on_reject = on_reject
         self._open = is_open
         self._lock = threading.Lock()
         self.written: list[bytes] = []
         self.fail_writes = False  # simulate a wedged link (write returns False)
+        self.acks = True
+        self.reject: str | None = None
+        self.delay_s = delay_s
         self.opens = 0
         self.closes = 0
+
+    def _answer(self, callback, token: str, after_s: float = 0.0) -> None:
+        if not self.acks:
+            return
+        if self.delay_s is None:
+            callback(token)
+        else:
+            timer = threading.Timer(self.delay_s + after_s, callback, (token,))
+            timer.daemon = True
+            timer.start()
 
     @property
     def is_open(self) -> bool:
@@ -118,15 +138,23 @@ class FakeLink:
 
     def send_arm(self, spec: ArmSpec) -> bool:
         with self._lock:
-            if self._open and not self.fail_writes:
-                self.written.append(spec.to_bytes())
-                return True
-            return False
+            if not self._open or self.fail_writes:
+                return False
+            self.written.append(spec.to_bytes())
+        if self.reject is not None:
+            self._answer(self._on_reject, self.reject)
+        else:
+            self._answer(self._on_status, "R")
+            if spec.duration_ms:
+                self._answer(self._on_status, "D", spec.duration_ms / 1000)
+        return True
 
     def send_cancel(self) -> None:
         with self._lock:
-            if self._open:
-                self.written.append(bytes([CANCEL_MAGIC]))
+            if not self._open:
+                return
+            self.written.append(bytes([CANCEL_MAGIC]))
+        self._answer(self._on_status, "C")
 
     def send_identify(self) -> None:
         pass
@@ -166,12 +194,17 @@ class FakeController:
         self.camera_system = list(cameras)
 
 
-def _plugin_with_fake(is_open: bool = True, **kwargs) -> tuple[TriggerboxPlugin, FakeLink]:
-    plugin = _build({"device": DEVICE, **kwargs})
-    link = FakeLink(is_open=is_open)
+def _fake_link(plugin: TriggerboxPlugin, is_open: bool = True, **kwargs) -> FakeLink:
+    link = FakeLink(
+        plugin._on_arduino_status, plugin._on_arduino_reject, is_open=is_open, **kwargs
+    )
     plugin._link = link
-    plugin._ack_timeout_s = 0.0  # no reader thread to send the 'R' ack
-    return plugin, link
+    return link
+
+
+def _plugin_with_fake(is_open: bool = True, **options) -> tuple[TriggerboxPlugin, FakeLink]:
+    plugin = _build({"device": DEVICE, **options})
+    return plugin, _fake_link(plugin, is_open)
 
 
 def _last_arm(link: FakeLink) -> dict:
@@ -568,10 +601,9 @@ def test_default_start_params_shape():
     assert [c["pin"] for c in params["cameras"]] == ["D13"]
     assert len(params["lights"]) == 2
     # round-trips: feeding it back into on_recording_start arms
-    plugin._link = FakeLink()
-    plugin._ack_timeout_s = 0.0
+    link = _fake_link(plugin)
     plugin.on_recording_start({"triggerbox": params})
-    assert _last_arm(plugin._link)["fps"] == 80
+    assert _last_arm(link)["fps"] == 80
 
 
 def _tab_spec(plugin: TriggerboxPlugin, **light_changes) -> dict:
@@ -660,28 +692,17 @@ def test_snapshot_options_all_lights_off_reloads_as_off():
 
 
 def test_arm_and_wait_classifies_outcomes():
-    plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 0.0
+    plugin, link = _plugin_with_fake(delay_s=0.01)  # answers arrive during the wait
     arm = plugin._build_arm_spec(80, 1000, plugin._cameras, plugin._lights)
-    assert plugin._arm_and_wait(arm) == "ok"  # ack disabled -> optimistic ok
+    assert plugin._arm_and_wait(arm) == "ok"
+    link.reject = "d"
+    assert plugin._arm_and_wait(arm) == "reject"
     link.fail_writes = True
     assert plugin._arm_and_wait(arm) == "write_failed"
     link.fail_writes = False
+    link.acks = False
     plugin._ack_timeout_s = 0.02
-    assert plugin._arm_and_wait(arm) == "timeout"  # no reader to ack
-    # a reject arrives during the wait (wait for a NEW frame — the link already
-    # holds frames from the calls above)
-    plugin._ack_timeout_s = 1.0
-    base = len(link.snapshot())
-
-    def reject():
-        if wait_until(lambda: len(link.snapshot()) > base, timeout=1.0, interval=0.001):
-            plugin._on_arduino_reject("d")
-
-    t = threading.Thread(target=reject)
-    t.start()
-    assert plugin._arm_and_wait(arm) == "reject"
-    t.join(timeout=2.0)
+    assert plugin._arm_and_wait(arm) == "timeout"
 
 
 def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
@@ -692,7 +713,8 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     bc = _Broadcasts()
     plugin, link = _plugin_with_fake()
     plugin.set_broadcast(bc)
-    plugin._ack_timeout_s = 0.03  # nothing acks
+    link.acks = False
+    plugin._ack_timeout_s = 0.03
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert calls == [DEVICE]  # a USB-reset recovery was attempted
     assert link.opens >= 1 and link.closes >= 1  # link was cycled
@@ -721,6 +743,7 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
     plugin.set_broadcast(bc)
+    link.acks = False
     plugin._ack_timeout_s = 0.2  # first arm times out quickly, then recovery re-arms
 
     # Ack only the SECOND arm (after the USB-reset recovery), simulating a board
@@ -743,16 +766,9 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1])
     plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 1.0
-
-    def reject():
-        if wait_until(link.snapshot, timeout=1.0, interval=0.001):
-            plugin._on_arduino_reject("r")  # reserved pin
-
-    t = threading.Thread(target=reject)
-    t.start()
+    link.reject = "r"  # reserved pin
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    t.join(timeout=2.0)
+    assert plugin._last_error and "REJECTED" in plugin._last_error
     assert calls == []  # a protocol reject is not a wedge; no USB reset
 
 
@@ -793,13 +809,13 @@ def test_arm_and_wait_serialized_by_arm_lock():
     # Fix 6: the clear+send+wait window must be serialized so two concurrent arms
     # can't share _armed_event/_last_reject and steal each other's ack/reject.
     plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 0.0
     gate = threading.Event()
     in_send = threading.Event()
 
     def blocking_send(spec):
         in_send.set()
         gate.wait(2.0)
+        plugin._on_arduino_status("R")
         return True
 
     link.send_arm = blocking_send
@@ -819,17 +835,8 @@ def test_arm_and_wait_serialized_by_arm_lock():
 
 
 def test_on_recording_start_no_warning_when_ack_arrives(caplog):
-    plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 1.0
-
-    def ack():
-        if wait_until(link.snapshot, timeout=0.5, interval=0.001):
-            plugin._on_arduino_status("R")
-
-    t = threading.Thread(target=ack)
-    t.start()
+    plugin, link = _plugin_with_fake(delay_s=0.005)
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    t.join(timeout=2.0)
     assert plugin._armed_event.is_set()
     assert plugin._last_error is None  # a clean ack reports no failure
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
@@ -837,16 +844,8 @@ def test_on_recording_start_no_warning_when_ack_arrives(caplog):
 
 def test_on_recording_start_logs_firmware_reject(caplog):
     plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 1.0
-
-    def reject():
-        if wait_until(link.snapshot, timeout=0.5, interval=0.001):
-            plugin._on_arduino_reject("p")  # unknown pin id
-
-    t = threading.Thread(target=reject)
-    t.start()
+    link.reject = "p"  # unknown pin id
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
-    t.join(timeout=2.0)
     assert any("REJECTED" in m and "unknown pin" in m for m in caplog.messages)
 
 
@@ -1531,43 +1530,16 @@ def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
     ), messages
 
 
-class _AckingLink(FakeLink):
-    """A FakeLink whose board answers: 'R' on an arm, 'D' once a finite run is
-    over, 'C' on a cancel — delivered to the plugin like the reader thread."""
-
-    def __init__(self, plugin_ref, *, ack_cancel=True):
-        super().__init__()
-        self.plugin_ref = plugin_ref
-        self.ack_cancel = ack_cancel
-
-    def _later(self, delay, token):
-        threading.Timer(delay, lambda: self.plugin_ref[0]._on_arduino_status(token)).start()
-
-    def send_arm(self, spec):
-        ok = super().send_arm(spec)
-        if ok:
-            self._later(0.005, "R")
-            if spec.duration_ms:
-                self._later(0.005 + spec.duration_ms / 1000, "D")
-        return ok
-
-    def send_cancel(self):
-        super().send_cancel()
-        if self.ack_cancel:
-            self._later(0.005, "C")
-
-
-def _acking_plugin(**kwargs):
-    plugin = _build({"device": DEVICE, **kwargs})
-    ref = [plugin]
-    link = _AckingLink(ref, **{k: v for k, v in kwargs.items() if k == "ack_cancel"})
-    plugin._link = link
+def _realtime_plugin(**options):
+    """A plugin whose fake board answers from a timer, as the reader thread would."""
+    plugin = _build({"device": DEVICE, **options})
+    link = _fake_link(plugin, delay_s=0.005)
     plugin._ack_timeout_s = 0.5
     return plugin, link
 
 
 def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
-    plugin, link = _acking_plugin(
+    plugin, link = _realtime_plugin(
         cameras=[{"pin": "D13", "pulse_us": 500}],
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25}],
     )
@@ -1591,7 +1563,7 @@ def test_prime_trigger_declines_without_a_camera_line_or_a_board():
 
 
 def test_on_preview_stop_waits_for_the_boards_cancel_ack():
-    plugin, link = _acking_plugin()
+    plugin, link = _realtime_plugin()
     plugin._idle_event.clear()
     plugin.on_preview_stop()
     assert plugin._idle_event.is_set()  # returned only once 'C' arrived
@@ -1599,7 +1571,8 @@ def test_on_preview_stop_waits_for_the_boards_cancel_ack():
 
 
 def test_an_unacknowledged_cancel_is_bounded(caplog):
-    plugin, _link = _acking_plugin(ack_cancel=False)
+    plugin, link = _realtime_plugin()
+    link.acks = False
     started = time.monotonic()
     with caplog.at_level(logging.WARNING, logger="octacam"):
         plugin.on_preview_stop()

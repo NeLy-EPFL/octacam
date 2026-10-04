@@ -1397,14 +1397,12 @@ class TriggerboxPlugin(Plugin):
         self._done_event.clear()
         if self._arm_and_wait(arm) != "ok":
             return False
-        if self._ack_timeout_s > 0:
-            burst_s = arm.duration_ms / 1000
-            if not self._done_event.wait(burst_s + self._ack_timeout_s):
-                log.warning(
-                    "triggerbox: no end-of-run from %s after the priming pulses; "
-                    "cancelling", self.device,
-                )
-                self._cancel_and_wait()
+        if not self._done_event.wait(arm.duration_ms / 1000 + self._ack_timeout_s):
+            log.warning(
+                "triggerbox: no end-of-run from %s after the priming pulses; "
+                "cancelling", self.device,
+            )
+            self._cancel_and_wait()
         self._set_arduino_state("idle")
         return True
 
@@ -1413,7 +1411,7 @@ class TriggerboxPlugin(Plugin):
         with self._arm_lock:
             self._idle_event.clear()
             self._link.send_cancel()
-            if self._ack_timeout_s <= 0 or not self._link.is_open:
+            if not self._link.is_open:
                 return True
             acked = self._idle_event.wait(min(self._ack_timeout_s, CANCEL_ACK_TIMEOUT_S))
         if not acked:
@@ -1423,7 +1421,7 @@ class TriggerboxPlugin(Plugin):
     def _arm_and_wait(self, arm: ArmSpec) -> str:
         """Send an arm packet and classify the outcome.
 
-        Returns ``"ok"`` (running ack seen, or ack-wait disabled), ``"reject"``
+        Returns ``"ok"`` (running ack seen), ``"reject"``
         (board sent E<code>), ``"timeout"`` (no ack in time), or ``"write_failed"``
         (the bytes never reached the OS — a wedged/closed link).
 
@@ -1436,8 +1434,6 @@ class TriggerboxPlugin(Plugin):
             self._last_reject = None
             if not self._link.send_arm(arm):
                 return "write_failed"
-            if self._ack_timeout_s <= 0:
-                return "ok"
             if not self._armed_event.wait(self._ack_timeout_s):
                 return "timeout"
             return "reject" if self._last_reject is not None else "ok"

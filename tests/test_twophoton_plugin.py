@@ -29,12 +29,15 @@ ARM_FORMAT   = "<BHI"  # magic(u8) + fps(u16) + duration_ms(u32) = 7 bytes
 # ---------------------------------------------------------------------------
 
 class FakeLink:
-    """Records writes; lets tests inject incoming status bytes."""
+    """Records writes and answers an arm with 'A', as the board does, unless
+    ``acks`` is off."""
 
-    def __init__(self, is_open: bool = True):
+    def __init__(self, on_status, is_open: bool = True):
+        self._on_status = on_status
         self._open = is_open
         self._lock = threading.Lock()
         self.written: list[bytes] = []
+        self.acks = True
 
     @property
     def is_open(self) -> bool:
@@ -48,10 +51,12 @@ class FakeLink:
 
     def send_arm(self, params: ArmParams) -> bool:
         with self._lock:
-            if self._open:
-                self.written.append(params.to_bytes())
-                return True
-            return False
+            if not self._open:
+                return False
+            self.written.append(params.to_bytes())
+        if self.acks:
+            self._on_status("A")
+        return True
 
     def send_cancel(self) -> None:
         with self._lock:
@@ -81,11 +86,8 @@ def _plugin_with_fake(is_open: bool = True) -> tuple[TwoPhotonPlugin, FakeLink]:
         default_fps=DEFAULT_FPS,
         default_duration_ms=DEFAULT_DURATION_MS,
     )
-    link = FakeLink(is_open=is_open)
+    link = FakeLink(plugin._on_arduino_status, is_open=is_open)
     plugin._link = link
-    # FakeLink has no reader thread to send the 'A' ack, so skip the bounded
-    # ack wait in on_recording_start (exercised separately with a real link).
-    plugin._ack_timeout_s = 0.0
     return plugin, link
 
 
@@ -240,7 +242,8 @@ def test_on_recording_start_surfaces_write_failure_to_gui():
 
 def test_on_recording_start_surfaces_ack_timeout_to_gui():
     plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 0.05  # no reader to send 'A', so the wait elapses
+    link.acks = False
+    plugin._ack_timeout_s = 0.05
     events: list[tuple[str, dict]] = []
     plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
@@ -403,6 +406,7 @@ def test_on_recording_start_warns_when_no_arm_ack(caplog):
     # With no reader to send 'A', the bounded ack wait elapses and warns rather
     # than letting a silently-dropped arm leave the cameras hanging.
     plugin, link = _plugin_with_fake()
+    link.acks = False
     plugin._ack_timeout_s = 0.05
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
     assert link.snapshot()  # the arm packet was still sent
@@ -411,10 +415,10 @@ def test_on_recording_start_warns_when_no_arm_ack(caplog):
 
 def test_on_recording_start_no_warning_when_ack_arrives(caplog):
     plugin, link = _plugin_with_fake()
-    plugin._ack_timeout_s = 1.0
+    link.acks = False
 
     def ack():
-        # Deliver the firmware 'A' as soon as the arm packet is written.
+        # Deliver the firmware 'A' from another thread, as the reader does.
         if wait_until(link.snapshot, timeout=0.5, interval=0.001):
             plugin._on_arduino_status("A")
 
