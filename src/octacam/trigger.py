@@ -7,9 +7,8 @@ import time
 class PreciseTimer:
     """Calls `callback` at a fixed frequency on a dedicated thread.
 
-    Like the C++ PreciseTimer, there is no catch-up protection: if a tick is
-    late, subsequent ticks fire immediately until the schedule is caught up,
-    keeping the average rate (and thus total frame count) at the target.
+    Late ticks are caught up by firing at once, so the average rate (and so the
+    total trigger count) stays on target.
     """
 
     def __init__(self, callback):

@@ -1,9 +1,8 @@
 """octacam_config.toml parsing.
 
-The loader is deliberately *tolerant*: a malformed file, section, or field is
-warned about and falls back to the default rather than raising, so a rig's
-config can never stop the app from starting. pydantic validates the types;
-``_lenient_validate`` turns validation errors into warn-and-default.
+Tolerant per field: a malformed section or field is warned about and falls back
+to its default (``_lenient_validate``). A file that does not parse at all raises
+:class:`ConfigError`, since stock defaults would silently run the wrong rig.
 """
 
 import datetime
@@ -35,11 +34,8 @@ _DefaultT = TypeVar("_DefaultT")
 
 
 def _scalar_str(value: object) -> str:
-    """Coerce a TOML scalar to a string, rejecting bool/array/table.
-
-    TOML strings are normally quoted, but an unquoted integer serial number or
-    a date-like save directory parses as an int/date; accept those as text
-    (mirroring how the values were always meant to be read)."""
+    """Coerce a TOML scalar to a string, rejecting bool/array/table: an unquoted
+    serial number or date-like save directory parses as an int or a date."""
     if isinstance(value, bool):
         raise ValueError("expected a string, got a boolean")
     if isinstance(value, str):
@@ -61,9 +57,7 @@ class CameraConfig(BaseModel):
     window_y: float = -1.0
     window_width: float = -1.0
     window_height: float = -1.0
-    # Auto-center the sensor ROI on each axis: when true, OffsetX/OffsetY are
-    # derived from the full sensor size and the ROI size and recomputed whenever
-    # the ROI changes, instead of being set by hand.
+    # Center the ROI on that axis (its offset follows every ROI change).
     center_x: bool = False
     center_y: bool = False
 
@@ -74,10 +68,8 @@ class CameraConfig(BaseModel):
 
 
 def _valid_ffmpeg_params(value: str) -> str:
-    """Reject an ffmpeg_params string ffmpeg could never parse (bad quoting).
-
-    Raising here lets ``_lenient_validate`` fall the field back to its default
-    rather than letting the malformed string reach ffmpeg at record/transcode."""
+    """Reject an ffmpeg_params string with bad quoting (the field then keeps its
+    default)."""
     try:
         shlex.split(value)
     except ValueError as e:
@@ -100,36 +92,23 @@ class RecordConfig(BaseModel):
     duration: float = 5.0
     duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
     trigger_source: Literal["software", "managed", "external"] = "software"
-    # How preview is triggered so it approximates the recording. "auto" mirrors
-    # trigger_source; "software"/"free_running" force that preview mode. See
-    # RecordingController._effective_preview_mode.
+    # "auto" mirrors trigger_source (RecordingController._effective_preview_mode).
     preview_trigger_source: Literal["auto", "software", "free_running"] = "auto"
     directory: str = "./"
     relative_directory: str = ""
-    # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU (H.264 NVENC, falling back to
-    # libx264 for cameras beyond max_nvenc_sessions); "raw" = Mono8 dump for
-    # offline transcoding.
+    # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU, cameras beyond
+    # max_nvenc_sessions on CPU; "raw" = Mono8 dump, transcoded later.
     save_method: Literal["ffmpeg", "raw", "nvenc"] = "ffmpeg"
-    # CPU encoder args (save_method="ffmpeg").
+    # Encoder args per method, kept apart so each preset persists.
     ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    # GPU encoder args (save_method="nvenc"). A separate field so the CPU and GPU
-    # presets persist independently; defaults to the curated NVENC H.264 preset.
     nvenc_params: str = NVENC_H264_PARAMS
-    # Max concurrent NVENC (GPU) encode sessions to use when save_method="nvenc";
-    # cameras beyond this encode on CPU instead of failing. Omit (None) to
-    # auto-detect the GPU/driver cap (one consumer GeForce allows only a handful —
-    # 8 on driver 570; a Quadro/patched driver allows more); set an int to cap it
-    # lower (e.g. to reserve GPU headroom). `octacam doctor` reports the detected
-    # limit for this GPU.
+    # None = the GPU's detected session cap (`octacam doctor` reports it); an
+    # int caps it lower.
     max_nvenc_sessions: int | None = None
-    # Frames buffered per camera between the grab loop and the encoder. The grab
-    # loop never blocks, so a frame arriving while this queue is full is dropped;
-    # a deeper queue absorbs a transient encoder stall (bursty ffmpeg/GPU) at the
-    # cost of peak RAM (queue x frame bytes x cameras). Raise it if a fast rig
-    # shows brief drop bursts; lower it on memory-tight / high-resolution rigs.
+    # Frames buffered per camera before the encoder: a deeper queue absorbs a
+    # transient encoder stall, at the cost of peak RAM (queue x frame x cameras).
     writer_queue_size: int = 64
-    # true bakes each camera's display transform (rotation/flips) into the video
-    # (old record_form "display"); false saves the raw sensor image ("sensor").
+    # Bake each camera's display transform (rotation, flips) into the video.
     save_transformed: bool = True
     save_timestamps: bool = False
 
@@ -152,14 +131,12 @@ class RecordConfig(BaseModel):
     @field_validator("max_nvenc_sessions")
     @classmethod
     def _floor_nvenc_sessions(cls, value: int | None) -> int | None:
-        # None = auto-detect the GPU session cap; an int is floored at 0.
         return None if value is None else max(0, value)
 
     @field_validator("writer_queue_size")
     @classmethod
     def _floor_writer_queue_size(cls, value: int) -> int:
-        # A queue.Queue(maxsize=0) is *unbounded* (would grow to OOM on a slow
-        # encoder); floor at 1 so the bound is always meaningful.
+        # Floored at 1: a queue.Queue(maxsize=0) is unbounded.
         return max(1, value)
 
 
@@ -182,15 +159,12 @@ class TranscodeConfig(BaseModel):
 
 
 class VisualizationConfig(BaseModel):
-    """One ``[[visualization]]`` entry: a named composite grid to generate.
+    """One ``[[visualization]]`` entry: a composite grid video ``octacam
+    process`` builds in each recording folder.
 
-    ``octacam process`` builds ``<name>`` in each recording folder from
-    ``layout`` (a 2D list of camera names; ``""`` is a black fill cell, all rows
-    equal length). Optional ``ffmpeg_params`` overrides the encoder args for this
-    grid; empty falls back to ``[transcode].ffmpeg_params`` (with pix_fmt forced
-    to a widely-playable yuv420p).
-
-    Example for a 3×3 grid on an 8-camera rig::
+    ``layout`` is a 2D list of camera names, rows of equal length, ``""`` a black
+    cell. An empty ``ffmpeg_params`` uses ``[transcode].ffmpeg_params``.
+    For example, a 3×3 grid on an 8-camera rig::
 
         [[visualization]]
         name = "grid.mp4"
@@ -225,11 +199,9 @@ class VisualizationConfig(BaseModel):
 class TransferConfig(BaseModel):
     """The ``[transfer]`` section: where `octacam process` mirrors recordings.
 
-    Each recording folder is copied to ``directory``/``relative_directory`` (the
-    ``relative_directory`` resolved at record time and stored in the summary), so
-    the local tree is mirrored on the destination. ``directory`` supports the
-    same strftime ``%``-codes as ``record.directory``. ``checksum``
-    content-verifies each copy before promoting it (false = size-only).
+    A recording goes to ``directory``/<its summary's ``relative_directory``>;
+    ``directory`` takes strftime ``%``-codes like ``record.directory``.
+    ``checksum`` verifies each copy's content (false: its size only).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -249,9 +221,7 @@ class GuiConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     display_refresh_interval_ms: int = 33
-    # Default colour theme for the web GUI ("dark" or "light"). Applied on load
-    # as the rig default; a per-browser choice made with the header toggle (kept
-    # in localStorage) always overrides it.
+    # The rig's default theme; a browser's own choice overrides it.
     theme: Literal["dark", "light"] = "dark"
 
 
@@ -260,12 +230,8 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-# Backend names accepted in the TOML ``backend`` key: "auto" plus every concrete
-# backend the registry knows (kept in sync with ``registry.BACKENDS``). Listing
-# them as a literal here avoids importing the cameras package (and its heavy SDK
-# deps) just to validate a config. ``spinnaker`` (the Spinnaker C-API tier) is
-# included so a rig without PySpin installed can still pin its FLIRs to it by
-# name instead of only reaching it via "auto".
+# "auto" plus registry.BACKENDS, listed here so validating a config imports no
+# camera SDK.
 _BACKENDS = (
     "auto",
     "basler",
@@ -277,14 +243,8 @@ _BACKENDS = (
 
 
 class OctacamConfig(BaseModel):
-    # Which camera backend(s) this rig uses. "auto" (the default, and what an
-    # absent key means) resolves to the preference cascade: each camera is claimed
-    # by the best available tier that sees it — vendor SDK (basler/flir), then the
-    # Spinnaker C-API tier (spinnaker) that claims the FLIRs when PySpin is not
-    # installed, then the always-present pycameleon floor — so a rig just
-    # uses whatever is plugged in with whatever is installed. A concrete name pins
-    # the rig to one backend (including "spinnaker" for the FLIR C-API tier). Every
-    # existing config keeps working.
+    # "auto": each camera is claimed by the best installed tier that sees it
+    # (registry.CASCADE); a backend name pins the rig to that one.
     backend: str = "auto"
     record: RecordConfig = Field(default_factory=RecordConfig)
     transcode: TranscodeConfig = Field(default_factory=TranscodeConfig)
@@ -303,20 +263,15 @@ _DURATION_UNIT_SECONDS = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
 
 
 def duration_to_seconds(duration: float, unit: str, fps: float) -> float:
-    """Convert a record ``duration`` in its ``unit`` to seconds.
-
-    ``"frames"`` divides by ``fps`` (a frame count at the recording rate); the
-    other units multiply by their seconds factor."""
+    """A record ``duration`` in its ``unit`` (``"frames"`` at ``fps``) as seconds."""
     if unit == "frames":
         return duration / fps if fps > 0 else 0.0
     return duration * _DURATION_UNIT_SECONDS.get(unit, 1.0)
 
 
 def _apply_template(text: str, when: time.struct_time) -> str:
-    """Expand strftime ``%``-codes in a path template.
-
-    Tolerant: a bad strftime code is warned about and the text is left as-is
-    rather than raising, matching the module's parsing philosophy."""
+    """Expand strftime ``%``-codes in a path template; a bad code is warned
+    about and the text kept."""
     try:
         return time.strftime(text, when)
     except ValueError as e:
@@ -325,15 +280,12 @@ def _apply_template(text: str, when: time.struct_time) -> str:
 
 
 def _normalize_dir(text: str) -> str:
-    """Strip, expand ``~``, make absolute, forward-slash — mirrors the GUI."""
+    """Strip, expand ``~``, make absolute, use forward slashes."""
     return str(Path(text.strip()).expanduser().absolute()).replace("\\", "/")
 
 
 def resolve_dir_template(template: str, when: time.struct_time | None = None) -> str:
-    """Resolve a directory template to an absolute path.
-
-    Used for ``record.directory`` and ``transfer.directory`` (both accept
-    strftime ``%``-codes, expanded at record time)."""
+    """Resolve a directory template (strftime ``%``-codes) to an absolute path."""
     when = when or time.localtime()
     return _normalize_dir(_apply_template(template, when))
 
@@ -348,20 +300,15 @@ def resolve_record_directory(
 def resolve_relative_directory(
     record: RecordConfig, when: time.struct_time | None = None
 ) -> str:
-    """Resolve ``record.relative_directory`` (strftime codes expanded, kept relative).
-
-    Unlike ``resolve_record_directory`` this is *not* absolutized: it is the
-    sub-path that sits under the base directory (and that the transfer step
-    mirrors onto the destination)."""
+    """Resolve ``record.relative_directory``, kept relative (the transfer mirrors
+    it under its destination)."""
     when = when or time.localtime()
     return _apply_template(record.relative_directory, when)
 
 
 def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None) -> str:
-    """Resolve the absolute save directory from directory + relative_directory.
-
-    Templating happens at record start (pass a single ``when`` snapshot so both
-    parts share one date). Returns an absolute, ``~``-expanded path."""
+    """The absolute save directory, ``directory``/``relative_directory``, both
+    expanded at the one moment ``when``."""
     when = when or time.localtime()
     base = _apply_template(record.directory, when)
     rel = _apply_template(record.relative_directory, when)
@@ -400,12 +347,8 @@ def _parse_visualization(src: object) -> list[VisualizationConfig]:
 
 
 def _validate_visualization_cameras(config: OctacamConfig) -> None:
-    """Warn about visualization-layout cells naming a camera not in ``[[cameras]]``.
-
-    Runs only when both a visualization and an explicit camera list exist (an
-    empty camera list means "use all detected", whose names aren't known here).
-    A typo'd cell would otherwise silently render as a black tile with no hint.
-    """
+    """Warn about layout cells naming no configured camera (they render black).
+    Without a camera list, the names are not known here."""
     if not config.visualization or not config.cameras:
         return
     known = {c.name for c in config.cameras if c.name}
@@ -428,7 +371,7 @@ def _validate_visualization_cameras(config: OctacamConfig) -> None:
 
 
 def _parse_backend(value: object) -> str:
-    """Parse the optional top-level ``backend`` key, tolerantly (defaults auto)."""
+    """Parse the optional top-level ``backend`` key (else ``"auto"``)."""
     if value is None:
         return "auto"
     try:
@@ -483,13 +426,9 @@ def _lenient_validate(
 
 
 def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
-    """Parse the optional ``plugins`` array (opt-in plugin selection).
-
-    Each entry is either a bare name (``plugins = ["flywheel"]``) or a table with
-    ``name`` and optional ``options`` (``[[plugins]]`` / ``name = "flywheel"`` +
-    ``[plugins.options]``). Malformed or duplicate entries are warned about and
-    skipped — never raised — matching the rest of this module's tolerant
-    parsing."""
+    """Parse the optional ``plugins`` array: bare names or ``[[plugins]]``
+    tables with ``name`` and ``options``. Malformed or duplicate entries are
+    warned about and skipped."""
     if plugins_src is None:
         return []
     if not isinstance(plugins_src, list):
@@ -528,13 +467,8 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
 
 
 def _is_safe_camera_name(name: str) -> bool:
-    """Whether ``name`` is usable as a per-camera video filename stem.
-
-    A camera's name becomes ``<name>.<ext>`` at record time, so it must be a
-    single path segment with no traversal. Mirrors
-    ``controller.sanitize_camera_name``, duplicated here so this parse module
-    stays free of the heavier camera/controller imports.
-    """
+    """Whether ``name`` is usable as a video filename stem: one path segment,
+    no traversal (as ``controller.sanitize_camera_name`` checks)."""
     return (
         name not in (".", "..")
         and "/" not in name
@@ -587,9 +521,8 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
                 index,
             )
             camera.name = ""
-        # A blank name records under the serial number as the filename stem, so
-        # validate the *effective* name (name or serial) to catch a later entry
-        # whose explicit name collides with this camera's serial fallback.
+        # A blank name records under the serial, so names and serials must not
+        # collide either.
         effective_name = camera.name or serial_number
         if effective_name in used_names:
             log.warning(
@@ -638,12 +571,6 @@ def parse_config(file_path: str | Path) -> OctacamConfig:
     try:
         data = tomllib.loads(file_path.read_text())
     except tomllib.TOMLDecodeError as e:
-        # Field-level problems warn and fall back to a default (the tolerant
-        # contract the rest of this module implements), but a file that does not
-        # parse yielded *nothing* — continuing would silently run the rig on
-        # stock defaults: every detected camera, save dir "./", no plugins, no
-        # [transfer] destination. That reads to the operator as "octacam ignored
-        # my config", so fail loudly and name the line instead.
         raise ConfigError(f"{file_path}: {e}") from e
 
     config.backend = _parse_backend(data.get("backend"))
@@ -685,14 +612,11 @@ def find_config_file(config_dir: str | Path) -> Path:
 def resolve_config_dir(config_dir: str | Path) -> Path:
     """The config directory *config_dir* names, allowing a recording folder.
 
-    A recording keeps its config snapshot and camera parameter files in its
-    ``octacam_recording`` subfolder, which is a complete config directory; so
-    `octacam gui <recording>` relaunches from that subfolder when the folder
-    itself has no config. It does too when the folder's own config is an older
-    flat take's snapshot (a flat summary beside it) that the subfolder's take
-    superseded, as :func:`octacam.transform.recording_info_dir` decides. A rig
-    config directory that was recorded into keeps its own config: it has no
-    flat summary. Anything else is returned unchanged."""
+    A recording's ``octacam_recording`` subfolder is a config directory, used
+    when the folder has no config of its own, or only an older flat take's
+    snapshot (a flat summary beside it) the subfolder superseded
+    (:func:`octacam.transform.recording_info_dir`). A rig config directory that
+    was recorded into has no flat summary and keeps its own config."""
     config_dir = Path(config_dir)
     nested = config_dir / RECORDING_INFO_DIRNAME
     if not find_config_file(nested).exists():
