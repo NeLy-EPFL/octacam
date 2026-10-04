@@ -582,11 +582,6 @@ class TwoPhotonPlugin(Plugin):
                 "needs_flash": bool(check and check.needs_flash),
             }
 
-        @router.get("/api/twophoton/status")
-        def get_status():
-            """Current connection and Arduino state (for initial page load)."""
-            return {"ready": self._link.is_open, **self.status()}
-
         @router.get("/api/twophoton/firmware")
         def get_firmware():
             """Firmware state vs. the sketch source + whether octacam can flash it."""

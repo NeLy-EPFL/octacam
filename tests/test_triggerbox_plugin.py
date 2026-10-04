@@ -868,10 +868,9 @@ def _test_client(plugin: TriggerboxPlugin) -> TestClient:
     return TestClient(app)
 
 
-def test_status_endpoint_reports_cameras_and_lights():
+def test_status_reports_cameras_and_lights():
     plugin, _link = _plugin_with_fake()
-    data = _test_client(plugin).get("/api/triggerbox/status").json()
-    assert data["ready"] is True
+    data = plugin.status()
     assert data["device"] == DEVICE
     assert [c["pin"] for c in data["cameras"]] == ["D13"]
     assert len(data["lights"]) == 2
@@ -879,11 +878,10 @@ def test_status_endpoint_reports_cameras_and_lights():
     assert data["error"] is None  # no failure recorded yet
 
 
-def test_status_endpoint_surfaces_last_error():
+def test_status_surfaces_last_error():
     plugin, _link = _plugin_with_fake()
     plugin._last_error = "the board did not arm"
-    data = _test_client(plugin).get("/api/triggerbox/status").json()
-    assert data["error"] == "the board did not arm"
+    assert plugin.status()["error"] == "the board did not arm"
 
 
 def test_exposures_endpoint_lists_camera_timings():

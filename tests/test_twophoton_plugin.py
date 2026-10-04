@@ -328,17 +328,6 @@ def _test_client(plugin: TwoPhotonPlugin) -> TestClient:
     return TestClient(app)
 
 
-def test_get_status_endpoint():
-    plugin, _ = _plugin_with_fake()
-    client = _test_client(plugin)
-    r = client.get("/api/twophoton/status")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["ready"] is True
-    assert data["device"] == "/dev/arduinoCams"
-    assert data["arduino_state"] == "idle"
-
-
 def test_reconnect_endpoint_reopens_link(monkeypatch):
     plugin, link = _plugin_with_fake(is_open=False)
     monkeypatch.setattr(plugin, "_open", lambda: None)  # suppress real serial open
