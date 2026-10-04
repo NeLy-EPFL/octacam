@@ -30,6 +30,18 @@ from octacam.cli import (
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _restore_octacam_logger():
+    # `--log-level` reconfigures the process-wide octacam logger; restore it so a
+    # later test's warnings still reach its handlers.
+    logger = logging.getLogger("octacam")
+    saved = (logger.level, list(logger.handlers), logger.propagate)
+    yield
+    logger.setLevel(saved[0])
+    logger.handlers[:] = saved[1]
+    logger.propagate = saved[2]
+
+
 def test_version():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0
