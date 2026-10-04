@@ -1,45 +1,17 @@
 """Multi-vendor camera layer.
 
-The concrete, SDK-neutral :class:`Camera` / :class:`CameraSystem` live here; each
-vendor implements the thin :class:`CameraBackend` seam in its own module
-(``basler``, ``flir``, ``spinnaker_c``, ``pycameleon``, ``fake``), imported lazily
-through ``registry``.
+:class:`~octacam.cameras.base.Camera` and :class:`CameraSystem` are SDK-neutral;
+each vendor module (``basler``, ``flir``, ``spinnaker_c``, ``pycameleon``,
+``fake``) implements the backend seam and is imported lazily through ``registry``.
 """
 
-from octacam.cameras.base import (
-    GEOMETRY_PARAMS,
-    LIVE_PARAMS,
-    PARAM_NODES,
-    RUNTIME_MANAGED_FEATURES,
-    BackendError,
-    Camera,
-    CameraBackend,
-    FeatureInfo,
-    LatestFrame,
-    NodeInfo,
-    snap_value,
-)
-from octacam.cameras.registry import (
-    BackendUnavailable,
-    available_backends,
-    select_backend,
-)
+from octacam.cameras.base import BackendError
+from octacam.cameras.registry import BackendUnavailable, select_backend
 from octacam.cameras.system import CameraSystem
 
 __all__ = [
-    "GEOMETRY_PARAMS",
-    "LIVE_PARAMS",
-    "PARAM_NODES",
-    "RUNTIME_MANAGED_FEATURES",
     "BackendError",
     "BackendUnavailable",
-    "Camera",
-    "CameraBackend",
     "CameraSystem",
-    "FeatureInfo",
-    "LatestFrame",
-    "NodeInfo",
-    "available_backends",
     "select_backend",
-    "snap_value",
 ]
