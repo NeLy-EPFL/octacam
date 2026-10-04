@@ -53,8 +53,6 @@ except ImportError:  # pragma: no cover - exercised only on a non-FLIR box
 
 log = logging.getLogger("octacam")
 
-TRIGGER_READY_TIMEOUT_MS = 1000
-
 # Spinnaker TL-stream counters a recording reports (lost at the host, dropped
 # from the output queue, delivered incomplete, delivered at all).
 STREAM_STATISTICS = (
