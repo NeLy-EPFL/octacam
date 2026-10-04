@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
+from typing import Any
 
 from pypylon import genicam, pylon
 
@@ -191,7 +192,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
     def __init__(self, device):
         # Set to None by close() once the device is destroyed; the is_open/
         # is_grabbing guards below tolerate that so a second close() is a no-op.
-        self.raw = pylon.InstantCamera(device)
+        self.raw: Any = pylon.InstantCamera(device)
         info = self.raw.GetDeviceInfo()
         self._serial = str(info.GetSerialNumber())
         # Whether grab timestamps count ns (USB3 Vision; a GigE camera's count ticks).
