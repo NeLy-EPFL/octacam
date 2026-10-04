@@ -890,23 +890,22 @@ def enumerate_basler(
     pool = ThreadPoolExecutor(
         max_workers=len(wanted), thread_name_prefix="pylon-create"
     )
-    fut_to_serial: dict[Future, str] = {}
-    for serial, device in wanted:
-        fut_to_serial[pool.submit(factory.CreateDevice, device)] = serial
+    fut_to_serial = {
+        pool.submit(factory.CreateDevice, device): serial for serial, device in wanted
+    }
     pool.shutdown(wait=False)
 
     results: dict[str, object | None] = {}
     pending = set(fut_to_serial)
     started = time.monotonic()
-    deadline = started + timeout
     announced = False
     while pending:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
+        # Past the deadline this is a last zero-timeout wait, which still takes
+        # every handle that landed since the previous one.
+        left = max(0.0, started + timeout - time.monotonic())
         done, pending = futures_wait(
             pending,
-            timeout=min(remaining, _CREATE_PROGRESS_INTERVAL_S),
+            timeout=min(left, _CREATE_PROGRESS_INTERVAL_S),
             return_when=FIRST_COMPLETED,
         )
         for future in done:
@@ -914,31 +913,21 @@ def enumerate_basler(
             try:
                 results[serial] = future.result()
             except Exception as e:
-                # CreateDevice downloads the camera's XML over USB, so a device
-                # that enumerated but can't be operated throws here. One bad
-                # camera must not crash the enumeration of the whole rig.
-                #
-                # Deliberately broader than genicam.GenericException: pypylon is a
-                # SWIG binding over a USB transport, so this call can also raise a
-                # plain RuntimeError, or an OSError/MemoryError from the XML
-                # download. Letting one of those escape defeated the whole
-                # (serial, None) "present but unusable" design — it aborted the
-                # rig's enumeration — and skipped the _release_late_device
-                # callbacks below, orphaning every still-pending handle to be
-                # destroyed after PylonTerminate(). _describe_open_failure is
-                # typed for Exception precisely for this.
+                # Not only GenericException: pypylon is SWIG over a USB transport
+                # and also raises RuntimeError, OSError or MemoryError here. One
+                # escaping would abort the whole rig's enumeration and skip the
+                # stragglers' release below.
                 log.error("%s", _describe_open_failure(serial, e))
                 results[serial] = None
+        if not left:
+            break
         if (
             pending
             and not announced
             and time.monotonic() - started >= _CREATE_PROGRESS_INTERVAL_S
         ):
-            # The stall used to be completely silent — the operator saw nothing
-            # between "Found N camera(s) in octacam config file" and the grid
-            # appearing minutes later. Name the cameras we are still waiting on.
-            # Time-gated: a healthy rig finishes well inside the interval and must
-            # stay quiet, or every normal startup cries wolf.
+            # Name the cameras still being waited on. Time-gated: a healthy rig
+            # finishes inside the interval and must stay quiet.
             announced = True
             log.info(
                 "Waiting up to %gs for %d Basler camera(s) to respond: %s",
@@ -947,20 +936,8 @@ def enumerate_basler(
                 ", ".join(sorted(fut_to_serial[f] for f in pending)),
             )
 
-    for future in pending:
+    for future in pending:  # still inside pylon at the deadline
         serial = fut_to_serial[future]
-        if future.done():
-            # It landed between the last wait and the deadline check; it is a
-            # real handle, not a straggler, so take it rather than destroying it.
-            try:
-                results[serial] = future.result()
-            except Exception as e:  # see the same catch above
-                log.error("%s", _describe_open_failure(serial, e))
-                results[serial] = None
-            continue
-        # Unlike _describe_open_failure there is no exception to inspect here —
-        # this fires purely because a wall-clock deadline elapsed — so suggest
-        # causes rather than asserting one.
         log.error(
             "Camera %s did not respond within %gs and will be skipped. It "
             "enumerated, so its link trained (it may even report a healthy "
@@ -975,9 +952,7 @@ def enumerate_basler(
             timeout,
             timeout,
         )
-        # Report it with the "present but unusable" None sentinel, and release
-        # the handle if pylon eventually hands one over (see _release_late_device).
         future.add_done_callback(_release_late_device(factory, serial))
         results[serial] = None
 
-    return [(serial, results.get(serial)) for serial, _device in wanted]
+    return [(serial, results[serial]) for serial, _device in wanted]
