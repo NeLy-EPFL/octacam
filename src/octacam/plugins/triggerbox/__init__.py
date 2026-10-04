@@ -838,7 +838,7 @@ class TriggerboxPlugin(Plugin):
         the board's 'R' ack, closing the arm/flash race); falls back to the last-
         seen board state."""
         controller = self._controller
-        if controller is not None and getattr(controller, "recording_active", False):
+        if controller is not None and controller.recording_active:
             return True, "refusing to flash while a recording is active — stop it first"
         if self._arduino_state == "running":
             return True, "refusing to flash while the board is armed/running — stop the recording first"

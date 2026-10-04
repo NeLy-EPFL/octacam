@@ -436,7 +436,7 @@ class FirmwareProvisioner:
                 self.needed_build = sketch_fingerprint(spec.sketch_dir)
             except Exception:
                 log.debug("firmware: could not fingerprint %s sketch",
-                          getattr(spec, "name", "?"), exc_info=True)
+                          spec.name, exc_info=True)
         self.check: FirmwareCheck | None = None
         self.port_lock = threading.RLock()
         self._resolve_device = resolve_device

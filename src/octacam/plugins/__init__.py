@@ -106,7 +106,7 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     """The configured and enabled plugins; one that is unknown or fails to
     build is logged and skipped."""
     _discover_entry_points()
-    selection = _resolve_selection(getattr(config, "plugins", []), enabled)
+    selection = _resolve_selection(config.plugins, enabled)
     plugins: list[OctacamPlugin] = []
     seen: set[str] = set()
     for name, options in selection:

@@ -191,6 +191,8 @@ class FakeCamera:
 
 
 class FakeController:
+    recording_active = False
+
     def __init__(self, cameras):
         self.camera_system = list(cameras)
 
@@ -1210,6 +1212,16 @@ def test_flash_firmware_refused_while_running():
     result = plugin.flash_firmware()
     assert not result.ok
     assert "running" in result.message
+
+
+def test_flash_firmware_refused_while_recording():
+    plugin, _link = _plugin_with_fake()
+    controller = FakeController([])
+    controller.recording_active = True
+    plugin.set_controller(controller)
+    result = plugin.flash_firmware()
+    assert not result.ok
+    assert "recording" in result.message
 
 
 def test_flash_firmware_without_source():
