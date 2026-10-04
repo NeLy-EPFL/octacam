@@ -17,6 +17,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -124,6 +125,19 @@ def _default_nodes() -> dict[str, dict]:
     return nodes
 
 
+@dataclass
+class _Image:
+    """An image the fake device exposed and holds until a fetch takes it."""
+
+    seq: int  # the trigger's sequence number, -1 when unnumbered
+    misses: int  # fetches it still misses
+    ready_at: float  # monotonic time it is ready
+    stamp: int  # its timestamp: when it was exposed, as a camera stamps it
+
+    def ready(self, now: float) -> bool:
+        return self.misses <= 0 and now >= self.ready_at
+
+
 # Command nodes the fake exposes (name -> (display, category, visibility)). The
 # execute is a no-op that bumps a counter so tests can assert it ran.
 _COMMANDS = {
@@ -182,10 +196,8 @@ class FakeBackend(SoftwareTriggerHandoff):
         self.fetch_blocks = False
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
-        # Images exposed but not yet fetched, oldest first: [trigger sequence
-        # number (-1 when unnumbered), fetches it still misses, monotonic time
-        # it is ready, its timestamp: when it was exposed, as a camera stamps it].
-        self._device_images: list[list[float]] = []
+        # Images exposed but not yet fetched, oldest first.
+        self._device_images: list[_Image] = []
         self._init_trigger_handoff()
 
     @property
@@ -537,14 +549,14 @@ class FakeBackend(SoftwareTriggerHandoff):
         if seq in self.lost_triggers:
             return True  # nothing will arrive; the hand-off gives up on it
         key = -1 if seq is None else seq
+        latency = self.latency_by_fire.get(self._triggers_since_grab, self.image_latency_s)
         self._device_images.append(
-            [
-                key,
-                self.late_triggers.get(key, 0),
-                time.monotonic()
-                + self.latency_by_fire.get(self._triggers_since_grab, self.image_latency_s),
-                time.time_ns(),
-            ]
+            _Image(
+                seq=key,
+                misses=self.late_triggers.get(key, 0),
+                ready_at=time.monotonic() + latency,
+                stamp=time.time_ns(),
+            )
         )
         return True
 
@@ -554,9 +566,9 @@ class FakeBackend(SoftwareTriggerHandoff):
         hands over, or None when none is ready — after a short wait, standing in
         for a real fetch's timeout without holding a test up for it."""
         head = self._device_images[0] if self._device_images else None
-        if head is None or head[1] > 0 or time.monotonic() < head[2]:
-            if head is not None and head[1] > 0:
-                head[1] -= 1
+        if head is None or not head.ready(time.monotonic()):
+            if head is not None and head.misses > 0:
+                head.misses -= 1
             if not self.fetch_blocks:
                 self._cond.wait(_FETCH_WAIT_S)
                 return None
@@ -564,18 +576,15 @@ class FakeBackend(SoftwareTriggerHandoff):
             # trigger was offered meanwhile (the condition's notify).
             until = time.monotonic() + timeout_ms / 1000.0
             while (now := time.monotonic()) < until:
-                if self._device_images and self._device_images[0][1] <= 0 and (
-                    now >= self._device_images[0][2]
-                ):
+                if self._device_images and self._device_images[0].ready(now):
                     break
                 self._cond.wait(until - now)
             else:
                 return None
             head = self._device_images[0]
-        seq, stamp = int(head[0]), int(head[3])
         self._device_images.pop(0)
-        self._trigger_answered(stamp)
-        return seq, stamp
+        self._trigger_answered(head.stamp)
+        return head.seq, head.stamp
 
     def _retrieve_clocked(
         self, timeout_ms: int, wants_array: Callable[[], bool], period_ns: int
