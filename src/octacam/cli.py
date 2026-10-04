@@ -600,17 +600,12 @@ def gui(
         config_dir=config_dir,
         ready=False,
     )
-    # Assigned by create_app() inside the try so a failure there still runs the
-    # finally (controller.close + plugins.teardown_all); the init closure and the
-    # finally read it lazily and tolerate None.
-    app = None
-
     capture_stack = contextlib.ExitStack()
     # Set on shutdown so a still-running init bails before arming hardware the
     # teardown is about to release (join() below also serializes the two).
     stopping = threading.Event()
 
-    def _initialize_rig() -> None:
+    def _initialize_rig(app_state) -> None:
         """Open the cameras + arm the plugins (in parallel), load params, start
         preview, then push the ready system to any connected browser.
 
@@ -618,8 +613,6 @@ def gui(
         A failure here surfaces to the GUI (an error event + placeholder) and the
         log rather than aborting the already-running server."""
         from concurrent.futures import ThreadPoolExecutor
-
-        app_state = getattr(getattr(app, "state", None), "app_state", None)
 
         def _publish() -> None:
             # Push the current system descriptor + state to every connected
@@ -629,8 +622,7 @@ def gui(
             # shows the init error — otherwise an armed board reads as
             # "unavailable" until a manual reload (the WS-connect handshake, sent
             # before setup_all finished, reported it not-ready).
-            if app_state is not None:
-                app_state.broadcast_system()
+            app_state.broadcast_system()
             controller.notify_state()
 
         def _open_cameras() -> CameraSystem:
@@ -711,12 +703,10 @@ def gui(
         # grid (and enables camera controls) without a reload.
         _publish()
 
-    init_thread = threading.Thread(
-        target=_initialize_rig, name="octacam-init", daemon=True
-    )
+    # Assigned inside the try, so a create_app failure still runs the teardown.
+    app = None
+    init_thread: threading.Thread | None = None
     try:
-        # Build the app first (inside the try so a failure still hits the finally,
-        # though no hardware is armed yet); the init closure reads `app` lazily.
         app = create_app(controller, config, plugins, config_dir=str(config_dir))
         # The capture-active marker is published by _initialize_rig once the
         # cameras are actually attached — not here. Serve-first startup means this
@@ -725,6 +715,12 @@ def gui(
         # hardware, yet the marker parks every `octacam process` on this machine
         # at its next work-unit boundary with no timeout.
         # Kick off the hardware init in the background, then serve immediately.
+        init_thread = threading.Thread(
+            target=_initialize_rig,
+            args=(app.state.app_state,),
+            name="octacam-init",
+            daemon=True,
+        )
         init_thread.start()
         log.info(
             "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
@@ -777,7 +773,7 @@ def gui(
         # below, so the two never race over the cameras. Bounded so a wedged SDK
         # open can't hang shutdown forever.
         stopping.set()
-        if init_thread.ident is not None:  # skip if create_app raised before start
+        if init_thread is not None and init_thread.is_alive():
             init_thread.join(timeout=30)
         controller.close()
         plugins.teardown_all()
@@ -790,8 +786,7 @@ def gui(
         # The shutdown button can ask us to start processing this session's
         # recordings on the way out (POST /api/shutdown {process_after}); else we
         # just print the ready-to-run `octacam process` hints.
-        state = getattr(getattr(app, "state", None), "app_state", None)
-        process_after = bool(getattr(state, "process_after", False))
+        process_after = app is not None and app.state.app_state.process_after
         _finish_gui_session(session_id, config_dir, process_after)
         log.info("octacam stopped.")
 
