@@ -1145,12 +1145,9 @@ class Camera:
     # ------------------------------------------------------- grab loop bodies
 
     def _store_timestamp(self, timestamp: int) -> None:
-        self._store_timestamp_fallback(timestamp)
-        self._timestamps.append(timestamp or time.time_ns())
-
-    def _store_timestamp_fallback(self, timestamp: int) -> None:
         if not timestamp:  # backend supplied no hardware timestamp for this frame
             self._host_fallback_count += 1
+        self._timestamps.append(timestamp or time.time_ns())
 
     def _update_resulting_fps(self, n_frames: int = 6) -> None:
         timestamps = self._timestamps
