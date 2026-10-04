@@ -75,6 +75,15 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   report *outdated* until reflashed: `octacam flash <config>` or the tab's
   *Flash firmware* button.
 
+### Removed
+
+- **The legacy `/api/cameras/{index}/params` camera API** (`GET`/`PUT` and
+  `POST …/params/reset`), its `camera_params` WebSocket message, and the
+  per-camera `params` field of `/api/system`. The Camera tab uses
+  `/api/cameras/{index}/features`; building `params` read every camera over USB
+  on each browser connect.
+- **The `octacam.camera` module**: import from `octacam.cameras`.
+
 ### Fixed
 
 - **Two full-sensor FLIR Grasshopper3s could not record together**: each asked

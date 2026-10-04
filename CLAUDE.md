@@ -125,7 +125,6 @@ src/octacam/
   grid.py           octacam process → composite grid videos (ffmpeg xstack;
                     opt-in per rig via [[visualization]], no built-in layout)
   session_cache.py  remembers recording folders for `process --last/--all`
-  camera.py         re-exports CameraSystem/Camera/PARAM_NODES
   cameras/          the backend layer (see below)
   plugins/          serial-hardware plugins (triggerbox, twophoton, flywheel)
   web/              FastAPI app + vanilla-JS static frontend
