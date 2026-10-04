@@ -1627,6 +1627,12 @@ class RecordingController:
                 return StartResult(
                     StartResult.BUSY, "Camera reconfiguration in progress"
                 )
+            if self._tearing_down:
+                # The previous recording's off-lock tail still disarms and re-arms
+                # the trigger plugin, which the benchmark disarms too.
+                return StartResult(
+                    StartResult.BUSY, "Previous recording is still finishing"
+                )
             if self._starting:
                 return StartResult(StartResult.BUSY, "A recording is starting")
             # Snapshot the settings so a concurrent edit can't shift the target

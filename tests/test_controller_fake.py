@@ -706,6 +706,42 @@ def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
     controller.join(timeout=20)
 
 
+def test_teardown_gate_blocks_a_racing_benchmark(fake_system, tmp_path):
+    """A benchmark disarms the trigger plugin too, so it must not start while a
+    finished recording's teardown tail is still disarming and re-arming it."""
+    import threading as _t
+
+    from octacam.plugins.base import Plugin, PluginManager
+
+    in_stop = _t.Event()
+    release = _t.Event()
+
+    class Gate(Plugin):
+        name = "gate"
+
+        def on_recording_stop(self, aborted):
+            in_stop.set()
+            release.wait(10)  # hold the teardown tail open
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.3, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        fake_system, settings, PluginManager([Gate()]), auto_preview=False
+    )
+    try:
+        assert controller.start_recording().ok
+        assert in_stop.wait(20)
+        assert not controller.recording_active
+        result = controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null")
+        assert result.status == StartResult.BUSY
+        assert result.message == "Previous recording is still finishing"
+    finally:
+        release.set()
+        controller.join(timeout=20)
+    assert controller.state == "idle"
+
+
 def test_fake_abort_recording(fake_system, tmp_path):
     save_dir = tmp_path / "abort" / "001"
     settings = RecordingSettings(fps=50.0, duration_s=60.0, save_dir=str(save_dir))
