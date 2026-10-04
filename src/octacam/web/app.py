@@ -61,7 +61,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 # A plugin name lands in its mount path and import() URL: it must not escape /plugins/.
 _PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
-# Recent controller events replayed to a (re)connecting client's log.
+# Recent controller events replayed to a (re)connecting client's log; also each
+# client's event-queue bound, so a replay is never truncated.
 EVENT_BACKLOG_REPLAY = 50
 # Longest preview edge of an unfocused tile; only a focused (maximized or
 # zoomed) tile may go finer.
@@ -367,7 +368,7 @@ class _Client:
         self.id = next(_Client._next_id)
         self.frames: dict[int, bytes] = {}
         self.texts: dict[str, str] = {}
-        self.events: deque[str] = deque(maxlen=50)
+        self.events: deque[str] = deque(maxlen=EVENT_BACKLOG_REPLAY)
         self.wakeup = asyncio.Event()
         # Event-loop thread only, so no lock.
         self.views: dict[int, _ViewSpec] = {}
