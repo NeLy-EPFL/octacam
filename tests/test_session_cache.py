@@ -103,9 +103,9 @@ def test_retention_prunes_old_entries(cache_dir, tmp_path, monkeypatch):
     monkeypatch.setattr(
         session_cache, "_now", lambda: real_now - datetime.timedelta(days=60)
     )
-    session_cache.record_recording(old, "s_old", retention_days=30)
+    session_cache.record_recording(old, "s_old")
     monkeypatch.setattr(session_cache, "_now", lambda: real_now)
-    session_cache.record_recording(fresh, "s_new", retention_days=30)
+    session_cache.record_recording(fresh, "s_new")
 
     entries = session_cache._read_entries()
     assert [e["session"] for e in entries] == ["s_new"]  # the 60-day-old one pruned

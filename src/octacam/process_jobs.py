@@ -566,9 +566,9 @@ def resume(status: JobStatus) -> bool:
         return False
 
 
-def prune(retention_days: int = RETENTION_DAYS) -> None:
+def prune() -> None:
     """Remove finished job dirs older than the retention window. Best-effort."""
-    cutoff = time.time() - retention_days * 86400
+    cutoff = time.time() - RETENTION_DAYS * 86400
     try:
         entries = list(jobs_dir().iterdir())
     except OSError:

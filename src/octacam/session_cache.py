@@ -161,13 +161,7 @@ def _write_entries(entries: list[dict]) -> None:
         raise
 
 
-def record_recording(
-    folder: str | Path,
-    session_id: str,
-    kind: str = "gui",
-    *,
-    retention_days: int = RETENTION_DAYS,
-) -> None:
+def record_recording(folder: str | Path, session_id: str, kind: str = "gui") -> None:
     """Note that ``folder`` was just recorded, pruning anything past retention.
 
     Best-effort: a cache failure is logged but never raised, so it cannot
@@ -182,7 +176,7 @@ def record_recording(
     }
     try:
         with _locked():
-            cutoff = _now() - datetime.timedelta(days=retention_days)
+            cutoff = _now() - datetime.timedelta(days=RETENTION_DAYS)
             kept = [
                 e
                 for e in _read_entries()
