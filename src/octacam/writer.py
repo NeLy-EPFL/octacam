@@ -166,20 +166,13 @@ def encoder_of(ffmpeg_params: str) -> str | None:
     return _extract_opt(tokens, _VIDEO_CODEC_FLAGS)
 
 
-def is_nvenc_params(ffmpeg_params: str) -> bool:
-    """True when ffmpeg_params selects an NVIDIA NVENC encoder (``*_nvenc``)."""
-    enc = encoder_of(ffmpeg_params)
-    return bool(enc) and enc.endswith("_nvenc")
+def nvenc_encoder(ffmpeg_params: str) -> str | None:
+    """The NVIDIA encoder (``*_nvenc``) ffmpeg_params names, or None.
 
-
-def _required_encoder(ffmpeg_params: str) -> str | None:
-    """The encoder :func:`find_ffmpeg` must guarantee for these params.
-
-    Only GPU encoders (which the bundled imageio ffmpeg lacks, and which a stale
-    driver can fail to run) need a capability search; libx264/CPU work runs on
-    any ffmpeg, so return None there to keep the historical fast-path binary."""
-    enc = encoder_of(ffmpeg_params)
-    return enc if enc and enc.endswith("_nvenc") else None
+    Only these need :func:`find_ffmpeg`'s capability search: the bundled
+    imageio ffmpeg lacks them and a stale driver can fail to run them."""
+    encoder = encoder_of(ffmpeg_params)
+    return encoder if encoder and encoder.endswith("_nvenc") else None
 
 
 def _which_all(name: str) -> list[str]:
@@ -779,7 +772,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
     def _open_sink(self, filename, fps, frame_size):
         width, height = frame_size
         args = build_encode_args(
-            find_ffmpeg(require_encoder=_required_encoder(self.ffmpeg_params)),
+            find_ffmpeg(require_encoder=nvenc_encoder(self.ffmpeg_params)),
             filename,
             fps,
             width,
@@ -983,9 +976,9 @@ def resolve_capture_formats(
     recording is cheap after the first."""
     if num_cameras <= 0:
         return [], []
-    if not is_nvenc_params(base.ffmpeg_params):
+    encoder = nvenc_encoder(base.ffmpeg_params)
+    if encoder is None:
         return [base] * num_cameras, []
-    encoder = encoder_of(base.ffmpeg_params) or "h264_nvenc"
     warnings: list[str] = []
     try:
         find_ffmpeg(require_encoder=encoder)

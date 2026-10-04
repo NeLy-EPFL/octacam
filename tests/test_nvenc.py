@@ -20,7 +20,7 @@ from octacam.writer import (
     NVENC_H264_PARAMS,
     cpu_fallback_format,
     encoder_of,
-    is_nvenc_params,
+    nvenc_encoder,
     resolve_capture_formats,
 )
 
@@ -54,16 +54,10 @@ requires_nvenc = pytest.mark.skipif(
         ("-c:v 'unterminated", None, False),  # bad quoting -> None, not a crash
     ],
 )
-def test_encoder_of_and_is_nvenc(params, encoder, nvenc):
+def test_encoder_of_and_nvenc_encoder(params, encoder, nvenc):
     assert encoder_of(params) == encoder
-    assert is_nvenc_params(params) is nvenc
-
-
-def test_required_encoder_only_for_gpu():
-    # CPU work runs on any ffmpeg (no capability search); only *_nvenc needs one.
-    assert w._required_encoder(DEFAULT_FFMPEG_PARAMS) is None
-    assert w._required_encoder(NVENC_H264_PARAMS) == "h264_nvenc"
-    assert w._required_encoder("-c:v hevc_nvenc") == "hevc_nvenc"
+    # Only an *_nvenc encoder needs find_ffmpeg's capability search.
+    assert nvenc_encoder(params) == (encoder if nvenc else None)
 
 
 # --- find_ffmpeg(require_encoder) probe + cache -----------------------------
@@ -118,17 +112,17 @@ def test_resolve_zero_cameras():
 def test_resolve_all_gpu_under_cap(monkeypatch):
     monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
     formats, warns = resolve_capture_formats(FORMATS["nvenc"], 3, 8)
-    assert all(is_nvenc_params(f.ffmpeg_params) for f in formats)
+    assert all(nvenc_encoder(f.ffmpeg_params) for f in formats)
     assert warns == []
 
 
 def test_resolve_overflow_to_cpu(monkeypatch):
     monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
     formats, warns = resolve_capture_formats(FORMATS["nvenc"], 10, 8)
-    assert sum(is_nvenc_params(f.ffmpeg_params) for f in formats) == 8
+    assert sum(nvenc_encoder(f.ffmpeg_params) is not None for f in formats) == 8
     assert sum("libx264" in f.ffmpeg_params for f in formats) == 2
     # NVENC cameras come first; the CPU overflow is the tail.
-    assert is_nvenc_params(formats[7].ffmpeg_params)
+    assert nvenc_encoder(formats[7].ffmpeg_params)
     assert "libx264" in formats[8].ffmpeg_params
     assert len(warns) == 1 and "exceed the NVENC session limit" in warns[0]
 
@@ -156,7 +150,7 @@ def test_resolve_auto_uses_detected_cap(monkeypatch):
     monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
     monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": 3)
     formats, warns = resolve_capture_formats(FORMATS["nvenc"], 5, None)
-    assert sum(is_nvenc_params(f.ffmpeg_params) for f in formats) == 3
+    assert sum(nvenc_encoder(f.ffmpeg_params) is not None for f in formats) == 3
     assert sum("libx264" in f.ffmpeg_params for f in formats) == 2
     assert len(warns) == 1
 
@@ -166,7 +160,7 @@ def test_resolve_auto_is_the_default_arg(monkeypatch):
     monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
     monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": 4)
     formats, warns = resolve_capture_formats(FORMATS["nvenc"], 4)
-    assert all(is_nvenc_params(f.ffmpeg_params) for f in formats)
+    assert all(nvenc_encoder(f.ffmpeg_params) for f in formats)
     assert warns == []
 
 
@@ -176,7 +170,7 @@ def test_resolve_auto_inconclusive_probe_does_not_force_cpu(monkeypatch):
     monkeypatch.setattr(w, "find_ffmpeg", lambda require_encoder=None: "/ok")
     monkeypatch.setattr(w, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
     formats, warns = resolve_capture_formats(FORMATS["nvenc"], 3, None)
-    assert all(is_nvenc_params(f.ffmpeg_params) for f in formats)
+    assert all(nvenc_encoder(f.ffmpeg_params) for f in formats)
     assert warns == []
 
 
@@ -197,7 +191,7 @@ def test_cpu_fallback_mirrors_container():
     base = w.VideoFormat("ffmpeg", "mp4", "x", ffmpeg_params=NVENC_H264_PARAMS)
     cpu = cpu_fallback_format(base)
     assert cpu.extension == "mp4"
-    assert "libx264" in cpu.ffmpeg_params and not is_nvenc_params(cpu.ffmpeg_params)
+    assert "libx264" in cpu.ffmpeg_params and nvenc_encoder(cpu.ffmpeg_params) is None
     # Preserves the base pixel format (yuv420p), so a mixed GPU+CPU recording is
     # uniform (all yuv420p) rather than the fallback emitting monochrome 4:0:0.
     assert "-pix_fmt yuv420p" in cpu.ffmpeg_params
