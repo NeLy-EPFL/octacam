@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from rich.progress import TaskID
 
-    from octacam.config import RecordConfig
+    from octacam.config import OctacamConfig, RecordConfig
     from octacam.controller import RecordingSettings
     from octacam.process_jobs import JobReporter
     from octacam.transfer import TransferCallback
@@ -1634,7 +1634,7 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
     detected_real = {os.path.realpath(p.device) for p in ports}
     used_real: set[str] = set()
     any_serial_plugin = False
-    for pc in getattr(cfg, "plugins", []):
+    for pc in cfg.plugins:
         name = canonical_name(pc.name)
         if name not in sp.SERIAL_PLUGINS:
             continue
@@ -1711,7 +1711,7 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
 
     expected: dict[str, tuple[str, str]] = {}
     if cfg is not None:
-        for pc in getattr(cfg, "plugins", []):
+        for pc in cfg.plugins:
             name = canonical_name(pc.name)
             banner = sp.EXPECTED_BANNER.get(name)
             device, is_auto = _configured_device(pc)
@@ -2740,19 +2740,17 @@ def record(
 # ---------------------------------------------------------------------------
 
 
-def _load_config_or_empty(config_dir: Path | None):
-    """Load a rig config if present, else an empty stand-in (``.plugins == []``)."""
-    from types import SimpleNamespace
+def _load_config_or_empty(config_dir: Path | None) -> "OctacamConfig":
+    """Load a rig config if present, else the default (empty) one."""
+    from octacam.config import OctacamConfig, load_config_dir
 
     if config_dir is None:
-        return SimpleNamespace(plugins=[])
+        return OctacamConfig()
     try:
-        from octacam.config import load_config_dir
-
         return load_config_dir(config_dir)
     except Exception as e:
         log.debug("flash: could not load config at %s: %s", config_dir, e)
-        return SimpleNamespace(plugins=[])
+        return OctacamConfig()
 
 
 def _flashable_plugins(plugins, only: str | None):
@@ -2761,7 +2759,7 @@ def _flashable_plugins(plugins, only: str | None):
 
     out = [
         p
-        for p in getattr(plugins, "plugins", [])
+        for p in plugins.plugins
         if hasattr(p, "flash_firmware") and hasattr(p, "firmware_provisioning")
     ]
     if only:
@@ -2782,7 +2780,7 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
     console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
     # An un-openable board (unplugged, wrong path, or port held by a running
     # session) can't be probed — never report that as "up to date".
-    if not getattr(plugin, "is_ready", lambda: True)():
+    if not plugin.is_ready():
         console.print(
             "  [red]could not open the board[/red] — it may be unplugged, the "
             "device path may be wrong, or the port may be held by a running octacam "
@@ -2840,14 +2838,13 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
     never auto-flashed; the operator must confirm with ``octacam flash``)."""
     interactive = sys.stdin.isatty()
     console = None
-    for p in getattr(plugins, "plugins", []):
+    for p in plugins.plugins:
         if not (hasattr(p, "firmware_provisioning") and hasattr(p, "flash_firmware")):
             continue
         try:
             prov = p.firmware_provisioning()
         except Exception:
-            log.debug("firmware preflight: %s provisioning failed", getattr(p, "name", "?"),
-                      exc_info=True)
+            log.debug("firmware preflight: %s provisioning failed", p.name, exc_info=True)
             continue
         if not prov.get("needs_flash"):
             continue
@@ -2937,7 +2934,7 @@ def flash(
     if config_dir is not None:
         config_dir = _resolve_config_dir(config_dir)
     config = _load_config_or_empty(config_dir)
-    if config_dir is None and not plugin and not getattr(config, "plugins", []):
+    if config_dir is None and not plugin and not config.plugins:
         raise typer.BadParameter(
             "give a rig CONFIG_DIR or --plugin <name>", param_hint="--plugin"
         )
