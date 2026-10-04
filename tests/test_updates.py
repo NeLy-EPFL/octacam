@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from types import SimpleNamespace
 
 from octacam import updates
 from octacam.updates import UpdateNotice
@@ -150,13 +151,17 @@ def test_read_direct_url_rejects_non_object(monkeypatch):
     # A direct_url.json that is valid JSON but not an object (a malformed file
     # could be a list/scalar) is treated as absent, so detect_install_method can
     # assume a dict without a shape check.
-    monkeypatch.setattr(updates, "_read_dist_text", lambda name: "[1, 2, 3]")
+    def _dist_with(text):
+        dist = SimpleNamespace(read_text=lambda name: text)
+        monkeypatch.setattr(updates, "distribution", lambda name: dist)
+
+    _dist_with("[1, 2, 3]")
     assert updates._read_direct_url() is None
-    monkeypatch.setattr(updates, "_read_dist_text", lambda name: "42")
+    _dist_with("42")
     assert updates._read_direct_url() is None
-    monkeypatch.setattr(
-        updates, "_read_dist_text", lambda name: '{"dir_info": {"editable": true}}'
-    )
+    _dist_with(None)  # no direct_url.json: installed from an index
+    assert updates._read_direct_url() is None
+    _dist_with('{"dir_info": {"editable": true}}')
     assert updates._read_direct_url() == {"dir_info": {"editable": True}}
 
 
@@ -179,7 +184,8 @@ def test_advice_for_each_manager():
     assert updates.advice_for("uv-tool") == "uv tool upgrade octacam"
     assert updates.advice_for("pipx") == "pipx upgrade octacam"
     assert updates.advice_for("conda") == "conda update octacam"
-    assert updates.advice_for("editable") == "git pull && uv sync"
+    assert updates.advice_for("editable") == ""
+    assert updates.advice_for("vcs") == ""
     assert updates.advice_for("something-else") == ""
 
 

@@ -64,10 +64,6 @@ class UpdateNotice:
         }
 
 
-def _opted_out() -> bool:
-    return any(os.environ.get(name) for name in _OPT_OUT_ENV)
-
-
 def current_version() -> str:
     try:
         return version("octacam")
@@ -100,24 +96,15 @@ def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
     # (that lives per-file in files[]), so a fully-yanked latest release would be
     # reported as newest and we'd advise an upgrade the package manager then
     # refuses. Accepted for now — read-only advice, and octacam yanks are rare.
-    best: Version | None = None
+    stable: list[Version] = []
     for raw in versions:
         try:
             v = Version(raw)
         except (InvalidVersion, TypeError):
             continue
-        if v.is_prerelease or v.is_devrelease:
-            continue
-        if best is None or v > best:
-            best = v
-    return str(best) if best is not None else None
-
-
-def _read_dist_text(name: str) -> str | None:
-    try:
-        return distribution("octacam").read_text(name)
-    except PackageNotFoundError:
-        return None
+        if not v.is_prerelease:  # dev releases count as prereleases
+            stable.append(v)
+    return str(max(stable)) if stable else None
 
 
 def _read_direct_url() -> dict | None:
@@ -126,7 +113,10 @@ def _read_direct_url() -> dict | None:
     Returns None for anything that isn't a JSON object (a malformed file could
     parse to a list/scalar), so callers can assume a dict without a shape check.
     """
-    text = _read_dist_text("direct_url.json")
+    try:
+        text = distribution("octacam").read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
     if not text:
         return None
     try:
@@ -174,17 +164,13 @@ def detect_install_method() -> str:
 
 
 def advice_for(method: str) -> str:
-    """The upgrade command to suggest for an install method, or "".
-
-    Empty when octacam should not print a command: a dev/VCS checkout (the user
-    owns the source tree). conda/pip/uv-tool/pipx each get their manager's command.
-    """
+    """The upgrade command to suggest for an install method; "" for a dev or VCS
+    checkout, whose source tree the user owns."""
     return {
         "pip": "pip install --upgrade octacam",
         "uv-tool": "uv tool upgrade octacam",
         "pipx": "pipx upgrade octacam",
         "conda": "conda update octacam",
-        "editable": "git pull && uv sync",
     }.get(method, "")
 
 
@@ -192,7 +178,7 @@ def check(timeout: float = _DEFAULT_TIMEOUT) -> UpdateNotice:
     """Check PyPI and return advice. Never raises; safe on air-gapped rigs."""
     current = current_version()
     method = detect_install_method()
-    if _opted_out():
+    if any(os.environ.get(name) for name in _OPT_OUT_ENV):
         return UpdateNotice(current, None, False, method, "", "update check disabled")
     # A dev/editable/VCS build isn't a PyPI release, so a version compare is
     # meaningless (a dev build is usually AHEAD of the latest stable). Don't nag.
