@@ -102,8 +102,8 @@ _cam_list: Any = None
 
 # Camera handles handed out and not yet released, by id(). The System released
 # with one outstanding aborts the process (a libusb usbi_mutex_destroy
-# assertion, exit 134), so teardown() releases any a closed camera did not, as
-# after doctor's enumerate-only probe.
+# assertion, exit 134), so teardown() releases any handle no close() released,
+# as after doctor's enumerate-only probe.
 _outstanding: dict[int, Any] = {}
 
 # The loaded binding (_spin()); tests replace it with a fake.
@@ -894,6 +894,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             spin.camera_release(cam)
         except Exception:
             pass
+        # teardown() must not release it again: a double spinCameraRelease errors.
         _outstanding.pop(id(cam), None)
         self._cam = None
         self._nodemap = None
