@@ -1880,6 +1880,48 @@ def test_flash_refuses_a_rig_the_gui_holds_however_the_path_is_spelled(
     assert f"(pid {os.getpid()})" in result.output
 
 
+# --- record's firmware preflight, headless ------------------------------------
+
+
+class _StaleBoardPlugin:
+    """A serial plugin whose board runs an old build of its own sketch."""
+
+    name = "triggerbox"
+
+    def __init__(self, auto_flash):
+        self.auto_flash = auto_flash
+        self.flashed = 0
+
+    def firmware_provisioning(self):
+        return {
+            "device": "/dev/ttyACM0",
+            "detail": "board build abc, source build def",
+            "needs_flash": True,
+            "can_flash": True,
+            "safe_to_auto_flash": True,
+            "auto_flash": self.auto_flash,
+        }
+
+    def flash_firmware(self, on_line=None):
+        self.flashed += 1
+        return SimpleNamespace(ok=True, message="flashed")
+
+
+@pytest.mark.parametrize("auto_flash", [True, False])
+def test_record_preflight_reflashes_headless_only_with_auto_flash(
+    monkeypatch, caplog, auto_flash
+):
+    from octacam.cli import _preflight_firmware
+    from octacam.plugins.base import PluginManager
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    plugin = _StaleBoardPlugin(auto_flash)
+    _preflight_firmware(PluginManager([plugin]), assume_yes=False)
+    assert plugin.flashed == (1 if auto_flash else 0)
+    if not auto_flash:
+        assert "pass --yes or set auto_flash=true" in caplog.text
+
+
 # --- record closes the cameras on every exit before the controller owns them --
 
 

@@ -2859,7 +2859,7 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
         device = prov.get("device")
         can = bool(prov.get("can_flash"))
         safe = bool(prov.get("safe_to_auto_flash"))
-        auto = bool(getattr(p, "_auto_flash", False))
+        auto = bool(prov.get("auto_flash"))
         msg = f"{p.name}: board firmware on {device} is out of date — {prov.get('detail', '')}"
         do_flash = False
         if interactive and can:
