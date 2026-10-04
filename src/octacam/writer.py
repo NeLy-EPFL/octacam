@@ -570,26 +570,17 @@ class AsyncFrameWriter:
         self._queue: queue.Queue | None = None
         self._thread: threading.Thread | None = None
         self._running = False
-        self._failed = False
+        self._profile = profile
+        # True once the sink has died; later writes are refused.
+        self.failed = False
         # Frames accepted (fills included) and frames handed to the sink; each
         # counter has a single writer thread, so their difference is race-free.
         self._accepted = 0
-        self._written = 0
-        self._profile = profile
-        self._encode_ns_samples: list[int] = []
-        self._max_queue_depth = 0
-
-    @property
-    def failed(self) -> bool:
-        """True once the sink has died; subsequent writes are dropped."""
-        return self._failed
-
-    @property
-    def frames_written(self) -> int:
-        """Frames actually handed to the sink (excludes any discarded after
-        a sink failure). The grab loop reconciles this against the queue to
-        keep the CSV's per-frame `dropped` column accurate."""
-        return self._written
+        self.frames_written = 0
+        # With ``profile``: each frame's sink write time (ns) and the queue's
+        # high-water depth.
+        self.encode_ns_samples: list[int] = []
+        self.max_queue_depth = 0
 
     @property
     def max_queue_size(self) -> int:
@@ -598,27 +589,9 @@ class AsyncFrameWriter:
 
     @property
     def backlog(self) -> int:
-        """Frames accepted but not yet handed to the sink, fills included — how
-        far behind the encoder is (the queue's item count hides the fills that
-        ride on each item)."""
-        return max(0, self._accepted - self._written)
-
-    @property
-    def encode_ns_samples(self) -> list[int]:
-        """Per-frame ``_write_frame`` durations (ns), when ``profile`` is on.
-
-        Empty unless the writer was constructed with ``profile=True``. This is
-        the real encode (ffmpeg pipe write) / disk-write cost the diagnostics
-        engine turns into percentiles."""
-        return self._encode_ns_samples
-
-    @property
-    def max_queue_depth(self) -> int:
-        """High-water queue occupancy seen by :meth:`write`, when profiling.
-
-        A queue that repeatedly fills (approaching ``max_queue_size``) is the
-        signature of an encoder that cannot keep up with the grab rate."""
-        return self._max_queue_depth
+        """Frames accepted but not yet handed to the sink, fills included (the
+        queue's item count hides the fills that ride on each item)."""
+        return max(0, self._accepted - self.frames_written)
 
     def open(self, filename: str, fps: float, frame_size: tuple[int, int]) -> bool:
         """Open `filename` for writing. frame_size is (width, height)."""
@@ -628,11 +601,11 @@ class AsyncFrameWriter:
         except Exception as e:
             log.error("Failed to open writer for %s: %s", filename, e)
             return False
-        self._failed = False
+        self.failed = False
         self._accepted = 0
-        self._written = 0
-        self._encode_ns_samples = []
-        self._max_queue_depth = 0
+        self.frames_written = 0
+        self.encode_ns_samples = []
+        self.max_queue_depth = 0
         self._queue = queue.Queue(maxsize=self._max_queue_size)
         self._running = True
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
@@ -642,12 +615,10 @@ class AsyncFrameWriter:
     def write(self, frame, fill_before: int = 0) -> bool:
         """Enqueue a frame, preceded by ``fill_before`` repeats of the previous
         one; returns False if it was dropped (and with it, the fill)."""
-        if not self._running or self._failed:
+        if not self._running or self.failed:
             return False
         if self._profile:
-            depth = self._queue.qsize()
-            if depth > self._max_queue_depth:
-                self._max_queue_depth = depth
+            self.max_queue_depth = max(self.max_queue_depth, self._queue.qsize())
         try:
             self._queue.put_nowait((frame, fill_before))
         except queue.Full:
@@ -679,7 +650,7 @@ class AsyncFrameWriter:
             if item is _SENTINEL:
                 break
             frame, fill = item
-            if self._failed:
+            if self.failed:
                 continue  # keep draining so close() semantics are unchanged
             # A fill repeats the previous frame; a leading one (nothing written
             # yet) repeats the frame it precedes.
@@ -687,18 +658,18 @@ class AsyncFrameWriter:
             try:
                 for _ in range(fill if filler is not None else 0):
                     self._write_frame(filler)
-                    self._written += 1
+                    self.frames_written += 1
                 if frame is not None:
                     if self._profile:
                         t0 = time.perf_counter_ns()
                         self._write_frame(frame)
-                        self._encode_ns_samples.append(time.perf_counter_ns() - t0)
+                        self.encode_ns_samples.append(time.perf_counter_ns() - t0)
                     else:
                         self._write_frame(frame)
-                    self._written += 1
+                    self.frames_written += 1
                     last = frame
             except Exception as e:
-                self._failed = True
+                self.failed = True
                 self._on_sink_failure(e)
 
     # -- subclass hooks ----------------------------------------------------
@@ -828,7 +799,7 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             self._stderr_thread.join(timeout=2)
             self._stderr_thread = None
         if returncode != 0:
-            self._failed = True
+            self.failed = True
             log.error(
                 "ffmpeg exited with code %d for %s%s",
                 returncode,
