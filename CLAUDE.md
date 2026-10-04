@@ -21,11 +21,11 @@ The project uses **uv** (no pip in the venv).
 
 ```bash
 uv sync                                   # install (dev + core deps)
-uv run pytest -q -o addopts=""            # ~726 tests (the -o skips slow coverage)
-uv run ruff check src/                    # lint (see the known baseline below)
+uv run pytest -q -o addopts=""            # ~1,450 tests, ~9.5 min (the -o skips slow coverage)
+uv run ruff check src/                    # lint (clean)
 uv run pyright src/                       # types (documented baseline; net-new must be 0)
 uv run --group docs mkdocs build --strict # docs build + link/nav validation
-uv run --group frontend pytest tests/test_frontend.py  # browser-driven GUI tests
+uv run --group frontend pytest tests/test_frontend.py -o addopts=""  # browser GUI tests, on their own
 
 PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, no hardware
 ```
@@ -33,26 +33,31 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
 - **`fake` backend** is the CI vehicle — a rich SFNC-keyed synthetic camera that
   exercises every node/widget kind without hardware. Prefer adding fake-backed
   regression tests over hardware-only assertions.
-- **Lint/type baselines** (pre-existing, not introduced by new work): ruff has a
-  couple of intentional `E501`/`F401`-style items already in `[tool.ruff]`
-  ignore or documented; pyright reports ~45 errors, mostly `self.raw`/`self._cam`
-  Optional-access in the vendor backends and cli. **New work must add zero.**
+- **Lint/type baselines:** ruff is clean; pyright reports 40 errors, mostly
+  `self.raw`/`self._cam` Optional-access in the vendor backends and cli. **New
+  work must add zero.**
+- **`tests/conftest.py`** sets the env (`PYLON_CAMEMU`, `OCTACAM_FAKE_CAMERAS`,
+  `OCTACAM_NO_UPDATE_CHECK`), gives each test its own `OCTACAM_CACHE_DIR`,
+  restores the `octacam` logger after each test (so use `caplog` —
+  `caplog.set_level(..., logger="octacam")` for INFO/DEBUG — never attach a
+  handler), and stubs arduino-cli flashing and USB resets (`no_flash`,
+  `no_usb_reset`; a module that tests those functions overrides them by name).
+  Poll with `tests/helpers.py::wait_until`. Tests open the emulated rig with
+  `backend="basler"` and the doctor tests use test_cli's `emulated_rig`, so the
+  suite never touches the real cameras on the dev rig.
 - **Frontend has a browser test harness** (`tests/test_frontend.py`): it loads
   the real `web/static/js/*.js` ES modules in a headless Chromium against the
   real `index.html` and asserts GUI wiring (fields exist, enable/disable,
-  applySettings round-trips). Opt-in via the `frontend` dependency group
-  (`playwright`), so the default suite skips it (importorskip) and it self-skips
-  if no Chromium is installed. This is the automated form of the manual
-  headless-render recipe below — add a case here whenever a backend setting gains
-  a GUI control, so "shipped a knob with no widget" gets caught.
-- **Full-suite runtime is ~8 min.** Run the relevant `tests/test_*.py` file(s)
+  applySettings round-trips). It needs the `frontend` group (it skips without
+  playwright and self-skips without Chromium), and the conftest collects it only
+  when the command line names it. Add a case whenever a backend setting gains a
+  GUI control, so "shipped a knob with no widget" gets caught.
+- **Run the frontend tests on their own.** playwright's *sync* API leaves a
+  running event loop in the process, so any later test calling `asyncio.run`
+  dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
+  retrieve cases); naming the file in a list with others still collects it.
+- **Full-suite runtime is ~9.5 min.** Run the relevant `tests/test_*.py` file(s)
   during development; run the whole suite before committing.
-- **Don't run the frontend group inside a full-suite run.** playwright's *sync*
-  API leaves a running event loop in the process, so any later test calling
-  `asyncio.run` dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
-  retrieve cases — one browser test anywhere earlier is enough). That is what the
-  opt-in group buys: keep them two commands, as above. If a venv has playwright
-  installed, `uv run pytest` collects them and shows those failures.
 - **The dev rig runs Python 3.14, but `requires-python` is `>= 3.10`.** 3.14
   evaluates annotations lazily (PEP 649), so a bug that a 3.10–3.13 user hits at
   *import* is invisible here. Concretely: a name imported only under
@@ -172,8 +177,8 @@ loops exit → writers drain → `octacam_recording/recording_summary.json` +
 - **A rig that opens fewer cameras than its config asks for is not silent.**
   `CameraSystem` records the shortfall (`.missing`, `.incomplete`), logs one
   `INCOMPLETE RIG` warning naming each camera, exposes it as `missing_cameras` in
-  `/api/system`, and `octacam record` confirms before recording (or warns under
-  `--force`/non-interactive). Dropping a failed camera and carrying on is
+  `/api/system` (the GUI shows a persistent warning naming each), and `octacam
+  record` confirms before recording (or warns under `--force`/non-interactive). Dropping a failed camera and carrying on is
   deliberate — the rest of the rig is worth having — but synchronized N-camera
   capture is the point, so a 7-of-8 session must never look like a healthy one.
 
@@ -426,7 +431,8 @@ FLIR **GS3-U3-41C6NIR** (CMV4000 CMOS, 2048², Mono8):
   camera limit, not a bug.**
 - **`TriggerOverlap=ReadOut` is mandatory** — with the default `Off`, a trigger
   fired during the previous frame's readout is silently ignored (~half rate + a
-  200 ms stall). Set best-effort in every backend's frame-trigger enable.
+  200 ms stall). Set best-effort in the GenICam backends' frame-trigger enable
+  (flir, spinnaker, pycameleon); Basler does not set it yet.
 - To exceed 80 fps: external/hardware trigger (overlaps exposure+transfer → ~90),
   or shorten exposure ≲1 ms. `DeviceLinkThroughputLimit` is maxed at open.
 - **One USB3 bus is ~384 MB/s shared** → at 2048² Mono8 (4.19 MB/frame) ~90
@@ -662,9 +668,9 @@ scales with the box (draw at real pixel size); force a theme by setting
 
 Eight commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
 `record`, `flash`, `benchmark`, `process`, `check` (screen recordings for missed
-pulses / desync; read-only). `doctor` never opens a camera (safe
-during a live session). A rig **instance-lock** prevents two octacams owning one
-rig.
+pulses / desync; read-only). `doctor` never opens a camera (safe during a live
+session). A rig **instance-lock**, keyed on the resolved config dir, prevents two
+octacams owning one rig.
 
 **`process` never trusts an output that predates its source** (`cli._is_stale`).
 A folder recorded into twice keeps the previous take's `*.mp4`/`grid.mp4` (the

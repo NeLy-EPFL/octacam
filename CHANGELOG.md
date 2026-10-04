@@ -77,6 +77,23 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **`octacam flash` could reset a board the GUI was using** when the config
+  directory was given as a relative path: the rig instance lock is now keyed on
+  the resolved path, so every spelling of one rig shares one lock.
+- **`octacam record` and `octacam benchmark` left the cameras open** when they
+  stopped before recording (a declined prompt, no camera opened, a parameter
+  load failure).
+- **The GUI did not show an incomplete rig**: a persistent warning now names each
+  configured camera that did not open, and why.
+- **FLIR (PySpin) preview and recording failed to start** when AcquisitionMode or
+  the stream buffer mode could not be set; like the ctypes Spinnaker backend,
+  only a refused BeginAcquisition fails the start now.
+- **A Basler camera raised `AttributeError`** when its trigger source was set after
+  it had been closed.
+- **The Benchmark tab showed queue peaks "of 20"**: the benchmark now uses and
+  reports `record.writer_queue_size`, and an NVENC benchmark reports its NVENC
+  encoder arguments.
+
 - **Recorded videos played as flat gray frames in VLC on NVIDIA machines.**
   The default `-pix_fmt gray` wrote monochrome 4:0:0 H.264. NVIDIA's hardware
   decoder (NVDEC/VDPAU, which VLC picks by default) decodes it as a uniform
