@@ -387,98 +387,40 @@ def mark_capture_active(detail: str = "") -> Iterator[None]:
         yield
 
 
-def _maybe_remove_stale(marker: Path) -> None:
-    """Remove an unlocked marker once it is clearly past any publish window."""
-    try:
-        age = _now().timestamp() - marker.stat().st_mtime
-    except OSError:
-        return
-    if age > _STALE_MARKER_AGE_S:
-        try:
-            marker.unlink(missing_ok=True)
-        except OSError:
-            pass
+def _scan(directory: Path) -> tuple[int, int]:
+    """Check the flock-held markers in ``directory``; return (live, swept).
 
-
-def _count_live_markers(directory: Path) -> int:
-    """How many flock-held markers in ``directory`` are still live.
-
-    A marker whose flock we can take is orphaned (its publisher exited or
-    crashed); it is ignored and, once stale, swept away.
-    """
-    try:
-        markers = [p for p in directory.iterdir() if p.suffix == ".lock"]
-    except OSError:
-        return 0
-    active = 0
-    for marker in markers:
-        try:
-            # Read-only: the handle is used only for flock (advisory, independent
-            # of the access mode), so this needs only the read bit — a marker
-            # owned by another user on a shared rig is still detectable. "r" also
-            # refuses to create, so a marker unlinked between iterdir and here is
-            # skipped (FileNotFoundError) rather than re-created as an empty file.
-            handle = open(marker)
-        except OSError:
-            continue
-        try:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                active += 1  # still held -> a live publisher
-                continue
-            # We took the lock, so nobody owns it: orphaned (or mid-publish).
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            _maybe_remove_stale(marker)
-        finally:
-            handle.close()
-    return active
-
-
-def _sweep_markers(directory: Path) -> tuple[int, int]:
-    """Remove clearly-orphaned markers in ``directory``; return (removed, live_kept).
-
-    Mirrors :func:`_count_live_markers`, but for an explicit cache clear. A marker
-    whose flock is still held signals a live publisher and is left alone (counted
-    in ``live_kept``). An orphaned (lock-takeable) marker is removed only once it
-    is past the mid-publish window (:data:`_STALE_MARKER_AGE_S`) — the same
-    conservative rule the liveness checks use — so a clear can never delete a
-    marker a just-armed capture/transcode is still holding open but hasn't locked.
+    A marker whose flock is still held has a live publisher. One whose flock we
+    can take is orphaned (its publisher exited or crashed) and is removed once
+    past the mid-publish window (:data:`_STALE_MARKER_AGE_S`), so a marker that
+    is created but not yet locked is never swept.
     """
     try:
         markers = [p for p in directory.iterdir() if p.suffix == ".lock"]
     except OSError:
         return 0, 0
-    removed = live = 0
+    live = swept = 0
     for marker in markers:
         try:
+            # Read-only: flock is advisory and works on any open mode, so a
+            # marker another user owns is still checkable; and "r" never
+            # creates, so a marker unlinked since iterdir is skipped.
             handle = open(marker)
         except OSError:
             continue
-        held = False
-        try:
+        with handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                held = True
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        finally:
-            handle.close()
-        if held:
-            live += 1
-            continue
+                live += 1
+                continue
         try:
-            age = _now().timestamp() - marker.stat().st_mtime
-        except OSError:
-            continue
-        if age > _STALE_MARKER_AGE_S:
-            try:
+            if _now().timestamp() - marker.stat().st_mtime > _STALE_MARKER_AGE_S:
                 marker.unlink(missing_ok=True)
-                removed += 1
-            except OSError:
-                pass
-    return removed, live
+                swept += 1
+        except OSError:
+            pass
+    return live, swept
 
 
 def sweep_orphan_markers() -> tuple[int, int]:
@@ -490,15 +432,15 @@ def sweep_orphan_markers() -> tuple[int, int]:
     """
     removed = live = 0
     for directory in (_transcode_dir(), _capture_dir()):
-        r, held = _sweep_markers(directory)
-        removed += r
+        held, swept = _scan(directory)
+        removed += swept
         live += held
     return removed, live
 
 
 def transcode_running() -> int:
     """How many `octacam process` runs are transcoding on this machine right now."""
-    return _count_live_markers(_transcode_dir())
+    return _scan(_transcode_dir())[0]
 
 
 def capture_running() -> int:
@@ -507,7 +449,7 @@ def capture_running() -> int:
     Usually 0 or 1, but two different rigs can capture at once (the instance lock
     only stops two octacams sharing one config), so this is a count, not a flag.
     """
-    return _count_live_markers(_capture_dir())
+    return _scan(_capture_dir())[0]
 
 
 def capture_active() -> bool:
