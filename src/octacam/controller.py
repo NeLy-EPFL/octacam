@@ -792,6 +792,15 @@ class RecordingController:
         cameras a fresh trigger clock right before the recording's own arm."""
         return self.recording_active or self.diagnosing or self._starting
 
+    def _require_camera_control(
+        self, refusal: str, *, recording_only: bool = False
+    ) -> None:
+        """Raise ``RuntimeError(refusal)`` while camera control is locked, or, for
+        an operation only a recording conflicts with, while recording. Caller
+        holds the lock."""
+        if self.recording_active if recording_only else self._camera_locked:
+            raise RuntimeError(refusal)
+
     def _busy_reason(self, *, benchmark: bool = False) -> str | None:
         """Why a recording (or a benchmark) cannot claim the cameras now, else
         None. Caller holds the lock."""
@@ -1017,10 +1026,9 @@ class RecordingController:
         ``_reconfiguring`` so a recording cannot start mid-change. Returns the
         refreshed feature payload for every camera it touched."""
         with self._lock:
-            if self._camera_locked:
-                raise RuntimeError(
-                    "Camera parameters are locked while recording or benchmarking"
-                )
+            self._require_camera_control(
+                "Camera parameters are locked while recording or benchmarking"
+            )
             if self._reconfiguring:
                 raise RuntimeError("A camera reconfiguration is already in progress")
             if scope == "all":
@@ -1075,10 +1083,9 @@ class RecordingController:
         """Snapshot every camera's parameter text (Basler .pfs / FLIR .txt);
         rejected while recording/benchmarking."""
         with self._lock:
-            if self._camera_locked:
-                raise RuntimeError(
-                    "Cannot save camera parameters while recording or benchmarking"
-                )
+            self._require_camera_control(
+                "Cannot save camera parameters while recording or benchmarking"
+            )
         return self.camera_system.save_all_params()
 
     def set_camera_name(self, index: int, name: str) -> dict:
@@ -1092,8 +1099,9 @@ class RecordingController:
         """
         clean = sanitize_camera_name(name)
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Camera names are locked while recording")
+            self._require_camera_control(
+                "Camera names are locked while recording", recording_only=True
+            )
             camera = self.camera_system.camera_at(index)
             for other_index, other in enumerate(self.camera_system):
                 if other_index != index and other.name == clean:
@@ -1110,8 +1118,9 @@ class RecordingController:
         View-tab rotate/flip pushes here as the operator works — keeping "what
         you see" and "what is recorded" in sync without a config save."""
         with self._lock:
-            if self.recording_active:
-                raise RuntimeError("Camera transforms are locked while recording")
+            self._require_camera_control(
+                "Camera transforms are locked while recording", recording_only=True
+            )
             camera = self.camera_system.camera_at(index)
             camera.display_transform = DisplayTransform.from_scale_rotation(
                 scale_x, scale_y, rotation_deg
@@ -1201,10 +1210,9 @@ class RecordingController:
     def start_preview(self) -> None:
         """(Re)start live preview in the resolved preview trigger mode."""
         with self._lock:
-            if self._camera_locked:
-                raise RuntimeError(
-                    "Cannot start preview while recording or benchmarking"
-                )
+            self._require_camera_control(
+                "Cannot start preview while recording or benchmarking"
+            )
             mode = self._arm_preview_locked()
         self._dispatch_preview_arm(mode)
 
