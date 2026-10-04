@@ -161,8 +161,7 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
                 # Known builtin whose module failed to import (the cause was logged
                 # by _import_builtin) — not the same as a genuinely unknown name.
                 log.warning(
-                    "Builtin plugin %r failed to import (run with debug logging "
-                    "for the cause); skipping",
+                    "Builtin plugin %r failed to import (cause logged above); skipping",
                     name,
                 )
             else:
