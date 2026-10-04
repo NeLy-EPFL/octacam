@@ -39,11 +39,6 @@ BACKENDS = ("basler", "flir", "spinnaker", "pycameleon", "fake")
 # through to the pycameleon floor.
 CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 
-# The real (non-``fake``) backends an auto-detecting rig sweeps, in cascade
-# priority order. ``fake`` is synthetic (it always reports FAKE-* serials
-# regardless of hardware), so it is never swept — only used when named.
-REAL_BACKENDS = CASCADE
-
 
 class BackendUnavailable(RuntimeError):
     """A requested camera backend is unknown or its SDK is not installed."""
