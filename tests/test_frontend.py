@@ -870,7 +870,6 @@ def _system_payload(*, ready, plugins=None):
                 "name": "cam0",
                 "width": 640,
                 "height": 480,
-                "params": {},
                 "layout": {
                     "window_x": -1.0,
                     "window_y": -1.0,

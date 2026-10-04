@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from octacam import config_writer
-from octacam.camera import GEOMETRY_PARAMS, PARAM_NODES, CameraSystem
+from octacam.camera import CameraSystem
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (
@@ -973,126 +973,6 @@ class RecordingController:
             "entries": entries,
         }
 
-    # ------------------------------------------------------ camera parameters
-
-    @staticmethod
-    def _param_payload(index: int, camera, params: dict) -> dict:
-        return {
-            "index": index,
-            "serial": camera.serial_number,
-            "width": camera.width,
-            "height": camera.height,
-            "params": params,
-        }
-
-    def read_camera_params(self, index: int) -> dict:
-        """Current sensor-parameter descriptors for one camera."""
-        with self._lock:
-            camera = self.camera_system.camera_at(index)
-        return self._param_payload(index, camera, camera.read_params())
-
-    def set_camera_param(
-        self, index: int, name: str, value: float, scope: str = "selected"
-    ) -> dict:
-        """Set a sensor parameter on one camera or all; rejected while recording.
-
-        Width/Height require cycling the preview grab, which can take ~100 ms;
-        that work is done OFF the controller lock (guarded by ``_reconfiguring``
-        so a recording cannot start mid-cycle) to keep snapshot()/state polling
-        responsive.
-        """
-        if name not in PARAM_NODES:
-            raise ValueError(f"Unknown camera parameter: {name}")
-        with self._lock:
-            if self._camera_locked:
-                raise RuntimeError(
-                    "Camera parameters are locked while recording or benchmarking"
-                )
-            if self._reconfiguring:
-                raise RuntimeError("A camera reconfiguration is already in progress")
-            if scope == "all":
-                targets = list(enumerate(self.camera_system))
-            else:
-                targets = [(index, self.camera_system.camera_at(index))]
-            self._reconfiguring = True
-
-        is_geometry = name in GEOMETRY_PARAMS
-
-        def apply(camera) -> dict:
-            if is_geometry:
-                return camera.set_geometry(**{name: int(value)})["params"]
-            return {name: camera.set_live_param(name, value)}
-
-        try:
-            if scope == "all":
-                # Run every camera at once: each geometry change cycles only its
-                # own preview, so 8 reconfigure in roughly one camera's time.
-                results = self.camera_system.apply_to_all(apply)
-                updated = [
-                    self._param_payload(i, camera, params)
-                    for (i, camera), params in zip(targets, results, strict=True)
-                ]
-            else:
-                i, camera = targets[0]
-                updated = [self._param_payload(i, camera, apply(camera))]
-        finally:
-            with self._lock:
-                self._reconfiguring = False
-        return {"updated": updated}
-
-    def reset_camera_params(
-        self, index: int, pfs_by_serial: dict[str, str], scope: str = "selected"
-    ) -> dict:
-        """Restore one camera's (or all cameras') sensor parameters to the config.
-
-        ``pfs_by_serial`` maps a serial number to its per-camera parameter text
-        from the active config dir, in whatever format the backend persists
-        (Basler ``.pfs`` / FLIR-GenICam ``.txt``). Cameras without a saved file are
-        left unchanged; if none of the targeted cameras has one, ``FileNotFoundError``
-        is raised so the caller can report that there is nothing to reset to. As
-        in set_camera_param, the grab-cycling reload runs OFF the controller
-        lock, guarded by ``_reconfiguring`` so a recording cannot start
-        mid-cycle.
-        """
-        with self._lock:
-            if self._camera_locked:
-                raise RuntimeError(
-                    "Camera parameters are locked while recording or benchmarking"
-                )
-            if self._reconfiguring:
-                raise RuntimeError("A camera reconfiguration is already in progress")
-            if scope == "all":
-                targets = list(enumerate(self.camera_system))
-            else:
-                targets = [(index, self.camera_system.camera_at(index))]
-            if not any(
-                pfs_by_serial.get(camera.serial_number) for _, camera in targets
-            ):
-                raise FileNotFoundError(
-                    "No saved camera parameters in the active config to reset to"
-                )
-            self._reconfiguring = True
-
-        def apply(camera) -> dict:
-            return camera.reset_params(pfs_by_serial.get(camera.serial_number, ""))[
-                "params"
-            ]
-
-        try:
-            if scope == "all":
-                results = self.camera_system.apply_to_all(apply)
-                updated = [
-                    self._param_payload(i, camera, params)
-                    for (i, camera), params in zip(targets, results, strict=True)
-                ]
-            else:
-                i, camera = targets[0]
-                updated = [self._param_payload(i, camera, apply(camera))]
-        finally:
-            with self._lock:
-                self._reconfiguring = False
-        return {"updated": updated}
-
     # -------------------------------------------------- full device node map
 
     @staticmethod
@@ -1116,8 +996,8 @@ class RecordingController:
     def _reconfigure(self, index: int, scope: str, apply) -> dict:
         """Run ``apply(camera)`` on one camera or all, off the controller lock.
 
-        Shared by the feature write/reset/command/center paths: it takes the
-        same recording/reconfigure guards as set_camera_param, resolves the
+        Shared by the feature write/reset/command/center paths: it refuses while
+        the cameras are locked or another reconfiguration runs, resolves the
         scope, then runs the (possibly grab-cycling) work under
         ``_reconfiguring`` so a recording cannot start mid-change. Returns the
         refreshed feature payload for every camera it touched."""

@@ -691,14 +691,14 @@ def test_run_diagnostic_via_controller(fake_system):
     assert controller.run_diagnostic().status == StartResult.BUSY
     assert controller.start_recording().status == StartResult.BUSY
     with pytest.raises(RuntimeError):
-        controller.set_camera_param(0, "exposure", 2000.0)
+        controller.set_camera_feature(0, "ExposureTime", 2000.0)
 
     wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
     assert controller.state == "preview"  # preview resumed cleanly
     assert controller.get_last_diagnostic() is not None
     assert got and got[0]["backend"] == "fake"
     # camera control works again once the benchmark is done
-    controller.set_camera_param(0, "exposure", 2000.0)
+    controller.set_camera_feature(0, "ExposureTime", 2000.0)
 
 
 def test_benchmark_preview_rearm_failure_leaves_idle(fake_system, monkeypatch):
@@ -719,7 +719,7 @@ def test_benchmark_preview_rearm_failure_leaves_idle(fake_system, monkeypatch):
     assert controller.state == "idle"  # not wedged in "diagnosing"
     assert not controller._camera_locked
     # Camera control (and a recording) work again once the benchmark is done.
-    controller.set_camera_param(0, "exposure", 2000.0)
+    controller.set_camera_feature(0, "ExposureTime", 2000.0)
 
 
 def test_run_diagnostic_emits_progress_notifications(fake_system):

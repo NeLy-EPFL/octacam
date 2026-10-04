@@ -54,7 +54,7 @@ PRIME_STRAGGLER_PERIODS = 2.5
 # of growing without bound. Recording keeps the full, untrimmed series.
 PREVIEW_TIMESTAMPS_MAX = 64
 
-# Editable sensor parameters, mapped from the GUI's snake_case names to their
+# Editable sensor parameters, mapped from octacam's snake_case names to their
 # GenICam node names. These SFNC names (ExposureTime, Gain, Width, ...) are the
 # standard ones shared by Basler and FLIR/Spinnaker, so every GenICam backend
 # reuses this mapping. GEOMETRY_PARAMS can only be written while the camera is
@@ -706,34 +706,9 @@ class Camera:
                 "writable": writable,
             }
 
-    def read_params(self) -> dict[str, dict]:
-        """Descriptors for every editable param the camera actually exposes."""
-        params: dict[str, dict] = {}
-        for name in PARAM_NODES:
-            try:
-                params[name] = self.read_param(name)
-            except BackendError:
-                continue  # node unavailable on this model
-        return params
-
-    def set_live_param(self, name: str, value: float) -> dict:
-        """Set a param writable on a running camera (exposure/gain/offset)."""
-        if name not in LIVE_PARAMS:
-            raise ValueError(f"{name} cannot be set live")
-        with self._param_lock:
-            info = self._backend.read_node(name)
-            target = snap_value(float(value), info)
-            if isinstance(info.value, int):
-                target = int(round(target))
-            try:
-                self._backend.write_node(name, target)
-            except BackendError as e:
-                raise ValueError(str(e)) from None
-        return self.read_param(name)
-
     def set_geometry(
         self, *, width: int | None = None, height: int | None = None
-    ) -> dict:
+    ) -> None:
         """Set Width/Height, transparently cycling this camera's preview grab.
 
         The SDK refuses Width/Height writes while grabbing, so the preview loop
@@ -769,55 +744,10 @@ class Camera:
             self.frame_for_display.push(
                 np.zeros((self.height, self.width), dtype=np.uint8)
             )
-            params = self.read_params()  # read while stopped for clean values
             if was_grabbing:
                 self.start_preview()
             if error is not None:
                 raise error
-        return {"width": self.width, "height": self.height, "params": params}
-
-    def reset_params(self, config_str: str) -> dict:
-        """Re-apply this camera's config snapshot, cycling the preview grab.
-
-        Restores every sensor parameter to the value the active config shipped
-        (exactly what load_config applied at startup). The full reload includes
-        Width/Height, which the SDK refuses mid-grab, so the preview is stopped
-        and restored around the write, as set_geometry does. An empty
-        ``config_str`` (no saved params for this camera) leaves the camera
-        untouched and just reports its current parameters.
-        """
-        with self._param_lock:
-            if not config_str:
-                return {
-                    "width": self.width,
-                    "height": self.height,
-                    "params": self.read_params(),
-                }
-            was_grabbing = self._backend.is_grabbing()
-            if was_grabbing:
-                self.stop()
-                self.join()
-            self.frame_for_display.pop()  # drop stale frame so it reshapes
-            error: ValueError | None = None
-            try:
-                self.load_params(config_str)
-            except BackendError as e:
-                # A config the device rejects (wrong model/firmware, hand-edited,
-                # out-of-range value) must not strand the preview: mirror
-                # set_geometry and always restore it, refreshing the placeholder
-                # to the current ROI, before re-raising as a ValueError.
-                error = ValueError(str(e))
-                self.width = self._backend.width()
-                self.height = self._backend.height()
-                self.frame_for_display.push(
-                    np.zeros((self.height, self.width), dtype=np.uint8)
-                )
-            params = self.read_params()  # read while stopped for clean values
-            if was_grabbing:
-                self.start_preview()
-            if error is not None:
-                raise error
-        return {"width": self.width, "height": self.height, "params": params}
 
     def save_params(self) -> str:
         """Full config text of the current parameters (round-trips load_params)."""

@@ -641,7 +641,7 @@ def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlik
     # pulse late (or unverifiable); between unlike cameras it says nothing.
     slow = next(c for c in fake_system if c.serial_number == "FAKE-1")
     if unlike == "exposure":
-        slow.set_live_param("exposure", 12000)
+        slow.set_feature("ExposureTime", 12000)
     elif unlike == "geometry":
         slow.set_geometry(width=2 * W, height=2 * H)
     _ignoring_cameras(fake_system, [0, 0])  # hardware-clocked, trigger line

@@ -46,8 +46,8 @@ _SENSOR_W, _SENSOR_H = 1920, 1200
 _FETCH_WAIT_S = 0.002
 
 # The fake's node model is keyed by SFNC name (matching real GenICam backends);
-# the six legacy snake_case params (read_node/write_node/set_live_param) map onto
-# it via PARAM_NODES. Nodes the fake does not model are skipped by the config
+# the six legacy snake_case params (read_node/write_node) map onto it via
+# PARAM_NODES. Nodes the fake does not model are skipped by the config
 # applier/serialiser and never appear in the feature browser.
 _PARAM_TO_SFNC = dict(PARAM_NODES)
 

@@ -163,11 +163,6 @@ export class CameraTab {
     }
   }
 
-  // Legacy /api/cameras/{i}/params WS broadcast — the new UI drives everything
-  // through /features, so this is a no-op kept only so an old broadcast (or
-  // another tool hitting the legacy endpoint) can't error the client.
-  applyParams() {}
-
   applyName(entry) {
     const cam = this.cameras[entry.index];
     if (!cam || typeof entry.name !== "string") return;

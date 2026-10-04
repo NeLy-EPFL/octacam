@@ -591,9 +591,6 @@ async function main() {
       case "diagnostics_progress":
         benchmark.applyProgress(msg);
         break;
-      case "camera_params":
-        cameraTab?.applyParams(msg);
-        break;
       case "camera_features_dirty":
         cameraTab?.applyFeaturesDirty(msg);
         // Let plugin tabs (e.g. triggerbox's timing diagram) react to a camera

@@ -308,24 +308,6 @@ class DiagnosticRunRequest(BaseModel):
         return value
 
 
-class CameraParamPatch(BaseModel):
-    """Set one sensor parameter on the selected camera or all cameras."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    value: float
-    scope: Literal["selected", "all"] = "selected"
-
-
-class CameraParamReset(BaseModel):
-    """Reset the selected camera's (or all cameras') params to the config."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    scope: Literal["selected", "all"] = "selected"
-
-
 class CameraFeaturePatch(BaseModel):
     """Set one full-node-map feature by GenApi node name on one camera or all.
 
@@ -455,9 +437,6 @@ class _Client:
         self.id = next(_Client._next_id)
         self.frames: dict[int, bytes] = {}
         self.texts: dict[str, str] = {}
-        # Bumped on every queue_text so a caller that computed a payload before
-        # awaiting can tell whether something newer landed meanwhile.
-        self.text_seq: dict[str, int] = {}
         self.events: deque[str] = deque(maxlen=50)  # events are not dropped
         self.wakeup = asyncio.Event()
         # Per-camera-index display request (resolution / paused). Absent => the
@@ -507,23 +486,7 @@ class _Client:
 
     def queue_text(self, kind: str, message: str) -> None:
         self.texts[kind] = message
-        self.text_seq[kind] = self.text_seq.get(kind, 0) + 1
         self.wakeup.set()
-
-    def queue_text_if_current(self, kind: str, message: str, seen: int) -> bool:
-        """Queue ``message`` only if nothing else queued ``kind`` since ``seen``.
-
-        ``texts`` is newest-only per kind, so a payload computed *before* an
-        ``await`` would otherwise overwrite whatever arrived during it. That is
-        harmless for kinds the server re-sends on a tick (``state``), and fatal
-        for ``system``: nothing re-sends it, so clobbering the init thread's
-        ready descriptor with a stale placeholder strands the GUI on the loading
-        screen until the operator reloads the page.
-        """
-        if self.text_seq.get(kind, 0) != seen:
-            return False
-        self.queue_text(kind, message)
-        return True
 
     def queue_event(self, message: str) -> None:
         self.events.append(message)
@@ -639,7 +602,6 @@ class _AppState:
                     "name": camera.name,
                     "width": camera.width,
                     "height": camera.height,
-                    "params": camera.read_params(),
                     "layout": {
                         key: getattr(camera_config, key) if camera_config else -1.0
                         for key in (
@@ -720,13 +682,6 @@ class _AppState:
         its grid and plugin readiness without a reload. No-ops when there are no
         clients / the loop is down (a browser connecting later gets the current
         descriptor from the WS-connect handshake instead)."""
-        # Skip building the descriptor at all when nobody is listening — it reads
-        # every camera's params over USB, so it is not free. A client that
-        # connects later gets the current descriptor from the WS-connect
-        # handshake, so nothing is lost.
-        loop = self.loop
-        if loop is None or loop.is_closed() or not self.clients:
-            return
         self.broadcast_threadsafe("system", self.system_descriptor())
 
     # ------------------------------------------------------- broadcasting
@@ -1070,33 +1025,6 @@ def create_app(
             "default_params": NVENC_H264_PARAMS,
         }
 
-    @app.get("/api/cameras/{index}/params")
-    def get_camera_params(index: int):
-        try:
-            return controller.read_camera_params(index)
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-
-    @app.put("/api/cameras/{index}/params")
-    def put_camera_params(index: int, patch: CameraParamPatch):
-        try:
-            result = controller.set_camera_param(
-                index, patch.name, patch.value, patch.scope
-            )
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
-            raise HTTPException(422, str(e)) from None
-        # Push the new values to every client, deduped per camera index so a
-        # fast slider drag collapses to the latest (newest-only queue_text).
-        for entry in result["updated"]:
-            state.broadcast_threadsafe(
-                f"camera_params:{entry['index']}", {"type": "camera_params", **entry}
-            )
-        return result
-
     @app.put("/api/cameras/{index}/name")
     def put_camera_name(index: int, patch: CameraNamePatch):
         try:
@@ -1124,30 +1052,6 @@ def create_app(
             raise HTTPException(404, f"No camera at index {index}") from None
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from None
-
-    @app.post("/api/cameras/{index}/params/reset")
-    def reset_camera_params(index: int, payload: CameraParamReset | None = None):
-        if not config_dir:
-            raise HTTPException(400, "No config directory is set for this session")
-        payload = payload or CameraParamReset()
-        pfs_by_serial = config_writer.read_pfs_files(
-            config_dir, controller.camera_system.extensions
-        )
-        try:
-            result = controller.reset_camera_params(index, pfs_by_serial, payload.scope)
-        except IndexError:
-            raise HTTPException(404, f"No camera at index {index}") from None
-        except FileNotFoundError as e:
-            raise HTTPException(422, str(e)) from None
-        except RuntimeError as e:
-            raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:  # a .pfs the device rejects
-            raise HTTPException(422, str(e)) from None
-        for entry in result["updated"]:
-            state.broadcast_threadsafe(
-                f"camera_params:{entry['index']}", {"type": "camera_params", **entry}
-            )
-        return result
 
     # ---------------------------------------------- full device node map (tab)
 
@@ -1422,17 +1326,12 @@ def create_app(
         sender = asyncio.create_task(client.sender())
         loop = asyncio.get_running_loop()
         try:
-            # Send the current /api/system descriptor so a browser connecting
-            # after (or during) the background camera init fills in its grid and
-            # plugin readiness from the socket, without waiting for — or racing —
-            # the one-shot broadcast the init thread fires on completion.
-            seen_system = client.text_seq.get("system", 0)
-            descriptor = await loop.run_in_executor(None, state.system_descriptor)
-            # read_params() walks every camera over USB, so this await lasts tens
-            # to hundreds of ms — long enough for _initialize_rig to finish and
-            # broadcast the real descriptor to this already-registered client.
-            client.queue_text_if_current(
-                "system", json.dumps({"type": "system", **descriptor}), seen_system
+            # The current /api/system descriptor, so a browser connecting during
+            # the background camera init still fills in. Built and queued with no
+            # await in between: an init finishing later broadcasts to this
+            # (already registered) client after it, never before.
+            client.queue_text(
+                "system", json.dumps({"type": "system", **state.system_descriptor()})
             )
             snapshot = await loop.run_in_executor(None, controller.snapshot)
             client.queue_text("state", json.dumps({"type": "state", **snapshot}))
