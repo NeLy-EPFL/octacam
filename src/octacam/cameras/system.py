@@ -63,9 +63,9 @@ class CameraSystem:
         for _serial, handle, make_backend in entries:
             self.cameras.append(Camera(make_backend(handle)))
 
-        # A camera that fails to open (e.g. a USB3 link that fell back to USB 2.0,
-        # which no backend opens) is dropped loudly and the rest come up; only a
-        # total failure raises.
+        # A camera that fails to open (in use by another process, or a USB3 link
+        # that fell back to USB 2.0) is dropped loudly and the rest come up; only
+        # a total failure raises.
         failures = [
             (camera, exc)
             for camera, _result, exc in self._run_parallel(lambda c: c.open())

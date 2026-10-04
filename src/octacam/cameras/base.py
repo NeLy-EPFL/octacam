@@ -95,8 +95,9 @@ class FeatureInfo:
     ``type`` is the widget kind: int, float, bool, enum (``entries`` of
     ``{"value", "display", "available"}``), string, command or category.
     ``value`` is None for command and category nodes and an enum's symbolic
-    otherwise. ``managed`` marks a node octacam drives
-    (:data:`RUNTIME_MANAGED_FEATURES`).
+    otherwise. ``category`` comes only from a node-map walk: a single-node read
+    leaves it blank, and the client keeps its grouping. ``managed`` marks a node
+    octacam drives (:data:`RUNTIME_MANAGED_FEATURES`).
     """
 
     name: str
@@ -250,6 +251,9 @@ class CameraBackend(Protocol):
     def start_grab_preview(self) -> None: ...
     def start_grab_record(self) -> bool: ...
     def stop_grab(self) -> None: ...
+
+    # The fetches never raise: None on a device error or a stop race, since an
+    # exception would kill the grab thread and orphan its writer.
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
