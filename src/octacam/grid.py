@@ -137,7 +137,9 @@ def _filtergraph(rows: int, cols: int, width: int, height: int, pix_fmt: str) ->
     Each cell is converted to *pix_fmt* first: xstack's implicit conversion of
     full-range camera videos and limited-range lavfi cells mis-tags the range
     (washed out in VLC, stalling in QuickTime). ``out_range=full`` keeps 0-255
-    luma for limited-range YUV (see writer._color_range_args).
+    luma for limited-range YUV (see writer._color_range_args), so the pad's bars
+    are true black. ``force_divisible_by=2`` keeps a letterboxed camera's fitted
+    size even, as yuv420p needs.
     """
     scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
     n_cells = rows * cols
