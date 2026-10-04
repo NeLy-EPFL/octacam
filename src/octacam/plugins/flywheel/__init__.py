@@ -365,7 +365,7 @@ class FlywheelPlugin(Plugin):
 
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash mid-jog: the board's reset would drop the coil state."""
-        if getattr(self, "_jog_owner", None) is not None:
+        if self._jog_owner is not None:
             return True, "refusing to flash while the motor is jogging — release it first"
         return False, ""
 
