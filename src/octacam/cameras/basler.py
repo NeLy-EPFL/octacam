@@ -192,7 +192,10 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # Set to None by close() once the device is destroyed; the is_open/
         # is_grabbing guards below tolerate that so a second close() is a no-op.
         self.raw = pylon.InstantCamera(device)
-        self._serial = str(self.raw.GetDeviceInfo().GetSerialNumber())
+        info = self.raw.GetDeviceInfo()
+        self._serial = str(info.GetSerialNumber())
+        # Whether grab timestamps count ns (USB3 Vision; a GigE camera's count ticks).
+        self._stamps_ns = info.GetDeviceClass() == "BaslerUsb"
         self._original_trigger_source: str | None = None
         # Count grabs that pylon flagged as incomplete/failed (USB bandwidth
         # gaps, packet loss) so a rig delivering partial frames can be spotted.
@@ -216,21 +219,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # BackendError so the caller reports it cleanly instead of letting
             # a raw pylon traceback escape.
             raise BackendError(str(e)) from e
-
-    def _stamps_ns(self) -> bool:
-        """Whether this camera's grab timestamps count nanoseconds (USB3 Vision
-        does; a GigE camera's count device ticks)."""
-        known = getattr(self, "_timestamps_ns", None)
-        if known is None:
-            raw = self.raw
-            if raw is None:
-                return False
-            try:
-                known = raw.GetDeviceInfo().GetDeviceClass() == "BaslerUsb"
-            except Exception:
-                known = False
-            self._timestamps_ns = known
-        return known
 
     def close(self) -> None:
         # Tear the device down while the pylon runtime is still alive. pypylon
@@ -670,7 +658,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
             # the camera clock, when that clock counts ns (USB3 Vision; a GigE
             # camera's ticks are not), so a late image cannot answer a later one.
             self._trigger_answered(
-                int(result.TimeStamp) if succeeded and self._stamps_ns() else None
+                int(result.TimeStamp) if succeeded and self._stamps_ns else None
             )
             # A valid-but-failed grab is an incomplete frame (USB bandwidth gap,
             # packet loss): pylon already drops it for us, but partial frames are

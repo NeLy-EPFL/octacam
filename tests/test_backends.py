@@ -199,6 +199,7 @@ def _make_basler_backend(raw):
     be = BaslerBackend.__new__(BaslerBackend)
     be._init_trigger_handoff()
     be._serial = "test-basler"
+    be._stamps_ns = False
     be._incomplete_grabs = 0
     be.raw = raw
     return be
