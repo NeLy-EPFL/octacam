@@ -234,7 +234,7 @@ def build_grid_video(
         _atomic_output,
         _color_range_args,
         _run_ffmpeg,
-        _strip_opts,
+        _split_opts,
         find_ffmpeg,
     )
 
@@ -293,7 +293,7 @@ def build_grid_video(
 
     # Encoder args from the config ffmpeg_params, minus the pix_fmt/filter knobs
     # the grid owns itself (it always outputs pix_fmt via its own filtergraph).
-    encoder = _strip_opts(
+    encoder, _ = _split_opts(
         shlex.split(ffmpeg_params or DEFAULT_TRANSCODE_FFMPEG_PARAMS),
         ("-pix_fmt", "-pixel_format", "-vf", "-filter:v"),
     )

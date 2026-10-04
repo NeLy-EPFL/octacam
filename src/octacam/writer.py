@@ -424,49 +424,28 @@ def _extract_opt(tokens: list[str], names: tuple[str, ...]) -> str | None:
     return None
 
 
-def _strip_opts(tokens: list[str], names: tuple[str, ...]) -> list[str]:
-    """Return ``tokens`` with each ``name`` option and its value token removed.
+def _split_opts(
+    tokens: list[str], names: tuple[str, ...], flags: tuple[str, ...] = ()
+) -> tuple[list[str], list[str]]:
+    """Split ``tokens`` into the rest and the values of the ``names`` options.
 
-    Used by the grid compositor, which owns its own ``-pix_fmt``/filter handling
-    and must drop those from a config ``ffmpeg_params`` string while keeping the
-    encoder choice (``-c:v``/``-preset``/``-crf``)."""
-    cleaned: list[str] = []
-    skip = False
-    for tok in tokens:
-        if skip:
-            skip = False
-            continue
-        if tok in names:
-            skip = True
-            continue
-        cleaned.append(tok)
-    return cleaned
-
-
-def _split_vf(tokens: list[str]) -> tuple[list[str], str]:
-    """Pull any ``-vf``/``-filter:v`` out of ``tokens``.
-
-    ffmpeg accepts only one ``-vf``, so a user filter inside ``ffmpeg_params``
-    must be merged with octacam's full-range conversion rather than passed
-    beside it. Returns the tokens without it and the user's filter ("" if none).
+    ``flags`` (options that take no value) are dropped too.
     """
-    cleaned: list[str] = []
-    user_vf = ""
-    skip = False
-    for i, tok in enumerate(tokens):
-        if skip:
-            skip = False
-            continue
-        if tok in ("-vf", "-filter:v"):
-            if i + 1 < len(tokens):
-                user_vf = tokens[i + 1]
-                skip = True
-            continue
-        cleaned.append(tok)
-    return cleaned, user_vf
+    rest: list[str] = []
+    values: list[str] = []
+    it = iter(tokens)
+    for tok in it:
+        if tok in names:
+            value = next(it, None)
+            if value is not None:
+                values.append(value)
+        elif tok not in flags:
+            rest.append(tok)
+    return rest, values
 
 
 _PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
+_VF_OPTS = ("-vf", "-filter:v")
 _VIDEO_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
 # Software encoders whose monochrome (4:0:0) output hardware decoders mishandle.
 _MONO_UNSAFE_ENCODERS = ("libx264", "libx265")
@@ -529,8 +508,9 @@ def _output_args(
     """
     tokens = _playable_pix_fmt(shlex.split(ffmpeg_params), frame_size)
     out_pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS) or ""
-    tokens, user_vf = _split_vf(tokens)
-    merged_vf = _full_range_vf(out_pix_fmt, user_vf)
+    # ffmpeg takes one -vf (the last), so a user filter merges into ours.
+    tokens, user_vfs = _split_opts(tokens, _VF_OPTS)
+    merged_vf = _full_range_vf(out_pix_fmt, user_vfs[-1] if user_vfs else "")
     return tokens, merged_vf, _color_range_args(out_pix_fmt)
 
 
@@ -1362,19 +1342,11 @@ def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
     mode needs: the octacam bar wants a quiet ffmpeg emitting a machine-readable
     ``-progress`` stream, while raw mode wants ffmpeg's native ``-stats`` line
     at info level streamed straight to the terminal."""
-    exe, rest = args[0], args[1:]
-    cleaned: list[str] = []
-    skip_next = False
-    for tok in rest:
-        if skip_next:
-            skip_next = False
-            continue
-        if tok in ("-loglevel", "-progress"):
-            skip_next = True  # also drop the value token that follows
-            continue
-        if tok in ("-hide_banner", "-stats", "-nostats"):
-            continue
-        cleaned.append(tok)
+    cleaned, _ = _split_opts(
+        args[1:],
+        ("-loglevel", "-progress"),
+        flags=("-hide_banner", "-stats", "-nostats"),
+    )
     # -nostdin in both modes (+ stdin=DEVNULL at the launch): a transcode reads
     # from -i, never the tty, so ffmpeg has no reason to grab the terminal — and
     # if it does, a Ctrl-C mid-encode kills it before it restores echo, wedging
@@ -1392,7 +1364,7 @@ def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
             "-progress",
             "pipe:1",
         ]
-    return [exe, *flags, *cleaned]
+    return [args[0], *flags, *cleaned]
 
 
 def _to_int(value: str, default: int) -> int:

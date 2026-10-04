@@ -13,7 +13,7 @@ from octacam.writer import (
     FfmpegVideoWriter,
     RawVideoWriter,
     _color_range_args,
-    _split_vf,
+    _split_opts,
     build_encode_args,
     find_ffmpeg,
     transcode_encoded,
@@ -242,12 +242,18 @@ def test_build_encode_args_uses_source_and_input_pix_fmt():
     assert args[args.index("-i") + 1] == "in.raw"
 
 
-def test_split_vf_pulls_the_user_filter():
+def test_split_opts_pulls_options_and_their_values():
+    vf = ("-vf", "-filter:v")
     tokens = ["-c:v", "libx264", "-vf", "eq=contrast=2", "-crf", "18"]
-    assert _split_vf(tokens) == (["-c:v", "libx264", "-crf", "18"], "eq=contrast=2")
-    # -filter:v is treated the same as -vf.
-    assert _split_vf(["-filter:v", "hflip"]) == ([], "hflip")
-    assert _split_vf(["-c:v", "libx264"]) == (["-c:v", "libx264"], "")
+    rest = ["-c:v", "libx264", "-crf", "18"]
+    assert _split_opts(tokens, vf) == (rest, ["eq=contrast=2"])
+    both = ["-filter:v", "hflip", "-vf", "vflip"]
+    assert _split_opts(both, vf) == ([], ["hflip", "vflip"])
+    assert _split_opts(["-c:v", "libx264"], vf) == (["-c:v", "libx264"], [])
+    # A trailing option with no value is dropped; flags go without a value.
+    assert _split_opts(["-y", "-vf"], vf) == (["-y"], [])
+    flagged = ["-stats", "-i", "x"]
+    assert _split_opts(flagged, (), flags=("-stats",)) == (["-i", "x"], [])
 
 
 def test_build_encode_args_merges_user_vf():
