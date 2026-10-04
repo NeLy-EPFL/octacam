@@ -2,6 +2,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 from helpers import wait_until
@@ -16,6 +17,7 @@ from octacam.controller import (
     normalize_save_dir,
     sanitize_camera_name,
 )
+from octacam.transform import DisplayTransform
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 # Where a recording writes everything but its videos (transform.
@@ -23,27 +25,56 @@ EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 INFO_DIR = "octacam_recording"
 
 
+def _finished_camera(name="cam0", **fields):
+    """A camera after its recording, with every stat the summary, the timestamps
+    file and the sync check read: an empty, flawless take unless overridden."""
+    stats = {
+        "name": name,
+        "serial_number": name,
+        "display_transform": DisplayTransform(),
+        "recorded_frame_size": (320, 240),
+        "pixel_format": "Mono8",
+        "mean_fps": 0.0,
+        "frames_recorded": 0,
+        "dropped_count": 0,
+        "dropped_indices": [],
+        "missed_pulses": [],
+        "writer_dropped": 0,
+        "writer_skipped": 0,
+        "writer_skipped_pulses": [],
+        "late_pulses": [],
+        "extra_frames": 0,
+        "primed_frames": 0,
+        "clock_mismatch": False,
+        "timestamp_glitches": [],
+        "unclocked_frames": 0,
+        "stream_statistics": {},
+        "start_timestamp_ns": None,
+        "host_fallback_count": 0,
+        "writer_failed": False,
+        "frame_timestamps": [],
+        "frame_dropped": [],
+        "frame_missed": [],
+        "frame_pulse_index": [],
+        "frame_arrival_ns": [],
+    }
+    return SimpleNamespace(**{**stats, **fields})
+
+
 # ------------------------------------------------------------------- units
 
 
 def test_build_recording_summary():
-    from types import SimpleNamespace
-
     from octacam.controller import build_recording_summary
-    from octacam.transform import DisplayTransform
 
-    cam = SimpleNamespace(
-        name="cam0",
+    cam = _finished_camera(
         serial_number="S0",
         recorded_frame_size=(240, 320),
-        pixel_format="Mono8",
         mean_fps=99.97,
         frames_recorded=500,
         dropped_count=2,
         dropped_indices=[137, 411],
         start_timestamp_ns=123,
-        host_fallback_count=0,
-        writer_failed=False,
         display_transform=DisplayTransform(rotation_deg=90),
     )
     settings = RecordingSettings(
@@ -65,7 +96,6 @@ def test_build_recording_summary():
     assert entry["file"] == "cam0.mkv"
     assert entry["pixel_format"] == "Mono8"
     assert entry["dropped_indices"] == [137, 411]
-    # A camera that predates pulse accounting reads as having none.
     assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
     assert entry["writer_dropped"] == 0 and entry["stream"] == {}
     assert entry["writer_skipped"] == 0 and entry["writer_skipped_pulse_indices"] == []
@@ -89,30 +119,20 @@ BASLER = DeliveryProfile("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 
 GS3 = DeliveryProfile("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
 
 
-def _sync_camera(name, latency_ns, *, late_pulses=0, frames=16, **extra):
+def _sync_camera(name, latency_ns, *, started_late=0, frames=16, **extra):
     """A finished camera as _check_sync reads it: ``frames`` frames of a train at
     125 fps, each reaching the host ``latency_ns`` after its pulse, the whole
-    video ``late_pulses`` pulses behind the train."""
-    from types import SimpleNamespace
-
+    video ``started_late`` pulses behind the train."""
     t0 = 1_700_000_000_000_000_000
-    fields = {
-        "name": name,
-        "serial_number": name,
-        "frames_recorded": frames,
-        "missed_pulses": [],
-        "writer_dropped": 0,
-        "extra_frames": 0,
-        "clock_mismatch": False,
-        "unclocked_frames": 0,
-        "timestamp_glitches": [],
-        "frame_arrival_ns": [
-            t0 + (p + late_pulses) * PERIOD_125_FPS + latency_ns for p in range(frames)
+    return _finished_camera(
+        name,
+        frames_recorded=frames,
+        frame_arrival_ns=[
+            t0 + (p + started_late) * PERIOD_125_FPS + latency_ns for p in range(frames)
         ],
-        "frame_pulse_index": list(range(frames)),
+        frame_pulse_index=list(range(frames)),
         **extra,
-    }
-    return SimpleNamespace(**fields)
+    )
 
 
 def _sync_controller(cameras, profiles):
@@ -185,7 +205,7 @@ def test_check_sync_still_catches_a_like_camera_a_pulse_late():
     cams = [
         _sync_camera("b0", 6_700_000),
         _sync_camera("f0", 12_700_000),
-        _sync_camera("f1", 12_600_000, late_pulses=1),
+        _sync_camera("f1", 12_600_000, started_late=1),
     ]
     sync = _sync_controller(cams, {"b0": BASLER, "f0": GS3, "f1": GS3})._check_sync(
         completed=True
@@ -199,7 +219,7 @@ def test_check_sync_still_catches_a_like_camera_a_pulse_late():
 
 
 def test_check_sync_compares_a_camera_without_a_profile_with_none():
-    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, late_pulses=1)]
+    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, started_late=1)]
     sync = _sync_controller(cams, {"f0": GS3, "f1": None})._check_sync(completed=True)
     assert sync["ok"] and sync["start_offsets"] == {}, sync
     assert len(sync["notes"]) == 1
@@ -215,31 +235,10 @@ def test_check_sync_flags_frames_the_writer_skipped():
     assert not sync["ok"]
     (warning,) = sync["warnings"]
     assert "f1" in warning and "2 frame(s)" in warning and "pulse_index" in warning
-    from types import SimpleNamespace
-
     from octacam.controller import build_recording_summary
-    from octacam.transform import DisplayTransform
 
     summary = build_recording_summary(
-        RecordingSettings(fps=125.0),
-        [
-            SimpleNamespace(
-                **vars(cam),
-                recorded_frame_size=(2048, 2048),
-                pixel_format="Mono8",
-                mean_fps=125.0,
-                dropped_count=0,
-                dropped_indices=[],
-                start_timestamp_ns=1,
-                host_fallback_count=0,
-                writer_failed=False,
-                display_transform=DisplayTransform(),
-            )
-            for cam in cams
-        ],
-        0,
-        aborted=False,
-        sync=sync,
+        RecordingSettings(fps=125.0), cams, 0, aborted=False, sync=sync
     )
     entry = summary["cameras"][1]
     assert entry["writer_skipped"] == 2 and entry["writer_skipped_pulse_indices"] == [7, 8]
@@ -263,37 +262,41 @@ def test_timestamp_source_derivation():
 
 
 def test_build_timestamps_arrays():
-    from types import SimpleNamespace
-
     import numpy as np
 
     from octacam.controller import build_timestamps_arrays
 
+    def camera(name, timestamps, dropped):
+        n = len(timestamps)
+        return _finished_camera(
+            name,
+            frame_timestamps=timestamps,
+            frame_dropped=dropped,
+            frame_missed=dropped[:n],
+            frame_pulse_index=list(range(n)),
+            frame_arrival_ns=[t + 5 for t in timestamps],
+        )
+
     cams = [
-        SimpleNamespace(
-            name="cam0",
-            frame_timestamps=[10, 20, 30],
-            frame_dropped=[False, True, False],
-        ),
+        camera("cam0", [10, 20, 30], [False, True, False]),
         # Different length (ragged) — long format handles it naturally.
-        SimpleNamespace(
-            name="cam1",
-            frame_timestamps=[100, 200],
-            frame_dropped=[False, False],
-        ),
+        camera("cam1", [100, 200], [False, False]),
         # Zero-frame camera contributes empty arrays.
-        SimpleNamespace(name="cam2", frame_timestamps=[], frame_dropped=[]),
+        camera("cam2", [], []),
         # Defensive: a length skew truncates to the shared minimum, never raises.
-        SimpleNamespace(
-            name="cam3", frame_timestamps=[1, 2, 3], frame_dropped=[True]
-        ),
+        camera("cam3", [1, 2, 3], [True]),
     ]
     arrays = build_timestamps_arrays(cams)
 
     assert arrays["cam0/timestamp_ns"].dtype == np.int64
     assert arrays["cam0/dropped"].dtype == np.bool_
+    assert arrays["cam0/missed"].dtype == np.bool_
+    assert arrays["cam0/pulse_index"].dtype == np.int64
+    assert arrays["cam0/arrival_ns"].dtype == np.int64
     assert list(arrays["cam0/timestamp_ns"]) == [10, 20, 30]
     assert list(arrays["cam0/dropped"]) == [False, True, False]
+    assert list(arrays["cam0/pulse_index"]) == [0, 1, 2]
+    assert list(arrays["cam0/arrival_ns"]) == [15, 25, 35]
     assert list(arrays["cam1/timestamp_ns"]) == [100, 200]
     assert len(arrays["cam2/timestamp_ns"]) == 0
     assert len(arrays["cam2/dropped"]) == 0

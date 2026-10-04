@@ -358,13 +358,6 @@ def _capped(indices: list[int]) -> list[int]:
     return list(indices[:SUMMARY_INDEX_LIMIT])
 
 
-def _writer_skipped(camera) -> tuple[int, list[int]]:
-    """How many frames the writer refused that were skipped rather than filled,
-    and which (read tolerantly: a camera may predate the counters)."""
-    indices = list(getattr(camera, "writer_skipped_pulses", None) or [])
-    return int(getattr(camera, "writer_skipped", 0) or len(indices)), indices
-
-
 class DeliveryProfile(NamedTuple):
     """What a frame's trigger-to-host delay depends on (see
     RecordingController._check_sync)."""
@@ -452,6 +445,7 @@ def build_recording_summary(
         transform = camera.display_transform
         applied = settings.record_form == "display" and not transform.is_identity
         size = camera.recorded_frame_size
+        missed, late = camera.missed_pulses, camera.late_pulses
         cams.append(
             {
                 "name": camera.name,
@@ -464,21 +458,19 @@ def build_recording_summary(
                 "frames": camera.frames_recorded,
                 "dropped": camera.dropped_count,
                 "dropped_indices": _capped(camera.dropped_indices),
-                # Pulse accounting (read tolerantly: a duck-typed camera, as in
-                # tests or a remote node's summary, may predate these fields).
-                "missed_pulses": len(missed := list(getattr(camera, "missed_pulses", []))),
+                "missed_pulses": len(missed),
                 "missed_pulse_indices": _capped(missed),
-                "writer_dropped": getattr(camera, "writer_dropped", 0),
-                "writer_skipped": (skipped := _writer_skipped(camera))[0],
-                "writer_skipped_pulse_indices": _capped(skipped[1]),
-                "late_frames": len(late := list(getattr(camera, "late_pulses", []))),
+                "writer_dropped": camera.writer_dropped,
+                "writer_skipped": camera.writer_skipped,
+                "writer_skipped_pulse_indices": _capped(camera.writer_skipped_pulses),
+                "late_frames": len(late),
                 "late_pulse_indices": _capped(late),
-                "extra_frames": getattr(camera, "extra_frames", 0),
-                "primed_frames": getattr(camera, "primed_frames", 0),
-                "clock_mismatch": getattr(camera, "clock_mismatch", False),
-                "timestamp_glitches": getattr(camera, "timestamp_glitches", []),
-                "unclocked_frames": getattr(camera, "unclocked_frames", 0),
-                "stream": getattr(camera, "stream_statistics", {}),
+                "extra_frames": camera.extra_frames,
+                "primed_frames": camera.primed_frames,
+                "clock_mismatch": camera.clock_mismatch,
+                "timestamp_glitches": camera.timestamp_glitches,
+                "unclocked_frames": camera.unclocked_frames,
+                "stream": camera.stream_statistics,
                 "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
                     camera.name
                 ),
@@ -559,13 +551,12 @@ def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
         series = {
             "timestamp_ns": (camera.frame_timestamps, np.int64),
             "dropped": (camera.frame_dropped, bool),
-            "missed": (getattr(camera, "frame_missed", None), bool),
-            "pulse_index": (getattr(camera, "frame_pulse_index", None), np.int64),
-            "arrival_ns": (getattr(camera, "frame_arrival_ns", None), np.int64),
+            "missed": (camera.frame_missed, bool),
+            "pulse_index": (camera.frame_pulse_index, np.int64),
+            "arrival_ns": (camera.frame_arrival_ns, np.int64),
         }
-        present = {k: v for k, v in series.items() if v[0] is not None}
-        n = min(len(values) for values, _dtype in present.values())
-        for key, (values, dtype) in present.items():
+        n = min(len(values) for values, _dtype in series.values())
+        for key, (values, dtype) in series.items():
             arrays[f"{camera.name}/{key}"] = np.asarray(values[:n], dtype=dtype)
     return arrays
 
@@ -1589,7 +1580,7 @@ class RecordingController:
         return [
             camera.name
             for camera in self.camera_system
-            if camera.name in recording and getattr(camera, "primed_frames", 1) == 0
+            if camera.name in recording and camera.primed_frames == 0
         ]
 
     def _resume_preview(self) -> str | None:
@@ -2088,14 +2079,13 @@ class RecordingController:
                     "the writer queue was full and were filled with the previous "
                     "frame (the encoder could not keep up)"
                 )
-            skipped, _indices = _writer_skipped(camera)
-            if skipped:
+            if camera.writer_skipped:
                 ok = False
                 warnings.append(
-                    f"Camera {name}: {skipped} frame(s) the writer could not accept "
-                    "were skipped, not filled (the encoder or disk could not keep "
-                    "up), so video frame k is no longer pulse k; map frames to "
-                    f"pulses with pulse_index in {TIMESTAMPS_FILENAME}"
+                    f"Camera {name}: {camera.writer_skipped} frame(s) the writer "
+                    "could not accept were skipped, not filled (the encoder or disk "
+                    "could not keep up), so video frame k is no longer pulse k; map "
+                    f"frames to pulses with pulse_index in {TIMESTAMPS_FILENAME}"
                 )
             if camera.extra_frames:
                 warnings.append(
