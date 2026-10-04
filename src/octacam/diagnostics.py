@@ -1056,7 +1056,6 @@ def _classify(
     encode_min = ceilings.encode_min
     recs: list[str] = []
 
-    # Cameras throttling each other point at the shared transport (TRANSFER).
     bus_contended = ceilings.bus_contended
 
     # A target right at a ceiling is attributed to that stage.
@@ -1259,7 +1258,6 @@ def diagnose(
 
     emit(PHASE_ACQUIRE, f"({duration_s:g}s)")
     grab_fps = measure_grab_ceiling(cameras, duration_s, cancel=cancel)
-    # A camera that failed to arm is absent, which would flatter grab_min.
     if not _cancelled(cancel):
         missing = [c.name for c in cameras if c.serial_number not in grab_fps]
         if missing:
@@ -1386,8 +1384,6 @@ def diagnose(
         hi = predicted * 1.1
         # lo is a rate already known to be *stable* when the target was.
         lo = target_fps if outcome.stable_passed else min(target_fps, predicted * 0.5)
-        # A stable record rate cannot exceed what the camera can acquire or the
-        # encoder can drain in isolation, so the reported max is capped here.
         ceiling_cap = predicted
 
         def probe(fps: float) -> bool:
