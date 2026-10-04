@@ -14,6 +14,7 @@ from helpers import wait_until
 from typer.testing import CliRunner
 
 import octacam
+from octacam.cameras import BackendError, BackendUnavailable
 from octacam.cli import (
     _LOCK_UNAVAILABLE,
     _acquire_instance_lock,
@@ -146,14 +147,14 @@ def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("error_type", "expected"),
     [
-        ("BackendError", "Could not open the cameras: {e}. They may already be in use"),
-        ("BackendUnavailable", "{e}"),
-        ("ValueError", "Camera initialization failed: {e}"),
+        (BackendError, "Could not open the cameras: {e}. They may already be in use"),
+        (BackendUnavailable, "{e}"),
+        (ValueError, "Camera initialization failed: {e}"),
     ],
 )
-def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error, expected):
+def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error_type, expected):
     # The GUI serves the page before opening the cameras, so a camera-open
     # failure (e.g. another octacam holds them — SDKs open USB3 devices
     # exclusively) does not exit the process. It is surfaced in the GUI: the
@@ -163,7 +164,6 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error, expected):
     from octacam.config import CameraConfig, OctacamConfig
     from octacam.controller import RecordingSettings
 
-    error_type = getattr(cameras_mod, error, None) or ValueError
     message = "The device is controlled by another application."
     expected = expected.format(e=error_type(message))
 
@@ -368,11 +368,12 @@ def test_record_holds_the_capture_marker_until_the_cameras_are_closed(
     # and controller.close(), which finalizes it and releases the cameras.
     import octacam.cli as cli_mod
     from octacam import session_cache
+    from octacam.config import CameraConfig, OctacamConfig
     from octacam.controller import RecordingSettings
 
     cam = SimpleNamespace(serial_number="s1", name="cam1", frames_recorded=1)
-    config = SimpleNamespace(
-        cameras=[cam], backend="fake", record=object(), transcode=None, transfer=None
+    config = OctacamConfig(
+        cameras=[CameraConfig(serial_number="s1", name="cam1")], backend="fake"
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
