@@ -362,3 +362,50 @@ def test_incomplete_image_reports_carry_the_grabs_running_total(backend, monkeyp
     assert "delivered an incomplete image" in messages[0]
     assert "2 incomplete images discarded in this grab (1 since" in messages[1]
     assert "3 incomplete images discarded in this grab (1 since" in messages[2]
+
+
+# ---------------------------------------------------------- acquisition start
+class RefusedEnumNode(EnumNode):
+    def SetIntValue(self, value):
+        raise FakeSpinnakerException("node is not writable")
+
+
+def _count_starts(backend):
+    started = []
+    backend._cam.BeginAcquisition = lambda: started.append(True)
+    return started
+
+
+def test_record_starts_although_its_mode_and_buffer_handling_are_refused(backend):
+    """Only BeginAcquisition is fatal, as in spinnaker_c: the camera defaults to
+    Continuous and the buffer handling only tunes the stream. The fake node map
+    has no AcquisitionMode, and its stream refuses the buffer handling but still
+    takes the record buffer count."""
+    stream = {
+        "StreamBufferHandlingMode": RefusedEnumNode(
+            "NewestOnly", ["NewestOnly", "OldestFirst"]
+        ),
+        "StreamBufferCountMode": EnumNode("Auto", ["Auto", "Manual"]),
+        "StreamBufferCountManual": IntNode(10, lambda: 1000),
+    }
+    backend._cam.GetTLStreamNodeMap = lambda: SimpleNamespace(GetNode=stream.get)
+    started = _count_starts(backend)
+    assert backend.start_grab_record() is True
+    assert started == [True] and backend.is_grabbing()
+    assert stream["StreamBufferCountManual"].value == flir.RECORD_STREAM_BUFFERS
+
+
+def test_preview_starts_without_a_stream_node_map(backend):
+    started = _count_starts(backend)  # the fixture's stream node map raises
+    backend.start_grab_preview()
+    assert started == [True] and backend.is_grabbing()
+
+
+def test_a_refused_begin_acquisition_fails_the_start(backend):
+    def refuse():
+        raise FakeSpinnakerException("insufficient system resources")
+
+    backend._cam.BeginAcquisition = refuse
+    with pytest.raises(BackendError, match="insufficient system resources"):
+        backend.start_grab_preview()
+    assert not backend.is_grabbing()

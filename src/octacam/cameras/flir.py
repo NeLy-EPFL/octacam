@@ -67,6 +67,18 @@ RECORD_STREAM_BUFFERS = 128
 INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 
+def _set_buffer_handling(spin, snodemap, mode: str, serial: str) -> None:
+    """Best-effort: the stream's buffer handling, NewestOnly for preview (like
+    pylon's LatestImageOnly) or OldestFirst for recording (like OneByOne)."""
+    try:
+        handling = spin.CEnumerationPtr(snodemap.GetNode("StreamBufferHandlingMode"))
+        entry = handling.GetEntryByName(mode)
+        if spin.IsAvailable(entry) and spin.IsReadable(entry):
+            handling.SetIntValue(entry.GetValue())
+    except spin.SpinnakerException as e:
+        log.debug("Could not set buffer mode %s on camera %s: %s", mode, serial, e)
+
+
 def _set_stream_buffers(spin, snodemap, buffers: int, serial: str) -> None:
     """Best-effort: a manual stream buffer count of ``buffers`` (≤ the max)."""
     try:
@@ -581,19 +593,22 @@ class FlirBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         return out
 
     def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
+        # Only BeginAcquisition is fatal, as in spinnaker_c: FLIR defaults to
+        # Continuous, and the stream settings only tune its buffering.
         spin = _spin()
         try:
             self._set_enum("AcquisitionMode", "Continuous")
-            # Buffer handling lives on the transport-layer stream nodemap.
+        except BackendError as e:
+            log.debug("Could not set AcquisitionMode on camera %s: %s", self._serial, e)
+        try:
             snodemap = self._cam.GetTLStreamNodeMap()
-            handling = spin.CEnumerationPtr(
-                snodemap.GetNode("StreamBufferHandlingMode")
-            )
-            entry = handling.GetEntryByName(buffer_mode)
-            if spin.IsAvailable(entry) and spin.IsReadable(entry):
-                handling.SetIntValue(entry.GetValue())
+        except spin.SpinnakerException as e:
+            log.debug("No stream node map on camera %s: %s", self._serial, e)
+        else:
+            _set_buffer_handling(spin, snodemap, buffer_mode, self._serial)
             if buffers:
                 _set_stream_buffers(spin, snodemap, buffers, self._serial)
+        try:
             self._cam.BeginAcquisition()
         except spin.SpinnakerException as e:
             # Name the camera (mirrors the Basler "insufficient resources" hint).
