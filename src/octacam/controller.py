@@ -561,7 +561,7 @@ class RecordingController:
         self._recordings_made = 0
         self._lock = threading.RLock()
         self._state = "idle"
-        # Gates that refuse a recording start while set (see _busy_reason):
+        # Gates that refuse a recording or a benchmark while set (see _busy_reason):
         # a camera reconfiguration is running off the lock;
         self._reconfiguring = False
         # a finished take's off-lock tail (plugin disarm, preview re-arm) still
