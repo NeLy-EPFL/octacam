@@ -73,15 +73,15 @@ def test_read_param_rejects_unknown(previewing_system):
 
 def test_set_geometry_resizes_and_keeps_previewing(previewing_system):
     cam = previewing_system.camera_at(0)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     cam.set_geometry(width=640, height=480)
     assert (cam.width, cam.height) == (640, 480)
     # display placeholder reshaped to the new ROI; preview resumed
     frame = cam.frame_for_display.pop()
     assert frame is not None and frame.shape == (480, 640)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     # the other camera is unaffected
-    assert previewing_system.camera_at(1)._camera.IsGrabbing()
+    assert previewing_system.camera_at(1).backend.is_grabbing()
 
 
 def test_save_params_round_trips_and_normalizes_trigger(previewing_system):
@@ -141,7 +141,7 @@ def test_set_feature_live_and_geometry(previewing_system):
     assert abs(cam.read_feature("ExposureTime")["value"] - 3210.0) < 2.0
     # A Width write cycles the grab and keeps previewing.
     cam.set_feature("Width", 512)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     assert cam.read_feature("Width")["value"] == 512
 
 
@@ -202,7 +202,7 @@ def test_offset_editable_and_written_via_grab_cycle(previewing_system):
     # A write cycles the grab (like Width/Height), lands, and preview resumes —
     # a plain mid-grab write would be rejected by the SDK.
     cam.set_feature("OffsetX", 16)
-    assert cam._camera.IsGrabbing()
+    assert cam.backend.is_grabbing()
     off = cam.read_feature("OffsetX")
     assert abs(off["value"] - 16) <= (off["inc"] or 1)
 

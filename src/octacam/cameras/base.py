@@ -456,15 +456,6 @@ class Camera:
         self._started = False
 
     @property
-    def _camera(self):
-        """Back-compat/test shim: the underlying SDK camera handle, if any.
-
-        Only meaningful for the Basler backend (whose ``raw`` is the pylon
-        ``InstantCamera``); other backends expose no such handle.
-        """
-        return getattr(self._backend, "raw", None)
-
-    @property
     def backend(self) -> CameraBackend:
         """The underlying :class:`CameraBackend` (for diagnostics/advanced drivers).
 
