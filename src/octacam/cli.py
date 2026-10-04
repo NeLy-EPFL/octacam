@@ -657,23 +657,21 @@ def gui(
                 cam_future = ex.submit(_open_cameras)
                 ex.submit(plugins.setup_all)
                 opened_system = cam_future.result()
-        except BackendUnavailable as e:
-            controller.fail_init(str(e))
-            _publish()
-            return
-        except BackendError as e:
-            # Most often another octacam already holds the cameras (vendor SDKs
-            # open USB3 devices exclusively), or one is disconnected.
-            controller.fail_init(
-                f"Could not open the cameras: {e}. They may already be in use by "
-                "another octacam instance on this rig, or disconnected — only one "
-                "process can open them at a time."
-            )
-            _publish()
-            return
         except Exception as e:  # never let the init thread die silently
-            log.exception("Camera initialization failed")
-            controller.fail_init(f"Camera initialization failed: {e}")
+            if isinstance(e, BackendUnavailable):
+                message = str(e)
+            elif isinstance(e, BackendError):
+                # Most often another octacam already holds the cameras (vendor SDKs
+                # open USB3 devices exclusively), or one is disconnected.
+                message = (
+                    f"Could not open the cameras: {e}. They may already be in use by "
+                    "another octacam instance on this rig, or disconnected — only one "
+                    "process can open them at a time."
+                )
+            else:
+                log.exception("Camera initialization failed")
+                message = f"Camera initialization failed: {e}"
+            controller.fail_init(message)
             _publish()
             return
 

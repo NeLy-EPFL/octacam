@@ -145,15 +145,26 @@ def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
     assert "already running for this config" in result.output
 
 
-def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
-    # The GUI now serves the page before opening the cameras, so a camera-open
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("BackendError", "Could not open the cameras: {e}. They may already be in use"),
+        ("BackendUnavailable", "{e}"),
+        ("ValueError", "Camera initialization failed: {e}"),
+    ],
+)
+def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error, expected):
+    # The GUI serves the page before opening the cameras, so a camera-open
     # failure (e.g. another octacam holds them — SDKs open USB3 devices
-    # exclusively) no longer exits the process. It is surfaced in the GUI: the
+    # exclusively) does not exit the process. It is surfaced in the GUI: the
     # background init calls controller.fail_init with a clean message (not a raw
     # SDK traceback), the server stays up, and the browser shows the reason.
     import octacam.cameras as cameras_mod
-    from octacam.cameras import BackendError
     from octacam.controller import RecordingSettings
+
+    error_type = getattr(cameras_mod, error, None) or ValueError
+    message = "The device is controlled by another application."
+    expected = expected.format(e=error_type(message))
 
     real_cs = cameras_mod.CameraSystem
 
@@ -165,7 +176,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
             return real_cs.pending(backend)
 
         def __init__(self, *_a, **_k):
-            raise BackendError("The device is controlled by another application.")
+            raise error_type(message)
 
     monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
 
@@ -199,7 +210,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output  # served + shut down cleanly
     ctrl = captured["controller"]
     assert ctrl.ready is False
-    assert "in use by another octacam" in (ctrl.init_error or "")
+    assert (ctrl.init_error or "").startswith(expected)
 
 
 def _fake_camera_system(cam):
