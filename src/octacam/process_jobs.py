@@ -237,6 +237,14 @@ def _cleanup_dir(jd: Path) -> None:
         shutil.rmtree(jd)
 
 
+def _job_dirs() -> list[Path]:
+    """Every job directory on disk; none when the jobs directory is unreadable."""
+    try:
+        return [jd for jd in jobs_dir().iterdir() if jd.is_dir()]
+    except OSError:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Spawner (parent side)
 # ---------------------------------------------------------------------------
@@ -491,13 +499,7 @@ def list_jobs() -> list[JobStatus]:
     """All jobs (reconciled + pruned), newest first."""
     prune()
     out: list[JobStatus] = []
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return out
-    for jd in entries:
-        if not jd.is_dir():
-            continue
+    for jd in _job_dirs():
         status = read_status(jd)
         if status is None:
             continue
@@ -569,12 +571,8 @@ def resume(status: JobStatus) -> bool:
 def prune() -> None:
     """Remove finished job dirs older than the retention window. Best-effort."""
     cutoff = time.time() - RETENTION_DAYS * 86400
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return
-    for jd in entries:
-        if not jd.is_dir() or is_live(jd):
+    for jd in _job_dirs():
+        if is_live(jd):
             continue
         try:
             mtime = _status_path(jd).stat().st_mtime
@@ -622,13 +620,7 @@ def clear_finished() -> tuple[int, int]:
     those left in place.
     """
     removed = kept = 0
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return 0, 0
-    for jd in entries:
-        if not jd.is_dir():
-            continue
+    for jd in _job_dirs():
         if _is_finished(jd):
             _cleanup_dir(jd)
             removed += 1
@@ -645,13 +637,7 @@ def job_dir_counts() -> tuple[int, int]:
     still-arming ``starting`` job counts as live).
     """
     live = finished = 0
-    try:
-        entries = list(jobs_dir().iterdir())
-    except OSError:
-        return 0, 0
-    for jd in entries:
-        if not jd.is_dir():
-            continue
+    for jd in _job_dirs():
         if _is_finished(jd):
             finished += 1
         else:
