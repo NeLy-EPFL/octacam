@@ -1,6 +1,7 @@
 """Web backend integration tests against the camera emulator."""
 
 import asyncio
+import contextlib
 import json
 import math
 import time
@@ -733,6 +734,179 @@ def test_live_transform_is_baked_into_display_recording(client, tmp_path):
     assert plain["transform_applied"] is False
     # A 90deg rotation swaps the recorded dimensions vs the un-rotated camera.
     assert (rotated["width"], rotated["height"]) == (plain["height"], plain["width"])
+
+
+def _state(client) -> str:
+    return client.get("/api/state").json()["state"]
+
+
+@pytest.mark.parametrize(("route", "aborted"), [("stop", False), ("abort", True)])
+def test_recording_stop_and_abort_end_a_running_take(client, tmp_path, route, aborted):
+    save_dir = tmp_path / "rec" / "001"
+    # A take only the request can end within this test's timeouts.
+    assert client.put("/api/settings", json={"duration_s": 120}).status_code == 200
+    assert client.post("/api/recording/start", json={}).status_code == 202
+    assert wait_until(lambda: _state(client) == "recording", timeout=20)
+
+    response = client.post(f"/api/recording/{route}")
+
+    assert response.status_code == 202
+    assert wait_until(lambda: _state(client) == "preview", timeout=20)
+    summary = json.loads(
+        (save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text()
+    )
+    assert summary["aborted"] is aborted
+    assert summary["completed"] is False
+    assert all(c["frames"] > 0 for c in summary["cameras"])
+    # A stopped take keeps its folder and the next take gets a new one; an
+    # aborted take's folder is reused.
+    next_save_dir = client.get("/api/settings").json()["save_dir"]
+    assert next_save_dir.endswith("001" if aborted else "002")
+
+
+def _next_message(ws, kind: str, timeout: float = 20.0) -> dict:
+    """The next text message of type ``kind`` on ``ws``, skipping everything
+    else. Telemetry arrives twice a second, so the deadline is always checked."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        message = ws.receive()
+        if message.get("text"):
+            payload = json.loads(message["text"])
+            if payload["type"] == kind:
+                return payload
+    raise AssertionError(f"no {kind!r} message within {timeout} s")
+
+
+def test_benchmark_cancel_ends_a_running_benchmark(client):
+    with client.websocket_connect("/api/ws") as ws:
+        # A benchmark only the cancel can end within this test's timeouts.
+        started = client.post(
+            "/api/diagnostics/run", json={"duration_s": 60, "sink": "null"}
+        )
+        assert started.status_code == 202
+        _next_message(ws, "diagnostics_progress")
+
+        cancelled = client.post("/api/diagnostics/cancel")
+
+        assert cancelled.status_code == 202
+        report = _next_message(ws, "diagnostics")
+    assert any("cancel" in note.lower() for note in report["notes"])
+    assert wait_until(lambda: _state(client) == "preview", timeout=20)
+
+
+def test_serial_ports_lists_the_detected_ports_without_opening_any(client, monkeypatch):
+    from octacam.serial_ports import SerialPort
+
+    ports = [
+        SerialPort(
+            device="/dev/ttyACM0",
+            description="",
+            manufacturer="Arduino",
+            product=None,
+            vid=0x2341,
+            pid=0x0070,
+            serial_number="SN123",
+            hwid="",
+            board_name="Arduino Nano ESP32",
+            likely_microcontroller=True,
+            likely_arduino=True,
+        ),
+        SerialPort(
+            device="/dev/ttyS0",
+            description="",
+            manufacturer=None,
+            product=None,
+            vid=None,
+            pid=None,
+            serial_number=None,
+            hwid="",
+            board_name="generic serial",
+            likely_microcontroller=False,
+            likely_arduino=False,
+        ),
+    ]
+    monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: ports)
+
+    def open_port(*args, **kwargs):
+        raise AssertionError("listing the serial ports opened one")
+
+    monkeypatch.setattr("serial.Serial", open_port)
+
+    response = client.get("/api/serial/ports")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ports": [
+            {
+                "device": "/dev/ttyACM0",
+                "board_name": "Arduino Nano ESP32",
+                "vid_pid": "2341:0070",
+                "serial_number": "SN123",
+                "likely_arduino": True,
+                "likely_microcontroller": True,
+            },
+            {
+                "device": "/dev/ttyS0",
+                "board_name": "generic serial",
+                "vid_pid": "?:?",
+                "serial_number": None,
+                "likely_arduino": False,
+                "likely_microcontroller": False,
+            },
+        ]
+    }
+
+
+@contextlib.contextmanager
+def _fake_rig_client(tmp_path, serials):
+    """A client for a rig of fake cameras whose config lists ``serials``."""
+    system = CameraSystem(serials, backend="fake")
+    settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
+    controller = RecordingController(system, settings)
+    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        controller.close()
+
+
+def test_system_lists_a_configured_camera_that_was_not_found(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
+
+    with _fake_rig_client(tmp_path, ["FAKE-0", "FAKE-9", "FAKE-1"]) as client:
+        system = client.get("/api/system").json()
+
+    assert system["missing_cameras"] == [{"serial": "FAKE-9", "reason": "not found"}]
+    assert [camera["serial"] for camera in system["cameras"]] == ["FAKE-0", "FAKE-1"]
+
+
+def test_system_lists_a_configured_camera_that_failed_to_open(tmp_path, monkeypatch):
+    from octacam.cameras import BackendError
+    from octacam.cameras.fake import FakeBackend
+
+    monkeypatch.setenv("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
+    open_camera = FakeBackend.open
+
+    def open_all_but_one(self):
+        if self.serial_number == "FAKE-1":
+            raise BackendError("simulated: device busy")
+        open_camera(self)
+
+    monkeypatch.setattr(FakeBackend, "open", open_all_but_one)
+
+    with _fake_rig_client(tmp_path, ["FAKE-0", "FAKE-1"]) as client:
+        system = client.get("/api/system").json()
+
+    [missing] = system["missing_cameras"]
+    assert missing["serial"] == "FAKE-1"
+    assert "failed to open" in missing["reason"]
+    assert "simulated: device busy" in missing["reason"]
+    assert [camera["serial"] for camera in system["cameras"]] == ["FAKE-0"]
+
+
+def test_system_lists_no_missing_camera_for_a_complete_rig(client):
+    assert client.get("/api/system").json()["missing_cameras"] == []
 
 
 def test_transform_endpoint_locked_while_recording(client):
