@@ -322,7 +322,7 @@ def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch, caplo
     def _no_ffprobe():
         raise RuntimeError("No ffprobe executable found: ...")
 
-    monkeypatch.setattr("octacam.writer.find_ffprobe", _no_ffprobe)
+    monkeypatch.setattr(grid_mod, "find_ffprobe", _no_ffprobe)
     _gray_mp4(tmp_path, "a")
     with caplog.at_level(logging.ERROR, logger="octacam"):
         out = grid_mod.build_grid_video(tmp_path, layout=[["a", ""]], dry_run=True)

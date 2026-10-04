@@ -22,12 +22,20 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shlex
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from octacam.writer import ProgressCallback
+from octacam.writer import (
+    DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+    ProgressCallback,
+    _atomic_output,
+    _color_range_args,
+    _run_ffmpeg,
+    _split_opts,
+    find_ffmpeg,
+    find_ffprobe,
+)
 
 log = logging.getLogger("octacam")
 
@@ -163,8 +171,6 @@ def build_grid_video(
     # grid with the real reason instead (the transcodes and the transfer still
     # run), rather than probing every cell only to report the misleading
     # "no probeable mp4 files found".
-    from octacam.writer import find_ffprobe
-
     try:
         ffprobe = find_ffprobe()
     except RuntimeError as e:
@@ -227,17 +233,6 @@ def build_grid_video(
     # One -i per grid cell (real file or lavfi color source), in row-major order.
     # The black lavfi source uses a long duration; xstack's shortest=1 ends the
     # output when the first real video finishes.
-    import shlex
-
-    from octacam.writer import (
-        DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-        _atomic_output,
-        _color_range_args,
-        _run_ffmpeg,
-        _split_opts,
-        find_ffmpeg,
-    )
-
     cmd: list[str] = [find_ffmpeg(), "-y"]
     for p in slot_files:
         if p is not None:
