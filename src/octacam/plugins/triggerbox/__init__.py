@@ -78,7 +78,7 @@ ACK_TIMEOUT_S = 1.0
 CANCEL_ACK_TIMEOUT_S = 0.3
 
 # ---- Wire protocol v2 (must match triggerbox.ino) --------------------------
-# The cancel and identify bytes are shared with twophoton (_serial_link).
+# SerialReaderLink sends the cancel and identify bytes.
 _ARM_MAGIC = 0xA5
 _PROTOCOL_VERSION = 2
 _MAX_FPS = 5000

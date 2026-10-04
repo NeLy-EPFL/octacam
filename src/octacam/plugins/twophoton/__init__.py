@@ -48,7 +48,7 @@ DEFAULT_DURATION_MS = 10_000
 # How long an arm waits for the board's 'A' (sent within ms) before reporting it.
 ACK_TIMEOUT_S = 1.0
 
-# The cancel and identify bytes are shared with triggerbox (_serial_link).
+# SerialReaderLink sends the cancel and identify bytes.
 _ARM_MAGIC = 0xA5
 _ARM_FORMAT = "<BHI"
 
