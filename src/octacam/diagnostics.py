@@ -385,11 +385,9 @@ class DiagnosticReport:
     predicted_max_fps: float = 0.0
     measured_max_fps: float | None = None  # STABLE software-trigger max (confirmed)
     max_confirmed: bool = False  # did measured_max hold the longer confirmation trial
-    freerun_max_fps: float | None = None  # free-run acquisition ceiling (slowest cam)
     hardware_max_fps: float | None = (
         None  # external/free-run system max (measured free-run trial, or min(freerun, encode))
     )
-    transfer_bound: bool = False  # is shared bus bandwidth the limiting factor?
     # Per-camera and aggregate acquisition throughput at the concurrent grab
     # ceiling (MB/s) — the "transfer" dimension, derived from frame size × fps.
     throughput_mbps: dict[str, float] = field(default_factory=dict)
@@ -425,9 +423,7 @@ class DiagnosticReport:
             "predicted_max_fps": _finite(self.predicted_max_fps),
             "measured_max_fps": _finite(self.measured_max_fps),
             "max_confirmed": self.max_confirmed,
-            "freerun_max_fps": _finite(self.freerun_max_fps),
             "hardware_max_fps": _finite(self.hardware_max_fps),
-            "transfer_bound": self.transfer_bound,
             "throughput_mbps": {
                 s: _finite(v) for s, v in self.throughput_mbps.items()
             },
@@ -1570,7 +1566,6 @@ def diagnose(
     report.achievable, report.bottleneck, report.recommendations = _classify(
         target_fps, ceilings, outcome, report.throughput_mbps_total
     )
-    report.transfer_bound = report.bottleneck == TRANSFER
     if report.system_cpu_percent is not None and (
         report.system_cpu_percent > SYSTEM_CPU_WARN_PERCENT
     ):
@@ -1595,7 +1590,6 @@ def diagnose(
     # capped by the encoder when one is measured (a measured free-run trial below
     # refines this).
     if freerun_fps:
-        report.freerun_max_fps = ceilings.freerun_min
         report.hardware_max_fps = min(ceilings.freerun_min, encode_min)
 
     # --- measured free-run end-to-end trial (real free-run/external pipeline) ---

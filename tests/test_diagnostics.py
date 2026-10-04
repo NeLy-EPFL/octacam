@@ -453,10 +453,9 @@ def test_diagnose_measures_freerun_and_hardware_max(fake_system):
     )
     assert set(report.ceilings.freerun_fps) == set(FAKE_SERIALS)
     assert all(v > 0 for v in report.ceilings.freerun_fps.values())
-    assert report.freerun_max_fps is not None and report.freerun_max_fps > 0
     # null sink -> the encoder is not measured, so the hardware max is the
     # free-run acquisition ceiling alone.
-    assert report.hardware_max_fps == pytest.approx(report.freerun_max_fps)
+    assert report.hardware_max_fps == pytest.approx(report.ceilings.freerun_min)
     # The whole report (with the new free-run/hardware fields) is strict JSON.
     payload = json.loads(json.dumps(report.to_dict(), allow_nan=False))
     assert payload["ceilings"]["freerun_min"] is not None
@@ -473,7 +472,6 @@ def test_diagnose_freerun_disabled(fake_system):
         sink="null",
     )
     assert report.ceilings.freerun_fps == {}
-    assert report.freerun_max_fps is None
     assert report.hardware_max_fps is None
 
 
@@ -491,7 +489,7 @@ def test_diagnose_freerun_unsupported_backend_noted(fake_system):
         sink="null",
     )
     assert report.ceilings.freerun_fps == {}
-    assert report.freerun_max_fps is None
+    assert report.hardware_max_fps is None
     assert any("does not support free-run" in n for n in report.notes)
 
 
