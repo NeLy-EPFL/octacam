@@ -272,8 +272,6 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
     ``[transcode]``/``[transfer]`` values seed the GUI's Process fields, which
     are baked into each recording's config snapshot for ``octacam process``
     (``transfer`` is ``None`` when the rig has no ``[transfer]`` section)."""
-    import time as _time
-
     from octacam.config import (
         duration_to_seconds,
         resolve_record_directory,
@@ -282,7 +280,7 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
     )
     from octacam.controller import RecordingSettings
 
-    when = _time.localtime()
+    when = time.localtime()
     return RecordingSettings(
         fps=record.fps,
         duration_s=duration_to_seconds(
@@ -2437,19 +2435,17 @@ def _drive_record_progress(controller, duration_s: float) -> None:
     frame count; off a TTY a periodic log heartbeat stands in (so a piped/cron
     run still shows it is alive). Returns once the recording is no longer active
     — the caller then join()s the monitor to finalize the summary."""
-    import time as _time
-
     poll = 0.1
     if not sys.stderr.isatty():
         next_beat = 0.0
         while controller.recording_active:
-            now = _time.monotonic()
+            now = time.monotonic()
             if now >= next_beat:
                 snap = controller.snapshot()
                 frames = sum(c["frames"] for c in snap["cameras"])
                 log.info("Recording (%s): %d frames captured", snap["state"], frames)
                 next_beat = now + 2.0
-            _time.sleep(poll)
+            time.sleep(poll)
         return
 
     from rich.progress import BarColumn, Progress, TextColumn, TimeRemainingColumn
@@ -2478,7 +2474,7 @@ def _drive_record_progress(controller, duration_s: float) -> None:
                 )
             elif state == "finishing":
                 progress.update(task, description=f"Finishing — {frames} frames")
-            _time.sleep(poll)
+            time.sleep(poll)
         progress.update(task, completed=duration_s)
 
 
