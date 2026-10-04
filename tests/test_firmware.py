@@ -13,6 +13,12 @@ import pytest
 
 from octacam import firmware as fw
 
+
+@pytest.fixture
+def no_flash():
+    """Overrides conftest's stub: this module tests the real discovery and flash."""
+
+
 # ---------------------------------------------------------------------------
 # sketch_fingerprint
 # ---------------------------------------------------------------------------

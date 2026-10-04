@@ -7,9 +7,9 @@ exercised the way a browser actually runs it. This is the automated counterpart
 to the manual "GUI headless render" recipe in CLAUDE.md, and it is what catches
 the class of bug where a backend setting ships without a GUI control.
 
-Opt-in: the ``playwright`` package lives in the ``frontend`` dependency group,
-so the default ``uv run pytest`` skips this whole module (importorskip). Run it
-with::
+Opt-in: conftest collects this module only when the command line names it, and
+the ``playwright`` package lives in the ``frontend`` dependency group (the
+module skips without it). Run it with::
 
     uv run --group frontend pytest tests/test_frontend.py
 

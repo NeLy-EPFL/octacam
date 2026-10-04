@@ -10,6 +10,11 @@ import pytest
 from octacam import serial_ports as sp
 
 
+@pytest.fixture
+def no_usb_reset():
+    """Overrides conftest's stub: this module tests the real reset and wait."""
+
+
 def _port(device, vid=None, pid=None, sn=None, desc="", manuf=None, product=None):
     return SimpleNamespace(
         device=device,
