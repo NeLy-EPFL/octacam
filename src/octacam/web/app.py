@@ -813,6 +813,11 @@ def create_app(
         daemon=True,
     ).start()
 
+    def _require_config_dir() -> Path:
+        if not config_dir:
+            raise HTTPException(400, "No config directory is set for this session")
+        return Path(config_dir)
+
     # Handlers are sync `def`: FastAPI runs them in its thread pool, so blocking
     # SDK, serial and filesystem calls never stall the preview WebSocket's loop.
 
@@ -893,11 +898,6 @@ def create_app(
             raise HTTPException(404, f"No camera at index {index}") from None
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from None
-
-    def _require_config_dir() -> Path:
-        if not config_dir:
-            raise HTTPException(400, "No config directory is set for this session")
-        return Path(config_dir)
 
     # ---------------------------------------------- full device node map (tab)
 
