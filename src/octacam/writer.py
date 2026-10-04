@@ -76,19 +76,9 @@ DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
 # NVENC session limit falls the overflow back to libx264 (resolve_capture_formats).
 NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
 
-# Recorded pixel format -> ffmpeg rawvideo input pixel format / bytes-per-pixel.
-# Mono8 is the invariant every backend records today; the maps give a single
-# seam to extend if a backend ever records Mono10/RGB.
-_INPUT_PIX_FMT = {"Mono8": "gray"}
-_BYTES_PER_PIXEL = {"Mono8": 1}
-
-
-def _input_pix_fmt(pixel_format: str) -> str:
-    return _INPUT_PIX_FMT.get(pixel_format, "gray")
-
-
-def _bytes_per_pixel(pixel_format: str) -> int:
-    return _BYTES_PER_PIXEL.get(pixel_format, 1)
+# Recorded pixel format -> (ffmpeg rawvideo pixel format, bytes per pixel).
+# Every backend records Mono8.
+_RAW_PIXEL_FORMATS = {"Mono8": ("gray", 1)}
 
 
 def _is_limited_range_yuv(pix_fmt: str) -> bool:
@@ -1146,10 +1136,12 @@ def transcode_raw(
             f"no recording_summary.json geometry for {raw_path}; cannot "
             "determine width/height/fps to transcode the raw stream"
         )
+    if pixel_format not in _RAW_PIXEL_FORMATS:
+        raise ValueError(f"cannot transcode {pixel_format} raw video from {raw_path}")
+    input_pix_fmt, bytes_per_pixel = _RAW_PIXEL_FORMATS[pixel_format]
     total_frames = frames
     if total_frames is None and width and height:
-        bpp = _bytes_per_pixel(pixel_format)
-        total_frames = raw_path.stat().st_size // (width * height * bpp)
+        total_frames = raw_path.stat().st_size // (width * height * bytes_per_pixel)
     with _atomic_output(output) as tmp:
         args = build_encode_args(
             find_ffmpeg(),
@@ -1159,7 +1151,7 @@ def transcode_raw(
             height,
             ffmpeg_params,
             source=str(raw_path),
-            input_pix_fmt=_input_pix_fmt(pixel_format),
+            input_pix_fmt=input_pix_fmt,
         )
         _run_ffmpeg(
             args,

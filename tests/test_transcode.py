@@ -134,6 +134,17 @@ def test_transcode_raw_without_geometry_raises(tmp_path):
         transcode_raw(raw, output=tmp_path / "cam.mp4")
 
 
+def test_transcode_raw_refuses_an_unknown_pixel_format(tmp_path):
+    # Read as Mono8, a wider format would decode as garbage frames.
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    with pytest.raises(ValueError, match="Mono12"):
+        transcode_raw(
+            raw, tmp_path / "cam.mp4", width=16, height=12, fps=10.0, pixel_format="Mono12"
+        )
+    assert not (tmp_path / "cam.mp4").exists()
+
+
 # ------------------------------------------------------- progress reporting
 
 
