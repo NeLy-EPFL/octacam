@@ -300,6 +300,11 @@ class CameraTrial:
         }
 
 
+def _slowest(fps: dict[str, float]) -> float:
+    """The slowest camera's rate, or inf when none was measured."""
+    return min(fps.values(), default=float("inf"))
+
+
 @dataclass
 class Ceilings:
     """Isolated per-camera acquisition and encode ceilings (fps).
@@ -322,19 +327,19 @@ class Ceilings:
 
     @property
     def grab_min(self) -> float:
-        return min(self.grab_fps.values()) if self.grab_fps else float("inf")
+        return _slowest(self.grab_fps)
 
     @property
     def encode_min(self) -> float:
-        return min(self.encode_fps.values()) if self.encode_fps else float("inf")
+        return _slowest(self.encode_fps)
 
     @property
     def freerun_min(self) -> float:
-        return min(self.freerun_fps.values()) if self.freerun_fps else float("inf")
+        return _slowest(self.freerun_fps)
 
     @property
     def grab_solo_min(self) -> float:
-        return min(self.grab_solo_fps.values()) if self.grab_solo_fps else float("inf")
+        return _slowest(self.grab_solo_fps)
 
     @property
     def bus_contended(self) -> bool:
