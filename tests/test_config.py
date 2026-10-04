@@ -274,6 +274,53 @@ def test_transfer_checksum_parsed(tmp_path):
     assert load_config_dir(tmp_path).transfer.checksum is False
 
 
+@pytest.mark.parametrize("body", ["", 'transfer = "/mnt/store"\n'])
+def test_transfer_absent_or_not_a_table_is_none(tmp_path, body):
+    (tmp_path / "octacam_config.toml").write_text(body)
+    assert load_config_dir(tmp_path).transfer is None
+
+
+def test_transfer_bad_field_keeps_default(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[transfer]\ndirectory = "/mnt/store"\nchecksum = "maybe"\n'
+    )
+    transfer = load_config_dir(tmp_path).transfer
+    assert transfer is not None
+    assert (transfer.directory, transfer.checksum) == ("/mnt/store", True)
+
+
+def test_visualization_skips_entries_without_a_valid_layout(tmp_path, caplog):
+    (tmp_path / "octacam_config.toml").write_text(
+        'visualization = [\n'
+        '  "not a table",\n'
+        '  { name = "missing.mp4" },\n'
+        '  { name = "empty.mp4", layout = [] },\n'
+        '  { name = "ragged.mp4", layout = [["a", "b"], ["c"]] },\n'
+        '  { name = "number.mp4", layout = [["a", 1]] },\n'
+        '  { name = "flat.mp4", layout = ["a", "b"] },\n'
+        '  { name = "ok.mp4", layout = [["a", ""], ["", "b"]] },\n'
+        ']\n'
+    )
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        viz = load_config_dir(tmp_path).visualization
+    assert [(v.name, v.layout) for v in viz] == [("ok.mp4", [["a", ""], ["", "b"]])]
+    assert len(caplog.messages) == 6
+
+
+def test_visualization_bad_fields_default_and_duplicate_names_skip(tmp_path):
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[visualization]]\nname = ["x"]\nffmpeg_params = true\nlayout = [["a"]]\n'
+        '[[visualization]]\nlayout = [["b"]]\n'
+        '[[visualization]]\nname = "side.mp4"\nffmpeg_params = "-crf 20"\n'
+        'layout = [["c"]]\n'
+    )
+    viz = load_config_dir(tmp_path).visualization
+    assert [(v.name, v.layout, v.ffmpeg_params) for v in viz] == [
+        ("grid.mp4", [["a"]], ""),
+        ("side.mp4", [["c"]], "-crf 20"),
+    ]
+
+
 def test_visualization_layout_unknown_camera_warns(tmp_path, caplog):
     # A layout cell naming a camera that isn't declared must be reported, not
     # silently rendered black.
