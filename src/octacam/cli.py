@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
     from octacam.config import OctacamConfig, RecordConfig
     from octacam.controller import RecordingSettings
-    from octacam.process_jobs import JobReporter
+    from octacam.process_jobs import JobReporter, JobStatus
     from octacam.transfer import TransferCallback
     from octacam.writer import ProgressCallback
 
@@ -4829,18 +4829,30 @@ def jobs_attach(job_id: _JobArg = None) -> None:
     raise typer.Exit(process_jobs.attach(job, _stderr_console()))
 
 
+def _control_live_job(
+    job_id: str | None,
+    verb: str,
+    action: "Callable[[JobStatus], bool]",
+    done: str,
+    hint: str = "",
+) -> None:
+    """Apply ``action`` to a live job (the latest when no id is given); exit on failure."""
+    from octacam import process_jobs
+
+    job = process_jobs.resolve_job(job_id, require_live=True)
+    if job is None:
+        sys.exit("No such live job." if job_id else f"No live processing jobs to {verb}.")
+    if not action(job):
+        sys.exit(f"Could not {verb} job {job.job_id}{hint}.")
+    log.info(done, job.job_id)
+
+
 @jobs_app.command("pause")
 def jobs_pause(job_id: _JobArg = None) -> None:
     """Pause a running detached job (it parks at its next file/folder boundary)."""
     from octacam import process_jobs
 
-    job = process_jobs.resolve_job(job_id, require_live=True)
-    if job is None:
-        sys.exit("No such live job." if job_id else "No live processing jobs to pause.")
-    if process_jobs.pause(job):
-        log.info("Requested pause of job %s.", job.job_id)
-    else:
-        sys.exit(f"Could not pause job {job.job_id}.")
+    _control_live_job(job_id, "pause", process_jobs.pause, "Requested pause of job %s.")
 
 
 @jobs_app.command("resume")
@@ -4848,13 +4860,9 @@ def jobs_resume(job_id: _JobArg = None) -> None:
     """Clear a manual pause (a gui/record auto-pause clears on its own)."""
     from octacam import process_jobs
 
-    job = process_jobs.resolve_job(job_id, require_live=True)
-    if job is None:
-        sys.exit("No such live job." if job_id else "No live processing jobs to resume.")
-    if process_jobs.resume(job):
-        log.info("Cleared manual pause of job %s.", job.job_id)
-    else:
-        sys.exit(f"Could not resume job {job.job_id}.")
+    _control_live_job(
+        job_id, "resume", process_jobs.resume, "Cleared manual pause of job %s."
+    )
 
 
 @jobs_app.command("cancel")
@@ -4862,13 +4870,13 @@ def jobs_cancel(job_id: _JobArg = None) -> None:
     """Cancel a running detached job (a clean stop; already-done work is kept)."""
     from octacam import process_jobs
 
-    job = process_jobs.resolve_job(job_id, require_live=True)
-    if job is None:
-        sys.exit("No such live job." if job_id else "No live processing jobs to cancel.")
-    if process_jobs.cancel(job):
-        log.info("Cancelling job %s.", job.job_id)
-    else:
-        sys.exit(f"Could not cancel job {job.job_id} (it may have already finished).")
+    _control_live_job(
+        job_id,
+        "cancel",
+        process_jobs.cancel,
+        "Cancelling job %s.",
+        hint=" (it may have already finished)",
+    )
 
 
 def _human_size(num_bytes: int) -> str:

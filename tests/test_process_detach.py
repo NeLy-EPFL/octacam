@@ -90,6 +90,30 @@ def test_jobs_pause_resume_delegate(cache_dir, monkeypatch):
     assert seen == [("pause", "live"), ("resume", "live")]
 
 
+@pytest.mark.parametrize(
+    ("verb", "message"),
+    [
+        ("pause", "Could not pause job live."),
+        ("resume", "Could not resume job live."),
+        ("cancel", "Could not cancel job live (it may have already finished)."),
+    ],
+)
+def test_jobs_control_failures(cache_dir, monkeypatch, verb, message):
+    none_live = runner.invoke(app, ["jobs", verb])
+    assert none_live.exit_code == 1
+    assert f"No live processing jobs to {verb}." in none_live.output
+    unknown = runner.invoke(app, ["jobs", verb, "nope"])
+    assert unknown.exit_code == 1
+    assert "No such live job." in unknown.output
+
+    pj.write_status(pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1))
+    monkeypatch.setattr(pj, "is_live", lambda jd: True)
+    monkeypatch.setattr(pj, verb, lambda job: False)
+    refused = runner.invoke(app, ["jobs", verb, "live"])
+    assert refused.exit_code == 1
+    assert message in refused.output
+
+
 # ------------------------------------------------------------- _pause_gate
 
 
