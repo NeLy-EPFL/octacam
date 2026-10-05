@@ -1909,6 +1909,50 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
     assert rects == {(0, 0, 64, 64), (0, 0, 32, 32)}
 
 
+def test_encode_camera_clamps_each_crop_to_the_popped_frame():
+    # The frame can be smaller than the camera's size when the variants were
+    # grouped (a geometry change): each rect is re-clamped to the frame, and the
+    # header carries what was encoded.
+    import cv2
+
+    from octacam.web.preview import EncodeJob, _encode_camera
+
+    frame = np.zeros((64, 64), np.uint8)
+    groups = {((0, 0, 128, 128), 1): ["whole"], ((48, 40, 32, 32), 1): ["corner"]}
+    job = EncodeJob(
+        camera=0, frame=frame, groups=groups, number=1, timestamp_ns=0,
+        fps=0.0, dropped=0, recording=False,
+    )
+    encoded = {}
+    for message, (name,) in _encode_camera(job):
+        fields = FRAME_HEADER.unpack(message[: FRAME_HEADER.size])
+        image = cv2.imdecode(
+            np.frombuffer(message[FRAME_HEADER.size :], np.uint8), cv2.IMREAD_GRAYSCALE
+        )
+        encoded[name] = (fields[8:], image.shape)
+    assert encoded == {
+        "whole": ((0, 0, 64, 64, 64, 64), (64, 64)),
+        "corner": ((48, 40, 16, 24, 64, 64), (24, 16)),
+    }
+
+
+def test_preview_frames_flag_a_recording(client):
+    assert client.put("/api/settings", json={"duration_s": 30.0}).status_code == 200
+    started = client.post("/api/recording/start", json={"confirm_overwrite": True})
+    assert started.status_code == 202, started.text
+    try:
+        with client.websocket_connect("/api/ws") as ws:
+            deadline = time.monotonic() + 15
+            flags = 0
+            while time.monotonic() < deadline and not flags & 1:
+                message = ws.receive()
+                if message.get("bytes"):
+                    flags = FRAME_HEADER.unpack(message["bytes"][: FRAME_HEADER.size])[3]
+        assert flags & 1, "no preview frame carried the recording flag"
+    finally:
+        client.controller.stop_recording(abort=True)
+
+
 def test_preview_tick_encodes_cameras_concurrently(client, monkeypatch):
     """One executor task per camera, not one task encoding them in sequence.
 
