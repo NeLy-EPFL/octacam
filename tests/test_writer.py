@@ -116,8 +116,9 @@ def test_ffmpeg_open_reaps_child_when_stderr_thread_fails(tmp_path, monkeypatch,
     else:
         with pytest.raises(exc):
             writer.open(str(out), 30.0, (WIDTH, HEIGHT))
-    assert created, "expected an ffmpeg child to have been spawned"
-    assert created[0].poll() is not None  # reaped: killed + waited, not orphaned
+    # The first find_ffmpeg() in a process also runs the bundled ffmpeg -version.
+    (proc,) = [p for p in created if "pipe:0" in p.args]
+    assert proc.poll() is not None  # reaped: killed + waited, not orphaned
     assert writer._proc is None
     writer.close()  # no-op (writer thread never started), must not raise
 
