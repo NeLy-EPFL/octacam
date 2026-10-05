@@ -846,49 +846,6 @@ def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
         scan.run(on_done=on_done)
 
 
-def _run_ffmpeg_probe(exe: str, args: list[str]) -> str:
-    """Run a fast, read-only ffmpeg query and return its combined output ("" on error)."""
-    try:
-        # stdin=DEVNULL keeps even these non-encoding queries off the controlling
-        # tty, so a timeout kill can never leave the terminal in no-echo mode.
-        out = subprocess.run(
-            [exe, *args], stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, timeout=10,
-        )  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return (out.stdout or "") + (out.stderr or "")
-
-
-def _ffmpeg_version(exe: str) -> str:
-    """The version token from ``ffmpeg -version`` (e.g. "7.0.2"), or ""."""
-    for line in _run_ffmpeg_probe(exe, ["-hide_banner", "-version"]).splitlines():
-        line = line.strip()
-        if line.startswith("ffmpeg version"):
-            toks = line.split()
-            return toks[2] if len(toks) >= 3 else line
-    return ""
-
-
-def _ffmpeg_source(exe: str) -> str:
-    """Where the resolved ffmpeg came from, matching find_ffmpeg's precedence."""
-    if os.environ.get("OCTACAM_FFMPEG"):
-        return "OCTACAM_FFMPEG override"
-    try:
-        import imageio_ffmpeg
-
-        if os.path.realpath(imageio_ffmpeg.get_ffmpeg_exe()) == os.path.realpath(exe):
-            from importlib.metadata import PackageNotFoundError, version
-
-            try:
-                return f"bundled imageio-ffmpeg {version('imageio-ffmpeg')}"
-            except PackageNotFoundError:
-                return "bundled imageio-ffmpeg"
-    except Exception:  # pragma: no cover - depends on environment
-        pass
-    return "system PATH"
-
-
 def _nvidia_gpus() -> list[str]:
     """Detected NVIDIA GPUs as "<name> (driver <ver>)", via nvidia-smi; empty
     when there is none (so NVENC is unavailable)."""
@@ -1116,7 +1073,7 @@ def _doctor_backends(
 
 
 def _doctor_encoding(report: _Report) -> None:
-    from octacam.ffmpeg import find_ffmpeg
+    from octacam.ffmpeg import ffmpeg_query, ffmpeg_source, ffmpeg_version, find_ffmpeg
     from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
     from octacam.writer import DEFAULT_FFMPEG_PARAMS
 
@@ -1126,13 +1083,13 @@ def _doctor_encoding(report: _Report) -> None:
     except RuntimeError as e:
         report.add("error", str(e))
         return
-    version = _ffmpeg_version(exe)
+    version = ffmpeg_version(exe)
     report.add(
         "ok" if version else "warn",
-        f"ffmpeg {version or 'version unknown'} ({_ffmpeg_source(exe)})",
+        f"ffmpeg {version or 'version unknown'} ({ffmpeg_source(exe)})",
     )
     report.add("list", exe)
-    has_x264 = "libx264" in _run_ffmpeg_probe(exe, ["-hide_banner", "-encoders"])
+    has_x264 = "libx264" in ffmpeg_query(exe, "-hide_banner", "-encoders")
     report.add(
         "ok" if has_x264 else "error",
         "libx264 encoder present"
@@ -1141,7 +1098,7 @@ def _doctor_encoding(report: _Report) -> None:
     )
     system = shutil.which("ffmpeg")
     if system and os.path.realpath(system) != os.path.realpath(exe):
-        sysver = _ffmpeg_version(system)
+        sysver = ffmpeg_version(system)
         report.add(
             "info",
             f"system ffmpeg on PATH: {sysver or system} (unused; the resolved "
@@ -1154,7 +1111,7 @@ def _doctor_encoding(report: _Report) -> None:
 
 def _doctor_gpu_encoding(report: _Report) -> None:
     """Report GPU (NVIDIA NVENC) encode availability — the opt-in save_method="nvenc"."""
-    from octacam.ffmpeg import find_ffmpeg, probe_nvenc_max_sessions
+    from octacam.ffmpeg import ffmpeg_version, find_ffmpeg, probe_nvenc_max_sessions
     from octacam.writer import NVENC_H264_PARAMS
 
     gpus = _nvidia_gpus()
@@ -1181,7 +1138,7 @@ def _doctor_gpu_encoding(report: _Report) -> None:
         return
     report.add(
         "ok",
-        f"h264_nvenc works via {_ffmpeg_version(nvexe) or 'ffmpeg'} at {nvexe}",
+        f"h264_nvenc works via {ffmpeg_version(nvexe) or 'ffmpeg'} at {nvexe}",
     )
     sessions = probe_nvenc_max_sessions()
     if sessions is not None:

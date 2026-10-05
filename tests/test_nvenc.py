@@ -95,9 +95,8 @@ def test_find_ffmpeg_override_skips_the_search(monkeypatch):
 
 
 def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
-    monkeypatch.setattr(
-        ff, "_ffmpeg_candidates", lambda: ["/no/nvenc", "/has/nvenc", "/also"]
-    )
+    candidates = [(exe, "system PATH") for exe in ("/no/nvenc", "/has/nvenc", "/also")]
+    monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: candidates)
     monkeypatch.setattr(ff, "ffmpeg_encoder_works", lambda exe, enc: exe == "/has/nvenc")
     assert ff.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
     # Cached: a second call must not recompute the candidate list.
@@ -108,7 +107,8 @@ def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_cach
 
 
 def test_find_ffmpeg_require_encoder_raises_when_none(monkeypatch, probe_caches):
-    monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: ["/a", "/b"])
+    candidates = [(exe, "system PATH") for exe in ("/a", "/b")]
+    monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: candidates)
     monkeypatch.setattr(ff, "ffmpeg_encoder_works", lambda exe, enc: False)
     with pytest.raises(RuntimeError, match="h264_nvenc"):
         ff.find_ffmpeg(require_encoder="h264_nvenc")

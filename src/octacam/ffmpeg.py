@@ -8,6 +8,7 @@ so a killed ffmpeg, or concurrent ones racing to restore it, would leave the
 user's shell echo-off. The capture pipe is exempt: its stdin carries the frames.
 """
 
+import contextlib
 import functools
 import logging
 import os
@@ -15,6 +16,7 @@ import shlex
 import shutil
 import subprocess
 from collections.abc import Iterator
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 log = logging.getLogger("octacam")
@@ -22,6 +24,8 @@ log = logging.getLogger("octacam")
 # Not "gray": 4:0:0 H.264 decodes as flat gray on NVIDIA hardware decoders
 # (see _playable_pix_fmt).
 DEFAULT_PIX_FMT = "yuv420p"
+
+_BUNDLED = "bundled imageio-ffmpeg"
 
 
 def quiet_argv(exe: str, *args: str) -> list[str]:
@@ -32,16 +36,16 @@ def quiet_argv(exe: str, *args: str) -> list[str]:
 # --- discovery ---------------------------------------------------------------
 
 
-def _ffmpeg_candidates() -> Iterator[str]:
-    """ffmpeg executables, most preferred first, realpath-deduped:
-    $OCTACAM_FFMPEG, the bundled imageio binary, then every ffmpeg on $PATH
-    (where a working NVENC lives: the bundled one has none). Lazy, so taking
-    the first never runs the bundled binary's validation behind an override."""
+def _ffmpeg_candidates() -> Iterator[tuple[str, str]]:
+    """(executable, origin) of every ffmpeg, most preferred first, realpath-deduped:
+    $OCTACAM_FFMPEG, the bundled imageio binary, then $PATH's (where a working
+    NVENC lives). Lazy: taking the first never runs the bundled binary's
+    validation behind an override."""
 
-    def found() -> Iterator[str]:
+    def found() -> Iterator[tuple[str, str]]:
         env = os.environ.get("OCTACAM_FFMPEG")
         if env:
-            yield env
+            yield env, "OCTACAM_FFMPEG override"
         try:
             import imageio_ffmpeg
 
@@ -49,21 +53,25 @@ def _ffmpeg_candidates() -> Iterator[str]:
         except Exception as e:  # pragma: no cover - depends on environment
             log.debug("imageio-ffmpeg unavailable: %s", e)
         else:
-            yield bundled
+            yield bundled, _BUNDLED
         for directory in os.get_exec_path():  # os.defpath without $PATH
             exe = shutil.which("ffmpeg", path=directory) if directory else None
             if exe:
-                yield exe
+                yield exe, "system PATH"
 
     seen: set[str] = set()
-    for exe in found():
-        try:
-            key = os.path.realpath(exe)
-        except OSError:
-            key = exe
+    for exe, origin in found():
+        key = _realpath(exe)
         if key not in seen:
             seen.add(key)
-            yield exe
+            yield exe, origin
+
+
+def _realpath(exe: str) -> str:
+    try:
+        return os.path.realpath(exe)
+    except OSError:
+        return exe
 
 
 def find_ffmpeg(require_encoder: str | None = None) -> str:
@@ -73,20 +81,20 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
     """
     if require_encoder is not None:
         return _ffmpeg_for_encoder(require_encoder)
-    exe = next(iter(_ffmpeg_candidates()), None)
-    if exe is None:
+    first = next(iter(_ffmpeg_candidates()), None)
+    if first is None:
         raise RuntimeError(
             "No ffmpeg executable found: install the imageio-ffmpeg package or "
             "a system ffmpeg, or set OCTACAM_FFMPEG."
         )
-    return exe
+    return first[0]
 
 
 @functools.cache
 def _ffmpeg_for_encoder(encoder: str) -> str:
     """The first candidate ffmpeg that runs ``encoder`` (cached); a failure
     (RuntimeError) is not cached, so a later call searches again."""
-    for exe in _ffmpeg_candidates():
+    for exe, _origin in _ffmpeg_candidates():
         if ffmpeg_encoder_works(exe, encoder):
             return exe
     raise RuntimeError(
@@ -124,7 +132,42 @@ def find_ffprobe() -> str:
     )
 
 
+def ffmpeg_source(exe: str) -> str:
+    """Where *exe* sits in :func:`find_ffmpeg`'s search, for ``octacam doctor``."""
+    key = _realpath(exe)
+    origin = next(
+        (o for candidate, o in _ffmpeg_candidates() if _realpath(candidate) == key),
+        "system PATH",
+    )
+    if origin == _BUNDLED:
+        with contextlib.suppress(PackageNotFoundError):
+            return f"{origin} {version('imageio-ffmpeg')}"
+    return origin
+
+
 # --- probes --------------------------------------------------------------------
+
+
+def ffmpeg_query(exe: str, *args: str) -> str:
+    """The combined output of a fast, read-only ffmpeg query ("" on error)."""
+    try:
+        out = subprocess.run(
+            quiet_argv(exe, *args), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=10,
+        )  # fmt: skip
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "") + (out.stderr or "")
+
+
+def ffmpeg_version(exe: str) -> str:
+    """The version token from ``ffmpeg -version`` (e.g. "7.0.2"), or ""."""
+    for line in ffmpeg_query(exe, "-hide_banner", "-version").splitlines():
+        line = line.strip()
+        if line.startswith("ffmpeg version"):
+            toks = line.split()
+            return toks[2] if len(toks) >= 3 else line
+    return ""
 
 
 @functools.cache

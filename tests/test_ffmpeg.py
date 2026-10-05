@@ -224,10 +224,14 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     probe = functools.cache(ff.ffmpeg_encoder_works.__wrapped__)
     monkeypatch.setattr(ff, "ffmpeg_encoder_works", probe)
     assert probe("/fake/ffmpeg", "h264_nvenc") is True
-    assert len(runs) == 1
-    assert_off_tty(*runs[0], "ffmpeg_encoder_works")
+    # 2. The doctor's queries.
+    ff.ffmpeg_version("/fake/ffmpeg")
+    ff.ffmpeg_query("/fake/ffmpeg", "-hide_banner", "-encoders")
+    assert len(runs) == 3
+    for cmd, kwargs in runs:
+        assert_off_tty(cmd, kwargs, cmd[-1])
 
-    # 2. probe_nvenc_max_sessions: up to 12 concurrent encodes via Popen.
+    # 3. probe_nvenc_max_sessions: up to 12 concurrent encodes via Popen.
     monkeypatch.setattr(ff, "find_ffmpeg", lambda **_: "/fake/ffmpeg")
     launches: list[tuple[list, dict]] = []
 
@@ -244,7 +248,29 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     for cmd, kwargs in launches:
         assert_off_tty(cmd, kwargs, "probe_nvenc_max_sessions")
 
-    # 3. Transcodes and grids, in both progress modes, run with -nostdin.
+    # 4. Transcodes and grids, in both progress modes, run with -nostdin.
     for raw in (False, True):
         flags = _reporting_args(["/fake/ffmpeg", "-i", "in.mkv"], raw)
         assert flags.count("-nostdin") == 1, flags
+
+
+def test_ffmpeg_source_names_each_origin(tmp_path, monkeypatch):
+    # The doctor labels the resolved ffmpeg by where find_ffmpeg's search found it.
+    import imageio_ffmpeg
+
+    bundled = tmp_path / "bundled-ffmpeg"
+    on_path = tmp_path / "bin" / "ffmpeg"
+    on_path.parent.mkdir()
+    for exe in (bundled, on_path):
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(0o755)
+    monkeypatch.setattr(imageio_ffmpeg, "get_ffmpeg_exe", lambda: str(bundled))
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    monkeypatch.delenv("OCTACAM_FFMPEG", raising=False)
+
+    assert ff.find_ffmpeg() == str(bundled)
+    assert ff.ffmpeg_source(str(bundled)).startswith("bundled imageio-ffmpeg")
+    assert ff.ffmpeg_source(str(on_path)) == "system PATH"
+    monkeypatch.setenv("OCTACAM_FFMPEG", str(on_path))
+    assert ff.find_ffmpeg() == str(on_path)
+    assert ff.ffmpeg_source(str(on_path)) == "OCTACAM_FFMPEG override"

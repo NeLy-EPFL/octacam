@@ -969,7 +969,7 @@ def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
     from octacam.cli import _doctor_gpu_encoding, _Report
 
     monkeypatch.setattr("octacam.cli._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
-    monkeypatch.setattr("octacam.cli._ffmpeg_version", lambda exe: "n7.1")
+    monkeypatch.setattr(ff, "ffmpeg_version", lambda exe: "n7.1")
     monkeypatch.setattr(ff, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
     monkeypatch.setattr(ff, "probe_nvenc_max_sessions", lambda: None)
 
