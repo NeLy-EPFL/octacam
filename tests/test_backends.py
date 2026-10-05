@@ -354,6 +354,77 @@ def test_basler_retrieve_credits_a_late_image_to_its_own_trigger(make_basler_bac
     assert raw.fired == 2 and be.last_trigger_index == 1
 
 
+class _RefusingRaw(_LateImageRaw):
+    """A raw whose first software trigger the device refuses."""
+
+    def __init__(self, results):
+        super().__init__(results)
+        self.refusals = 1
+
+    def ExecuteSoftwareTrigger(self):
+        if self.refusals:
+            from pypylon import genicam
+
+            self.refusals -= 1
+            raise genicam.GenericException("trigger refused", "test", 0)
+        super().ExecuteSoftwareTrigger()
+
+
+def test_basler_retrieve_does_not_await_a_refused_trigger(make_basler_backend):
+    raw = _RefusingRaw([_GrabResult(timestamp=111)])
+    be = make_basler_backend(raw)
+    be.trigger.begin_grab()
+    be.trigger_once()
+    assert be.retrieve(50, lambda: True) is None
+    assert be.trigger.fired_index is None and raw.results  # nothing fetched
+    be.trigger_once()  # fires at once: nothing awaits trigger 0's image
+    frame = be.retrieve(50, lambda: True)
+    assert frame is not None and frame[1] == 111
+    assert raw.fired == 1 and be.last_trigger_index == 1
+
+
+def test_basler_unpulsed_fetches_answer_no_trigger(make_basler_backend):
+    # Free run and an external trigger fetch outside the hand-off: answering it
+    # would make every frame UNMATCHED_TRIGGER, discarded as extra.
+    raw = _LateImageRaw([_GrabResult(timestamp=111), _GrabResult(timestamp=222)])
+    be = make_basler_backend(raw)
+    be.trigger.begin_grab()
+    assert be.retrieve_freerun(50, lambda: True)[1] == 111
+    assert be.retrieve_external(50, lambda: True)[1] == 222
+    assert be.last_trigger_index is None and raw.fired == 0
+
+
+class _ClosableRaw(_FakeBaslerRaw):
+    def __init__(self):
+        super().__init__()
+        self.destroyed = False
+
+    def IsGrabbing(self):
+        return self.start_grabbing_calls > self.stop_grabbing_calls
+
+    def IsOpen(self):
+        return True
+
+    def Close(self):
+        pass
+
+    def DestroyDevice(self):
+        self.destroyed = True
+
+
+def test_basler_close_mid_grab_ends_it_and_retrieve_stays_quiet(make_basler_backend):
+    raw = _ClosableRaw()
+    be = make_basler_backend(raw)
+    assert be.start_grab_record() is True
+    be.close()
+    assert be.is_grabbing() is False and raw.destroyed
+    assert raw.stop_grabbing_calls == 1
+    be.trigger.begin_grab()  # a stop race: the hand-off still reads grabbing
+    be.trigger_once()
+    assert be.retrieve(10, lambda: True) is None
+    assert be.retrieve_freerun(10, lambda: True) is None
+
+
 class _FakeBaslerDevice:
     def __init__(self, serial):
         self._serial = serial

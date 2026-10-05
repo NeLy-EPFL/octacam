@@ -188,6 +188,29 @@ def test_retrieve_executes_trigger_then_receives():
     backend.stop_grab()
 
 
+def test_a_refused_software_trigger_is_not_awaited():
+    class RefusingCam(FakePyCam):
+        refusals = 1
+
+        def execute(self, node):
+            if self.refusals:
+                self.refusals -= 1
+                raise RuntimeError("TriggerSoftware refused")
+            super().execute(node)
+
+    cam = RefusingCam()
+    backend = PycameleonBackend(cam)
+    backend.open()
+    backend.start_grab_preview()
+    backend.trigger_once()
+    assert backend.retrieve(100, lambda: True) is None
+    assert backend.trigger.fired_index is None
+    backend.trigger_once()  # fires at once: nothing awaits trigger 0's image
+    assert backend.retrieve(100, lambda: True) is not None
+    assert cam.executed == ["TriggerSoftware"] and backend.last_trigger_index == 1
+    backend.stop_grab()
+
+
 def test_a_frame_is_copied_off_the_device_lock():
     # Only the fire and the receive hold the lock, so a Camera-tab read or a stop
     # never waits behind a frame copy.
