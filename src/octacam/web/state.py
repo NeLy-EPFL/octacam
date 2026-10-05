@@ -72,10 +72,8 @@ class AppState:
             log.debug("update check failed", exc_info=True)
 
     def system_descriptor(self) -> dict:
-        """The /api/system payload, also pushed as the WS ``system`` message.
-
-        ``ready`` is False (``cameras: []``) while the init thread opens the
-        cameras; it pushes a fresh descriptor once they are attached."""
+        """The /api/system payload and WS ``system`` message; ``ready`` is False
+        (no cameras) until the init thread attaches them and pushes a fresh one."""
         controller = self.controller
         config_by_serial = {c.serial_number: c for c in self.config.cameras}
         cameras = []
@@ -126,8 +124,7 @@ class AppState:
             "ready": controller.ready,
             # Why the init opened no camera, instead of an endless placeholder.
             "init_error": controller.init_error,
-            # Configured cameras that did not open: a 7-of-8 rig must not look
-            # like a healthy one with a smaller grid.
+            # Configured cameras that did not open: an incomplete rig must say so.
             "missing_cameras": [
                 {"serial": serial, "reason": reason}
                 for serial, reason in sorted(controller.camera_system.missing.items())
@@ -146,6 +143,5 @@ class AppState:
         }
 
     def broadcast_system(self) -> None:
-        """Push a fresh descriptor to every browser (the init thread, once the
-        cameras are attached)."""
+        """Push a fresh descriptor to every browser."""
         self.hub.publish("system", self.system_descriptor())

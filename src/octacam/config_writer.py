@@ -439,9 +439,8 @@ def load_raw_config(config_dir: str | Path) -> dict:
 
 @dataclasses.dataclass(frozen=True)
 class SavedConfig:
-    """What :func:`save_rig_config` wrote. ``raw`` is the rewritten active
-    config's document, for the caller to adopt (None when no active TOML was
-    written: a new config dir is never adopted)."""
+    """What :func:`save_rig_config` wrote; ``raw`` is the rewritten active config's
+    document, for the caller to adopt (a new config dir is never adopted)."""
 
     directory: Path
     cameras_written: list[str]
@@ -459,12 +458,11 @@ def save_rig_config(
     sensor: bool = True,
     display: bool = True,
 ) -> SavedConfig:
-    """Save the cameras' parameter files (``sensor``) and their display settings
-    patched into ``raw`` (``display``) to ``active_dir``, or to a new config dir
-    ``new_name`` (with the auxiliary parameter files, so it is complete).
-
-    With ``sensor``, raises RuntimeError while camera control is locked (the
-    caller refuses a save while recording). Raises ValueError for a bad name,
+    """Write the cameras' parameter files (``sensor``) and ``raw`` patched with
+    their display settings (``display``) to ``active_dir``, or to a new config
+    dir ``new_name`` with the auxiliary parameter files, so it is complete.
+    Raises RuntimeError while camera control is locked (with ``sensor``; the
+    caller refuses a save while recording), ValueError for a bad name,
     FileExistsError for an existing new dir without ``overwrite``, and OSError
     when a write fails."""
     system = controller.camera_system

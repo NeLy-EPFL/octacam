@@ -1,6 +1,5 @@
-"""Live preview over the GUI WebSocket: each client's per-camera view spec, and
-the loop that encodes a camera's newest frame once per variant (crop,
-decimation) its ready clients need."""
+"""Live preview over the GUI WebSocket: per-client view specs, and the loop that
+encodes each camera's newest frame once per variant its ready clients need."""
 
 import asyncio
 import dataclasses
@@ -41,12 +40,10 @@ Variant = tuple[Rect, int]  # (region, decimation factor)
 
 @dataclasses.dataclass(frozen=True)
 class ViewSpec:
-    """What one client needs of one camera; the default is the baseline preview.
-
-    ``want`` False skips the camera for that client (hidden behind a maximized
-    tile). ``need`` is the longest source edge in px it can display (None: the
-    baseline); ``full`` marks a focused tile, which may exceed
-    ``PREVIEW_MAX_DIM``; ``crop`` asks for that region only."""
+    """One client's need of one camera (the default: the baseline preview).
+    ``want`` False skips it (hidden behind a maximized tile); ``need`` is the
+    longest source edge it can show, in px; ``full`` marks a focused tile, which
+    may exceed ``PREVIEW_MAX_DIM``; ``crop`` asks for that region only."""
 
     want: bool = True
     need: int | None = None
@@ -119,11 +116,9 @@ def _clamp_crop(crop: Rect | None, width: int, height: int) -> Rect:
 def _preview_factor(
     sensor_long: int, region_long: int, spec: ViewSpec, recording: bool
 ) -> int:
-    """Integer decimation of the encoded region (the sensor, or a crop of it).
-
-    Without ``need``: the baseline ``ceil(sensor_long / PREVIEW_MAX_DIM)``. An
-    unfocused tile may only go coarser; a focused one may go down to 1:1, capped
-    at ``PREVIEW_FOCUS_MAX_DIM_RECORDING`` while recording."""
+    """Integer decimation of the encoded region (the sensor, or a crop of it):
+    without ``need`` the baseline; an unfocused tile only coarser; a focused one
+    down to 1:1, capped while recording."""
     sensor_long = max(sensor_long, 1)
     region_long = max(region_long, 1)
     baseline = max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM))
@@ -202,8 +197,7 @@ class EncodeJob:
 
 
 def _encode_camera(job: EncodeJob) -> list[tuple[bytes, list[Client]]]:
-    """Encode every variant of one camera's frame, on an executor thread; each
-    message with the clients it goes to."""
+    """Encode each variant of the job's frame; each message with its clients."""
     import cv2
 
     frame = job.frame
@@ -257,9 +251,8 @@ async def preview_loop(
             ))
         if not jobs:
             continue
-        # One executor task per camera: cv2.imencode releases the GIL, so a
-        # tick costs the slowest camera, not the sum (eight focused 2048²
-        # cameras: 85 ms serial vs 14 ms parallel, against a 33 ms refresh).
+        # One executor task per camera: cv2.imencode releases the GIL, so a tick
+        # costs the slowest camera, not the sum (8 focused 2048²: 85 vs 14 ms).
         batches = await asyncio.gather(
             *[loop.run_in_executor(None, _encode_camera, job) for job in jobs]
         )

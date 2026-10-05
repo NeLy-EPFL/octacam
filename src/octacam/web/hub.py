@@ -37,8 +37,7 @@ class Client:
         self.views: dict[int, ViewSpec] = {}
 
     def queue(self, type: str, text: str, key: Hashable = None) -> None:
-        """Queue a JSON message, keeping the newest per ``(type, key)``; events
-        all queue (they are the GUI's log)."""
+        """Keep the newest message per ``(type, key)``; every event queues (a log)."""
         if type == "event":
             self.events.append(text)
         else:
@@ -55,9 +54,8 @@ class Client:
         return camera_index not in self.frames
 
     async def sender(self) -> None:
-        # A send after the socket closed raises a bare RuntimeError from the ASGI
-        # layer. End quietly on it and on a disconnect: the endpoint's teardown
-        # `await sender` would re-raise either into the ASGI app.
+        # A send after close raises a bare RuntimeError (ASGI). End quietly on it
+        # and on a disconnect, or the endpoint's `await sender` re-raises it.
         with contextlib.suppress(WebSocketDisconnect, RuntimeError):
             while True:
                 await self.wakeup.wait()
@@ -75,7 +73,6 @@ class Client:
 
 
 def to_json(type: str, payload: dict) -> str:
-    """The JSON text of a ``type`` message."""
     return json.dumps({"type": type, **payload})
 
 
@@ -88,8 +85,7 @@ class Hub:
         self.loop: asyncio.AbstractEventLoop | None = None
 
     def publish(self, type: str, payload: dict, key: Hashable = None) -> None:
-        """Push a message to every client from any thread; each keeps only the
-        newest per ``(type, key)`` (see :meth:`Client.queue`)."""
+        """Queue a message for every client, from any thread (:meth:`Client.queue`)."""
         loop = self.loop
         if loop is None or loop.is_closed() or not self.clients:
             return

@@ -1,15 +1,8 @@
-"""FastAPI backend for the octacam web GUI.
+"""The web GUI's FastAPI app: the per-area routers (system, record, cameras,
+save, ws), the static and plugin mounts, and the lifespan's background loops.
 
-One process serves the SPA, a REST control plane and one WebSocket carrying
-preview JPEGs (binary), telemetry/state/event JSON and plugin messages such as
-the flywheel jog. One socket works through a plain `ssh -L` forward and stays
-under the browser's per-host connection limit. Preview frames follow the display
-refresh rate, go newest-only to each client, and are encoded only for a client.
-
-The routes live in per-area routers (system, record, cameras, save, ws). Their
-HTTP handlers are sync ``def``: FastAPI runs them in its thread pool, so
-blocking SDK, serial and filesystem calls never stall the WebSocket's loop.
-"""
+The HTTP handlers are sync ``def``: FastAPI runs them in its thread pool, so
+blocking SDK, serial and filesystem calls never stall the WebSocket's loop."""
 
 import asyncio
 import contextlib
@@ -64,10 +57,10 @@ def create_app(
     hub = Hub()
     plugins = controller.plugins
     plugins.attach(broadcast=hub.publish)
-    for plugin in plugins.plugins:
-        if plugin.web_dir is not None and not plugin.web_dir.is_dir():
+    for p in plugins.plugins:
+        if p.web_dir is not None and not p.web_dir.is_dir():
             log.warning(
-                "Plugin %r: web_dir %s does not exist; skipping", plugin.name, plugin.web_dir
+                "Plugin %r: web_dir %s does not exist; skipping", p.name, p.web_dir
             )
     state = AppState(
         controller,
