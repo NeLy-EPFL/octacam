@@ -1,6 +1,6 @@
 // Record tab: settings inputs, start/stop button state machine, status line.
 
-import { api, clamp, clampInput, formatBytes, formatHMS, store } from "./util.js";
+import { api, clamp, clampInput, el, formatBytes, formatHMS, request, store } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
@@ -10,6 +10,66 @@ const ADV_KEY = "octacam.record.advanced";
 function trimNum(v) {
   return String(Math.round(v * 1000) / 1000);
 }
+
+// How each kind of input shows a server value (one of its type) and reads an
+// edit.
+const KINDS = {
+  number: {
+    accepts: (v) => typeof v === "number",
+    show: (input, v) => (input.value = trimNum(v)),
+    read: (input) => clampInput(input),
+  },
+  // Clamped and rounded, and written back: the server rejects a non-integer.
+  int: {
+    accepts: (v) => typeof v === "number",
+    show: (input, v) => (input.value = trimNum(v)),
+    read: (input) => {
+      const v = Math.round(clampInput(input));
+      input.value = String(v);
+      return v;
+    },
+  },
+  text: {
+    accepts: (v) => typeof v === "string",
+    show: (input, v) => (input.value = v),
+    read: (input) => input.value,
+  },
+  path: {
+    accepts: (v) => typeof v === "string",
+    show: (input, v) => (input.value = v),
+    read: (input) => input.value.trim(),
+  },
+  select: {
+    accepts: (v) => Boolean(v),
+    show: (input, v) => (input.value = v),
+    read: (input) => input.value,
+  },
+  checkbox: {
+    accepts: (v) => typeof v === "boolean",
+    show: (input, v) => (input.checked = v),
+    read: (input) => input.checked,
+  },
+};
+
+// The plain settings: [server key, input id, kind]. A change PUTs that key.
+// Duration, the two record-directory halves and the NVENC session cap are
+// wired by hand below.
+const FIELDS = [
+  ["fps", "fps", "number"],
+  ["trigger_source", "trigger-source", "select"],
+  ["preview_trigger_source", "preview-trigger-source", "select"],
+  ["save_method", "format", "select"],
+  ["ffmpeg_params", "ffmpeg-params", "text"],
+  ["nvenc_params", "nvenc-params", "text"],
+  ["record_form", "record-form", "select"],
+  ["save_frame_timestamps", "save-frame-timestamps", "checkbox"],
+  ["writer_queue_size", "writer-queue-size", "int"],
+  // The Process section: baked into each recording's config snapshot for
+  // `octacam process`.
+  ["transcode_ffmpeg_params", "transcode-ffmpeg-params", "text"],
+  ["transfer_directory", "transfer-dir", "path"],
+  ["transfer_checksum", "transfer-checksum", "checkbox"],
+];
 
 export class RecordTab {
   constructor({ formats, getPluginParams, notify }) {
@@ -33,7 +93,6 @@ export class RecordTab {
     this.fields = document.getElementById("record-fields");
     this.durationValue = document.getElementById("duration-value");
     this.durationUnit = document.getElementById("duration-unit");
-    this.fpsInput = document.getElementById("fps");
     // The server composes save_dir from these two halves.
     this.recordDir = document.getElementById("record-dir");
     this.relativeDir = document.getElementById("relative-dir");
@@ -41,12 +100,9 @@ export class RecordTab {
     this.advancedToggle = document.getElementById("record-advanced-toggle");
     this.advancedSection = document.getElementById("record-advanced");
     this.trigger = document.getElementById("trigger-source");
-    this.previewTrigger = document.getElementById("preview-trigger-source");
     this.format = document.getElementById("format");
-    this.ffmpegParams = document.getElementById("ffmpeg-params");
     // One encoder-params box per save method (see _syncSaveMethodFields).
     this.ffmpegParamsRow = document.getElementById("ffmpeg-params-row");
-    this.nvencParams = document.getElementById("nvenc-params");
     this.nvencParamsRow = document.getElementById("nvenc-params-row");
     this.nvencSessionsRow = document.getElementById("nvenc-sessions-row");
     this.nvencAuto = document.getElementById("nvenc-auto");
@@ -54,16 +110,6 @@ export class RecordTab {
     this.nvencDetected = document.getElementById("nvenc-detected");
     this._nvencCaps = null; // see _ensureNvencCaps
     this._nvencCapsPending = false;
-    this.recordForm = document.getElementById("record-form");
-    this.saveFrameTimestamps = document.getElementById("save-frame-timestamps");
-    this.writerQueueSize = document.getElementById("writer-queue-size");
-    // Process section: baked into each recording's config snapshot for
-    // `octacam process`.
-    this.transcodeFfmpegParams = document.getElementById(
-      "transcode-ffmpeg-params"
-    );
-    this.transferDir = document.getElementById("transfer-dir");
-    this.transferChecksum = document.getElementById("transfer-checksum");
     this.button = document.getElementById("record-button");
     this.writerAlert = document.getElementById("record-writer-alert");
     this.status = document.getElementById("record-status");
@@ -71,50 +117,32 @@ export class RecordTab {
     this.progressBar = document.getElementById("record-progress-bar");
 
     for (const f of formats) {
-      const opt = document.createElement("option");
+      const opt = el("option", null, f.save_method);
       opt.value = f.save_method;
-      opt.textContent = f.save_method;
       this.format.appendChild(opt);
     }
 
+    this._fields = FIELDS.map(([key, id, kind]) => {
+      const input = document.getElementById(id);
+      input.addEventListener("change", () =>
+        this._put({ [key]: KINDS[kind].read(input) }, [input])
+      );
+      return { key, input, kind: KINDS[kind] };
+    });
+    this.format.addEventListener("change", () => this._syncSaveMethodFields());
+
     this.durationValue.addEventListener("change", () => this._commitDuration());
     this.durationUnit.addEventListener("change", () => this._reexpressDuration());
-    this.fpsInput.addEventListener("change", () =>
-      this._put({ fps: clampInput(this.fpsInput) }, [this.fpsInput])
-    );
-    this.recordDir.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        this.recordDir.blur(); // triggers change
-      }
-    });
+    for (const input of [this.recordDir, this.relativeDir]) {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          input.blur(); // triggers change
+        }
+      });
+    }
     this.recordDir.addEventListener("change", () => this._commitRecordDir());
-    this.relativeDir.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        this.relativeDir.blur(); // triggers change
-      }
-    });
     this.relativeDir.addEventListener("change", () => this._commitRelativeDir());
-    this.trigger.addEventListener("change", () =>
-      this._put({ trigger_source: this.trigger.value }, [this.trigger])
-    );
-    this.previewTrigger.addEventListener("change", () =>
-      this._put(
-        { preview_trigger_source: this.previewTrigger.value },
-        [this.previewTrigger]
-      )
-    );
-    this.format.addEventListener("change", () => {
-      this._put({ save_method: this.format.value }, [this.format]);
-      this._syncSaveMethodFields();
-    });
-    this.ffmpegParams.addEventListener("change", () =>
-      this._put({ ffmpeg_params: this.ffmpegParams.value }, [this.ffmpegParams])
-    );
-    this.nvencParams.addEventListener("change", () =>
-      this._put({ nvenc_params: this.nvencParams.value }, [this.nvencParams])
-    );
     // Auto-detect sends null (the server probes the GPU cap); turning it off
     // commits the box as an explicit cap, seeded from the detected cap when
     // blank, never 0 (which would put every camera on the CPU).
@@ -128,49 +156,14 @@ export class RecordTab {
       const v =
         this.maxNvencSessions.value.trim() === ""
           ? (this._nvencCaps?.max_sessions ?? 1)
-          : Math.round(clampInput(this.maxNvencSessions));
+          : KINDS.int.read(this.maxNvencSessions);
       this.maxNvencSessions.value = String(v);
-      this._put(
-        { max_nvenc_sessions: v },
-        [this.nvencAuto, this.maxNvencSessions]
-      );
+      this._put({ max_nvenc_sessions: v }, [this.nvencAuto, this.maxNvencSessions]);
     });
-    this.maxNvencSessions.addEventListener("change", () => {
-      const v = Math.round(clampInput(this.maxNvencSessions));
-      this.maxNvencSessions.value = String(v);
-      this._put({ max_nvenc_sessions: v }, [this.maxNvencSessions]);
-    });
-    this.recordForm.addEventListener("change", () =>
-      this._put({ record_form: this.recordForm.value }, [this.recordForm])
-    );
-    this.saveFrameTimestamps.addEventListener("change", () =>
+    this.maxNvencSessions.addEventListener("change", () =>
       this._put(
-        { save_frame_timestamps: this.saveFrameTimestamps.checked },
-        [this.saveFrameTimestamps]
-      )
-    );
-    // The server rejects a non-integer writer_queue_size (422).
-    this.writerQueueSize.addEventListener("change", () => {
-      const v = Math.round(clampInput(this.writerQueueSize));
-      this.writerQueueSize.value = String(v);
-      this._put({ writer_queue_size: v }, [this.writerQueueSize]);
-    });
-    this.transcodeFfmpegParams.addEventListener("change", () =>
-      this._put(
-        { transcode_ffmpeg_params: this.transcodeFfmpegParams.value },
-        [this.transcodeFfmpegParams]
-      )
-    );
-    this.transferDir.addEventListener("change", () =>
-      this._put(
-        { transfer_directory: this.transferDir.value.trim() },
-        [this.transferDir]
-      )
-    );
-    this.transferChecksum.addEventListener("change", () =>
-      this._put(
-        { transfer_checksum: this.transferChecksum.checked },
-        [this.transferChecksum]
+        { max_nvenc_sessions: KINDS.int.read(this.maxNvencSessions) },
+        [this.maxNvencSessions]
       )
     );
     this.button.addEventListener("click", () => this._onButton());
@@ -200,22 +193,22 @@ export class RecordTab {
 
   // "managed" needs a loaded trigger-generating plugin (the server says).
   setManagedAvailable(available) {
-    this._managedAvailable = available;
     if (available) this._enableManagedOption();
   }
 
   _enableManagedOption() {
-    const opt = this.trigger?.querySelector('option[value="managed"]');
-    if (opt) opt.disabled = false;
+    this.trigger.querySelector('option[value="managed"]').disabled = false;
   }
 
   // Never overwrite an input the user is editing, unless it is listed in
   // `force` (the input that originated the change).
   applySettings(s, force = []) {
     this.settings = s;
-    const canSet = (el) => force.includes(el) || document.activeElement !== el;
-    if (typeof s.fps === "number" && canSet(this.fpsInput)) {
-      this.fpsInput.value = trimNum(s.fps);
+    const canSet = (input) => force.includes(input) || document.activeElement !== input;
+    // The server may promote external to "managed"; the option must be enabled.
+    if (s.trigger_source === "managed") this._enableManagedOption();
+    for (const { key, input, kind } of this._fields) {
+      if (kind.accepts(s[key]) && canSet(input)) kind.show(input, s[key]);
     }
     if (
       typeof s.duration_s === "number" &&
@@ -225,28 +218,11 @@ export class RecordTab {
       const factor = Number(this.durationUnit.value) || 1;
       this.durationValue.value = trimNum(s.duration_s / factor);
     }
-    if (typeof s.record_directory === "string" && canSet(this.recordDir)) {
-      this.recordDir.value = s.record_directory;
-    }
-    if (typeof s.relative_directory === "string" && canSet(this.relativeDir)) {
-      this.relativeDir.value = s.relative_directory;
-    }
-    if (s.trigger_source && canSet(this.trigger)) {
-      // The server may promote external to "managed"; the option must be enabled.
-      if (s.trigger_source === "managed") this._enableManagedOption();
-      this.trigger.value = s.trigger_source;
-    }
-    if (s.preview_trigger_source && canSet(this.previewTrigger)) {
-      this.previewTrigger.value = s.preview_trigger_source;
-    }
-    if (s.save_method && canSet(this.format)) {
-      this.format.value = s.save_method;
-    }
-    if (typeof s.ffmpeg_params === "string" && canSet(this.ffmpegParams)) {
-      this.ffmpegParams.value = s.ffmpeg_params;
-    }
-    if (typeof s.nvenc_params === "string" && canSet(this.nvencParams)) {
-      this.nvencParams.value = s.nvenc_params;
+    for (const [key, input] of [
+      ["record_directory", this.recordDir],
+      ["relative_directory", this.relativeDir],
+    ]) {
+      if (KINDS.path.accepts(s[key]) && canSet(input)) input.value = s[key];
     }
     // max_nvenc_sessions is null when auto-detecting the GPU cap, else an int cap.
     if (
@@ -258,36 +234,6 @@ export class RecordTab {
       this.nvencAuto.checked = auto;
       this.maxNvencSessions.disabled = auto;
       if (!auto) this.maxNvencSessions.value = trimNum(s.max_nvenc_sessions);
-    }
-    if (s.record_form && canSet(this.recordForm)) {
-      this.recordForm.value = s.record_form;
-    }
-    if (
-      typeof s.save_frame_timestamps === "boolean" &&
-      canSet(this.saveFrameTimestamps)
-    ) {
-      this.saveFrameTimestamps.checked = s.save_frame_timestamps;
-    }
-    if (
-      typeof s.writer_queue_size === "number" &&
-      canSet(this.writerQueueSize)
-    ) {
-      this.writerQueueSize.value = trimNum(s.writer_queue_size);
-    }
-    if (
-      typeof s.transcode_ffmpeg_params === "string" &&
-      canSet(this.transcodeFfmpegParams)
-    ) {
-      this.transcodeFfmpegParams.value = s.transcode_ffmpeg_params;
-    }
-    if (typeof s.transfer_directory === "string" && canSet(this.transferDir)) {
-      this.transferDir.value = s.transfer_directory;
-    }
-    if (
-      typeof s.transfer_checksum === "boolean" &&
-      canSet(this.transferChecksum)
-    ) {
-      this.transferChecksum.checked = s.transfer_checksum;
     }
     this._syncSaveMethodFields();
   }
@@ -312,16 +258,10 @@ export class RecordTab {
     // applySettings runs on every telemetry tick: one request in flight at most.
     if (this._nvencCapsPending) return;
     this._nvencCapsPending = true;
-    let r;
-    try {
-      r = await api("GET", "/api/nvenc/capabilities");
-    } catch {
-      return;
-    } finally {
-      this._nvencCapsPending = false;
-    }
-    if (r && r.ok && r.data) {
-      this._nvencCaps = r.data;
+    const caps = await request("GET", "/api/nvenc/capabilities");
+    this._nvencCapsPending = false;
+    if (caps) {
+      this._nvencCaps = caps;
       this._applyNvencCaps();
     }
   }
@@ -544,42 +484,26 @@ export class RecordTab {
     this._put({ relative_directory: rel }, [this.relativeDir]);
   }
 
+  // Non-fatal on failure: telemetry keeps disk free up to date.
   async _validateRecordDir() {
-    try {
-      const r = await api("POST", "/api/save-dir/validate", {
-        path: this.settings.record_directory,
-      });
-      if (!r.ok || !r.data) return;
-      this.diskFree.textContent = `${formatBytes(r.data.free_bytes)} free`;
-      if (!r.data.exists && !r.data.creatable) {
-        this.notify(
-          "warning",
-          `Directory cannot be created: ${r.data.resolved}`
-        );
-      }
-    } catch {
-      // non-fatal; telemetry keeps disk free up to date
+    const d = await request("POST", "/api/save-dir/validate", {
+      path: this.settings.record_directory,
+    });
+    if (!d) return;
+    this.diskFree.textContent = `${formatBytes(d.free_bytes)} free`;
+    if (!d.exists && !d.creatable) {
+      this.notify("warning", `Directory cannot be created: ${d.resolved}`);
     }
   }
 
   async _put(partial, force = []) {
-    let r;
-    try {
-      r = await api("PUT", "/api/settings", partial);
-    } catch {
-      this.notify("error", "Settings update failed: server unreachable");
-      return false;
-    }
-    if (r.ok && r.data) {
-      this.applySettings(r.data, force);
-      return true;
-    }
-    this.notify(
-      "error",
-      r.data?.detail || `Settings update failed (HTTP ${r.status})`
-    );
-    if (this.settings) this.applySettings(this.settings, force); // revert
-    return false;
+    const s = await request("PUT", "/api/settings", partial, {
+      action: "Settings update",
+      notify: this.notify,
+    });
+    if (s) this.applySettings(s, force);
+    else if (this.settings) this.applySettings(this.settings, force); // revert
+    return Boolean(s);
   }
 
   async _onButton() {
