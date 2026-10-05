@@ -4124,7 +4124,6 @@ def process(
                                     fps=job.fps,
                                     pixel_format=job.pixel_format,
                                     frames=job.frames,
-                                    total_frames=job.frames,
                                     on_progress=on_progress,
                                     raw_output=raw_output,
                                 )

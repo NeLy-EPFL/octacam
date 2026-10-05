@@ -14,7 +14,7 @@ import pytest
 
 from octacam.ffmpeg import find_ffmpeg
 from octacam.grid import build_grid_video
-from octacam.transcode import transcode_raw
+from octacam.transcode import transcode_file
 
 pytest.importorskip("cv2")  # parity with the other ffmpeg-backed suites
 
@@ -31,9 +31,9 @@ def _gray_mp4(folder, name, frame=None):
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.astype(np.uint8).tobytes())
     out = folder / f"{name}.mp4"
-    transcode_raw(
+    transcode_file(
         raw,
-        output=out,
+        out,
         ffmpeg_params=_GRAY_FFMPEG_PARAMS,
         width=W,
         height=H,
@@ -54,9 +54,9 @@ def _gray_mp4_sized(folder, name, w, h, value):
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.tobytes())
     out = folder / f"{name}.mp4"
-    transcode_raw(
+    transcode_file(
         raw,
-        output=out,
+        out,
         ffmpeg_params=_GRAY_FFMPEG_PARAMS,
         width=w,
         height=h,

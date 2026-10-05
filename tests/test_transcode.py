@@ -15,9 +15,7 @@ from octacam.transcode import (
     _reporting_args,
     atomic_output,
     is_partial_transcode,
-    transcode_encoded,
     transcode_file,
-    transcode_raw,
 )
 from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
 
@@ -39,7 +37,7 @@ def _make_mkv(path, frame, fps=10.0):
     raw = path.with_suffix(".raw")
     height, width = frame.shape
     _write_raw(raw, frame)
-    transcode_raw(
+    transcode_file(
         raw,
         output=path,
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -96,9 +94,9 @@ def test_transcode_file_raw_to_mp4(tmp_path):
     assert _dims(out) == (16, 12)
 
 
-def test_transcode_encoded_produces_valid_video(tmp_path):
+def test_transcode_file_reencodes_an_encoded_video(tmp_path):
     src = _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
-    out = transcode_encoded(src, tmp_path / "cam.mp4")  # mkv -> re-encoded mp4
+    out = transcode_file(src, tmp_path / "cam.mp4")  # mkv -> re-encoded mp4
     assert _dims(out) == (16, 12)
 
 
@@ -114,7 +112,7 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
         open(args[-1], "wb").close()  # a real run leaves the output file in place
 
     monkeypatch.setattr("octacam.transcode.run_ffmpeg", fake_run)
-    transcode_encoded(
+    transcode_file(
         tmp_path / "cam.mkv",
         tmp_path / "cam.mp4",
         ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
@@ -148,10 +146,10 @@ def test_transcode_raw_without_geometry_raises(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
     with pytest.raises(FileNotFoundError):
-        transcode_raw(raw, output=tmp_path / "cam.mp4")
+        transcode_file(raw, tmp_path / "cam.mp4")
     # A partial geometry is still insufficient.
     with pytest.raises(FileNotFoundError):
-        transcode_raw(raw, output=tmp_path / "cam.mp4", width=16, height=12)
+        transcode_file(raw, tmp_path / "cam.mp4", width=16, height=12)
 
 
 def test_transcode_raw_refuses_an_unknown_pixel_format(tmp_path):
@@ -159,7 +157,7 @@ def test_transcode_raw_refuses_an_unknown_pixel_format(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
     with pytest.raises(ValueError, match="Mono12"):
-        transcode_raw(
+        transcode_file(
             raw, tmp_path / "cam.mp4", width=16, height=12, fps=10.0, pixel_format="Mono12"
         )
     assert not (tmp_path / "cam.mp4").exists()
@@ -234,7 +232,7 @@ def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))  # exactly one 16x12 Mono8 frame
     samples: list[TranscodeProgress] = []
-    transcode_raw(
+    transcode_file(
         raw,
         output=tmp_path / "cam.mkv",
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -270,7 +268,7 @@ def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
         raise Boom
 
     with pytest.raises(Boom):
-        transcode_raw(
+        transcode_file(
             raw,
             output=tmp_path / "cam.mkv",
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -297,7 +295,7 @@ def test_interrupt_leaves_no_partial_output(tmp_path):
     _write_raw(raw, _frame(64, 48))
     out = tmp_path / "cam.mkv"
     with pytest.raises(_Stop):
-        transcode_raw(
+        transcode_file(
             raw,
             output=out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -319,7 +317,7 @@ def test_interrupt_does_not_clobber_existing_output(tmp_path):
     out = tmp_path / "cam.mkv"
     out.write_bytes(b"PREEXISTING-GOOD-OUTPUT")
     with pytest.raises(_Stop):
-        transcode_raw(
+        transcode_file(
             raw,
             output=out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -332,13 +330,12 @@ def test_interrupt_does_not_clobber_existing_output(tmp_path):
 
 
 def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
-    # transcode_encoded (re-encode of an already-encoded source) shares
-    # atomic_output, so an interrupt mid-re-encode must also leave no output
-    # and no temp behind.
+    # The re-encode of an already-encoded source shares atomic_output, so an
+    # interrupt mid-re-encode must also leave no output and no temp behind.
     src = _make_mkv(tmp_path / "cam.mkv", _frame(64, 48))
     out = tmp_path / "out.mp4"
     with pytest.raises(_Stop):
-        transcode_encoded(
+        transcode_file(
             src,
             out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -353,7 +350,7 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
     # The happy path must not strand the temp sibling either.
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
-    transcode_raw(
+    transcode_file(
         raw,
         output=tmp_path / "cam.mkv",
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -817,7 +814,7 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
 
     monkeypatch.setattr(transcode.subprocess, "run", fake_run)
     with pytest.raises(KeyboardInterrupt):
-        transcode_raw(
+        transcode_file(
             raw,
             output=tmp_path / "cam.mkv",
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -928,7 +925,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
     def run():
         try:
             barrier.wait()
-            transcode_raw(
+            transcode_file(
                 tmp_path / "cam.raw",
                 output=out,
                 width=frame.shape[1],

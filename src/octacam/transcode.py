@@ -54,9 +54,9 @@ class TranscodeProgress:
 ProgressCallback = Callable[[TranscodeProgress], None]
 
 
-def transcode_raw(
-    raw_path: Path,
-    output: Path | None = None,
+def transcode_file(
+    src: Path,
+    output: Path,
     ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     *,
     width: int | None = None,
@@ -67,76 +67,38 @@ def transcode_raw(
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
 ) -> Path:
-    """Encode a .raw dump to *output* (default ``<raw>.mkv``).
+    """Re-encode one ``.raw``/``.mkv``/``.mp4`` to *output* (its extension picks
+    the container), never stream-copying: captures use a fast preset, and this
+    offline pass is where a slow one pays off.
 
-    The stream has no geometry: *width*/*height*/*fps* come from the recording
-    summary and are required. *frames* (else the file size) sizes the bar.
+    A ``.raw`` has no geometry: *width*/*height*/*fps* (from the recording
+    summary) are required, and *frames* (else the file size) sizes the bar. An
+    encoded input uses *width*/*height* only to make a gray output 4:2:0, and
+    *frames* only for the bar.
     """
-    raw_path = Path(raw_path)
-    output = Path(output) if output else raw_path.with_suffix(".mkv")
-    if width is None or height is None or fps is None:
-        raise FileNotFoundError(
-            f"no recording_summary.json geometry for {raw_path}; cannot "
-            "determine width/height/fps to transcode the raw stream"
-        )
-    if pixel_format not in _RAW_PIXEL_FORMATS:
-        raise ValueError(f"cannot transcode {pixel_format} raw video from {raw_path}")
-    input_pix_fmt, bytes_per_pixel = _RAW_PIXEL_FORMATS[pixel_format]
+    src, output = Path(src), Path(output)
     total_frames = frames
-    if total_frames is None and width and height:
-        total_frames = raw_path.stat().st_size // (width * height * bytes_per_pixel)
-    with atomic_output(output) as tmp:
-        args = [
-            find_ffmpeg(),
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            *rawvideo_input_args(width, height, fps, str(raw_path), input_pix_fmt),
-            *output_args(ffmpeg_params, (width, height)),
-            "-y",
-            str(tmp),
-        ]
-        run_ffmpeg(
-            args,
-            raw_path,
-            on_progress=on_progress,
-            total_frames=total_frames,
-            raw_output=raw_output,
-        )
-    return output
-
-
-def transcode_encoded(
-    src: Path,
-    output: Path,
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    total_frames: int | None = None,
-    on_progress: ProgressCallback | None = None,
-    raw_output: bool = False,
-) -> Path:
-    """Re-encode an mkv/mp4 to *output*, never stream-copying: captures use a
-    fast preset, and this offline pass is where a slow one pays off.
-
-    *width*/*height* let a gray output become 4:2:0 (see
-    :func:`octacam.ffmpeg.output_args`); *total_frames* sizes the bar.
-    """
-    src = Path(src)
-    output = Path(output)
-    ffmpeg = find_ffmpeg()
+    if src.suffix == ".raw":
+        if width is None or height is None or fps is None:
+            raise FileNotFoundError(
+                f"no recording_summary.json geometry for {src}; cannot "
+                "determine width/height/fps to transcode the raw stream"
+            )
+        if pixel_format not in _RAW_PIXEL_FORMATS:
+            raise ValueError(f"cannot transcode {pixel_format} raw video from {src}")
+        input_pix_fmt, bytes_per_pixel = _RAW_PIXEL_FORMATS[pixel_format]
+        if total_frames is None and width and height:
+            total_frames = src.stat().st_size // (width * height * bytes_per_pixel)
+        input_args = rawvideo_input_args(width, height, fps, str(src), input_pix_fmt)
+    else:
+        input_args = ["-i", str(src)]
     frame_size = (width, height) if width and height else None
     with atomic_output(output) as tmp:
         args = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-y",
-            "-i",
-            str(src),
+            find_ffmpeg(),
+            *input_args,
             *output_args(ffmpeg_params, frame_size),
+            "-y",
             str(tmp),
         ]
         run_ffmpeg(
@@ -147,50 +109,6 @@ def transcode_encoded(
             raw_output=raw_output,
         )
     return output
-
-
-def transcode_file(
-    input_path: Path,
-    output: Path,
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    fps: float | None = None,
-    pixel_format: str = "Mono8",
-    frames: int | None = None,
-    total_frames: int | None = None,
-    on_progress: ProgressCallback | None = None,
-    raw_output: bool = False,
-) -> Path:
-    """Transcode one ``.raw``/``.mkv``/``.mp4`` to *output* (its extension picks
-    the container). A ``.raw`` takes geometry and *frames* from the summary; an
-    encoded input uses *width*/*height* only for its output pixel format and
-    *total_frames* for the bar."""
-    input_path = Path(input_path)
-    if input_path.suffix == ".raw":
-        return transcode_raw(
-            input_path,
-            output=output,
-            ffmpeg_params=ffmpeg_params,
-            width=width,
-            height=height,
-            fps=fps,
-            pixel_format=pixel_format,
-            frames=frames,
-            on_progress=on_progress,
-            raw_output=raw_output,
-        )
-    return transcode_encoded(
-        input_path,
-        output,
-        ffmpeg_params=ffmpeg_params,
-        width=width,
-        height=height,
-        total_frames=total_frames,
-        on_progress=on_progress,
-        raw_output=raw_output,
-    )
 
 
 # --- atomic partial outputs ------------------------------------------------------
