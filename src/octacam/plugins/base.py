@@ -24,19 +24,14 @@ log = logging.getLogger("octacam")
 
 
 class Plugin:
-    """Every hook the core calls, each a no-op by default.
-
-    A hook's ``params`` is this plugin's slice of the start request (what its
-    GUI tab or :meth:`default_start_params` gave), or None without one.
-    """
+    """Every hook the core calls, each a no-op by default. A hook's ``params`` is
+    this plugin's slice of the start request, or None without one."""
 
     name: str = "plugin"
-    # The plugin that generates the trigger (triggerbox). A managed recording
-    # counts frames against its trigger_train and primes with prime_trigger, and
-    # a managed preview runs on its trigger: armed indefinitely by
-    # on_preview_start, disarmed by on_preview_stop. on_preview_stop also runs
-    # before a recording's record grab starts, so on_recording_start arms
-    # against idle cameras (see RecordingController.start_recording).
+    # The trigger-generating plugin (triggerbox). A managed recording counts
+    # frames against its trigger_train and primes with prime_trigger; a managed
+    # preview runs on its trigger from on_preview_start to on_preview_stop, which
+    # also runs before a record grab starts, so on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
     # JS/CSS served under /plugins/<name>/ (<name>.js, optional <name>.css);
     # None = no UI.
@@ -52,13 +47,11 @@ class Plugin:
     controller: RecordingController | None = None
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
-        """Push ``payload`` to every GUI client as a ``topic`` message; a no-op
-        until PluginManager.attach gives the web app's."""
+        """Push ``payload`` to every GUI client as ``topic``; a no-op until attached."""
 
     @classmethod
     def from_options(cls, options: dict) -> Plugin:
-        """The plugin its ``[plugins.options]`` table configures; raises when it
-        cannot be built."""
+        """The plugin a ``[plugins.options]`` table configures; raises if it can't."""
         return cls()
 
     # ---- process lifecycle ----
@@ -87,9 +80,8 @@ class Plugin:
         pass
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
-        """The slice headless ``octacam record`` starts with (the GUI sends its
-        tab's); a plugin that acts at record start, such as arming a board,
-        needs one. None: nothing to contribute."""
+        """The slice headless ``octacam record`` starts with, as the GUI sends its
+        tab's: a plugin that arms a board at record start needs one."""
         return None
 
     def snapshot_options(self, params: dict | None) -> dict | None:
@@ -124,9 +116,8 @@ class Plugin:
         return None
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """Handle a GUI WebSocket message; True if it was this plugin's.
-        ``client_id`` names the socket, so per-connection state (a hold-to-jog)
-        stays with it."""
+        """True if the message was this plugin's. ``client_id`` names the socket,
+        so per-connection state (a hold-to-jog) stays with it."""
         return False
 
     def on_ws_disconnect(self, client_id: int) -> None:
@@ -135,13 +126,11 @@ class Plugin:
     # ---- board firmware (firmware is not None) ----
 
     def firmware_provisioning(self) -> dict:
-        """The board's firmware state and whether octacam can flash it
-        (FirmwareProvisioner.provisioning)."""
+        """FirmwareProvisioner.provisioning for this plugin's board."""
         raise NotImplementedError
 
     def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> FlashResult:
-        """Upload the current firmware, streaming arduino-cli's output to
-        ``on_line``; never raises."""
+        """Upload the current firmware (FirmwareProvisioner.flash); never raises."""
         raise NotImplementedError
 
 
@@ -222,8 +211,7 @@ class PluginManager:
             self._call(plugin, plugin.on_ws_disconnect, client_id)
 
     def trigger_plugin(self) -> Plugin | None:
-        """The first plugin that generates the trigger, else None (a managed
-        preview then free-runs)."""
+        """The first plugin that generates the trigger, else None."""
         return next((p for p in self.plugins if p.generates_trigger), None)
 
     def trigger_train(self, params: dict | None) -> dict | None:
@@ -252,9 +240,8 @@ class PluginManager:
         return params
 
     def snapshot_options(self, params: dict | None) -> dict[str, dict]:
-        """Each plugin's snapshot options, keyed by name for every plugin (empty
-        when its config already reproduces it) so one enabled with ``--plugin``
-        is listed too."""
+        """Every plugin's snapshot options by name, empty when its config already
+        reproduces it (so one enabled with ``--plugin`` is listed too)."""
         result: dict[str, dict] = {}
         for plugin in self.plugins:
             slice_ = self._slice(plugin, params)
