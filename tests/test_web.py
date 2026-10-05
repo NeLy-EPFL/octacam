@@ -988,8 +988,10 @@ def test_camera_name_endpoint(client):
     assert client.put("/api/cameras/0/name", json={"name": "left"}).status_code == 200
 
     # path separators and blank names are rejected (the name is a filename stem)
-    assert client.put("/api/cameras/0/name", json={"name": "a/b"}).status_code == 422
-    assert client.put("/api/cameras/0/name", json={"name": "   "}).status_code == 422
+    for bad in ("a/b", "   "):
+        r = client.put("/api/cameras/0/name", json={"name": bad})
+        assert r.status_code == 422
+        assert r.json()["detail"] == f"Invalid camera name: {bad!r}"
 
     # bad index, and strict-model violations
     assert client.put("/api/cameras/9/name", json={"name": "x"}).status_code == 404
@@ -1045,6 +1047,7 @@ def test_config_save_rejects_unsafe_camera_name(client, tmp_path):
             },
         )
         assert r.status_code == 422, (bad, r.text)
+        assert "Invalid camera name" in r.text
 
     # Two cameras sharing a name would collide on one video file -> rejected.
     dup = client.post(
