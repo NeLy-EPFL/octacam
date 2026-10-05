@@ -831,7 +831,7 @@ def test_flir_enumerate_releases_previous_system(monkeypatch):
 
 
 def test_flir_registers_atexit_teardown(monkeypatch):
-    # An enumerate-only path (doctor/probe) never runs teardown_backend, so the
+    # An enumerate-only path (doctor/probe) never closes a CameraSystem, so the
     # module must net the System release at interpreter shutdown. Reload the
     # module with a recording atexit.register to prove it registers teardown().
     import atexit

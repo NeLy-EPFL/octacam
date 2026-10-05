@@ -340,6 +340,9 @@ class CameraBackend(ABC):
     @abstractmethod
     def begin_freerun(self, fps: float | None = None) -> bool: ...
 
+    # Streaming: a start calls trigger.begin_grab() once the SDK streams, a stop
+    # calls trigger.end_grab() before the native stop. A record start that
+    # returns False has left the camera not grabbing.
     @abstractmethod
     def start_grab_preview(self) -> None: ...
     @abstractmethod
