@@ -1175,6 +1175,19 @@ def test_camera_feature_reset_prefers_config(client, tmp_path):
     assert abs(restored - saved) < 2.0
 
 
+def test_camera_feature_reset_needs_a_config_dir(tmp_path):
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    controller = RecordingController(system, settings)
+    try:
+        with TestClient(create_app(controller, OctacamConfig())) as client:
+            r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+            assert r.status_code == 400
+            assert r.json()["detail"] == "No config directory is set for this session"
+    finally:
+        controller.close()
+
+
 def test_camera_features_locked_while_recording(client):
     client.post("/api/config/save", json={"target": "active", "save_display": False})
     started = client.post("/api/recording/start", json={"confirm_overwrite": True})

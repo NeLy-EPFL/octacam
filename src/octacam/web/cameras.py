@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 
-from octacam.web.state import AppState, StrictModel
+from octacam.web.state import AppState, StrictModel, require_config_dir
 
 
 class CameraNamePatch(StrictModel):
@@ -118,7 +118,8 @@ def router(state: AppState) -> APIRouter:
 
     @api.post("/api/cameras/{index}/features/reset")
     def reset_camera_feature(index: int, payload: CameraFeatureReset):
-        state.require_config_dir()
+        # The saved values come from the controller's config dir.
+        require_config_dir(controller.config_dir)
         with _http_errors():
             result = controller.reset_camera_feature(index, payload.name, payload.scope)
         _publish_features_dirty(result)

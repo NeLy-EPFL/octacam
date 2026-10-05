@@ -418,9 +418,9 @@ class RecordingController:
                 "trigger_source 'external' with a trigger-driving plugin loaded; "
                 "treating it as 'managed' (octacam drives the trigger)."
             )
-        # Its octacam_config.toml is snapshotted into each recording; None (as
-        # in tests) records without a snapshot.
-        self._config_dir = Path(config_dir) if config_dir is not None else None
+        # The rig's config dir: each recording snapshots its octacam_config.toml
+        # and a feature reset reads its parameter files; None (as in tests): neither.
+        self.config_dir = Path(config_dir) if config_dir is not None else None
         # Finished recordings are noted in the session cache under this id.
         self._session_id = session_id or session_cache.new_session_id()
         self._record_kind = record_kind
@@ -712,9 +712,9 @@ class RecordingController:
 
     def _saved_params(self, camera) -> str:
         """``camera``'s parameter file text in the config dir ("" without one)."""
-        if self._config_dir is None:
+        if self.config_dir is None:
             return ""
-        path = self._config_dir / f"{camera.serial_number}.{camera.extension}"
+        path = self.config_dir / f"{camera.serial_number}.{camera.extension}"
         try:
             return path.read_text()
         except OSError:
@@ -1664,9 +1664,9 @@ class RecordingController:
     def _snapshot_source(self) -> Path | None:
         """The rig config file each recording's snapshot is made from, or None
         (no config dir or file)."""
-        if self._config_dir is None:
+        if self.config_dir is None:
             return None
-        src = self._config_dir / CONFIG_SNAPSHOT_FILENAME
+        src = self.config_dir / CONFIG_SNAPSHOT_FILENAME
         dst = self._recording_info_dir() / CONFIG_SNAPSHOT_FILENAME
         # A rig relaunched from a recording that records into that same folder
         # must not rewrite its own config.

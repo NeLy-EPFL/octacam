@@ -23,6 +23,13 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def require_config_dir(config_dir: str | Path | None) -> Path:
+    """``config_dir`` as a Path; 400 when the session has none."""
+    if not config_dir:
+        raise HTTPException(400, "No config directory is set for this session")
+    return Path(config_dir)
+
+
 @dataclasses.dataclass(eq=False)
 class AppState:
     """One GUI session; cli.gui reads it as ``app.state.app_state``.
@@ -43,11 +50,6 @@ class AppState:
     # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then
     # starts a detached processing job.
     process_after: bool = False
-
-    def require_config_dir(self) -> Path:
-        if not self.config_dir:
-            raise HTTPException(400, "No config directory is set for this session")
-        return Path(self.config_dir)
 
     def adopt_config(self, raw: dict) -> None:
         """Make the active config just saved from ``raw`` live: the next save

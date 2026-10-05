@@ -7,7 +7,7 @@ from pydantic import Field, field_validator, model_validator
 
 from octacam import config_writer
 from octacam.config import safe_segment
-from octacam.web.state import AppState, StrictModel
+from octacam.web.state import AppState, StrictModel, require_config_dir
 
 
 class CameraDisplayParams(StrictModel):
@@ -55,7 +55,7 @@ def router(state: AppState) -> APIRouter:
 
     @api.post("/api/config/save")
     def save_config(req: SaveConfigRequest):
-        active = state.require_config_dir()
+        active = require_config_dir(state.config_dir)
         if not req.save_sensor and not req.save_display:
             raise HTTPException(422, "Nothing to save: enable sensor and/or display")
         # A node-map snapshot would contend with the record grab loops.
