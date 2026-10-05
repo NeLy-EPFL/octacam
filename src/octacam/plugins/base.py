@@ -25,7 +25,8 @@ log = logging.getLogger("octacam")
 class Plugin:
     """Every hook the core calls, each a no-op by default.
 
-    A hook's ``params`` is the start request's ``{plugin name: slice}`` dict.
+    A hook's ``params`` is this plugin's slice of the start request (what its
+    GUI tab or :meth:`default_start_params` gave), or None without one.
     """
 
     name: str = "plugin"
@@ -146,6 +147,13 @@ class PluginManager:
                 plugin.broadcast = broadcast
 
     @staticmethod
+    def _slice(plugin: Plugin, params: dict | None) -> dict | None:
+        """``plugin``'s slice of a ``{plugin name: slice}`` request; a slice
+        that is not a table counts as none."""
+        slice_ = (params or {}).get(plugin.name)
+        return slice_ if isinstance(slice_, dict) else None
+
+    @staticmethod
     def _call(plugin: Plugin, hook: Callable[..., Any], *args, default=None) -> Any:
         """``hook(*args)``, a bound method of ``plugin``; ``default`` when it raises."""
         try:
@@ -164,7 +172,7 @@ class PluginManager:
 
     def on_preview_start(self, params: dict | None) -> None:
         for plugin in self.plugins:
-            self._call(plugin, plugin.on_preview_start, params)
+            self._call(plugin, plugin.on_preview_start, self._slice(plugin, params))
 
     def on_preview_stop(self) -> None:
         for plugin in self.plugins:
@@ -172,11 +180,11 @@ class PluginManager:
 
     def on_recording_start(self, params: dict | None) -> None:
         for plugin in self.plugins:
-            self._call(plugin, plugin.on_recording_start, params)
+            self._call(plugin, plugin.on_recording_start, self._slice(plugin, params))
 
     def on_first_frame(self, params: dict | None) -> None:
         for plugin in self.plugins:
-            self._call(plugin, plugin.on_first_frame, params)
+            self._call(plugin, plugin.on_first_frame, self._slice(plugin, params))
 
     def on_recording_stop(self, aborted: bool) -> None:
         for plugin in self.plugins:
@@ -203,14 +211,15 @@ class PluginManager:
         plugin = self.trigger_plugin()
         if plugin is None:
             return None
-        return self._call(plugin, plugin.trigger_train, params)
+        return self._call(plugin, plugin.trigger_train, self._slice(plugin, params))
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
         """Have the trigger plugin emit ``pulses`` priming pulses; True if it did."""
         plugin = self.trigger_plugin()
         if plugin is None:
             return False
-        return bool(self._call(plugin, plugin.prime_trigger, params, pulses))
+        slice_ = self._slice(plugin, params)
+        return bool(self._call(plugin, plugin.prime_trigger, slice_, pulses))
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
         """Each plugin's headless start slice, keyed by name as the GUI sends
@@ -226,10 +235,13 @@ class PluginManager:
         """Each plugin's snapshot options, keyed by name for every plugin (empty
         when its config already reproduces it) so one enabled with ``--plugin``
         is listed too."""
-        return {
-            plugin.name: dict(self._call(plugin, plugin.snapshot_options, params) or {})
-            for plugin in self.plugins
-        }
+        result: dict[str, dict] = {}
+        for plugin in self.plugins:
+            slice_ = self._slice(plugin, params)
+            result[plugin.name] = dict(
+                self._call(plugin, plugin.snapshot_options, slice_) or {}
+            )
+        return result
 
     def status(self) -> dict:
         """Each plugin's status() with its is_ready() as ``ready``, which wins

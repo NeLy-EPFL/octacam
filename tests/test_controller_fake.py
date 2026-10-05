@@ -182,7 +182,7 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
         name = "lamp"
 
         def snapshot_options(self, params):
-            return {"level": params["lamp"]["level"]}
+            return {"level": params["level"]}
 
     save_dir = tmp_path / "rec" / "001"
     settings = RecordingSettings(

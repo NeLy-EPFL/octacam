@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
+from octacam.plugins.base import PluginManager
 from octacam.plugins.flywheel import (
     COMMAND_FIELDS,
     JOG_DEFAULT_INTERVAL_US,
@@ -91,13 +92,11 @@ def test_on_first_frame_writes_armed_command():
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
         {
-            "flywheel": {
-                "n_steps": -4096,
-                "step_interval_us": 1465,
-                "rest_duration_ms": 1000,
-                "n_repeats": 3,
-                "init_wait_duration_s": 10,
-            }
+            "n_steps": -4096,
+            "step_interval_us": 1465,
+            "rest_duration_ms": 1000,
+            "n_repeats": 3,
+            "init_wait_duration_s": 10,
         }
     )
     assert link.written == [b"\x00\xf0\xb9\x05\xe8\x03\x03\x0a"]
@@ -108,8 +107,8 @@ def test_on_first_frame_without_params_is_noop():
     plugin._link = link = FakeLink()
     plugin.on_first_frame(None)
     plugin.on_first_frame({})
-    plugin.on_first_frame({"other_plugin": {"n_steps": 1}})
-    plugin.on_first_frame({"flywheel": {"bogus": "field"}})  # malformed -> skipped
+    PluginManager([plugin]).on_first_frame({"other_plugin": {"n_steps": 1}})
+    plugin.on_first_frame({"bogus": "field"})  # malformed -> skipped
     assert link.written == []
 
 
@@ -120,13 +119,11 @@ def test_on_first_frame_skips_out_of_range_command():
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
         {
-            "flywheel": {
-                "n_steps": 40000,  # > int16 max
-                "step_interval_us": 70000,  # > uint16 max
-                "rest_duration_ms": 0,
-                "n_repeats": 300,  # > uint8 max
-                "init_wait_duration_s": 0,
-            }
+            "n_steps": 40000,  # > int16 max
+            "step_interval_us": 70000,  # > uint16 max
+            "rest_duration_ms": 0,
+            "n_repeats": 300,  # > uint8 max
+            "init_wait_duration_s": 0,
         }
     )  # must not raise
     assert link.snapshot() == []  # invalid command dropped, nothing written
@@ -197,13 +194,13 @@ def test_configured_command_tolerates_a_partial_or_bad_table():
 def test_snapshot_options_carry_the_armed_loop_command():
     plugin = _configured(**_RIG_COMMAND)
     # Armed with what the config says, or not armed at all: nothing to record.
-    assert plugin.snapshot_options({"flywheel": dict(_RIG_COMMAND)}) is None
+    assert plugin.snapshot_options(dict(_RIG_COMMAND)) is None
     assert plugin.snapshot_options(None) is None
     # Edited in the tab: the snapshot carries what this recording actually ran.
     edited = {**_RIG_COMMAND, "n_repeats": 9}
-    assert plugin.snapshot_options({"flywheel": edited}) == {"command": edited}
+    assert plugin.snapshot_options(edited) == {"command": edited}
     # A rig with no configured command records the armed one too.
-    assert _configured().snapshot_options({"flywheel": edited}) == {"command": edited}
+    assert _configured().snapshot_options(edited) == {"command": edited}
 
 
 def test_clamp_jog_interval():
@@ -588,6 +585,6 @@ def test_configured_command_arms_on_first_frame_headlessly():
     written = []
     plugin._link = type("L", (), {"write_command": lambda _s, c: written.append(c)})()
 
-    params = {plugin.name: plugin.default_start_params(100.0, 10.0)}
-    plugin.on_first_frame(params)
+    manager = PluginManager([plugin])
+    manager.on_first_frame(manager.default_start_params(100.0, 10.0))
     assert written == [command]

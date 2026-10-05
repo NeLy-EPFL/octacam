@@ -329,7 +329,7 @@ def test_auto_and_manual_channels_size_independently():
     PluginManager([plugin]).attach(
         controller=FakeController([FakeCamera("a", 2000, 50), FakeCamera("b", 1000, 0)])
     )
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     lights = _last_arm(link)["lights"]
     # channel 1 auto: max(2000+50, 1000+0) + 100 = 2150 µs
     assert lights[0][3] == 2150
@@ -344,7 +344,7 @@ def test_auto_duty_skips_camera_without_exposure_but_uses_others():
     PluginManager([plugin]).attach(
         controller=FakeController([FakeCamera("a", None), FakeCamera("b", 1500, 0)])
     )
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert _last_arm(link)["lights"][0][3] == 1500
 
 
@@ -355,7 +355,7 @@ def test_auto_duty_reads_trigger_delay_zero_when_unavailable():
     PluginManager([plugin]).attach(
         controller=FakeController([FakeCamera("a", 1000, 999, has_delay=False)])
     )
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert _last_arm(link)["lights"][0][3] == 1000  # delay treated as 0
 
 
@@ -363,7 +363,7 @@ def test_auto_duty_without_controller_falls_back_to_manual(caplog):
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto", "duty_percent": 30}]
     )
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert _last_arm(link)["lights"][0][3] == round(0.30 * PERIOD_80)
     assert any("no camera exposure could be read" in m for m in caplog.messages)
 
@@ -386,9 +386,9 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
         ],
     )
     slice_ = plugin.default_start_params(80.0, 10.0)
-    plugin.on_recording_start({"triggerbox": slice_})
+    plugin.on_recording_start(slice_)
     rec = _last_arm(link)
-    plugin.on_preview_start({"triggerbox": slice_})
+    plugin.on_preview_start(slice_)
     prev = _last_arm(link)
     # Recording runs exactly its 800 pulses (ending once the last pulse and
     # strobe are out, see plan_train); preview runs until cancel (0)...
@@ -405,13 +405,13 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
 def test_on_preview_start_without_slice_does_not_arm():
     plugin, link = _plugin_with_fake()
     plugin.on_preview_start(None)
-    plugin.on_preview_start({"flywheel": {}})
+    PluginManager([plugin]).on_preview_start({"flywheel": {}})
     assert not link.snapshot()
 
 
 def _preview_params(plugin: TriggerboxPlugin) -> dict:
-    """What the controller passes on_preview_start: the headless start slices."""
-    return {"triggerbox": plugin.default_start_params(80.0, 10.0)}
+    """The slice a managed preview arms with: the headless start slice."""
+    return plugin.default_start_params(80.0, 10.0)
 
 
 def test_on_preview_stop_cancels():
@@ -541,12 +541,10 @@ def test_on_recording_start_arms_with_full_spec():
     plugin, link = _plugin_with_fake()
     plugin.on_recording_start(
         {
-            "triggerbox": {
-                "fps": 100,
-                "duration_ms": 2000,
-                "cameras": [{"pin": "D13", "pulse_us": 500}],
-                "lights": [{"channel": 1, "mode": "continuous"}],
-            }
+            "fps": 100,
+            "duration_ms": 2000,
+            "cameras": [{"pin": "D13", "pulse_us": 500}],
+            "lights": [{"channel": 1, "mode": "continuous"}],
         }
     )
     dec = _last_arm(link)
@@ -560,7 +558,7 @@ def test_on_recording_start_arms_with_full_spec():
 
 def test_on_recording_start_uses_configured_spec_when_only_fps_given():
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     dec = _last_arm(link)
     assert len(dec["cams"]) == 1  # the classic D13 line
     assert len(dec["lights"]) == 2  # ch1 + ch2
@@ -568,14 +566,14 @@ def test_on_recording_start_uses_configured_spec_when_only_fps_given():
 
 def test_on_recording_start_ignored_without_spec():
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({})
+    PluginManager([plugin]).on_recording_start({})
     plugin.on_recording_start(None)
     assert not link.snapshot()
 
 
 def test_on_recording_start_reports_and_skips_when_link_closed():
     plugin, link = _plugin_with_fake(is_open=False)
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert not link.snapshot()  # nothing armed
     # Surfaced to the operator (not just logged), so a frozen preview/recording
     # has a visible cause.
@@ -586,7 +584,7 @@ def test_on_recording_start_reports_and_skips_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
     plugin._firmware_ok = False
     plugin._firmware = "OTHERBOARD 1"
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert not link.snapshot()
     assert plugin._last_error and "incompatible" in plugin._last_error
 
@@ -607,7 +605,7 @@ def test_default_start_params_shape():
     assert len(params["lights"]) == 2
     # round-trips: feeding it back into on_recording_start arms
     link = _fake_link(plugin)
-    plugin.on_recording_start({"triggerbox": params})
+    plugin.on_recording_start(params)
     assert _last_arm(link)["fps"] == 80
 
 
@@ -639,12 +637,14 @@ def test_snapshot_options_none_when_the_config_already_matches():
     plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     # Not armed with the recording: nothing to record.
     assert plugin.snapshot_options(None) is None
-    assert plugin.snapshot_options({"twophoton": {}}) is None
+    assert PluginManager([plugin]).snapshot_options({"twophoton": {}}) == {
+        "triggerbox": {}
+    }
     # An untouched tab (which never sends the off channel 3) and the headless
     # CLI slice (which does) both match the config, so the snapshot stays verbatim.
-    assert plugin.snapshot_options({"triggerbox": _tab_spec(plugin)}) is None
+    assert plugin.snapshot_options(_tab_spec(plugin)) is None
     headless = plugin.default_start_params(80.0, 5.0)
-    assert plugin.snapshot_options({"triggerbox": headless}) is None
+    assert plugin.snapshot_options(headless) is None
 
 
 def test_snapshot_options_carry_the_armed_lights_and_cameras():
@@ -659,7 +659,7 @@ def test_snapshot_options_carry_the_armed_lights_and_cameras():
     # The tab pushes each edit to the plugin as it happens, well before the
     # recording starts; that must not hide the edit from the snapshot.
     assert plugin.on_ws_message({"type": "triggerbox_spec", "spec": spec}, 1)
-    options = plugin.snapshot_options({"triggerbox": spec})
+    options = plugin.snapshot_options(spec)
     assert options is not None
     assert options["cameras"] == [{"pin": "D13", "pulse_us": 700, "delay_us": 0}]
     assert [(lt["channel"], lt["mode"]) for lt in options["lights"]] == [
@@ -678,13 +678,13 @@ def test_snapshot_options_none_after_edits_are_reverted():
     original = _tab_spec(plugin)
     plugin.on_ws_message({"type": "triggerbox_spec", "spec": edited}, 1)
     plugin.on_ws_message({"type": "triggerbox_spec", "spec": original}, 1)
-    assert plugin.snapshot_options({"triggerbox": original}) is None
+    assert plugin.snapshot_options(original) is None
 
 
 def test_snapshot_options_all_lights_off_reloads_as_off():
     plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     spec = _tab_spec(plugin, ch1={"mode": "off"}, ch2={"mode": "off"})
-    options = plugin.snapshot_options({"triggerbox": spec})
+    options = plugin.snapshot_options(spec)
     assert options is not None and options["lights"] == []
     # An explicit empty list means "all off", unlike an absent key (which
     # defaults to the classic two strobes).
@@ -720,7 +720,7 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
     plugin._ack_timeout_s = 0.03
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert calls == [DEVICE]  # a USB-reset recovery was attempted
     assert link.opens >= 1 and link.closes >= 1  # link was cycled
     assert len(link.snapshot()) == 2  # armed, then re-armed after the reset
@@ -736,7 +736,7 @@ def test_arm_write_failure_is_reported_and_recovered(monkeypatch):
     bc = _Broadcasts()
     PluginManager([plugin]).attach(broadcast=bc)
     link.fail_writes = True  # wedged: every write fails
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert link.closes >= 1  # recovery cycled the link
     assert bc.last_error() is not None
 
@@ -759,7 +759,7 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
 
     t = threading.Thread(target=ack)
     t.start()
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     t.join(timeout=3.0)
     assert plugin._armed_event.is_set()
     assert plugin._last_error is None  # the successful re-arm cleared the error
@@ -772,7 +772,7 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1])
     plugin, link = _plugin_with_fake()
     link.reject = "r"  # reserved pin
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert plugin._last_error and "REJECTED" in plugin._last_error
     assert calls == []  # a protocol reject is not a wedge; no USB reset
 
@@ -840,7 +840,7 @@ def test_arm_and_wait_serialized_by_arm_lock():
 
 def test_on_recording_start_no_warning_when_ack_arrives(caplog):
     plugin, link = _plugin_with_fake(delay_s=0.005)
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert plugin._armed_event.is_set()
     assert plugin._last_error is None  # a clean ack reports no failure
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
@@ -849,7 +849,7 @@ def test_on_recording_start_no_warning_when_ack_arrives(caplog):
 def test_on_recording_start_logs_firmware_reject(caplog):
     plugin, link = _plugin_with_fake()
     link.reject = "p"  # unknown pin id
-    plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert any("REJECTED" in m and "unknown pin" in m for m in caplog.messages)
 
 
@@ -1282,12 +1282,12 @@ def test_build_reads_auto_flash_option():
 
 def test_trigger_train_describes_the_exact_train():
     plugin, _link = _plugin_with_fake()
-    assert plugin.trigger_train({"triggerbox": {"fps": 125, "duration_ms": 900_000}}) == {
+    assert plugin.trigger_train({"fps": 125, "duration_ms": 900_000}) == {
         "period_ns": 8_000_000,
         "count": 112_500,
     }
     # 90 fps: the board's integer period, and round(fps * duration) pulses.
-    train = plugin.trigger_train({"triggerbox": {"fps": 90, "duration_ms": 10_000}})
+    train = plugin.trigger_train({"fps": 90, "duration_ms": 10_000})
     assert train == {"period_ns": 11_111_000, "count": 900}
     assert plugin.trigger_train(None) is None
 
@@ -1474,7 +1474,7 @@ def test_trigger_train_counts_the_pulses_the_arm_emits():
     # half a period after the last pulse emitted up to 9 fewer.
     for fps in (90, 300, 333, 401, 450, 480, 504, 505, 550, 610):
         plugin, link = _plugin_with_fake(cameras=[{"pin": "D13", "pulse_us": 500}])
-        params = {"triggerbox": {"fps": fps, "duration_ms": 10_000}}
+        params = {"fps": fps, "duration_ms": 10_000}
         count = _train_count(plugin, params)
         plugin.on_recording_start(params)
         arm = _last_arm(link)
@@ -1488,7 +1488,7 @@ def test_a_delayed_camera_line_gets_its_last_pulse():
         plugin, link = _plugin_with_fake(
             cameras=[{"pin": "D13", "pulse_us": 500, "delay_us": delay_us}]
         )
-        params = {"triggerbox": {"fps": 100, "duration_ms": 10_000}}
+        params = {"fps": 100, "duration_ms": 10_000}
         count = _train_count(plugin, params)
         plugin.on_recording_start(params)
         arm = _last_arm(link)
@@ -1515,7 +1515,7 @@ def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
     if exposure_us is not None:
         controller = FakeController([FakeCamera("a", exposure_us, 0)])
         PluginManager([plugin]).attach(controller=controller)
-    params = {"triggerbox": {"fps": fps, "duration_ms": 10_000}}
+    params = {"fps": fps, "duration_ms": 10_000}
     count = _train_count(plugin, params)
     plugin.on_recording_start(params)
     arm = _last_arm(link)
@@ -1533,7 +1533,7 @@ def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
             cameras=[{"pin": "D13", "pulse_us": 500}],
             lights=[{"channel": 1, "mode": "strobe", "duty_percent": duty}],
         )
-        plugin.on_recording_start({"triggerbox": {"fps": fps, "duration_ms": 10_000}})
+        plugin.on_recording_start({"fps": fps, "duration_ms": 10_000})
     messages = [(r.levelno, r.getMessage()) for r in caplog.records]
     assert any(
         level == logging.WARNING and "at 1000 fps" in m and "cannot end the train" in m
@@ -1563,7 +1563,7 @@ def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
     )
     spec = plugin.default_start_params(125.0, 10.0)
     started = time.monotonic()
-    assert plugin.prime_trigger({"triggerbox": spec}, 4) is True
+    assert plugin.prime_trigger(spec, 4) is True
     elapsed = time.monotonic() - started
     arm = _last_arm(link)
     assert arm["lights"] == []  # no light flash before the recording
@@ -1575,7 +1575,7 @@ def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
 
 def test_prime_trigger_declines_without_a_camera_line_or_a_board():
     plugin, _link = _plugin_with_fake(is_open=False)
-    assert plugin.prime_trigger({"triggerbox": plugin.default_start_params(80, 1)}, 4) is False
+    assert plugin.prime_trigger(plugin.default_start_params(80, 1), 4) is False
     plugin, _link = _plugin_with_fake()
     assert plugin.prime_trigger(None, 4) is False
 

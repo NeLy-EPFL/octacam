@@ -154,7 +154,7 @@ def test_arm_params_from_payload_handles_invalid_types():
 
 def test_on_recording_start_sends_arm_packet():
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"twophoton": {"fps": 120, "duration_ms": 5000}})
+    plugin.on_recording_start({"fps": 120, "duration_ms": 5000})
     written = link.snapshot()
     assert len(written) == 1
     magic, fps, dur = struct.unpack(ARM_FORMAT, written[0])
@@ -173,14 +173,14 @@ def test_on_recording_start_does_not_arm_when_no_params():
 def test_on_recording_start_does_not_arm_when_plugin_key_absent():
     # A different plugin's params present but no "twophoton" key → do not arm.
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"flywheel": {"n_steps": 100}})
+    PluginManager([plugin]).on_recording_start({"flywheel": {"n_steps": 100}})
     assert link.snapshot() == []
 
 
 def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty():
     # {"twophoton": {}} means checkbox was checked, GUI omitted optional fields.
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({"twophoton": {}})
+    plugin.on_recording_start({})
     written = link.snapshot()
     assert len(written) == 1
     _, fps, dur = struct.unpack(ARM_FORMAT, written[0])
@@ -233,7 +233,7 @@ def test_on_recording_start_surfaces_write_failure_to_gui():
         broadcast=lambda topic, data: events.append((topic, data))
     )
     link.send_arm = lambda params: False  # link open, but the write never lands
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 1000})
     assert plugin._last_error and "arm write" in plugin._last_error
     assert any(
         topic == "twophoton_state" and data["error"] == plugin._last_error
@@ -249,7 +249,7 @@ def test_on_recording_start_surfaces_ack_timeout_to_gui():
     PluginManager([plugin]).attach(
         broadcast=lambda topic, data: events.append((topic, data))
     )
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 1000})
     assert plugin._last_error and "no arm ack" in plugin._last_error
     assert any(
         topic == "twophoton_state" and data["error"] == plugin._last_error
@@ -384,7 +384,7 @@ def test_from_payload_clamps_duration_to_uint32():
 
 def test_on_recording_start_warns_and_skips_when_link_closed(caplog):
     plugin, link = _plugin_with_fake(is_open=False)
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 5000})
     assert link.snapshot() == []  # nothing armed
     assert any("is not open" in m for m in caplog.messages)  # warning emitted
 
@@ -415,7 +415,7 @@ def test_on_recording_start_warns_when_no_arm_ack(caplog):
     plugin, link = _plugin_with_fake()
     link.acks = False
     plugin._ack_timeout_s = 0.05
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 1000})
     assert link.snapshot()  # the arm packet was still sent
     assert any("no arm acknowledgement" in m for m in caplog.messages)
 
@@ -431,7 +431,7 @@ def test_on_recording_start_no_warning_when_ack_arrives(caplog):
 
     t = threading.Thread(target=ack)
     t.start()
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 1000})
     t.join(timeout=2.0)
     assert plugin._armed_event.is_set()
     assert not any("no arm acknowledgement" in m for m in caplog.messages)
@@ -742,7 +742,7 @@ def test_flash_refused_while_armed():
 def test_on_recording_start_refuses_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2 abcd")  # foreign -> firmware_ok False
-    plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 5000}})
+    plugin.on_recording_start({"fps": 100, "duration_ms": 5000})
     assert link.snapshot() == []  # nothing armed
 
 

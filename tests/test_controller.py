@@ -654,14 +654,14 @@ def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
     controller = RecordingController(
         camera_system, settings, PluginManager([Spy()]), auto_preview=False
     )
-    params = {"spy": {"value": 1}}
+    params = {"spy": {"value": 1}, "other": {"value": 2}}
     assert controller.start_recording(plugin_params=params).ok
     controller.join(timeout=20)
 
     first_frames = [c for c in calls if c[0] == "first_frame"]
     assert len(first_frames) == 1, "on_first_frame must fire exactly once"
-    assert first_frames[0][1] == params  # plugin slice threaded through
-    assert ("start", params) in calls
+    assert first_frames[0][1] == {"value": 1}  # the plugin's own slice
+    assert ("start", {"value": 1}) in calls
     assert ("stop", False) in calls  # completed, not aborted
 
 

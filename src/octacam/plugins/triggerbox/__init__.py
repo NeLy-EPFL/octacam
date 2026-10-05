@@ -1045,23 +1045,15 @@ class TriggerboxPlugin(Plugin):
             "lights": [asdict(lt) for lt in self._lights],
         }
 
-    @staticmethod
-    def _spec_from_params(params: dict | None) -> dict | None:
-        """This plugin's slice of the start params, or None."""
-        params = params or {}
-        spec = params.get("triggerbox")
-        return spec if isinstance(spec, dict) else None
-
     def snapshot_options(self, params: dict | None) -> dict | None:
         """The camera lines and light channels a recording armed, as config
         options; None when it armed none or what the config says. Off channels
         are left out on both sides: the tab never sends them, and an empty
         ``lights`` list reloads as all-off."""
-        spec = self._spec_from_params(params)
-        if spec is None:
+        if params is None:
             return None
-        cameras = self._cameras_from_spec(spec)
-        lights = [lt for lt in self._lights_from_spec(spec) if lt.mode != "off"]
+        cameras = self._cameras_from_spec(params)
+        lights = [lt for lt in self._lights_from_spec(params) if lt.mode != "off"]
         configured = [lt for lt in self._configured_lights if lt.mode != "off"]
         if cameras == self._configured_cameras and lights == configured:
             return None
@@ -1071,11 +1063,10 @@ class TriggerboxPlugin(Plugin):
         }
 
     def on_recording_start(self, params: dict | None) -> None:
-        """Arm the board when the start params hold a triggerbox slice."""
+        """Arm the board when the start request holds a triggerbox slice."""
         self._preview_armed = False
-        spec = self._spec_from_params(params)
-        if spec is not None:
-            self._arm_from_spec(spec, duration_ms=None, context="recording")
+        if params is not None:
+            self._arm_from_spec(params, duration_ms=None, context="recording")
 
     def _arm_from_spec(
         self, spec: dict, *, duration_ms: int | None, context: str
@@ -1171,12 +1162,11 @@ class TriggerboxPlugin(Plugin):
         *params*. The count depends on the camera lines only: the lights' auto
         duty needs a camera read, which this pure hook (called under the
         controller lock) must not make."""
-        spec = self._spec_from_params(params)
-        if spec is None:
+        if params is None:
             return None
-        fps = self._spec_fps(spec)
-        cameras = [c.record() for c in self._cameras_from_spec(spec)[:_MAX_CAM]]
-        plan = plan_train(fps, pulse_count(fps, self._spec_duration_ms(spec)), cameras)
+        fps = self._spec_fps(params)
+        cameras = [c.record() for c in self._cameras_from_spec(params)[:_MAX_CAM]]
+        plan = plan_train(fps, pulse_count(fps, self._spec_duration_ms(params)), cameras)
         return {"period_ns": period_us(fps) * 1000, "count": plan.count}
 
     def _report_train_plan(
@@ -1218,13 +1208,12 @@ class TriggerboxPlugin(Plugin):
         """Emit *pulses* sacrificial pulses on the camera lines, lights dark (see
         "Priming" in CLAUDE.md). Returns once the board reports the burst done,
         or once it is cancelled, so the train starts on a fresh clock."""
-        spec = self._spec_from_params(params)
-        if spec is None or not self._link.is_open or not self._firmware_ok:
+        if params is None or not self._link.is_open or not self._firmware_ok:
             return False
-        cams = self._cameras_from_spec(spec)
+        cams = self._cameras_from_spec(params)
         if not cams or pulses <= 0:
             return False
-        fps = self._spec_fps(spec)
+        fps = self._spec_fps(params)
         try:
             arm = self._build_arm_spec(fps, 0, cams, [])
             arm = replace(arm, duration_ms=plan_train(fps, pulses, arm.cameras).duration_ms)
@@ -1277,11 +1266,10 @@ class TriggerboxPlugin(Plugin):
 
     def on_preview_start(self, params: dict | None) -> None:
         """Arm the board until cancelled, with the recording's spec."""
-        spec = self._spec_from_params(params)
-        if spec is None:
+        if params is None:
             return
         self._preview_armed = True
-        self._arm_from_spec(spec, duration_ms=0, context="preview")
+        self._arm_from_spec(params, duration_ms=0, context="preview")
 
     def on_preview_stop(self) -> None:
         # Waits for the 'C': a recording's record grab starts next and must not

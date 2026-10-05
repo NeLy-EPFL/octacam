@@ -127,7 +127,7 @@ def test_only_the_trigger_plugin_is_asked_for_the_train_and_priming():
         generates_trigger = True
 
         def trigger_train(self, params):
-            return {"period_ns": 10_000_000, "count": params["board"]["count"]}
+            return {"period_ns": 10_000_000, "count": params["count"]}
 
         def prime_trigger(self, params, pulses):
             return pulses == 4
@@ -163,12 +163,31 @@ def test_a_ws_message_goes_to_the_first_plugin_that_claims_it():
     assert seen == ["a"]
 
 
+def test_each_hook_gets_its_own_slice():
+    seen = []
+
+    class Slice(Plugin):
+        def __init__(self, name):
+            self.name = name
+
+        def on_recording_start(self, params):
+            seen.append((self.name, params))
+
+    manager = PluginManager([Slice("a"), Slice("b"), Slice("c")])
+    manager.on_recording_start({"a": {"x": 1}, "b": True})
+    # b's slice is not a table, and c has none: both get None.
+    assert seen == [("a", {"x": 1}), ("b", None), ("c", None)]
+    seen.clear()
+    manager.on_recording_start(None)
+    assert seen == [("a", None), ("b", None), ("c", None)]
+
+
 def test_snapshot_options_lists_every_plugin():
     class Live(Plugin):
         name = "live"
 
         def snapshot_options(self, params):
-            return {"lights": params["live"]}
+            return {"lights": params["lights"]}
 
     class Unchanged(Plugin):
         name = "unchanged"  # the base hook: nothing differs from the config
@@ -182,7 +201,7 @@ def test_snapshot_options_lists_every_plugin():
     manager = PluginManager([Live(), Unchanged(), Boom()])
     # Every loaded plugin is keyed (so the snapshot lists it); only a plugin with
     # live changes contributes options, and a failing hook never raises.
-    assert manager.snapshot_options({"live": [1]}) == {
+    assert manager.snapshot_options({"live": {"lights": [1]}}) == {
         "live": {"lights": [1]},
         "unchanged": {},
         "boom": {},

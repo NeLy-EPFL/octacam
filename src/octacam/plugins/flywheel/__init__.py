@@ -488,12 +488,9 @@ class FlywheelPlugin(Plugin):
     def _command_from(self, params: dict | None) -> Command | None:
         if not params:
             return None
-        spec = params.get(self.name)
-        if not spec:
-            return None
-        command = Command.parse(spec)
+        command = Command.parse(params)
         if command is None:
-            log.warning("Flywheel plugin: ignoring invalid command %r", spec)
+            log.warning("Flywheel plugin: ignoring invalid command %r", params)
         return command
 
     # --------------------------------------------------------- web contrib

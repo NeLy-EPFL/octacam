@@ -166,7 +166,7 @@ def test_managed_preview_arms_driving_plugin(make_controller):
     assert controller._effective_preview_mode() == "managed"
     assert plugin.preview_starts == 1
     # The controller hands the plugin its recording arm slice to reuse.
-    assert plugin.last_params == {"faketrigger": {"fps": 50, "duration_ms": 20000}}
+    assert plugin.last_params == {"fps": 50, "duration_ms": 20000}
 
 
 def test_non_managed_preview_disarms_driving_plugin(make_controller):

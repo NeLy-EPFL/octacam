@@ -377,12 +377,11 @@ class TwoPhotonPlugin(Plugin):
         }
 
     def on_recording_start(self, params: dict | None) -> None:
-        """Arm the board when the start params hold a twophoton slice (the tab's
-        "Arm with recording"); a missing fps or duration takes its default."""
-        spec = (params or {}).get("twophoton")
-        if spec is None:
+        """Arm the board when the start request holds a twophoton slice (the
+        tab's "Arm with recording"); a missing fps or duration takes its default."""
+        if params is None:
             return
-        arm = ArmParams.from_payload(spec, self._default_fps, self._default_duration_ms)
+        arm = ArmParams.from_payload(params, self._default_fps, self._default_duration_ms)
         if not self._link.is_open:
             log.warning(
                 "2-photon trigger: link to %s is not open; recording will NOT be "
