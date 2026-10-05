@@ -1101,12 +1101,11 @@ def _doctor_backends(
     report: _Report, only_backend: str | None, scan: _CameraScan
 ) -> None:
     from octacam.cameras import BackendUnavailable
-    from octacam.cameras.registry import BACKENDS, select_backend
+    from octacam.cameras.registry import BACKENDS, is_auto, select_backend
 
     report.section("Camera backends")
-    backends = (
-        (only_backend,) if only_backend else tuple(b for b in BACKENDS if b != "fake")
-    )
+    only = None if is_auto(only_backend) else only_backend
+    backends = (only,) if only else tuple(b for b in BACKENDS if b != "fake")
     detected_serials: set[str] = set()
     for name in backends:
         try:
@@ -1140,13 +1139,13 @@ def _doctor_backends(
             "SuperSpeed link fails to train drops back to USB 2.0 even in a USB 3 "
             "port; check/replace its cable, reseat it, or try another USB 3 port.",
         )
-    if not only_backend and os.environ.get("PYLON_CAMEMU"):
+    if not only and os.environ.get("PYLON_CAMEMU"):
         report.add(
             "info",
             f"PYLON_CAMEMU={os.environ['PYLON_CAMEMU']} (emulated Basler cameras)",
         )
     # Under "auto" a camera may be seen by several tiers; show which one wins.
-    if not only_backend:
+    if not only:
         assignment = scan.cascade()
         if assignment:
             report.add("info", "cascade selection (backend each camera opens through):")

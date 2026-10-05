@@ -873,6 +873,29 @@ def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
     ), warns
 
 
+def test_doctor_backends_reads_auto_as_the_cascade(monkeypatch):
+    # `doctor --backend auto` reports every tier and the cascade's pick, as the
+    # scan and the config cross-check do, not an unknown backend named 'auto'.
+    from octacam import cli
+    from octacam.cli import _doctor_backends, _Report
+
+    monkeypatch.setattr(cli, "_usb_camera_links", lambda _detected: [])
+
+    class _FakeScan:
+        def get(self, _name):
+            return [("S1", "M")]
+
+        def cascade(self):
+            return [("S1", "basler", "M")]
+
+    for selector in ("auto", "ALL"):
+        report = _Report()
+        _doctor_backends(report, only_backend=selector, scan=_FakeScan())
+        texts = [t for _title, items in report.sections for _s, t in items]
+        assert not any("'auto'" in t or "'ALL'" in t for t in texts), texts
+        assert "S1 → basler" in " ".join(texts), texts
+
+
 def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     # End-to-end of the asymmetry fix: the REAL _enumerate_backend generic path
     # must resolve the backend's read_model through its registry spec and
