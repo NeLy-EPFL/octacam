@@ -2143,9 +2143,40 @@ def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
 def test_doctor_probe_classifies_a_configured_board(
     emulated_rig, monkeypatch, tmp_path, banner, line
 ):
+    banner = banner or f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    flat = _doctor_probe_triggerbox(monkeypatch, tmp_path, banner)
+    assert "plugin 'triggerbox' device /dev/ttyACM0 is connected" in flat
+    assert line in flat
+
+
+@pytest.mark.parametrize(
+    ("banner", "foreign"), [("FLYWHEEL 1 abc", True), ("TRIGGERBOX 2 x", False)]
+)
+def test_doctor_probe_without_the_sketch_checks_the_banner_name(
+    emulated_rig, monkeypatch, tmp_path, banner, foreign
+):
+    from dataclasses import replace
+
+    from octacam.plugins.triggerbox import TriggerboxPlugin
+
+    # A wheel install: no source build to compare, only the board's name.
+    monkeypatch.setattr(
+        TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
+    )
+    flat = _doctor_probe_triggerbox(monkeypatch, tmp_path, banner)
+    assert ("wrong board?" in flat) is foreign
+    if foreign:
+        assert (
+            "/dev/ttyACM0: expected triggerbox firmware (banner 'TRIGGERBOX') but "
+            "got 'FLYWHEEL 1 abc' — wrong board?"
+        ) in flat
+
+
+def _doctor_probe_triggerbox(monkeypatch, tmp_path, banner) -> str:
+    """``doctor --probe-serial``'s output, whitespace-collapsed, for a rig whose
+    triggerbox board on its default port answers ``banner``."""
     from octacam.serial_ports import SerialIdentity
 
-    banner = banner or f"TRIGGERBOX 2 {_current_triggerbox_build()}"
     monkeypatch.setattr(
         "octacam.serial_ports.list_serial_ports",
         lambda: [_fake_serial_port("/dev/ttyACM0")],
@@ -2159,9 +2190,7 @@ def test_doctor_probe_classifies_a_configured_board(
     result = runner.invoke(
         app, ["--log-level", "error", "doctor", "--probe-serial", str(tmp_path)]
     )
-    flat = " ".join(result.output.split())
-    assert "plugin 'triggerbox' device /dev/ttyACM0 is connected" in flat
-    assert line in flat
+    return " ".join(result.output.split())
 
 
 # --- record's firmware preflight ----------------------------------------------
