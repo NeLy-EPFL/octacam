@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
     from rich.progress import TaskID
 
+    from octacam.cameras import CameraSystem
     from octacam.config import OctacamConfig, RecordConfig
     from octacam.plugins.serial import SerialPlugin
     from octacam.process_jobs import JobReporter, JobStatus
@@ -272,6 +273,45 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
         log.warning("Failed to open a browser — open %s manually.", url, exc_info=True)
 
 
+def _camera_open_error(e: Exception) -> str:
+    """The operator's message for a rig whose cameras did not open (*e* is a
+    BackendError or BackendUnavailable)."""
+    from octacam.cameras import BackendUnavailable
+
+    if isinstance(e, BackendUnavailable):
+        return str(e)
+    return (
+        f"Could not open the cameras: {e}. They may already be in use by another "
+        "octacam instance on this rig, or disconnected — only one process can open "
+        "them at a time."
+    )
+
+
+def _open_rig(
+    config: "OctacamConfig", config_dir: Path, backend: str | None = None
+) -> "CameraSystem":
+    """:meth:`CameraSystem.for_config`, exiting with the reason when the cameras
+    do not open."""
+    from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
+
+    try:
+        return CameraSystem.for_config(config, config_dir, backend)
+    except (BackendError, BackendUnavailable) as e:
+        sys.exit(_camera_open_error(e))
+
+
+def _confirm_gate(question: str, *, force: bool, forced: str, headless: str) -> None:
+    """Ask *question* on a terminal and exit 1 unless it is confirmed; under
+    --force, or with no terminal to ask on, warn (*forced* / *headless*) and go on."""
+    if force:
+        log.warning(forced)
+    elif sys.stdin.isatty() and sys.stderr.isatty():
+        if not typer.confirm(question):
+            raise typer.Exit(1)
+    else:
+        log.warning(headless)
+
+
 def _print_transcode_hints(session_id: str) -> None:
     """Print the `process` commands for this session's recordings, if any."""
     from octacam import session_cache
@@ -466,43 +506,16 @@ def gui(
             app_state.broadcast_system()
             controller.notify_state()
 
-        def _open_cameras() -> CameraSystem:
-            opened = CameraSystem(
-                [c.serial_number for c in config.cameras], backend=config.backend
-            )
-            # The devices are open: close on any failure (a bad parameter file
-            # raises), or they stay claimed and are destroyed after
-            # PylonTerminate (the segfault BaslerBackend.close documents).
-            try:
-                if len(opened) == 0:
-                    raise BackendError("no cameras were opened")
-                names = {c.serial_number: c.name for c in config.cameras if c.name}
-                for camera in opened:
-                    camera.name = names.get(camera.serial_number, camera.name)
-                opened.load_config(config_dir)
-                opened.apply_display_config(config.cameras)
-            except BaseException:
-                opened.close()
-                raise
-            return opened
-
-        opened_system: CameraSystem | None = None
         try:
             # Cameras and serial plugins are independent hardware. setup_all logs
             # its own errors; the pool's exit waits for it if the open raises.
             with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rig-init") as ex:
-                cam_future = ex.submit(_open_cameras)
+                cam_future = ex.submit(CameraSystem.for_config, config, config_dir)
                 ex.submit(plugins.setup_all)
                 opened_system = cam_future.result()
         except Exception as e:  # never let the init thread die silently
-            if isinstance(e, BackendUnavailable):
-                message = str(e)
-            elif isinstance(e, BackendError):
-                message = (
-                    f"Could not open the cameras: {e}. They may already be in use by "
-                    "another octacam instance on this rig, or disconnected — only one "
-                    "process can open them at a time."
-                )
+            if isinstance(e, (BackendError, BackendUnavailable)):
+                message = _camera_open_error(e)
             else:
                 log.exception("Camera initialization failed")
                 message = f"Camera initialization failed: {e}"
@@ -2113,7 +2126,6 @@ def record(
     day-to-day values (fps and duration, or an explicit --output save directory).
     """
     from octacam import session_cache
-    from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import RecordingSettings, load_config_dir
     from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
@@ -2131,24 +2143,9 @@ def record(
 
     _warn_if_transcoding()
 
+    system = _open_rig(config, config_dir)
+    # Until the controller owns the cameras, every exit closes them.
     try:
-        system = CameraSystem(
-            [c.serial_number for c in config.cameras], backend=config.backend
-        )
-    except BackendUnavailable as e:
-        sys.exit(str(e))
-    except BackendError as e:
-        sys.exit(
-            f"Could not open the cameras: {e}\n"
-            "They may already be in use by another octacam instance on this "
-            "rig, or disconnected — only one process can open them at a time."
-        )
-    # Until the controller owns the cameras, every exit closes them (an open
-    # camera left to interpreter teardown can crash it; see BaslerBackend.close).
-    try:
-        if len(system) == 0:
-            log.warning("No cameras opened. Exiting.")
-            sys.exit(1)
         log.info(
             "Opened %d of %d configured camera(s)",
             len(system),
@@ -2157,42 +2154,23 @@ def record(
         if system.incomplete:
             # (CameraSystem logged INCOMPLETE RIG.) Nothing downstream can tell a
             # short take from a smaller rig, so recording one is an explicit
-            # choice, like the overwrite gate below; --force covers both.
-            if force:
-                log.warning("Recording with an incomplete rig (--force).")
-            elif sys.stdin.isatty() and sys.stderr.isatty():
-                if not typer.confirm(
-                    f"Only {len(system)} of {len(system.requested_serial_numbers)} "
-                    "configured cameras opened. Record anyway?"
-                ):
-                    raise typer.Exit(1)
-            else:
-                log.warning(
-                    "Recording with an incomplete rig (pass --force to silence this)."
-                )
-
-        names = {c.serial_number: c.name for c in config.cameras if c.name}
-        for camera in system:
-            camera.name = names.get(camera.serial_number, camera.name)
-
-        system.load_config(config_dir)
-        system.apply_display_config(config.cameras)
-
+            # choice, like overwriting a take.
+            _confirm_gate(
+                f"Only {len(system)} of {len(system.requested_serial_numbers)} "
+                "configured cameras opened. Record anyway?",
+                force=force,
+                forced="Recording with an incomplete rig (--force).",
+                headless="Recording with an incomplete rig (pass --force to silence this).",
+            )
         if Path(settings.save_dir).exists():
-            if force:
-                log.warning("Save directory exists; overwriting: %s", settings.save_dir)
-            elif sys.stdin.isatty() and sys.stderr.isatty():
-                if not typer.confirm(
-                    f"Save directory already exists and will be overwritten:\n"
-                    f"  {settings.save_dir}\nContinue?"
-                ):
-                    raise typer.Exit(1)
-            else:  # non-interactive runs overwrite, loudly
-                log.warning(
-                    "Save directory exists, data may be overwritten: %s "
-                    "(pass --force to silence this)",
-                    settings.save_dir,
-                )
+            _confirm_gate(
+                f"Save directory already exists and will be overwritten:\n"
+                f"  {settings.save_dir}\nContinue?",
+                force=force,
+                forced=f"Save directory exists; overwriting: {settings.save_dir}",
+                headless=f"Save directory exists, data may be overwritten: "
+                f"{settings.save_dir} (pass --force to silence this)",
+            )
 
         plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
         plugins.setup_all()
@@ -2838,7 +2816,6 @@ def benchmark(
     pre-flight check in scripts.
     """
     from octacam import diagnostics as diag
-    from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import RecordingSettings, load_config_dir
 
     config_dir = _resolve_config_dir(config_dir)
@@ -2849,30 +2826,8 @@ def benchmark(
 
     _warn_if_transcoding()
 
+    system = _open_rig(config, config_dir, backend)
     try:
-        system = CameraSystem(
-            [c.serial_number for c in config.cameras],
-            backend=backend or config.backend,
-        )
-    except BackendUnavailable as e:
-        sys.exit(str(e))
-    except BackendError as e:
-        sys.exit(
-            f"Could not open the cameras: {e}\n"
-            "They may already be in use by another octacam instance on this rig, "
-            "or disconnected — only one process can open them at a time."
-        )
-    try:  # the cameras are open: every exit closes them
-        if len(system) == 0:
-            log.warning("No cameras opened. Exiting.")
-            sys.exit(1)
-
-        names = {c.serial_number: c.name for c in config.cameras if c.name}
-        for camera in system:
-            camera.name = names.get(camera.serial_number, camera.name)
-        system.load_config(config_dir)
-        system.apply_display_config(config.cameras)
-
         log.info(
             "Benchmarking %d camera(s) at %g fps (%s trigger, sink=%s)…",
             len(system),

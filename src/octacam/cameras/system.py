@@ -28,7 +28,7 @@ from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
 
 if TYPE_CHECKING:
-    from octacam.config import CameraConfig
+    from octacam.config import CameraConfig, OctacamConfig
 
 log = logging.getLogger("octacam")
 
@@ -103,6 +103,35 @@ class CameraSystem:
     def incomplete(self) -> bool:
         """True when the config asked for cameras that are not in this system."""
         return bool(self.requested_serial_numbers and self.missing)
+
+    @classmethod
+    def for_config(
+        cls,
+        config: "OctacamConfig",
+        config_dir: str | Path,
+        backend: str | None = None,
+    ) -> "CameraSystem":
+        """Open the rig *config* describes (through *backend*, else the config's):
+        each camera named, its parameter file loaded and its display settings
+        applied. Raises BackendError when no camera opens.
+
+        Any failure closes the cameras before raising: a camera left open to
+        interpreter teardown can crash it (see BaslerBackend.close)."""
+        system = cls(
+            [c.serial_number for c in config.cameras], backend=backend or config.backend
+        )
+        try:
+            if not system.cameras:
+                raise BackendError("no cameras were opened")
+            names = {c.serial_number: c.name for c in config.cameras if c.name}
+            for camera in system.cameras:
+                camera.name = names.get(camera.serial_number, camera.name)
+            system.load_config(config_dir)
+            system.apply_display_config(config.cameras)
+        except BaseException:
+            system.close()
+            raise
+        return system
 
     @classmethod
     def pending(cls, backend: str = "auto") -> "CameraSystem":

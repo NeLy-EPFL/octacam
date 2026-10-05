@@ -174,7 +174,8 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error_type, expected)
             # serve against; only opening the real cameras fails.
             return real_cs.pending(backend)
 
-        def __init__(self, *_a, **_k):
+        @classmethod
+        def for_config(cls, *_a, **_k):
             raise error_type(message)
 
     monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
@@ -215,8 +216,12 @@ def _fake_camera_system(cam):
         incomplete = False
         missing: dict[str, str] = {}
 
-        def __init__(self, *_a, **_k):
+        def __init__(self):
             self._cams = [cam]
+
+        @classmethod
+        def for_config(cls, *_a, **_k):
+            return cls()
 
         @classmethod
         def pending(cls, *_a, **_k):
@@ -229,12 +234,6 @@ def _fake_camera_system(cam):
 
         def __iter__(self):
             return iter(self._cams)
-
-        def load_config(self, *_a, **_k):
-            pass
-
-        def apply_display_config(self, *_a, **_k):
-            pass
 
         def close(self):
             _FACADE_CALLS.append("system.close")
@@ -2476,6 +2475,27 @@ def test_record_closes_the_cameras_when_it_exits_before_recording(
     with pytest.raises((SystemExit, RuntimeError)):  # typer.Exit is a RuntimeError
         cli.record(rig, output=save_dir)
     assert len(closed) == 1
+
+
+def test_for_config_opens_the_rig_named_and_configured(tmp_path):
+    # The one rig-open path (gui, record, benchmark): the config's names, each
+    # camera's own parameter file, and its display transform.
+    from octacam.cameras import CameraSystem
+    from octacam.config import load_config_dir
+
+    (tmp_path / "octacam_config.toml").write_text(
+        'backend = "fake"\n[[cameras]]\nserial_number = "FAKE-1"\nname = "left"\n'
+        "rotation_deg = 90\n"
+    )
+    (tmp_path / "FAKE-1.fake").write_text("Width\t320\nHeight\t240\n")
+    system = CameraSystem.for_config(load_config_dir(tmp_path), tmp_path)
+    try:
+        (camera,) = system
+        assert (camera.serial_number, camera.name) == ("FAKE-1", "left")
+        assert (camera.width, camera.height) == (320, 240)
+        assert camera.display_transform.rotation_deg == 90
+    finally:
+        system.close()
 
 
 @pytest.mark.parametrize(
