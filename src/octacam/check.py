@@ -117,10 +117,14 @@ def _natural_key(path: Path) -> list:
 
 
 def check_recordings(paths, fps: float | None = None) -> list[RecordingCheck]:
-    """Check every recording at or under *paths* (each may also name a summary
-    file or an ``octacam_recording`` subfolder), in natural order."""
-    folders = sorted(find_recordings(paths, recursive=True), key=_natural_key)
-    return [check_recording(folder, fps) for folder in folders]
+    """Check the recording each of *paths* names (it may also name a summary
+    file or an ``octacam_recording`` subfolder), or every recording under a path
+    that is not one, in natural order."""
+    found: dict[Path, Path] = {}
+    for path in paths:
+        for folder in find_recordings([path], False) or find_recordings([path], True):
+            found.setdefault(folder.resolve(), folder)
+    return [check_recording(f, fps) for f in sorted(found.values(), key=_natural_key)]
 
 
 def _after_frame(missed: list[int]) -> list[int]:

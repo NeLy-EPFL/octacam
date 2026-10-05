@@ -127,6 +127,13 @@ def test_check_recordings_walks_directories_in_natural_order(tmp_path):
     assert found == ["Fly1/001", "Fly2/001", "Fly10/001"]
 
 
+def test_a_recording_path_is_checked_alone_not_searched(tmp_path):
+    rec = _write(tmp_path / "rec", {"top": _train(10)})
+    _write(rec / "trial2", {"top": _train(10)}, nested=True)
+    assert _found([rec]) == [rec]
+    assert _found([tmp_path]) == [rec, rec / "trial2"]
+
+
 # ------------------------------------------------- both folder layouts
 
 
