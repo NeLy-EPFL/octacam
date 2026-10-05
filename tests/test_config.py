@@ -390,6 +390,18 @@ def test_visualization_bad_fields_default_and_duplicate_names_skip(tmp_path):
     ]
 
 
+def test_visualization_bad_ffmpeg_params_falls_back(tmp_path, caplog):
+    # The grid splits them at build time: bad quoting there would abort
+    # `octacam process` before its transfer.
+    (tmp_path / "octacam_config.toml").write_text(
+        '[[visualization]]\nlayout = [["a"]]\nffmpeg_params = "-c:v libx264 \\"oops"\n'
+    )
+    with caplog.at_level(logging.WARNING, logger="octacam"):
+        (viz,) = load_config_dir(tmp_path).visualization
+    assert viz.ffmpeg_params == ""
+    assert 'invalid "ffmpeg_params"' in caplog.text
+
+
 def test_visualization_layout_unknown_camera_warns(tmp_path, caplog):
     # A layout cell naming a camera that isn't declared must be reported, not
     # silently rendered black.

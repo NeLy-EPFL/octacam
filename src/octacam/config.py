@@ -162,7 +162,7 @@ class VisualizationConfig(BaseModel):
 
     name: ScalarStr = "grid.mp4"
     layout: list[list[str]]
-    ffmpeg_params: ScalarStr = ""
+    ffmpeg_params: _ScalarFfmpegArgs = ""
 
     @field_validator("layout")
     @classmethod
