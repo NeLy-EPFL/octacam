@@ -55,7 +55,7 @@ def _call_promptly(call):
 
 @pytest.mark.parametrize(
     "reads",
-    [("save_params",), ("read_node", "read_feature")],
+    [("save_params",), ("read_feature",)],
     ids=["parameter-export", "delivery-profile"],
 )
 def test_a_camera_stalled_in_a_start_read_leaves_snapshot_and_stop_responsive(

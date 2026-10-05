@@ -40,19 +40,16 @@ PRIME_STRAGGLER_PERIODS = 2.5
 # a recording keeps its whole series.
 PREVIEW_TIMESTAMPS_MAX = 64
 
-# octacam's parameter names -> SFNC node names, shared by every GenICam backend.
-# GEOMETRY_PARAMS are writable only while not grabbing (set_geometry cycles the
-# preview); LIVE_PARAMS are writable on a running camera.
+# octacam's parameter names -> SFNC node names (Camera.read_param). The geometry
+# ones are writable only while not grabbing (set_geometry cycles the preview).
 GEOMETRY_PARAMS = {"width": "Width", "height": "Height"}
-LIVE_PARAMS = {
+PARAM_NODES = {
+    **GEOMETRY_PARAMS,
     "exposure": "ExposureTime",
     "gain": "Gain",
     "offset_x": "OffsetX",
     "offset_y": "OffsetY",
 }
-PARAM_NODES = {**GEOMETRY_PARAMS, **LIVE_PARAMS}
-# The integer ones; the rest are floats.
-INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
 # --- Camera-tab policy, in SFNC node names -------------------------------------
 # ROI size, refused mid-grab on every camera, so written through set_geometry.
@@ -77,18 +74,6 @@ RUNTIME_MANAGED_FEATURES = frozenset({
 
 class BackendError(Exception):
     """An SDK-level failure surfaced by a camera backend (vendor-neutral)."""
-
-
-@dataclass
-class NodeInfo:
-    """One sensor parameter's current value, bounds, unit, and writability."""
-
-    value: float | int
-    min: float | None = None
-    max: float | None = None
-    inc: float | None = None
-    unit: str | None = None
-    writable: bool = False
 
 
 @dataclass
@@ -136,63 +121,6 @@ class FeatureInfo:
             if v is not None:
                 d[key] = v
         return d
-
-
-# --- Curated fallback: the six PARAM_NODES as features, through read_node and
-# write_node, for a backend that cannot walk its node map (pycameleon).
-_SFNC_TO_SNAKE = {sfnc: snake for snake, sfnc in PARAM_NODES.items()}
-_CURATED_CATEGORY = {
-    "Width": "ImageFormatControl",
-    "Height": "ImageFormatControl",
-    "OffsetX": "ImageFormatControl",
-    "OffsetY": "ImageFormatControl",
-    "ExposureTime": "AcquisitionControl",
-    "Gain": "AnalogControl",
-}
-
-
-def curated_list_features(backend) -> list["FeatureInfo"]:
-    """The six PARAM_NODES as FeatureInfo (fallback for non-introspectable SDKs)."""
-    out: list[FeatureInfo] = []
-    for snake, sfnc in PARAM_NODES.items():
-        try:
-            info = backend.read_node(snake)
-        except BackendError:
-            continue
-        out.append(_curated_feature(sfnc, info))
-    return out
-
-
-def _curated_feature(sfnc: str, info: "NodeInfo") -> "FeatureInfo":
-    kind = "int" if _SFNC_TO_SNAKE.get(sfnc) in INT_PARAMS else "float"
-    return FeatureInfo(
-        name=sfnc,
-        display_name=sfnc,
-        type=kind,
-        category=_CURATED_CATEGORY.get(sfnc, "Other"),
-        value=info.value,
-        min=info.min,
-        max=info.max,
-        inc=info.inc,
-        unit=info.unit,
-        readable=True,
-        writable=info.writable,
-    )
-
-
-def curated_read_feature(backend, name: str) -> "FeatureInfo":
-    snake = _SFNC_TO_SNAKE.get(name)
-    if snake is None:
-        raise BackendError(f"{name} is not available on this backend")
-    return _curated_feature(name, backend.read_node(snake))
-
-
-def curated_write_feature(backend, name: str, value: object) -> None:
-    snake = _SFNC_TO_SNAKE.get(name)
-    if snake is None:
-        raise BackendError(f"{name} is not editable on this backend")
-    is_int = snake in INT_PARAMS
-    backend.write_node(snake, int(float(value)) if is_int else float(value))
 
 
 # A retrieved frame: the owned image (None when the caller did not want it) and
@@ -302,11 +230,6 @@ class CameraBackend(ABC):
     @abstractmethod
     def height(self) -> int: ...
 
-    @abstractmethod
-    def read_node(self, name: str) -> NodeInfo: ...
-    @abstractmethod
-    def write_node(self, name: str, value: float) -> None: ...
-
     # The node map (Camera tab), by GenApi node name; the backend coerces
     # ``value`` to the node's type.
     @abstractmethod
@@ -351,7 +274,7 @@ class CameraBackend(ABC):
     def stop_grab(self) -> None: ...
 
 
-def snap_value(value: float, info: NodeInfo) -> float:
+def snap_value(value: float, info: FeatureInfo) -> float:
     """Clamp to [min, max] and round to the node's increment grid."""
     lo, hi, inc = info.min, info.max, info.inc
     if inc:
@@ -656,7 +579,7 @@ class Camera:
         if name not in PARAM_NODES:
             raise ValueError(f"Unknown camera parameter: {name}")
         with self._param_lock:
-            info = self._backend.read_node(name)
+            info = self._backend.read_feature(PARAM_NODES[name])
             # Geometry is editable while open (set_geometry cycles the grab); a
             # live param's own writability counts (a model without Gain).
             writable = (
@@ -700,11 +623,11 @@ class Camera:
             error: ValueError | None = None
             try:
                 if height is not None:
-                    info = self._backend.read_node("height")
-                    self._backend.write_node("height", int(snap_value(height, info)))
+                    info = self._backend.read_feature("Height")
+                    self._backend.write_feature("Height", int(snap_value(height, info)))
                 if width is not None:
-                    info = self._backend.read_node("width")
-                    self._backend.write_node("width", int(snap_value(width, info)))
+                    info = self._backend.read_feature("Width")
+                    self._backend.write_feature("Width", int(snap_value(width, info)))
             except BackendError as e:
                 error = ValueError(str(e))
             self.width = self._backend.width()
@@ -763,9 +686,7 @@ class Camera:
     def _centered_offset(self, node_name: str) -> int | None:
         """The offset that centers the ROI on ``node_name``'s axis, or None."""
         try:
-            info = self._backend.read_node(
-                "offset_x" if node_name == "OffsetX" else "offset_y"
-            )
+            info = self._backend.read_feature(node_name)
         except BackendError:
             return None
         size = self.width if node_name == "OffsetX" else self.height
@@ -791,9 +712,8 @@ class Camera:
             target = self._centered_offset(node_name)
             if target is None:
                 continue
-            snake = "offset_x" if node_name == "OffsetX" else "offset_y"
             try:
-                self._backend.write_node(snake, target)
+                self._backend.write_feature(node_name, target)
             except BackendError as e:
                 log.debug("Could not center %s on %s: %s", node_name, self.serial_number, e)
 

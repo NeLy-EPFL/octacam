@@ -11,19 +11,12 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
-from octacam.cameras._genicam_config import apply_config, dump_config, parse_config
-from octacam.cameras.base import (
-    PARAM_NODES,
-    BackendError,
-    CameraBackend,
-    FeatureInfo,
-    Frame,
-    NodeInfo,
-    coerce_bool,
-)
+from octacam.cameras.base import BackendError, FeatureInfo, Frame, coerce_bool
+from octacam.cameras.genicam import GenICamBackend
 from octacam.cameras.registry import BackendSpec, select_serials
 
 log = logging.getLogger("octacam")
@@ -109,6 +102,12 @@ def _default_nodes() -> dict[str, dict]:
     return nodes
 
 
+# The Python type of each node kind's value.
+_CAST: dict[str, Callable[[Any], Any]] = {
+    "int": int, "float": float, "bool": bool, "enum": str, "string": str,
+}
+
+
 @dataclass
 class _Image:
     """An image the fake device exposed and holds until a fetch takes it."""
@@ -129,7 +128,7 @@ _COMMANDS = {
 }
 
 
-class FakeBackend(CameraBackend):
+class FakeBackend(GenICamBackend):
     """A single in-memory camera driven by software triggers."""
 
     extension = "fake"
@@ -185,12 +184,6 @@ class FakeBackend(CameraBackend):
     def is_open(self) -> bool:
         return self._open
 
-    def width(self) -> int:
-        return int(self._nodes["Width"]["value"])
-
-    def height(self) -> int:
-        return int(self._nodes["Height"]["value"])
-
     # ----------------------------------------------------- sensor parameters
 
     def _offset_max(self, sfnc: str) -> int:
@@ -203,7 +196,7 @@ class FakeBackend(CameraBackend):
         """A ROI node's ceiling, or None. The coupling runs both ways, as on a
         camera (an origin's max is sensor - size, a size's sensor - origin), so
         the suite catches ROI writes in the wrong order (see
-        ``_genicam_config._clear_roi_offsets``)."""
+        ``genicam._clear_roi_offsets``)."""
         if sfnc in ("OffsetX", "OffsetY"):
             return self._offset_max(sfnc)
         if sfnc == "Width":
@@ -216,68 +209,32 @@ class FakeBackend(CameraBackend):
             )
         return None
 
-    def read_node(self, name: str) -> NodeInfo:
-        """A PARAM_NODES parameter (or an SFNC node by its own name)."""
-        sfnc = PARAM_NODES.get(name, name)
-        try:
-            node = self._nodes[sfnc]
-        except KeyError as e:
-            raise BackendError(f"unknown node: {name}") from e
-        max_val = node.get("max")
-        if sfnc in ("OffsetX", "OffsetY"):
-            max_val = self._offset_max(sfnc)
-        return NodeInfo(
-            value=node["value"],
-            min=node.get("min"),
-            max=max_val,
-            inc=node.get("inc"),
-            unit=node.get("unit"),
-            writable=self._open and node.get("writable", True),
-        )
-
-    def write_node(self, name: str, value: float) -> None:
-        sfnc = PARAM_NODES.get(name, name)
-        if sfnc not in self._nodes:
-            raise BackendError(f"unknown node: {name}")
-        self._nodes[sfnc]["value"] = value
-
-    # The applier's typed seam, straight into the node table; a node the fake
-    # lacks raises or reads None, so the applier skips it as a camera's would.
-    def _set_enum(self, name: str, value: str) -> None:
+    # The typed seam, straight into the node table; a node the fake lacks raises
+    # or reads None, so the TSV applier skips it as a camera's would.
+    def _typed(self, name: str, kind: str) -> dict | None:
+        """``name``'s table entry if it holds a ``kind`` value (int and float
+        interchange), else None."""
         node = self._nodes.get(name)
-        if node is None or node["type"] != "enum":
-            raise BackendError(f"fake has no enumeration {name}")
-        node["value"] = value
+        numeric = ("int", "float")
+        if node is None or not (
+            node["type"] == kind or (kind in numeric and node["type"] in numeric)
+        ):
+            return None
+        return node
 
-    def _get_enum(self, name: str) -> str | None:
-        node = self._nodes.get(name)
-        return node["value"] if node and node["type"] == "enum" else None
+    def get_node(self, name: str, kind: str) -> Any:
+        node = self._typed(name, kind)
+        return None if node is None else _CAST[kind](node["value"])
 
-    def _set_bool(self, name: str, value: bool) -> None:
-        node = self._nodes.get(name)
-        if node is None or node["type"] != "bool":
-            raise BackendError(f"fake has no boolean {name}")
-        node["value"] = bool(value)
-
-    def _get_bool(self, name: str) -> bool | None:
-        node = self._nodes.get(name)
-        return bool(node["value"]) if node and node["type"] == "bool" else None
-
-    def _set_number(self, name: str, value: float, is_int: bool) -> None:
-        node = self._nodes.get(name)
-        if node is None or node["type"] not in ("int", "float"):
-            raise BackendError(f"fake has no node {name}")
+    def set_node(self, name: str, kind: str, value: Any) -> None:
+        node = self._typed(name, kind)
+        if node is None:
+            raise BackendError(f"fake has no {kind} node {name}")
         # Only the coupled ROI nodes are bounds-checked (see _roi_max).
         limit = self._roi_max(name)
         if limit is not None and value > limit:
             raise BackendError(f"fake: {name} value {int(value)} exceeds max {limit}")
-        node["value"] = int(value) if is_int else float(value)
-
-    def _get_number(self, name: str, is_int: bool) -> float | int | None:
-        node = self._nodes.get(name)
-        if node is None or node["type"] not in ("int", "float"):
-            return None
-        return int(node["value"]) if is_int else float(node["value"])
+        node["value"] = _CAST[kind](value)
 
     # ---------------------------------------------------- full device node map
 
@@ -356,16 +313,6 @@ class FakeBackend(CameraBackend):
         if name not in _COMMANDS:
             raise BackendError(f"no such command: {name}")
         self._commands_run[name] = self._commands_run.get(name, 0) + 1
-
-    def config_values(self, config_str: str) -> dict[str, str]:
-        return dict(parse_config(config_str))
-
-    def load_params(self, config_str: str) -> None:
-        if config_str:
-            apply_config(self, config_str)
-
-    def save_params(self) -> str:
-        return dump_config(self, "FakeCamera")
 
     # ----------------------------------------------------------- triggering
 

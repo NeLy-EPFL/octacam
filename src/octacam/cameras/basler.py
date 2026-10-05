@@ -17,16 +17,8 @@ from typing import Any
 
 from pypylon import genicam, pylon
 
-from octacam.cameras.base import (
-    GEOMETRY_FEATURES,
-    PARAM_NODES,
-    BackendError,
-    CameraBackend,
-    FeatureInfo,
-    Frame,
-    NodeInfo,
-    coerce_bool,
-)
+from octacam.cameras.base import GEOMETRY_FEATURES, BackendError, Frame
+from octacam.cameras.genicam import Bounds, GenApi, NodeMapBackend
 from octacam.cameras.registry import BackendSpec, select_serials
 
 log = logging.getLogger("octacam")
@@ -43,8 +35,6 @@ _STREAM_STATISTICS = (
 
 _TRIGGER_SELECTOR_RE = re.compile(r"\{TriggerSelector=([^}]+)\}")
 
-# Interface type -> widget kind. pypylon hands nodes back already downcast to
-# their typed interface; only INode metadata needs .GetNode().
 _IFACE_KIND = {
     genicam.intfIInteger: "int",
     genicam.intfIFloat: "float",
@@ -62,80 +52,108 @@ _VIS_NAME = {
 }
 
 
-def _typed_value_attr(node, getter: str):
-    """Best-effort ``node.<getter>()`` (e.g. GetInc on a float without one)."""
+def _call(obj: Any, method: str) -> Any:
+    """``obj.<method>()``, or None where the SDK refuses or the node lacks it
+    (a float without GetInc)."""
     try:
-        return getattr(node, getter)()
+        return getattr(obj, method)()
     except (AttributeError, genicam.GenericException):
         return None
 
 
-def _basler_feature(typed) -> FeatureInfo | None:
-    """Build a FeatureInfo from a pypylon typed node (None = skip)."""
-    inode = typed.GetNode()
-    kind = _IFACE_KIND.get(inode.GetPrincipalInterfaceType())
-    if kind is None or kind == "category":
-        return None
-    name = inode.GetName()
-    readable = genicam.IsReadable(inode)
-    writable = genicam.IsWritable(inode)
-    feature = FeatureInfo(
-        name=name,
-        display_name=inode.GetDisplayName() or name,
-        type=kind,
-        readable=readable,
-        writable=writable,
-        visibility=_VIS_NAME.get(inode.GetVisibility(), "beginner"),
-        tooltip=(inode.GetToolTip() or inode.GetDescription() or None),
-    )
-    if kind in ("int", "float"):
-        if readable:
-            feature.value = _typed_value_attr(typed, "GetValue")
-        feature.min = _typed_value_attr(typed, "GetMin")
-        feature.max = _typed_value_attr(typed, "GetMax")
-        feature.inc = _typed_value_attr(typed, "GetInc")
-        feature.unit = _typed_value_attr(typed, "GetUnit") or None
-    elif kind == "bool":
-        if readable:
-            feature.value = _typed_value_attr(typed, "GetValue")
-    elif kind == "enum":
-        if readable:
-            try:
-                feature.value = typed.ToString()
-            except genicam.GenericException:
-                feature.value = None
-        feature.entries = _basler_enum_entries(typed)
-    elif kind == "string":
-        if readable:
-            feature.value = _typed_value_attr(typed, "GetValue")
-    return feature
+class _PylonGenApi(GenApi):
+    """pypylon's GenApi. Nodes come back downcast to their typed interface;
+    their INode (``GetNode()``) carries the metadata and the access mode."""
 
+    def node(self, nodemap: Any, name: str) -> Any:
+        try:
+            return nodemap.GetNode(name)
+        except genicam.GenericException:
+            return None
 
-def _basler_enum_entries(node) -> list[dict] | None:
-    try:
+    def children(self, category: Any) -> list[Any]:
         out = []
-        for entry in node.GetEntries():
+        for typed in _call(category, "GetFeatures") or ():
             try:
-                symbolic = entry.GetSymbolic()
-            except genicam.GenericException:
-                continue
+                inode = typed.GetNode()
+                if inode.IsFeature() and genicam.IsAvailable(inode):
+                    out.append(typed)
+            except genicam.GenericException as e:
+                log.debug("Skipping node during feature walk: %s", e)
+        return out
+
+    def kind(self, node: Any) -> str | None:
+        return _IFACE_KIND.get(_call(node.GetNode(), "GetPrincipalInterfaceType"))
+
+    def name(self, node: Any) -> str | None:
+        return _call(node.GetNode(), "GetName")
+
+    def display_name(self, node: Any) -> str | None:
+        return _call(node.GetNode(), "GetDisplayName")
+
+    def tooltip(self, node: Any) -> str | None:
+        inode = node.GetNode()
+        return _call(inode, "GetToolTip") or _call(inode, "GetDescription") or None
+
+    def visibility(self, node: Any) -> str:
+        return _VIS_NAME.get(_call(node.GetNode(), "GetVisibility"), "beginner")
+
+    def readable(self, node: Any) -> bool:
+        try:
+            return bool(genicam.IsReadable(node.GetNode()))
+        except genicam.GenericException:
+            return False
+
+    def writable(self, node: Any) -> bool:
+        try:
+            return bool(genicam.IsWritable(node.GetNode()))
+        except genicam.GenericException:
+            return False
+
+    def value(self, node: Any, kind: str) -> Any:
+        return _call(node, "ToString" if kind == "enum" else "GetValue")
+
+    def bounds(self, node: Any, kind: str) -> Bounds:
+        unit = _call(node, "GetUnit") or None
+        return (_call(node, "GetMin"), _call(node, "GetMax"), _call(node, "GetInc"), unit)
+
+    def entries(self, node: Any) -> list[tuple[str, bool]]:
+        out = []
+        for entry in _call(node, "GetEntries") or ():
+            symbolic = _call(entry, "GetSymbolic")
             if not symbolic:
                 continue
             try:
-                available = genicam.IsAvailable(entry.GetNode())
+                available = bool(genicam.IsAvailable(entry.GetNode()))
             except genicam.GenericException:
                 available = True
-            out.append({"value": symbolic, "display": symbolic, "available": available})
-        return out or None
-    except genicam.GenericException:
-        return None
+            out.append((symbolic, available))
+        return out
+
+    def write(self, node: Any, kind: str, value: Any) -> None:
+        try:
+            if kind in ("enum", "string"):
+                node.FromString(str(value))
+            else:
+                node.SetValue(value)
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+    def execute(self, node: Any) -> None:
+        try:
+            node.Execute()
+        except genicam.GenericException as e:
+            raise BackendError(str(e)) from e
+
+
+_GENAPI = _PylonGenApi()
 
 
 def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
     """Undo a live preview's FrameStart trigger overrides in a saved .pfs:
     TriggerMode back to Off (the shipped convention), TriggerSource to the one
     load_params captured. Other selectors are left alone. The TSV counterpart is
-    :func:`octacam.cameras._genicam_config.normalize_trigger_source`.
+    :func:`octacam.cameras.genicam.normalize_trigger_source`.
     """
     out = []
     for line in content.splitlines():
@@ -173,18 +191,18 @@ def _drop_empty_pfs_values(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class BaslerBackend(CameraBackend):
-    """A single Basler camera, driven through pypylon."""
+class BaslerBackend(NodeMapBackend):
+    """A single Basler camera, driven through pypylon; parameters persist as
+    ``.pfs`` (the trigger chain is the shared GenICam one)."""
 
     extension = "pfs"
 
     def __init__(self, device):
         self.raw: Any = pylon.InstantCamera(device)  # None once closed
         info = self.raw.GetDeviceInfo()
-        super().__init__(str(info.GetSerialNumber()))
+        super().__init__(str(info.GetSerialNumber()), _GENAPI)
         # Whether grab timestamps count ns (USB3 Vision; a GigE camera's count ticks).
         self._stamps_ns = info.GetDeviceClass() == "BaslerUsb"
-        self._original_trigger_source: str | None = None
         # Grabs pylon flagged failed (bandwidth gaps, packet loss).
         self._incomplete_grabs = 0
 
@@ -193,6 +211,7 @@ class BaslerBackend(CameraBackend):
             self.raw.Open()
         except genicam.GenericException as e:
             raise BackendError(str(e)) from e
+        self._nodemap = self.raw.GetNodeMap()
 
     def close(self) -> None:
         # Destroy the device while the pylon runtime lives: pypylon runs
@@ -201,6 +220,7 @@ class BaslerBackend(CameraBackend):
         if self.raw is None:  # a second close() is a no-op
             return
         self.trigger.end_grab()
+        self._nodemap = None
         try:
             if self.raw.IsGrabbing():
                 self.raw.StopGrabbing()
@@ -219,125 +239,7 @@ class BaslerBackend(CameraBackend):
         # pylon locks the whole ROI while grabbing (TLParamsLocked), offsets too.
         return GEOMETRY_FEATURES | {"OffsetX", "OffsetY"}
 
-    def width(self) -> int:
-        return self.raw.Width.Value
-
-    def height(self) -> int:
-        return self.raw.Height.Value
-
-    # ----------------------------------------------------- sensor parameters
-
-    def read_node(self, name: str) -> NodeInfo:
-        node = getattr(self.raw, PARAM_NODES[name])
-        try:
-            value = node.Value
-        except genicam.GenericException as e:
-            raise BackendError(str(e)) from e
-        return NodeInfo(
-            value=value,
-            min=_typed_value_attr(node, "GetMin"),
-            max=_typed_value_attr(node, "GetMax"),
-            inc=_typed_value_attr(node, "GetInc"),
-            unit=_typed_value_attr(node, "GetUnit"),
-            writable=genicam.IsWritable(node.Node),
-        )
-
-    def write_node(self, name: str, value: float) -> None:
-        node = getattr(self.raw, PARAM_NODES[name])
-        try:
-            node.Value = value
-        except genicam.GenericException as e:
-            raise BackendError(str(e)) from e
-
-    # ---------------------------------------------------- full device node map
-
-    def _walk(self, category, path: str, out: list, seen: set) -> None:
-        """Depth-first walk of the GenApi category tree, collecting features."""
-        try:
-            features = category.GetFeatures()
-        except genicam.GenericException:
-            return
-        for typed in features:
-            try:
-                inode = typed.GetNode()
-                if not inode.IsFeature() or not genicam.IsAvailable(inode):
-                    continue
-                vis = _VIS_NAME.get(inode.GetVisibility(), "beginner")
-                if vis not in ("beginner", "expert", "guru"):
-                    continue
-                iface = inode.GetPrincipalInterfaceType()
-                if iface == genicam.intfICategory:
-                    self._walk(typed, inode.GetName(), out, seen)
-                    continue
-                name = inode.GetName()
-                if name in seen:
-                    continue
-                seen.add(name)
-                feature = _basler_feature(typed)
-                if feature is not None:
-                    feature.category = path or "Other"
-                    out.append(feature)
-            except genicam.GenericException as e:
-                log.debug("Skipping node during feature walk: %s", e)
-
-    def list_features(self) -> list[FeatureInfo]:
-        if self.raw is None or not self.raw.IsOpen():
-            return []
-        nodemap = self.raw.GetNodeMap()
-        try:
-            root = nodemap.GetNode("Root")
-        except genicam.GenericException:
-            return []
-        out: list[FeatureInfo] = []
-        self._walk(root, "", out, set())
-        return out
-
-    def read_feature(self, name: str) -> FeatureInfo:
-        try:
-            typed = self.raw.GetNodeMap().GetNode(name)
-        except genicam.GenericException as e:
-            raise BackendError(f"no such node: {name}") from e
-        if typed is None:
-            raise BackendError(f"no such node: {name}")
-        feature = _basler_feature(typed)
-        if feature is None:
-            raise BackendError(f"node {name} is not an editable feature")
-        return feature
-
-    def write_feature(self, name: str, value: object) -> None:
-        try:
-            typed = self.raw.GetNodeMap().GetNode(name)
-            kind = _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType())
-        except genicam.GenericException as e:
-            raise BackendError(f"no such node: {name}") from e
-        try:
-            if kind == "int":
-                node_min = _typed_value_attr(typed, "GetMin")
-                node_inc = _typed_value_attr(typed, "GetInc")
-                snapped = int(round(float(value)))
-                if node_inc:
-                    base = node_min if node_min is not None else 0
-                    snapped = int(base + round((snapped - base) / node_inc) * node_inc)
-                typed.SetValue(snapped)
-            elif kind == "float":
-                typed.SetValue(float(value))
-            elif kind == "bool":
-                typed.SetValue(coerce_bool(value))
-            elif kind in ("enum", "string"):
-                typed.FromString(str(value))
-            else:
-                raise BackendError(f"node {name} is not writable ({kind})")
-        except genicam.GenericException as e:
-            raise BackendError(str(e)) from e
-
-    def execute_command(self, name: str) -> None:
-        try:
-            typed = self.raw.GetNodeMap().GetNode(name)
-            if _IFACE_KIND.get(typed.GetNode().GetPrincipalInterfaceType()) != "command":
-                raise BackendError(f"node {name} is not a command")
-            typed.Execute()
-        except genicam.GenericException as e:
-            raise BackendError(str(e)) from e
+    # ------------------------------------------------- .pfs persistence
 
     def config_values(self, config_str: str) -> dict[str, str]:
         """``.pfs`` lines as {name: last field}; selector-qualified lines collapse
@@ -363,84 +265,11 @@ class BaslerBackend(CameraBackend):
                 )
             except genicam.GenericException as e:
                 raise BackendError(str(e)) from e
-        try:
-            self._original_trigger_source = self.raw.TriggerSource.Value
-        except genicam.GenericException:
-            self._original_trigger_source = None
+        self._original_trigger_source = self.get_node("TriggerSource", "enum")
 
     def save_params(self) -> str:
         content = pylon.FeaturePersistence.SaveToString(self.raw.GetNodeMap())
         return _normalize_pfs_triggers(content, self._original_trigger_source)
-
-    # ----------------------------------------------------------- triggering
-
-    # Guarded by is_open(), not raw.IsOpen(): raw is None once closed.
-    def enable_frame_trigger(self) -> None:
-        if not self.is_open():
-            return
-        self._clear_freerun_cap()
-        self.raw.TriggerSelector.Value = "FrameStart"
-        self.raw.TriggerMode.Value = "On"
-
-    def set_trigger_source(self, use_software: bool) -> None:
-        if not self.is_open():
-            return
-        try:
-            if use_software:
-                self.raw.TriggerSource.Value = "Software"
-            elif self._original_trigger_source is not None:
-                self.raw.TriggerSource.Value = self._original_trigger_source
-        except genicam.GenericException as e:
-            log.warning(
-                "Failed to set trigger source on camera %s: %s", self._serial, e
-            )
-
-    def begin_software_trigger_preview(self) -> None:
-        self._clear_freerun_cap()
-        self.raw.TriggerSelector.Value = "FrameStart"
-        self.raw.TriggerMode.Value = "On"
-        self.raw.TriggerSource.Value = "Software"
-
-    def _apply_freerun_cap(self, fps: float) -> None:
-        """Best-effort: cap the free-run rate at ``fps`` (SFNC nodes on the ace)."""
-        try:
-            self.raw.AcquisitionFrameRateEnable.Value = True
-            self.raw.AcquisitionFrameRate.Value = float(fps)
-        except genicam.GenericException as e:
-            log.debug(
-                "Could not cap free-run rate at %s fps on camera %s: %s",
-                fps, self._serial, e,
-            )
-
-    def _clear_freerun_cap(self) -> None:
-        """Best-effort removal of the free-run cap, which on Basler applies even
-        while triggered and would clip a recording."""
-        raw = self.raw
-        if raw is None:
-            return
-        try:
-            raw.AcquisitionFrameRateEnable.Value = False
-        except genicam.GenericException:
-            pass
-
-    def begin_freerun(self, fps: float | None = None) -> bool:
-        """TriggerMode Off, capped at ``fps`` when given; False if refused. Arming
-        a triggered mode later clears the cap."""
-        raw = self.raw
-        if raw is None:
-            return False
-        try:
-            raw.TriggerMode.Value = "Off"
-            try:
-                raw.AcquisitionMode.Value = "Continuous"
-            except genicam.GenericException:
-                pass  # Continuous is the default
-            if fps is not None:
-                self._apply_freerun_cap(fps)
-            return True
-        except genicam.GenericException as e:
-            log.debug("free-run unsupported on camera %s: %s", self._serial, e)
-            return False
 
     def _count_incomplete(self, result) -> None:
         """Count a failed grab, logging its cause rate-limited."""

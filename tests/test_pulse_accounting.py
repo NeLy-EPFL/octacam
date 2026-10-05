@@ -858,8 +858,8 @@ def _direct_camera(serial):
 
     backend: Any = FakeBackend(serial)
     backend.open()
-    backend.write_node("width", W)
-    backend.write_node("height", H)
+    backend.write_feature("Width", W)
+    backend.write_feature("Height", H)
     return backend, Camera(backend)
 
 

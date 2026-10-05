@@ -14,7 +14,7 @@ import time
 import pytest
 
 from octacam.cameras import CameraSystem
-from octacam.cameras._genicam_config import parse_config
+from octacam.cameras.genicam import parse_config
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
@@ -96,12 +96,12 @@ def test_load_params_grows_roi_past_a_previous_sessions_offset(previewing_system
     # Rig A: a cropped, vertically offset ROI (as configs/hexaview ships).
     cam.load_params(roi(full_w, full_h - 640, offset_y=278))
     assert (cam.width, cam.height) == (full_w, full_h - 640)
-    assert cam._backend._get_number("OffsetY", True) == 278
+    assert cam._backend.get_node("OffsetY", "int") == 278
 
     # Rig B: the whole sensor back (as configs/triggerbox ships).
     cam.load_params(roi(full_w, full_h))
     assert (cam.width, cam.height) == (full_w, full_h)
-    assert cam._backend._get_number("OffsetY", True) == 0
+    assert cam._backend.get_node("OffsetY", "int") == 0
 
 
 def test_save_all_params_covers_every_camera(previewing_system):

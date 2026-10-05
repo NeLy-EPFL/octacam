@@ -15,19 +15,8 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras._genicam_config import GenICamTriggerConfig
-from octacam.cameras.base import (
-    INT_PARAMS,
-    PARAM_NODES,
-    BackendError,
-    CameraBackend,
-    FeatureInfo,
-    Frame,
-    NodeInfo,
-    curated_list_features,
-    curated_read_feature,
-    curated_write_feature,
-)
+from octacam.cameras.base import BackendError, FeatureInfo, Frame
+from octacam.cameras.genicam import GenICamBackend
 from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
 try:  # pycameleon is a core dep, but keep the import defensive like the others.
@@ -39,6 +28,20 @@ log = logging.getLogger("octacam")
 
 # Payload buffers: one frame per software trigger, so a small pool is plenty.
 _STREAM_CAPACITY = 8
+
+# No node-map walk: the Camera tab gets these nodes, by kind and category.
+_CURATED = {
+    "Width": ("int", "ImageFormatControl"),
+    "Height": ("int", "ImageFormatControl"),
+    "OffsetX": ("int", "ImageFormatControl"),
+    "OffsetY": ("int", "ImageFormatControl"),
+    "ExposureTime": ("float", "AcquisitionControl"),
+    "Gain": ("float", "AnalogControl"),
+}
+# The node kinds pycameleon reads and writes.
+_KINDS = ("int", "float", "bool", "enum")
+# The only bounds pycameleon can read: each size's sensor maximum.
+_SIZE_MAX = {"Width": "WidthMax", "Height": "HeightMax"}
 
 
 def _pycameleon():
@@ -55,22 +58,19 @@ def ensure_available() -> None:
     _pycameleon()
 
 
-class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
+class PycameleonBackend(GenICamBackend):
     """A single USB3-Vision camera driven through pycameleon/libusb."""
-
-    extension = "txt"
 
     def __init__(self, cam):
         self._cam: Any = cam  # a PyCameleonCamera; None once closed
         super().__init__(_read_serial(cam))
         self._open = False
-        self._original_trigger_source: str | None = None
         # The GenApi XML, read from the camera on the first open; a re-open loads it.
         self._context_xml: str | None = None
         self._receiver = None
         # Drives the bounded receive_async (_receive_bounded); closed by close().
         self._recv_loop: asyncio.AbstractEventLoop | None = None
-        # Every device call holds it. Reentrant: open() sets Mono8 through _set_enum.
+        # Every device call holds it. Reentrant: open() sets Mono8 through set_node.
         self._lock = threading.RLock()
 
     # ------------------------------------------------------------- lifecycle
@@ -88,7 +88,7 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
             self._open = True
             # Mono8, so receive() yields the 2-D uint8 array the GRAY8 writer takes.
             try:
-                self._set_enum("PixelFormat", "Mono8")
+                self.set_node("PixelFormat", "enum", "Mono8")
             except BackendError as e:
                 log.warning("Could not set Mono8 on camera %s: %s", self._serial, e)
 
@@ -113,114 +113,78 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
     def is_open(self) -> bool:
         return self._cam is not None and self._open
 
-    def width(self) -> int:
-        with self._lock:
-            return int(self._cam.read_integer("Width"))
+    # ------------------------------------------------- nodes and features
 
-    def height(self) -> int:
-        with self._lock:
-            return int(self._cam.read_integer("Height"))
-
-    # ----------------------------------------------------- node plumbing
-
-    def _set_enum(self, node: str, value: str) -> None:
+    def _read(self, name: str, kind: str) -> Any:
+        if kind not in _KINDS:
+            raise BackendError(f"cannot read a {kind} node")
         with self._lock:
             try:
-                self._cam.write_enum_as_str(node, value)
+                if kind == "int":
+                    return int(self._cam.read_integer(name))
+                if kind == "float":
+                    return float(self._cam.read_float(name))
+                if kind == "bool":
+                    return bool(self._cam.read_bool(name))
+                return self._cam.read_enum_as_str(name)
             except Exception as e:
                 raise BackendError(str(e)) from e
 
-    def _get_enum(self, node: str) -> str | None:
-        with self._lock:
-            try:
-                return self._cam.read_enum_as_str(node)
-            except Exception:
-                return None
+    def get_node(self, name: str, kind: str) -> Any:
+        try:
+            return self._read(name, kind)
+        except BackendError:
+            return None
 
-    def _set_bool(self, node: str, value: bool) -> None:
+    def set_node(self, name: str, kind: str, value: Any) -> None:
+        if kind not in _KINDS:
+            raise BackendError(f"cannot write a {kind} node")
         with self._lock:
             try:
-                self._cam.write_bool(node, bool(value))
-            except Exception as e:
-                raise BackendError(str(e)) from e
-
-    def _get_bool(self, node: str) -> bool | None:
-        with self._lock:
-            try:
-                return bool(self._cam.read_bool(node))
-            except Exception:
-                return None
-
-    def _set_number(self, node: str, value: float, is_int: bool) -> None:
-        with self._lock:
-            try:
-                if is_int:
-                    self._cam.write_integer(node, int(value))
+                if kind == "int":
+                    self._cam.write_integer(name, int(value))
+                elif kind == "float":
+                    self._cam.write_float(name, float(value))
+                elif kind == "bool":
+                    self._cam.write_bool(name, bool(value))
                 else:
-                    self._cam.write_float(node, float(value))
+                    self._cam.write_enum_as_str(name, value)
             except Exception as e:
                 raise BackendError(str(e)) from e
 
-    def _get_number(self, node: str, is_int: bool) -> float | int | None:
-        with self._lock:
-            try:
-                return (
-                    int(self._cam.read_integer(node))
-                    if is_int
-                    else float(self._cam.read_float(node))
-                )
-            except Exception:
-                return None
-
-    # ----------------------------------------------------- sensor parameters
-
-    def read_node(self, name: str) -> NodeInfo:
-        sfnc = PARAM_NODES[name]
-        with self._lock:
-            try:
-                if name in INT_PARAMS:
-                    value: float | int = int(self._cam.read_integer(sfnc))
-                else:
-                    value = float(self._cam.read_float(sfnc))
-            except Exception as e:
-                raise BackendError(str(e)) from e
-        # The only bounds pycameleon can read: WidthMax/HeightMax.
-        maximum: float | None = None
-        if name == "width":
-            maximum = self._get_number("WidthMax", True)
-        elif name == "height":
-            maximum = self._get_number("HeightMax", True)
-        return NodeInfo(
-            value=value,
-            min=None,
-            max=maximum,
-            inc=None,
-            unit=None,
-            writable=self._open,
-        )
-
-    def write_node(self, name: str, value: float) -> None:
-        sfnc = PARAM_NODES[name]
-        with self._lock:
-            try:
-                if name in INT_PARAMS:
-                    self._cam.write_integer(sfnc, int(value))
-                else:
-                    self._cam.write_float(sfnc, float(value))
-            except Exception as e:
-                raise BackendError(str(e)) from e
-
-    # No node-map walk: the six curated PARAM_NODES.
     def list_features(self) -> list[FeatureInfo]:
         if not self.is_open():
             return []
-        return curated_list_features(self)
+        out = []
+        for name in _CURATED:
+            try:
+                out.append(self.read_feature(name))
+            except BackendError:
+                continue
+        return out
 
     def read_feature(self, name: str) -> FeatureInfo:
-        return curated_read_feature(self, name)
+        if name not in _CURATED:
+            raise BackendError(f"{name} is not available on this backend")
+        kind, category = _CURATED[name]
+        value = self._read(name, kind)
+        maximum = self.get_node(_SIZE_MAX[name], "int") if name in _SIZE_MAX else None
+        return FeatureInfo(
+            name=name,
+            display_name=name,
+            type=kind,
+            category=category,
+            value=value,
+            max=maximum,
+            writable=self._open,
+        )
 
     def write_feature(self, name: str, value: object) -> None:
-        curated_write_feature(self, name, value)
+        if name not in _CURATED:
+            raise BackendError(f"{name} is not editable on this backend")
+        kind = _CURATED[name][0]
+        number = float(value)  # type: ignore[arg-type]
+        self.set_node(name, kind, int(number) if kind == "int" else number)
 
     def execute_command(self, name: str) -> None:
         raise BackendError("command execution is not supported on this backend")

@@ -119,7 +119,7 @@ def test_select_fake_backend():
 
 def test_select_pycameleon_backend():
     # pycameleon is a core dependency, so selecting it always works and it
-    # persists parameters as native GenApi TSV (shared _genicam_config format).
+    # persists parameters as native GenApi TSV (the shared genicam format).
     spec = select_backend("pycameleon")
     assert spec.factory.extension == "txt"
     assert callable(spec.enumerate) and callable(spec.read_model)
@@ -156,7 +156,7 @@ def test_spinnaker_module_imports_without_sdk():
     # converts a missing libSpinnaker_C.so to BackendUnavailable at selection.
     import octacam.cameras.spinnaker_c as spinnaker_c
 
-    assert spinnaker_c.SpinnakerBackend.extension == "txt"
+    assert spinnaker_c.SPEC.ensure_available is spinnaker_c.ensure_available
 
 
 def test_select_spinnaker_without_sdk_raises(monkeypatch):
@@ -168,7 +168,7 @@ def test_select_spinnaker_without_sdk_raises(monkeypatch):
 
     # A never-loaded facade + a soname that does not exist makes ctypes.CDLL fail
     # exactly as it would on a box without the SDK, regardless of this host.
-    monkeypatch.setattr(spinnaker_c, "_facade", None)
+    monkeypatch.setattr(spinnaker_c, "_binding", None)
     monkeypatch.setattr(spinnaker_c, "_LIB_NAME", "libSpinnaker_C_absent_for_test.so")
     with pytest.raises(BackendUnavailable):
         select_backend("spinnaker")
@@ -916,28 +916,28 @@ class _FakeCamList:
 
 def test_flir_enumerate_releases_previous_system(monkeypatch):
     # Re-enumeration (octacam doctor enumerates twice) must release the prior
-    # System first instead of orphaning it. Fix mirrors spinnaker_c's guard.
+    # System first instead of orphaning it.
     import octacam.cameras.flir as flir
 
+    binding = flir.PySpinBinding()
     prev_system = _FakeSystem(_FakeCamList())
     prev_list = _FakeCamList()
-    monkeypatch.setattr(flir, "_system", prev_system)
-    monkeypatch.setattr(flir, "_cam_list", prev_list)
-
+    binding._system, binding._cam_list = prev_system, prev_list
     new_system = _FakeSystem(_FakeCamList(size=0))
+    monkeypatch.setattr(
+        flir,
+        "PySpin",
+        types.SimpleNamespace(
+            SpinnakerException=RuntimeError,
+            System=types.SimpleNamespace(GetInstance=lambda: new_system),
+        ),
+    )
 
-    class _FakeSpin:
-        class System:
-            @staticmethod
-            def GetInstance():
-                return new_system
-
-    monkeypatch.setattr(flir, "_spin", lambda: _FakeSpin)
-
-    assert flir.enumerate_flir(None) == []
-    # The stale session was torn down before GetInstance ran again.
-    assert prev_system.released == 1
-    assert prev_list.cleared == 1
+    assert binding.enumerate(None) == []
+    # The stale session was torn down before GetInstance ran again, and the
+    # empty new one too.
+    assert prev_system.released == 1 and prev_list.cleared == 1
+    assert new_system.released == 1 and binding._system is None
 
 
 def test_flir_registers_atexit_teardown(monkeypatch):
@@ -975,7 +975,7 @@ def test_roi_offsets_are_applied_after_sizes_whatever_the_file_order():
     ``Height = 2048`` was refused against a max of 1770, leaving the camera on the
     previous session's ROI for the whole recording.
     """
-    from octacam.cameras._genicam_config import _roi_offsets_last
+    from octacam.cameras.genicam import _roi_offsets_last
 
     pairs = [
         ("OffsetY", "278"),
@@ -994,7 +994,7 @@ def test_roi_offsets_are_applied_after_sizes_whatever_the_file_order():
 
 def test_roi_reorder_is_a_no_op_for_dump_config_order():
     """octacam's own files already list sizes first; they must be untouched."""
-    from octacam.cameras._genicam_config import _roi_offsets_last
+    from octacam.cameras.genicam import _roi_offsets_last
 
     pairs = [("Width", "2048"), ("Height", "2048"), ("OffsetX", "0"), ("OffsetY", "0")]
     assert _roi_offsets_last(pairs) == pairs
@@ -1008,20 +1008,17 @@ def test_rejected_geometry_write_is_reported_loudly(caplog):
     means the take comes out at the previous session's ROI with nothing visible to
     the operator, and the default CLI log level is info.
     """
-    from octacam.cameras._genicam_config import apply_config
     from octacam.cameras.base import BackendError
+    from octacam.cameras.genicam import apply_config
 
     class Backend:
         serial_number = "17475185"
 
-        def _set_number(self, name, value, is_int):
+        def set_node(self, name, kind, value):
             if name == "Height":
                 raise BackendError("Height = 2048 must be equal or smaller than Max")
 
-        def _set_bool(self, name, value):
-            pass
-
-        def _set_enum(self, name, value):
+        def _try_set(self, name, kind, value):
             pass
 
     with caplog.at_level(logging.WARNING, logger="octacam"):
