@@ -27,7 +27,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendSpec
+from octacam.cameras.registry import BackendSpec, select_serials
 
 log = logging.getLogger("octacam")
 
@@ -673,14 +673,12 @@ def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
     return _callback
 
 
-def enumerate_basler(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """``[(serial, device)]``: every camera sorted by serial, or the requested
-    ones in order. A camera present but unusable (a USB 2.0 fallback, no answer
-    to its first register read) gets a None handle and a loud message: the
-    cascade claims it without opening it, so no lower tier retries it. The
-    CreateDevice calls run concurrently under one deadline
+def enumerate_basler(requested_serials: list[str] | None = None):
+    """``[(serial, device)]`` in :func:`select_serials` order (each serial once:
+    a second handle would never be destroyed). A camera present but unusable (a
+    USB 2.0 fallback, no answer to its first register read) gets a None handle
+    and a loud message: the cascade claims it without opening it, so no lower
+    tier retries it. The CreateDevice calls run concurrently under one deadline
     (:func:`_create_device_timeout`).
     """
     factory = tl_factory()
@@ -689,22 +687,13 @@ def enumerate_basler(
         return []
     log.debug("basler enumerated %d camera(s)", len(devices))
 
-    detected = [str(device.GetSerialNumber()) for device in devices]
-    final = sorted(detected) if not requested_serials else list(requested_serials)
-
-    wanted: list[tuple[str, object]] = []
-    seen: set[str] = set()
-    for serial in final:
-        if serial in seen:  # a second handle would never be destroyed
-            continue
-        try:
-            index = detected.index(serial)
-        except ValueError:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
-        seen.add(serial)
-        wanted.append((serial, devices[index]))
+    by_serial: dict[str, object] = {}
+    for device in devices:
+        by_serial.setdefault(str(device.GetSerialNumber()), device)
+    wanted = [
+        (serial, by_serial[serial])
+        for serial in select_serials(by_serial, requested_serials)
+    ]
     if not wanted:
         return []
 

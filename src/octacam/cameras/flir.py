@@ -29,7 +29,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendSpec, BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
 try:  # PySpin ships with the Spinnaker SDK and is not pip-installable.
     import PySpin  # type: ignore
@@ -666,11 +666,9 @@ def read_model(cam) -> str | None:
     return None
 
 
-def enumerate_flir(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """``[(serial, CameraPtr)]``: every camera sorted by serial, or the requested
-    ones in order. Holds the System until :func:`teardown`."""
+def enumerate_flir(requested_serials: list[str] | None = None):
+    """``[(serial, CameraPtr)]`` in :func:`select_serials` order. Holds the
+    System until :func:`teardown`."""
     spin = _spin()
     global _system, _cam_list
     # Release a previous enumeration's System (doctor enumerates twice), or it
@@ -686,23 +684,13 @@ def enumerate_flir(
     log.debug("flir enumerated %d camera(s)", count)
 
     by_serial: dict[str, object] = {}
-    detected: list[str] = []
     for i in range(count):
         cam = _cam_list.GetByIndex(i)
-        serial = _read_serial(cam)
-        detected.append(serial)
-        by_serial[serial] = cam
-
-    final = sorted(detected) if not requested_serials else list(requested_serials)
-    out = []
-    for serial in final:
-        cam = by_serial.get(serial)
-        if cam is None:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
-        out.append((serial, cam))
-    return out
+        by_serial[_read_serial(cam)] = cam
+    return [
+        (serial, by_serial[serial])
+        for serial in select_serials(by_serial, requested_serials)
+    ]
 
 
 def _complete_timestamp(image) -> int | None:

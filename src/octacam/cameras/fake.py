@@ -24,7 +24,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendSpec
+from octacam.cameras.registry import BackendSpec, select_serials
 
 log = logging.getLogger("octacam")
 
@@ -547,24 +547,13 @@ def _available_serials() -> list[str]:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-def enumerate_fake(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """``[(serial, serial)]``: every fake camera sorted, or the requested ones
-    in order."""
+def enumerate_fake(requested_serials: list[str] | None = None):
+    """``[(serial, serial)]`` in :func:`select_serials` order."""
     available = _available_serials()
     if not available:
         return []
     log.debug("fake enumerated %d camera(s)", len(available))
-    final = sorted(available) if not requested_serials else list(requested_serials)
-    out = []
-    for serial in final:
-        if serial not in available:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
-        out.append((serial, serial))
-    return out
+    return [(serial, serial) for serial in select_serials(available, requested_serials)]
 
 
 SPEC = BackendSpec(enumerate_fake, FakeBackend)

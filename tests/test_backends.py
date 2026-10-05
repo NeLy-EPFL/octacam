@@ -560,10 +560,10 @@ def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):
     from octacam.cameras import system as sysmod
     from octacam.cameras.system import CameraSystem
 
-    def top_enum(_req, *, warn_missing=True):  # a vendor tier: sees SN1 but declines it (None handle)
+    def top_enum(_req):  # a vendor tier: sees SN1 but declines it (None handle)
         return [("SN1", None), ("SN2", object())]
 
-    def floor_enum(_req, *, warn_missing=True):  # the pycameleon-style floor: sees everything
+    def floor_enum(_req):  # the pycameleon-style floor: sees everything
         return [("SN1", object()), ("SN2", object()), ("SN3", object())]
 
     monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["top", "floor"])
@@ -585,7 +585,7 @@ def test_single_backend_filters_declined_camera(monkeypatch):
     from octacam.cameras import system as sysmod
     from octacam.cameras.system import CameraSystem
 
-    def only_enum(_req, *, warn_missing=True):
+    def only_enum(_req):
         return [("SN1", None), ("SN2", object())]
 
     monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["solo"])
@@ -680,20 +680,26 @@ def test_enumerate_basler_create_timeout_env_override_is_validated(monkeypatch):
     assert _create_device_timeout() == _CREATE_DEVICE_TIMEOUT_S
 
 
-def test_enumerate_basler_warn_missing_false_is_quiet(monkeypatch, caplog):
+def test_enumerate_basler_says_nothing_of_an_absent_serial(monkeypatch, caplog):
     # The cascade offers every tier the rig's whole serial list, so serials owned
-    # by another backend must not be reported missing by this one.
+    # by another backend must not be reported missing by this one: only
+    # CameraSystem reports a serial no tier found.
     from octacam.cameras.basler import enumerate_basler
 
     _patch_basler_factory(monkeypatch, ["40018619"], bad=())
     caplog.set_level(logging.DEBUG, logger="octacam")
-    quiet = enumerate_basler(["40018619", "17475185"], warn_missing=False)
+    out = enumerate_basler(["40018619", "17475185"])
+    assert [s for s, _h in out] == ["40018619"]
     assert not any("17475185" in m for m in caplog.messages)
-    loud = enumerate_basler(["40018619", "17475185"])
-    # Either way the absent serial is simply not returned.
-    assert [s for s, _h in quiet] == ["40018619"]
-    assert [s for s, _h in loud] == ["40018619"]
-    assert any("17475185" in m and "not found" in m for m in caplog.messages)
+
+
+def test_select_serials_requested_in_order_else_all_sorted():
+    from octacam.cameras.registry import select_serials
+
+    detected = ["C", "A", "B", "A"]
+    assert select_serials(detected, None) == ["A", "B", "C"]
+    assert select_serials(detected, []) == ["A", "B", "C"]
+    assert select_serials(detected, ["B", "Z", "A", "B"]) == ["B", "A"]
 
 
 def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch):
@@ -707,7 +713,7 @@ def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch)
     seen: list[tuple[str, object]] = []
 
     def make_enum(name, serials):
-        def enumerate_fn(requested, *, warn_missing=True):
+        def enumerate_fn(requested):
             seen.append((name, requested))
             pairs = [(s, object()) for s in serials]
             if requested:
@@ -727,8 +733,7 @@ def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch)
     entries = system._enumerate("auto", ["SN1", "SN4"])
 
     assert [serial for serial, _h, _mk in entries] == ["SN1", "SN4"]
-    # Every tier got the requested list — not None — and was told to stay quiet
-    # about serials that belong to another tier.
+    # Every tier got the requested list, not None.
     assert seen == [("vendor", ["SN1", "SN4"]), ("floor", ["SN1", "SN4"])]
 
 

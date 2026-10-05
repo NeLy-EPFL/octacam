@@ -138,10 +138,7 @@ class CameraSystem:
         claimed_by: dict[str, str] = {}  # serial -> the tier that claimed it
         found: dict[str, tuple[str, object, Callable]] = {}
         for name, spec in active:
-            # Quiet: most absent serials belong to another tier.
-            for serial, handle in spec.enumerate(
-                requested_serial_numbers, warn_missing=False
-            ):
+            for serial, handle in spec.enumerate(requested_serial_numbers):
                 if serial in claimed_by:
                     continue  # a higher-priority tier already owns this camera
                 claimed_by[serial] = name

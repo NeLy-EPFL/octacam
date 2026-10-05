@@ -55,9 +55,11 @@ class BackendUnavailable(RuntimeError):
 class BackendSpec:
     """What the registry reaches in one backend module.
 
-    ``enumerate(requested_serials, *, warn_missing=True)`` returns ``[(serial,
-    handle), ...]``; a None handle is a camera present but unusable, claimed
-    without being opened. ``factory`` builds the backend from a handle.
+    ``enumerate(requested_serials)`` returns ``[(serial, handle), ...]`` in
+    :func:`select_serials` order, silently: a tier also sees serials another one
+    owns, so only CameraSystem reports one nobody found. A None handle is a camera
+    present but unusable, claimed without being opened. ``factory`` builds the
+    backend from a handle.
     """
 
     enumerate: Callable[..., list[tuple[str, Any]]]
@@ -68,6 +70,15 @@ class BackendSpec:
     read_model: Callable[[Any], str | None] | None = None
     # Releases session-wide SDK state once every camera is closed.
     teardown: Callable[[], None] | None = None
+
+
+def select_serials(detected, requested: list[str] | None) -> list[str]:
+    """The serials an enumeration hands out, each once: the requested ones it
+    detected, in requested order, else every detected one, sorted."""
+    found = set(detected)
+    if not requested:
+        return sorted(found)
+    return [serial for serial in dict.fromkeys(requested) if serial in found]
 
 
 def select_backend(name: str) -> BackendSpec:

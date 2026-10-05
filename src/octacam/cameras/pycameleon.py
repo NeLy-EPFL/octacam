@@ -27,7 +27,7 @@ from octacam.cameras.base import (
     curated_read_feature,
     curated_write_feature,
 )
-from octacam.cameras.registry import BackendSpec, BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
 try:  # pycameleon is a core dep, but keep the import defensive like the others.
     import pycameleon
@@ -352,11 +352,8 @@ def read_model(cam) -> str | None:
     return str(model) if model else None
 
 
-def enumerate_pycameleon(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """``[(serial, PyCameleonCamera)]``: every camera sorted by serial, or the
-    requested ones in order."""
+def enumerate_pycameleon(requested_serials: list[str] | None = None):
+    """``[(serial, PyCameleonCamera)]`` in :func:`select_serials` order."""
     p = _pycameleon()
     cams = p.enumerate_cameras()
     if not cams:
@@ -364,24 +361,14 @@ def enumerate_pycameleon(
     log.debug("pycameleon enumerated %d camera(s)", len(cams))
 
     by_serial: dict[str, object] = {}
-    detected: list[str] = []
     for cam in cams:
         serial = _read_serial(cam)
-        if not serial:
-            continue
-        detected.append(serial)
-        by_serial[serial] = cam
-
-    final = sorted(detected) if not requested_serials else list(requested_serials)
-    out = []
-    for serial in final:
-        cam = by_serial.get(serial)
-        if cam is None:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
-        out.append((serial, cam))
-    return out
+        if serial:
+            by_serial[serial] = cam
+    return [
+        (serial, by_serial[serial])
+        for serial in select_serials(by_serial, requested_serials)
+    ]
 
 
 SPEC = BackendSpec(

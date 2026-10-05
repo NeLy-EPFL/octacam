@@ -37,7 +37,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendSpec, BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
 log = logging.getLogger("octacam")
 
@@ -1155,12 +1155,10 @@ def read_model(hcam) -> str | None:
     return _spin().read_model(hcam)
 
 
-def enumerate_spinnaker(
-    requested_serials: list[str] | None = None, *, warn_missing: bool = True
-):
-    """``[(serial, spinCamera)]``: every camera sorted by serial, or the requested
-    ones in order. Holds the System until :func:`teardown`; the handles not
-    handed out are released here (each spinCameraListGet pairs a release)."""
+def enumerate_spinnaker(requested_serials: list[str] | None = None):
+    """``[(serial, spinCamera)]`` in :func:`select_serials` order. Holds the
+    System until :func:`teardown`; the handles not handed out are released here
+    (each spinCameraListGet pairs a release)."""
     spin = _spin()
     global _system, _cam_list
     # Release a previous enumeration's System (doctor enumerates twice): released
@@ -1182,18 +1180,11 @@ def enumerate_spinnaker(
         all_cams.append((spin.read_serial(hcam), hcam))
     by_serial = dict(all_cams)
 
-    detected = [serial for serial, _hcam in all_cams]
-    final = sorted(detected) if not requested_serials else list(requested_serials)
     out: list[tuple[str, Any]] = []
-    used: set[str] = set()
-    for serial in final:
-        hcam = by_serial.get(serial)
-        if hcam is None:
-            if warn_missing:
-                log.warning("Camera with serial number %s not found", serial)
-            continue
+    used = select_serials(by_serial, requested_serials)
+    for serial in used:
+        hcam = by_serial[serial]
         out.append((serial, hcam))
-        used.add(serial)
         _outstanding[id(hcam)] = hcam
     for serial, hcam in all_cams:
         if serial not in used:

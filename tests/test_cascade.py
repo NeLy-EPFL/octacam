@@ -26,7 +26,7 @@ def _fake_backends(monkeypatch, layout: dict[str, list[str]]):
     def fake_select(name):
         serials = layout[name]
 
-        def enumerate_fn(requested, *, warn_missing=True):
+        def enumerate_fn(requested):
             pairs = [(s, s) for s in serials]
             if requested:
                 by = dict(pairs)
