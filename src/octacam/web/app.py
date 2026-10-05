@@ -15,7 +15,6 @@ import json
 import logging
 import math
 import os
-import re
 import signal
 import struct
 import threading
@@ -57,8 +56,6 @@ from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
 log = logging.getLogger("octacam")
 
 STATIC_DIR = Path(__file__).parent / "static"
-# A plugin name lands in its mount path and import() URL: it must not escape /plugins/.
-_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 TELEMETRY_INTERVAL_S = 0.5
 # Recent controller events replayed to a (re)connecting client's log; also each
 # client's event-queue bound, so a replay is never truncated.
@@ -757,14 +754,11 @@ def create_app(
     plugins.attach(broadcast=state.broadcast_threadsafe)
 
     # Resolved once, so the mounts and /api/system agree on which plugins have a
-    # UI; a bad name or a missing dir means none.
+    # UI; a missing dir means none.
     plugin_web: dict[str, Path] = {}
     for plugin in plugins.plugins:
         adir, name = plugin.web_dir, plugin.name
         if adir is None:
-            continue
-        if not _PLUGIN_NAME_RE.match(name):
-            log.warning("Plugin %r: name is not URL-safe; not serving its assets", name)
             continue
         if not adir.is_dir():
             log.warning("Plugin %r: web_dir %s does not exist; skipping", name, adir)
