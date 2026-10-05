@@ -99,12 +99,8 @@ class CameraConfig(BaseModel):
 
 class RecordConfig(BaseModel):
     """The ``[record]`` section: how and where recordings are captured.
-
-    ``directory``/``relative_directory`` are path templates resolved at record
-    start: they accept strftime ``%``-codes (see :func:`resolve_save_path`).
-    ``ffmpeg_params`` is the verbatim encoder arg string used when
-    ``save_method == "ffmpeg"``.
-    """
+    ``directory``/``relative_directory`` take strftime ``%``-codes, expanded at
+    record start (:func:`resolve_save_path`)."""
 
     fps: float = 100.0
     duration: float = 5.0
