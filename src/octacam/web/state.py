@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 
 import octacam
 from octacam import updates
-from octacam.config import OctacamConfig
+from octacam.config import ConfigError, OctacamConfig, find_config_file, parse_config
 from octacam.controller import RecordingController
 from octacam.web.hub import Hub
 from octacam.writer import FORMATS
@@ -48,6 +48,19 @@ class AppState:
         if not self.config_dir:
             raise HTTPException(400, "No config directory is set for this session")
         return Path(self.config_dir)
+
+    def adopt_config(self, raw: dict) -> None:
+        """Make the active config just saved from ``raw`` live: the next save
+        patches it, and the cameras get its display transforms (which recordings
+        bake in) and its ROI centering."""
+        self.raw_config = raw
+        try:
+            self.config = parse_config(find_config_file(self.config_dir))
+        except ConfigError as e:
+            # Unexpected (written from a validated document); the save succeeded.
+            log.error("Saved config did not parse back; keeping the live one: %s", e)
+            return
+        self.controller.camera_system.apply_display_config(self.config.cameras)
 
     def refresh_update_notice(self) -> None:
         """Set ``update_notice`` from a PyPI check. Fail-soft; never raises."""

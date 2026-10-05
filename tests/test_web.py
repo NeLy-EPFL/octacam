@@ -1297,6 +1297,84 @@ def test_config_save_persists_center_flags(tmp_path):
         controller.close()
 
 
+def test_config_save_adopts_the_written_config_even_if_applying_it_fails(
+    tmp_path, monkeypatch
+):
+    # The TOML is on disk once written: a failing apply must not read as a
+    # refused save, and the next save must patch what was written.
+    active = _config_dir(tmp_path / "rigs" / "active")
+    controller, app = _save_client(tmp_path, active)
+
+    def busy(cameras):
+        raise RuntimeError("camera busy")
+
+    monkeypatch.setattr(controller.camera_system, "apply_display_config", busy)
+    state = app.state.app_state
+    try:
+        with TestClient(app) as client:
+            with pytest.raises(RuntimeError, match="camera busy"):  # an unmapped 500
+                client.post(
+                    "/api/config/save",
+                    json={
+                        "target": "active",
+                        "save_sensor": False,
+                        "cameras": [{"serial": EMULATED_SERIALS[0], "name": "left"}],
+                    },
+                )
+        assert 'name = "left"' in (active / "octacam_config.toml").read_text()
+        assert state.raw_config["cameras"][0]["name"] == "left"
+        assert [c.name for c in state.config.cameras] == ["left"]
+    finally:
+        controller.close()
+
+
+def test_config_saved_as_new_is_written_but_never_adopted(tmp_path):
+    active = _config_dir(tmp_path / "rigs" / "active")
+    controller, app = _save_client(tmp_path, active)
+    state = app.state.app_state
+    raw, config = state.raw_config, state.config
+    cams = [{"serial": s, "rotation_deg": 90.0} for s in EMULATED_SERIALS]
+    try:
+        with TestClient(app) as client:
+            r = client.post(
+                "/api/config/save", json={"target": "new", "name": "other", "cameras": cams}
+            )
+            assert r.status_code == 200, r.text
+            other = tmp_path / "rigs" / "other"
+            assert r.json()["config_dir"] == str(other)
+            assert "rotation_deg = 90.0" in (other / "octacam_config.toml").read_text()
+            # The session keeps running its own config.
+            assert state.raw_config is raw and state.config is config
+            for camera in client.get("/api/system").json()["cameras"]:
+                assert camera["transform"]["rotation_deg"] == 0.0
+            assert all(c.display_transform.is_identity for c in controller.camera_system)
+    finally:
+        controller.close()
+
+
+def test_consecutive_active_saves_patch_the_last_one(tmp_path):
+    # The second save sends one camera; the other keeps what the first wrote.
+    active = _config_dir(tmp_path / "rigs" / "active")
+    controller, app = _save_client(tmp_path, active)
+    first = [{"serial": s, "rotation_deg": 90.0} for s in EMULATED_SERIALS]
+    second = [{"serial": EMULATED_SERIALS[0], "rotation_deg": 180.0}]
+    try:
+        with TestClient(app) as client:
+            for cams in (first, second):
+                r = client.post(
+                    "/api/config/save",
+                    json={"target": "active", "save_sensor": False, "cameras": cams},
+                )
+                assert r.status_code == 200, r.text
+            transforms = [
+                c["transform"]["rotation_deg"]
+                for c in client.get("/api/system").json()["cameras"]
+            ]
+            assert transforms == [180.0, 90.0]
+    finally:
+        controller.close()
+
+
 def test_config_save_refused_while_recording(tmp_path):
     active = tmp_path / "rigs" / "active"
     active.mkdir(parents=True)

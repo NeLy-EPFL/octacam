@@ -84,10 +84,10 @@ def router(state: AppState) -> APIRouter:
             raise HTTPException(403, f"Config directory is not writable: {e}") from None
         except OSError as e:
             raise HTTPException(500, f"Failed to write config: {e}") from None
+        # Outside the error mapping: the file is on disk, so the session adopts it
+        # even if applying it to the cameras fails (a 500, not a refused save).
         if saved.raw is not None:
-            state.raw_config = saved.raw
-        if saved.config is not None:
-            state.config = saved.config
+            state.adopt_config(saved.raw)
         return {
             "status": "ok",
             "config_dir": str(saved.directory),

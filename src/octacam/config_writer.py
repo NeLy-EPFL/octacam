@@ -10,7 +10,6 @@ import contextlib
 import copy
 import dataclasses
 import datetime
-import logging
 import os
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -19,11 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 from octacam._compat import tomllib
 from octacam.config import (
-    ConfigError,
-    OctacamConfig,
     duration_to_seconds,
     find_config_file,
-    parse_config,
     parse_record_section,
     safe_segment,
 )
@@ -33,8 +29,6 @@ from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
 
 if TYPE_CHECKING:
     from octacam.controller import RecordingController
-
-log = logging.getLogger("octacam")
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (
@@ -470,14 +464,13 @@ def load_raw_config(config_dir: str | Path) -> dict:
 
 @dataclasses.dataclass(frozen=True)
 class SavedConfig:
-    """What :func:`save_rig_config` wrote. ``raw`` is set when the active
-    config's TOML was rewritten (it is now the document a save patches) and
-    ``config`` when that file also parsed back (it is now live)."""
+    """What :func:`save_rig_config` wrote. ``raw`` is the rewritten active
+    config's document, for the caller to adopt (None when no active TOML was
+    written: a new config dir is never adopted)."""
 
     directory: Path
     cameras_written: list[str]
     raw: dict | None = None
-    config: OctacamConfig | None = None
 
 
 def save_rig_config(
@@ -495,10 +488,10 @@ def save_rig_config(
     patched into ``raw`` (``display``) to ``active_dir``, or to a new config dir
     ``new_name`` (with the auxiliary parameter files, so it is complete).
 
-    A saved active config goes live: its cameras get its display transforms,
-    which recordings bake in, and its ROI centering. Raises RuntimeError while
-    recording, ValueError for a bad name, FileExistsError for an existing new
-    dir without ``overwrite``, and OSError when a write fails."""
+    With ``sensor``, raises RuntimeError while camera control is locked (the
+    caller refuses a save while recording). Raises ValueError for a bad name,
+    FileExistsError for an existing new dir without ``overwrite``, and OSError
+    when a write fails."""
     system = controller.camera_system
     params = controller.export_camera_params() if sensor else {}
     doc = merge_camera_display(raw, cameras) if display else None
@@ -510,17 +503,6 @@ def save_rig_config(
         copy_auxiliary_pfs(active_dir, target, set(params), system.extensions)
     if sensor:
         write_pfs_files(target, params, system.extension_by_serial())
-    written = sorted(params)
-    if doc is None:
-        return SavedConfig(target, written)
-    write_config(target, doc)
-    if new_name is not None:  # a new config is written, never adopted
-        return SavedConfig(target, written)
-    try:
-        config = parse_config(find_config_file(target))
-    except ConfigError as e:
-        # Unexpected (written from a validated document); the save succeeded.
-        log.error("Saved config did not parse back; keeping the live one: %s", e)
-        return SavedConfig(target, written, raw=doc)
-    system.apply_display_config(config.cameras)
-    return SavedConfig(target, written, raw=doc, config=config)
+    if doc is not None:
+        write_config(target, doc)
+    return SavedConfig(target, sorted(params), raw=doc if new_name is None else None)
