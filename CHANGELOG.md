@@ -50,6 +50,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- `octacam benchmark --json` (and the GUI's benchmark payload) no longer reports
+  `transfer_bound` or `freerun_max_fps`; use `bottleneck == "transfer"` and
+  `ceilings.freerun_min`. `--sink` and `--record-form` list their choices in
+  `--help`.
+- `octacam process` refuses to transcode a raw video whose summary names a pixel
+  format other than Mono8, instead of decoding it as Mono8.
+- An invalid `[[visualization]]` layout is reported with the validation reason.
 - **A recording folder now shows just its videos; everything else goes into an
   `octacam_recording/` subfolder** — the `recording_summary.json`, the opt-in
   `timestamps.npz`, the `octacam_config.toml` config snapshot and every camera
@@ -77,6 +84,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Removed
 
+- **`GET /api/config/configs`, `GET /api/diagnostics/last` and the triggerbox and
+  twophoton `GET /api/<plugin>/status` routes**, which no client called. A
+  browser that connects still gets the last benchmark report over the WebSocket,
+  and the plugin tabs read their status from `/api/system`.
 - **The legacy `/api/cameras/{index}/params` camera API** (`GET`/`PUT` and
   `POST …/params/reset`), its `camera_params` WebSocket message, and the
   per-camera `params` field of `/api/system`. The Camera tab uses
@@ -86,6 +97,11 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **A benchmark started just after a recording could run while the trigger board
+  was being re-armed for preview**, pulsing the trigger line through the
+  free-run benchmark: it is now refused until the recording has fully finished.
+- **A capture writer whose thread failed to start leaked its ffmpeg process**;
+  the camera's recording start now fails cleanly.
 - **Two full-sensor FLIR Grasshopper3s could not record together**: each asked
   for 128 stream buffers, more than the kernel's default 1000 MB of USB memory
   holds, and both failed to start ("Could not start acquisition"). A pool that

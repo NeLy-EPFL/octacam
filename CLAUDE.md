@@ -33,9 +33,9 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
 - **`fake` backend** is the CI vehicle — a rich SFNC-keyed synthetic camera that
   exercises every node/widget kind without hardware. Prefer adding fake-backed
   regression tests over hardware-only assertions.
-- **Lint/type baselines:** ruff is clean; pyright reports 40 errors, mostly
-  `self.raw`/`self._cam` Optional-access in the vendor backends and cli. **New
-  work must add zero.**
+- **Lint/type baselines:** ruff is clean; pyright reports 16 errors (cli, web/app.py's plugin
+  injection, and float() on `object` feature values in the camera layer); every
+  backend's SDK handle is typed `Any`. **New work must add zero.**
 - **`tests/conftest.py`** sets the env (`PYLON_CAMEMU`, `OCTACAM_FAKE_CAMERAS`,
   `OCTACAM_NO_UPDATE_CHECK`), gives each test its own `OCTACAM_CACHE_DIR`,
   restores the `octacam` logger after each test (so use `caplog` —
@@ -145,7 +145,7 @@ machine:
 preview/idle → waiting → recording → finishing → preview/idle
 ```
 
-A **monitor thread** replaces the old Qt timers: it polls for the first frame on
+A per-recording **monitor thread** polls for the first frame on
 every camera (firing plugin `on_first_frame` hooks at that t0), enforces the
 recording deadline, then runs teardown in a fixed order (stop trigger → grab
 loops exit → writers drain → `octacam_recording/recording_summary.json` +
@@ -160,6 +160,8 @@ loops exit → writers drain → `octacam_recording/recording_summary.json` +
   warm-up): it walks every camera's full node map over USB with no timeout, and
   `snapshot()`/`stop_recording()`/`notify_state()` take the same lock, so doing it
   under the lock let one stalled camera wedge the GUI's status and Stop button.
+  A finished take's off-lock tail (plugin disarm + preview re-arm) holds
+  `_tearing_down`, which refuses a new recording *and a benchmark* until it ends.
 - **A managed preview's trigger arm is canceled *before* the record grab starts.**
   `start_recording` is two-phase: admission checks + stop the preview grab under
   the lock (fast: pulses still flow) → `on_preview_stop` off the lock under a
