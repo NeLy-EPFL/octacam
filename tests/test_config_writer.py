@@ -178,16 +178,6 @@ def test_atomic_write_leaves_no_temp(tmp_path):
     assert not list(tmp_path.glob(".octacam-*"))
 
 
-def test_read_pfs_files(tmp_path):
-    (tmp_path / "0815-0000.pfs").write_text("live\n")
-    (tmp_path / "fictrac_camera_config.pfs").write_text("aux\n")
-    (tmp_path / "octacam_config.toml").write_text("[gui]\n")  # non-.pfs ignored
-    out = cw.read_pfs_files(tmp_path)
-    assert out == {"0815-0000": "live\n", "fictrac_camera_config": "aux\n"}
-    # a missing directory yields an empty map rather than raising
-    assert cw.read_pfs_files(tmp_path / "nope") == {}
-
-
 def test_copy_auxiliary_pfs_skips_live_serials(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
@@ -204,26 +194,18 @@ def test_pfs_helpers_honor_a_non_pfs_extension(tmp_path):
     # The persistence generalization: a FLIR/fake backend persists per-camera
     # files under its own extension; the helpers must round-trip those too.
     cw.write_pfs_files(tmp_path, {"FAKE-0": "{}\n"}, extension="json")
-    assert (tmp_path / "FAKE-0.json").exists()
+    assert (tmp_path / "FAKE-0.json").read_text() == "{}\n"
     assert not (tmp_path / "FAKE-0.pfs").exists()
-    assert cw.read_pfs_files(tmp_path, extension="json") == {"FAKE-0": "{}\n"}
-    # the default extension stays "pfs" and ignores the json file
-    assert cw.read_pfs_files(tmp_path) == {}
 
 
 def test_pfs_helpers_handle_a_mixed_vendor_rig(tmp_path):
-    # A Basler+FLIR rig writes each camera's params in its own format and reads
-    # them all back: write_pfs_files takes a per-serial extension map, and
-    # read_pfs_files / copy_auxiliary_pfs take the set of suffixes in play.
+    # A Basler+FLIR rig writes each camera's params in its own format:
+    # write_pfs_files takes a per-serial extension map, and copy_auxiliary_pfs
+    # the set of suffixes in play.
     ext_by_serial = {"BAS-1": "pfs", "FLIR-1": "json"}
     cw.write_pfs_files(tmp_path, {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}, ext_by_serial)
-    assert (tmp_path / "BAS-1.pfs").exists()
-    assert (tmp_path / "FLIR-1.json").exists()
-
-    both = cw.read_pfs_files(tmp_path, ("pfs", "json"))
-    assert both == {"BAS-1": "<pfs/>\n", "FLIR-1": "{}\n"}
-    # A single suffix still reads only its own files.
-    assert cw.read_pfs_files(tmp_path, "json") == {"FLIR-1": "{}\n"}
+    assert (tmp_path / "BAS-1.pfs").read_text() == "<pfs/>\n"
+    assert (tmp_path / "FLIR-1.json").read_text() == "{}\n"
 
     # copy_auxiliary_pfs preserves non-live per-camera files across both formats.
     (tmp_path / "aux.pfs").write_text("<aux/>\n")

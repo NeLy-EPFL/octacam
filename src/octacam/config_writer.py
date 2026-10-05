@@ -375,13 +375,6 @@ def write_config(config_dir: str | Path, doc: dict) -> Path:
     return path
 
 
-def _extensions(extension: str | Iterable[str]) -> tuple[str, ...]:
-    """One suffix, or a mixed rig's suffixes, as a tuple."""
-    if isinstance(extension, str):
-        return (extension,)
-    return tuple(extension)
-
-
 def write_pfs_files(
     target_dir: str | Path,
     pfs_by_serial: dict[str, str],
@@ -395,25 +388,6 @@ def write_pfs_files(
         atomic_write_text(target_dir / f"{serial}.{ext}", text)
 
 
-def read_pfs_files(
-    config_dir: str | Path, extension: str | Iterable[str] = "pfs"
-) -> dict[str, str]:
-    """Map file stem -> text for every parameter file in ``config_dir`` (the
-    inverse of :func:`write_pfs_files`). Auxiliary files such as
-    ``fictrac_camera_config.pfs`` are read too and never match a serial."""
-    config_dir = Path(config_dir)
-    out: dict[str, str] = {}
-    if not config_dir.is_dir():
-        return out
-    for ext in _extensions(extension):
-        for path in sorted(config_dir.glob(f"*.{ext}")):
-            try:
-                out[path.stem] = path.read_text()
-            except OSError:
-                continue
-    return out
-
-
 def copy_auxiliary_pfs(
     src_dir: str | Path,
     target_dir: str | Path,
@@ -421,11 +395,12 @@ def copy_auxiliary_pfs(
     extension: str | Iterable[str] = "pfs",
 ) -> None:
     """Copy the parameter files no live camera wrote (auxiliary configs,
-    cameras not opened), so ``target_dir`` is a complete config directory."""
+    cameras not opened), so ``target_dir`` is a complete config directory;
+    ``extension`` is one suffix or a mixed rig's suffixes."""
     src_dir, target_dir = Path(src_dir), Path(target_dir)
     if src_dir.resolve() == target_dir.resolve():
         return
-    for ext in _extensions(extension):
+    for ext in (extension,) if isinstance(extension, str) else extension:
         for src in sorted(src_dir.glob(f"*.{ext}")):
             if src.stem not in live_serials:
                 atomic_write_text(target_dir / src.name, src.read_text())

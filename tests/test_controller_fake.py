@@ -155,7 +155,7 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
 
 def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path):
     from octacam.config import load_config_dir, resolve_config_dir
-    from octacam.config_writer import read_pfs_files, write_config
+    from octacam.config_writer import write_config
     from octacam.plugins import PluginManager
     from octacam.plugins.base import Plugin
 
@@ -215,7 +215,7 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
         ("lamp", {"device": "/dev/null", "level": 7})
     ]
     # ...with each camera's live parameters beside it, plus the rig's other files.
-    params = read_pfs_files(save_dir / INFO_DIR, "fake")
+    params = {p.stem: p.read_text() for p in (save_dir / INFO_DIR).glob("*.fake")}
     assert set(params) == {"FAKE-0", "FAKE-1", "AUX"}
     assert "ExposureTime\t1234\n" in params["FAKE-0"]
     assert "ExposureTime\t1234\n" not in params["FAKE-1"]
