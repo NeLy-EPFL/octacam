@@ -472,7 +472,7 @@ def test_websocket_preview_and_telemetry(client):
 
 
 def test_plugin_contributions_wired_into_app(tmp_path):
-    """A loaded plugin's router, status, and WS handler reach the app, and the
+    """A loaded plugin's router, status, and WS hooks reach the app, and the
     plugin gets the controller and a broadcast that reaches the GUI clients."""
     from fastapi import APIRouter
 
@@ -483,6 +483,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
 
         def __init__(self):
             self.jogs = []
+            self.disconnects = []
 
         def status(self):
             return {"hello": "world"}
@@ -502,6 +503,9 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             self.jogs.append((message.get("n"), client_id))
             self.broadcast("stub_state", {"n": message.get("n")})
             return True
+
+        def on_ws_disconnect(self, client_id):
+            self.disconnects.append(client_id)
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)
@@ -536,6 +540,8 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             n, client_id = stub.jogs[0]
             assert n == 5
             assert isinstance(client_id, int) and client_id > 0
+            # A dropped socket tells the plugin, e.g. to stop that client's jog.
+            assert wait_until(lambda: stub.disconnects == [client_id], timeout=5), stub.disconnects
     finally:
         controller.close()
 
@@ -810,6 +816,27 @@ def _next_message(ws, kind: str, timeout: float = 20.0) -> dict:
             if payload["type"] == kind:
                 return payload
     raise AssertionError(f"no {kind!r} message within {timeout} s")
+
+
+def test_a_write_to_every_camera_pushes_one_message_per_camera(client):
+    # Per-camera pushes are kept newest-per-camera, not newest-per-type: a
+    # scope="all" write must not reach a client as only the last camera's.
+    with client.websocket_connect("/api/ws") as ws:
+        _next_message(ws, "settings")  # the handshake is through
+        r = client.put(
+            "/api/cameras/0/features",
+            json={"name": "ExposureTime", "value": 2000.0, "scope": "all"},
+        )
+        assert r.status_code == 200, r.text
+        indices = {_next_message(ws, "camera_features_dirty", 5)["index"] for _ in range(2)}
+    assert indices == {0, 1}
+
+
+def test_a_settings_change_is_pushed_to_every_client(client):
+    with client.websocket_connect("/api/ws") as ws:
+        assert _next_message(ws, "settings")["fps"] == 50.0  # the handshake's
+        assert client.put("/api/settings", json={"fps": 40.0}).status_code == 200
+        assert _next_message(ws, "settings", 5)["fps"] == 40.0
 
 
 def test_benchmark_cancel_ends_a_running_benchmark(client):
