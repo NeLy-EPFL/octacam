@@ -254,9 +254,9 @@ class RecordingSettings:
         return Path(self.save_dir).name
 
 
-
 _SETTINGS = TypeAdapter(RecordingSettings)
 _SETTINGS_FIELDS = frozenset(f.name for f in dataclasses.fields(RecordingSettings))
+
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:
     """``round(fps * duration)``, the pulses an octacam-driven trigger emits, so
