@@ -2185,7 +2185,8 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
         ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
          *flags],
     )
-    assert result.exit_code == 1, result.output
+    # A flash can't happen; --check fails only on a board known to be out of date.
+    assert result.exit_code == (0 if flags == ["--check"] else 1), result.output
     flat = " ".join(result.output.split())
     assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
     assert "source build: (not available)" in flat

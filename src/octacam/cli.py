@@ -2424,7 +2424,8 @@ def _confirm_flash(console, prov: dict, *, assume_yes: bool, indent: str = "") -
 
 def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: bool) -> int:
     """Report one board's firmware and, unless --check, offer to flash it.
-    Returns 0 when known up to date or flashed, else 1."""
+    Returns 0 when up to date or flashed, or under --check when not known to be
+    out of date; else 1."""
     device = prov.get("device")
     console.print()
     console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
@@ -2446,7 +2447,9 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
             else "[red]✗ incompatible firmware[/red]"
         )
         console.print(f"  {verdict} — {prov.get('detail', '')}")
-        if not check_only and prov.get("needed_build") is None:
+        if check_only:  # --check fails only on a board known to be out of date
+            return 0 if prov.get("firmware_ok") else 1
+        if prov.get("needed_build") is None:
             console.print(
                 "  Flash it manually with arduino-cli, or set OCTACAM_ARDUINO_DIR to "
                 "a checkout's arduino/ folder."
@@ -2550,8 +2553,7 @@ def flash(
         bool,
         typer.Option(
             "--check",
-            help="Report only; exit nonzero unless every board is known up to date. "
-            "Never flashes.",
+            help="Report only; exit nonzero if any board is out of date. Never flashes.",
         ),
     ] = False,
 ) -> None:
@@ -2559,9 +2561,9 @@ def flash(
 
     Reads the board's identify banner, compares its build fingerprint to the sketch
     source in ``arduino/<name>``, and (unless ``--check``) compiles + uploads the
-    current firmware with arduino-cli. Exits 0 when every board is known up to
-    date (or was flashed), nonzero otherwise: without the sketch source a board's
-    build is unknown.
+    current firmware with arduino-cli. Exits 0 when every board is up to date (or
+    was flashed), nonzero otherwise; without the sketch source a board's build is
+    unknown, which fails a flash but not ``--check``.
     """
     from rich.console import Console
 
