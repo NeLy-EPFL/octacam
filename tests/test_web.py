@@ -1369,7 +1369,7 @@ def test_sender_survives_send_after_socket_close():
     """
     from starlette.websockets import WebSocketState
 
-    from octacam.web.app import _Client
+    from octacam.web.hub import Client
 
     class _ClosedWS:
         client_state = WebSocketState.CONNECTED  # peer still looks connected
@@ -1383,8 +1383,8 @@ def test_sender_survives_send_after_socket_close():
         async def send_bytes(self, _message):  # pragma: no cover
             raise RuntimeError("socket already closed")
 
-    client = _Client(_ClosedWS())
-    client.queue_text("state", "{}")
+    client = Client(_ClosedWS())
+    client.queue("state", "{}")
 
     # Must return cleanly (and promptly) instead of propagating RuntimeError.
     asyncio.run(asyncio.wait_for(client.sender(), timeout=1.0))
@@ -1394,12 +1394,12 @@ def test_sender_skips_send_once_peer_disconnected():
     """If the peer is already gone, the sender shouldn't even attempt a send."""
     from starlette.websockets import WebSocketState
 
-    from octacam.web.app import _Client
+    from octacam.web.hub import Client
 
     ws = Mock()
     ws.client_state = WebSocketState.DISCONNECTED
-    client = _Client(ws)
-    client.queue_text("state", "{}")
+    client = Client(ws)
+    client.queue("state", "{}")
     client.queue_frame(0, b"jpegbytes")
 
     asyncio.run(asyncio.wait_for(client.sender(), timeout=1.0))
@@ -1413,11 +1413,11 @@ def test_client_is_ready_for_tracks_unsent_frames():
     it can't keep up with."""
     from starlette.websockets import WebSocketState
 
-    from octacam.web.app import _Client
+    from octacam.web.hub import Client
 
     ws = Mock()
     ws.client_state = WebSocketState.CONNECTED
-    client = _Client(ws)
+    client = Client(ws)
 
     # Fresh client: nothing pending, ready for every camera.
     assert client.is_ready_for(0)
@@ -1464,12 +1464,11 @@ def test_preview_factor_policy():
     assert _preview_factor(L, 800, _ViewSpec(need=400, full=True), False) == 2
 
 
-def test_client_apply_view_is_tolerant():
-    """apply_view stores per-camera specs and never raises on garbage input."""
-    from octacam.web.app import _DEFAULT_VIEW, _Client, _ViewSpec
+def test_parse_views_is_tolerant():
+    """A view message's specs are read per camera, and garbage never raises."""
+    from octacam.web.app import _parse_views, _ViewSpec
 
-    client = _Client(Mock())
-    client.apply_view(
+    views = _parse_views(
         {
             "type": "view",
             "cameras": {
@@ -1483,16 +1482,38 @@ def test_client_apply_view_is_tolerant():
             },
         }
     )
-    assert client.view_for(0) == _ViewSpec(
-        want=True, need=512, full=True, crop=(10, 20, 300, 400)
-    )
-    assert client.view_for(1).want is False
-    assert client.view_for(2).need is None
-    assert client.view_for(4).crop is None  # malformed crop dropped
-    assert client.view_for(9) is _DEFAULT_VIEW  # never set -> default
+    assert views[0] == _ViewSpec(want=True, need=512, full=True, crop=(10, 20, 300, 400))
+    assert views[1].want is False
+    assert views[2].need is None
+    assert views[4].crop is None  # malformed crop dropped
+    assert set(views) == {0, 1, 2, 4}
     # Malformed top-level payloads are ignored, not raised.
-    client.apply_view({"cameras": "nope"})
-    client.apply_view({})
+    assert _parse_views({"cameras": "nope"}) == {}
+    assert _parse_views({}) == {}
+
+
+def test_hub_keeps_the_newest_message_per_type_and_key():
+    """A client keeps one pending message per (type, key) and every event."""
+    from octacam.web.hub import Client, Hub
+
+    hub = Hub()
+    client = Client(Mock())
+    hub.clients.add(client)
+    hub.broadcast("camera_name", {"index": 0, "name": "a"}, key=0)
+    hub.broadcast("camera_name", {"index": 1, "name": "b"}, key=1)
+    hub.broadcast("camera_name", {"index": 0, "name": "c"}, key=0)
+    hub.broadcast("state", {"n": 1})
+    hub.broadcast("state", {"n": 2})
+    hub.broadcast("event", {"message": "x"})
+    hub.broadcast("event", {"message": "y"})
+
+    pending = [json.loads(text) for text in client.texts.values()]
+    assert pending == [
+        {"type": "camera_name", "index": 0, "name": "c"},
+        {"type": "camera_name", "index": 1, "name": "b"},
+        {"type": "state", "n": 2},
+    ]
+    assert [json.loads(text)["message"] for text in client.events] == ["x", "y"]
 
 
 def test_cap_variants_bounds_encode_count():

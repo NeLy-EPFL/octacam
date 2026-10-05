@@ -10,7 +10,6 @@ refresh rate, go newest-only to each client, and are encoded only for a client.
 import asyncio
 import contextlib
 import dataclasses
-import itertools
 import json
 import logging
 import math
@@ -19,7 +18,6 @@ import signal
 import struct
 import threading
 import time
-from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -35,12 +33,12 @@ from fastapi import (
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from starlette.websockets import WebSocketState
 
 import octacam
 from octacam import config_writer, updates
 from octacam.config import OctacamConfig, safe_segment
 from octacam.controller import RecordingController, StartResult
+from octacam.web.hub import EVENT_BACKLOG_REPLAY, Client, Hub, to_json
 from octacam.ffmpeg import nvenc_max_sessions
 from octacam.writer import FORMATS, NVENC_H264_PARAMS
 
@@ -48,9 +46,6 @@ log = logging.getLogger("octacam")
 
 STATIC_DIR = Path(__file__).parent / "static"
 TELEMETRY_INTERVAL_S = 0.5
-# Recent controller events replayed to a (re)connecting client's log; also each
-# client's event-queue bound, so a replay is never truncated.
-EVENT_BACKLOG_REPLAY = 50
 # Longest preview edge of an unfocused tile; only a focused (maximized or
 # zoomed) tile may go finer.
 PREVIEW_MAX_DIM = 640
@@ -310,92 +305,36 @@ class SaveConfigRequest(BaseModel):
         return self
 
 
-class _Client:
-    """One WebSocket's send state. Frames and texts are newest-only (a slow client
-    gets fewer updates, never a backlog); events queue."""
-
-    _next_id = itertools.count(1)
-
-    def __init__(self, ws: WebSocket):
-        self.ws = ws
-        # Lets a plugin scope per-connection state (the flywheel jog) to this socket.
-        self.id = next(_Client._next_id)
-        self.frames: dict[int, bytes] = {}
-        self.texts: dict[str, str] = {}
-        self.events: deque[str] = deque(maxlen=EVENT_BACKLOG_REPLAY)
-        self.wakeup = asyncio.Event()
-        # Event-loop thread only, so no lock.
-        self.views: dict[int, _ViewSpec] = {}
-
-    def view_for(self, camera_index: int) -> _ViewSpec:
-        return self.views.get(camera_index, _DEFAULT_VIEW)
-
-    def apply_view(self, message: dict) -> None:
-        """Update view specs from a ``{"type": "view"}`` message. A malformed entry
-        is skipped, never raised: that would tear down the socket."""
-        cameras = message.get("cameras")
-        if not isinstance(cameras, dict):
-            return
-        for key, spec in cameras.items():
+def _parse_views(message: dict) -> dict[int, _ViewSpec]:
+    """The view specs a ``{"type": "view"}`` message sets, by camera index. A
+    malformed entry is skipped, never raised: that would tear down the socket."""
+    cameras = message.get("cameras")
+    if not isinstance(cameras, dict):
+        return {}
+    views = {}
+    for key, spec in cameras.items():
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(spec, dict):
+            continue
+        need = spec.get("need")
+        if need is not None:
             try:
-                index = int(key)
+                need = int(need)
             except (TypeError, ValueError):
-                continue
-            if not isinstance(spec, dict):
-                continue
-            need = spec.get("need")
-            if need is not None:
-                try:
-                    need = int(need)
-                except (TypeError, ValueError):
+                need = None
+            else:
+                if need <= 0:
                     need = None
-                else:
-                    if need <= 0:
-                        need = None
-            self.views[index] = _ViewSpec(
-                want=bool(spec.get("want", True)),
-                need=need,
-                full=bool(spec.get("full", False)),
-                crop=_parse_crop(spec.get("crop")),
-            )
-
-    def queue_frame(self, camera_index: int, message: bytes) -> None:
-        self.frames[camera_index] = message
-        self.wakeup.set()
-
-    def queue_text(self, kind: str, message: str) -> None:
-        self.texts[kind] = message
-        self.wakeup.set()
-
-    def queue_event(self, message: str) -> None:
-        self.events.append(message)
-        self.wakeup.set()
-
-    def is_ready_for(self, camera_index: int) -> bool:
-        """True when no frame for this camera is pending; the preview loop encodes
-        only for ready clients, so a stalled client costs no CPU."""
-        return camera_index not in self.frames
-
-    async def sender(self) -> None:
-        # A send after the socket closed raises a bare RuntimeError from the ASGI
-        # layer. End quietly on it and on a disconnect: the endpoint's teardown
-        # `await sender` would re-raise either into the ASGI app.
-        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
-            while True:
-                await self.wakeup.wait()
-                self.wakeup.clear()
-                if self.ws.client_state != WebSocketState.CONNECTED:
-                    return
-                frames, self.frames = self.frames, {}
-                texts, self.texts = self.texts, {}
-                events = list(self.events)
-                self.events.clear()
-                for message in texts.values():
-                    await self.ws.send_text(message)
-                for message in events:
-                    await self.ws.send_text(message)
-                for message in frames.values():
-                    await self.ws.send_bytes(message)
+        views[index] = _ViewSpec(
+            want=bool(spec.get("want", True)),
+            need=need,
+            full=bool(spec.get("full", False)),
+            crop=_parse_crop(spec.get("crop")),
+        )
+    return views
 
 
 class _AppState:
@@ -419,8 +358,7 @@ class _AppState:
         # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then
         # starts a detached processing job.
         self.process_after = False
-        self.clients: set[_Client] = set()
-        self.loop: asyncio.AbstractEventLoop | None = None
+        self.hub = Hub()
         self._frame_counters: dict[int, int] = {}
         # The update banner's notice; None until the background check returns.
         self._update_notice: updates.UpdateNotice | None = None
@@ -515,39 +453,7 @@ class _AppState:
     def broadcast_system(self) -> None:
         """Push a fresh descriptor to every browser (the init thread, once the
         cameras are attached)."""
-        self.broadcast_threadsafe("system", self.system_descriptor())
-
-    # ------------------------------------------------------- broadcasting
-
-    def _broadcast_text(self, kind: str, message: str) -> None:
-        for client in list(self.clients):
-            client.queue_text(kind, message)
-
-    def _broadcast_event(self, message: str) -> None:
-        for client in list(self.clients):
-            client.queue_event(message)
-
-    def broadcast_presence(self) -> None:
-        """Tell every browser how many are connected (any of them can drive the
-        rig). Event-loop thread only."""
-        self._broadcast_text(
-            "presence",
-            json.dumps({"type": "presence", "clients": len(self.clients)}),
-        )
-
-    def broadcast_threadsafe(self, kind: str, payload: dict) -> None:
-        """Push controller/state updates from non-asyncio threads."""
-        loop = self.loop
-        if loop is None or loop.is_closed() or not self.clients:
-            return
-        message = json.dumps({"type": kind, **payload})
-        if kind == "event":
-            loop.call_soon_threadsafe(self._broadcast_event, message)
-        else:
-            loop.call_soon_threadsafe(self._broadcast_text, kind, message)
-
-    def on_controller_event(self, kind: str, payload: dict) -> None:
-        self.broadcast_threadsafe(kind, payload)
+        self.hub.publish("system", self.system_descriptor())
 
     # ----------------------------------------------------- background tasks
 
@@ -556,7 +462,7 @@ class _AppState:
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(interval)
-            clients = list(self.clients)
+            clients = list(self.hub.clients)
             if not clients:
                 continue
             recording = self.controller.recording_active
@@ -567,11 +473,11 @@ class _AppState:
             for index, camera in enumerate(self.controller.camera_system):
                 width, height = camera.width, camera.height
                 sensor_long = max(width, height)
-                groups: dict[tuple, list[_Client]] = {}
+                groups: dict[tuple, list[Client]] = {}
                 for client in clients:
                     if not client.is_ready_for(index):
                         continue
-                    spec = client.view_for(index)
+                    spec = client.views.get(index, _DEFAULT_VIEW)
                     if not spec.want:
                         continue
                     region = _clamp_crop(spec.crop, width, height)
@@ -614,7 +520,7 @@ class _AppState:
 
     @staticmethod
     def _cap_variants(
-        groups: dict[tuple, list["_Client"]],
+        groups: dict[tuple, list[Client]],
         width: int,
         height: int,
         sensor_long: int,
@@ -639,7 +545,7 @@ class _AppState:
             bucket.extend(groups.pop(key))
 
     @staticmethod
-    def _encode_camera(job, flags: int) -> list[tuple[int, bytes, list["_Client"]]]:
+    def _encode_camera(job, flags: int) -> list[tuple[int, bytes, list[Client]]]:
         """Encode every variant of one camera's frame, on an executor thread.
         Everything arrives by value: it touches no shared state or camera."""
         import cv2
@@ -672,12 +578,10 @@ class _AppState:
         loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(TELEMETRY_INTERVAL_S)
-            if not self.clients:
+            if not self.hub.clients:
                 continue
             snapshot = await loop.run_in_executor(None, self.controller.snapshot)
-            self._broadcast_text(
-                "telemetry", json.dumps({"type": "telemetry", **snapshot})
-            )
+            self.hub.broadcast("telemetry", snapshot)
 
 
 def _default_shutdown() -> None:
@@ -710,7 +614,8 @@ def create_app(
     """The GUI's app for ``controller``, serving the plugins it was built with."""
     state = _AppState(controller, config, config_dir)
     plugins = state.plugins
-    plugins.attach(broadcast=state.broadcast_threadsafe)
+    hub = state.hub
+    plugins.attach(broadcast=hub.publish)
 
     # Resolved once, so the mounts and /api/system agree on which plugins have a
     # UI; a missing dir means none.
@@ -727,8 +632,8 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
-        state.loop = asyncio.get_running_loop()
-        controller.add_listener(state.on_controller_event)
+        hub.loop = asyncio.get_running_loop()
+        controller.add_listener(hub.publish)
         tasks = [
             asyncio.create_task(state.preview_loop()),
             asyncio.create_task(state.telemetry_loop()),
@@ -802,7 +707,7 @@ def create_app(
         except ValueError as e:
             raise HTTPException(422, str(e)) from None
         settings = dataclasses.asdict(updated)
-        state.broadcast_threadsafe("settings", settings)
+        hub.publish("settings", settings)
         return settings
 
     @app.get("/api/nvenc/capabilities")
@@ -822,10 +727,7 @@ def create_app(
     def put_camera_name(index: int, patch: CameraNamePatch):
         with _http_errors():
             result = controller.set_camera_name(index, patch.name)
-        # The `:index` suffix keeps one pending rename per camera (newest-only).
-        state.broadcast_threadsafe(
-            f"camera_name:{result['index']}", {"type": "camera_name", **result}
-        )
+        hub.publish("camera_name", result, key=result["index"])
         return result
 
     @app.put("/api/cameras/{index}/transform")
@@ -845,10 +747,10 @@ def create_app(
         """Tell clients to re-GET a changed camera's features (too large to push)."""
         for entry in result["updated"]:
             index = entry["index"]
-            state.broadcast_threadsafe(
-                f"camera_features_dirty:{index}",
-                {"type": "camera_features_dirty", "index": index,
-                 "center_x": entry["center_x"], "center_y": entry["center_y"]},
+            hub.publish(
+                "camera_features_dirty",
+                {"index": index, "center_x": entry["center_x"], "center_y": entry["center_y"]},
+                key=index,
             )
 
     @app.get("/api/cameras/{index}/features")
@@ -1000,36 +902,24 @@ def create_app(
     @app.websocket("/api/ws")
     async def websocket_endpoint(ws: WebSocket):
         await ws.accept()
-        client = _Client(ws)
-        state.clients.add(client)
-        state.broadcast_presence()
+        client = Client(ws)
+        hub.connect(client)
         sender = asyncio.create_task(client.sender())
         loop = asyncio.get_running_loop()
         try:
             # The descriptor is built and queued with no await between, so an init
             # that finishes later reaches this client after it, never before.
-            client.queue_text(
-                "system", json.dumps({"type": "system", **state.system_descriptor()})
-            )
+            client.queue("system", to_json("system", state.system_descriptor()))
             snapshot = await loop.run_in_executor(None, controller.snapshot)
-            client.queue_text("state", json.dumps({"type": "state", **snapshot}))
-            client.queue_text(
-                "settings",
-                json.dumps(
-                    {
-                        "type": "settings",
-                        **dataclasses.asdict(controller.get_settings()),
-                    }
-                ),
-            )
+            client.queue("state", to_json("state", snapshot))
+            settings = dataclasses.asdict(controller.get_settings())
+            client.queue("settings", to_json("settings", settings))
             # Replay the last benchmark report and recent events.
             last_diag = controller.get_last_diagnostic()
             if last_diag:
-                client.queue_text(
-                    "diagnostics", json.dumps({"type": "diagnostics", **last_diag})
-                )
+                client.queue("diagnostics", to_json("diagnostics", last_diag))
             for event in list(controller.events)[-EVENT_BACKLOG_REPLAY:]:
-                client.queue_event(json.dumps({"type": "event", **event}))
+                client.queue("event", to_json("event", event))
             while True:
                 text = await ws.receive_text()
                 try:
@@ -1039,7 +929,7 @@ def create_app(
                 # "view" is the core's: cheap dict work, handled inline, never
                 # offered to plugins.
                 if isinstance(message, dict) and message.get("type") == "view":
-                    client.apply_view(message)
+                    client.views.update(_parse_views(message))
                     continue
                 # In the executor: a plugin's hook may block on I/O. A raising
                 # hook is logged, so a bad message cannot kill the socket.
@@ -1049,8 +939,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
-            state.clients.discard(client)
-            state.broadcast_presence()
+            hub.disconnect(client)
             # E.g. the flywheel stops a jog this client owned, so a dropped socket
             # cannot leave the motor spinning. In the executor: it may block.
             await loop.run_in_executor(
