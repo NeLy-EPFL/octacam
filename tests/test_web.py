@@ -622,6 +622,26 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
         controller.close()
 
 
+def test_plugin_with_a_missing_web_dir_gets_no_ui_and_a_warning(tmp_path, caplog):
+    from octacam.plugins.base import Plugin, PluginManager
+
+    class StubWebPlugin(Plugin):
+        name = "stub"
+        web_dir = tmp_path / "not_built"
+
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    controller = RecordingController(system, settings, PluginManager([StubWebPlugin()]))
+    try:
+        app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+        assert "web_dir" in caplog.text and "does not exist" in caplog.text
+        with TestClient(app) as client:
+            assert "web" not in client.get("/api/system").json()["plugins"]["stub"]
+            assert client.get("/plugins/stub/stub.js").status_code == 404
+    finally:
+        controller.close()
+
+
 def _wait_for_take(client):
     """Poll /api/state until the take is over and counted; return the last state."""
     states = []

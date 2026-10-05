@@ -13,6 +13,7 @@ blocking SDK, serial and filesystem calls never stall the WebSocket's loop.
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import threading
@@ -31,6 +32,8 @@ from octacam.web import cameras, record, save, system, ws
 from octacam.web.hub import Hub
 from octacam.web.preview import preview_loop
 from octacam.web.state import AppState
+
+log = logging.getLogger("octacam")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -61,6 +64,11 @@ def create_app(
     hub = Hub()
     plugins = controller.plugins
     plugins.attach(broadcast=hub.publish)
+    for plugin in plugins.plugins:
+        if plugin.web_dir is not None and not plugin.web_dir.is_dir():
+            log.warning(
+                "Plugin %r: web_dir %s does not exist; skipping", plugin.name, plugin.web_dir
+            )
     state = AppState(
         controller,
         hub,
@@ -68,7 +76,7 @@ def create_app(
         config_dir,
         raw_config=config_writer.load_raw_config(config_dir) if config_dir else {},
         # Resolved once, so the mounts and /api/system agree on which plugins
-        # have a UI; a missing dir means none.
+        # have a UI.
         plugin_web={
             p.name: p.web_dir
             for p in plugins.plugins
