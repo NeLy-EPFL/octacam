@@ -76,7 +76,7 @@ export class ReconnectingSocket {
   }
 }
 
-// 36-byte little-endian header (see FRAME_HEADER in app.py) followed by JPEG
+// 36-byte little-endian header (see FRAME_HEADER in preview.py) followed by JPEG
 // bytes. The crop rect (sensor px) locates a server-cropped region within the
 // full sensor; for an un-cropped frame it is (0, 0, sensorW, sensorH).
 function parseFrame(buf) {
