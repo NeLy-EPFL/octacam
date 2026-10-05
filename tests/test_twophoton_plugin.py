@@ -180,7 +180,7 @@ def test_on_recording_start_does_not_arm_when_plugin_key_absent():
 def test_on_recording_start_uses_defaults_when_twophoton_key_present_but_empty():
     # {"twophoton": {}} means checkbox was checked, GUI omitted optional fields.
     plugin, link = _plugin_with_fake()
-    plugin.on_recording_start({})
+    PluginManager([plugin]).on_recording_start({"twophoton": {}})
     written = link.snapshot()
     assert len(written) == 1
     _, fps, dur = struct.unpack(ARM_FORMAT, written[0])

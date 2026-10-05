@@ -115,14 +115,36 @@ def test_a_bundled_plugin_declares_its_facts(name, trigger, device, banner):
     assert cls.from_options({})._fw.spec == cls.firmware
 
 
-def test_dispatch_swallows_plugin_exceptions():
-    class Boom(Plugin):
-        name = "boom"
+@pytest.mark.parametrize(
+    ("method", "hook", "args"),
+    [
+        ("setup_all", "setup", ()),
+        ("teardown_all", "teardown", ()),
+        ("on_preview_start", "on_preview_start", ({},)),
+        ("on_preview_stop", "on_preview_stop", ()),
+        ("on_recording_start", "on_recording_start", ({},)),
+        ("on_first_frame", "on_first_frame", ({},)),
+        ("on_recording_stop", "on_recording_stop", (False,)),
+        ("on_ws_disconnect", "on_ws_disconnect", (1,)),
+    ],
+)
+def test_a_raising_hook_does_not_stop_the_next_plugin(method, hook, args):
+    calls = []
 
-        def on_first_frame(self, params):
-            raise RuntimeError("boom")
+    def boom(self, *args):
+        raise RuntimeError("boom")
 
-    PluginManager([Boom()]).on_first_frame(None)  # must not raise
+    def record(self, *args):
+        calls.append(args)
+
+    plugins = [
+        type("Boom", (Plugin,), {"name": "boom", hook: boom})(),
+        type("Recorder", (Plugin,), {"name": "recorder", hook: record})(),
+    ]
+    if method == "teardown_all":
+        plugins.reverse()  # teardown runs in reverse, so Boom still goes first
+    getattr(PluginManager(plugins), method)(*args)  # must not raise
+    assert len(calls) == 1
 
 
 def test_a_failing_hook_without_a_name_is_still_isolated():
@@ -211,13 +233,14 @@ def test_each_hook_gets_its_own_slice():
         def on_recording_start(self, params):
             seen.append((self.name, params))
 
-    manager = PluginManager([Slice("a"), Slice("b"), Slice("c")])
-    manager.on_recording_start({"a": {"x": 1}, "b": True})
-    # b's slice is not a table, and c has none: both get None.
-    assert seen == [("a", {"x": 1}), ("b", None), ("c", None)]
+    manager = PluginManager([Slice("a"), Slice("b"), Slice("c"), Slice("d")])
+    manager.on_recording_start({"a": {"x": 1}, "b": True, "d": {}})
+    # b's slice is not a table, and c has none: both get None. d's empty table
+    # is a slice (armed with defaults), not None.
+    assert seen == [("a", {"x": 1}), ("b", None), ("c", None), ("d", {})]
     seen.clear()
     manager.on_recording_start(None)
-    assert seen == [("a", None), ("b", None), ("c", None)]
+    assert seen == [("a", None), ("b", None), ("c", None), ("d", None)]
 
 
 def test_snapshot_options_lists_every_plugin():
