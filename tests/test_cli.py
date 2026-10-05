@@ -16,9 +16,8 @@ from typer.testing import CliRunner
 
 import octacam
 from octacam.cameras import BackendError, BackendUnavailable
+from octacam import locks
 from octacam.cli import (
-    _LOCK_UNAVAILABLE,
-    _acquire_instance_lock,
     _browser_skip_reason,
     _build_config_doc,
     _port_available,
@@ -137,15 +136,11 @@ def test_gui_exits_when_port_already_in_use(tmp_path):
 def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
     # The single-instance guard is keyed on the config dir, not the port: while
     # one instance holds the lock, a second launch is refused on any port.
-    held = _acquire_instance_lock(tmp_path.resolve())
-    assert held is not None and held is not _LOCK_UNAVAILABLE
-    try:
+    with locks.instance_lock(tmp_path):
         # --port 0 leaves the port probe free, so only the lock can block us.
         result = runner.invoke(
             app, ["gui", str(tmp_path), "--port", "0", "--no-browser"]
         )
-    finally:
-        held.close()
     assert result.exit_code != 0
     assert "already running for this config" in result.output
 
@@ -1998,9 +1993,9 @@ def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch)
 
     def refuse(config_dir):
         seen.append(config_dir)
-        return None
+        raise locks.RigInUse("1")
 
-    monkeypatch.setattr("octacam.cli._acquire_instance_lock", refuse)
+    monkeypatch.setattr("octacam.locks.instance_lock", refuse)
     result = runner.invoke(app, ["--log-level", "error", "gui", str(rec), "--no-browser"])
     assert result.exit_code != 0
     assert seen == [(rec / RECORDING_INFO_DIRNAME).resolve()]
@@ -2063,16 +2058,25 @@ def test_flash_refuses_a_rig_the_gui_holds_however_the_path_is_spelled(
     # find that lock from a relative path too: the board may be mid-recording.
     rig = tmp_path / "rig"
     rig.mkdir()
-    held = _acquire_instance_lock(rig.resolve())
-    assert held is not None and held is not _LOCK_UNAVAILABLE
     monkeypatch.chdir(tmp_path)
-    try:
+    with locks.instance_lock(rig.resolve()):
         result = runner.invoke(app, ["flash", "rig"])
-    finally:
-        held.close()
     assert result.exit_code == 2, result.output
     assert "Another octacam instance owns this rig" in result.output
     assert f"(pid {os.getpid()})" in result.output
+
+
+def test_lock_holder_names_the_pid_only_while_the_rig_is_held(tmp_path, monkeypatch):
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    assert locks.holder(rig) is None
+    monkeypatch.chdir(tmp_path)
+    with locks.instance_lock(Path("rig")):
+        assert locks.holder(rig) == str(os.getpid())
+        with pytest.raises(locks.RigInUse) as refused, locks.instance_lock(rig):
+            pass
+        assert refused.value.holder == str(os.getpid())
+    assert locks.holder(rig) is None
 
 
 # --- `octacam flash` against a faked triggerbox board -------------------------

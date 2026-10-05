@@ -1,6 +1,4 @@
 import contextlib
-import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -10,7 +8,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import webbrowser
@@ -120,48 +117,6 @@ def _port_available(host: str, port: int) -> bool:
         except OSError:
             return False
     return True
-
-
-class _NoLock:
-    """Stand-in when the lock file cannot be opened: the exclusive camera open is
-    then the only guard. close() is a no-op so callers need no special case."""
-
-    def close(self) -> None:
-        pass
-
-
-_LOCK_UNAVAILABLE = _NoLock()
-
-
-def _instance_lock_path(config_dir: Path) -> Path:
-    """Per-rig lock path, keyed on the resolved config dir so every spelling of
-    one rig shares one lock."""
-    key = hashlib.sha1(str(config_dir.resolve()).encode()).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f"octacam-{key}.lock"
-
-
-def _acquire_instance_lock(config_dir: Path):
-    """Flock a per-rig file so one octacam owns this rig, on any ``--port``.
-
-    The OS releases the lock on exit, even on SIGKILL, so it never goes stale.
-    Returns the locked handle (keep it referenced for the whole run), ``None``
-    if another instance holds it, or :data:`_LOCK_UNAVAILABLE`."""
-    path = _instance_lock_path(config_dir)
-    try:
-        handle = open(path, "a+")
-    except OSError as e:
-        log.debug("Instance lock %s unavailable (%s); relying on camera lock", path, e)
-        return _LOCK_UNAVAILABLE
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    handle.seek(0)  # the pid is informational (doctor names the holder)
-    handle.truncate()
-    handle.write(f"{os.getpid()}\n")
-    handle.flush()
-    return handle
 
 
 app = typer.Typer(
@@ -445,7 +400,7 @@ def gui(
     """Launch the octacam web GUI for the cameras in CONFIG_DIR."""
     import uvicorn
 
-    from octacam import session_cache
+    from octacam import locks, session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import RecordingSettings, load_config_dir
     from octacam.controller import RecordingController
@@ -458,8 +413,11 @@ def gui(
     config_dir = _resolve_config_dir(config_dir).resolve()
     log.info("Using config directory: %s", config_dir)
 
-    instance_lock = _acquire_instance_lock(config_dir)
-    if instance_lock is None:
+    # Released in the teardown below, before the capture marker.
+    rig_lock = contextlib.ExitStack()
+    try:
+        rig_lock.enter_context(locks.instance_lock(config_dir))
+    except locks.RigInUse:
         sys.exit(
             f"Another octacam instance is already running for this config "
             f"({config_dir}). Open its GUI in a browser, or stop it first."
@@ -621,7 +579,7 @@ def gui(
             init_thread.join(timeout=30)
         controller.close()
         plugins.teardown_all()
-        instance_lock.close()  # a relaunch need not wait for this process to exit
+        rig_lock.close()  # a relaunch need not wait for this process to exit
         # Drop the marker before a processing job starts, or it parks at once.
         capture_stack.close()
         process_after = app is not None and app.state.app_state.process_after
@@ -877,27 +835,6 @@ def _nvidia_gpus() -> list[str]:
         else:
             gpus.append(parts[0])
     return gpus
-
-
-def _instance_lock_holder(config_dir: Path) -> str | None:
-    """The PID holding this rig's instance lock, or None if it is free.
-
-    A non-blocking flock, released at once if won, so probing never steals or
-    blocks a running session's lock."""
-    path = _instance_lock_path(config_dir)
-    try:
-        handle = open(path)
-    except OSError:
-        return None  # never created -> nobody has ever locked this rig
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return handle.read().strip() or "unknown"
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return None
-    finally:
-        handle.close()
 
 
 def _report_free_space(report: _Report, path: Path, label: str) -> None:
@@ -1437,7 +1374,7 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
 
 
 def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
-    from octacam import session_cache
+    from octacam import locks, session_cache
 
     report.section("Recording cache & runtime")
     cdir = session_cache.cache_dir()
@@ -1468,7 +1405,7 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     else:
         report.add("ok", "no transcode running on this machine")
     if config_dir is not None:
-        holder = _instance_lock_holder(config_dir)
+        holder = locks.holder(config_dir)
         if holder:
             report.add(
                 "warn",
@@ -2524,7 +2461,7 @@ def flash(
     """
     from rich.console import Console
 
-    from octacam.plugins import build_plugins
+    from octacam import locks
 
     console = Console()
     if config_dir is not None:
@@ -2536,50 +2473,56 @@ def flash(
         )
 
     # Flashing resets the board, which another octacam may have armed.
-    instance_lock = None
-    if config_dir is not None:
-        instance_lock = _acquire_instance_lock(config_dir)
-        if instance_lock is None:
-            holder = _instance_lock_holder(config_dir)
-            who = f" (pid {holder})" if holder else ""
-            console.print(
-                f"[red]Another octacam instance owns this rig{who}[/red] — its board "
-                "may be armed. Stop it before flashing."
-            )
-            raise typer.Exit(2)
-
     try:
-        plugins = build_plugins(config, [plugin] if plugin else None)
-        flashable = _flashable_plugins(plugins, plugin)
-        if not flashable:
-            which = f" {plugin!r}" if plugin else ""
-            console.print(
-                f"[yellow]No firmware-flashable serial plugin{which} is enabled.[/yellow] "
-                "triggerbox, twophoton, and flywheel support firmware flashing."
-            )
-            raise typer.Exit(1 if plugin else 0)
+        with (
+            locks.instance_lock(config_dir)
+            if config_dir is not None
+            else contextlib.nullcontext()
+        ):
+            raise typer.Exit(_flash_boards(console, config, plugin, device, yes, check_only))
+    except locks.RigInUse as e:
+        console.print(
+            f"[red]Another octacam instance owns this rig (pid {e.holder})[/red] — "
+            "its board may be armed. Stop it before flashing."
+        )
+        raise typer.Exit(2) from None
 
-        exit_code = 0
-        for p in flashable:
-            if device:
-                p.configured_device = device
+
+def _flash_boards(
+    console, config, plugin: str | None, device: str | None, yes: bool, check_only: bool
+) -> int:
+    """Report (and unless *check_only*, flash) each flashable plugin's board;
+    the command's exit code."""
+    from octacam.plugins import build_plugins
+
+    plugins = build_plugins(config, [plugin] if plugin else None)
+    flashable = _flashable_plugins(plugins, plugin)
+    if not flashable:
+        which = f" {plugin!r}" if plugin else ""
+        console.print(
+            f"[yellow]No firmware-flashable serial plugin{which} is enabled.[/yellow] "
+            "triggerbox, twophoton, and flywheel support firmware flashing."
+        )
+        return 1 if plugin else 0
+
+    exit_code = 0
+    for p in flashable:
+        if device:
+            p.configured_device = device
+        try:
+            p.setup()  # open the link + read the identity banner
+        except Exception as e:
+            console.print(f"[yellow]{p.name}: could not open the board: {e}[/yellow]")
+        try:
+            prov = p.firmware_provisioning()
+            if _flash_one(console, p, prov, assume_yes=yes, check_only=check_only) != 0:
+                exit_code = 1
+        finally:
             try:
-                p.setup()  # open the link + read the identity banner
-            except Exception as e:
-                console.print(f"[yellow]{p.name}: could not open the board: {e}[/yellow]")
-            try:
-                prov = p.firmware_provisioning()
-                if _flash_one(console, p, prov, assume_yes=yes, check_only=check_only) != 0:
-                    exit_code = 1
-            finally:
-                try:
-                    p.teardown()
-                except Exception:
-                    pass
-        raise typer.Exit(exit_code)
-    finally:
-        if instance_lock is not None:
-            instance_lock.close()
+                p.teardown()
+            except Exception:
+                pass
+    return exit_code
 
 
 # ---------------------------------------------------------------------------
