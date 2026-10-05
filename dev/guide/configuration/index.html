@@ -1008,8 +1008,9 @@
   <code>&lt;serial&gt;.txt</code> (the native GenApi feature-persistence TSV) for FLIR/GenICam,
   written by the GUI's <em>Save…</em> dialog.</li>
 </ul>
-<p>Every recording folder is also a config directory: it holds a snapshot of the
-setup it was recorded with (see
+<p>Every recording folder also holds a config directory: its <code>octacam_recording/</code>
+subfolder is a snapshot of the setup it was recorded with, and
+<code>octacam gui &lt;recording folder&gt;</code> launches from it (see
 <a href="../recording/#the-embedded-config-snapshot">Recording</a>).</p>
 <p>Everything below is optional and has a sensible default — an empty or missing
 <code>octacam_config.toml</code> uses all detected cameras with defaults. octacam parses the
@@ -1058,7 +1059,7 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="n">relative_directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"%y%m%d-genotype/Fly1/001-bhv"</span><span class="w">   </span><span class="c1"># strftime template</span>
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>
 <a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="n">save_method</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"ffmpeg"</span><span class="w">         </span><span class="c1"># ffmpeg | raw</span>
-<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset ultrafast -crf 18 -pix_fmt gray"</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset ultrafast -crf 18 -pix_fmt yuv420p"</span>
 <a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="n">save_transformed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span>
 <a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="n">save_timestamps</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
 </code></pre></div>
@@ -1114,7 +1115,7 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <tr>
 <td><code>ffmpeg_params</code></td>
 <td>ultrafast x264, see above</td>
-<td>Encoder args used at record time.</td>
+<td>Encoder args used at record time. octacam writes Mono8 frames as full-range 4:2:0 (<code>yuv420p</code>, neutral chroma), so the pixel values are unchanged. An older <code>-pix_fmt gray</code> (monochrome 4:0:0) is also written as <code>yuv420p</code> for libx264/libx265, because NVIDIA hardware decoders (VLC's default on an NVIDIA machine) show 4:0:0 H.264 as flat gray frames. Frames with an odd width or height stay 4:0:0, since 4:2:0 can't encode them.</td>
 </tr>
 <tr>
 <td><code>save_transformed</code></td>
@@ -1124,7 +1125,7 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <tr>
 <td><code>save_timestamps</code></td>
 <td><code>false</code></td>
-<td>Also write a single compressed per-frame timestamp file (<code>timestamps.npz</code>) covering all cameras.</td>
+<td>Also write a single compressed per-frame timestamp file (<code>timestamps.npz</code>, in the recording's <code>octacam_recording/</code> subfolder) covering all cameras.</td>
 </tr>
 </tbody>
 </table>
@@ -1132,7 +1133,7 @@ to a single backend. See <a href="../backends/">Camera backends</a>.</p>
 <p>Encoder args <code>octacam process</code> uses to re-encode recordings to archival mp4.
 Usually a slower, higher-quality preset than the record-time params.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[transcode]</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray"</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">ffmpeg_params</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"-c:v libx264 -preset veryslow -crf 20 -pix_fmt yuv420p"</span>
 </code></pre></div>
 <h2 id="transfer"><code>[transfer]</code><a class="headerlink" href="#transfer" title="Permanent link">&para;</a></h2>
 <p>Where <code>octacam process</code> copies finished outputs. Omit the whole section to

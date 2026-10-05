@@ -959,9 +959,10 @@ are written to video as you record. See the <a href="../guide/gui/">Web GUI guid
 <p>Prefer no browser (a script, or a remote box)? Record headlessly:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>octacam<span class="w"> </span>record<span class="w"> </span>&lt;config_dir&gt;<span class="w"> </span>--duration<span class="w"> </span><span class="m">10</span><span class="w"> </span>--fps<span class="w"> </span><span class="m">100</span>
 </code></pre></div>
-<p>Either way, each recording writes its videos, a <code>recording_summary.json</code>, and a
-snapshot of its config (with each camera's parameters) into its own folder, so
-the same setup can be relaunched later. See <a href="../guide/recording/">Recording</a>.</p>
+<p>Either way, each recording writes its videos into its own folder, with a
+<code>recording_summary.json</code> and a snapshot of its config (with each camera's
+parameters) in that folder's <code>octacam_recording/</code> subfolder, so the same setup
+can be relaunched later. See <a href="../guide/recording/#recording-outputs">Recording</a>.</p>
 <h2 id="5-archive-everything">5. Archive everything<a class="headerlink" href="#5-archive-everything" title="Permanent link">&para;</a></h2>
 <p>Turn the day's recordings into transcoded videos (plus any composite grid videos
 the rig config asks for) and copies on shared storage — one command, no paths to

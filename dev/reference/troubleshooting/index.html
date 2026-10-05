@@ -793,6 +793,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#videos-play-as-flat-gray-frames" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Videos play as flat gray frames
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#colour-looks-wrong-after-transcoding" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -934,6 +945,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#videos-play-as-flat-gray-frames" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Videos play as flat gray frames
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#colour-looks-wrong-after-transcoding" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1021,7 +1043,9 @@ needed. Confirm with:</p>
 </code></pre></div>
 <h2 id="dropped-frames-and-missed-trigger-pulses">Dropped frames and missed trigger pulses<a class="headerlink" href="#dropped-frames-and-missed-trigger-pulses" title="Permanent link">&para;</a></h2>
 <p>Run <code>octacam check &lt;recording or directory&gt;</code> — it lists every camera's missed
-pulses, unequal frame counts and start offsets. In <code>recording_summary.json</code>:</p>
+pulses, unequal frame counts and start offsets. In the recording's
+<code>octacam_recording/recording_summary.json</code> (flat beside the videos in a recording
+made before that subfolder existed):</p>
 <ul>
 <li><code>writer_dropped</code> counts frames the <strong>encoder/writer queue</strong> could not accept.
   If you see these, the machine is CPU-bound — check whether an <code>octacam process</code>
@@ -1045,6 +1069,16 @@ whether the fault follows the cable or the camera.</p>
 mounted/present or isn't writable (local recording still works either way). Mount
 the share or fix permissions, then re-run — transfers <strong>resume</strong>, redoing at most
 the one in-progress file. See <a href="../../guide/processing/#transfer">Processing → Transfer</a>.</p>
+<h2 id="videos-play-as-flat-gray-frames">Videos play as flat gray frames<a class="headerlink" href="#videos-play-as-flat-gray-frames" title="Permanent link">&para;</a></h2>
+<p>Videos recorded with <code>-pix_fmt gray</code> (the default before 0.3.4) are monochrome
+4:0:0 H.264. NVIDIA's hardware decoder shows these as a uniform gray frame,
+and VLC uses that decoder by default on an NVIDIA machine. Software decoders
+(ffmpeg, OpenCV, analysis tools) read them correctly. octacam now writes
+full-range 4:2:0, even for configs and recording snapshots that still say
+<code>gray</code>, so <code>octacam process</code> turns an older recording into an MP4 that plays
+everywhere. To view an old <code>.mkv</code> directly, turn off hardware decoding in VLC
+(<em>Tools → Preferences → Input / Codecs → Hardware-accelerated decoding →
+Disable</em>).</p>
 <h2 id="colour-looks-wrong-after-transcoding">Colour looks wrong after transcoding<a class="headerlink" href="#colour-looks-wrong-after-transcoding" title="Permanent link">&para;</a></h2>
 <p>octacam resolves an ffmpeg binary (bundled <code>imageio-ffmpeg</code> by default), and
 colour-range flags can differ between ffmpeg versions. <code>octacam doctor</code> reports

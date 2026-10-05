@@ -976,8 +976,10 @@ single command:</p>
 <p>There is no <code>--config</code> to pass. Each recording carries an embedded snapshot of
 its rig config (see <a href="../recording/#the-embedded-config-snapshot">Recording</a>), and
 <code>process</code> reads the encoder args, grid layouts, and transfer destination from
-that snapshot. Point it at recording folders (or, with <code>-r</code>, parent directories)
-and it does the rest.</p>
+that snapshot. Point it at recording folders — the folders holding the videos —
+(or, with <code>-r</code>, parent directories) and it does the rest. The snapshot and
+summary live in each recording's <code>octacam_recording/</code> subfolder; older recordings
+that keep them flat beside the videos are processed just the same.</p>
 <h2 id="the-three-steps">The three steps<a class="headerlink" href="#the-three-steps" title="Permanent link">&para;</a></h2>
 <p><code>process</code> runs three steps in order; skip any of them:</p>
 <table>
@@ -1050,7 +1052,9 @@ encoder settings come from the embedded config's <code>[transcode].ffmpeg_params
 not the command line. Recordings are reproduced as saved — any display transform
 was already baked in at record time (see
 <a href="../recording/#transformed-vs-raw-frames">transformed vs raw</a>).</p>
-<p><code>process</code> accepts any mix of recording folders. Already-transcoded outputs are
+<p><code>process</code> accepts any mix of recording folders, of either layout; with <code>-r</code> an
+<code>octacam_recording/</code> subfolder is never taken for a folder of videos to
+transcode. Already-transcoded outputs are
 skipped unless you pass <code>--force</code> — except one left over from an earlier take in
 the same folder (it is older than the video it was made from), which is redone
 with a warning instead of being transferred as this recording's. Pass
@@ -1095,11 +1099,12 @@ transcode:</p>
 <h2 id="transfer">Transfer<a class="headerlink" href="#transfer" title="Permanent link">&para;</a></h2>
 <p><code>process</code> copies all transcoded mp4s and grid videos to the transfer destination
 (a network share or any writable path), mirroring the recording's directory
-tree. The recording's metadata goes with them: <code>recording_summary.json</code>,
-<code>timestamps.npz</code>, and its config (the <code>octacam_config.toml</code> snapshot and the
-camera parameter files), so the copy can
-<a href="../recording/#the-embedded-config-snapshot">relaunch the same setup</a>. The raw
-capture files (<code>.mkv</code> / <code>.raw</code>) stay local.</p>
+tree. The recording's <code>octacam_recording/</code> subfolder goes with them —
+<code>recording_summary.json</code>, <code>timestamps.npz</code>, and its config (the
+<code>octacam_config.toml</code> snapshot and the camera parameter files) — so the copy can
+<a href="../recording/#the-embedded-config-snapshot">relaunch the same setup</a>. An older
+recording with those files flat beside its videos is transferred flat, as it is.
+The raw capture files (<code>.mkv</code> / <code>.raw</code>) stay local.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">[transfer]</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">directory</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"/mnt/store/matthias"</span><span class="w">    </span><span class="c1"># strftime %-codes expand here too</span>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">checksum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">true</span><span class="w">                      </span><span class="c1"># content-verify each copy (default)</span>

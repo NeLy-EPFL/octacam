@@ -1142,7 +1142,7 @@ opens a camera, so it is safe to run while a session is live.</p>
 </tr>
 <tr>
 <td><code>--probe-serial</code></td>
-<td>Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed).</td>
+<td>Also open each detected serial port briefly to read its firmware identity. It writes to each board, even one a running session holds (the plugins don't lock their port; only a port another process holds exclusively, or on Windows any port in use, is skipped), so skip it while a board may be armed.</td>
 </tr>
 </tbody>
 </table>
@@ -1204,7 +1204,7 @@ override only the day-to-day values. See <a href="../../guide/recording/">Record
 </tr>
 <tr>
 <td><code>--yes</code>, <code>-y</code></td>
-<td>Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash).</td>
+<td>Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about; use <code>octacam flash</code>).</td>
 </tr>
 <tr>
 <td><code>--plugin &lt;name&gt;</code></td>
@@ -1220,7 +1220,8 @@ override only the day-to-day values. See <a href="../../guide/recording/">Record
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>octacam<span class="w"> </span>check<span class="w"> </span><span class="o">[</span>PATHS...<span class="o">]</span>
 </code></pre></div>
 <p>Screen recording folders — or whole directory trees, searched for
-<code>recording_summary.json</code> — for missed trigger pulses, unequal frame counts, a
+<code>recording_summary.json</code> (in each recording's <code>octacam_recording/</code> subfolder, or
+flat beside the videos in an older recording) — for missed trigger pulses, unequal frame counts, a
 start offset between cameras, late exposures and camera-clock jumps. Reads each
 recording's summary and <code>timestamps.npz</code> and never modifies anything: new
 recordings are checked from the recorder's own accounting (the summary alone
@@ -1255,7 +1256,10 @@ has a problem, including one it cannot read. See
 </code></pre></div>
 <p>Check a serial plugin's board firmware against the bundled Arduino sketch and,
 unless <code>--check</code>, compile + upload the current sketch with arduino-cli. Pass
-<code>CONFIG_DIR</code> (whose serial plugins to check), <code>--plugin</code>, or both.</p>
+<code>CONFIG_DIR</code> (whose serial plugins to check), <code>--plugin</code>, or both. Without the
+sketch source (an install with no checkout), a board's build is unknown and can't
+be flashed here, so a flash exits non-zero; <code>--check</code> fails only on a board known
+to be out of date or to run other firmware.</p>
 <table>
 <thead>
 <tr>
