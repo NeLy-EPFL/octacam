@@ -139,6 +139,21 @@ def test_transcode_file_gives_the_4_2_0_rule_its_frame_size(tmp_path, monkeypatc
     assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "yuv420p"
 
 
+@pytest.mark.parametrize("suffix", [".mkv", ".raw"])
+def test_transcode_file_with_no_argv_leaves_the_folder_alone(tmp_path, suffix):
+    # Bad quoting fails before a temp exists, so no orphan sweep runs either.
+    src = tmp_path / f"cam{suffix}"
+    _write_raw(src, _frame(16, 12))
+    orphan = tmp_path / f".cam{PARTIAL_INFIX}.1.deadbeef.mp4"
+    orphan.write_bytes(b"")
+    before = sorted(tmp_path.iterdir())
+    with pytest.raises(ValueError):
+        transcode_file(
+            src, tmp_path / "cam.mp4", "-c:v 'unterminated", width=16, height=12, fps=10.0
+        )
+    assert sorted(tmp_path.iterdir()) == before
+
+
 def test_transcode_raw_without_geometry_raises(tmp_path):
     # A .raw carries no geometry of its own; without width/height/fps (from the
     # recording summary) it cannot be laid out, so the encode refuses rather than

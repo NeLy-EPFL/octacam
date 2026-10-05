@@ -93,16 +93,11 @@ def transcode_file(
     else:
         input_args = ["-i", str(src)]
     frame_size = (width, height) if width and height else None
+    # Built before the temp exists: no ffmpeg or bad quoting leaves the folder alone.
+    cmd = [find_ffmpeg(), *input_args, *output_args(ffmpeg_params, frame_size)]
     with atomic_output(output) as tmp:
-        args = [
-            find_ffmpeg(),
-            *input_args,
-            *output_args(ffmpeg_params, frame_size),
-            "-y",
-            str(tmp),
-        ]
         run_ffmpeg(
-            args,
+            [*cmd, "-y", str(tmp)],
             src,
             on_progress=on_progress,
             total_frames=total_frames,
