@@ -364,6 +364,17 @@ def test_a_software_retrieve_fires_one_trigger_and_its_image_answers_it(
     assert backend.last_trigger_index == 0 and image.released == 1
 
 
+def test_an_incomplete_software_image_answers_its_trigger(backend, monkeypatch):
+    # A transport failure is an incomplete image: it answers its trigger at
+    # once, so the next one fires rather than waiting out the answer deadline.
+    image = FakeImage(incomplete=True)
+    command = _software_grab(backend, monkeypatch, image)
+    backend.trigger_once()
+    assert backend.retrieve(100, lambda: True) is None
+    assert backend.trigger.fired_index is None and backend.last_trigger_index == 0
+    assert command.executed == 1 and image.released == 1
+
+
 def test_a_refused_software_trigger_is_not_awaited(backend, monkeypatch):
     image = FakeImage(array=np.zeros((4, 4), dtype=np.uint8))
     command = _software_grab(backend, monkeypatch, image, refusals=1)

@@ -210,9 +210,11 @@ def test_only_the_spinnaker_tiers_hold_session_state():
 class _Raw:
     """A pylon InstantCamera stand-in: a GigE camera (timestamps in ticks)."""
 
+    device_class = "BaslerGigE"
+
     def GetDeviceInfo(self):
         return types.SimpleNamespace(
-            GetSerialNumber=lambda: "test-basler", GetDeviceClass=lambda: "BaslerGigE"
+            GetSerialNumber=lambda: "test-basler", GetDeviceClass=lambda: self.device_class
         )
 
 
@@ -307,8 +309,9 @@ def test_basler_retrieve_freerun_swallows_device_error(make_basler_backend):
 
 
 class _GrabResult:
-    def __init__(self, valid=True, timestamp=0):
+    def __init__(self, valid=True, timestamp=0, succeeded=True):
         self._valid = valid
+        self._succeeded = succeeded
         self.TimeStamp = timestamp
         self.Array = None
 
@@ -316,7 +319,13 @@ class _GrabResult:
         return self._valid
 
     def GrabSucceeded(self):
-        return True
+        return self._succeeded
+
+    def GetErrorCode(self):
+        return 0xE1000014
+
+    def GetErrorDescription(self):
+        return "The buffer was incompletely grabbed"
 
     def Release(self):
         pass
@@ -394,6 +403,34 @@ def test_basler_unpulsed_fetches_answer_no_trigger(make_basler_backend):
     assert be.retrieve_freerun(50, lambda: True)[1] == 111
     assert be.retrieve_external(50, lambda: True)[1] == 222
     assert be.last_trigger_index is None and raw.fired == 0
+
+
+def test_basler_failed_grab_answers_its_trigger(make_basler_backend):
+    # A transport failure is a failed grab: it answers its trigger at once, so
+    # the next one fires rather than waiting out the answer deadline.
+    raw = _LateImageRaw([_GrabResult(timestamp=111, succeeded=False)])
+    be = make_basler_backend(raw)
+    be.trigger.begin_grab()
+    be.trigger_once()
+    assert be.retrieve(50, lambda: True) is None
+    assert be.trigger.fired_index is None and be.last_trigger_index == 0
+    assert be.stream_statistics()["IncompleteImagesDiscarded"] == 1
+
+
+@pytest.mark.parametrize(("device_class", "stamp"), [("BaslerUsb", 111), ("BaslerGigE", None)])
+def test_basler_only_ns_timestamps_reach_the_clock_check(
+    make_basler_backend, monkeypatch, device_class, stamp
+):
+    # The stale-image check compares ns offsets; a GigE camera's count ticks.
+    raw = _LateImageRaw([_GrabResult(timestamp=111)])
+    raw.device_class = device_class
+    be = make_basler_backend(raw)
+    answers: list[int | None] = []
+    monkeypatch.setattr(be.trigger, "answered", answers.append)
+    be.trigger.begin_grab()
+    be.trigger_once()
+    assert be.retrieve(50, lambda: True)[1] == 111
+    assert answers == [stamp]
 
 
 class _ClosableRaw(_FakeBaslerRaw):

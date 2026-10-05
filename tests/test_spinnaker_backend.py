@@ -625,13 +625,27 @@ def test_retrieve_none_on_grab_timeout():
     assert nm.TriggerSoftware.executed == 1  # trigger fired; frame just didn't arrive
 
 
+def test_unpulsed_fetches_answer_no_trigger():
+    # Free run and an external trigger fetch outside the hand-off: answering it
+    # would make every frame UNMATCHED_TRIGGER, discarded as extra.
+    nm = FakeNodeMap()
+    backend, cam = _grabbing_backend(nm)
+    cam.next_image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), timestamp=7)
+    assert backend.retrieve_freerun(100, lambda: True)[1] == 7
+    assert backend.retrieve_external(100, lambda: True)[1] == 7
+    assert backend.last_trigger_index is None and nm.TriggerSoftware.executed == 0
+
+
 def test_retrieve_skips_incomplete_image_but_releases_it():
+    # A transport failure is an incomplete image: it answers its trigger at
+    # once, so the next one fires rather than waiting out the answer deadline.
     backend, cam = _grabbing_backend()
     image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), incomplete=True)
     cam.next_image = image
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None
     assert image.released  # incomplete frames are still released
+    assert backend.trigger.fired_index is None and backend.last_trigger_index == 0
 
 
 def _incomplete_logs(records):

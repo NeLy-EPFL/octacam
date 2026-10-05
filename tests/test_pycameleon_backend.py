@@ -277,6 +277,24 @@ def test_retrieve_freerun_returns_frame():
     backend.stop_grab()
 
 
+def test_unpulsed_fetches_answer_no_trigger():
+    # Free run and an external trigger fetch outside the hand-off: answering it
+    # would make every frame UNMATCHED_TRIGGER, discarded as extra. A payload
+    # cameleon rejects answers nothing either.
+    backend, cam = _open_backend()
+    backend.start_grab_preview()
+    assert backend.retrieve_freerun(100, lambda: True) is not None
+    assert backend.retrieve_external(100, lambda: True) is not None
+
+    async def reject(_rx):
+        raise RuntimeError("Failed to receive image: invalid trailer")
+
+    cam.receive_async = reject
+    assert backend.retrieve_external(100, lambda: True) is None
+    assert backend.last_trigger_index is None and cam.executed == []
+    backend.stop_grab()
+
+
 def test_enumerate_sorts_then_filters(monkeypatch):
     import octacam.cameras.pycameleon as pcmod
 
