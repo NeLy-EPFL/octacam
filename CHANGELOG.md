@@ -58,11 +58,29 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - `octacam config --backend ""` means auto, like every other backend selector.
 - `octacam benchmark --json` (and the GUI's benchmark payload) no longer reports
   `transfer_bound` or `freerun_max_fps`; use `bottleneck == "transfer"` and
-  `ceilings.freerun_min`. `--sink` and `--record-form` list their choices in
+  `ceilings.freerun_min`. It gains `bottleneck_label`, the wording the CLI and the
+  Benchmark tab now share. `--sink` and `--record-form` list their choices in
   `--help`.
+- The benchmark's progress bar (CLI and Benchmark tab) shows the time left. Its
+  `diagnostics_progress` WebSocket message now carries `phase`, `detail`,
+  `elapsed_s`, `step_s` and `total_s`.
 - `octacam process` refuses to transcode a raw video whose summary names a pixel
   format other than Mono8, instead of decoding it as Mono8.
 - An invalid `[[visualization]]` layout is reported with the validation reason.
+- `octacam process` accepts a `recording_summary.json` path for its recording,
+  like `octacam check`, and warns once, not twice, about a recording without a
+  config snapshot.
+- `octacam record` and `octacam benchmark` on a rig where no camera opens exit
+  with the GUI's "Could not open the cameras" message.
+- **Basler cameras get `TriggerOverlap=ReadOut` best-effort** when their frame
+  trigger is armed, through the same trigger setup as FLIR and pycameleon cameras
+  (which also sets `AcquisitionFrameRateAuto=Off` for a free-run rate cap). The
+  Basler Camera tab groups features by category display name, and a FLIR (PySpin)
+  parameter file's header names the camera model.
+- Plugin log lines start with the plugin's name.
+- The GUI's digit shortcuts follow the tab bar's order (a plugin tab's digit
+  depends on which plugins are loaded), and a plugin tab's firmware banner sits
+  right under its link status.
 - **A recording folder now shows just its videos; everything else goes into an
   `octacam_recording/` subfolder** — the `recording_summary.json`, the opt-in
   `timestamps.npz`, the `octacam_config.toml` config snapshot and every camera
@@ -87,6 +105,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   once, and `duration_ms` / pulse-train t0 restart with the new spec. Boards
   report *outdated* until reflashed: `octacam flash <config>` or the tab's
   *Flash firmware* button.
+- **Internal restructuring** (for contributors; no behavior change beyond these
+  entries): a `cli/` package, `take.py`/`cameras/take.py` (one recording, one
+  camera's), `recording_format.py`, `process.py`, `ffmpeg.py`/`transcode.py`, one
+  GenICam layer and FLIR backend, a `SerialPlugin` base. CLAUDE.md has the map.
 
 ### Removed
 
@@ -105,6 +127,14 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Saved configs, recording config snapshots and camera parameter files were
+  owner-only (0600)**, and `octacam process` copied that mode onto the storage
+  share; they now get the umask's permissions like every other octacam output.
+- **`octacam process` crashed on a `recording_summary.json` that is valid JSON
+  but not an object**; it now warns and skips that recording.
+- **flywheel: a serial port that died mid-session still read as ready**; the
+  board now shows as not ready and offers a reconnect, like triggerbox and
+  twophoton.
 - **`octacam flash` without the sketch source reported every board up to date**:
   it now reports the build as unknown (or incompatible from the banner) and a
   flash request exits non-zero.

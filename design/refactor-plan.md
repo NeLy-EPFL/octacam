@@ -460,7 +460,7 @@ Load-bearing behavior and knowledge. Condense the words, keep the substance.
 - The one-sided host check.
 - Fill, don't skip, except for sustained writer overload (skip, `sync.ok` false).
 - Fill rows are stamped from the tracker clock, never 0.
-- `_check_sync` compares only cameras with the same delivery profile; the software trigger records offset 0.
+- `check_sync` compares only cameras with the same delivery profile; the software trigger records offset 0.
 
 **Software-trigger hand-off:**
 - One frame per trigger fired.
@@ -505,7 +505,7 @@ Load-bearing behavior and knowledge. Condense the words, keep the substance.
 - NVENC `-cq`; the session probe runs off the lock.
 - `bufsize=0`.
 - Fills ride on the next item.
-- Atomic partial temps: real extension last, pid+uuid names, flock liveness, `glob.escape`.
+- Atomic partial temps (`files.py`: partial naming, `flock_held`): real extension last, pid+uuid names, flock liveness, `glob.escape`.
 
 **CLI:**
 - fd limit.
@@ -516,7 +516,7 @@ Load-bearing behavior and knowledge. Condense the words, keep the substance.
 - Shutdown order.
 - uvicorn's ws settings.
 - Doctor scan: SDK imports on the calling thread, `tl_factory` before the workers.
-- `_is_stale` mtime rule.
+- `is_stale` mtime rule.
 - Grids never take a grid as input.
 - Detached-job argv uses absolute paths.
 - `_inject_default_last` (the typer fork).
@@ -593,3 +593,21 @@ Load-bearing behavior and knowledge. Condense the words, keep the substance.
 | 2026-10-05 | Phase 2 gate + rig | Gate 1,545 passed, frontend 57, pyright 11. Rig: managed 4-camera take 240/240 (PySpin + pylon), software take = pre-refactor, ctypes Spinnaker 240/240, pycameleon 40/40 (its Baslers lose the first 4 software triggers — the same on pre-refactor code; fallback tier, not fixed), GUI smoke (Camera-tab walk + write on Basler and FLIR, managed preview over the WebSocket, GUI take 160/160, clean shutdown), doctor --probe-serial and flash --check read firmware facts from the plugin class |
 | 2026-10-05 | Phase 3 wave A | P3.C: ffmpeg.py (toolchain, quiet_argv), writer.py capture-only (1,194 → 428), transcode.py (one transcode_file, atomic_output). P3.D: web/app.py 1,122 → 127 lines; hub.py, preview.py, state.py, routers; save_rig_config; feature reset reads the camera's own file. P3.F: the two firmware CLI bugs found in P2.A fixed. Gate 1,577 passed |
 | 2026-10-05 | Wave B (P3.B, P4.C, P4.D, P4.E, P5) | recording_format.py + files.py; SerialPlugin + triggerbox protocol/train/plugin + Camera.trigger_window_us; benchmark compaction (seconds-budget progress, one rate loop, report label); frontend helpers (el/store/request/Modal), SerialTab, plugins own their markup; one GenICam walker (genicam.py, _genicam_config gone), one FlirBackend over PySpin + ctypes bindings, Basler on the shared trigger chain (best-effort TriggerOverlap). Integration fix: trigger_window_us read the removed read_node. Gate 1,624 passed, frontend 64, pyright 8. Rig: managed 240/240 ×4, software = camera ceiling, ctypes 240/240, pycameleon unchanged, GUI smoke (158/137 features, preview, GUI take 160/160), firmware checks OK |
+| 2026-10-05 | Wave C (P3.A, P4.A, P4.B) | 14 commits. P3.A: the pipeline in `process.py` (`ProcessOptions`, `run`, one config cache per run), the run side in `process_jobs` (`worker`, `NullReporter`, `pause_gate`), `locks.py` (`instance_lock`/`RigInUse`/`holder`), `CameraSystem.for_config` as the one rig-open path, the `cli/` package (one module per command group + `_common`; `--help` and the command tree unchanged), `create_app` reading `controller.config_dir`. P4.A/B: the writer owns its overload policy (`write()` → `WriteResult`), `cameras/take.py` (`CameraTake` record loop, `CameraStats`), `take.py` (`Take`: start sequence, priming, monitor phases, teardown, pure `check_sync`, config snapshot and files), one table of busy reasons, controller tests built through the constructor. Found and fixed: the preview read `camera.take` twice per frame (a preview start clears it in between). Gate: 1,653 passed / 0 failed, frontend 64, docs build, pyright 4, ruff clean. Rig: managed 240/240 ×4, ctypes Spinnaker 240/240, pycameleon unchanged, GUI smoke (Camera tab, preview, GUI take 160/160, clean shutdown), software take on an idle box 40–41 missed vs 42–44 on the pre-refactor code (GS3 software-trigger ceiling) |
+| 2026-10-05 | P5.C docs | CLAUDE.md names, module map and numbers match the code; CHANGELOG `[Unreleased]` completed |
+
+## Result
+
+Source 30,432 → 23,346 lines (−23%), prose 27% → 17%; pyright 41 → 4 errors (the
+fake backend's node table and `float()` on its `object` values, and
+`savez_compressed(**arrays)`); tests 1,424 → 1,654. Twenty user-visible bugs
+were fixed along the way (the `[Unreleased]` *Fixed* entries added on this
+branch), besides the in-branch regressions that review and integration caught
+(`trigger_window_us` reading the removed `read_node`, `check` searching inside a
+recording path, the preview's double `camera.take` read). Follow-ups: re-port
+`feat/cluster-recording` (see Decisions); rename `record_form` /
+`save_frame_timestamps` to the config's names; a stream-qualified
+`-pix_fmt:v gray` is not covered by the 4:0:0 rule; pycameleon's Baslers lose
+their first 4 software triggers (also before the refactor; fallback tier); a
+board running foreign firmware reads UNIDENTIFIED rather than WRONG_BOARD at
+plugin connect; `diagnose.js` should import `el` from `util.js`.
