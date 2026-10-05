@@ -165,8 +165,8 @@ class FakeBackend(CameraBackend):
         # (1 = the first: a USB stall).
         self.image_latency_s = 0.0
         self.latency_by_fire: dict[int, float] = {}
-        # A fetch finding no image waits out its whole timeout, not woken by a
-        # trigger offer, as a real SDK fetch does.
+        # A fetch finding no image waits out its whole timeout (or until the grab
+        # ends), not woken by a trigger offer, as a real SDK fetch does.
         self.fetch_blocks = False
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
