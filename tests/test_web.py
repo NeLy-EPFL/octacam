@@ -536,12 +536,17 @@ def test_plugin_contributions_wired_into_app(tmp_path):
                 else:
                     pytest.fail("the plugin's broadcast never reached the client")
                 assert payload == {"type": "stub_state", "n": 5}
-            assert len(stub.jogs) == 1
-            n, client_id = stub.jogs[0]
-            assert n == 5
-            assert isinstance(client_id, int) and client_id > 0
-            # A dropped socket tells the plugin, e.g. to stop that client's jog.
-            assert wait_until(lambda: stub.disconnects == [client_id], timeout=5), stub.disconnects
+                assert len(stub.jogs) == 1
+                n, client_id = stub.jogs[0]
+                assert n == 5
+                assert isinstance(client_id, int) and client_id > 0
+                # A dropped socket tells the plugin, e.g. to stop that client's
+                # jog. Waited for inside the block: leaving it cancels the
+                # endpoint task, which can drop the not-yet-started hook.
+                ws.close()
+                assert wait_until(
+                    lambda: stub.disconnects == [client_id], timeout=5
+                ), stub.disconnects
     finally:
         controller.close()
 
