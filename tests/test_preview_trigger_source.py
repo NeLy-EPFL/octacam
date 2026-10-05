@@ -345,8 +345,10 @@ def test_camera_ops_are_refused_while_the_preview_arm_is_being_canceled(
         assert second.status == StartResult.BUSY
         assert "starting" in second.message
         assert controller.run_diagnostic().status == StartResult.BUSY
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="starting"):
             controller.update_settings(fps=60.0)
+        with pytest.raises(ValueError):  # a bad change is rejected as such
+            controller.update_settings(fps=0)
         with pytest.raises(RuntimeError):
             controller.start_preview()
         assert controller.get_settings().fps == 50.0

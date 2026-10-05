@@ -5,6 +5,7 @@ import json
 import pytest
 from helpers import camera_stats, wait_until
 
+from octacam.cameras import CameraSystem
 from octacam.config import RecordingSettings
 from octacam.controller import RecordingController, StartResult
 from octacam.pulses import PulseClock
@@ -293,18 +294,11 @@ def test_capture_frame_count():
     ) == 1
 
 
-def test_update_settings_validation():
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings()
-    controller._state = "preview"
-    controller._lock = __import__("threading").RLock()
-
-    class _SystemStub:
-        def set_software_trigger_frequency(self, hz):
-            self.hz = hz
-
-    controller.camera_system = _SystemStub()
+def test_update_settings_validation(monkeypatch):
+    system = CameraSystem.pending()
+    rates: list[float] = []
+    monkeypatch.setattr(system, "set_software_trigger_frequency", rates.append)
+    controller = RecordingController(system, RecordingSettings(), auto_preview=False)
     with pytest.raises(ValueError):
         controller.update_settings(codec="vp9")
     with pytest.raises(ValueError):
@@ -340,26 +334,35 @@ def test_update_settings_validation():
         == "-c:v hevc_nvenc -cq 20"
     )
     controller.update_settings(fps=42.0)
-    assert controller.camera_system.hz == 42.0
-
-    controller._state = "recording"
-    with pytest.raises(RuntimeError):
-        controller.update_settings(fps=10.0)
-    # A bad change is rejected as such in any state.
-    with pytest.raises(ValueError):
-        controller.update_settings(fps=0)
+    assert rates == [42.0]
     with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
         controller.update_settings(self=1)
 
-    # A starting recording locks the settings too: a change could re-arm the
-    # preview under it.
-    controller._state = "preview"
-    controller._starting = True
-    with pytest.raises(RuntimeError, match="starting"):
-        controller.update_settings(fps=10.0)
-    with pytest.raises(ValueError):
-        controller.update_settings(fps=0)
-    assert controller._settings.fps == 42.0
+
+def test_settings_and_names_are_locked_while_recording(tmp_path):
+    system = CameraSystem(["FAKE-0"], backend="fake")
+    system.load_config(tmp_path)
+    system.camera_at(0).set_geometry(width=64, height=48)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=60.0, save_method="raw", save_dir=str(tmp_path / "rec")
+    )
+    controller = RecordingController(system, settings, auto_preview=False)
+    try:
+        assert controller.start_recording().ok
+        assert controller.recording_active
+        with pytest.raises(RuntimeError):
+            controller.update_settings(fps=10.0)
+        # A bad change is rejected as such in any state.
+        with pytest.raises(ValueError):
+            controller.update_settings(fps=0)
+        with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
+            controller.update_settings(self=1)
+        with pytest.raises(RuntimeError):
+            controller.set_camera_name(0, "other")
+    finally:
+        controller.close()
+    assert controller.get_settings().fps == 50.0
+    assert system.camera_at(0).name == "FAKE-0"
 
 
 def test_update_settings_lone_save_dir_clears_split_halves():
@@ -367,18 +370,15 @@ def test_update_settings_lone_save_dir_clears_split_halves():
     # patch) must clear the stale split halves — otherwise relative_save_dir
     # keeps preferring the old relative_directory and the post-recording increment
     # recomposes save_dir from it, discarding the explicitly set path.
-    import threading
-
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings(
-        record_directory="/base",
-        relative_directory="240101/001",
-        save_dir="/base/240101/001",
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(
+            record_directory="/base",
+            relative_directory="240101/001",
+            save_dir="/base/240101/001",
+        ),
+        auto_preview=False,
     )
-    controller._state = "idle"
-    controller._lock = threading.RLock()
-    controller._auto_preview = False
 
     merged = controller.update_settings(save_dir="/other/place")
     assert merged.save_dir.endswith("/other/place")
@@ -403,9 +403,11 @@ def test_browse_directory(tmp_path):
     (tmp_path / "octacam_recording").mkdir()
     (tmp_path / "f.txt").write_text("x")
 
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(save_dir=str(tmp_path / "rec" / "001")),
+        auto_preview=False,
+    )
 
     listing = controller.browse_directory(str(tmp_path))
     assert listing["path"] == str(tmp_path)
@@ -665,8 +667,3 @@ def test_set_camera_name(camera_system):
         controller.set_camera_name(0, "a/b")
     with pytest.raises(IndexError):
         controller.set_camera_name(9, "x")
-
-    # names are locked while a recording is active
-    controller._state = "recording"
-    with pytest.raises(RuntimeError):
-        controller.set_camera_name(0, "other")
