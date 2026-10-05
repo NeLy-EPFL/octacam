@@ -2422,7 +2422,7 @@ def _confirm_flash(console, prov: dict, *, assume_yes: bool, indent: str = "") -
 
 def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: bool) -> int:
     """Report one board's firmware and, unless --check, offer to flash it.
-    Returns 0 when up to date or flashed, else 1."""
+    Returns 0 when known up to date or flashed, else 1."""
     device = prov.get("device")
     console.print()
     console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
@@ -2436,26 +2436,27 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
         return 1
     console.print(f"  board firmware: {prov.get('firmware') or '(no identity reply)'}")
     console.print(f"  source build:   {prov.get('needed_build') or '(source not found)'}")
+    # An open board is unclassified only without a source build to compare it to.
+    if prov.get("state") is None:
+        console.print(f"  [yellow]? unknown[/yellow] — {prov.get('detail', '')}")
+        if not check_only:
+            console.print(
+                "  [red]Can't auto-flash[/red] (a wheel install without a checkout). "
+                "Flash manually with arduino-cli, or set OCTACAM_ARDUINO_DIR."
+            )
+        return 1
     if not prov.get("needs_flash"):
         console.print("  [green]✓ up to date[/green]")
         return 0
     console.print(f"  [yellow]needs flashing[/yellow] — {prov.get('detail', '')}")
     if check_only:
         return 1
+    # Classified, so the source is there: only arduino-cli can be missing.
     if not prov.get("can_flash"):
-        if not prov.get("sketch_found"):
-            console.print(
-                "  [red]Can't auto-flash:[/red] the sketch source wasn't found (a "
-                "wheel install without a checkout). Flash manually with arduino-cli, "
-                "or set OCTACAM_ARDUINO_DIR."
-            )
-        elif not prov.get("cli_available"):
-            console.print(
-                "  [red]Can't auto-flash:[/red] arduino-cli was not found. Install it "
-                "(https://arduino.github.io/arduino-cli/) or set OCTACAM_ARDUINO_CLI."
-            )
-        else:
-            console.print("  [red]Can't auto-flash on this host.[/red]")
+        console.print(
+            "  [red]Can't auto-flash:[/red] arduino-cli was not found. Install it "
+            "(https://arduino.github.io/arduino-cli/) or set OCTACAM_ARDUINO_CLI."
+        )
         return 1
     if not _confirm_flash(console, prov, assume_yes=assume_yes, indent="  "):
         console.print("  skipped — the board keeps its current firmware.")
@@ -2543,7 +2544,8 @@ def flash(
         bool,
         typer.Option(
             "--check",
-            help="Report only; exit nonzero if any board is out of date. Never flashes.",
+            help="Report only; exit nonzero unless every board is known up to date. "
+            "Never flashes.",
         ),
     ] = False,
 ) -> None:
@@ -2551,8 +2553,9 @@ def flash(
 
     Reads the board's identify banner, compares its build fingerprint to the sketch
     source in ``arduino/<name>``, and (unless ``--check``) compiles + uploads the
-    current firmware with arduino-cli. Exits 0 when every board is up to date (or
-    was flashed), nonzero if any remains out of date.
+    current firmware with arduino-cli. Exits 0 when every board is known up to
+    date (or was flashed), nonzero otherwise: without the sketch source a board's
+    build is unknown.
     """
     from rich.console import Console
 

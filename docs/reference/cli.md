@@ -120,14 +120,17 @@ octacam flash [CONFIG_DIR]
 
 Check a serial plugin's board firmware against the bundled Arduino sketch and,
 unless `--check`, compile + upload the current sketch with arduino-cli. Pass
-`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both.
+`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both. Without the
+sketch source (an install with no checkout), a board's build is reported as
+unknown and can't be flashed here. Exits non-zero unless every board is known up
+to date or was flashed.
 
 | Option | Purpose |
 | --- | --- |
 | `--plugin <name>` | Serial plugin whose firmware to manage (e.g. `triggerbox`); enables it even if not in the config. |
 | `--device <path>` | Serial device override (e.g. `/dev/ttyACM0` or `auto`). |
 | `--yes`, `-y` | Flash without prompting when out of date. |
-| `--check` | Report only; exit nonzero if any board is out of date. Never flashes. |
+| `--check` | Report only; exit non-zero unless every board is known up to date. Never flashes. |
 
 ## `benchmark`
 

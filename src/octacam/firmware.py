@@ -487,7 +487,12 @@ class FirmwareProvisioner:
             out.update(self.check.to_dict())
         else:
             out["state"] = None
-            out["detail"] = "firmware not classified (no source checkout or not probed)"
+            out["detail"] = (
+                "the sketch source is not available, so the board's build can't be "
+                "compared or flashed"
+                if self.needed_build is None
+                else "the board has not been probed"
+            )
             out["needs_flash"] = False
             out["safe_to_auto_flash"] = False
         if extra:

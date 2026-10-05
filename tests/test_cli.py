@@ -2114,6 +2114,19 @@ def test_flash_reports_a_stale_board_and_flashes_it_unless_checking(
     assert fake_triggerbox.devices == ["/dev/ttyFAKE7"] * (2 if flashed else 1)
 
 
+def test_flash_names_a_missing_arduino_cli(fake_triggerbox, monkeypatch):
+    monkeypatch.setattr("octacam.firmware.arduino_cli_path", lambda: None)
+    result = runner.invoke(
+        app, ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
+              "--yes"],
+    )
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert "needs flashing" in flat
+    assert "Can't auto-flash: arduino-cli was not found" in flat
+    assert "uploaded build" not in flat
+
+
 def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
     fake_triggerbox.banner = None
     result = runner.invoke(
@@ -2148,6 +2161,33 @@ def test_flash_warns_before_overwriting_an_unidentified_board(fake_triggerbox):
     assert "the board sent no identity" in flat
     assert "Upload the current firmware to /dev/x?" in flat
     assert "skipped" in flat
+
+
+@pytest.mark.parametrize("flags", [[], ["--yes"], ["--check"]], ids=["ask", "yes", "check"])
+def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
+    fake_triggerbox, monkeypatch, flags
+):
+    from dataclasses import replace
+
+    from octacam.plugins.triggerbox import TriggerboxPlugin
+
+    # A wheel install: no source build to compare the board against or flash.
+    monkeypatch.setattr(
+        TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
+    )
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
+         *flags],
+    )
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
+    assert "? unknown — the sketch source is not available" in flat
+    assert "up to date" not in flat
+    assert ("Can't auto-flash" in flat) is (flags != ["--check"])
+    assert "uploaded build" not in flat
+    assert fake_triggerbox.devices == ["/dev/x"]
 
 
 def test_flash_reports_a_board_that_does_not_open():
