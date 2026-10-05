@@ -511,6 +511,16 @@ def test_update_settings_validation():
     with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
         controller.update_settings(self=1)
 
+    # A starting recording locks the settings too: a change could re-arm the
+    # preview under it.
+    controller._state = "preview"
+    controller._starting = True
+    with pytest.raises(RuntimeError, match="starting"):
+        controller.update_settings(fps=10.0)
+    with pytest.raises(ValueError):
+        controller.update_settings(fps=0)
+    assert controller._settings.fps == 42.0
+
 
 def test_settings_updated_names_each_bad_field():
     settings = RecordingSettings()
