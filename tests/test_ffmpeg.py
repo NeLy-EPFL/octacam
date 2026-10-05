@@ -1,7 +1,9 @@
 """ffmpeg toolchain: argument policy, off-tty launches and binary discovery."""
 
 import functools
+import io
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -211,7 +213,7 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     # launch must keep ffmpeg off the tty: -nostdin in the args AND
     # stdin=subprocess.DEVNULL. (The capture pipe is exempt: its stdin is the
     # frame pipe.)
-    from octacam.transcode import _reporting_args
+    from octacam.transcode import run_ffmpeg
 
     def assert_off_tty(cmd, kwargs, what):
         assert "-nostdin" in cmd, f"{what}: missing -nostdin in {cmd}"
@@ -246,6 +248,7 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     class FakeProc:
         def __init__(self, cmd, **kwargs):
             launches.append((cmd, kwargs))
+            self.stdout, self.stderr = io.StringIO(), io.StringIO()
 
         def wait(self, timeout=None):
             return 0
@@ -256,10 +259,17 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     for cmd, kwargs in launches:
         assert_off_tty(cmd, kwargs, "probe_nvenc_max_sessions")
 
-    # 4. Transcodes and grids, in both progress modes, run with -nostdin.
+    # 4. Transcodes and grids (run_ffmpeg), in both progress modes; a caller's
+    #    own -nostdin is not doubled.
+    runs.clear()
+    launches.clear()
     for raw in (False, True):
-        flags = _reporting_args(["/fake/ffmpeg", "-i", "in.mkv"], raw)
-        assert flags.count("-nostdin") == 1, flags
+        argv = ["/fake/ffmpeg", "-nostdin", "-i", "in.mkv", "out.mp4"]
+        run_ffmpeg(argv, Path("in.mkv"), raw_output=raw)
+    assert len(runs) == 1 and len(launches) == 1
+    for cmd, kwargs in [*runs, *launches]:
+        assert_off_tty(cmd, kwargs, "run_ffmpeg")
+        assert cmd.count("-nostdin") == 1, cmd
 
 
 def test_ffmpeg_source_names_each_origin(tmp_path, monkeypatch):
