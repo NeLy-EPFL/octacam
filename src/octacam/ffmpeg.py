@@ -253,9 +253,9 @@ def _nvenc_session_cap(encoder: str) -> int | None:
 
 PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
 VF_OPTS = ("-vf", "-filter:v")
-# The video-codec spellings encoder_of reads, and those the 4:0:0 rule reads.
-_VIDEO_CODEC_FLAGS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
-_VIDEO_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
+# The video-encoder spellings encoder_of reads, and those the 4:0:0 rule reads.
+_ENCODER_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
+_MONO_RULE_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
 
 
 def split_opts(
@@ -292,7 +292,7 @@ def _param_value(ffmpeg_params: str, names: tuple[str, ...]) -> str | None:
 
 def encoder_of(ffmpeg_params: str) -> str | None:
     """The video encoder named by an ffmpeg_params string (after -c:v), or None."""
-    return _param_value(ffmpeg_params, _VIDEO_CODEC_FLAGS)
+    return _param_value(ffmpeg_params, _ENCODER_OPTS)
 
 
 def pix_fmt_of(ffmpeg_params: str) -> str | None:
@@ -348,7 +348,7 @@ def _playable_pix_fmt(
     odd side, so such a frame stays (or falls back to) 4:0:0; an unknown size is
     left as configured.
     """
-    if _first_value(tokens, _VIDEO_CODEC_OPTS) not in _MONO_UNSAFE_ENCODERS:
+    if _first_value(tokens, _MONO_RULE_CODEC_OPTS) not in _MONO_UNSAFE_ENCODERS:
         return tokens
     pix_fmt = _first_value(tokens, PIX_FMT_OPTS)
     if frame_size is None or pix_fmt not in ("gray", "yuv420p"):
