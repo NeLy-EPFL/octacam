@@ -406,9 +406,9 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
     # A file with a known total followed by one without must NOT inherit the
     # prior total (rich's reset/update keep total on None) — regression guard.
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
 
-    bar = _FileProgressBar(2)
+    bar = FileProgressBar(2)
     determinate = bar.file(1, tmp_path / "a.raw")
     determinate(TranscodeProgress(50, 10.0, 5.0, 1.0, total_frames=100, done=False))
     assert bar._progress.tasks[-1].total == 100
@@ -422,9 +422,9 @@ def test_progress_bar_indeterminate_after_determinate(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
     # The frame total is only a hint; a recording with dropped frames encodes
     # fewer than the hint, so the final block must still read 100%.
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
 
-    bar = _FileProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
     on_progress(TranscodeProgress(90, 10.0, 9.0, 1.0, total_frames=100, done=True))
     task = bar._progress.tasks[-1]
@@ -435,9 +435,9 @@ def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_undershoots(tmp_path):
     # The hint can also undershoot (more frames encoded than expected); the bar
     # must still land on a full 100% rather than appearing to overflow.
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
 
-    bar = _FileProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
     on_progress(TranscodeProgress(110, 10.0, 11.0, 1.0, total_frames=100, done=True))
     task = bar._progress.tasks[-1]
@@ -448,9 +448,9 @@ def test_progress_bar_indeterminate_snaps_to_full_when_done(tmp_path):
     # A file with no known total draws an indeterminate bar; on completion it
     # must still close on a clean 100% (final frame count becomes the total)
     # instead of vanishing mid-pulse — the "moved on before 100%" symptom.
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
 
-    bar = _FileProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.mkv")
     on_progress(TranscodeProgress(40, 10.0, 4.0, 1.0, total_frames=None, done=False))
     assert bar._progress.tasks[-1].total is None  # indeterminate while running
@@ -639,13 +639,13 @@ def test_folder_display_form_recording_keeps_baked_orientation(tmp_path):
 
 
 def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path, caplog):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     _write_raw(tmp_path / "a.raw", _frame(16, 12))
     _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
     # The CLI callback stops the octacam logger's propagation, so exercise the
     # resolver directly to capture its warning and inspect the jobs.
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["a.raw", "b.mkv"]
     # Without a summary the job carries no geometry (defaults apply).
     assert all(j.width is None and j.height is None for j in jobs)
@@ -662,7 +662,7 @@ def test_folder_without_summary_transcodes_encoded_to_mp4(tmp_path):
 
 
 def test_summary_skips_zero_frame_cameras_with_warning(tmp_path, caplog):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     # A real capture and a 0-frame (header-only) capture in the same folder.
     _make_mkv(tmp_path / "good.mkv", _frame(16, 12))
@@ -674,7 +674,7 @@ def test_summary_skips_zero_frame_cameras_with_warning(tmp_path, caplog):
             {"file": "empty.mkv", "frames": 0},
         ],
     )
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     # The frameless file is skipped; the real one is still queued.
     assert [j.input_path.name for j in jobs] == ["good.mkv"]
     assert any("0 frames" in m for m in caplog.messages)
@@ -692,13 +692,13 @@ def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
 
 
 def test_single_file_skips_zero_frame_capture_with_warning(tmp_path, caplog):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     # Naming a 0-frame capture's file directly must skip it (mirror the folder
     # scan) instead of feeding a header-only file to ffmpeg.
     (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)  # header-only stub
     _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
-    jobs = _transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
+    jobs = transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
     assert jobs == []
     assert any("0 frames" in m for m in caplog.messages)
 
@@ -870,7 +870,7 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
 
 def test_transcode_skips_orphaned_partial_files(tmp_path):
     # A partial temp file a hard kill orphaned must not be picked up as a job.
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam.raw", frame)
@@ -879,10 +879,10 @@ def test_transcode_skips_orphaned_partial_files(tmp_path):
     orphan.write_bytes(b"\x00" * 32)  # leftover ".octacam-part" sibling
     assert is_partial(orphan)
     # ...whether discovered by a folder scan...
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["cam.raw"]  # orphan skipped
     # ...or named explicitly on the command line.
-    explicit = _transcode_jobs([orphan], recursive=False)
+    explicit = transcode_jobs([orphan], recursive=False)
     assert explicit == []
 
 
@@ -1020,12 +1020,12 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
 
 @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
 def test_folder_summary_drives_jobs_in_either_layout(tmp_path, nested):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam0.raw", frame)
     _summary(tmp_path, [_camera_entry("cam0.raw", frame, fps=25.0)], nested=nested)
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     # The summary's file names are relative to the recording folder either way.
     assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
     assert (jobs[0].width, jobs[0].height, jobs[0].fps) == (16, 12, 25.0)
@@ -1033,12 +1033,12 @@ def test_folder_summary_drives_jobs_in_either_layout(tmp_path, nested):
 
 @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
 def test_single_file_finds_summary_in_either_layout(tmp_path, nested):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam0.raw", frame)
     _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=nested)
-    jobs = _transcode_jobs([tmp_path / "cam0.raw"], recursive=False)
+    jobs = transcode_jobs([tmp_path / "cam0.raw"], recursive=False)
     assert len(jobs) == 1
     assert (jobs[0].width, jobs[0].height) == (16, 12)
 
@@ -1046,14 +1046,14 @@ def test_single_file_finds_summary_in_either_layout(tmp_path, nested):
 def test_nested_summary_wins_over_an_older_flat_take(tmp_path):
     # Recorded into again after the layout change: the older take's flat summary
     # (and its video) stay behind, but the newer take's nested one is the word.
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "old.raw", frame)
     _write_raw(tmp_path / "new.raw", frame)
     _summary(tmp_path, [_camera_entry("old.raw", frame)])
     _summary(tmp_path, [_camera_entry("new.raw", frame)], nested=True)
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     assert [j.input_path.name for j in jobs] == ["new.raw"]
 
 
@@ -1061,7 +1061,7 @@ def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path, caplog):
     # A mixed tree: a flat (older) recording and a nested one. The nested one's
     # octacam_recording subfolder holds no videos; even a stray .mkv in it must
     # not be transcoded, nor warned about as a folder of loose files.
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     flat = tmp_path / "day" / "flat"
@@ -1073,18 +1073,18 @@ def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path, caplog):
     _summary(nested, [_camera_entry("cam.raw", frame)], nested=True)
     _make_mkv(nested / RECORDING_INFO_DIRNAME / "stray.mkv", frame)
     caplog.clear()
-    jobs = _transcode_jobs([tmp_path], recursive=True)
+    jobs = transcode_jobs([tmp_path], recursive=True)
     assert sorted(j.input_path for j in jobs) == [flat / "cam.raw", nested / "cam.raw"]
     assert not any(RECORDING_INFO_DIRNAME in m for m in caplog.messages)
 
 
 def test_naming_the_info_dir_means_the_recording_around_it(tmp_path):
-    from octacam.cli import _transcode_jobs
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam0.raw", frame)
     _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=True)
-    jobs = _transcode_jobs([tmp_path / RECORDING_INFO_DIRNAME], recursive=False)
+    jobs = transcode_jobs([tmp_path / RECORDING_INFO_DIRNAME], recursive=False)
     assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
 
 

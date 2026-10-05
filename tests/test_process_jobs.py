@@ -283,7 +283,7 @@ def test_worker_failure_marks_failed(cache_dir, tmp_path, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("ffmpeg blew up")
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", boom)
+    monkeypatch.setattr("octacam.process.transcode_file", boom)
     jd, result = _run_worker("w2", folder, "--no-grid", "--no-transfer")
     assert result.exit_code != 0
     s = pj.read_status(jd)
@@ -296,7 +296,7 @@ def test_worker_interrupt_marks_cancelled(cache_dir, tmp_path, monkeypatch):
     def interrupt(*a, **k):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", interrupt)
+    monkeypatch.setattr("octacam.process.transcode_file", interrupt)
     jd, result = _run_worker("w3", folder, "--no-grid", "--no-transfer")
     assert result.exit_code == 130
     s = pj.read_status(jd)

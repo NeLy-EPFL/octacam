@@ -366,7 +366,7 @@ def test_sweep_only_reaps_old_temps(tmp_path):
 
 def test_mixed_roots_skip_non_recording(tmp_path):
     # A stray non-recording dir mixed with a valid recording must NOT abort.
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     rec = tmp_path / "recA"
     rec.mkdir()
@@ -374,7 +374,7 @@ def test_mixed_roots_skip_non_recording(tmp_path):
     stray = tmp_path / "notes"
     stray.mkdir()
 
-    found = _find_recording_dirs([rec, stray], recursive=False)
+    found = find_recording_dirs([rec, stray], recursive=False)
     assert found == [rec]  # valid kept, stray skipped, no SystemExit
 
 
@@ -462,7 +462,7 @@ def test_progress_phases(tmp_path):
 
 
 def test_discovery_hint(tmp_path):
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     rec = tmp_path / "parent" / "001"
     rec.mkdir(parents=True)
@@ -470,23 +470,23 @@ def test_discovery_hint(tmp_path):
 
     # Non-recursive at a non-recording parent → exit with a hint.
     with pytest.raises(SystemExit):
-        _find_recording_dirs([tmp_path / "parent"], recursive=False)
+        find_recording_dirs([tmp_path / "parent"], recursive=False)
     # Recursive discovers the nested recording.
-    found = {p.resolve() for p in _find_recording_dirs([tmp_path / "parent"], True)}
+    found = {p.resolve() for p in find_recording_dirs([tmp_path / "parent"], True)}
     assert rec.resolve() in found
     # Pointing directly at a recording works non-recursively.
-    assert _find_recording_dirs([rec], recursive=False) == [rec]
+    assert find_recording_dirs([rec], recursive=False) == [rec]
 
 
 def test_discovery_finds_nested_recordings_never_their_subfolder(tmp_path):
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     flat = _make_recording(tmp_path / "parent" / "001", {})
     nested = _make_recording(tmp_path / "parent" / "002", {}, nested=True)
 
-    found = _find_recording_dirs([tmp_path / "parent"], True)
+    found = find_recording_dirs([tmp_path / "parent"], True)
     assert sorted(p.resolve() for p in found) == [flat.resolve(), nested.resolve()]
-    assert _find_recording_dirs([nested], recursive=False) == [nested]
+    assert find_recording_dirs([nested], recursive=False) == [nested]
     # Naming the subfolder means the recording around it.
     info = nested / RECORDING_INFO_DIRNAME
-    assert _find_recording_dirs([info], recursive=False) == [nested]
+    assert find_recording_dirs([info], recursive=False) == [nested]

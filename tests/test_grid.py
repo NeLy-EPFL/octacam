@@ -391,7 +391,8 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
     import os
     import types
 
-    from octacam import cli
+    from octacam.process import ProcessOptions, build_grids
+    from octacam.process_jobs import NullReporter
 
     folder = tmp_path / "run1"
     folder.mkdir()
@@ -419,27 +420,19 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,
     )
-    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
-    # _pause_gate polls a machine-global "capture-active" marker (a live
-    # octacam gui/record on this box), so neutralise it — a unit test must not
-    # block on whatever else is running on the developer's rig.
-    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
-
     built = []
     monkeypatch.setattr(
-        "octacam.grid.build_grid_video",
+        "octacam.process.build_grid_video",
         lambda folder, **kw: built.append(kw["output"].name),
     )
 
     # --no-transcode semantics: every mp4 in the folder, grids included.
-    folder_outputs = {folder: sorted(folder.glob("*.mp4"))}
-    cli._grid_and_transfer(
-        folder_outputs,
-        True,  # do_grid
-        False,  # do_transfer
-        None,
-        False,  # dry_run
-        False,  # show_bar
+    build_grids(
+        {folder: sorted(folder.glob("*.mp4"))},
+        set(),
+        ProcessOptions(),
+        {folder: cfg},
+        NullReporter(),
     )
     assert built == [], f"rebuilt grids that were already current: {built}"
 
@@ -450,7 +443,8 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
     import os
     import types
 
-    from octacam import cli
+    from octacam.process import ProcessOptions, build_grids
+    from octacam.process_jobs import NullReporter
 
     folder = tmp_path / "run1"
     folder.mkdir()
@@ -469,19 +463,17 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,
     )
-    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
-    # _pause_gate polls a machine-global "capture-active" marker (a live
-    # octacam gui/record on this box), so neutralise it — a unit test must not
-    # block on whatever else is running on the developer's rig.
-    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
-
     built = []
     monkeypatch.setattr(
-        "octacam.grid.build_grid_video",
+        "octacam.process.build_grid_video",
         lambda folder, **kw: built.append(kw["output"].name),
     )
 
-    cli._grid_and_transfer(
-        {folder: sorted(folder.glob("*.mp4"))}, True, False, None, False, False
+    build_grids(
+        {folder: sorted(folder.glob("*.mp4"))},
+        set(),
+        ProcessOptions(),
+        {folder: cfg},
+        NullReporter(),
     )
     assert built == ["grid.mp4"]

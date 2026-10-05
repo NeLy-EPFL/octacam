@@ -11,7 +11,6 @@ import sys
 import threading
 import time
 import webbrowser
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, get_args
 
@@ -25,7 +24,7 @@ if TYPE_CHECKING:
     from octacam.cameras import CameraSystem
     from octacam.config import OctacamConfig, RecordConfig
     from octacam.plugins.serial import SerialPlugin
-    from octacam.process_jobs import JobReporter, JobStatus
+    from octacam.process_jobs import JobStatus
     from octacam.transcode import ProgressCallback
     from octacam.transfer import TransferCallback
 
@@ -2862,154 +2861,6 @@ def benchmark(
         raise typer.Exit(1)
 
 
-def _read_summary(folder: Path) -> dict | None:
-    """*folder*'s summary, or None (with a warning) if unreadable."""
-    from octacam.recording_format import read_summary, recording_summary_path
-
-    try:
-        return read_summary(folder)
-    except (OSError, ValueError) as e:
-        log.warning("Could not read %s: %s", recording_summary_path(folder), e)
-        return None
-
-
-@dataclass
-class TranscodeJob:
-    """One source file to transcode. A ``.raw`` stream carries no geometry, so
-    the summary supplies it; encoded inputs leave these None."""
-
-    input_path: Path
-    frames: int | None = None
-    width: int | None = None
-    height: int | None = None
-    fps: float | None = None
-    pixel_format: str = "Mono8"
-
-
-def _is_stale(output: Path, source: Path) -> bool:
-    """Whether a derived file predates its source.
-
-    A folder recorded into twice keeps the previous take's ``.mp4``/``grid.mp4``,
-    which would otherwise pass as finished and be transferred as this take's.
-    Equal mtimes count as current, a stat error as not stale."""
-    try:
-        return output.stat().st_mtime_ns < source.stat().st_mtime_ns
-    except OSError:
-        return False
-
-
-def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
-    """Resolve folders/files to a deduped list of :class:`TranscodeJob`.
-
-    A recording's summary (in either layout) supplies each camera's geometry;
-    loose .mkv/.raw without one are transcoded with defaults and a warning. An
-    ``octacam_recording`` folder named directly means its recording, and a
-    recursive walk never enters one."""
-    from octacam.files import is_partial
-    from octacam.recording_format import (
-        RECORDING_SUMMARY_FILENAME,
-        recording_folder,
-        recording_summary_path,
-        walk_folders,
-    )
-
-    jobs: dict[Path, TranscodeJob] = {}
-
-    def add(job: TranscodeJob) -> None:
-        jobs.setdefault(job.input_path.resolve(), job)
-
-    def _job_from_entry(
-        video: Path, entry: dict, fps_target: float | None
-    ) -> TranscodeJob:
-        frames = entry.get("frames")
-        return TranscodeJob(
-            input_path=video,
-            frames=frames if isinstance(frames, int) else None,
-            width=entry.get("width"),
-            height=entry.get("height"),
-            fps=entry.get("fps") or fps_target,
-            pixel_format=entry.get("pixel_format") or "Mono8",
-        )
-
-    def _warn_zero_frames(video: Path) -> None:
-        # A header-only file: ffmpeg would fail with a cryptic EBML error.
-        log.warning(
-            "Skipping %s: recording captured 0 frames (empty header-only file)",
-            video,
-        )
-
-    def handle_dir(directory: Path) -> None:
-        summary_path = recording_summary_path(directory)
-        if summary_path.exists():
-            data = _read_summary(directory)
-            if data is not None:
-                fps_target = data.get("fps_target")
-                for entry in data.get("cameras", []):
-                    name = entry.get("file")
-                    if not name:
-                        continue
-                    video = directory / name
-                    if not video.exists():
-                        log.warning("%s lists %s but it is missing", summary_path, name)
-                    elif entry.get("frames") == 0:
-                        _warn_zero_frames(video)
-                    else:
-                        add(_job_from_entry(video, entry, fps_target))
-                return
-        loose = sorted(
-            p
-            for p in directory.iterdir()
-            if p.suffix in (".mkv", ".raw") and not is_partial(p)
-        )
-        if loose:
-            log.warning(
-                "No %s in %s; transcoding %d file(s) with defaults",
-                RECORDING_SUMMARY_FILENAME,
-                directory,
-                len(loose),
-            )
-        for video in loose:
-            add(TranscodeJob(input_path=video))
-
-    for raw in paths:
-        path = recording_folder(raw)
-        if path != raw:
-            log.info("%s is part of the recording in %s", raw, path)
-        if path.is_dir():
-            for directory in walk_folders(path) if recursive else [path]:
-                handle_dir(directory)
-        elif is_partial(path):  # an orphan from a hard kill
-            log.warning("Skipping orphaned partial transcode: %s", path)
-        else:
-            entry = None
-            fps_target = None
-            if recording_summary_path(path.parent).exists():
-                data = _read_summary(path.parent)
-                if data is not None:
-                    fps_target = data.get("fps_target")
-                    entry = next(
-                        (
-                            e
-                            for e in data.get("cameras", [])
-                            if e.get("file") == path.name
-                        ),
-                        None,
-                    )
-            if entry is not None and entry.get("frames") == 0:
-                _warn_zero_frames(path)
-            elif entry is not None:
-                add(_job_from_entry(path, entry, fps_target))
-            else:
-                log.warning(
-                    "No %s entry for %s; transcoding with defaults",
-                    RECORDING_SUMMARY_FILENAME,
-                    path,
-                )
-                add(TranscodeJob(input_path=path))
-
-    return list(jobs.values())
-
-
 def _resolve_transcode_paths(
     paths: list[Path],
     last: str | None,
@@ -3075,7 +2926,7 @@ def _resolve_transcode_paths(
     return folders
 
 
-class _FileProgressBar:
+class FileProgressBar:
     """`process`'s progress bar on the stderr console, one rich task per file.
 
     Each file gets a fresh task: rich keeps a task's total when updated with
@@ -3105,7 +2956,7 @@ class _FileProgressBar:
         )
         self._task: TaskID | None = None
 
-    def __enter__(self) -> "_FileProgressBar":
+    def __enter__(self) -> "FileProgressBar":
         self._progress.start()
         return self
 
@@ -3169,351 +3020,6 @@ class _FileProgressBar:
             )
 
         return on_progress
-
-
-def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
-    """The recordings (either layout) at *roots*, or under them when
-    *recursive*, deduped (see :func:`~octacam.recording_format.find_recordings`).
-
-    A root that is not a recording is warned about and skipped, so a stray
-    folder never aborts the batch; if nothing is left and recordings lie
-    beneath, the exit suggests ``-r``."""
-    from octacam.recording_format import (
-        RECORDING_SUMMARY_FILENAME,
-        find_recordings,
-        is_recording_dir,
-        recording_folder,
-    )
-
-    result = find_recordings(roots, recursive)
-    saw_nested = False
-    for root in roots:
-        folder = recording_folder(root)
-        if folder != root:
-            log.info("%s is part of the recording in %s", root, folder)
-        if recursive or is_recording_dir(folder):
-            continue
-        nested = find_recordings([folder], recursive=True)
-        if nested:
-            saw_nested = True
-            log.warning(
-                "%s is not a recording directory; %d recording(s) found beneath "
-                "it — pass -r/--recursive to include them. Skipping.",
-                folder,
-                len(nested),
-            )
-        else:
-            log.warning(
-                "%s is not a recording directory (no %s). Skipping.",
-                folder,
-                RECORDING_SUMMARY_FILENAME,
-            )
-
-    if not recursive and not result and saw_nested:
-        sys.exit(
-            "No recording directory given directly — re-run with -r/--recursive "
-            "to copy the recordings found beneath the path(s) above."
-        )
-
-    return result
-
-
-def _config_for_recording(folder: Path, cli_config_dir: Path | None):
-    """The config governing one recording: its own snapshot (either layout),
-    else ``--config``, else built-in defaults."""
-    from octacam.config import OctacamConfig, find_config_file, load_config_dir
-    from octacam.recording_format import recording_info_dir
-
-    info_dir = recording_info_dir(folder)
-    if find_config_file(info_dir).exists():
-        return load_config_dir(info_dir)
-    if cli_config_dir is not None:
-        log.warning(
-            "%s has no embedded config; falling back to --config %s",
-            folder,
-            cli_config_dir,
-        )
-        return load_config_dir(cli_config_dir)
-    log.warning(
-        "%s has no embedded config and no --config given; using built-in defaults",
-        folder,
-    )
-    return OctacamConfig()
-
-
-def _transfer_dest(cfg, folder: Path) -> Path | None:
-    """Where one folder transfers to (None to skip): its summary's
-    ``relative_directory`` under ``transfer.directory``."""
-    from octacam.config import resolve_dir_template
-    transfer = cfg.transfer
-    if transfer is None or not transfer.directory:
-        log.warning(
-            "No [transfer].directory resolvable for %s; skipping transfer", folder
-        )
-        return None
-    base = resolve_dir_template(transfer.directory)
-    summary = _read_summary(folder) or {}
-    rel = summary.get("relative_directory") or folder.name
-    return Path(base) / rel
-
-
-def _grid_and_transfer(
-    folder_outputs: dict[Path, list[Path]],
-    do_grid: bool,
-    do_transfer: bool,
-    cli_config_dir: Path | None,
-    dry_run: bool,
-    show_bar: bool,
-    force: bool = False,
-    reporter: "JobReporter | None" = None,
-    job_dir: Path | None = None,
-    rewritten: set[Path] | None = None,
-    ignore_capture: bool = False,
-) -> int:
-    """Build the grids, then transfer each folder; return the number of files
-    that failed to transfer. Both phases pause between folders while a
-    gui/record owns the cameras (not on a dry run).
-
-    On a dry run ``folder_outputs`` may name outputs the transcode step only
-    planned, and ``rewritten`` those it will rewrite: a grid built from either
-    is listed as work to do instead of being probed."""
-    from octacam.grid import build_grid_video
-    from octacam.transfer import transfer_folder
-
-    folder_cfgs = {f: _config_for_recording(f, cli_config_dir) for f in folder_outputs}
-
-    # Phase 1, grids: only folders with a [[visualization]] take part.
-    grid_files: dict[Path, list[Path]] = {}
-    folder_grids = {}
-    if do_grid:
-        folder_grids = {
-            f: [(v.name, v.layout, v.ffmpeg_params) for v in cfg.visualization]
-            for f, cfg in folder_cfgs.items()
-        }
-    grid_targets = [f for f in folder_outputs if folder_grids.get(f)]
-    if do_grid and not grid_targets:
-        log.info(
-            "Grid: no [[visualization]] entry in the config — skipping grid "
-            "generation (add one to the rig config to build a composite)"
-        )
-    if grid_targets:
-        grid_bar = (
-            _FileProgressBar(len(grid_targets)) if (show_bar and not dry_run) else None
-        )
-        grid_skipped = grid_todo = 0
-        if reporter is not None:
-            reporter.begin_phase("grid", len(grid_targets))
-        with grid_bar or contextlib.nullcontext():
-            for i, folder in enumerate(grid_targets, 1):
-                if not dry_run:
-                    _pause_gate(reporter, job_dir, unit="folder", ignore_capture=ignore_capture)
-                if reporter is not None:
-                    reporter.item_started(i, len(grid_targets), folder)
-                cfg = folder_cfgs[folder]
-                planned = (
-                    [
-                        p
-                        for p in folder_outputs[folder]
-                        if not p.exists() or p in (rewritten or set())
-                    ]
-                    if dry_run
-                    else []
-                )
-                built: list[Path] = []
-                # A grid is never an input, not even of another grid: under
-                # --no-transcode folder_outputs is every *.mp4, and two grids
-                # would mark each other stale and rebuild on every run.
-                grid_outputs = {folder / n for n, _layout, _ff in folder_grids[folder]}
-                for name, layout, ff in folder_grids[folder]:
-                    out_path = folder / name
-                    inputs = [
-                        p
-                        for p in folder_outputs[folder]
-                        if p.exists() and p not in grid_outputs
-                    ]
-                    grid_stale = out_path.exists() and any(
-                        _is_stale(out_path, p) for p in inputs
-                    )
-                    if grid_stale:
-                        log.warning(
-                            "%s is older than the videos it composites — "
-                            "rebuilding",
-                            out_path.name,
-                        )
-                    if out_path.exists() and not force and not grid_stale:
-                        # Built atomically, so a present grid is complete; it
-                        # still goes to the transfer phase.
-                        grid_skipped += 1
-                        built.append(out_path)
-                        continue
-                    cells = {cell for row in layout for cell in row if cell}
-                    waiting = [p.name for p in planned if p.stem in cells]
-                    if waiting:
-                        log.info(
-                            "[dry-run] grid: %s (waits for: %s)",
-                            out_path,
-                            ", ".join(waiting),
-                        )
-                        grid_todo += 1
-                        built.append(out_path)
-                        continue
-                    on_prog = grid_bar.file(i, folder, "grid: ") if grid_bar else None
-                    out = build_grid_video(
-                        folder,
-                        layout=layout,
-                        output=out_path,
-                        ffmpeg_params=ff or cfg.transcode.ffmpeg_params,
-                        dry_run=dry_run,
-                        on_progress=on_prog,
-                    )
-                    if out is not None:
-                        grid_todo += 1
-                        built.append(out)
-                grid_files[folder] = built
-                if reporter is not None:
-                    reporter.item_done()
-        if dry_run:
-            log.info(
-                "[dry-run] Grid: %d to build, %d already exist",
-                grid_todo,
-                grid_skipped,
-            )
-        elif grid_skipped:
-            log.info(
-                "Grid: %d already exist — skipping (use --force to rebuild)",
-                grid_skipped,
-            )
-
-    # Phase 2, transfer.
-    transfer_failed = 0
-    if do_transfer:
-        n_copied = n_skipped = 0
-        transfer_bar = _FileProgressBar() if (show_bar and not dry_run) else None
-        if reporter is not None:
-            reporter.begin_phase("transfer", len(folder_outputs))
-        with transfer_bar or contextlib.nullcontext():
-            transfer_cb = transfer_bar.transfer_callback() if transfer_bar else None
-            for i, (folder, outputs) in enumerate(folder_outputs.items(), 1):
-                if not dry_run:
-                    _pause_gate(reporter, job_dir, unit="folder", ignore_capture=ignore_capture)
-                if reporter is not None:
-                    reporter.item_started(i, len(folder_outputs), folder)
-                cfg = folder_cfgs[folder]
-                dest = _transfer_dest(cfg, folder)
-                if dest is None:
-                    if reporter is not None:
-                        reporter.item_done()
-                    continue
-                files = list(outputs) + grid_files.get(folder, [])
-                on_prog = transfer_cb
-                if transfer_bar is None and reporter is not None:
-                    on_prog = reporter.transfer_progress(i, len(folder_outputs))
-                result = transfer_folder(
-                    folder,
-                    dest,
-                    files_only=files,
-                    dry_run=dry_run,
-                    verify=cfg.transfer.checksum,
-                    on_progress=on_prog,
-                )
-                n_copied += len(result.copied)
-                n_skipped += len(result.skipped)
-                transfer_failed += len(result.failed)
-                if reporter is not None:
-                    reporter.item_done()
-        if dry_run:
-            log.info(
-                "[dry-run] Transfer: %d to copy, %d already up to date",
-                n_copied,
-                n_skipped,
-            )
-        else:
-            log.info(
-                "Transfer: %d copied, %d skipped, %d failed",
-                n_copied,
-                n_skipped,
-                transfer_failed,
-            )
-            if transfer_failed:
-                log.error("%d file(s) failed to transfer", transfer_failed)
-    return transfer_failed
-
-
-def _rebuild_process_argv(
-    folders: list[Path],
-    *,
-    recursive: bool,
-    no_transcode: bool,
-    no_grid: bool,
-    no_transfer: bool,
-    force: bool,
-    config_dir: Path | None,
-    delete_source: bool,
-    dry_run: bool,
-    ignore_capture: bool = False,
-) -> list[str]:
-    """The ``process`` argv for a detached re-exec. Selectors arrive resolved to
-    ``folders``; every path is absolute (the child runs from $HOME); no
-    ``--progress-style``, so log.txt stays line-oriented."""
-    argv: list[str] = []
-    if no_transcode:
-        argv.append("--no-transcode")
-    if no_grid:
-        argv.append("--no-grid")
-    if no_transfer:
-        argv.append("--no-transfer")
-    if force:
-        argv.append("--force")
-    if recursive:
-        argv.append("--recursive")
-    if delete_source:
-        argv.append("--delete-source")
-    if dry_run:
-        argv.append("--dry-run")
-    if ignore_capture:
-        argv.append("--ignore-capture")
-    if config_dir is not None:
-        argv += ["--config", str(config_dir.resolve())]
-    argv += [str(Path(f).resolve()) for f in folders]
-    return argv
-
-
-def _pause_gate(
-    reporter: "JobReporter | None",
-    job_dir: Path | None,
-    *,
-    unit: str,
-    ignore_capture: bool = False,
-) -> None:
-    """Block at a work-unit boundary while capture is active or the job
-    (``job_dir``) is manually paused, polling every second.
-
-    A cancel or Ctrl-C interrupts the sleep. The capture pause has no timeout,
-    so ``ignore_capture`` is the operator's only way past it."""
-    from octacam import process_jobs, session_cache
-
-    announced = False
-    while True:
-        capture = (not ignore_capture) and session_cache.capture_active()
-        manual = job_dir is not None and process_jobs.is_manually_paused(job_dir)
-        if not (capture or manual):
-            break
-        reasons = []
-        if capture:
-            reasons.append("capture-active")
-        if manual:
-            reasons.append("manual")
-        reason = "+".join(reasons)
-        if not announced:
-            log.info("Paused before next %s — %s. Resumes automatically.", unit, reason)
-            announced = True
-        if reporter is not None:
-            reporter.set_paused(True, reason)
-        time.sleep(1.0)
-    if announced:
-        if reporter is not None:
-            reporter.set_paused(False, None)
-        log.info("Resumed processing.")
 
 
 def _inject_default_last(args: list[str]) -> list[str]:
@@ -3771,38 +3277,29 @@ def process(
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
     """
-    from octacam import process_jobs, session_cache
-    from octacam.files import is_partial
-    from octacam.transcode import transcode_file
+    from octacam import process as pipeline
+    from octacam import process_jobs
 
-    do_transcode = not no_transcode
-    do_grid = not no_grid
-    do_transfer = not no_transfer
-    if not (do_transcode or do_grid or do_transfer):
+    if no_transcode and no_grid and no_transfer:
         sys.exit("Nothing to do: --no-transcode, --no-grid and --no-transfer all set.")
-
-    folders = _resolve_transcode_paths(
-        list(paths or []), last, session_id, all_
+    folders = _resolve_transcode_paths(list(paths or []), last, session_id, all_)
+    options = pipeline.ProcessOptions(
+        transcode=not no_transcode,
+        grid=not no_grid,
+        transfer=not no_transfer,
+        force=force,
+        recursive=recursive,
+        delete_source=delete_source,
+        dry_run=dry_run,
+        ignore_capture=ignore_capture,
+        # Resolved before a --detach re-exec, so the child is handed the same dir.
+        config_dir=_resolve_config_dir(config_dir) if config_dir is not None else None,
+        raw_output=progress_style is ProgressStyle.ffmpeg,
     )
-    # Resolved before a --detach re-exec so the child is handed the same dir.
-    if config_dir is not None:
-        config_dir = _resolve_config_dir(config_dir)
 
-    # The detached child re-runs this command with --_job-dir: the worker below.
+    # The detached child re-runs this command with --_job-dir, as the job's worker.
     if detach and job_dir is None:
-        argv_tail = _rebuild_process_argv(
-            folders,
-            recursive=recursive,
-            no_transcode=no_transcode,
-            no_grid=no_grid,
-            no_transfer=no_transfer,
-            force=force,
-            config_dir=config_dir,
-            delete_source=delete_source,
-            dry_run=dry_run,
-            ignore_capture=ignore_capture,
-        )
-        status = process_jobs.spawn_detached(argv_tail=argv_tail, folders=folders)
+        status = process_jobs.spawn_detached(argv_tail=options.argv(folders), folders=folders)
         typer.echo(status.job_id)  # stdout: scriptable
         log.info(
             "Detached processing job %s — watch it with: octacam jobs attach %s",
@@ -3811,239 +3308,20 @@ def process(
         )
         raise typer.Exit()
 
-    # worker_start has already written a lock failure into status.json.
-    try:
-        worker = process_jobs.worker_start(job_dir) if job_dir is not None else None
-    except process_jobs.JobLockError as e:
-        sys.exit(str(e))
-    reporter = worker.reporter if worker is not None else None
-
-    raw_output = progress_style is ProgressStyle.ffmpeg
     # A worker's forced-color log makes stderr look like a terminal, but its
     # progress belongs in status.json (what `jobs attach` renders), not in
     # cursor codes in log.txt.
     show_bar = (
-        not raw_output
+        not options.raw_output
         and not dry_run
-        and worker is None
+        and job_dir is None
         and _stderr_console().is_terminal
     )
-
-    def _run() -> None:
-        # Each folder's outputs (on a dry run, also the planned ones).
-        folder_outputs: dict[Path, list[Path]] = {}
-        # Outputs this run will (re)write; a dry run's grid preview plans around
-        # them, as their bytes are still the old ones.
-        rewritten: set[Path] = set()
-        cfg_cache: dict[Path, object] = {}
-        failures = 0
-        completed = 0
-        skipped = 0
-        planned = 0
-        interrupted = False
-
-        if do_transcode:
-            jobs = _transcode_jobs(folders, recursive)
-            if not jobs:
-                log.warning("No videos to transcode in: %s", ", ".join(map(str, folders)))
-            else:
-                bar = _FileProgressBar(len(jobs)) if show_bar else None
-                if reporter is not None:
-                    reporter.begin_phase("transcode", len(jobs))
-                with (
-                    # A dry run encodes nothing: no transcode-active marker.
-                    contextlib.nullcontext()
-                    if dry_run
-                    else session_cache.mark_transcode_active(f"{len(jobs)} file(s)"),
-                    bar or contextlib.nullcontext(),
-                ):
-                    # Ctrl-C stops the batch; transcode_file discards the partial.
-                    try:
-                        for index, job in enumerate(jobs, 1):
-                            # A dry run (often wanted mid-session) never waits.
-                            if not dry_run:
-                                _pause_gate(reporter, job_dir, unit="file", ignore_capture=ignore_capture)
-                            input_path = job.input_path
-                            output = input_path.with_suffix(".mp4")
-                            if reporter is not None:
-                                reporter.item_started(index, len(jobs), input_path)
-                            if output.resolve() == input_path.resolve():
-                                log.warning(
-                                    "Skipping %s: already in target format (mp4)",
-                                    input_path,
-                                )
-                                folder_outputs.setdefault(input_path.parent, []).append(
-                                    output
-                                )
-                                if reporter is not None:
-                                    reporter.item_done()
-                                continue
-                            folder = input_path.parent
-                            stale = output.exists() and _is_stale(output, input_path)
-                            if stale:
-                                log.warning(
-                                    "%s is older than %s — it is left over from an "
-                                    "earlier recording in this folder; re-transcoding",
-                                    output.name,
-                                    input_path.name,
-                                )
-                                rewritten.add(output)
-                            if output.exists() and not force and not stale:
-                                # Transcoded atomically, so a present .mp4 is
-                                # complete; it still feeds grid/transfer.
-                                skipped += 1
-                                folder_outputs.setdefault(folder, []).append(output)
-                                if reporter is not None:
-                                    reporter.item_done()
-                                continue
-                            if dry_run:
-                                log.info(
-                                    "[dry-run] transcode: %s → %s",
-                                    input_path,
-                                    output.name,
-                                )
-                                if delete_source:
-                                    log.info(
-                                        "[dry-run] would delete source: %s", input_path
-                                    )
-                                planned += 1
-                                rewritten.add(output)
-                                folder_outputs.setdefault(folder, []).append(output)
-                                if reporter is not None:
-                                    reporter.item_done()
-                                continue
-                            cfg = cfg_cache.get(folder)
-                            if cfg is None:
-                                cfg = _config_for_recording(folder, config_dir)
-                                cfg_cache[folder] = cfg
-                            if bar is not None:
-                                on_progress = bar.file(index, input_path)
-                            elif reporter is not None:
-                                on_progress = reporter.transcode_progress(index, len(jobs))
-                            else:
-                                on_progress = None
-                            try:
-                                result = transcode_file(
-                                    input_path,
-                                    output,
-                                    ffmpeg_params=cfg.transcode.ffmpeg_params,
-                                    width=job.width,
-                                    height=job.height,
-                                    fps=job.fps,
-                                    pixel_format=job.pixel_format,
-                                    frames=job.frames,
-                                    on_progress=on_progress,
-                                    raw_output=raw_output,
-                                )
-                                typer.echo(result)
-                            except Exception as e:  # one bad file must not abort the batch
-                                failures += 1
-                                log.error("Failed to transcode %s: %s", input_path, e)
-                                continue
-                            completed += 1
-                            folder_outputs.setdefault(folder, []).append(output)
-                            if reporter is not None:
-                                reporter.item_done()
-                            if delete_source:
-                                _delete_source_files(input_path)
-                    except KeyboardInterrupt:
-                        interrupted = True
-                if dry_run and not interrupted:
-                    log.info(
-                        "[dry-run] Transcode: %d to transcode, %d already done",
-                        planned,
-                        skipped,
-                    )
-                elif not interrupted:
-                    log.info(
-                        "Transcode: %d done, %d skipped, %d failed%s",
-                        completed,
-                        skipped,
-                        failures,
-                        " (use --force to re-transcode existing)"
-                        if skipped and not force
-                        else "",
-                    )
-        else:
-            # The mp4s already present, minus orphaned partials from a hard kill.
-            for folder in _find_recording_dirs(folders, recursive):
-                folder_outputs.setdefault(
-                    folder,
-                    sorted(p for p in folder.glob("*.mp4") if not is_partial(p)),
-                )
-
-        transfer_failed = 0
-        if not interrupted and (do_grid or do_transfer) and folder_outputs:
-            transfer_failed = _grid_and_transfer(
-                folder_outputs,
-                do_grid,
-                do_transfer,
-                config_dir,
-                dry_run,
-                show_bar,
-                force,
-                reporter=reporter,
-                job_dir=job_dir,
-                rewritten=rewritten,
-                ignore_capture=ignore_capture,
-            )
-
-        # Report outside the `with` so messages land after the live bar is gone.
-        if interrupted:
-            log.warning(
-                "Interrupted — stopped after %d file(s); the in-progress transcode "
-                "was discarded.",
-                completed,
-            )
-            raise typer.Exit(130)  # 128 + SIGINT, the shell convention for Ctrl-C
-        problems = []
-        if failures:
-            problems.append(f"{failures} file(s) failed to transcode")
-        if transfer_failed:
-            problems.append(f"{transfer_failed} file(s) failed to transfer")
-        if problems:
-            sys.exit("; ".join(problems))
-
-    # A plain foreground run just executes; a worker records its terminal state.
-    if worker is None:
-        _run()
-        return
     try:
-        _run()
-    except typer.Exit as e:
-        code = e.exit_code
-        if code == 130:
-            worker.finish(process_jobs.CANCELLED, 130, None)
-        elif code:
-            worker.finish(
-                process_jobs.FAILED,
-                code if isinstance(code, int) else 1,
-                "process reported failures",
-            )
-        else:
-            worker.finish(process_jobs.DONE, 0, None)
-        raise
-    except SystemExit as e:
-        msg = e.code if isinstance(e.code, str) else "process failed"
-        worker.finish(process_jobs.FAILED, 1, msg)
-        raise
-    except BaseException as e:
-        if isinstance(e, KeyboardInterrupt):
-            worker.finish(process_jobs.CANCELLED, 130, None)
-        else:
-            worker.finish(process_jobs.FAILED, 1, repr(e))
-        raise
-    else:
-        worker.finish(process_jobs.DONE, 0, None)
-
-
-def _delete_source_files(input_path: Path) -> None:
-    """Delete a source video once it has transcoded; only that file goes (never
-    the recording's info), and a failure is only logged."""
-    try:
-        input_path.unlink(missing_ok=True)
-    except OSError as e:
-        log.warning("Could not remove %s: %s", input_path, e)
+        with process_jobs.worker(job_dir) as reporter:
+            pipeline.run(folders, options, reporter, FileProgressBar if show_bar else None)
+    except process_jobs.JobLockError as e:  # already written into status.json
+        sys.exit(str(e))
 
 
 # ---------------------------------------------------------------------------

@@ -590,7 +590,7 @@ def test_warn_if_transcoding_logs_only_when_active(caplog):
         cli._warn_if_transcoding()
     blob = "\n".join(caplog.messages)
     assert "transcod" in blob
-    # The warning must describe what _pause_gate actually does. It used to say a
+    # The warning must describe what pause_gate actually does. It used to say a
     # foreground `octacam process` does *not* auto-pause, which was the opposite
     # of the code (and of docs/guide/processing.md): the gate applies to both, and
     # only the manual-pause half is detached-only.
@@ -1173,8 +1173,8 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     before_mp4 = (folder / "camera_LF.mp4").read_bytes()
     before_grid = (folder / "grid.mp4").read_bytes()
@@ -1216,8 +1216,8 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
 
@@ -1234,7 +1234,7 @@ def test_process_dry_run_lists_leftover_outputs_as_work(
     _make_recording(folder, with_outputs=True)
     _age(folder / "camera_LF.mp4", 10)
     _age(folder / "grid.mp4", 20)
-    _forbid(monkeypatch, "octacam.transcode.transcode_file", "octacam.grid.build_grid_video")
+    _forbid(monkeypatch, "octacam.process.transcode_file", "octacam.process.build_grid_video")
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--dry-run"])
 
@@ -1263,8 +1263,8 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--force"])
     assert result.exit_code == 0, result.output
@@ -1292,8 +1292,8 @@ def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypat
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
     assert result.exit_code == 0, result.output
@@ -1326,14 +1326,32 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     def fake_grid(folder, layout=None, output=None, **kwargs):
         raise AssertionError("grid should be skipped, not run")
 
-    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder)])
     assert result.exit_code == 0, result.output
     dest = dest_root / folder.name
     assert (dest / "camera_LF.mp4").read_bytes() == b"finished-transcode"
     assert (dest / "grid.mp4").read_bytes() == b"finished-grid"
+
+
+def test_process_reads_each_recordings_config_once(tmp_path, monkeypatch, process_log):
+    # The transcode, grid and transfer steps share one config per recording, so
+    # a recording without a snapshot is warned about once.
+    folder = tmp_path / "rec"
+    _make_recording(folder, with_outputs=False, visualization=False)
+
+    def fake_transcode(input_path, output, **kwargs):
+        Path(output).write_bytes(b"encoded")
+        return output
+
+    monkeypatch.setattr("octacam.process.transcode_file", fake_transcode)
+    result = runner.invoke(app, ["process", str(folder)])
+    assert result.exit_code == 0, result.output
+    assert [m for m in process_log.messages if "has no embedded config" in m] == [
+        f"{folder} has no embedded config and no --config given; using built-in defaults"
+    ]
 
 
 # --- process --dry-run: a plan, never a partial run --------------------------
@@ -1375,10 +1393,9 @@ def test_process_dry_run_plans_every_step_without_running_any(
     _make_recording(folder, with_outputs=False, extra_toml=_transfer_toml(dest_root))
     _forbid(
         monkeypatch,
-        "octacam.transcode.transcode_file",
+        "octacam.process.transcode_file",
         # Its input isn't transcoded yet, so there is nothing to probe.
-        "octacam.grid.build_grid_video",
-        "octacam.cli._delete_source_files",
+        "octacam.process.build_grid_video",
     )
     before = sorted(p.name for p in folder.iterdir())
 
@@ -1412,14 +1429,14 @@ def test_process_dry_run_previews_a_grid_whose_inputs_exist(
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
     (folder / "grid.mp4").unlink()
-    _forbid(monkeypatch, "octacam.transcode.transcode_file")
+    _forbid(monkeypatch, "octacam.process.transcode_file")
     dry_runs = []
 
     def fake_grid(folder, layout=None, output=None, **kwargs):
         dry_runs.append(kwargs.get("dry_run"))
         return output
 
-    monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
+    monkeypatch.setattr("octacam.process.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--dry-run", "--no-transfer"])
 
@@ -1441,10 +1458,10 @@ def test_process_dry_run_never_waits_on_a_live_capture(
     )
     _forbid(
         monkeypatch,
-        "octacam.cli._pause_gate",
+        "octacam.process_jobs.pause_gate",
         "octacam.session_cache.mark_transcode_active",
-        "octacam.transcode.transcode_file",
-        "octacam.grid.build_grid_video",
+        "octacam.process.transcode_file",
+        "octacam.process.build_grid_video",
     )
 
     result = runner.invoke(app, ["process", str(folder), "--dry-run"])
@@ -1461,7 +1478,7 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
-    _forbid(monkeypatch, "octacam.transcode.transcode_file", "octacam.grid.build_grid_video")
+    _forbid(monkeypatch, "octacam.process.transcode_file", "octacam.process.build_grid_video")
     finish = runner.invoke(app, ["process", str(folder)])
     assert finish.exit_code == 0, finish.output
     process_log.clear()
@@ -1485,10 +1502,10 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
 
 
 def test_progress_bar_labels_a_grid_encode(tmp_path):
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
     from octacam.transcode import TranscodeProgress
 
-    bar = _FileProgressBar(2)
+    bar = FileProgressBar(2)
     on_progress = bar.file(2, tmp_path / "run1", "grid: ")
     on_progress(TranscodeProgress(5, 10.0, 0.5, 1.0, total_frames=None, done=True))
     (task,) = bar._progress.tasks
@@ -1497,10 +1514,10 @@ def test_progress_bar_labels_a_grid_encode(tmp_path):
 
 
 def test_progress_bar_shows_one_task_per_file_copy_and_verify():
-    from octacam.cli import _FileProgressBar
+    from octacam.cli import FileProgressBar
     from octacam.transfer import TransferProgress
 
-    bar = _FileProgressBar()
+    bar = FileProgressBar()
     on_progress = bar.transfer_callback()
     seen = []
     for index, phase, done in [(1, "copy", 50), (1, "copy", 100), (1, "verify", 100), (2, "copy", 10)]:
@@ -1845,16 +1862,16 @@ def _layout_recording(folder, *, nested, toml=None):
 
 @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
 def test_find_recording_dirs_accepts_a_recording_in_either_layout(tmp_path, nested):
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=nested)
-    assert _find_recording_dirs([rec], recursive=False) == [rec]
-    assert _find_recording_dirs([rec], recursive=True) == [rec]
+    assert find_recording_dirs([rec], recursive=False) == [rec]
+    assert find_recording_dirs([rec], recursive=True) == [rec]
 
 
 def test_find_recording_dirs_recursive_mixed_tree_never_lists_the_info_dir(tmp_path):
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     flat = tmp_path / "day1" / "fly1"
     nested = tmp_path / "day1" / "fly2"
@@ -1865,36 +1882,36 @@ def test_find_recording_dirs_recursive_mixed_tree_never_lists_the_info_dir(tmp_p
     # Recorded into again after the layout change: the folder holds both an
     # older take's flat summary and the new take's nested one; still one recording.
     _layout_recording(flat, nested=True)
-    found = _find_recording_dirs([tmp_path], recursive=True)
+    found = find_recording_dirs([tmp_path], recursive=True)
     assert found == [flat, nested, deep]
 
 
 def test_find_recording_dirs_hints_recursive_for_nested_layout(tmp_path):
     # Non-recursive on a parent: the nested-layout recordings beneath it are
     # counted for the -r hint (never their subfolders), then it exits.
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
 
     _layout_recording(tmp_path / "a", nested=True)
     _layout_recording(tmp_path / "b", nested=False)
     with pytest.raises(SystemExit) as exc:
-        _find_recording_dirs([tmp_path], recursive=False)
+        find_recording_dirs([tmp_path], recursive=False)
     assert "-r/--recursive" in str(exc.value)
 
 
 def test_find_recording_dirs_info_dir_named_directly_means_its_recording(tmp_path):
-    from octacam.cli import _find_recording_dirs
+    from octacam.process import find_recording_dirs
     from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True)
     info = rec / RECORDING_INFO_DIRNAME
-    assert _find_recording_dirs([info], recursive=False) == [rec]
-    assert _find_recording_dirs([info, rec], recursive=True) == [rec]
+    assert find_recording_dirs([info], recursive=False) == [rec]
+    assert find_recording_dirs([info, rec], recursive=True) == [rec]
 
 
 @pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
 def test_config_for_recording_reads_the_snapshot_in_either_layout(tmp_path, nested):
-    from octacam.cli import _config_for_recording
+    from octacam.process import config_for_recording
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=nested, toml='[record]\nfps = 42\n')
@@ -1902,33 +1919,33 @@ def test_config_for_recording_reads_the_snapshot_in_either_layout(tmp_path, nest
     fallback = tmp_path / "rig"
     fallback.mkdir()
     (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
-    assert _config_for_recording(rec, fallback).record.fps == 42
+    assert config_for_recording(rec, fallback).record.fps == 42
 
 
 def test_config_for_recording_nested_snapshot_beats_an_older_flat_one(tmp_path):
-    from octacam.cli import _config_for_recording
+    from octacam.process import config_for_recording
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=False, toml='[record]\nfps = 11\n')
     _layout_recording(rec, nested=True, toml='[record]\nfps = 22\n')
-    assert _config_for_recording(rec, None).record.fps == 22
+    assert config_for_recording(rec, None).record.fps == 22
 
 
 def test_config_for_recording_without_snapshot_falls_back(tmp_path):
-    from octacam.cli import _config_for_recording
+    from octacam.process import config_for_recording
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True)
     fallback = tmp_path / "rig"
     fallback.mkdir()
     (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
-    assert _config_for_recording(rec, fallback).record.fps == 7
+    assert config_for_recording(rec, fallback).record.fps == 7
 
 
 def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
     tmp_path, monkeypatch
 ):
-    # The no-transcode path discovers recordings via _find_recording_dirs and
+    # The no-transcode path discovers recordings via find_recording_dirs and
     # reads the summary's relative_directory for the transfer destination.
     from octacam.recording_format import (
         RECORDING_INFO_DIRNAME,
@@ -1950,7 +1967,7 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
         seen["folder"], seen["destination"] = folder, destination
         return SimpleNamespace(copied=[], skipped=[], failed=[])
 
-    monkeypatch.setattr("octacam.transfer.transfer_folder", fake_transfer)
+    monkeypatch.setattr("octacam.process.transfer_folder", fake_transfer)
     result = runner.invoke(
         app, ["--log-level", "error", "process", "-r", str(tmp_path / "data"),
               "--no-transcode", "--no-grid"],

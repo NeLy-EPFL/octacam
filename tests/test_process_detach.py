@@ -38,21 +38,37 @@ def test_process_detach_spawns_with_absolute_paths(cache_dir, tmp_path, monkeypa
     assert "--no-transfer" in captured["argv_tail"]
 
 
-def test_rebuild_process_argv_is_absolute_and_drops_selectors(tmp_path):
+def test_process_options_argv_is_absolute_and_drops_raw_output(tmp_path, monkeypatch):
+    from octacam.process import ProcessOptions
+
     folder = tmp_path / "r"
     folder.mkdir()
-    argv = cli._rebuild_process_argv(
-        [folder],
-        recursive=False,
-        no_transcode=False,
-        no_grid=True,
-        no_transfer=False,
+    monkeypatch.chdir(tmp_path)
+    options = ProcessOptions(grid=False, force=True, raw_output=True)
+    assert options.argv([Path("r")]) == ["--no-grid", "--force", str(folder.resolve())]
+    every = ProcessOptions(
+        transcode=False,
+        grid=False,
+        transfer=False,
         force=True,
-        config_dir=None,
-        delete_source=False,
-        dry_run=False,
+        recursive=True,
+        delete_source=True,
+        dry_run=True,
+        ignore_capture=True,
+        config_dir=Path("r"),
     )
-    assert argv == ["--no-grid", "--force", str(folder.resolve())]
+    assert every.argv([]) == [
+        "--no-transcode",
+        "--no-grid",
+        "--no-transfer",
+        "--force",
+        "--recursive",
+        "--delete-source",
+        "--dry-run",
+        "--ignore-capture",
+        "--config",
+        str(folder.resolve()),
+    ]
 
 
 # ------------------------------------------------------------- octacam jobs
