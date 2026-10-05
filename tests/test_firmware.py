@@ -483,8 +483,8 @@ def test_a_spec_without_a_source_checkout_is_never_classified_or_flashed(real_sp
     info = prov.provisioning(
         plugin_name="triggerbox", device="/dev/ttyACM0", firmware=None, firmware_ok=True
     )
-    assert (info["state"], info["sketch_found"], info["can_flash"], info["needs_flash"]) == (
-        None, False, False, False
+    assert (info["state"], info["needed_build"], info["can_flash"], info["needs_flash"]) == (
+        None, None, False, False
     )
     assert info["detail"].startswith("the sketch source was not found")
     result = prov.flash()

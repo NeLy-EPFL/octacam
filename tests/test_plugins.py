@@ -113,7 +113,6 @@ def test_a_bundled_plugin_declares_its_facts(name, trigger, device, banner):
     # The spec the CLI and doctor read is the one the plugin provisions with.
     prov = cls.from_options({}).firmware_provisioning()
     assert prov["needed_build"] == fw.source_build(cls.firmware)
-    assert prov["sketch_found"] is (cls.firmware.sketch_dir is not None)
 
 
 @pytest.mark.parametrize(

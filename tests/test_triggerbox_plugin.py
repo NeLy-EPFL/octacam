@@ -1187,7 +1187,7 @@ def no_source_checkout(monkeypatch):
 
 def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):
     plugin, link = _plugin_with_fake()
-    assert plugin.firmware_provisioning()["sketch_found"] is False
+    assert plugin.firmware_provisioning()["needed_build"] is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
     assert plugin._firmware_ok  # name+version compatible; no flash offer
     assert plugin._fw.check is None

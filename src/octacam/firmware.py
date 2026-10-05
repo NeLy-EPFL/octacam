@@ -479,8 +479,6 @@ class FirmwareProvisioner:
             "firmware": firmware,
             "firmware_ok": firmware_ok,
             "needed_build": self.needed_build,
-            "sketch_found": self.spec.sketch_dir is not None,
-            "cli_available": arduino_cli_path() is not None,
             "can_flash": self.can_flash,
         }
         if self.check is not None:
