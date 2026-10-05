@@ -21,12 +21,12 @@ import signal
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from octacam import session_cache
+from octacam.files import atomic_write_text, flock_held
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -129,11 +129,6 @@ def _pause_path(jd: Path) -> Path:
     return jd / PAUSE_FILENAME
 
 
-def new_job_id() -> str:
-    """A sortable id grouping one detached run, like session ids."""
-    return f"{datetime.datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
-
-
 def _now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -144,13 +139,10 @@ def _now_iso() -> str:
 
 
 def write_status(jd: Path, status: JobStatus) -> None:
-    """Atomically write ``status.json`` (temp + os.replace). Best-effort."""
+    """Atomically write ``status.json``. Best-effort."""
     status.updated = _now_iso()
     try:
-        jd.mkdir(parents=True, exist_ok=True)
-        tmp = jd / f".{STATUS_FILENAME}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-        tmp.write_text(json.dumps(status.to_dict(), indent=2) + "\n")
-        os.replace(tmp, _status_path(jd))
+        atomic_write_text(_status_path(jd), json.dumps(status.to_dict(), indent=2) + "\n")
     except OSError as e:
         log.debug("Could not write job status in %s (%s)", jd, e)
 
@@ -168,26 +160,13 @@ def read_status(jd: Path) -> JobStatus | None:
     return JobStatus.from_dict(data)
 
 
-def _flock_is_live(path: Path) -> bool:
-    """True when another process holds the exclusive flock on ``path``."""
-    try:
-        handle = open(path)
-    except OSError:
-        return False  # no lock file -> nobody is holding it
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True  # held elsewhere -> live
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
-    finally:
-        handle.close()
-
-
 def is_live(jd: Path) -> bool:
-    """True while the job's worker process is running (holds ``job.lock``)."""
-    return _flock_is_live(_lock_path(jd))
+    """True while the job's worker process is running (holds ``job.lock``); a
+    lock the filesystem cannot probe counts as held."""
+    try:
+        return flock_held(_lock_path(jd)) is not False
+    except OSError:
+        return False  # no lock file: nobody holds it
 
 
 def is_manually_paused(jd: Path) -> bool:
@@ -234,7 +213,7 @@ def _job_dirs() -> list[Path]:
 
 
 def _reserve_job_dir() -> Path:
-    base = new_job_id()
+    base = session_cache.new_session_id()
     name = base
     suffix = 1
     while True:

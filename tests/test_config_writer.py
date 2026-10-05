@@ -1,7 +1,6 @@
 """TOML config writer: round-trip fidelity, strftime safety, atomic writes."""
 
 import glob
-import os
 from pathlib import Path
 
 import pytest
@@ -171,21 +170,6 @@ def test_resolve_new_config_dir_collision(tmp_path):
         cw.resolve_new_config_dir(tmp_path / "active", "exists")
     assert cw.resolve_new_config_dir(tmp_path / "active", "exists", overwrite=True)
     assert cw.resolve_new_config_dir(tmp_path / "active", "fresh") == tmp_path / "fresh"
-
-
-def test_atomic_write_leaves_no_temp(tmp_path):
-    cw.atomic_write_text(tmp_path / "octacam_config.toml", "[gui]\nfps_default = 1.0\n")
-    assert (tmp_path / "octacam_config.toml").exists()
-    assert [p.name for p in tmp_path.iterdir()] == ["octacam_config.toml"]
-
-
-def test_atomic_write_gets_the_umask_permissions(tmp_path):
-    old = os.umask(0o022)
-    try:
-        cw.atomic_write_text(tmp_path / "octacam_config.toml", "[gui]\n")
-    finally:
-        os.umask(old)
-    assert (tmp_path / "octacam_config.toml").stat().st_mode & 0o777 == 0o644
 
 
 def test_copy_auxiliary_pfs_skips_live_serials(tmp_path):

@@ -18,10 +18,10 @@ import logging
 import os
 import shutil
 import time
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from octacam.files import partial_glob, partial_path
 from octacam.transform import (
     CONFIG_SNAPSHOT_FILENAME,
     PARAM_FILE_EXTENSIONS,
@@ -33,9 +33,6 @@ from octacam.transform import (
 log = logging.getLogger("octacam")
 
 _CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
-
-# Tags an in-progress copy's temp, so one a hard kill left is swept later.
-_TEMP_INFIX = ".octacam-part"
 
 # Only a temp this old is an orphan: a concurrent run's live copy keeps its
 # temp's mtime fresh.
@@ -76,14 +73,6 @@ class TransferResult:
     copied: list[str] = dataclasses.field(default_factory=list)
     skipped: list[str] = dataclasses.field(default_factory=list)
     failed: list[str] = dataclasses.field(default_factory=list)
-
-
-def _temp_path(final: Path) -> Path:
-    """A sibling temp of *final*: same filesystem, so the rename is atomic, and
-    unique per process and call, so concurrent runs never share one."""
-    return final.with_name(
-        f".{final.name}{_TEMP_INFIX}.{os.getpid()}.{uuid.uuid4().hex}"
-    )
 
 
 def _file_digest(path: Path, on_chunk: Callable[[int], None] | None = None) -> str:
@@ -151,7 +140,7 @@ def _stream_copy(
 def _sweep_stale_temps(final: Path) -> None:
     """Remove *final*'s orphaned temps (see :data:`_STALE_TEMP_AGE_S`)."""
     cutoff = time.time() - _STALE_TEMP_AGE_S
-    for stale in final.parent.glob(f".{final.name}{_TEMP_INFIX}.*"):
+    for stale in final.parent.glob(partial_glob(final)):
         try:
             if stale.stat().st_mtime < cutoff:
                 stale.unlink()
@@ -173,7 +162,7 @@ def _copy_one(
     removes the temp and leaves *final* untouched."""
     size = src.stat().st_size
     _sweep_stale_temps(final)
-    tmp = _temp_path(final)
+    tmp = partial_path(final)
     try:
         if verify or on_progress is not None:
             src_digest = _stream_copy(

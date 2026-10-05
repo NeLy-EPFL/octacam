@@ -3024,7 +3024,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     loose .mkv/.raw without one are transcoded with defaults and a warning. An
     ``octacam_recording`` folder named directly means its recording, and a
     recursive walk never enters one."""
-    from octacam.transcode import is_partial_transcode
+    from octacam.files import is_partial
     from octacam.transform import (
         RECORDING_INFO_DIRNAME,
         RECORDING_SUMMARY_FILENAME,
@@ -3077,7 +3077,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
         loose = sorted(
             p
             for p in directory.iterdir()
-            if p.suffix in (".mkv", ".raw") and not is_partial_transcode(p)
+            if p.suffix in (".mkv", ".raw") and not is_partial(p)
         )
         if loose:
             log.warning(
@@ -3102,7 +3102,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
                         sub.relative_to(path).parts
                     ):
                         handle_dir(sub)
-        elif is_partial_transcode(path):  # an orphan from a hard kill
+        elif is_partial(path):  # an orphan from a hard kill
             log.warning("Skipping orphaned partial transcode: %s", path)
         else:
             entry = None
@@ -3922,7 +3922,8 @@ def process(
     skipped.
     """
     from octacam import process_jobs, session_cache
-    from octacam.transcode import is_partial_transcode, transcode_file
+    from octacam.files import is_partial
+    from octacam.transcode import transcode_file
 
     do_transcode = not no_transcode
     do_grid = not no_grid
@@ -4118,7 +4119,7 @@ def process(
             for folder in _find_recording_dirs(folders, recursive):
                 folder_outputs.setdefault(
                     folder,
-                    sorted(p for p in folder.glob("*.mp4") if not is_partial_transcode(p)),
+                    sorted(p for p in folder.glob("*.mp4") if not is_partial(p)),
                 )
 
         transfer_failed = 0

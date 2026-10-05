@@ -20,6 +20,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from octacam.files import atomic_write_text, flock_held
+
 log = logging.getLogger("octacam")
 
 CACHE_FILENAME = "recordings.jsonl"
@@ -113,19 +115,8 @@ def _read_entries() -> list[dict]:
 
 
 def _write_entries(entries: list[dict]) -> None:
-    """Atomically replace the cache file with ``entries``. The temp name is
-    unique per writer, so even unlocked two writers never share one."""
-    path = _cache_file()
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_text("".join(json.dumps(e) + "\n" for e in entries))
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+    """Atomically replace the cache file with ``entries`` (safe unlocked too)."""
+    atomic_write_text(_cache_file(), "".join(json.dumps(e) + "\n" for e in entries))
 
 
 def record_recording(folder: str | Path, session_id: str, kind: str = "gui") -> None:
@@ -344,15 +335,12 @@ def _scan(directory: Path) -> tuple[int, int]:
         try:
             # Read-only, so another user's marker is still checkable and one
             # unlinked since iterdir is not recreated.
-            handle = open(marker)
+            held = flock_held(marker)
         except OSError:
             continue
-        with handle:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                live += 1
-                continue
+        if held is not False:
+            live += 1
+            continue
         try:
             if _now().timestamp() - marker.stat().st_mtime > _STALE_MARKER_AGE_S:
                 marker.unlink(missing_ok=True)

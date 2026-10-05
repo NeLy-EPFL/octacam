@@ -2,22 +2,15 @@
 into an atomic partial output, with ffmpeg's progress reported as it runs."""
 
 import contextlib
-import errno
-import glob
+import fcntl
 import os
 import subprocess
 import threading
 import time
-import uuid
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - POSIX only; see _partial_is_live
-    fcntl = None  # type: ignore[assignment]
 
 from octacam.ffmpeg import (
     DEFAULT_PIX_FMT,
@@ -27,6 +20,7 @@ from octacam.ffmpeg import (
     rawvideo_input_args,
     split_opts,
 )
+from octacam.files import flock_held, partial_glob, partial_path
 
 # The offline pass re-encodes harder than capture (writer.DEFAULT_FFMPEG_PARAMS).
 DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
@@ -108,60 +102,22 @@ def transcode_file(
 
 # --- atomic partial outputs ------------------------------------------------------
 
-# Tags a transcode's temp (see _partial_path), which folder scans skip.
-PARTIAL_INFIX = ".octacam-part"
-
 # Without flock, a temp idle this long is an orphan. Generous: deleting a live
 # temp is worse than keeping a dead one, and a live ffmpeg touches it every few
 # seconds.
 _PARTIAL_IDLE_S = 6 * 3600
 
 
-def _partial_path(output: Path) -> Path:
-    """A hidden temp beside *output*: the same directory (an atomic rename), the
-    real extension last (ffmpeg picks the muxer from it), and pid+uuid so two
-    runs over one folder never share a temp or rename the other's."""
-    return output.with_name(
-        f".{output.stem}{PARTIAL_INFIX}.{os.getpid()}.{uuid.uuid4().hex}{output.suffix}"
-    )
-
-
-def _partial_glob(output: Path) -> str:
-    """Glob for every temp of *output*, the pid-less ``.<stem>.octacam-part<ext>``
-    included. Escaped: unescaped, a camera ``cam[1]`` would match (and sweep)
-    ``cam1``'s temp."""
-    return f".{glob.escape(output.stem)}{PARTIAL_INFIX}*{glob.escape(output.suffix)}"
-
-
-def is_partial_transcode(path: Path) -> bool:
-    """True for a transcode temp (see :func:`_partial_path`), which a hard kill
-    can leave behind."""
-    return PARTIAL_INFIX in path.name
-
-
 def _partial_is_live(path: Path) -> bool:
     """Whether a process still writes *path*: :func:`atomic_output` holds a
-    flock on its temp while it owns it, so a lockable temp is an orphan. Without
-    flock (some network mounts), an idle-mtime test. Anything uninspectable is
-    live, so the sweep only ever errs toward keeping."""
-    if fcntl is None:  # pragma: no cover - POSIX only
-        return _partial_is_recent(path)
+    flock on its temp while it owns it, so a lockable temp is an orphan. Where
+    flock cannot tell (some network mounts), an idle-mtime test. Anything
+    uninspectable is live, so the sweep only ever errs toward keeping."""
     try:
-        handle = open(path, "r+")
+        held = flock_held(path, "r+")
     except OSError:
         return True
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
-                return True  # a live atomic_output holds it
-            return _partial_is_recent(path)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
-    finally:
-        with contextlib.suppress(OSError):
-            handle.close()
+    return _partial_is_recent(path) if held is None else held
 
 
 def _partial_is_recent(path: Path) -> bool:
@@ -174,7 +130,7 @@ def _partial_is_recent(path: Path) -> bool:
 def _sweep_orphan_partials(output: Path, keep: Path) -> None:
     """Delete *output*'s temps whose writer is gone, never a live one or *keep*."""
     try:
-        stale_paths = list(output.parent.glob(_partial_glob(output)))
+        stale_paths = list(output.parent.glob(partial_glob(output, extension_last=True)))
     except OSError:
         return
     for stale in stale_paths:
@@ -196,13 +152,13 @@ def atomic_output(output: Path):
     ffmpeg runs (every caller passes ``-y``), so a concurrent run can tell it
     from an orphan.
     """
-    tmp = _partial_path(output)
+    tmp = partial_path(output, extension_last=True)
     try:
         lock = open(tmp, "w")
     except OSError:
         # Let the encode fail with the real error (read-only dir, ENOSPC).
         lock = None
-    if lock is not None and fcntl is not None:
+    if lock is not None:
         with contextlib.suppress(OSError):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:

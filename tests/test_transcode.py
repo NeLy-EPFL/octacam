@@ -7,20 +7,23 @@ import pytest
 from typer.testing import CliRunner
 
 from octacam.cli import app
+from octacam.files import PARTIAL_INFIX, is_partial, partial_path
 from octacam.transcode import (
-    PARTIAL_INFIX,
     TranscodeProgress,
     _parse_progress,
-    _partial_path,
     _reporting_args,
     atomic_output,
-    is_partial_transcode,
     transcode_file,
 )
 from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
 
 runner = CliRunner()
 cv2 = pytest.importorskip("cv2")
+
+
+def _temp(output):
+    """A transcode temp of *output*, as atomic_output names it."""
+    return partial_path(output, extension_last=True)
 
 
 def _frame(width, height):
@@ -380,7 +383,7 @@ def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
         )
     assert not out.exists()
     assert src.exists()  # the source is never touched on the way out
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_successful_transcode_leaves_no_temp_file(tmp_path):
@@ -396,7 +399,7 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
         fps=10.0,
     )
     assert (tmp_path / "cam.mkv").exists()
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
@@ -833,7 +836,7 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
     assert (tmp_path / "a.mp4").exists()  # finished output renamed into place
     assert not (tmp_path / "b.mp4").exists()  # interrupted output absent
     # the interrupted encode's temp is discarded, not orphaned
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
@@ -861,7 +864,7 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
             raw_output=True,
         )
     assert not (tmp_path / "cam.mkv").exists()
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_transcode_skips_orphaned_partial_files(tmp_path):
@@ -871,9 +874,9 @@ def test_transcode_skips_orphaned_partial_files(tmp_path):
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam.raw", frame)
     _summary(tmp_path, [_camera_entry("cam.raw", frame)])
-    orphan = _partial_path(tmp_path / "cam.mkv")
+    orphan = _temp(tmp_path / "cam.mkv")
     orphan.write_bytes(b"\x00" * 32)  # leftover ".octacam-part" sibling
-    assert is_partial_transcode(orphan)
+    assert is_partial(orphan)
     # ...whether discovered by a folder scan...
     jobs = _transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["cam.raw"]  # orphan skipped
@@ -895,18 +898,17 @@ def test_process_cli_rejects_unknown_progress_style(tmp_path):
 # and atomic_output unlinked it on entry, so two `octacam process` runs over one
 # folder — trivially, `--last` in two terminals — each destroyed the other's
 # in-flight temp and then renamed a file it had not written onto the output.
-# octacam.transfer._temp_path had already solved exactly this with pid+uuid.
 
 
 def test_partial_path_is_unique_but_still_muxer_inferable(tmp_path):
     out = tmp_path / "cam.mp4"
-    a, b = _partial_path(out), _partial_path(out)
+    a, b = _temp(out), _temp(out)
     assert a != b, "two runs must not share one temp name"
     for p in (a, b):
         assert p.parent == out.parent  # same filesystem -> os.replace is atomic
         assert p.name.startswith(".")  # hidden
         assert PARTIAL_INFIX in p.name  # still recognised by the folder scan
-        assert is_partial_transcode(p)
+        assert is_partial(p)
         assert p.suffix == ".mp4", "ffmpeg infers the muxer from the extension"
 
 
@@ -924,7 +926,7 @@ def test_concurrent_atomic_outputs_do_not_clobber_each_other(tmp_path):
         assert first.exists(), "promoting the second run's file removed the first's"
     # Both completed; the later finisher wins, and neither is left behind.
     assert out.read_bytes() == b"AAAA"
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_orphaned_partials_are_still_reclaimed(tmp_path):
@@ -932,12 +934,12 @@ def test_orphaned_partials_are_still_reclaimed(tmp_path):
     # a temp nobody holds open is an orphan and is reclaimed on the next run,
     # including one left by the older deterministic-name octacam.
     out = tmp_path / "cam.mp4"
-    orphan = _partial_path(out)
+    orphan = _temp(out)
     orphan.write_bytes(b"x" * 64)
     legacy = out.with_name(f".{out.stem}{PARTIAL_INFIX}{out.suffix}")
     legacy.write_bytes(b"y" * 64)
     other = tmp_path / "second.mp4"  # a different output's temp is not ours
-    other_orphan = _partial_path(other)
+    other_orphan = _temp(other)
     other_orphan.write_bytes(b"z" * 64)
 
     with atomic_output(out) as tmp:
@@ -980,7 +982,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
 
     assert not errors, errors
     assert out.exists() and out.stat().st_size > 0
-    leftovers = [p.name for p in tmp_path.iterdir() if is_partial_transcode(p)]
+    leftovers = [p.name for p in tmp_path.iterdir() if is_partial(p)]
     assert not leftovers, leftovers
 
 
@@ -990,7 +992,7 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     # would delete a *different* camera's in-flight temp.
     bracket = tmp_path / "cam[1].mp4"
     plain = tmp_path / "cam1.mp4"
-    victim = _partial_path(plain)
+    victim = _temp(plain)
     victim.write_bytes(b"another camera's work")
 
     with atomic_output(bracket) as tmp:
@@ -1000,7 +1002,7 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     assert victim.read_bytes() == b"another camera's work"
 
     # ...and its own orphans are still reclaimed.
-    own = _partial_path(bracket)
+    own = _temp(bracket)
     own.write_bytes(b"orphan")
     with atomic_output(bracket) as tmp:
         assert not own.exists()

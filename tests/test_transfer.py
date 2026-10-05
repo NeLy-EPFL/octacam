@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from octacam import transfer as transfer_mod
+from octacam.files import PARTIAL_INFIX
 from octacam.transfer import TransferResult, transfer_folder
 from octacam.transform import (
     CONFIG_SNAPSHOT_FILENAME,
@@ -20,7 +21,7 @@ from octacam.transform import (
     recording_info_dir,
 )
 
-TEMP_GLOB = f".*{transfer_mod._TEMP_INFIX}*"
+TEMP_GLOB = f".*{PARTIAL_INFIX}*"
 
 
 def _make_recording(
@@ -351,8 +352,8 @@ def test_sweep_only_reaps_old_temps(tmp_path):
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"x" * 100})
     dest = tmp_path / "dest" / "rec"
     dest.mkdir(parents=True)
-    fresh = dest / f".camera_LF.mp4{transfer_mod._TEMP_INFIX}.999.fresh"
-    old = dest / f".camera_LF.mp4{transfer_mod._TEMP_INFIX}.999.old"
+    fresh = dest / f".camera_LF.mp4{PARTIAL_INFIX}.999.fresh"
+    old = dest / f".camera_LF.mp4{PARTIAL_INFIX}.999.old"
     fresh.write_bytes(b"a concurrent run's live temp")
     old.write_bytes(b"a crash orphan")
     old_t = _time.time() - transfer_mod._STALE_TEMP_AGE_S - 100
