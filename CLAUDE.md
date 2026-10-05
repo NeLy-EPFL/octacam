@@ -117,7 +117,10 @@ src/octacam/
                     a file that does not parse at all raises ConfigError), the
                     strict live RecordingSettings, save-path and safe-name rules
   config_writer.py  writes config snapshots (inline-table TOML for triggerbox)
-  writer.py         AsyncFrameWriter → ffmpeg subprocess (H.264) or raw byte dump
+  ffmpeg.py         the ffmpeg toolchain: binary discovery, encoder/NVENC probes,
+                    the 4:2:0/full-range output policy, quiet_argv (-nostdin)
+  writer.py         capture writers: AsyncFrameWriter → ffmpeg pipe (H.264) or raw dump
+  transcode.py      octacam process → one transcode_file into an atomic partial output
   transform.py      DisplayTransform (rotate/flip) + recording-summary constants
   diagnostics.py    the frame-rate benchmark engine
   firmware.py       Arduino sketch fingerprinting + arduino-cli flashing
@@ -128,7 +131,8 @@ src/octacam/
   session_cache.py  remembers recording folders for `process --last/--all`
   cameras/          the backend layer (see below)
   plugins/          serial-hardware plugins (triggerbox, twophoton, flywheel)
-  web/              FastAPI app + vanilla-JS static frontend
+  web/              FastAPI GUI: app.py (assembly), hub.py (clients, publish),
+                    preview.py, state.py (AppState), per-area routers + static frontend
 arduino/            triggerbox, 2photon_trigger, stepper_motor sketches
 configs/<rig>/      octacam_config.toml + per-camera sensor files (.pfs / .txt)
 tests/              pytest suite (fake backend + faked SDK facades)
@@ -528,8 +532,8 @@ libx264/libx265 write monochrome 4:0:0. Software decoders read it fine, but
 NVIDIA's hardware decoder (NVDEC/VDPAU — VLC's default on the rig) renders it as
 a uniform 128-gray frame, so every recording "was gray" in VLC. Videos are
 full-range `yuv420p` (neutral chroma, so software decoders return the same pixels
-as before), and `writer._playable_pix_fmt` rewrites a configured `gray` to it at
-the shared `_output_args` seam. That seam is what fixes old configs and every
+as before), and `ffmpeg._playable_pix_fmt` rewrites a configured `gray` to it at
+the shared `ffmpeg.output_args` seam (every encoder spelling). That seam is what fixes old configs and every
 recording snapshot `octacam process` transcodes from. Odd-sized frames stay 4:0:0
 (4:2:0 can't encode them; libx264 refuses), and an unknown size is left alone.
 To test a decode the way VLC does here, use `ffmpeg -hwaccel cuda`.
@@ -635,7 +639,10 @@ placeholder; octacam bakes the real hash into a *throwaway copy* of the sketch a
 flash time (the repo tree is never dirtied). `firmware.py` +
 `FirmwareProvisioner` classify a board (CURRENT/OUTDATED/WRONG_BOARD/…) and offer
 `arduino-cli` flashing under a re-entrant `port_lock`. `octacam flash` and
-`octacam record --yes` drive it. flywheel uses a backward-compatible identify
+`octacam record --yes` drive it. Without the sketch source a board is never
+called up to date: `flash` reports its build unknown (or incompatible from the
+banner) and exits non-zero. `record --yes` never prompts, but flashes unasked only
+a board running an old build of its own sketch (`safe_to_auto_flash`). flywheel uses a backward-compatible identify
 *sentinel* (its wire protocol is frameless, so no forced reflash).
 
 ## Web GUI
@@ -670,11 +677,15 @@ teardown. The **adaptive preview** protocol sends a per-client
 per-camera "view spec"; the server encodes each distinct on-screen resolution
 once and shares it (cost tracks resolutions, not clients), with server-side crop
 of a zoomed region (frame header v2). Each **camera** encodes on its own executor
-task (`_encode_camera`, one `run_in_executor` per camera per tick) — `cv2.imencode`
+task (`preview._encode_camera`, one `run_in_executor` per camera per tick, a by-value `EncodeJob`) — `cv2.imencode`
 releases the GIL, so a tick costs the slowest camera, not the sum; serializing it
 again silently reintroduces a cost linear in rig size that overruns the 33 ms
 refresh (8× 2048² focused: 85 ms serial vs 14 ms parallel). Everything the encode
-needs is passed in by value, so the workers touch no shared state. The **Camera tab** is a full GenApi
+needs is passed in by value, so the workers touch no shared state. Every push goes
+through `web/hub.py`: `Hub.publish(type, payload, key=None)` keeps only the newest
+message per (type, key) per client; events always queue (`EVENT_BACKLOG_REPLAY`).
+Routes are per-area `APIRouter` factories (sync `def` handlers); a GUI config save
+is `config_writer.save_rig_config`. The **Camera tab** is a full GenApi
 node-map browser (typed widgets, per-field reset, ROI auto-center; nodes writable
 only while not grabbing cycle the preview grab). Plugin tabs live in a responsive
 overflow menu; theme is a rig config option overridable per-browser.

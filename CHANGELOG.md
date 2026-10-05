@@ -105,6 +105,16 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **`octacam flash` without the sketch source reported every board up to date**:
+  it now reports the build as unknown (or incompatible from the banner) and a
+  flash request exits non-zero.
+- **`octacam record --yes` still asked on a terminal before reflashing** a board
+  running an old build of its sketch, although `--yes` says "Don't prompt". A
+  blank or foreign board is still never flashed unasked.
+- **`-c:v:0`/`-codec:v:0` encoder spellings with `-pix_fmt gray` still wrote 4:0:0
+  H.264** (flat gray in NVIDIA hardware decoders); they get full-range 4:2:0 too.
+- The `doctor --probe-serial` help no longer claims ports held by a running
+  session are skipped (on Linux and macOS they are probed).
 - **Encoder args with bad shell quoting were accepted by the Record tab**, and
   every camera's writer then failed at record start; they are refused when entered.
 - **`octacam doctor --backend auto` (or `all`) reported an unknown backend**
