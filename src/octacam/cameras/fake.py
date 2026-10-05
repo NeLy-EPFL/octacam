@@ -499,7 +499,7 @@ class FakeBackend(CameraBackend):
                 self.trigger.wait(_FETCH_WAIT_S)
                 return None
             # A real fetch returns early only for an image, never because a
-            # trigger was offered meanwhile.
+            # trigger was offered meanwhile; this one also ends with the grab.
             until = time.monotonic() + timeout_ms / 1000.0
             while (now := time.monotonic()) < until and self.trigger.grabbing:
                 if self._device_images and self._device_images[0].ready(now):
