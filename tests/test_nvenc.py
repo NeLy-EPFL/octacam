@@ -12,8 +12,8 @@ import numpy as np
 import pytest
 
 from octacam import writer as w
-from octacam.config import RecordConfig
-from octacam.controller import RecordingController, RecordingSettings
+from octacam.config import RecordConfig, RecordingSettings
+from octacam.controller import RecordingController
 from octacam.transform import recording_summary_path
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,

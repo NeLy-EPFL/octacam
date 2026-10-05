@@ -21,7 +21,8 @@ import octacam.cameras._trigger_handoff as handoff
 import octacam.controller as controller_module
 from octacam.cameras import CameraSystem
 from octacam.check import check_recording
-from octacam.controller import RecordingController, RecordingSettings
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController
 from octacam.plugins.base import Plugin, PluginManager
 from octacam.pulses import PulseClock
 from octacam.writer import FORMATS

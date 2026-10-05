@@ -446,8 +446,8 @@ def gui(
 
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import load_config_dir
-    from octacam.controller import RecordingController, RecordingSettings
+    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
 
@@ -2221,8 +2221,8 @@ def record(
     """
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import load_config_dir
-    from octacam.controller import RecordingController, RecordingSettings
+    from octacam.config import RecordingSettings, load_config_dir
+    from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
 
     config_dir = _resolve_config_dir(config_dir)
@@ -2952,8 +2952,7 @@ def benchmark(
     """
     from octacam import diagnostics as diag
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
-    from octacam.config import load_config_dir
-    from octacam.controller import RecordingSettings
+    from octacam.config import RecordingSettings, load_config_dir
 
     config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)

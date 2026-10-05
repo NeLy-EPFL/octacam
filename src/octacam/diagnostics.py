@@ -49,7 +49,7 @@ from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_format
 
 if TYPE_CHECKING:
     from octacam.cameras.system import CameraSystem
-    from octacam.controller import RecordingSettings
+    from octacam.config import RecordingSettings
 
 log = logging.getLogger("octacam")
 

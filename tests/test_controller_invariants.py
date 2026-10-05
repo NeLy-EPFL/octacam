@@ -14,7 +14,8 @@ from helpers import wait_until
 
 from octacam.cameras import CameraSystem
 from octacam.cameras.fake import FakeBackend
-from octacam.controller import RecordingController, RecordingSettings
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController
 from octacam.plugins.base import Plugin, PluginManager
 
 SERIALS = ["FAKE-0", "FAKE-1"]

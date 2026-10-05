@@ -16,7 +16,8 @@ from helpers import wait_until
 
 from octacam import diagnostics as dg
 from octacam.cameras import CameraSystem
-from octacam.controller import RecordingController, RecordingSettings, StartResult
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController, StartResult
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 

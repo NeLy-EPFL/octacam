@@ -1,16 +1,19 @@
-"""octacam_config.toml parsing.
+"""octacam_config.toml parsing, the save-path and safe-name rules, and the live
+:class:`RecordingSettings` a config seeds.
 
-Tolerant per field: a malformed section or field is warned about and falls back
+The config is tolerant per field: a malformed section or field is warned about and falls back
 to its default (``_lenient_validate``). A file that does not parse at all raises
 :class:`ConfigError`, since stock defaults would silently run the wrong rig.
 """
 
+import dataclasses
 import datetime
 import logging
 import os
 import re
 import shlex
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple, TypeVar
 
@@ -19,6 +22,9 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
+    PositiveFloat,
+    StrictInt,
+    TypeAdapter,
     ValidationError,
     field_validator,
 )
@@ -33,7 +39,9 @@ from octacam.transform import (
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
+    FORMATS,
     NVENC_H264_PARAMS,
+    VideoFormat,
 )
 
 log = logging.getLogger("octacam")
@@ -272,6 +280,173 @@ def resolve_save_path(record: RecordConfig) -> SavePath:
     base = _apply_template(record.directory, when)
     relative = _apply_template(record.relative_directory, when)
     return SavePath(compose_save_dir(base, relative), normalize_dir(base), relative)
+
+
+# ---------------------------------------------------------------------------
+# Live settings (seeded from the config, edited in the GUI)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordingSettings:
+    """The live Record and Process settings; :meth:`updated` checks the
+    constraints declared here."""
+
+    fps: PositiveFloat = 100.0
+    duration_s: PositiveFloat = 20.0
+    save_dir: str = "./"
+    # save_dir is record_directory/relative_directory once either is set; the
+    # transfer mirrors relative_directory (else save_dir's basename).
+    record_directory: str = ""
+    relative_directory: str = ""
+    trigger_source: TriggerSource = "software"
+    preview_trigger_source: PreviewTriggerSource = "auto"
+    save_method: SaveMethod = "ffmpeg"
+    # Encoder args per method, kept apart so switching keeps both presets.
+    ffmpeg_params: FfmpegArgs = DEFAULT_FFMPEG_PARAMS
+    nvenc_params: FfmpegArgs = NVENC_H264_PARAMS
+    # None = the GPU's detected session cap; cameras beyond it encode on CPU.
+    max_nvenc_sessions: Annotated[StrictInt, Field(ge=0)] | None = None
+    writer_queue_size: Annotated[StrictInt, Field(ge=1)] = 64
+    # "display" bakes the display transform into the video; "sensor" does not.
+    record_form: Literal["display", "sensor"] = "display"
+    save_frame_timestamps: bool = False
+    # `octacam process` params: unused during capture, patched into each
+    # recording's config snapshot. An empty transfer_directory skips the transfer.
+    transcode_ffmpeg_params: FfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    transfer_directory: str = ""
+    transfer_checksum: bool = True
+
+    @classmethod
+    def from_config(
+        cls, config: OctacamConfig, *, fps: float | None = None
+    ) -> "RecordingSettings":
+        """The settings ``config`` loads as (its tolerance stands: nothing is
+        re-checked), with the save dirs resolved now. ``fps`` overrides the
+        config's, before a frame-count duration converts at it."""
+        record, transfer = config.record, config.transfer
+        fps = record.fps if fps is None else fps
+        path = resolve_save_path(record)
+        return cls(
+            fps=fps,
+            duration_s=duration_to_seconds(record.duration, record.duration_unit, fps),
+            save_dir=path.save_dir,
+            record_directory=path.directory,
+            relative_directory=path.relative,
+            trigger_source=record.trigger_source,
+            preview_trigger_source=record.preview_trigger_source,
+            save_method=record.save_method,
+            ffmpeg_params=record.ffmpeg_params,
+            nvenc_params=record.nvenc_params,
+            max_nvenc_sessions=record.max_nvenc_sessions,
+            writer_queue_size=record.writer_queue_size,
+            record_form="display" if record.save_transformed else "sensor",
+            save_frame_timestamps=record.save_timestamps,
+            transcode_ffmpeg_params=config.transcode.ffmpeg_params,
+            transfer_directory=transfer.directory if transfer else "",
+            transfer_checksum=transfer.checksum if transfer else True,
+        )
+
+    def record_config_values(self) -> dict:
+        """The settings as ``[record]`` keys, the inverse of :meth:`from_config`
+        with ``duration_s`` for ``duration``/``duration_unit``
+        (config_writer.with_record_settings). The save path is left out: a
+        snapshot keeps the config's templates so a relaunch resolves a fresh
+        folder, and the path a recording used is in its summary."""
+        return {
+            "fps": self.fps,
+            "duration_s": self.duration_s,
+            "trigger_source": self.trigger_source,
+            "preview_trigger_source": self.preview_trigger_source,
+            "save_method": self.save_method,
+            "ffmpeg_params": self.ffmpeg_params,
+            "nvenc_params": self.nvenc_params,
+            "max_nvenc_sessions": self.max_nvenc_sessions,
+            "writer_queue_size": self.writer_queue_size,
+            "save_transformed": self.record_form == "display",
+            "save_timestamps": self.save_frame_timestamps,
+        }
+
+    def updated(self, /, **changes) -> "RecordingSettings":
+        """A copy with ``changes`` validated and applied, else ValueError naming
+        each bad field. A ``record_directory`` or ``relative_directory`` edit
+        recomposes save_dir from the split; a lone ``save_dir`` clears it."""
+        unknown = changes.keys() - _SETTINGS_FIELDS
+        if unknown:
+            raise ValueError(f"Unknown settings: {sorted(unknown)}")
+        try:
+            # Only the changed fields: a config value the GUI would refuse
+            # (fps 0) must not block editing another one.
+            valid = _SETTINGS.validate_python(changes)
+        except ValidationError as e:
+            raise ValueError(
+                "; ".join(f"{err['loc'][0]}: {err['msg']}" for err in e.errors())
+            ) from None
+        new = dataclasses.replace(self, **{key: getattr(valid, key) for key in changes})
+        if "record_directory" in changes:
+            new.record_directory = normalize_dir(new.record_directory)
+        if "record_directory" in changes or "relative_directory" in changes:
+            new.save_dir = new._composed_save_dir()
+        elif "save_dir" in changes:
+            new = new.with_save_dir(new.save_dir)
+        return new
+
+    def video_format(self) -> VideoFormat:
+        video_format = FORMATS[self.save_method]
+        if self.save_method == "ffmpeg":
+            params = self.ffmpeg_params
+        elif self.save_method == "nvenc":
+            params = self.nvenc_params
+        else:
+            return video_format
+        return dataclasses.replace(video_format, ffmpeg_params=params)
+
+    def with_save_dir(self, path: str) -> "RecordingSettings":
+        """An explicit save dir (``--output``, a lone GUI edit). It clears the
+        split, or the transfer and next_take would recompose the old path."""
+        return dataclasses.replace(
+            self,
+            save_dir=normalize_dir(path),
+            record_directory="",
+            relative_directory="",
+        )
+
+    def next_take(self) -> "RecordingSettings":
+        """The next recording's folder: the relative part's trailing number
+        bumped, else save_dir's."""
+        if not self.relative_directory.strip():
+            return dataclasses.replace(
+                self, save_dir=increment_trailing_number(self.save_dir)
+            )
+        new = dataclasses.replace(
+            self, relative_directory=increment_trailing_number(self.relative_directory)
+        )
+        new.save_dir = new._composed_save_dir()
+        return new
+
+    def _composed_save_dir(self) -> str:
+        # A live edit and the next take join the relative part stripped; the
+        # first take (resolve_save_path) joins it as the config wrote it.
+        return compose_save_dir(self.record_directory, self.relative_directory.strip())
+
+    def relative_save_dir(self) -> str:
+        """The recording folder relative to the base directory: the explicit
+        ``relative_directory``, else save_dir relative to the base, else (no
+        base, or a folder outside it such as an --output override) its name."""
+        if self.relative_directory.strip():
+            return self.relative_directory
+        if self.record_directory:
+            try:
+                rel = os.path.relpath(self.save_dir, self.record_directory)
+                if not rel.startswith(".."):
+                    return rel
+            except ValueError:  # e.g. different drives on Windows
+                pass
+        return Path(self.save_dir).name
+
+
+_SETTINGS = TypeAdapter(RecordingSettings)
+_SETTINGS_FIELDS = frozenset(f.name for f in dataclasses.fields(RecordingSettings))
 
 
 def _parse_visualization(src: object) -> list[VisualizationConfig]:

@@ -13,7 +13,8 @@ import pytest
 from helpers import wait_until
 
 from octacam.cameras import CameraSystem
-from octacam.controller import RecordingController, RecordingSettings, StartResult
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController, StartResult
 from octacam.plugins.base import Plugin, PluginManager
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]

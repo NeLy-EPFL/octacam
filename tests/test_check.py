@@ -602,7 +602,8 @@ def test_a_fake_recording_checks_the_same_with_or_without_timestamps(
     # ones: a filled miss is a warning either way.
     from octacam.cameras import CameraSystem
     from octacam.cameras.fake import FakeBackend
-    from octacam.controller import RecordingController, RecordingSettings
+    from octacam.config import RecordingSettings
+    from octacam.controller import RecordingController
 
     system = CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
     try:

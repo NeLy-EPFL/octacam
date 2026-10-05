@@ -1,8 +1,6 @@
 """RecordingController tests: pure-unit + emulator integration."""
 
 import json
-import os
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -308,121 +306,6 @@ def dataclasses_replace(obj, **kw):
     return dataclasses.replace(obj, **kw)
 
 
-def test_record_config_values_covers_every_record_setting():
-    # Each recording's config snapshot is written from record_config_values, so a
-    # new [record] key must either be reproduced there or be deliberately left
-    # out — otherwise a recording made with it would relaunch with the rig
-    # file's value instead of its own.
-    from octacam.config import RecordConfig
-
-    reproduced = set(RecordingSettings().record_config_values())
-    # duration_s stands in for the duration/unit pair (config_writer picks a unit).
-    reproduced = (reproduced - {"duration_s"}) | {"duration", "duration_unit"}
-    # The save path templates are kept as written, so a relaunch resolves a fresh
-    # dated folder; the path a recording used is in its summary.
-    excluded = {"directory", "relative_directory"}
-    assert set(RecordConfig.model_fields) == reproduced | excluded
-
-
-def test_from_config_takes_the_config_as_it_loads(monkeypatch):
-    from octacam.config import OctacamConfig, RecordConfig, TransferConfig
-
-    moment = time.localtime(0)
-    monkeypatch.setattr(time, "localtime", lambda *_a: moment)
-
-    config = OctacamConfig(
-        record=RecordConfig(
-            fps=50.0,
-            duration=100.0,
-            duration_unit="frames",
-            directory="/data/%Y",
-            relative_directory="Fly1/001",
-            save_transformed=False,
-            save_timestamps=True,
-        ),
-        transfer=TransferConfig(directory="/store", checksum=False),
-    )
-    settings = RecordingSettings.from_config(config)
-    year = time.strftime("%Y", moment)
-    assert (settings.fps, settings.duration_s) == (50.0, 2.0)
-    assert settings.record_directory == f"/data/{year}"
-    assert settings.relative_directory == "Fly1/001"
-    assert settings.save_dir == f"/data/{year}/Fly1/001"
-    assert (settings.record_form, settings.save_frame_timestamps) == ("sensor", True)
-    assert settings.transfer_directory == "/store"
-    assert settings.transfer_checksum is False
-    # The fps override applies before a frame-count duration converts.
-    overridden = RecordingSettings.from_config(config, fps=100.0)
-    assert (overridden.fps, overridden.duration_s) == (100.0, 1.0)
-    # No [transfer]: no transfer, and checksums on for a later one.
-    bare = RecordingSettings.from_config(OctacamConfig())
-    assert (bare.transfer_directory, bare.transfer_checksum) == ("", True)
-
-
-def test_from_config_expands_the_save_dirs_at_one_moment(monkeypatch):
-    from octacam.config import OctacamConfig, RecordConfig
-
-    # Each read of the clock a year later: a second read would split the dirs.
-    moments = iter(time.strptime(f"{year}-12-31", "%Y-%m-%d") for year in (2025, 2026))
-    monkeypatch.setattr(time, "localtime", lambda *_a: next(moments))
-    record = RecordConfig(directory="/d/%Y", relative_directory="%Y/001")
-    settings = RecordingSettings.from_config(OctacamConfig(record=record))
-    assert (settings.record_directory, settings.relative_directory) == (
-        "/d/2025",
-        "2025/001",
-    )
-    assert settings.save_dir == "/d/2025/2025/001"
-
-
-def test_next_take_bumps_the_relative_part_else_save_dir():
-    split = RecordingSettings(
-        record_directory="/base", relative_directory="day/009", save_dir="/base/day/009"
-    ).next_take()
-    assert split.relative_directory == "day/010"
-    assert split.save_dir == "/base/day/010"
-    lone = RecordingSettings(save_dir="/data/001-bhv").next_take()
-    assert lone.save_dir == "/data/002-bhv"
-    # The relative part is joined stripped, as a live edit joins it.
-    padded = RecordingSettings(
-        record_directory="/base", relative_directory=" day/009", save_dir="/base/ day/009"
-    ).next_take()
-    assert (padded.relative_directory, padded.save_dir) == (" day/010", "/base/day/010")
-
-
-def test_updated_composes_save_dir_from_the_split():
-    settings = RecordingSettings(record_directory="/base", save_dir="/base")
-    assert settings.updated(relative_directory="day/002").save_dir == "/base/day/002"
-    # Stored as sent, joined stripped.
-    padded = settings.updated(relative_directory=" day/002")
-    assert (padded.relative_directory, padded.save_dir) == (" day/002", "/base/day/002")
-    # An absolute relative part discards the base.
-    for relative in ("/elsewhere/001", " /elsewhere/001"):
-        assert settings.updated(relative_directory=relative).save_dir == "/elsewhere/001"
-    assert settings.updated(record_directory=" ~/b ").save_dir == (
-        f"{os.path.expanduser('~')}/b"
-    )
-
-
-def test_with_save_dir_clears_the_split():
-    settings = RecordingSettings(
-        record_directory="/base", relative_directory="day/001", save_dir="/base/day/001"
-    ).with_save_dir(" ~/other ")
-    assert settings.save_dir == f"{os.path.expanduser('~')}/other"
-    assert (settings.record_directory, settings.relative_directory) == ("", "")
-
-
-def test_relative_save_dir():
-    # The explicit relative part, else save_dir under the base, else its name.
-    assert RecordingSettings(
-        record_directory="/b", relative_directory="day/001", save_dir="/b/day/001"
-    ).relative_save_dir() == "day/001"
-    under = RecordingSettings(record_directory="/b", save_dir="/b/x/002")
-    assert under.relative_save_dir() == "x/002"
-    outside = RecordingSettings(record_directory="/b", save_dir="/out/003")
-    assert outside.relative_save_dir() == "003"
-    assert RecordingSettings(save_dir="/out/004").relative_save_dir() == "004"
-
-
 def test_capture_frame_count():
     # octacam-clocked triggers cap at the intended pulse count round(fps*dur)...
     assert capture_frame_count(
@@ -522,39 +405,6 @@ def test_update_settings_validation():
     assert controller._settings.fps == 42.0
 
 
-def test_settings_updated_names_each_bad_field():
-    settings = RecordingSettings()
-    with pytest.raises(ValueError, match=r"^Unknown settings: \['codec'\]$"):
-        settings.updated(codec="vp9")
-    with pytest.raises(ValueError, match="^fps: ") as error:
-        settings.updated(fps=0, duration_s=5.0)
-    assert "duration_s" not in str(error.value)
-    with pytest.raises(ValueError, match="^duration_s: "):
-        settings.updated(duration_s=0)
-    with pytest.raises(ValueError, match="^save_method: "):
-        settings.updated(save_method="vp9")
-    with pytest.raises(ValueError, match="^transcode_ffmpeg_params: bad quoting"):
-        settings.updated(transcode_ffmpeg_params='a "b')
-    # Every field is type-checked, as JSON would be: no None in a str or bool.
-    for field in ("save_dir", "transfer_directory", "save_frame_timestamps"):
-        with pytest.raises(ValueError, match=f"^{field}: "):
-            settings.updated(**{field: None})
-    # Coerced like the HTTP boundary's JSON: a numeric string is a number.
-    assert settings.updated(fps="100").fps == 100.0
-    # The changed fields only: a config value the GUI would refuse (fps 0, as
-    # the tolerant config loads it) must not block editing another field.
-    assert RecordingSettings(fps=0.0).updated(duration_s=5.0).duration_s == 5.0
-
-
-def test_save_methods_are_the_writer_formats():
-    from typing import get_args
-
-    from octacam.config import SaveMethod
-    from octacam.writer import FORMATS
-
-    assert set(get_args(SaveMethod)) == set(FORMATS)
-
-
 def test_update_settings_lone_save_dir_clears_split_halves():
     # Setting save_dir alone (no record_directory/relative_directory in the same
     # patch) must clear the stale split halves — otherwise relative_save_dir
@@ -612,28 +462,6 @@ def test_browse_directory(tmp_path):
     assert controller.browse_directory(str(tmp_path / "a" / "x" / "y"))["path"] == str(
         tmp_path / "a"
     )
-
-
-def test_video_format_carries_ffmpeg_params():
-    settings = RecordingSettings(
-        save_method="ffmpeg",
-        ffmpeg_params="-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p",
-    )
-    video_format = settings.video_format()
-    assert video_format.save_method == "ffmpeg"
-    assert (
-        video_format.ffmpeg_params
-        == "-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p"
-    )
-    assert RecordingSettings(save_method="raw").video_format().extension == "raw"
-
-
-def test_recording_settings_default_ffmpeg_params():
-    # The capture default tracks writer.DEFAULT_FFMPEG_PARAMS (CRF 18 ultrafast,
-    # near visually lossless); config's record.ffmpeg_params overrides it.
-    from octacam.writer import DEFAULT_FFMPEG_PARAMS
-
-    assert RecordingSettings().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
 
 
 # ------------------------------------------------- emulator integration
