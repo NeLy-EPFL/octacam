@@ -95,6 +95,14 @@ def test_gray_h264_is_written_as_full_range_yuv420p(encoder):
     assert "scale=out_range=full" in args[args.index("-vf") + 1]
 
 
+@pytest.mark.parametrize(
+    "spelling", ["-c:v", "-codec:v", "-vcodec", "-c:v:0", "-c", "-codec"]
+)
+def test_every_encoder_spelling_gets_the_4_2_0_rule(spelling):
+    args = output_args(f"{spelling} libx264 -pix_fmt gray", (64, 48))
+    assert _out_pix_fmt(args) == "yuv420p"
+
+
 @pytest.mark.parametrize("size", [(63, 48), (64, 47)])
 def test_odd_frames_stay_monochrome(size):
     # 4:2:0 cannot code an odd side (libx264: "width not divisible by 2"), so

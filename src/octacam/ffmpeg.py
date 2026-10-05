@@ -253,9 +253,9 @@ def _nvenc_session_cap(encoder: str) -> int | None:
 
 PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
 VF_OPTS = ("-vf", "-filter:v")
-# The video-encoder spellings encoder_of reads, and those the 4:0:0 rule reads.
+# The video-encoder spellings; the 4:0:0 rule also reads the all-stream -c/-codec.
 _ENCODER_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
-_MONO_RULE_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
+_MONO_RULE_CODEC_OPTS = (*_ENCODER_OPTS, "-c", "-codec")
 
 
 def split_opts(
