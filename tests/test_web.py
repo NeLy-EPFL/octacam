@@ -251,6 +251,7 @@ def test_system_and_settings_endpoints(client):
     ffmpeg = client.put("/api/settings", json={"ffmpeg_params": "-c:v ffv1"})
     assert ffmpeg.status_code == 200
     assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
+    assert client.put("/api/settings", json={"ffmpeg_params": 'a "b'}).status_code == 422
     assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
     # The GPU save method + its params/session-limit knobs round-trip; a negative

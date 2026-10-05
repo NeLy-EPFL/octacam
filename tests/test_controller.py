@@ -407,9 +407,12 @@ def test_update_settings_validation():
         controller.update_settings(max_nvenc_sessions=-1)
     with pytest.raises(ValueError):
         controller.update_settings(max_nvenc_sessions=True)
-    # nvenc_params must be shlex-parseable (bad quoting rejected up front).
+    # Encoder args must be shlex-parseable (bad quoting rejected up front): the
+    # writer splits them at open, so every camera's writer would fail to start.
     with pytest.raises(ValueError):
         controller.update_settings(nvenc_params='-c:v h264_nvenc "oops')
+    with pytest.raises(ValueError):
+        controller.update_settings(ffmpeg_params='-c:v libx264 "oops')
     assert (
         controller.update_settings(nvenc_params="-c:v hevc_nvenc -cq 20").nvenc_params
         == "-c:v hevc_nvenc -cq 20"

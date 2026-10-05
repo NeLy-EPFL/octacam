@@ -737,11 +737,12 @@ class RecordingController:
                 raise ValueError(
                     "max_nvenc_sessions must be a non-negative integer or None"
                 )
-            if "nvenc_params" in changes:
-                try:
-                    shlex.split(changes["nvenc_params"])
-                except ValueError as e:
-                    raise ValueError(f"invalid nvenc_params: {e}") from e
+            for key in ("ffmpeg_params", "nvenc_params"):
+                if key in changes:
+                    try:
+                        shlex.split(changes[key])
+                    except ValueError as e:
+                        raise ValueError(f"invalid {key}: {e}") from e
             if "fps" in changes and not changes["fps"] > 0:
                 raise ValueError("fps must be > 0")
             if "duration_s" in changes and not changes["duration_s"] > 0:
