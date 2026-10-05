@@ -2027,25 +2027,153 @@ def test_flash_refuses_a_rig_the_gui_holds_however_the_path_is_spelled(
     assert f"(pid {os.getpid()})" in result.output
 
 
-# --- record's firmware preflight, headless ------------------------------------
+# --- `octacam flash` against a faked triggerbox board -------------------------
+
+
+def _current_triggerbox_build():
+    from octacam import firmware as fw
+
+    return fw.sketch_fingerprint(fw.resolve_sketch_dir("triggerbox"))
+
+
+@pytest.fixture
+def fake_triggerbox(monkeypatch):
+    """The triggerbox link, faked at the class: the board answers ``banner`` and
+    ``devices`` lists every port the plugin opened."""
+    from octacam.plugins.triggerbox import TriggerboxLink
+
+    board = SimpleNamespace(open=False, banner="TRIGGERBOX 2 oldbuild", devices=[])
+
+    def open_(self, device, baud):
+        board.devices.append(device)
+        board.open = True
+
+    monkeypatch.setattr(TriggerboxLink, "open", open_)
+    monkeypatch.setattr(TriggerboxLink, "close", lambda self: setattr(board, "open", False))
+    monkeypatch.setattr(TriggerboxLink, "is_open", property(lambda self: board.open))
+    monkeypatch.setattr(TriggerboxLink, "identify", lambda self, timeout=0.5: board.banner)
+    monkeypatch.setattr(TriggerboxLink, "send_cancel", lambda self: None)
+    return board
+
+
+@pytest.mark.parametrize(
+    ("flags", "exit_code", "flashed"),
+    [(["--check"], 1, False), (["--yes"], 0, True)],
+    ids=["check", "yes"],
+)
+def test_flash_reports_a_stale_board_and_flashes_it_unless_checking(
+    fake_triggerbox, flags, exit_code, flashed
+):
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox",
+         "--device", "/dev/ttyFAKE7", *flags],
+    )
+    assert result.exit_code == exit_code, result.output
+    assert "triggerbox — /dev/ttyFAKE7" in result.output
+    assert "needs flashing" in result.output
+    assert ("uploaded build" in result.output) is flashed
+    # --device reaches the plugin; a flash closes and reopens the port.
+    assert fake_triggerbox.devices == ["/dev/ttyFAKE7"] * (2 if flashed else 1)
+
+
+def test_flash_leaves_a_current_board_alone(fake_triggerbox):
+    fake_triggerbox.banner = f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    result = runner.invoke(
+        app, ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "up to date" in result.output
+
+
+def test_flash_warns_before_overwriting_an_unidentified_board(fake_triggerbox):
+    fake_triggerbox.banner = None
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x"],
+        input="n\n",
+    )
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert "the board sent no identity" in flat
+    assert "Upload the current firmware to /dev/x?" in flat
+    assert "skipped" in flat
+
+
+def test_flash_reports_a_board_that_does_not_open():
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox",
+         "--device", "/nonexistent/ttyACM0"],
+    )
+    assert result.exit_code == 1, result.output
+    assert "could not open the board" in result.output
+
+
+@pytest.mark.parametrize(("plugin", "exit_code"), [("bogus", 1), ("", 0)])
+def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
+    (tmp_path / "octacam_config.toml").write_text("")
+    args = ["--plugin", plugin] if plugin else [str(tmp_path)]
+    result = runner.invoke(app, ["--log-level", "error", "flash", *args])
+    assert result.exit_code == exit_code, result.output
+    assert "No firmware-flashable serial plugin" in result.output
+
+
+@pytest.mark.parametrize(
+    ("banner", "line"),
+    [
+        ("TRIGGERBOX 2 oldbuild", "triggerbox firmware needs flashing"),
+        ("FLYWHEEL 1 abc", "triggerbox firmware needs flashing"),
+        (None, "triggerbox firmware up to date"),
+    ],
+    ids=["outdated", "foreign", "current"],
+)
+def test_doctor_probe_classifies_a_configured_board(
+    emulated_rig, monkeypatch, tmp_path, banner, line
+):
+    from octacam.serial_ports import SerialIdentity
+
+    banner = banner or f"TRIGGERBOX 2 {_current_triggerbox_build()}"
+    monkeypatch.setattr(
+        "octacam.serial_ports.list_serial_ports",
+        lambda: [_fake_serial_port("/dev/ttyACM0")],
+    )
+    monkeypatch.setattr(
+        "octacam.serial_ports.probe_identity",
+        lambda device, **kw: SerialIdentity(device, banner, False, None),
+    )
+    # No device option: the plugin's default port, /dev/ttyACM0.
+    (tmp_path / "octacam_config.toml").write_text('[[plugins]]\nname = "triggerbox"\n')
+    result = runner.invoke(
+        app, ["--log-level", "error", "doctor", "--probe-serial", str(tmp_path)]
+    )
+    flat = " ".join(result.output.split())
+    assert "plugin 'triggerbox' device /dev/ttyACM0 is connected" in flat
+    assert line in flat
+
+
+# --- record's firmware preflight ----------------------------------------------
 
 
 class _StaleBoardPlugin:
-    """A serial plugin whose board runs an old build of its own sketch."""
+    """A serial plugin whose board runs an old build of its own sketch (or, with
+    ``state="unidentified"``, sent no banner)."""
 
     name = "triggerbox"
 
-    def __init__(self, auto_flash):
+    def __init__(self, auto_flash, state="outdated"):
         self.auto_flash = auto_flash
+        self.state = state
         self.flashed = 0
 
     def firmware_provisioning(self):
         return {
             "device": "/dev/ttyACM0",
             "detail": "board build abc, source build def",
+            "state": self.state,
             "needs_flash": True,
             "can_flash": True,
-            "safe_to_auto_flash": True,
+            "safe_to_auto_flash": self.state == "outdated",
             "auto_flash": self.auto_flash,
         }
 
@@ -2067,6 +2195,30 @@ def test_record_preflight_reflashes_headless_only_with_auto_flash(
     assert plugin.flashed == (1 if auto_flash else 0)
     if not auto_flash:
         assert "pass --yes or set auto_flash=true" in caplog.text
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
+    monkeypatch, capsys, answer
+):
+    from rich.prompt import Confirm
+
+    from octacam.cli import _preflight_firmware
+    from octacam.plugins.base import PluginManager
+
+    asked = []
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        Confirm, "ask", lambda prompt, **kw: asked.append(prompt) or answer
+    )
+    plugin = _StaleBoardPlugin(auto_flash=False, state="unidentified")
+    # --yes does not skip the question on a tty.
+    _preflight_firmware(PluginManager([plugin]), assume_yes=True)
+    assert asked == ["Upload the current firmware to /dev/ttyACM0 now?"]
+    assert plugin.flashed == (1 if answer else 0)
+    err = " ".join(capsys.readouterr().err.split())
+    assert "board firmware on /dev/ttyACM0 is out of date" in err
+    assert "no identity" in err
 
 
 # --- record closes the cameras on every exit before the controller owns them --
