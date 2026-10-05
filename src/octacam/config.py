@@ -1,9 +1,11 @@
 """octacam_config.toml parsing, the save-path and safe-name rules, and the live
 :class:`RecordingSettings` a config seeds.
 
-The config is tolerant per field: a malformed section or field is warned about and falls back
-to its default (``_lenient_validate``). A file that does not parse at all raises
-:class:`ConfigError`, since stock defaults would silently run the wrong rig.
+The config is tolerant per field: a malformed section or field is warned about
+and falls back to its default (``_lenient_validate``). A file that does not
+parse at all raises :class:`ConfigError`, since stock defaults would silently
+run the wrong rig. The live settings are strict instead:
+:meth:`RecordingSettings.updated` rejects a bad value.
 """
 
 import dataclasses
