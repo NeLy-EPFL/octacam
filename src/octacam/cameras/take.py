@@ -29,7 +29,7 @@ GRAB_TIMEOUT_MS = 100
 # After priming (see CameraTake.arm_counting), a frame within
 # max(PRIME_STRAGGLER_NS, PRIME_STRAGGLER_PERIODS periods) of the last priming
 # frame is a priming straggler, not pulse 0. Both must stay below the take's
-# settle before the train (take.PRIME_SETTLE_S, at least four periods).
+# settle before the train (octacam.take.PRIME_SETTLE_S, at least four periods).
 PRIME_STRAGGLER_NS = 50_000_000
 PRIME_STRAGGLER_PERIODS = 2.5
 
