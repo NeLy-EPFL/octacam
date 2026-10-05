@@ -3417,10 +3417,6 @@ class _FileProgressBar:
         return on_progress
 
 
-# tests/test_transcode.py imports the bar by this name.
-_TranscodeProgressBar = _FileProgressBar
-
-
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     """Collect the recordings (either layout) at *roots*, or under them when
     *recursive*, deduped. An ``octacam_recording`` root means its recording.
