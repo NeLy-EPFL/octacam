@@ -1622,8 +1622,9 @@ def doctor(
         typer.Option(
             "--probe-serial",
             help="Also open each detected serial port briefly to read its "
-            "firmware identity. Skips ports held by a running session; skip "
-            "this if a board may be armed.",
+            "firmware identity. It writes to each board, even one a running "
+            "session holds (except on Windows), so skip this while a board may "
+            "be armed.",
         ),
     ] = False,
 ) -> None:

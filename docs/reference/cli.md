@@ -49,7 +49,7 @@ opens a camera, so it is safe to run while a session is live.
 | `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: the whole available cascade. |
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
-| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
+| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity. It writes to each board, even one a running session holds (the plugins don't open their port exclusively; only Windows skips a port in use), so skip it while a board may be armed. |
 
 Exits `0` when no errors are found, so it works as a pre-flight check in scripts.
 
