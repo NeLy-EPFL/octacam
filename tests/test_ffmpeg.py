@@ -98,9 +98,9 @@ def test_gray_h264_is_written_as_full_range_yuv420p(encoder):
 
 
 @pytest.mark.parametrize(
-    "spelling", ["-c:v", "-codec:v", "-vcodec", "-c:v:0", "-c", "-codec"]
+    "spelling", ["-c:v", "-codec:v", "-vcodec", "-c:v:0", "-codec:v:0", "-c", "-codec"]
 )
-def test_every_encoder_spelling_gets_the_4_2_0_rule(spelling):
+def test_the_4_2_0_rule_reads_each_encoder_option_spelling(spelling):
     args = output_args(f"{spelling} libx264 -pix_fmt gray", (64, 48))
     assert _out_pix_fmt(args) == "yuv420p"
 

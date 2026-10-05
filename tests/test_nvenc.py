@@ -61,6 +61,7 @@ def probe_caches(monkeypatch):
         (NVENC_H264_PARAMS, "h264_nvenc", True),
         ("-c:v hevc_nvenc -cq 20", "hevc_nvenc", True),
         ("-vcodec av1_nvenc", "av1_nvenc", True),
+        ("-codec:v:0 h264_nvenc", "h264_nvenc", True),
         (DEFAULT_FFMPEG_PARAMS, "libx264", False),
         ("-preset fast -pix_fmt gray", None, False),  # no -c:v
         ("-c:v 'unterminated", None, False),  # bad quoting -> None, not a crash
