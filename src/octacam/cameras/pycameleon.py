@@ -262,7 +262,7 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         # CameraBackend.retrieve, with the fire and the receive under one hold of
-        # the device lock (exclusive borrow).
+        # the device lock (exclusive borrow); the copy runs after it.
         fire = self.trigger.claim(timeout_ms)
         if fire is None:
             return None
@@ -272,9 +272,10 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
             if fire and not self._fire_trigger():
                 self.trigger.unfired()
                 return None
-            return self._fetch(
-                self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+            array = self._receive(
+                self.trigger.fetch_timeout_ms(timeout_ms), answers_trigger=True
             )
+        return self._frame(array, wants_array, answers_trigger=True)
 
     def _fire_trigger(self) -> bool:
         with self._lock:
@@ -288,11 +289,16 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
     def _fetch(
         self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
     ) -> Frame | None:
+        array = self._receive(timeout_ms, answers_trigger)
+        return self._frame(array, wants_array, answers_trigger)
+
+    def _receive(self, timeout_ms: int, answers_trigger: bool):
+        """The next payload under ``_lock``, or None (timed out, or rejected)."""
         with self._lock:
             if not self._streaming():
                 return None
             try:
-                array = self._receive_bounded(timeout_ms)
+                return self._receive_bounded(timeout_ms)
             except Exception as e:
                 # A payload cameleon rejected (short, a trailer error) is this
                 # backend's incomplete image: it answers its trigger.
@@ -300,6 +306,11 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
                 if answers_trigger:
                     self.trigger.answered()
                 return None
+
+    def _frame(
+        self, array, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        """A received payload as an owned frame, off ``_lock``."""
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
         if answers_trigger:

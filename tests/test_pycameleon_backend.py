@@ -1,6 +1,7 @@
 """pycameleon backend node/param mapping, with a mocked camera (no hardware)."""
 
 import asyncio
+import threading
 import types
 
 import numpy as np
@@ -184,6 +185,34 @@ def test_retrieve_executes_trigger_then_receives():
     assert array.shape == (4, 4) and timestamp == 0  # 0 ⇒ host-time fallback
     # With no pending trigger, retrieve times out and returns None.
     assert backend.retrieve(1, lambda: True) is None
+    backend.stop_grab()
+
+
+def test_a_frame_is_copied_off_the_device_lock():
+    # Only the fire and the receive hold the lock, so a Camera-tab read or a stop
+    # never waits behind a frame copy.
+    backend, _cam = _open_backend()
+    backend.start_grab_preview()
+    held: list[bool] = []
+
+    def wants_array():
+        free = threading.Event()
+
+        def probe():  # another thread: the device lock is reentrant
+            if backend._lock.acquire(blocking=False):
+                backend._lock.release()
+                free.set()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        held.append(not free.is_set())
+        return True
+
+    backend.trigger_once()
+    assert backend.retrieve(100, wants_array) is not None
+    assert backend.retrieve_freerun(100, wants_array) is not None
+    assert held == [False, False]
     backend.stop_grab()
 
 
