@@ -21,7 +21,7 @@ The project uses **uv** (no pip in the venv).
 
 ```bash
 uv sync                                   # install (dev + core deps)
-uv run pytest -q -o addopts=""            # ~1,450 tests, ~9.5 min (the -o skips slow coverage)
+uv run pytest -q -o addopts=""            # ~1,500 tests, ~6 min (the -o skips slow coverage)
 uv run ruff check src/                    # lint (clean)
 uv run pyright src/                       # types (documented baseline; net-new must be 0)
 uv run --group docs mkdocs build --strict # docs build + link/nav validation
@@ -33,9 +33,9 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
 - **`fake` backend** is the CI vehicle — a rich SFNC-keyed synthetic camera that
   exercises every node/widget kind without hardware. Prefer adding fake-backed
   regression tests over hardware-only assertions.
-- **Lint/type baselines:** ruff is clean; pyright reports 16 errors (cli, web/app.py's plugin
-  injection, and float() on `object` feature values in the camera layer); every
-  backend's SDK handle is typed `Any`. **New work must add zero.**
+- **Lint/type baselines:** ruff is clean; pyright reports 11 errors (cli, controller's
+  `savez_compressed`, and float() on `object` feature values in the camera
+  layer); every backend's SDK handle is typed `Any`. **New work must add zero.**
 - **`tests/conftest.py`** sets the env (`PYLON_CAMEMU`, `OCTACAM_FAKE_CAMERAS`,
   `OCTACAM_NO_UPDATE_CHECK`), gives each test its own `OCTACAM_CACHE_DIR`,
   restores the `octacam` logger after each test (so use `caplog` —
@@ -56,7 +56,7 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   running event loop in the process, so any later test calling `asyncio.run`
   dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
   retrieve cases); naming the file in a list with others still collects it.
-- **Full-suite runtime is ~9.5 min.** Run the relevant `tests/test_*.py` file(s)
+- **Full-suite runtime is ~6 min.** Run the relevant `tests/test_*.py` file(s)
   during development; run the whole suite before committing.
 - **The dev rig runs Python 3.14, but `requires-python` is `>= 3.10`.** 3.14
   evaluates annotations lazily (PEP 649), so a bug that a 3.10–3.13 user hits at
@@ -114,7 +114,8 @@ src/octacam/
   cli.py            typer CLI: gui, doctor, config, record, flash, benchmark, process
   controller.py     RecordingController — the framework-free record state machine
   config.py         octacam_config.toml parsing (pydantic, tolerant per field;
-                    a file that does not parse at all raises ConfigError)
+                    a file that does not parse at all raises ConfigError), the
+                    strict live RecordingSettings, save-path and safe-name rules
   config_writer.py  writes config snapshots (inline-table TOML for triggerbox)
   writer.py         AsyncFrameWriter → ffmpeg subprocess (H.264) or raw byte dump
   transform.py      DisplayTransform (rotate/flip) + recording-summary constants
@@ -212,7 +213,7 @@ easy to break:
   never read as a clock jump: re-anchoring it filled pulses the camera never
   missed, shifted its video and ended its take early.
 - Under the **software trigger** the index comes from the hand-off's trigger
-  sequence number (`SoftwareTriggerHandoff.last_trigger_index`): a fetched image
+  sequence number (`CameraBackend.last_trigger_index`): a fetched image
   answers the **oldest outstanding** trigger (see the hand-off below), so an
   image that arrives after its fetch timed out keeps its own pulse; a backend
   with no hardware timestamp (pycameleon) is `unclocked` and cannot detect misses.
@@ -320,13 +321,13 @@ which is exactly why the `spinnaker` tier drives the Spinnaker **SDK C API** ove
 that are easy to undo:
 
 - Every tier is enumerated with the rig's **requested serial list**, never `None`
-  — `enumerate_fn(requested_serial_numbers, warn_missing=False)`. The Basler
+  — `spec.enumerate(requested_serial_numbers)`. The Basler
   tier's `CreateDevice` downloads each camera's XML over USB, so sweeping the
   whole bus made a rig pay for cameras it never opens (a 2-camera FLIR rig paid
   for six attached Baslers) and leaked the surplus handles, which are dropped
-  without `DestroyDevice`. `warn_missing=False` is required because each tier
-  legitimately sees serials owned by another; `_enumerate` warns once for a
-  serial no tier claimed. Lower tiers still enumerate the full requested set, so
+  without `DestroyDevice`. An enumeration never reports an absent serial (each
+  tier legitimately sees serials another owns); `CameraSystem._enumerate` warns
+  once for a serial no tier claimed. Lower tiers still enumerate the full requested set, so
   a camera a vendor tier missed still falls through.
 - `enumerate_basler` runs its `CreateDevice` calls **concurrently under a shared
   deadline** (`_create_device_timeout`, 15 s, `OCTACAM_BASLER_CREATE_TIMEOUT`).
@@ -342,14 +343,23 @@ that are easy to undo:
   documents.
 
 ### Backend contract (`cameras/base.py :: CameraBackend`)
-All backends implement: enumerate/open/close; `load_params`/`save_params`;
-frame-trigger setup; a **software-trigger hand-off** (below); `begin_freerun` /
-`retrieve_freerun` (used by the benchmark and free-run preview); and a full
-GenApi node-map walk (`list_features`/`read_feature`/`write_feature`/
-`execute_command`) for the Camera-tab node browser. `basler` walks via genicam;
-`flir`/`spinnaker` walk the C/PySpin node map; `pycameleon` (no introspection)
-and the base fallback use a curated node set. Every `enumerate_*` takes
-`(requested_serials=None, *, warn_missing=True)` — the cascade relies on both.
+`CameraBackend` is an abstract base class every backend subclasses. The base owns
+the serial, `is_grabbing` (the hand-off's flag), `trigger_once`, and the one
+software-trigger `retrieve` (claim → `_fire_trigger()` → `_fetch(timeout_ms,
+wants_array, answers_trigger)`); `retrieve_freerun` is the un-gated `_fetch`. It
+supplies defaults for `grab_locked_features` (Basler overrides),
+`stream_statistics` (`{}`), `retrieve_external` (= `retrieve_freerun`; only the
+fake overrides it), the trigger-period/sequence hooks and `last_trigger_index`.
+pycameleon overrides `retrieve` only to hold its device lock across fire and
+receive. A backend implements open/close, `load_params`/`save_params`, the
+frame-trigger setup, `begin_freerun`, the grab start/stop, `_fire_trigger`/
+`_fetch`, and a GenApi node-map walk (`list_features`/`read_feature`/
+`write_feature`/`execute_command`) for the Camera-tab browser (`basler` via
+genicam, `flir`/`spinnaker` the PySpin/C node map, `pycameleon` a curated node
+set). Each backend module declares `SPEC = BackendSpec(...)` for the registry;
+every `enumerate_*` takes `(requested_serials=None)` and returns
+`registry.select_serials` order; `registry.is_auto()` is the one auto/all/empty
+test.
 
 ## Trigger model
 
@@ -364,13 +374,13 @@ Recording `trigger_source` (config `[record]`):
 `preview_trigger_source` (`auto`|`software`|`free_running`) makes live preview
 approximate the recording — `auto` mirrors `trigger_source`.
 
-**Software-trigger hand-off** (`cameras/_trigger_handoff.py :: SoftwareTriggerHandoff`):
+**Software-trigger hand-off** (`cameras/_trigger_handoff.py :: SoftwareTrigger`, composed on every backend as `backend.trigger`):
 a shared trigger-timer thread calling each backend's device trigger serially let
-a slow FLIR starve a fast Basler. So `trigger_once()` only bumps a `_pending`
-counter; each camera's own `retrieve()` fires the device trigger + fetches one
+a slow FLIR starve a fast Basler. So `trigger_once()` only offers a trigger
+(`trigger.offer`, counted in `trigger.pending`); each camera's own `retrieve()` fires the device trigger + fetches one
 frame. This is why `trigger_once` is *not* a device call. A fired trigger stays
-**outstanding** until an image answers it (`_claim_trigger` / `_trigger_unfired`
-/ `_trigger_answered`): while one is outstanding and younger than
+**outstanding** until an image answers it (`trigger.claim` / `unfired`
+/ `answered`): while one is outstanding and younger than
 `ANSWER_TIMEOUT_S` (1 s), `retrieve` fires nothing and only fetches, so a late
 image is paired with its own trigger — firing on regardless labeled every later
 frame one pulse late. Past the deadline the trigger is given up (a missed pulse).
@@ -410,7 +420,7 @@ not GigE ticks; pycameleon has none). (2) **Drain**: the check cannot see a
 steady one-trigger shift (one period), which starts when a late image waits in
 the buffer while nothing is outstanding — the loop does not fetch when it has
 nothing to fire. So for max(`DRAIN_WINDOW_S`, two periods) after a give-up, an
-idle loop fetches anyway (a `DRAIN_POLL_MS` poll via `_fetch_timeout_ms`, since a
+idle loop fetches anyway (a `DRAIN_POLL_MS` poll via `trigger.fetch_timeout_ms`, since a
 real fetch blocks for its whole timeout and would make the next trigger stale),
 and what it gets answers nothing. Counting start ends the drain and, if priming
 gave a trigger up, resets the offset reference. The fake's `fetch_blocks` models
@@ -461,6 +471,20 @@ defaults — every detected camera, save dir `./`, no plugins, no `[transfer]`
 destination — which reads to an operator as "octacam ignored my config" rather
 than "line 48 is malformed".
 
+**Record settings have one vocabulary.** config.py declares the shared field
+types (`ScalarStr`, `FfmpegArgs`, `TriggerSource`, `PreviewTriggerSource`,
+`SaveMethod`, `RecordForm`). `RecordConfig` uses them tolerantly (warn and default
+per field; the queue and session counts are floored); the live
+`RecordingSettings` (also in config.py, a dataclass) uses them strictly through
+one `TypeAdapter`: `updated()` validates only the changed fields, so a config
+value the GUI would refuse never blocks another edit, and `PUT /api/settings`
+passes its body straight to it (422 naming the field). Save-path string rules are
+config.py functions (`resolve_save_path`, `compose_save_dir`, `normalize_dir`,
+`increment_trailing_number`); the rules over the settings' path fields are
+`RecordingSettings.with_save_dir` (an explicit dir, as with `--output`, clears the
+base/relative split), `next_take` and `relative_save_dir`. Every
+single-path-segment name check goes through `config.safe_segment`.
+
 **Recording folder layout.** A recording folder holds only the videos
 (`<camera>.mkv`/`.raw`/`.mp4`, `grid.mp4`); the summary, `timestamps.npz`, the
 config snapshot and every camera/auxiliary parameter file go into its
@@ -480,8 +504,8 @@ recording's `octacam_recording/` subfolder a relaunchable config dir (camera
 parameter files must stay beside the TOML), and `octacam process` transfers it
 with the videos. Its rules:
 - The rig TOML is re-emitted with the **live** values patched in: the Record tab
-  (`config_writer.with_record_settings` ← `controller.record_config_values`, the
-  inverse of `cli._settings_from_record`), plugin tabs (`with_plugin_options` ←
+  (`config_writer.with_record_settings` ← `RecordingSettings.record_config_values`,
+  the inverse of `RecordingSettings.from_config`, both in config.py), plugin tabs (`with_plugin_options` ←
   the `snapshot_options` hook), the View-tab rotate/flip each camera's
   `display_transform` carries (`with_camera_transforms`, only for cameras the
   config already lists — adding one would change which cameras the rig opens),
@@ -545,22 +569,32 @@ whole `RecordConfig`, so any None-defaulting field would otherwise crash the dum
 
 ## Plugin system
 
-Serial-hardware plugins under `plugins/<name>/`, registered in
-`_BUILTINS = ("flywheel", "twophoton", "triggerbox")` with legacy
+Serial-hardware plugins under `plugins/<name>/`, listed in `plugins._PLUGINS`
+(name → "module:Class", imported on first use by `plugin_class(name)`; each class
+builds itself with `from_options(options)`), with the legacy
 `_ALIASES = {"arduino": "flywheel"}` (old configs keep working). The default
-launch loads none; enable via `[[plugins]]` or `--plugin`.
+launch loads none; enable via `[[plugins]]` or `--plugin`. No entry-point plugins.
 
-Lifecycle hooks (`plugins/base.py :: Plugin`): `on_recording_start/stop`,
-`on_first_frame`, `default_start_params` (so **headless `octacam record` arms the
-board** — a plugin that omits this never arms on the CLI), `drives_preview_trigger`
-/`on_preview_start/stop`, `snapshot_options` (the live settings a recording's
-config snapshot must carry; a plugin whose tab edits settings the config also
-holds must implement it, or a relaunch from the recording behaves differently);
-`trigger_train` (the exact `{period_ns, count}` the recording arm will emit — the
-recording counts frames against it) and `prime_trigger` (sacrificial pulses
-before the train) for a trigger-*generating* plugin;
-`set_controller`/`set_broadcast` are duck-typed injections. Each plugin adds a
-WS topic + `/api/<name>/*` REST + a GUI tab.
+The contract is declared once, on `plugins/base.py :: Plugin`, and nothing probes
+for hooks. Hooks (all with defaults): `setup/teardown`, `is_ready/status`,
+`on_recording_start/stop`, `on_first_frame`, `default_start_params` (so
+**headless `octacam record` arms the board** — a plugin that omits this never
+arms on the CLI), `on_preview_start/stop`, `snapshot_options` (the live settings a
+recording's config snapshot must carry; a plugin whose tab edits settings the
+config also holds must implement it, or a relaunch from the recording behaves
+differently), `api_router`, `on_ws_message/on_ws_disconnect`; for the
+trigger-*generating* plugin (`generates_trigger = True`, found by
+`PluginManager.trigger_plugin()`), `trigger_train` (the exact `{period_ns,
+count}` the recording arm will emit — the recording counts frames against it) and
+`prime_trigger` (sacrificial pulses before the train). Every hook that takes start
+params gets its own slice (`params[plugin.name]`, None when absent).
+`PluginManager.attach()` sets each plugin's `controller` (from
+`RecordingController.__init__`) and `broadcast` (from `create_app`);
+`PluginManager._call` logs and isolates a raising hook. Class facts: `web_dir`
+(the GUI assets) and, for a serial plugin, `firmware` (its FirmwareSpec;
+`sketch_dir` is None without a source checkout) and `default_device`, which
+`octacam flash` and `doctor` read from the class. Each plugin adds a WS topic +
+`/api/<name>/*` REST + a GUI tab.
 
 **triggerbox** generalizes the EPFL `common-trigger-circuit` (Arduino Nano
 ESP32). Self-describing wire protocol v2: `0xA5 | ver=2 | len u16 | payload |

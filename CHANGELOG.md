@@ -50,6 +50,12 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Changed
 
+- `PUT /api/settings` reports a bad value as one message naming the field, in any
+  state (only a valid change answers 409 during a take). It no longer coerces
+  `true`/`2.0`/`"3"` into the integer settings or accepts `null` for a setting
+  that has no "auto" value.
+- `octacam record`'s firmware prompt on a terminal uses `octacam flash`'s wording.
+- `octacam config --backend ""` means auto, like every other backend selector.
 - `octacam benchmark --json` (and the GUI's benchmark payload) no longer reports
   `transfer_bound` or `freerun_max_fps`; use `bottleneck == "transfer"` and
   `ceilings.freerun_min`. `--sink` and `--record-form` list their choices in
@@ -84,6 +90,8 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Removed
 
+- Registering plugins through an `octacam.plugins` entry-point group (it was
+  undocumented and unused).
 - **`GET /api/config/configs`, `GET /api/diagnostics/last` and the triggerbox and
   twophoton `GET /api/<plugin>/status` routes**, which no client called. A
   browser that connects still gets the last benchmark report over the WebSocket,
@@ -97,6 +105,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **Encoder args with bad shell quoting were accepted by the Record tab**, and
+  every camera's writer then failed at record start; they are refused when entered.
+- **`octacam doctor --backend auto` (or `all`) reported an unknown backend**
+  instead of every tier and the cascade's selection.
 - **A benchmark started just after a recording could run while the trigger board
   was being re-armed for preview**, pulsing the trigger line through the
   free-run benchmark: it is now refused until the recording has fully finished.
