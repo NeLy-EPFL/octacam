@@ -344,11 +344,13 @@ def test_nvenc_writer_encodes_real_gpu(tmp_path):
     from octacam.writer import FfmpegVideoWriter
 
     out = tmp_path / "nv.mkv"
-    writer = FfmpegVideoWriter(ffmpeg_params=NVENC_H264_PARAMS)
+    # Room for every frame: a GPU slow to start NVENC must not make write()
+    # refuse the burst's tail.
+    writer = FfmpegVideoWriter(ffmpeg_params=NVENC_H264_PARAMS, max_queue_size=64)
     assert writer.open(str(out), 30.0, (640, 480))  # (width, height)
     rng = np.random.default_rng(0)
     for _ in range(30):
-        writer.write(rng.integers(0, 255, size=(480, 640), dtype=np.uint8))
+        assert writer.write(rng.integers(0, 255, size=(480, 640), dtype=np.uint8))
     writer.close()
     assert not writer.failed, writer.error_tail
     assert out.stat().st_size > 0
