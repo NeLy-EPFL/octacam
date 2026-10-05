@@ -1,6 +1,8 @@
 """The software-trigger hand-off's pairing (cameras/_trigger_handoff.py), through
 its public API, on a hand-driven clock so every deadline is exact."""
 
+import logging
+
 import pytest
 
 from octacam.cameras._trigger_handoff import (
@@ -10,6 +12,7 @@ from octacam.cameras._trigger_handoff import (
     PENDING_MAX,
     PRIMING_ANSWER_TIMEOUT_S,
     PRIMING_TRIGGER,
+    REFERENCE_MIN_SAMPLES,
     UNMATCHED_TRIGGER,
     SoftwareTrigger,
 )
@@ -148,6 +151,20 @@ def test_trusts_no_reference_of_too_few_answers_and_heals_a_bad_one(trigger, clo
     assert trigger.last_index == 11 and trigger.stale_images == 1
 
 
+def test_a_priming_give_up_clears_the_reference_at_counting_start(trigger, clock):
+    # Priming's answers may be a stalled image's (here all 0.2 s late): once
+    # priming gave a trigger up, counting starts with no reference, so the
+    # train's first normal image is not judged stale against them.
+    for _ in range(REFERENCE_MIN_SAMPLES):
+        _answer_after(trigger, clock, 200_000_000)
+    _fire(trigger)
+    clock.advance(ANSWER_TIMEOUT_S + 0.01)
+    assert trigger.claim(10) is False  # given up on: a drain
+    trigger.restart_sequence()
+    _answer_after(trigger, clock, 1_000_000)
+    assert trigger.last_index == 0 and trigger.stale_images == 0
+
+
 def test_drops_a_trigger_left_pending_for_half_a_period(trigger, clock):
     # While a recording counts at a low rate, a trigger left pending behind an
     # unanswered one must be dropped once it is half a period old — not fired a
@@ -187,6 +204,19 @@ def test_after_a_give_up_an_idle_loop_drains_with_a_short_poll(trigger, clock):
     clock.advance(DRAIN_WINDOW_S + 0.01)
     assert trigger.claim(10) is None  # the drain is over: wait for a trigger
     assert trigger.fetch_timeout_ms(100) == 100
+
+
+def test_a_period_stretches_the_drain_to_two_periods(trigger, clock):
+    trigger.configure_period(0.2)
+    trigger.restart_sequence()
+    _fire(trigger)
+    clock.advance(ANSWER_TIMEOUT_S + 0.01)
+    assert trigger.claim(10) is False  # given up on: the drain starts
+    clock.advance(DRAIN_WINDOW_S + 0.05)  # past the window, short of 2 periods
+    assert trigger.claim(10) is False
+    assert trigger.fetch_timeout_ms(100) == DRAIN_POLL_MS
+    clock.advance(0.4 - DRAIN_WINDOW_S)
+    assert trigger.claim(10) is None
 
 
 def test_counting_start_ends_a_drain(trigger, clock):
@@ -234,6 +264,43 @@ def test_pending_max_drops_the_newest_and_numbers_it(trigger):
     assert trigger.claim(10) is True
     trigger.answered()
     assert trigger.last_index == 0  # the oldest fires first
+
+
+def _warnings(caplog, text: str) -> int:
+    return sum(
+        text in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_overflow_warns_on_the_first_drop_and_every_hundredth(trigger, caplog):
+    caplog.set_level(logging.WARNING, logger="octacam")
+    for _ in range(PENDING_MAX + 100):
+        trigger.offer()
+    assert trigger.dropped_triggers == 100
+    assert _warnings(caplog, "dropping software triggers") == 1
+    trigger.offer()
+    assert _warnings(caplog, "dropping software triggers") == 2
+
+
+def test_each_lost_trigger_kind_warns_once(trigger, clock, caplog):
+    # Unanswered, stale-pending and stale-image losses share the rate limit; each
+    # warns on its first event.
+    caplog.set_level(logging.WARNING, logger="octacam")
+    trigger.configure_period(0.2)
+    trigger.restart_sequence()
+    _fire(trigger)  # never answered
+    clock.advance(0.2)
+    trigger.offer()  # left pending behind it
+    clock.advance(ANSWER_TIMEOUT_S)
+    assert trigger.claim(10) is False
+    assert trigger.unanswered_triggers == 1 and trigger.stale_triggers == 1
+    for _ in range(REFERENCE_MIN_SAMPLES):
+        _answer_after(trigger, clock, 1_000_000)
+    _fire(trigger)
+    trigger.answered(clock.ns + CAMERA_AHEAD_NS - 200_000_000)
+    assert trigger.stale_images == 1
+    for text in ("no image arrived", "could no longer", "arrived after its trigger"):
+        assert _warnings(caplog, text) == 1, text
 
 
 def test_offers_outside_a_grab_are_dropped(trigger):
