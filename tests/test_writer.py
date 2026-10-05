@@ -249,7 +249,8 @@ def test_capture_pipes_rawvideo_into_the_configured_encoder(tmp_path, monkeypatc
         assert writer.write(frame)
     writer.close()
     assert not writer.failed, writer.error_tail
-    ((args, kwargs),) = launched
+    # The first find_ffmpeg() in a process also runs the bundled ffmpeg -version.
+    ((args, kwargs),) = [launch for launch in launched if "pipe:0" in launch[0]]
     assert args[args.index("-video_size") + 1] == f"{WIDTH}x{HEIGHT}"
     assert args[args.index("-framerate") + 1] == "30"
     assert args[args.index("-pixel_format") + 1] == "gray"  # input pix fmt
