@@ -139,6 +139,17 @@ def test_transcode_file_gives_the_4_2_0_rule_its_frame_size(tmp_path, monkeypatc
     assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "yuv420p"
 
 
+def test_transcode_file_sizes_an_encoded_inputs_bar_from_frames(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "octacam.transcode.run_ffmpeg", lambda args, src, **k: captured.update(k)
+    )
+    transcode_file(tmp_path / "cam.mkv", tmp_path / "cam.mp4", frames=7)
+    assert captured["total_frames"] == 7
+    transcode_file(tmp_path / "cam.mkv", tmp_path / "cam.mp4")
+    assert captured["total_frames"] is None  # no count: an indeterminate bar
+
+
 @pytest.mark.parametrize("suffix", [".mkv", ".raw"])
 def test_transcode_file_with_no_argv_leaves_the_folder_alone(tmp_path, suffix):
     # Bad quoting fails before a temp exists, so no orphan sweep runs either.
