@@ -1,5 +1,7 @@
 """Plugin registry + manager behavior."""
 
+import functools
+
 import pytest
 
 import octacam.plugins as plugins_mod
@@ -121,6 +123,18 @@ def test_dispatch_swallows_plugin_exceptions():
             raise RuntimeError("boom")
 
     PluginManager([Boom()]).on_first_frame(None)  # must not raise
+
+
+def test_a_failing_hook_without_a_name_is_still_isolated():
+    class Partial(Plugin):
+        name = "partial"
+
+        def _boom(self, *args):
+            raise RuntimeError("boom")
+
+        on_first_frame = functools.partialmethod(_boom)
+
+    PluginManager([Partial()]).on_first_frame(None)  # must not raise
 
 
 def test_attach_gives_every_plugin_the_controller_and_the_broadcast():
