@@ -181,6 +181,7 @@ class TwoPhotonPlugin(Plugin):
         self._link = TwoPhotonLink(
             self._on_arduino_status, on_broken=self._on_link_broken
         )
+        assert self.firmware is not None
         self._fw = fw.FirmwareProvisioner(
             self.firmware,
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),

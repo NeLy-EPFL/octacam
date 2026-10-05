@@ -639,6 +639,7 @@ class TriggerboxPlugin(Plugin):
             on_broken=self._on_link_broken,
             on_reject=self._on_arduino_reject,
         )
+        assert self.firmware is not None
         self._fw = fw.FirmwareProvisioner(
             self.firmware,
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),

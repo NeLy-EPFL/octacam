@@ -311,6 +311,7 @@ class FlywheelPlugin(Plugin):
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = SerialLink()
+        assert self.firmware is not None
         self._fw = fw.FirmwareProvisioner(
             replace(self.firmware, fqbn=fqbn),
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
