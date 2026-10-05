@@ -45,12 +45,8 @@ import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import serial
-
-if TYPE_CHECKING:
-    from octacam.controller import RecordingController
 
 from octacam import firmware as fw
 from octacam import serial_ports
@@ -609,6 +605,8 @@ class TriggerboxPlugin(Plugin):
     channel; the board then runs them on its own clock."""
 
     name = "triggerbox"
+    generates_trigger = True
+    web_dir = Path(__file__).parent / "web"
 
     def __init__(
         self,
@@ -643,7 +641,6 @@ class TriggerboxPlugin(Plugin):
         self._configured_lights = [replace(lt) for lt in self._lights]
         # A tab edit re-arms the board only during an (indefinite) preview arm.
         self._preview_armed = False
-        self._controller: RecordingController | None = None
         self._link = TriggerboxLink(
             self._on_arduino_status,
             on_broken=self._on_link_broken,
@@ -666,7 +663,6 @@ class TriggerboxPlugin(Plugin):
         self._last_reject: str | None = None
         self._last_error: str | None = None
         self._ack_timeout_s = ACK_TIMEOUT_S
-        self._broadcast: Callable[[str, dict], None] | None = None
 
     @classmethod
     def from_options(cls, options: dict) -> TriggerboxPlugin:
@@ -745,17 +741,10 @@ class TriggerboxPlugin(Plugin):
             lights=lights,
         )
 
-    def set_broadcast(self, callback: Callable[[str, dict], None]) -> None:
-        self._broadcast = callback
-
-    def set_controller(self, controller: RecordingController) -> None:
-        """The controller, whose cameras give the auto duty its exposures."""
-        self._controller = controller
-
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash while a recording runs or the board is armed. The
         controller's state comes first: it flips before the board's 'R' arrives."""
-        controller = self._controller
+        controller = self.controller
         if controller is not None and controller.recording_active:
             return True, "refusing to flash while a recording is active — stop it first"
         if self._arduino_state == "running":
@@ -787,7 +776,8 @@ class TriggerboxPlugin(Plugin):
             return 0.0
 
     def _camera_timings(self) -> list[CameraTiming]:
-        controller = self._controller
+        """The live cameras' timings (the controller's), for the auto duty."""
+        controller = self.controller
         if controller is None:
             return []
         try:
@@ -878,21 +868,20 @@ class TriggerboxPlugin(Plugin):
         self._broadcast_state()
 
     def _broadcast_state(self) -> None:
-        if self._broadcast is not None:
-            check = self._fw.check
-            self._broadcast(
-                "triggerbox_state",
-                {
-                    "state": self._arduino_state,
-                    "device": self.device,
-                    "ready": self._link.is_open,
-                    "firmware": self._firmware,
-                    "firmware_ok": self._firmware_ok,
-                    "firmware_state": check.state.value if check else None,
-                    "needs_flash": bool(check and check.needs_flash),
-                    "error": self._last_error,
-                },
-            )
+        check = self._fw.check
+        self.broadcast(
+            "triggerbox_state",
+            {
+                "state": self._arduino_state,
+                "device": self.device,
+                "ready": self._link.is_open,
+                "firmware": self._firmware,
+                "firmware_ok": self._firmware_ok,
+                "firmware_state": check.state.value if check else None,
+                "needs_flash": bool(check and check.needs_flash),
+                "error": self._last_error,
+            },
+        )
 
     # -------------------------------------------------- process lifecycle
 
@@ -1286,9 +1275,6 @@ class TriggerboxPlugin(Plugin):
 
     # ----------------------------------------------------------- preview arm
 
-    def drives_preview_trigger(self) -> bool:
-        return True
-
     def on_preview_start(self, params: dict | None) -> None:
         """Arm the board until cancelled, with the recording's spec."""
         spec = self._spec_from_params(params)
@@ -1325,9 +1311,6 @@ class TriggerboxPlugin(Plugin):
         return True
 
     # -------------------------------------------------- web contributions
-
-    def web_assets(self) -> Path:
-        return Path(__file__).parent / "web"
 
     def api_router(self):
         from fastapi import APIRouter, Body

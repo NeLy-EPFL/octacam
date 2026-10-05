@@ -571,9 +571,7 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
 
     class StubWebPlugin(Plugin):
         name = "stub"
-
-        def web_assets(self):
-            return assets
+        web_dir = assets
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
     system.load_config(tmp_path)

@@ -539,6 +539,7 @@ class RecordingController:
         self._ready = ready
         self._init_error: str | None = None
         self.plugins = plugins if plugins is not None else PluginManager([])
+        self.plugins.attach(controller=self)
         self._settings = settings
         self._auto_preview = auto_preview
         # A config predating "managed" says "external" with a trigger-driving
@@ -546,7 +547,7 @@ class RecordingController:
         # the same, and auto preview drives the plugin instead of free-running.
         if (
             self._settings.trigger_source == "external"
-            and self._preview_trigger_plugin() is not None
+            and self.managed_trigger_available
         ):
             self._settings = dataclasses.replace(self._settings, trigger_source="managed")
             log.info(
@@ -981,22 +982,10 @@ class RecordingController:
 
     # -------------------------------------------------------------- preview
 
-    def _preview_trigger_plugin(self):
-        """The first loaded plugin that generates the trigger (triggerbox), else
-        None; without one a ``managed`` preview free-runs."""
-        for plugin in self.plugins.plugins:
-            drives = getattr(plugin, "drives_preview_trigger", None)
-            try:
-                if callable(drives) and drives():
-                    return plugin
-            except Exception:
-                log.exception("plugin drives_preview_trigger check failed")
-        return None
-
     @property
     def managed_trigger_available(self) -> bool:
         """Whether a loaded plugin can drive the trigger (``managed`` is usable)."""
-        return self._preview_trigger_plugin() is not None
+        return self.plugins.trigger_plugin() is not None
 
     def _effective_preview_mode(self) -> str:
         """The preview trigger mode: software | free_running | managed.
@@ -1011,7 +1000,7 @@ class RecordingController:
         src = self._settings.trigger_source  # auto
         if src == "software":
             return "software"
-        if src == "managed" and self._preview_trigger_plugin() is not None:
+        if src == "managed" and self.managed_trigger_available:
             return "managed"
         return "free_running"
 
@@ -1032,9 +1021,9 @@ class RecordingController:
         """Arm the driving plugin for a managed preview; any other mode (or None,
         idle) cancels a preview arm that may be running. Off the lock."""
         if mode == "managed":
-            self.plugins.dispatch("on_preview_start", self._preview_arm_params())
+            self.plugins.on_preview_start(self._preview_arm_params())
         else:
-            self.plugins.dispatch("on_preview_stop")
+            self.plugins.on_preview_stop()
 
     def _preview_arm_params(self) -> dict:
         """The recording's arm parameters, so preview strobes as the recording
@@ -1113,7 +1102,7 @@ class RecordingController:
             self._starting = True
         try:
             if disarm_preview:
-                self.plugins.dispatch("on_preview_stop")
+                self.plugins.on_preview_stop()
             if profiles is None:  # skipped above; `_starting` now holds the cameras
                 profiles = self._read_delivery_profiles()
             return self._start_recording_admitted(plugin_params, pre_params, profiles)
@@ -1245,7 +1234,7 @@ class RecordingController:
             if not self._stop_event.is_set():
                 if use_software_trigger:
                     self.camera_system.start_software_trigger(settings.duration_s)
-                self.plugins.dispatch("on_recording_start", plugin_params)
+                self.plugins.on_recording_start(plugin_params)
                 # Anchored after the arm returns: it can take seconds (a board's
                 # USB-reset recovery), which an earlier anchor cuts from the take.
                 if clock.count and clock.fill:
@@ -1389,7 +1378,7 @@ class RecordingController:
             # The benchmark free-runs the cameras: stop the preview and disarm a
             # plugin that would keep pulsing the trigger line.
             self.camera_system.stop_software_trigger()
-            self.plugins.dispatch("on_preview_stop")
+            self.plugins.on_preview_stop()
             self.camera_system.stop()
 
             def progress(p) -> None:
@@ -1470,7 +1459,7 @@ class RecordingController:
         except Exception:
             log.exception("Recording monitor crashed; forcing idle")
             with contextlib.suppress(Exception):
-                self.plugins.dispatch("on_recording_stop", self._aborted)
+                self.plugins.on_recording_stop(self._aborted)
             with self._lock:
                 self._tearing_down = False
                 self._set_state("idle")
@@ -1532,7 +1521,7 @@ class RecordingController:
             # First-frame hooks (flywheel motion) start the countdown, never
             # before the arm.
             hooks_done.wait(hooks_timeout_s)
-            self.plugins.dispatch("on_first_frame", plugin_params)
+            self.plugins.on_first_frame(plugin_params)
             with self._lock:
                 deadline = time.monotonic() + duration_s + STOP_GRACE_S
                 self._deadline = deadline
@@ -1649,7 +1638,7 @@ class RecordingController:
                     self._set_state("idle")
                     resume_mode = None
             hooks_done.wait(hooks_timeout_s)
-            self.plugins.dispatch("on_recording_stop", aborted)
+            self.plugins.on_recording_stop(aborted)
             # After the recording's cancel, so the record arm is torn down first.
             self._dispatch_preview_arm(resume_mode)
             self._event(

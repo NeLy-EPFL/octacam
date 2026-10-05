@@ -165,6 +165,7 @@ class TwoPhotonPlugin(Plugin):
     """Arms the 2-photon trigger with the recording's fps and duration."""
 
     name = "twophoton"
+    web_dir = Path(__file__).parent / "web"
 
     def __init__(
         self,
@@ -198,7 +199,6 @@ class TwoPhotonPlugin(Plugin):
         self._arduino_state = "idle"
         self._armed_event = threading.Event()
         self._ack_timeout_s = ACK_TIMEOUT_S
-        self._broadcast: Callable[[str, dict], None] | None = None
 
     @classmethod
     def from_options(cls, options: dict) -> TwoPhotonPlugin:
@@ -239,9 +239,6 @@ class TwoPhotonPlugin(Plugin):
             return True, "refusing to flash while the trigger is armed/running — stop the recording first"
         return False, ""
 
-    def set_broadcast(self, callback: Callable[[str, dict], None]) -> None:
-        self._broadcast = callback
-
     def _on_arduino_status(self, status: str) -> None:
         state = _STATE_LABELS.get(status, "idle")
         if state == "armed":
@@ -259,11 +256,9 @@ class TwoPhotonPlugin(Plugin):
         self._broadcast_state()
 
     def _broadcast_state(self) -> None:
-        if self._broadcast is None:
-            return
         # Every push carries readiness and firmware state: no client polls.
         check = self._fw.check
-        self._broadcast(
+        self.broadcast(
             "twophoton_state",
             {
                 "state": self._arduino_state,
@@ -434,9 +429,6 @@ class TwoPhotonPlugin(Plugin):
         self._set_arduino_state("idle")
 
     # -------------------------------------------------- web contributions
-
-    def web_assets(self) -> Path:
-        return Path(__file__).parent / "web"
 
     def api_router(self):
         from fastapi import APIRouter, Body

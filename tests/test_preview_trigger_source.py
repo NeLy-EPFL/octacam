@@ -24,14 +24,12 @@ class DrivingPlugin(Plugin):
     trigger during preview and records the arm/disarm calls it receives."""
 
     name = "faketrigger"
+    generates_trigger = True
 
     def __init__(self):
         self.preview_starts = 0
         self.preview_stops = 0
         self.last_params = None
-
-    def drives_preview_trigger(self) -> bool:
-        return True
 
     def on_preview_start(self, params) -> None:
         self.preview_starts += 1

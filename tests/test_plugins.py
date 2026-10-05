@@ -96,7 +96,71 @@ def test_dispatch_swallows_plugin_exceptions():
         def on_first_frame(self, params):
             raise RuntimeError("boom")
 
-    PluginManager([Boom()]).dispatch("on_first_frame", None)  # must not raise
+    PluginManager([Boom()]).on_first_frame(None)  # must not raise
+
+
+def test_attach_gives_every_plugin_the_controller_and_the_broadcast():
+    a, b = Plugin(), Plugin()
+    manager = PluginManager([a, b])
+    a.broadcast("topic", {})  # a no-op until attached
+    controller, sent = object(), []
+    manager.attach(controller=controller)
+    manager.attach(broadcast=lambda topic, payload: sent.append(topic))
+    assert a.controller is b.controller is controller  # a later attach keeps it
+    a.broadcast("a_state", {})
+    b.broadcast("b_state", {})
+    assert sent == ["a_state", "b_state"]
+
+
+def test_only_the_trigger_plugin_is_asked_for_the_train_and_priming():
+    class Other(Plugin):
+        name = "other"
+
+        def trigger_train(self, params):
+            raise AssertionError("asked a plugin that does not generate the trigger")
+
+        def prime_trigger(self, params, pulses):
+            raise AssertionError("asked a plugin that does not generate the trigger")
+
+    class Board(Plugin):
+        name = "board"
+        generates_trigger = True
+
+        def trigger_train(self, params):
+            return {"period_ns": 10_000_000, "count": params["board"]["count"]}
+
+        def prime_trigger(self, params, pulses):
+            return pulses == 4
+
+    assert PluginManager([Other()]).trigger_plugin() is None
+    assert PluginManager([Other()]).trigger_train({}) is None
+    assert PluginManager([Other()]).prime_trigger({}, 4) is False
+    board = Board()
+    manager = PluginManager([Other(), board])
+    assert manager.trigger_plugin() is board
+    assert manager.trigger_train({"board": {"count": 7}})["count"] == 7
+    assert manager.prime_trigger({}, 4) is True
+
+
+def test_a_ws_message_goes_to_the_first_plugin_that_claims_it():
+    seen = []
+
+    class Claims(Plugin):
+        def __init__(self, name, claims):
+            self.name, self.claims = name, claims
+
+        def on_ws_message(self, message, client_id):
+            seen.append(self.name)
+            if self.claims == "raise":
+                raise ValueError("bad message")
+            return self.claims
+
+    PluginManager([Claims("a", False), Claims("b", True), Claims("c", True)]).on_ws_message({}, 1)
+    assert seen == ["a", "b"]
+    seen.clear()
+    # A raising hook is logged and counts as handled: the message goes no further.
+    PluginManager([Claims("a", "raise"), Claims("b", True)]).on_ws_message({}, 1)
+    assert seen == ["a"]
 
 
 def test_snapshot_options_lists_every_plugin():
@@ -109,22 +173,18 @@ def test_snapshot_options_lists_every_plugin():
     class Unchanged(Plugin):
         name = "unchanged"  # the base hook: nothing differs from the config
 
-    class Legacy:
-        name = "legacy"  # predates the hook and doesn't subclass Plugin
-
     class Boom(Plugin):
         name = "boom"
 
         def snapshot_options(self, params):
             raise RuntimeError("boom")
 
-    manager = PluginManager([Live(), Unchanged(), Legacy(), Boom()])
+    manager = PluginManager([Live(), Unchanged(), Boom()])
     # Every loaded plugin is keyed (so the snapshot lists it); only a plugin with
     # live changes contributes options, and a failing hook never raises.
     assert manager.snapshot_options({"live": [1]}) == {
         "live": {"lights": [1]},
         "unchanged": {},
-        "legacy": {},
         "boom": {},
     }
 

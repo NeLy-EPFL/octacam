@@ -296,6 +296,7 @@ class JogClock:
 
 class FlywheelPlugin(Plugin):
     name = "flywheel"
+    web_dir = Path(__file__).parent / "web"
 
     def __init__(
         self,
@@ -496,9 +497,6 @@ class FlywheelPlugin(Plugin):
         return command
 
     # --------------------------------------------------------- web contrib
-
-    def web_assets(self) -> Path:
-        return Path(__file__).parent / "web"
 
     def api_router(self):
         from fastapi import APIRouter, Body, HTTPException

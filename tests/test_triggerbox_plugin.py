@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from helpers import wait_until
 
 from octacam.plugins import build_plugins, plugin_class
+from octacam.plugins.base import PluginManager
 from octacam.plugins.triggerbox import (
     _PROTOCOL_VERSION,
     PIN_LABELS,
@@ -42,7 +43,7 @@ _LIGHT = struct.Struct("<BBIIII")
 
 
 class _Broadcasts:
-    """Capture set_broadcast() calls so a test can assert what the GUI is told."""
+    """Capture the plugin's broadcasts so a test can assert what the GUI is told."""
 
     def __init__(self):
         self.msgs: list[dict] = []
@@ -325,8 +326,8 @@ def test_auto_and_manual_channels_size_independently():
         ],
         strobe_guard_us=100,
     )
-    plugin.set_controller(
-        FakeController([FakeCamera("a", 2000, 50), FakeCamera("b", 1000, 0)])
+    PluginManager([plugin]).attach(
+        controller=FakeController([FakeCamera("a", 2000, 50), FakeCamera("b", 1000, 0)])
     )
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     lights = _last_arm(link)["lights"]
@@ -340,8 +341,8 @@ def test_auto_duty_skips_camera_without_exposure_but_uses_others():
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}], strobe_guard_us=0
     )
-    plugin.set_controller(
-        FakeController([FakeCamera("a", None), FakeCamera("b", 1500, 0)])
+    PluginManager([plugin]).attach(
+        controller=FakeController([FakeCamera("a", None), FakeCamera("b", 1500, 0)])
     )
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert _last_arm(link)["lights"][0][3] == 1500
@@ -351,7 +352,9 @@ def test_auto_duty_reads_trigger_delay_zero_when_unavailable():
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}], strobe_guard_us=0
     )
-    plugin.set_controller(FakeController([FakeCamera("a", 1000, 999, has_delay=False)]))
+    PluginManager([plugin]).attach(
+        controller=FakeController([FakeCamera("a", 1000, 999, has_delay=False)])
+    )
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert _last_arm(link)["lights"][0][3] == 1000  # delay treated as 0
 
@@ -370,9 +373,9 @@ def test_auto_duty_without_controller_falls_back_to_manual(caplog):
 # ===========================================================================
 
 
-def test_drives_preview_trigger_is_true():
+def test_triggerbox_generates_the_trigger():
     plugin, _link = _plugin_with_fake()
-    assert plugin.drives_preview_trigger() is True
+    assert PluginManager([plugin]).trigger_plugin() is plugin
 
 
 def test_preview_arm_matches_recording_except_indefinite_duration():
@@ -714,7 +717,7 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1])
     bc = _Broadcasts()
     plugin, link = _plugin_with_fake()
-    plugin.set_broadcast(bc)
+    PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
     plugin._ack_timeout_s = 0.03
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
@@ -731,7 +734,7 @@ def test_arm_write_failure_is_reported_and_recovered(monkeypatch):
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (True, "reset"))
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
-    plugin.set_broadcast(bc)
+    PluginManager([plugin]).attach(broadcast=bc)
     link.fail_writes = True  # wedged: every write fails
     plugin.on_recording_start({"triggerbox": {"fps": 80, "duration_ms": 1000}})
     assert link.closes >= 1  # recovery cycled the link
@@ -744,7 +747,7 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (True, "reset"))
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
-    plugin.set_broadcast(bc)
+    PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
     plugin._ack_timeout_s = 0.2  # first arm times out quickly, then recovery re-arms
 
@@ -879,7 +882,9 @@ def test_status_surfaces_last_error():
 
 def test_exposures_endpoint_lists_camera_timings():
     plugin, _link = _plugin_with_fake(strobe_guard_us=100)
-    plugin.set_controller(FakeController([FakeCamera("a", 2000, 50)]))
+    PluginManager([plugin]).attach(
+        controller=FakeController([FakeCamera("a", 2000, 50)])
+    )
     data = _test_client(plugin).get("/api/triggerbox/exposures").json()
     assert data["guard_us"] == 100
     assert data["cameras"] == [
@@ -893,7 +898,7 @@ def test_exposures_endpoint_empty_without_controller():
 
 
 def test_exposures_endpoint_follows_a_late_attached_camera_system():
-    """The endpoint is a live read, not a snapshot taken at set_controller time.
+    """The endpoint is a live read, not a snapshot taken at attach time.
 
     Serve-first startup hands the plugin a controller whose camera system is
     still the hardware-free placeholder (zero cameras), and swaps in the real one
@@ -901,7 +906,7 @@ def test_exposures_endpoint_follows_a_late_attached_camera_system():
     makes the tab's re-read on the init push (triggerbox.js applyStatus) work."""
     plugin, _link = _plugin_with_fake(strobe_guard_us=100)
     controller = FakeController([])
-    plugin.set_controller(controller)
+    PluginManager([plugin]).attach(controller=controller)
     client = _test_client(plugin)
 
     assert client.get("/api/triggerbox/exposures").json()["cameras"] == []
@@ -1184,7 +1189,7 @@ def test_no_source_falls_back_to_banner_compatibility():
 def test_broadcast_includes_firmware_state():
     plugin, link = _plugin_with_fake()
     bc = _Broadcasts()
-    plugin.set_broadcast(bc)
+    PluginManager([plugin]).attach(broadcast=bc)
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
     plugin._broadcast_state()
     last = bc.msgs[-1]
@@ -1216,7 +1221,7 @@ def test_flash_firmware_refused_while_recording():
     plugin, _link = _plugin_with_fake()
     controller = FakeController([])
     controller.recording_active = True
-    plugin.set_controller(controller)
+    PluginManager([plugin]).attach(controller=controller)
     result = plugin.flash_firmware()
     assert not result.ok
     assert "recording" in result.message
@@ -1509,7 +1514,7 @@ def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
     )
     if exposure_us is not None:
         controller = FakeController([FakeCamera("a", exposure_us, 0)])
-        plugin.set_controller(controller)  # pyright: ignore[reportArgumentType]
+        PluginManager([plugin]).attach(controller=controller)
     params = {"triggerbox": {"fps": fps, "duration_ms": 10_000}}
     count = _train_count(plugin, params)
     plugin.on_recording_start(params)

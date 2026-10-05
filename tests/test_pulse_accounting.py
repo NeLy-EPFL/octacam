@@ -88,6 +88,7 @@ class Board(Plugin):
     trigger at the period, primes with sacrificial pulses, like the triggerbox."""
 
     name = "board"
+    generates_trigger = True
 
     def __init__(self, system, count, period_ns=PERIOD_NS):
         self.system = system

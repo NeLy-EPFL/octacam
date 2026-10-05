@@ -25,6 +25,7 @@ from octacam.cli import (
     _resolve_enabled,
     app,
 )
+from octacam.plugins.base import PluginManager
 
 runner = CliRunner()
 
@@ -249,17 +250,14 @@ def _fake_camera_system(cam):
 _FACADE_CALLS: list[str] = []
 
 
-class _FakePlugins:
-    plugins: list = []
+class _FakePlugins(PluginManager):
+    """No plugins; journals the setup and teardown the CLI calls."""
 
     def setup_all(self):
         _FACADE_CALLS.append("setup_all")
 
     def teardown_all(self):
         _FACADE_CALLS.append("teardown_all")
-
-    def status(self):
-        return {}
 
 
 def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
@@ -2187,7 +2185,6 @@ def test_record_preflight_reflashes_headless_only_with_auto_flash(
     monkeypatch, caplog, auto_flash
 ):
     from octacam.cli import _preflight_firmware
-    from octacam.plugins.base import PluginManager
 
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
     plugin = _StaleBoardPlugin(auto_flash)
@@ -2204,7 +2201,6 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
     from rich.prompt import Confirm
 
     from octacam.cli import _preflight_firmware
-    from octacam.plugins.base import PluginManager
 
     asked = []
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
+from octacam.plugins.base import PluginManager
 from octacam.plugins.twophoton import (
     DEFAULT_DURATION_MS,
     DEFAULT_FPS,
@@ -215,7 +216,6 @@ def test_default_start_params_emits_headless_slice():
     # `octacam record` has no GUI to POST plugin_params, so the plugin must
     # contribute an arm slice itself (fps + duration_ms) or the board is never
     # armed and the external-triggered cameras hang forever.
-    from octacam.plugins import PluginManager
 
     plugin, _ = _plugin_with_fake()
     assert plugin.default_start_params(83.0, 12.0) == {"fps": 83, "duration_ms": 12000}
@@ -229,7 +229,9 @@ def test_on_recording_start_surfaces_write_failure_to_gui():
     # must reach the GUI (broadcast + _last_error), not just the server log.
     plugin, link = _plugin_with_fake()
     events: list[tuple[str, dict]] = []
-    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    PluginManager([plugin]).attach(
+        broadcast=lambda topic, data: events.append((topic, data))
+    )
     link.send_arm = lambda params: False  # link open, but the write never lands
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
     assert plugin._last_error and "arm write" in plugin._last_error
@@ -244,7 +246,9 @@ def test_on_recording_start_surfaces_ack_timeout_to_gui():
     link.acks = False
     plugin._ack_timeout_s = 0.05
     events: list[tuple[str, dict]] = []
-    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    PluginManager([plugin]).attach(
+        broadcast=lambda topic, data: events.append((topic, data))
+    )
     plugin.on_recording_start({"twophoton": {"fps": 100, "duration_ms": 1000}})
     assert plugin._last_error and "no arm ack" in plugin._last_error
     assert any(
@@ -278,7 +282,9 @@ def test_arduino_status_updates_internal_state():
 def test_broadcast_called_on_status_change():
     plugin, _ = _plugin_with_fake()
     received = []
-    plugin.set_broadcast(lambda kind, payload: received.append((kind, payload)))
+    PluginManager([plugin]).attach(
+        broadcast=lambda kind, payload: received.append((kind, payload))
+    )
 
     plugin._on_arduino_status("A")
     assert len(received) == 1
@@ -386,7 +392,9 @@ def test_on_recording_start_warns_and_skips_when_link_closed(caplog):
 def test_on_recording_stop_aborted_resets_state_and_broadcasts():
     plugin, link = _plugin_with_fake()
     events: list[tuple[str, dict]] = []
-    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    PluginManager([plugin]).attach(
+        broadcast=lambda topic, data: events.append((topic, data))
+    )
     plugin._arduino_state = "triggered"
     plugin.on_recording_stop(aborted=True)
     # Firmware goes IDLE silently on cancel; the host must reset+broadcast itself.
@@ -434,7 +442,9 @@ def test_link_broken_broadcasts_not_ready():
     # state with ready=False so the GUI disables the arm gate.
     plugin, link = _plugin_with_fake()
     events: list[tuple[str, dict]] = []
-    plugin.set_broadcast(lambda topic, data: events.append((topic, data)))
+    PluginManager([plugin]).attach(
+        broadcast=lambda topic, data: events.append((topic, data))
+    )
     link._open = False  # reader saw the port die
     plugin._on_link_broken()
     topic, data = events[-1]

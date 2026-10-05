@@ -2397,11 +2397,6 @@ def record(
     # by the with, after close().
     with contextlib.ExitStack() as capture:
         try:
-            # Plugins reading live device state (triggerbox's auto strobe duty)
-            # need the controller, as in create_app.
-            for plugin in plugins.plugins:
-                if hasattr(plugin, "set_controller"):
-                    plugin.set_controller(controller)
             capture.enter_context(session_cache.mark_capture_active("recording"))
             log.info(
                 "Recording %d camera(s) at %g fps for %g s to %s",

@@ -757,34 +757,20 @@ def create_app(
     plugins = plugins if plugins is not None else PluginManager([])
     state = _AppState(controller, config, plugins, config_dir)
 
-    # A plugin that pushes over the WS or reads live camera state (triggerbox's
-    # auto strobe duty) gets the broadcast callback or the controller.
-    for plugin in plugins.plugins:
-        if hasattr(plugin, "set_broadcast"):
-            plugin.set_broadcast(state.broadcast_threadsafe)
-        if hasattr(plugin, "set_controller"):
-            plugin.set_controller(controller)
+    plugins.attach(broadcast=state.broadcast_threadsafe)
 
     # Resolved once, so the mounts and /api/system agree on which plugins have a
-    # UI; a bad name, a missing dir or a raising hook means none.
+    # UI; a bad name or a missing dir means none.
     plugin_web: dict[str, Path] = {}
     for plugin in plugins.plugins:
-        try:
-            adir = plugin.web_assets() if hasattr(plugin, "web_assets") else None
-        except Exception:
-            log.exception("Plugin %s web_assets() failed", getattr(plugin, "name", "?"))
-            adir = None
+        adir, name = plugin.web_dir, plugin.name
         if adir is None:
             continue
-        name = plugin.name
         if not _PLUGIN_NAME_RE.match(name):
             log.warning("Plugin %r: name is not URL-safe; not serving its assets", name)
             continue
-        adir = Path(adir)
         if not adir.is_dir():
-            log.warning(
-                "Plugin %r: web_assets dir %s does not exist; skipping", name, adir
-            )
+            log.warning("Plugin %r: web_dir %s does not exist; skipping", name, adir)
             continue
         plugin_web[name] = adir
     state.plugin_web = plugin_web
@@ -1135,18 +1121,11 @@ def create_app(
                 if isinstance(message, dict) and message.get("type") == "view":
                     client.apply_view(message)
                     continue
-                # The first plugin to claim it wins; hooks run in the executor, as
-                # they may block on I/O.
-                for plugin in state.plugins.plugins:
-                    try:
-                        handled = await loop.run_in_executor(
-                            None, plugin.on_ws_message, message, client.id
-                        )
-                    except Exception:
-                        log.exception("Plugin %s.on_ws_message failed", plugin.name)
-                        handled = True  # swallow: a bad message must not kill the socket
-                    if handled:
-                        break
+                # In the executor: a plugin's hook may block on I/O. A raising
+                # hook is logged, so a bad message cannot kill the socket.
+                await loop.run_in_executor(
+                    None, state.plugins.on_ws_message, message, client.id
+                )
         except WebSocketDisconnect:
             pass
         finally:
@@ -1155,7 +1134,7 @@ def create_app(
             # E.g. the flywheel stops a jog this client owned, so a dropped socket
             # cannot leave the motor spinning. In the executor: it may block.
             await loop.run_in_executor(
-                None, state.plugins.dispatch, "on_ws_disconnect", client.id
+                None, state.plugins.on_ws_disconnect, client.id
             )
             sender.cancel()
             with contextlib.suppress(asyncio.CancelledError):
