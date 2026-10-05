@@ -364,6 +364,25 @@ def test_next_take_bumps_the_relative_part_else_save_dir():
     assert split.save_dir == "/base/day/010"
     lone = RecordingSettings(save_dir="/data/001-bhv").next_take()
     assert lone.save_dir == "/data/002-bhv"
+    # The relative part is joined stripped, as a live edit joins it.
+    padded = RecordingSettings(
+        record_directory="/base", relative_directory=" day/009", save_dir="/base/ day/009"
+    ).next_take()
+    assert (padded.relative_directory, padded.save_dir) == (" day/010", "/base/day/010")
+
+
+def test_updated_composes_save_dir_from_the_split():
+    settings = RecordingSettings(record_directory="/base", save_dir="/base")
+    assert settings.updated(relative_directory="day/002").save_dir == "/base/day/002"
+    # Stored as sent, joined stripped.
+    padded = settings.updated(relative_directory=" day/002")
+    assert (padded.relative_directory, padded.save_dir) == (" day/002", "/base/day/002")
+    # An absolute relative part discards the base.
+    for relative in ("/elsewhere/001", " /elsewhere/001"):
+        assert settings.updated(relative_directory=relative).save_dir == "/elsewhere/001"
+    assert settings.updated(record_directory=" ~/b ").save_dir == (
+        f"{os.path.expanduser('~')}/b"
+    )
 
 
 def test_with_save_dir_clears_the_split():

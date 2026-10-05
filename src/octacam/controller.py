@@ -197,9 +197,7 @@ class RecordingSettings:
         if "record_directory" in changes:
             new.record_directory = normalize_dir(new.record_directory)
         if "record_directory" in changes or "relative_directory" in changes:
-            new.save_dir = compose_save_dir(
-                new.record_directory, new.relative_directory
-            )
+            new.save_dir = new._composed_save_dir()
         elif "save_dir" in changes:
             new = new.with_save_dir(new.save_dir)
         return new
@@ -231,12 +229,16 @@ class RecordingSettings:
             return dataclasses.replace(
                 self, save_dir=increment_trailing_number(self.save_dir)
             )
-        relative = increment_trailing_number(self.relative_directory)
-        return dataclasses.replace(
-            self,
-            relative_directory=relative,
-            save_dir=compose_save_dir(self.record_directory, relative),
+        new = dataclasses.replace(
+            self, relative_directory=increment_trailing_number(self.relative_directory)
         )
+        new.save_dir = new._composed_save_dir()
+        return new
+
+    def _composed_save_dir(self) -> str:
+        # A live edit and the next take join the relative part stripped; the
+        # first take (resolve_save_path) joins it as the config wrote it.
+        return compose_save_dir(self.record_directory, self.relative_directory.strip())
 
     def relative_save_dir(self) -> str:
         """The recording folder relative to the base directory: the explicit
