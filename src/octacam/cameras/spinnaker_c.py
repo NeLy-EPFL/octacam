@@ -29,6 +29,7 @@ from octacam.cameras._genicam_config import (
     normalize_trigger_source,
 )
 from octacam.cameras.base import (
+    INT_PARAMS,
     PARAM_NODES,
     BackendError,
     CameraBackend,
@@ -68,10 +69,9 @@ _ERR_NAMES = {
     -2007: "ERR_GENICAM_TIMEOUT",
 }
 
-# Integer SFNC nodes; the rest of PARAM_NODES are floats. The C ABI has no
-# spinIntegerGetUnit or spinFloatGetInc (SDK 4.4), so an int's unit and a float's
-# increment stay None: unitless and continuous on these nodes anyway.
-_INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
+# The C ABI has no spinIntegerGetUnit or spinFloatGetInc (SDK 4.4), so an int
+# node's unit and a float's increment stay None: unitless and continuous on the
+# PARAM_NODES anyway.
 
 # As in flir.py.
 STREAM_STATISTICS = (
@@ -937,14 +937,14 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
         if self._nodemap is None:
             raise BackendError("camera is not open")
         return _spin().read_number(
-            self._nodemap, PARAM_NODES[name], name in _INT_PARAMS
+            self._nodemap, PARAM_NODES[name], name in INT_PARAMS
         )
 
     def write_node(self, name: str, value: float) -> None:
         if self._nodemap is None:
             raise BackendError("camera is not open")
         _spin().write_number(
-            self._nodemap, PARAM_NODES[name], value, name in _INT_PARAMS
+            self._nodemap, PARAM_NODES[name], value, name in INT_PARAMS
         )
 
     def list_features(self) -> list[FeatureInfo]:

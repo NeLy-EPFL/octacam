@@ -51,6 +51,8 @@ LIVE_PARAMS = {
     "offset_y": "OffsetY",
 }
 PARAM_NODES = {**GEOMETRY_PARAMS, **LIVE_PARAMS}
+# The integer ones; the rest are floats.
+INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
 # --- Camera-tab policy, in SFNC node names -------------------------------------
 # ROI size, refused mid-grab on every camera, so written through set_geometry.
@@ -162,7 +164,7 @@ def curated_list_features(backend) -> list["FeatureInfo"]:
 
 
 def _curated_feature(sfnc: str, info: "NodeInfo") -> "FeatureInfo":
-    kind = "int" if _SFNC_TO_SNAKE.get(sfnc) in ("width", "height", "offset_x", "offset_y") else "float"
+    kind = "int" if _SFNC_TO_SNAKE.get(sfnc) in INT_PARAMS else "float"
     return FeatureInfo(
         name=sfnc,
         display_name=sfnc,
@@ -189,7 +191,7 @@ def curated_write_feature(backend, name: str, value: object) -> None:
     snake = _SFNC_TO_SNAKE.get(name)
     if snake is None:
         raise BackendError(f"{name} is not editable on this backend")
-    is_int = snake in ("width", "height", "offset_x", "offset_y")
+    is_int = snake in INT_PARAMS
     backend.write_node(snake, int(float(value)) if is_int else float(value))
 
 

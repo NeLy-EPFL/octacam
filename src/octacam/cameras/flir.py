@@ -21,6 +21,7 @@ from octacam.cameras._genicam_config import (
     fewer_stream_buffers,
 )
 from octacam.cameras.base import (
+    INT_PARAMS,
     PARAM_NODES,
     BackendError,
     CameraBackend,
@@ -72,9 +73,6 @@ def _set_stream_buffers(spin, snodemap, buffers: int, serial: str) -> None:
     except spin.SpinnakerException as e:
         log.debug("Could not size the stream buffers of camera %s: %s", serial, e)
 
-
-# Integer SFNC nodes; the rest of PARAM_NODES are floats.
-_INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
 # The System singleton and its camera list, held until teardown().
 _system = None
@@ -286,7 +284,7 @@ class FlirBackend(GenICamTriggerConfig, CameraBackend):
     def _typed_node(self, name: str):
         spin = _spin()
         raw = self._nodemap().GetNode(PARAM_NODES[name])
-        return spin.CIntegerPtr(raw) if name in _INT_PARAMS else spin.CFloatPtr(raw)
+        return spin.CIntegerPtr(raw) if name in INT_PARAMS else spin.CFloatPtr(raw)
 
     # Each setter wraps SpinnakerException in BackendError: a writable node can
     # still refuse a value (see _genicam_config).
@@ -382,7 +380,7 @@ class FlirBackend(GenICamTriggerConfig, CameraBackend):
         if not spin.IsAvailable(node) or not spin.IsWritable(node):
             raise BackendError(f"node {PARAM_NODES[name]} is not writable")
         try:
-            node.SetValue(int(value) if name in _INT_PARAMS else float(value))
+            node.SetValue(int(value) if name in INT_PARAMS else float(value))
         except spin.SpinnakerException as e:
             raise BackendError(str(e)) from e
 

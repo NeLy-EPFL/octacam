@@ -17,6 +17,7 @@ import numpy as np
 
 from octacam.cameras._genicam_config import GenICamTriggerConfig
 from octacam.cameras.base import (
+    INT_PARAMS,
     PARAM_NODES,
     BackendError,
     CameraBackend,
@@ -35,9 +36,6 @@ except ImportError:  # pragma: no cover - pycameleon ships in core
     pycameleon = None
 
 log = logging.getLogger("octacam")
-
-# Integer SFNC nodes; the rest of PARAM_NODES are floats.
-_INT_PARAMS = frozenset({"width", "height", "offset_x", "offset_y"})
 
 # Payload buffers: one frame per software trigger, so a small pool is plenty.
 _STREAM_CAPACITY = 8
@@ -180,7 +178,7 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
         sfnc = PARAM_NODES[name]
         with self._lock:
             try:
-                if name in _INT_PARAMS:
+                if name in INT_PARAMS:
                     value: float | int = int(self._cam.read_integer(sfnc))
                 else:
                     value = float(self._cam.read_float(sfnc))
@@ -205,7 +203,7 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
         sfnc = PARAM_NODES[name]
         with self._lock:
             try:
-                if name in _INT_PARAMS:
+                if name in INT_PARAMS:
                     self._cam.write_integer(sfnc, int(value))
                 else:
                     self._cam.write_float(sfnc, float(value))
