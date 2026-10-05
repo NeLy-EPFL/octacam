@@ -42,7 +42,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from octacam.cameras.base import GRAB_TIMEOUT_MS, WRITER_QUEUE_SIZE, Camera
+from octacam.cameras.base import (
+    GRAB_TIMEOUT_MS,
+    WRITER_QUEUE_SIZE,
+    Camera,
+    CameraBackend,
+)
 from octacam.transform import apply_display_transform
 from octacam.trigger import PreciseTimer
 from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_formats
@@ -492,50 +497,44 @@ def _cpu_percent_probe():
 # --- Scenarios ---
 
 
-def measure_grab_ceiling(
+def _measure_rate(
     cameras: list[Camera],
+    arm: Callable[[CameraBackend], None],
+    fetch: Callable[[CameraBackend], object],
     duration_s: float,
-    warmup_s: float = WARMUP_S,
-    cancel: threading.Event | None = None,
+    warmup_s: float,
+    cancel: threading.Event | None,
 ) -> dict[str, float]:
-    """Max acquisition fps per camera ({serial: fps}), all grabbing at once on
-    their own threads (so bus and GIL contention count) with no writer; every
-    frame's array is materialized, as in a recording."""
-    results: dict[str, tuple[int, float]] = {}
+    """Each camera's delivered fps ({serial: fps}), all fetching back to back on
+    their own threads (so bus and GIL contention count). A camera whose *arm* or
+    grab raises is left out, for the caller to note: a slowest rate must not
+    silently rise to the rest's."""
+    results: dict[str, float] = {}
     stop = threading.Event()
 
     def loop(camera: Camera) -> None:
         backend = camera.backend
         try:
-            # A camera that fails to arm is missing from the results, and
-            # diagnose() says so: grab_min must not silently rise to the rest's.
-            try:
-                backend.begin_software_trigger_preview()
-                backend.start_grab_preview()
-            except Exception:
-                log.debug(
-                    "grab-ceiling arm failed on %s",
-                    camera.serial_number,
-                    exc_info=True,
-                )
-                return
+            arm(backend)
             warm_deadline = time.perf_counter() + warmup_s
             while time.perf_counter() < warm_deadline and not stop.is_set():
-                backend.trigger_once()
-                backend.retrieve(GRAB_TIMEOUT_MS, _wants_array)
+                fetch(backend)
             grabbed = 0
             t0 = time.perf_counter()
             while not stop.is_set():
-                backend.trigger_once()
-                if backend.retrieve(GRAB_TIMEOUT_MS, _wants_array) is not None:
+                if fetch(backend) is not None:
                     grabbed += 1
             elapsed = time.perf_counter() - t0
-            results[camera.serial_number] = (grabbed, elapsed)
+            results[camera.serial_number] = grabbed / elapsed if elapsed > 0 else 0.0
+        except Exception:
+            log.debug(
+                "rate measurement failed on %s", camera.serial_number, exc_info=True
+            )
         finally:
             backend.stop_grab()
 
     threads = [
-        threading.Thread(target=loop, args=(c,), name=f"grabceil-{c.serial_number}")
+        threading.Thread(target=loop, args=(c,), name=f"rate-{c.serial_number}")
         for c in cameras
     ]
     for t in threads:
@@ -544,10 +543,41 @@ def measure_grab_ceiling(
     stop.set()
     for t in threads:
         t.join()
-    return {
-        serial: (grabbed / elapsed if elapsed > 0 else 0.0)
-        for serial, (grabbed, elapsed) in results.items()
-    }
+    return results
+
+
+def _arm_software(backend: CameraBackend) -> None:
+    backend.begin_software_trigger_preview()
+    backend.start_grab_preview()
+
+
+def _fetch_software(backend: CameraBackend) -> object:
+    backend.trigger_once()
+    return backend.retrieve(GRAB_TIMEOUT_MS, _wants_array)
+
+
+def _arm_freerun(backend: CameraBackend) -> None:
+    if not backend.begin_freerun():
+        raise RuntimeError("this backend does not support free-run")
+    backend.start_grab_record()  # all-frames buffering, like a recording
+
+
+def _fetch_freerun(backend: CameraBackend) -> object:
+    return backend.retrieve_freerun(GRAB_TIMEOUT_MS, _wants_array)
+
+
+def measure_grab_ceiling(
+    cameras: list[Camera],
+    duration_s: float,
+    warmup_s: float = WARMUP_S,
+    cancel: threading.Event | None = None,
+) -> dict[str, float]:
+    """Max software-triggered acquisition fps per camera ({serial: fps}), all
+    grabbing at once with no writer; every frame's array is materialized, as in a
+    recording. A camera that fails to arm is left out."""
+    return _measure_rate(
+        cameras, _arm_software, _fetch_software, duration_s, warmup_s, cancel
+    )
 
 
 def measure_grab_ceiling_solo(
@@ -603,66 +633,13 @@ def measure_freerun_ceiling(
     duration_s: float,
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
-) -> tuple[dict[str, float], list[str]]:
-    """Max free-run fps per camera (continuous, untriggered): a hardware-triggered
-    rig's acquisition ceiling. Returns ({serial: fps}, notes); a camera that
-    cannot free-run is left out and named in the notes."""
-    results: dict[str, tuple[int, float]] = {}
-    unsupported: list[str] = []
-    stop = threading.Event()
-
-    def loop(camera: Camera) -> None:
-        backend = camera.backend
-        try:
-            armed = backend.begin_freerun()
-        except Exception:
-            log.debug("free-run arm failed on %s", camera.serial_number, exc_info=True)
-            armed = False
-        if not armed:
-            unsupported.append(camera.name)
-            return
-        try:
-            # Inside the try: a grab that cannot start is noted and stopped.
-            backend.start_grab_record()  # all-frames buffering, like a recording
-            warm_deadline = time.perf_counter() + warmup_s
-            while time.perf_counter() < warm_deadline and not stop.is_set():
-                backend.retrieve_freerun(GRAB_TIMEOUT_MS, _wants_array)
-            grabbed = 0
-            t0 = time.perf_counter()
-            while not stop.is_set():
-                if backend.retrieve_freerun(GRAB_TIMEOUT_MS, _wants_array) is not None:
-                    grabbed += 1
-            elapsed = time.perf_counter() - t0
-            results[camera.serial_number] = (grabbed, elapsed)
-        except Exception:
-            log.debug(
-                "free-run grab failed on %s", camera.serial_number, exc_info=True
-            )
-            unsupported.append(camera.name)
-        finally:
-            backend.stop_grab()
-
-    threads = [
-        threading.Thread(target=loop, args=(c,), name=f"freerun-{c.serial_number}")
-        for c in cameras
-    ]
-    for t in threads:
-        t.start()
-    _wait(warmup_s + duration_s, cancel)
-    stop.set()
-    for t in threads:
-        t.join()
-    fps = {
-        serial: (grabbed / elapsed if elapsed > 0 else 0.0)
-        for serial, (grabbed, elapsed) in results.items()
-    }
-    notes: list[str] = []
-    if unsupported:
-        notes.append(
-            "Free-run (external-trigger-equivalent) ceiling not measured for "
-            f"{', '.join(unsupported)}: this backend does not support free-run."
-        )
-    return fps, notes
+) -> dict[str, float]:
+    """Max free-run fps per camera ({serial: fps}; continuous, untriggered): a
+    hardware-triggered rig's acquisition ceiling. A camera that cannot free-run
+    is left out."""
+    return _measure_rate(
+        cameras, _arm_freerun, _fetch_freerun, duration_s, warmup_s, cancel
+    )
 
 
 def measure_encode_ceiling(
@@ -1256,16 +1233,18 @@ def diagnose(
 
     report.system_cpu_percent, report.load_per_core = _probe_system_load()
 
+    def note_unmeasured(fps: dict[str, float], message: str) -> None:
+        missing = [c.name for c in cameras if c.serial_number not in fps]
+        if missing and not _cancelled(cancel):
+            report.notes.append(message.format(", ".join(missing)))
+
     emit(PHASE_ACQUIRE, f"({duration_s:g}s)")
     grab_fps = measure_grab_ceiling(cameras, duration_s, cancel=cancel)
-    if not _cancelled(cancel):
-        missing = [c.name for c in cameras if c.serial_number not in grab_fps]
-        if missing:
-            report.notes.append(
-                "Acquisition ceiling not measured for "
-                f"{', '.join(missing)} (the camera failed to arm); the reported "
-                "grab ceiling reflects only the cameras that armed successfully."
-            )
+    note_unmeasured(
+        grab_fps,
+        "Acquisition ceiling not measured for {} (the camera failed to arm); the "
+        "reported grab ceiling reflects only the cameras that armed successfully.",
+    )
 
     grab_solo_fps: dict[str, float] = {}
     if run_solo and not _cancelled(cancel):
@@ -1277,10 +1256,12 @@ def diagnose(
     freerun_fps: dict[str, float] = {}
     if run_freerun and not _cancelled(cancel):
         emit(PHASE_FREERUN, f"({duration_s:g}s)")
-        freerun_fps, freerun_notes = measure_freerun_ceiling(
-            cameras, duration_s, cancel=cancel
+        freerun_fps = measure_freerun_ceiling(cameras, duration_s, cancel=cancel)
+        note_unmeasured(
+            freerun_fps,
+            "Free-run (external-trigger-equivalent) ceiling not measured for {}: "
+            "this backend does not support free-run.",
         )
-        report.notes.extend(freerun_notes)
 
     encode_fps: dict[str, float] = {}
     if run_encode and not _cancelled(cancel):
