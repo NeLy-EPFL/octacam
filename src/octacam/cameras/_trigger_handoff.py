@@ -332,16 +332,15 @@ class SoftwareTrigger:
                 self._offsets.append(offset)
 
     def take(self, timeout_ms: int) -> int | None:
-        """Consume one pending trigger as fired and answered at once (the fake's
-        model of a hardware trigger line): its sequence number, or None when none
-        came within ``timeout_ms`` or the grab ended."""
+        """Consume one pending trigger (the fake's model of a hardware trigger
+        line): its sequence number, or None when none came within ``timeout_ms``
+        or the grab ended."""
         with self._cond:
             if not self._pending and self._grabbing:
                 self._cond.wait(timeout_ms / 1000.0)
             if not self._pending or not self._grabbing:
                 return None
             seq, _offered = self._pending.popleft()
-            self._answer = (seq, self._epoch)
             return seq
 
     def wait(self, timeout_s: float) -> None:

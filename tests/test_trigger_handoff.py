@@ -311,9 +311,9 @@ def test_offers_outside_a_grab_are_dropped(trigger):
     assert trigger.pending == 0 and trigger.last_index is None
 
 
-def test_take_consumes_a_trigger_as_answered(trigger):
+def test_take_consumes_pending_triggers_in_order(trigger):
     assert trigger.take(1) is None
     trigger.offer()
     trigger.offer()
     assert trigger.take(1) == 0 and trigger.take(1) == 1
-    assert trigger.last_index == 1 and trigger.fired_index is None
+    assert trigger.pending == 0 and trigger.fired_index is None
