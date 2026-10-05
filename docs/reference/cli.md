@@ -85,7 +85,7 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config). |
 | `--output`, `-o` | Save directory, overriding the templated location. |
-| `--yes`, `-y` | Don't prompt: reflash a serial plugin's board that runs an old build of its firmware before recording (a blank or foreign board is only warned about; use `flash`). |
+| `--yes`, `-y` | Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about; use `octacam flash`). |
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 

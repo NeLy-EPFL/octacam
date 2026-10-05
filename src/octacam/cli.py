@@ -2198,8 +2198,8 @@ def record(
         typer.Option(
             "--yes",
             "-y",
-            help="Don't prompt: reflash a serial plugin's board that runs an old "
-            "build of its firmware before recording (a blank or foreign board is "
+            help="Before recording, reflash without asking a serial plugin's board "
+            "that runs an old build of its firmware (a blank or foreign board is "
             "only warned about).",
         ),
     ] = False,
