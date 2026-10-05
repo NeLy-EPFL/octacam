@@ -559,10 +559,9 @@ def test_run_target_trial_aborts_when_writer_open_fails(fake_system, monkeypatch
 
     monkeypatch.setattr(dg, "_make_writer", lambda vf, queue_size, *, profile: BadWriter())
 
+    formats = dict.fromkeys(FAKE_SERIALS, SimpleNamespace(extension="mkv"))
     with pytest.raises(RuntimeError, match="writer failed to open"):
-        dg.run_target_trial(
-            list(fake_system), SimpleNamespace(extension="mkv"), 60.0, 0.2
-        )
+        dg.run_target_trial(list(fake_system), formats, 60.0, 0.2)
     # Every writer created for the trial is closed before the abort propagates,
     # and no backend was left grabbing.
     assert len(closed) == len(FAKE_SERIALS)
@@ -580,7 +579,7 @@ def test_run_target_trial_tears_down_on_arm_failure(fake_system, monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bus dropped")),
     )
     with pytest.raises(RuntimeError, match="bus dropped"):
-        dg.run_target_trial(cams, None, 60.0, 0.2)  # null sink
+        dg.run_target_trial(cams, dict.fromkeys(FAKE_SERIALS), 60.0, 0.2)  # null sink
     for camera in fake_system:
         assert not camera.backend.is_grabbing()
 

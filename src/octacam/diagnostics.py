@@ -35,7 +35,7 @@ import statistics
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,7 +48,7 @@ from octacam.cameras.base import (
     Camera,
     CameraBackend,
 )
-from octacam.transform import apply_display_transform
+from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.trigger import PreciseTimer
 from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_formats
 
@@ -426,13 +426,20 @@ def _wait(seconds: float, cancel: threading.Event | None) -> None:
         time.sleep(min(0.05, remaining))
 
 
+def _baked_transform(camera: Camera, record_form: str) -> DisplayTransform | None:
+    """The display transform a recording bakes into *camera*'s frames, if any (as
+    :meth:`Camera.start_record` decides)."""
+    if record_form == "display" and not camera.display_transform.is_identity:
+        return camera.display_transform
+    return None
+
+
 def _frame_size(camera: Camera, record_form: str) -> tuple[int, int]:
-    """The (width, height) a recording writes for *camera*, as
-    :meth:`Camera.start_record` decides: a baked display transform's output size
-    (a 90°/270° rotation transposes it), else the sensor's."""
+    """The (width, height) a recording writes for *camera*: a baked transform's
+    output size (a 90°/270° rotation transposes it), else the sensor's."""
     sensor = (camera.backend.width(), camera.backend.height())
-    bake = record_form == "display" and not camera.display_transform.is_identity
-    return camera.display_transform.output_size(*sensor) if bake else sensor
+    transform = _baked_transform(camera, record_form)
+    return transform.output_size(*sensor) if transform else sensor
 
 
 class _NullWriter(AsyncFrameWriter):
@@ -457,6 +464,10 @@ def _make_writer(
     return video_format.create_writer(queue_size, profile=profile)
 
 
+def _sink_path(tmpdir: Path, serial: str, video_format: VideoFormat | None) -> Path:
+    return tmpdir / f"{serial}.{video_format.extension if video_format else 'null'}"
+
+
 class _JitterProbe:
     """Measures sleep overshoot (a proxy for GIL convoys / scheduler delay)."""
 
@@ -475,8 +486,10 @@ class _JitterProbe:
         self._thread.start()
 
     def stop(self) -> float | None:
+        """The p99 overshoot in ms, or None with too few samples (or never started)."""
         self._stop.set()
-        self._thread.join(timeout=1.0)
+        if self._thread.ident is not None:
+            self._thread.join(timeout=1.0)
         if len(self._samples) < 20:
             return None
         return _pct(sorted(self._samples), 99)
@@ -643,20 +656,18 @@ def measure_freerun_ceiling(
 
 
 def measure_encode_ceiling(
-    video_format: VideoFormat,
+    formats: Mapping[str, VideoFormat | None],
     sizes: dict[str, tuple[int, int]],
     fps: float,
     duration_s: float,
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
-    formats_by_serial: dict[str, VideoFormat] | None = None,
     queue_size: int = WRITER_QUEUE_SIZE,
 ) -> dict[str, float]:
-    """Max encode fps per camera ({serial: fps}), every real writer at once, each
-    fed one synthetic frame as fast as it accepts (a full queue yields to the
-    encoder). ``frames_written`` counts only encoded frames, so it gives the
-    drain rate however hard the producer pushes. *formats_by_serial* overrides
-    *video_format* per camera, as the record path splits NVENC sessions."""
+    """Max encode fps per camera ({serial: fps}), every camera's writer at once,
+    each fed one synthetic frame as fast as it accepts (a full queue yields to
+    the encoder). ``frames_written`` counts only encoded frames, so it gives the
+    drain rate however hard the producer pushes."""
     results: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
         tmpdir = Path(tmp)
@@ -666,10 +677,9 @@ def measure_encode_ceiling(
             # One constant frame, reused across writes: the writer never mutates
             # it, and the content is irrelevant to encoder throughput.
             frame = np.zeros((height, width), dtype=np.uint8)
-            fmt = (formats_by_serial or {}).get(serial, video_format)
-            writer = fmt.create_writer(queue_size, profile=True)
-            path = tmpdir / f"{serial}.{fmt.extension}"
-            if not writer.open(str(path), fps, size):
+            fmt = formats[serial]
+            writer = _make_writer(fmt, queue_size, profile=True)
+            if not writer.open(str(_sink_path(tmpdir, serial, fmt)), fps, size):
                 results[serial] = 0.0
                 return
             try:
@@ -703,13 +713,93 @@ def measure_encode_ceiling(
 
 @dataclass
 class _CamAccum:
-    """Per-camera accumulators for an end-to-end trial (grab-thread owned)."""
+    """One camera's end-to-end trial counters, written by its grab thread.
+    :meth:`mark` snapshots them, so a window counts only what happened between
+    two marks."""
 
+    camera: Camera
+    writer: AsyncFrameWriter
+    size: tuple[int, int]
     grabbed: int = 0
     dropped: int = 0
-    grab_ns: list[int] = field(default_factory=list)
+    acquire_ns: list[int] = field(default_factory=list)
     transform_ns: list[int] = field(default_factory=list)
     enqueue_ns: list[int] = field(default_factory=list)
+
+    def _samples(self) -> dict[str, list[int]]:
+        return {
+            "acquire": self.acquire_ns,
+            "transform": self.transform_ns,
+            "enqueue": self.enqueue_ns,
+            "encode": self.writer.encode_ns_samples,
+        }
+
+    def mark(self) -> dict[str, int]:
+        """Every counter now: the frame counts and each stage's sample count."""
+        return {
+            "grabbed": self.grabbed,
+            "dropped": self.dropped,
+            "encoded": self.writer.frames_written,
+        } | {name: len(samples) for name, samples in self._samples().items()}
+
+    def result(
+        self, start: dict[str, int], end: dict[str, int], target_fps: float, window: float
+    ) -> CameraTrial:
+        """The trial between the *start* and *end* marks, *window* seconds apart."""
+        grabbed = end["grabbed"] - start["grabbed"]
+        dropped = end["dropped"] - start["dropped"]
+        serial = self.camera.serial_number
+        # A grabbed-encoded gap with drops is encoder backpressure.
+        log.debug(
+            "trial %s: grabbed=%d encoded=%d dropped=%d",
+            serial,
+            grabbed,
+            end["encoded"] - start["encoded"],
+            dropped,
+        )
+        return CameraTrial(
+            serial=serial,
+            name=self.camera.name,
+            width=self.size[0],
+            height=self.size[1],
+            target_fps=target_fps,
+            achieved_fps=grabbed / window if window > 0 else 0.0,
+            grabbed=grabbed,
+            dropped=dropped,
+            drop_rate=dropped / grabbed if grabbed else 0.0,
+            max_queue_depth=self.writer.max_queue_depth,
+            stages={
+                name: _stage_timing(name, samples[start[name] : end[name]])
+                for name, samples in self._samples().items()
+            },
+        )
+
+
+def _trial_grab(
+    accum: _CamAccum, stop: threading.Event, record_form: str, free_run: bool
+) -> None:
+    """A trial's grab loop: retrieve → transform → write, each stage timed."""
+    backend = accum.camera.backend
+    transform = _baked_transform(accum.camera, record_form)
+    retrieve = backend.retrieve_freerun if free_run else backend.retrieve
+    while not stop.is_set() and backend.is_grabbing():
+        t0 = time.perf_counter_ns()
+        frame = retrieve(GRAB_TIMEOUT_MS, _wants_array)
+        t1 = time.perf_counter_ns()
+        if frame is None or frame[0] is None:
+            continue
+        array = frame[0]
+        accum.acquire_ns.append(t1 - t0)
+        accum.grabbed += 1
+        if transform is not None:
+            t2 = time.perf_counter_ns()
+            array = apply_display_transform(array, transform)
+            accum.transform_ns.append(time.perf_counter_ns() - t2)
+        t3 = time.perf_counter_ns()
+        accepted = accum.writer.write(array)
+        accum.enqueue_ns.append(time.perf_counter_ns() - t3)
+        if not accepted:
+            accum.dropped += 1
 
 
 @dataclass
@@ -760,66 +850,49 @@ class TrialOutcome:
 
 def run_target_trial(
     cameras: list[Camera],
-    video_format: VideoFormat | None,
+    formats: Mapping[str, VideoFormat | None],
     target_fps: float,
     duration_s: float,
     record_form: str = "display",
     warmup_s: float = WARMUP_S,
     cancel: threading.Event | None = None,
     free_run: bool = False,
-    formats_by_serial: dict[str, VideoFormat] | None = None,
     queue_size: int = WRITER_QUEUE_SIZE,
 ) -> TrialOutcome:
     """Run the instrumented pipeline at *target_fps* for *duration_s*.
 
     One shared timer triggers every camera; each camera's thread runs retrieve →
-    transform → write into a profiled writer (the null sink when *video_format*
-    is None). Only the window after the warmup counts. With *free_run* the
+    transform → write into a profiled writer for its entry in *formats* (the null
+    sink for None). Only the window after the warmup counts. With *free_run* the
     cameras clock themselves and *target_fps* is only the container rate: the
     free-run/external record path, encoder contention included.
     """
-    backends = [c.backend for c in cameras]
-    sizes = [_frame_size(c, record_form) for c in cameras]
-    accums = [_CamAccum() for _ in cameras]
-    writers = [
-        _make_writer(
-            (formats_by_serial or {}).get(c.serial_number, video_format),
-            queue_size,
-            profile=True,
+    accums = [
+        _CamAccum(
+            c,
+            _make_writer(formats[c.serial_number], queue_size, profile=True),
+            _frame_size(c, record_form),
         )
         for c in cameras
     ]
+    backends = [c.backend for c in cameras]
 
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
         tmpdir = Path(tmp)
-        ext = video_format.extension if video_format else "null"
-
         # Set before the try, for the finally to tear down after an early raise.
         stop = threading.Event()
         timer: PreciseTimer | None = None
         grab_threads: list[threading.Thread] = []
         jitter = _JitterProbe()
-        jitter_started = False
         proc = _cpu_percent_probe()
-        jitter_p99: float | None = None
-        cpu: float | None = None
-        end_grabbed: list[int] = []
-        end_dropped: list[int] = []
-        end_grab_ns: list[int] = []
-        end_transform_ns: list[int] = []
-        end_enqueue_ns: list[int] = []
-        end_encode: list[int] = []
-        end_encode_ns: list[int] = []
-        window = 0.0
         try:
-            for camera, writer, size in zip(cameras, writers, sizes, strict=True):
-                path = tmpdir / f"{camera.serial_number}.{ext}"
-                if not writer.open(str(path), target_fps, size):
+            for a in accums:
+                serial = a.camera.serial_number
+                path = _sink_path(tmpdir, serial, formats[serial])
+                if not a.writer.open(str(path), target_fps, a.size):
                     # An unopened writer refuses every frame, which would read as
                     # an ENCODE bottleneck. The finally closes those already open.
-                    raise RuntimeError(
-                        f"writer failed to open for {camera.serial_number}"
-                    )
+                    raise RuntimeError(f"writer failed to open for {serial}")
 
             for backend in backends:
                 if free_run:
@@ -833,82 +906,32 @@ def run_target_trial(
                     backend.begin_software_trigger_preview()
                 backend.start_grab_record()
 
-            def grab(camera, backend, writer, accum, size) -> None:
-                bake = (
-                    record_form == "display"
-                    and not camera.display_transform.is_identity
-                )
-                transform = camera.display_transform if bake else None
-                retrieve = backend.retrieve_freerun if free_run else backend.retrieve
-                while not stop.is_set() and backend.is_grabbing():
-                    t0 = time.perf_counter_ns()
-                    frame = retrieve(GRAB_TIMEOUT_MS, _wants_array)
-                    t1 = time.perf_counter_ns()
-                    if frame is None:
-                        continue
-                    array, _timestamp = frame
-                    if array is None:
-                        continue
-                    accum.grab_ns.append(t1 - t0)
-                    accum.grabbed += 1
-                    if transform is not None:
-                        t2 = time.perf_counter_ns()
-                        to_write = apply_display_transform(array, transform)
-                        accum.transform_ns.append(time.perf_counter_ns() - t2)
-                    else:
-                        to_write = array
-                    t3 = time.perf_counter_ns()
-                    accepted = writer.write(to_write)
-                    accum.enqueue_ns.append(time.perf_counter_ns() - t3)
-                    if not accepted:
-                        accum.dropped += 1
-
             grab_threads = [
                 threading.Thread(
-                    target=grab,
-                    args=(c, b, w, a, sz),
-                    name=f"trial-{c.serial_number}",
+                    target=_trial_grab,
+                    args=(a, stop, record_form, free_run),
+                    name=f"trial-{a.camera.serial_number}",
                     daemon=True,
                 )
-                for c, b, w, a, sz in zip(
-                    cameras, backends, writers, accums, sizes, strict=True
-                )
+                for a in accums
             ]
-
             if not free_run:
                 timer = PreciseTimer(lambda: [b.trigger_once() for b in backends])
                 timer.set_frequency(target_fps)
-
             for t in grab_threads:
                 t.start()
             if timer is not None:
                 timer.start()
             jitter.start()
-            jitter_started = True
 
-            # Warm up, then snapshot the baselines and measure over the window.
             _wait(warmup_s, cancel)
-            base_grabbed = [a.grabbed for a in accums]
-            base_dropped = [a.dropped for a in accums]
-            base_grab_ns = [len(a.grab_ns) for a in accums]
-            base_transform_ns = [len(a.transform_ns) for a in accums]
-            base_enqueue_ns = [len(a.enqueue_ns) for a in accums]
-            base_encode = [w.frames_written for w in writers]
-            base_encode_ns = [len(w.encode_ns_samples) for w in writers]
+            starts = [a.mark() for a in accums]
             t_measure = time.perf_counter()
-
             _wait(duration_s, cancel)
-
             # Snapshot before the producers stop, so the counts span exactly
             # `window`, not the stop+join tail.
             window = time.perf_counter() - t_measure
-            end_grabbed = [a.grabbed for a in accums]
-            end_dropped = [a.dropped for a in accums]
-            end_grab_ns = [len(a.grab_ns) for a in accums]
-            end_transform_ns = [len(a.transform_ns) for a in accums]
-            end_enqueue_ns = [len(a.enqueue_ns) for a in accums]
-            end_encode = [w.frames_written for w in writers]
-            end_encode_ns = [len(w.encode_ns_samples) for w in writers]
+            ends = [a.mark() for a in accums]
         finally:
             stop.set()
             if timer is not None:
@@ -919,60 +942,19 @@ def run_target_trial(
                     backend.stop_grab()
             for t in grab_threads:
                 t.join(timeout=GRAB_TIMEOUT_MS / 1000.0 + 1.0)
-            for w in writers:
-                w.close()  # idempotent: early-returns when the writer never opened
-            # Joining a probe thread that never started would raise.
-            jitter_p99 = jitter.stop() if jitter_started else None
+            for a in accums:
+                a.writer.close()  # idempotent: a no-op for a writer never opened
+            jitter_p99 = jitter.stop()
             cpu = proc.cpu_percent() if proc is not None else None
 
-    trials: list[CameraTrial] = []
-    for i, camera in enumerate(cameras):
-        grabbed = end_grabbed[i] - base_grabbed[i]
-        dropped = end_dropped[i] - base_dropped[i]
-        encoded = end_encode[i] - base_encode[i]
-        stages = {
-            "acquire": _stage_timing(
-                "acquire", accums[i].grab_ns[base_grab_ns[i] : end_grab_ns[i]]
-            ),
-            "transform": _stage_timing(
-                "transform",
-                accums[i].transform_ns[base_transform_ns[i] : end_transform_ns[i]],
-            ),
-            "enqueue": _stage_timing(
-                "enqueue",
-                accums[i].enqueue_ns[base_enqueue_ns[i] : end_enqueue_ns[i]],
-            ),
-            "encode": _stage_timing(
-                "encode",
-                writers[i].encode_ns_samples[base_encode_ns[i] : end_encode_ns[i]],
-            ),
-        }
-        width, height = sizes[i]
-        trials.append(
-            CameraTrial(
-                serial=camera.serial_number,
-                name=camera.name,
-                width=width,
-                height=height,
-                target_fps=target_fps,
-                achieved_fps=grabbed / window if window > 0 else 0.0,
-                grabbed=grabbed,
-                dropped=dropped,
-                drop_rate=(dropped / grabbed if grabbed else 0.0),
-                max_queue_depth=writers[i].max_queue_depth,
-                stages=stages,
-            )
-        )
-        # A grabbed-encoded gap with drops is encoder backpressure.
-        log.debug(
-            "trial %s: grabbed=%d encoded=%d dropped=%d",
-            camera.serial_number,
-            grabbed,
-            encoded,
-            dropped,
-        )
     return TrialOutcome(
-        trials=trials, jitter_p99_ms=jitter_p99, cpu_percent=cpu, queue_size=queue_size
+        trials=[
+            a.result(start, end, target_fps, window)
+            for a, start, end in zip(accums, starts, ends, strict=True)
+        ],
+        jitter_p99_ms=jitter_p99,
+        cpu_percent=cpu,
+        queue_size=queue_size,
     )
 
 
@@ -1016,6 +998,46 @@ def _reconcile_stable_max(
         return min(candidate, confirm.achieved_fps, ceiling_cap), True
     backed_off = max(lo, candidate * (1 - STABILITY_MARGIN))
     return min(backed_off, confirm.achieved_fps, ceiling_cap), False
+
+
+def _search_stable_max(
+    trial: Callable[[float, float], TrialOutcome],
+    lo: float,
+    cap: float,
+    probe_s: float,
+    confirm_s: float,
+    progress: Callable[[str, float, float], None],
+    cancel: threading.Event | None,
+) -> tuple[float, bool | None]:
+    """Bisect short ``trial(fps, seconds)`` runs from *lo* (known stable) to 10%
+    over *cap* (the predicted max) for the highest stable rate, then retest it
+    over *confirm_s*: a short probe can miss a queue that builds up over seconds.
+
+    Returns the max to report and whether the confirmation held (None when
+    cancelled before it ran). *progress* gets (detail, offset, budget) in seconds
+    into the search's budget of ``(1 + FIND_MAX_ITERATIONS)`` probes plus the
+    confirmation.
+    """
+    probe_slot = WARMUP_S + probe_s
+    probes = 0
+
+    def probe(fps: float) -> bool:
+        nonlocal probes
+        if _cancelled(cancel):
+            return False
+        progress(f"probing {fps:.0f} fps", probes * probe_slot, probe_slot)
+        probes += 1
+        return trial(fps, probe_s).stable_passed
+
+    candidate = find_max_fps(probe, lo, cap * 1.1, iterations=FIND_MAX_ITERATIONS)
+    if _cancelled(cancel):
+        return min(candidate, cap), None
+    progress(
+        f"confirming {candidate:.0f} fps",
+        (1 + FIND_MAX_ITERATIONS) * probe_slot,
+        WARMUP_S + confirm_s,
+    )
+    return _reconcile_stable_max(candidate, trial(candidate, confirm_s), lo, cap)
 
 
 # --- Verdict ---
@@ -1101,6 +1123,26 @@ def _classify(
     return achievable, bottleneck, recs
 
 
+def _load_recommendations(
+    system_cpu_percent: float | None, load_per_core: float | None
+) -> list[str]:
+    """Advice when other processes were already loading the machine."""
+    if system_cpu_percent is not None and system_cpu_percent > SYSTEM_CPU_WARN_PERCENT:
+        return [
+            f"The machine was already ~{system_cpu_percent:.0f}% CPU-busy "
+            "before the benchmark started — other processes are competing for the "
+            "CPU, which skews these numbers and risks dropped frames in a real "
+            "recording. Close them and re-run."
+        ]
+    if load_per_core is not None and load_per_core > LOAD_PER_CORE_WARN:
+        return [
+            f"System load is high ({load_per_core:.2f} per core) — other work "
+            "is competing for the CPU, which may skew these numbers and risk dropped "
+            "frames in a real recording. Close other processes and re-run."
+        ]
+    return []
+
+
 # --- Orchestrator ---
 
 
@@ -1132,19 +1174,30 @@ def diagnose(
     external = settings.trigger_source == "external"
     queue_size = settings.writer_queue_size  # as the record path's writers
 
+    serials = [c.serial_number for c in cameras]
     video_format = None if sink == "null" else settings.video_format()
-    # The record path's NVENC session split, so no overflow encoder fails.
-    formats_by_serial: dict[str, VideoFormat] | None = None
+    formats: dict[str, VideoFormat | None] = dict.fromkeys(serials)  # null sink
     if video_format is not None:
+        # The record path's NVENC session split, so no overflow encoder fails.
         per_cam, cap_warnings = resolve_capture_formats(
             video_format, len(cameras), settings.max_nvenc_sessions
         )
-        formats_by_serial = {
-            c.serial_number: fmt for c, fmt in zip(cameras, per_cam, strict=True)
-        }
+        formats.update(zip(serials, per_cam, strict=True))
         for message in cap_warnings:
             log.warning(message)
     sizes = {c.serial_number: _frame_size(c, record_form) for c in cameras}
+
+    def trial(fps: float, seconds: float, free_run: bool = False) -> TrialOutcome:
+        return run_target_trial(
+            cameras,
+            formats,
+            fps,
+            seconds,
+            record_form,
+            cancel=cancel,
+            free_run=free_run,
+            queue_size=queue_size,
+        )
 
     run_freerun = measure_freerun
     run_encode = video_format is not None
@@ -1267,13 +1320,7 @@ def diagnose(
     if run_encode and not _cancelled(cancel):
         emit(PHASE_ENCODE, f"({duration_s:g}s)")
         encode_fps = measure_encode_ceiling(
-            video_format,
-            sizes,
-            target_fps,
-            duration_s,
-            cancel=cancel,
-            formats_by_serial=formats_by_serial,
-            queue_size=queue_size,
+            formats, sizes, target_fps, duration_s, cancel=cancel, queue_size=queue_size
         )
     ceilings = Ceilings(
         grab_fps=grab_fps,
@@ -1289,16 +1336,7 @@ def diagnose(
 
     # --- end-to-end at the target fps ---
     emit(PHASE_TRIAL, f"@ {target_fps:g} fps ({duration_s:g}s)")
-    outcome = run_target_trial(
-        cameras,
-        video_format,
-        target_fps,
-        duration_s,
-        record_form,
-        cancel=cancel,
-        formats_by_serial=formats_by_serial,
-        queue_size=queue_size,
-    )
+    outcome = trial(target_fps, duration_s)
     report.trials = outcome.trials
     report.achieved_fps = outcome.achieved_fps
     report.drop_rate = outcome.drop_rate
@@ -1309,21 +1347,9 @@ def diagnose(
     report.achievable, report.bottleneck, report.recommendations = _classify(
         target_fps, ceilings, outcome, report.throughput_mbps_total
     )
-    if report.system_cpu_percent is not None and (
-        report.system_cpu_percent > SYSTEM_CPU_WARN_PERCENT
-    ):
-        report.recommendations.append(
-            f"The machine was already ~{report.system_cpu_percent:.0f}% CPU-busy "
-            "before the benchmark started — other processes are competing for the "
-            "CPU, which skews these numbers and risks dropped frames in a real "
-            "recording. Close them and re-run."
-        )
-    elif report.load_per_core is not None and report.load_per_core > LOAD_PER_CORE_WARN:
-        report.recommendations.append(
-            f"System load is high ({report.load_per_core:.2f} per core) — other work "
-            "is competing for the CPU, which may skew these numbers and risk dropped "
-            "frames in a real recording. Close other processes and re-run."
-        )
+    report.recommendations += _load_recommendations(
+        report.system_cpu_percent, report.load_per_core
+    )
     # A null sink measures no encoder: the acquisition ceiling alone.
     encode_min = ceilings.encode_min if video_format is not None else float("inf")
     report.predicted_max_fps = min(ceilings.grab_min, encode_min)
@@ -1338,17 +1364,7 @@ def diagnose(
             ceilings.freerun_min if math.isfinite(ceilings.freerun_min) else target_fps
         )
         emit(PHASE_FREERUN_TRIAL, f"(~{nominal:g} fps, {duration_s:g}s)")
-        fr = run_target_trial(
-            cameras,
-            video_format,
-            nominal,
-            duration_s,
-            record_form,
-            cancel=cancel,
-            free_run=True,
-            formats_by_serial=formats_by_serial,
-            queue_size=queue_size,
-        )
+        fr = trial(nominal, duration_s, free_run=True)
         report.freerun_trials = fr.trials
         if fr.trials:
             # A shared external trigger cannot outrun the slowest camera's
@@ -1359,56 +1375,29 @@ def diagnose(
             if sustained > 0:
                 report.hardware_max_fps = sustained
 
-    # --- empirical STABLE max-fps search (software trigger) ---
+    # --- empirical stable max-fps search (software trigger) ---
     if run_search and not _cancelled(cancel):
         predicted = report.predicted_max_fps
-        hi = predicted * 1.1
-        # lo is a rate already known to be *stable* when the target was.
+        # lo is a rate already known to be stable when the target was.
         lo = target_fps if outcome.stable_passed else min(target_fps, predicted * 0.5)
-        ceiling_cap = predicted
-
-        def probe(fps: float) -> bool:
-            if _cancelled(cancel):
-                return False
-            emit(PHASE_MAX, f"probing {fps:.0f} fps", advance=True, eta=WARMUP_S + probe_dur)
-            result = run_target_trial(
-                cameras,
-                video_format,
-                fps,
-                probe_dur,
-                record_form,
-                cancel=cancel,
-                formats_by_serial=formats_by_serial,
-                queue_size=queue_size,
+        report.measured_max_fps, confirmed = _search_stable_max(
+            trial,
+            lo,
+            predicted,
+            probe_dur,
+            duration_s,
+            lambda detail, _offset, step: emit(
+                PHASE_MAX, detail, advance=True, eta=step
+            ),
+            cancel,
+        )
+        report.max_confirmed = bool(confirmed)
+        if confirmed is False:
+            report.notes.append(
+                "The stable-max candidate did not hold over the longer "
+                f"confirmation window; reported with a {STABILITY_MARGIN:.0%} "
+                "safety margin."
             )
-            return result.stable_passed
-
-        candidate = find_max_fps(probe, lo, hi, iterations=FIND_MAX_ITERATIONS)
-        # Retest the marginal edge over the full window: a short probe can miss
-        # a queue that builds up over seconds.
-        if _cancelled(cancel):
-            report.measured_max_fps = min(candidate, ceiling_cap)
-        else:
-            emit(PHASE_MAX, f"confirming {candidate:.0f} fps", advance=True, eta=window)
-            confirm = run_target_trial(
-                cameras,
-                video_format,
-                candidate,
-                duration_s,
-                record_form,
-                cancel=cancel,
-                formats_by_serial=formats_by_serial,
-                queue_size=queue_size,
-            )
-            report.measured_max_fps, report.max_confirmed = _reconcile_stable_max(
-                candidate, confirm, lo, ceiling_cap
-            )
-            if not report.max_confirmed:
-                report.notes.append(
-                    "The stable-max candidate did not hold over the longer "
-                    f"confirmation window; reported with a {STABILITY_MARGIN:.0%} "
-                    "safety margin."
-                )
 
     if _cancelled(cancel):
         report.notes.append("Benchmark was cancelled before it finished.")
