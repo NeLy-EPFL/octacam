@@ -17,14 +17,9 @@ from typer.testing import CliRunner
 import octacam
 from octacam import locks
 from octacam.cameras import BackendError, BackendUnavailable
-from octacam.cli import (
-    _browser_skip_reason,
-    _build_config_doc,
-    _port_available,
-    _resolve_backend,
-    _resolve_enabled,
-    app,
-)
+from octacam.cli import app
+from octacam.cli._common import browser_skip_reason, port_available, resolve_enabled
+from octacam.cli.wizard import _build_config_doc, _resolve_backend
 from octacam.firmware import FirmwareSpec
 from octacam.plugins.base import PluginManager
 from octacam.plugins.serial import SerialPlugin
@@ -103,9 +98,9 @@ def test_port_available_detects_bound_socket():
         sock.listen(1)
         port = sock.getsockname()[1]
         # A live listener makes the port unavailable...
-        assert _port_available("127.0.0.1", port) is False
+        assert port_available("127.0.0.1", port) is False
     # ...and it is free again once the listener closes.
-    assert _port_available("127.0.0.1", port) is True
+    assert port_available("127.0.0.1", port) is True
 
 
 def test_gui_exits_when_port_already_in_use(tmp_path):
@@ -258,7 +253,6 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
     # create_app() runs inside the try (before any hardware is armed); if it
     # raises, the finally must still run controller.close() and
     # plugins.teardown_all() so nothing is left half-initialized.
-    import octacam.cli as cli_mod
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     _FACADE_CALLS.clear()
@@ -285,7 +279,7 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
         raise RuntimeError("create_app failed")
 
     monkeypatch.setattr("octacam.web.app.create_app", _boom)
-    monkeypatch.setattr(cli_mod, "_print_transcode_hints", lambda *a, **k: None)
+    monkeypatch.setattr("octacam.cli.gui._print_transcode_hints", lambda *a, **k: None)
 
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
     assert result.exit_code != 0  # the RuntimeError propagates after cleanup
@@ -299,7 +293,6 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     # A Ctrl-C/exception during join() must trigger controller.close() (which
     # aborts+joins the daemon monitor so metadata/timestamps are written, then
     # closes cameras once) — never a bare system.close() that races the monitor.
-    import octacam.cli as cli_mod
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     _FACADE_CALLS.clear()
@@ -314,7 +307,7 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
 
-    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+    monkeypatch.setattr("octacam.cli.record.preflight_firmware", lambda *a, **k: None)
 
     monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
 
@@ -342,7 +335,6 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
 def _patch_one_camera_record(monkeypatch, tmp_path, events):
     """Stub `record`'s hardware and controller; each step appends to *events*,
     with whether the capture marker was live then."""
-    import octacam.cli as cli_mod
     from octacam import session_cache
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
@@ -354,7 +346,7 @@ def _patch_one_camera_record(monkeypatch, tmp_path, events):
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
-    monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
+    monkeypatch.setattr("octacam.cli.record.preflight_firmware", lambda *a, **k: None)
 
     def note(step):
         events.append((step, session_cache.capture_active()))
@@ -446,27 +438,27 @@ def test_browser_skip_reason(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("DISPLAY", ":0")
     # Local graphical session, no SSH -> open the browser.
-    assert _browser_skip_reason(False) is None
+    assert browser_skip_reason(False) is None
     # --no-browser always wins.
-    assert _browser_skip_reason(True) is not None
+    assert browser_skip_reason(True) is not None
     # Ubuntu/GNOME on Wayland: DISPLAY may be unset but WAYLAND_DISPLAY is set,
     # which still counts as a local graphical session -> open the browser.
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    assert _browser_skip_reason(False) is None
+    assert browser_skip_reason(False) is None
     # An SSH session means the browser would open on the rig, not the laptop.
     monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5 6.7.8.9 22")
-    assert _browser_skip_reason(False) is not None
+    assert browser_skip_reason(False) is not None
     # Headless (no display) is skipped on Linux even without SSH_* set.
     monkeypatch.delenv("SSH_CONNECTION", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     if sys.platform.startswith("linux"):
-        assert _browser_skip_reason(False) is not None
+        assert browser_skip_reason(False) is not None
 
 
 def test_doctor_runtime_reports_why_the_browser_stays_closed(monkeypatch):
-    from octacam.cli import _doctor_runtime, _Report
+    from octacam.cli.doctor import _doctor_runtime, _Report
 
     def browser_lines():
         report = _Report()
@@ -496,48 +488,48 @@ def test_doctor_runtime_reports_why_the_browser_stays_closed(monkeypatch):
 
 
 def test_launch_browser_prefers_os_opener_on_linux(monkeypatch):
-    from octacam import cli
+    from octacam.cli import gui
 
     # On Linux we go straight to xdg-open rather than the stdlib browser hunt.
-    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(gui.sys, "platform", "linux")
     monkeypatch.delenv("BROWSER", raising=False)
 
     def _no_webbrowser(url):
         raise AssertionError("should prefer xdg-open over webbrowser")
 
-    monkeypatch.setattr(cli.webbrowser, "open", _no_webbrowser)
-    monkeypatch.setattr(cli.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
+    monkeypatch.setattr(gui.webbrowser, "open", _no_webbrowser)
+    monkeypatch.setattr(gui.shutil, "which", lambda cmd: f"/usr/bin/{cmd}")
     calls = []
-    monkeypatch.setattr(cli.subprocess, "Popen", lambda args, **kw: calls.append(args))
-    assert cli._launch_browser("http://127.0.0.1:8000/") is True
+    monkeypatch.setattr(gui.subprocess, "Popen", lambda args, **kw: calls.append(args))
+    assert gui._launch_browser("http://127.0.0.1:8000/") is True
     assert calls == [["xdg-open", "http://127.0.0.1:8000/"]]
 
 
 def test_launch_browser_honors_browser_env(monkeypatch):
-    from octacam import cli
+    from octacam.cli import gui
 
-    monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(gui.sys, "platform", "linux")
     monkeypatch.setenv("BROWSER", "firefox")
     opened = []
-    monkeypatch.setattr(cli.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(gui.webbrowser, "open", lambda url: opened.append(url) or True)
 
     def _no_fallback(*a, **k):
         raise AssertionError("must not shell out when $BROWSER opens")
 
-    monkeypatch.setattr(cli.subprocess, "Popen", _no_fallback)
-    assert cli._launch_browser("http://127.0.0.1:8000/") is True
+    monkeypatch.setattr(gui.subprocess, "Popen", _no_fallback)
+    assert gui._launch_browser("http://127.0.0.1:8000/") is True
     assert opened == ["http://127.0.0.1:8000/"]
 
 
 def test_launch_browser_uses_webbrowser_without_os_opener(monkeypatch):
-    from octacam import cli
+    from octacam.cli import gui
 
     # Platforms without an OS opener (e.g. Windows) fall back to webbrowser.
-    monkeypatch.setattr(cli.sys, "platform", "win32")
+    monkeypatch.setattr(gui.sys, "platform", "win32")
     monkeypatch.delenv("BROWSER", raising=False)
-    monkeypatch.setattr(cli.shutil, "which", lambda cmd: None)
-    monkeypatch.setattr(cli.webbrowser, "open", lambda url: True)
-    assert cli._launch_browser("http://127.0.0.1:8000/") is True
+    monkeypatch.setattr(gui.shutil, "which", lambda cmd: None)
+    monkeypatch.setattr(gui.webbrowser, "open", lambda url: True)
+    assert gui._launch_browser("http://127.0.0.1:8000/") is True
 
 
 def test_transcode_requires_paths():
@@ -581,13 +573,14 @@ def test_process_help_lists_cache_selectors():
 
 
 def test_warn_if_transcoding_logs_only_when_active(caplog):
-    from octacam import cli, session_cache
+    from octacam import session_cache
+    from octacam.cli._common import warn_if_transcoding
 
     caplog.set_level(logging.WARNING, logger="octacam")
-    cli._warn_if_transcoding()  # nothing running -> silent
+    warn_if_transcoding()  # nothing running -> silent
     assert not caplog.messages
     with session_cache.mark_transcode_active("3 file(s)"):
-        cli._warn_if_transcoding()
+        warn_if_transcoding()
     blob = "\n".join(caplog.messages)
     assert "transcod" in blob
     # The warning must describe what pause_gate actually does. It used to say a
@@ -599,33 +592,34 @@ def test_warn_if_transcoding_logs_only_when_active(caplog):
 
 
 def test_print_transcode_hints_lists_session_and_all(tmp_path, caplog):
-    from octacam import cli, session_cache
+    from octacam import session_cache
+    from octacam.cli.gui import _print_transcode_hints
 
     rec = tmp_path / "rec" / "001"
     rec.mkdir(parents=True)
     session_cache.record_recording(rec, "sessZ", "gui")
 
     caplog.set_level(logging.INFO, logger="octacam")
-    cli._print_transcode_hints("sessZ")
+    _print_transcode_hints("sessZ")
     blob = "\n".join(caplog.messages)
     # Two ready-to-run selectors: the last session and every cached session.
     assert "--last session" in blob and "--all" in blob
 
     # A session that recorded nothing prints no hint.
     caplog.clear()
-    cli._print_transcode_hints("sessNONE")
+    _print_transcode_hints("sessNONE")
     assert not caplog.messages
 
 
 def test_resolve_enabled():
     # None / empty -> no override (use the config).
-    assert _resolve_enabled(None, False) is None
-    assert _resolve_enabled([], False) is None
+    assert resolve_enabled(None, False) is None
+    assert resolve_enabled([], False) is None
     # Explicit plugin names are passed through.
-    assert _resolve_enabled(["flywheel"], False) == ["flywheel"]
+    assert resolve_enabled(["flywheel"], False) == ["flywheel"]
     # --no-plugins wins and disables everything.
-    assert _resolve_enabled(["flywheel"], True) == []
-    assert _resolve_enabled(None, True) == []
+    assert resolve_enabled(["flywheel"], True) == []
+    assert resolve_enabled(None, True) == []
 
 
 @pytest.fixture
@@ -660,7 +654,7 @@ def emulated_rig(monkeypatch):
     monkeypatch.setattr(
         pycameleon, "pycameleon", SimpleNamespace(enumerate_cameras=lambda: [])
     )
-    monkeypatch.setattr("octacam.cli._usb_camera_links", lambda detected: [])
+    monkeypatch.setattr("octacam.cli.doctor._usb_camera_links", lambda detected: [])
     monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: [])
 
 
@@ -708,23 +702,23 @@ def test_doctor_flags_undetected_camera_and_exits_nonzero(emulated_rig, tmp_path
 
 
 def _count_enumerations(monkeypatch):
-    """Return a Counter that ticks once per octacam.cli._enumerate_backend call.
+    """Return a Counter that ticks once per doctor.enumerate_backend call.
 
     doctor now enumerates the backends via a single parallel _CameraScan; this
     seam lets a test assert the scan never re-enumerates a backend (the whole
     point of the dedup — the old code enumerated the cascade ~3× per run)."""
     import collections
 
-    from octacam import cli
+    from octacam.cli import doctor
 
     counter: collections.Counter[str] = collections.Counter()
-    original = cli._enumerate_backend
+    original = doctor.enumerate_backend
 
     def counting(name):
         counter[name] += 1
         return original(name)
 
-    monkeypatch.setattr("octacam.cli._enumerate_backend", counting)
+    monkeypatch.setattr("octacam.cli.doctor.enumerate_backend", counting)
     return counter
 
 
@@ -771,7 +765,7 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
     # Parallel enumeration must not leak completion order into the report: the
     # Camera-backends section is assembled in a fixed backend order both times,
     # though basler's scan finishes last in the first run and first in the second.
-    from octacam import cli
+    from octacam.cli import doctor
 
     def backends_section(output: str) -> str:
         lines = output.splitlines()
@@ -782,7 +776,7 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
         )
         return "\n".join(lines[start:end])
 
-    enumerate_backend = cli._enumerate_backend
+    enumerate_backend = doctor.enumerate_backend
     slow = []
 
     def enumerate_slowly(name):
@@ -790,7 +784,7 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
             time.sleep(0.2)
         return enumerate_backend(name)
 
-    monkeypatch.setattr("octacam.cli._enumerate_backend", enumerate_slowly)
+    monkeypatch.setattr("octacam.cli.doctor.enumerate_backend", enumerate_slowly)
     slow[:] = ["basler"]
     first = runner.invoke(app, ["--log-level", "error", "doctor"])
     slow[:] = ["pycameleon"]
@@ -802,7 +796,7 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
 def test_camera_lines_groups_by_model_and_handles_unknown():
     # Same-model cameras collapse to one "model: s1, s2" line (first-seen order);
     # an unknown model falls back to a bare serial per line.
-    from octacam.cli import _camera_lines
+    from octacam.cli.doctor import _camera_lines
 
     assert _camera_lines(
         [("s1", "M1"), ("s2", "M1"), ("s3", "M2"), ("s4", None), ("s5", None)]
@@ -814,7 +808,7 @@ def test_usb_camera_links_reads_speeds_and_filters_non_cameras(tmp_path):
     # The sysfs link-speed reader: camera-vendor devices (Basler 2676, FLIR 1e10)
     # and any detected serial are reported with their negotiated speed; non-camera
     # devices and entries without a serial node are ignored.
-    from octacam.cli import _usb_camera_links
+    from octacam.cli.doctor import _usb_camera_links
 
     def mkdev(name, **fields):
         d = tmp_path / name
@@ -847,11 +841,11 @@ def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
     # doctor never opens a camera, so a USB3 camera that fell back to USB 2.0 must
     # be surfaced from its sysfs link speed — the gap the user hit (the GUI warned,
     # doctor was silent). The warning names the camera, the speed, and the fix.
-    from octacam import cli
-    from octacam.cli import _doctor_backends, _Report
+    from octacam.cli import doctor
+    from octacam.cli.doctor import _doctor_backends, _Report
 
     monkeypatch.setattr(
-        cli, "_usb_camera_links",
+        doctor, "_usb_camera_links",
         lambda _detected: [("40018619", "acA1920-150um", 480)],
     )
 
@@ -874,10 +868,10 @@ def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
 def test_doctor_backends_reads_auto_as_the_cascade(monkeypatch):
     # `doctor --backend auto` reports every tier and the cascade's pick, as the
     # scan and the config cross-check do, not an unknown backend named 'auto'.
-    from octacam import cli
-    from octacam.cli import _doctor_backends, _Report
+    from octacam.cli import doctor
+    from octacam.cli.doctor import _doctor_backends, _Report
 
-    monkeypatch.setattr(cli, "_usb_camera_links", lambda _detected: [])
+    monkeypatch.setattr(doctor, "_usb_camera_links", lambda _detected: [])
 
     class _FakeScan:
         def get(self, _name):
@@ -903,7 +897,7 @@ def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     import types
 
     import octacam.cameras.pycameleon as pcmod
-    from octacam.cli import _enumerate_backend
+    from octacam.cli._common import enumerate_backend
 
     class _Cam:
         def __init__(self, serial, model):
@@ -917,7 +911,7 @@ def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
         pcmod, "pycameleon", types.SimpleNamespace(enumerate_cameras=lambda: cams)
     )
     # enumerate sorts by serial; the blank model falls back to None (unknown).
-    assert _enumerate_backend("pycameleon") == [
+    assert enumerate_backend("pycameleon") == [
         ("17475185", "GS3-U3"),
         ("17475187", "GS3-U3"),
         ("B1", None),
@@ -930,7 +924,7 @@ def test_doctor_groups_cameras_by_model_including_non_basler(emulated_rig, monke
     # line. This stubs _enumerate_backend, so it covers _camera_lines + doctor
     # rendering only — the read_model wiring is covered by the test above.
     monkeypatch.setattr(
-        "octacam.cli._enumerate_backend",
+        "octacam.cli.doctor.enumerate_backend",
         lambda name: [
             ("17475185", "GS3-U3-41C6NIR"),
             ("17475187", "GS3-U3-41C6NIR"),
@@ -961,9 +955,9 @@ def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
     # GPU-present path so the section runs to its end: the NVENC-params line (the new
     # last line) proves we got there, and the hint must be gone.
     import octacam.ffmpeg as ff
-    from octacam.cli import _doctor_gpu_encoding, _Report
+    from octacam.cli.doctor import _doctor_gpu_encoding, _Report
 
-    monkeypatch.setattr("octacam.cli._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
+    monkeypatch.setattr("octacam.cli.doctor._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
     monkeypatch.setattr(ff, "ffmpeg_version", lambda exe: "n7.1")
     monkeypatch.setattr(ff, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
     monkeypatch.setattr(ff, "probe_nvenc_max_sessions", lambda: None)
@@ -1093,7 +1087,7 @@ def test_config_wizard_offers_the_plugins_default_device_without_a_port(
     from rich.console import Console
     from rich.prompt import Confirm, Prompt
 
-    import octacam.cli as cli_mod
+    from octacam.cli import wizard
 
     defaults = {}
 
@@ -1103,8 +1097,8 @@ def test_config_wizard_offers_the_plugins_default_device_without_a_port(
 
     monkeypatch.setattr(Confirm, "ask", lambda *a, **k: True)
     monkeypatch.setattr(Prompt, "ask", ask)
-    monkeypatch.setattr(cli_mod, "_detect_serial_ports", lambda console: [])
-    entries = cli_mod._prompt_serial_plugin(Console(file=io.StringIO()))
+    monkeypatch.setattr(wizard, "_detect_serial_ports", lambda console: [])
+    entries = wizard._prompt_serial_plugin(Console(file=io.StringIO()))
     assert defaults["Device"] == device
     assert entries == [{"name": name, "options": {"device": device}}]
 
@@ -1502,7 +1496,7 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
 
 
 def test_progress_bar_labels_a_grid_encode(tmp_path):
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
     from octacam.transcode import TranscodeProgress
 
     bar = FileProgressBar(2)
@@ -1514,7 +1508,7 @@ def test_progress_bar_labels_a_grid_encode(tmp_path):
 
 
 def test_progress_bar_shows_one_task_per_file_copy_and_verify():
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
     from octacam.transfer import TransferProgress
 
     bar = FileProgressBar()
@@ -1591,7 +1585,7 @@ def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
         "octacam.cameras.registry.available_backends", lambda: ["basler", "flir"]
     )
     monkeypatch.setattr(
-        "octacam.cli._enumerate_backend",
+        "octacam.cli.wizard.enumerate_backend",
         lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],
     )
     target = tmp_path / "mixed-rig"
@@ -1793,7 +1787,7 @@ def test_config_rejects_unknown_backend(tmp_path):
 
 def _doctor_update_line(monkeypatch, notice):
     from octacam import updates
-    from octacam.cli import _doctor_updates, _Report
+    from octacam.cli.doctor import _doctor_updates, _Report
 
     monkeypatch.setattr(updates, "check", lambda: notice)
     report = _Report()
@@ -1982,20 +1976,20 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
 
 
 def test_resolve_config_dir_redirects_a_recording_folder(tmp_path):
-    from octacam.cli import _resolve_config_dir
+    from octacam.cli._common import resolve_config_arg
     from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")
-    assert _resolve_config_dir(rec) == rec / RECORDING_INFO_DIRNAME
+    assert resolve_config_arg(rec) == rec / RECORDING_INFO_DIRNAME
     # A rig dir, and a flat (older) recording, are config dirs of their own.
     flat = tmp_path / "flat"
     _layout_recording(flat, nested=False, toml="")
-    assert _resolve_config_dir(flat) == flat
+    assert resolve_config_arg(flat) == flat
     rig = tmp_path / "rig"
     rig.mkdir()
     (rig / "octacam_config.toml").write_text("")
-    assert _resolve_config_dir(rig) == rig
+    assert resolve_config_arg(rig) == rig
 
 
 def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch):
@@ -2046,18 +2040,18 @@ def test_other_config_dir_commands_resolve_a_recording_folder(
     tmp_path, monkeypatch, argv
 ):
     # Each goes through the one resolver where it first takes the path.
-    from octacam import cli
+    from octacam import config
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")
     seen = []
-    real = cli._resolve_config_dir
+    real = config.resolve_config_dir
 
     def spy(config_dir):
         seen.append(real(config_dir))
         raise SystemExit("stop")
 
-    monkeypatch.setattr("octacam.cli._resolve_config_dir", spy)
+    monkeypatch.setattr("octacam.config.resolve_config_dir", spy)
     args = [a.format(rec=rec) for a in argv]
     result = runner.invoke(app, ["--log-level", "error", *args])
     assert result.exit_code != 0
@@ -2250,7 +2244,7 @@ def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
 def test_flash_names_no_missing_source_for_an_unprobed_board():
     from rich.console import Console
 
-    from octacam.cli import _flash_one
+    from octacam.cli.flash import _flash_one
     from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 
     # The checkout's source is there, but nothing classified the board.
@@ -2386,11 +2380,11 @@ class _StaleBoardPlugin(SerialPlugin):
 def test_record_preflight_reflashes_headless_only_with_auto_flash(
     monkeypatch, caplog, auto_flash
 ):
-    from octacam.cli import _preflight_firmware
+    from octacam.cli.flash import preflight_firmware
 
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
     plugin = _StaleBoardPlugin(auto_flash)
-    _preflight_firmware(PluginManager([plugin]), assume_yes=False)
+    preflight_firmware(PluginManager([plugin]), assume_yes=False)
     assert plugin.flashed == (1 if auto_flash else 0)
     if not auto_flash:
         assert "pass --yes or set auto_flash=true" in caplog.text
@@ -2402,7 +2396,7 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
 ):
     from rich.prompt import Confirm
 
-    from octacam.cli import _preflight_firmware
+    from octacam.cli.flash import preflight_firmware
 
     asked = []
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
@@ -2410,7 +2404,7 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
         Confirm, "ask", lambda prompt, **kw: asked.append(prompt) or answer
     )
     plugin = _StaleBoardPlugin(auto_flash=False, state="unidentified")
-    _preflight_firmware(PluginManager([plugin]), assume_yes=False)
+    preflight_firmware(PluginManager([plugin]), assume_yes=False)
     assert asked == ["Upload the current firmware to /dev/ttyACM0?"]
     assert plugin.flashed == (1 if answer else 0)
     err = " ".join(capsys.readouterr().err.split())
@@ -2425,7 +2419,7 @@ def test_record_preflight_yes_never_prompts_or_flashes_a_blank_board(
 ):
     from rich.prompt import Confirm
 
-    from octacam.cli import _preflight_firmware
+    from octacam.cli.flash import preflight_firmware
 
     def ask(prompt, **kw):
         raise AssertionError(f"--yes prompted: {prompt}")
@@ -2433,7 +2427,7 @@ def test_record_preflight_yes_never_prompts_or_flashes_a_blank_board(
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: interactive))
     monkeypatch.setattr(Confirm, "ask", ask)
     plugin = _StaleBoardPlugin(auto_flash=False, state=state)
-    _preflight_firmware(PluginManager([plugin]), assume_yes=True)
+    preflight_firmware(PluginManager([plugin]), assume_yes=True)
     assert plugin.flashed == (1 if state == "outdated" else 0)
     if state == "unidentified":
         assert "run `octacam flash` to reflash. Continuing WITHOUT reflashing" in caplog.text
@@ -2458,8 +2452,8 @@ def test_record_closes_the_cameras_when_it_exits_before_recording(
 ):
     import io
 
-    from octacam import cli
     from octacam.cameras import CameraSystem
+    from octacam.cli.record import record
 
     class Tty(io.StringIO):
         def isatty(self):
@@ -2490,7 +2484,7 @@ def test_record_closes_the_cameras_when_it_exits_before_recording(
         monkeypatch.setattr(CameraSystem, failure, fail)
     # Called directly: CliRunner's streams are never a tty, so it cannot prompt.
     with pytest.raises((SystemExit, RuntimeError)):  # typer.Exit is a RuntimeError
-        cli.record(rig, output=save_dir)
+        record(rig, output=save_dir)
     assert len(closed) == 1
 
 

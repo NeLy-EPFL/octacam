@@ -656,9 +656,9 @@ def test_save_methods_are_the_writer_formats():
 
 
 def test_record_forms_are_the_benchmark_choices():
-    from octacam import cli
+    from octacam.cli import benchmark
 
-    assert {form.value for form in cli.RecordForm} == set(get_args(RecordForm))
+    assert {form.value for form in benchmark.RecordForm} == set(get_args(RecordForm))
 
 
 def test_video_format_carries_ffmpeg_params():

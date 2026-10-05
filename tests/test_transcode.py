@@ -406,7 +406,7 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
     # A file with a known total followed by one without must NOT inherit the
     # prior total (rich's reset/update keep total on None) — regression guard.
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(2)
     determinate = bar.file(1, tmp_path / "a.raw")
@@ -422,7 +422,7 @@ def test_progress_bar_indeterminate_after_determinate(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
     # The frame total is only a hint; a recording with dropped frames encodes
     # fewer than the hint, so the final block must still read 100%.
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
@@ -435,7 +435,7 @@ def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_undershoots(tmp_path):
     # The hint can also undershoot (more frames encoded than expected); the bar
     # must still land on a full 100% rather than appearing to overflow.
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
@@ -448,7 +448,7 @@ def test_progress_bar_indeterminate_snaps_to_full_when_done(tmp_path):
     # A file with no known total draws an indeterminate bar; on completion it
     # must still close on a clean 100% (final frame count becomes the total)
     # instead of vanishing mid-pulse — the "moved on before 100%" symptom.
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.mkv")

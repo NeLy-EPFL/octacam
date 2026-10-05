@@ -584,17 +584,18 @@ def test_enumerate_basler_goes_through_the_guarded_factory(monkeypatch):
 
 
 def test_doctor_reaches_pylon_through_the_guarded_factory(monkeypatch):
-    # doctor's own route into pylon (cli._enumerate_backend, not enumerate_basler),
-    # and its parallel scan loads the factory on the main thread, before the
-    # other SDKs' workers start.
-    from octacam import cli
+    # doctor's own route into pylon (the CLI's enumerate_backend, not
+    # enumerate_basler), and its parallel scan loads the factory on the main
+    # thread, before the other SDKs' workers start.
+    from octacam.cli._common import enumerate_backend
+    from octacam.cli.doctor import _CameraScan
 
     monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
     factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
-    cli._CameraScan("basler")
+    _CameraScan("basler")
     assert factory.gentl_path_at_load == [None]
     monkeypatch.setattr("octacam.cameras.basler._tl_factory_ready", False)
-    assert cli._enumerate_backend("basler") == [("40018631", "acA1920-150um")]
+    assert enumerate_backend("basler") == [("40018631", "acA1920-150um")]
     assert factory.gentl_path_at_load == [None, None]
     assert os.environ["GENICAM_GENTL64_PATH"] == "/opt/pylon/lib/gentlproducer/gtl"
 

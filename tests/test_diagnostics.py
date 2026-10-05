@@ -851,7 +851,7 @@ def test_benchmark_reports_the_encoder_args_it_runs(save_method, args_field):
 def test_cli_benchmark_report_shows_queue_peaks_of_the_rigs_queue(
     fake_system, capsys, monkeypatch
 ):
-    from octacam.cli import _render_benchmark
+    from octacam.cli.benchmark import _render_benchmark
 
     monkeypatch.setenv("COLUMNS", "200")  # keep rich from wrapping the table
     settings = RecordingSettings(fps=60.0, writer_queue_size=7)

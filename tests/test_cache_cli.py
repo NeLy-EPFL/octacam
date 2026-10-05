@@ -10,7 +10,8 @@ from typer.testing import CliRunner
 
 from octacam import process_jobs as pj
 from octacam import session_cache
-from octacam.cli import _human_size, app
+from octacam.cli import app
+from octacam.cli.admin import _human_size
 
 runner = CliRunner()
 

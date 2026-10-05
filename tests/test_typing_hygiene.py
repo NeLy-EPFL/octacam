@@ -2,7 +2,7 @@
 
 Why this file exists: octacam declares ``requires-python >= 3.10`` but the dev rig
 runs 3.14, where PEP 649 makes annotations lazy — so a bug in this class is
-*invisible* there and fatal everywhere else. It shipped once: ``cli.py`` annotated
+*invisible* there and fatal everywhere else. It shipped once: the CLI annotated
 ``reporter: JobReporter | None`` with ``JobReporter`` imported only under
 ``if TYPE_CHECKING:``, which on 3.10–3.13 is evaluated when the ``def`` executes
 and raised ``NameError: name 'JobReporter' is not defined`` at import — the whole
@@ -24,7 +24,7 @@ Only annotation positions Python actually evaluates are checked:
 
 Function-*local* variable annotations are deliberately not checked: PEP 526
 leaves them unevaluated, which is why ``self._task: TaskID | None = None`` inside
-a method is safe and appears throughout ``cli.py``.
+a method is safe and appears throughout the CLI.
 """
 
 import ast
@@ -127,7 +127,7 @@ def _eager_annotations(tree: ast.Module):
     yield from _bodies(tree.body)
 
 
-@pytest.mark.parametrize("path", PY_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", PY_FILES, ids=lambda p: str(p.relative_to(SRC)))
 def test_type_checking_names_are_quoted_in_evaluated_annotations(path):
     tree = ast.parse(path.read_text(), filename=str(path))
     if _has_future_annotations(tree):

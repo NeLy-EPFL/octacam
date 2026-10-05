@@ -6,9 +6,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from octacam import cli
 from octacam import process_jobs as pj
-from octacam.cli import app
+from octacam.cli import app, gui
 
 runner = CliRunner()
 
@@ -210,7 +209,7 @@ def test_finish_gui_session_spawns_when_process_after(cache_dir, tmp_path, monke
         "spawn_detached",
         lambda **kw: captured.update(kw) or pj.JobStatus(job_id="jid"),
     )
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=True)
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=True)
     assert captured["argv_tail"] == ["--session-id", "sess1", "--config", "/cfg"]
     assert captured["folders"] == [folder]
 
@@ -218,8 +217,8 @@ def test_finish_gui_session_spawns_when_process_after(cache_dir, tmp_path, monke
 def test_finish_gui_session_prints_hints_when_not(cache_dir, monkeypatch):
     called = {"spawn": False, "hints": False}
     monkeypatch.setattr(pj, "spawn_detached", lambda **kw: called.update(spawn=True))
-    monkeypatch.setattr(cli, "_print_transcode_hints", lambda sid: called.update(hints=True))
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=False)
+    monkeypatch.setattr(gui, "_print_transcode_hints", lambda sid: called.update(hints=True))
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=False)
     assert called == {"spawn": False, "hints": True}
 
 
@@ -231,4 +230,4 @@ def test_finish_gui_session_noop_without_recordings(cache_dir, monkeypatch):
         pj, "spawn_detached", lambda **kw: pytest.fail("must not spawn with no recordings")
     )
     # Must not raise.
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=True)
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=True)

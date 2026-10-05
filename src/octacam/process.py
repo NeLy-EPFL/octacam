@@ -40,7 +40,7 @@ from octacam.transcode import transcode_file
 from octacam.transfer import transfer_folder
 
 if TYPE_CHECKING:
-    from octacam.cli import FileProgressBar
+    from octacam.cli.process import FileProgressBar
     from octacam.process_jobs import NullReporter
 
 log = logging.getLogger("octacam")
