@@ -178,7 +178,7 @@ class RecordingSettings:
             "save_timestamps": self.save_frame_timestamps,
         }
 
-    def updated(self, **changes) -> "RecordingSettings":
+    def updated(self, /, **changes) -> "RecordingSettings":
         """A copy with ``changes`` validated and applied, else ValueError naming
         each bad field. A ``record_directory`` or ``relative_directory`` edit
         recomposes save_dir from the split; a lone ``save_dir`` clears it."""
@@ -757,16 +757,18 @@ class RecordingController:
         with self._lock:
             return dataclasses.replace(self._settings)
 
-    def update_settings(self, **changes) -> RecordingSettings:
-        """Apply settings changes (:meth:`RecordingSettings.updated`); refused
-        while a recording is active or starting."""
+    def update_settings(self, /, **changes) -> RecordingSettings:
+        """Apply settings changes (:meth:`RecordingSettings.updated`). A bad
+        change is a ValueError in any state; a valid one is refused
+        (RuntimeError) while a recording is active or starting."""
         with self._lock:
+            settings = self._settings.updated(**changes)
             if self.recording_active:
                 raise RuntimeError("Settings are locked while recording")
             if self._starting:
                 # A change could re-arm the preview under the starting recording.
                 raise RuntimeError("Settings are locked while a recording is starting")
-            self._settings = self._settings.updated(**changes)
+            self._settings = settings
             if "fps" in changes:
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
             # Re-arm the preview when its trigger changes; a software preview

@@ -278,6 +278,12 @@ def test_system_and_settings_endpoints(client):
     # Record tab shows as is.
     bad_fps = client.put("/api/settings", json={"fps": -1})
     assert bad_fps.status_code == 422 and bad_fps.json()["detail"].startswith("fps: ")
+    bad_duration = client.put("/api/settings", json={"duration_s": -1})
+    assert bad_duration.status_code == 422
+    assert bad_duration.json()["detail"].startswith("duration_s: ")
+    named_self = client.put("/api/settings", json={"self": 1})
+    assert named_self.status_code == 422
+    assert named_self.json()["detail"] == "Unknown settings: ['self']"
     bogus = client.put("/api/settings", json={"bogus": 1})
     assert bogus.status_code == 422 and "bogus" in bogus.json()["detail"]
     assert client.put("/api/settings", json={"crf": 18}).status_code == 422
@@ -750,6 +756,10 @@ def test_recording_stop_and_abort_end_a_running_take(client, tmp_path, route, ab
     assert client.put("/api/settings", json={"duration_s": 120}).status_code == 200
     assert client.post("/api/recording/start", json={}).status_code == 202
     assert wait_until(lambda: _state(client) == "recording", timeout=20)
+    # A valid change is locked out; a bad one is a bad request in any state.
+    assert client.put("/api/settings", json={"fps": 10}).status_code == 409
+    assert client.put("/api/settings", json={"bogus": 1}).status_code == 422
+    assert client.put("/api/settings", json={"fps": "abc"}).status_code == 422
 
     response = client.post(f"/api/recording/{route}")
 

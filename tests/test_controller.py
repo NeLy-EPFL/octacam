@@ -487,6 +487,11 @@ def test_update_settings_validation():
     controller._state = "recording"
     with pytest.raises(RuntimeError):
         controller.update_settings(fps=10.0)
+    # A bad change is rejected as such in any state.
+    with pytest.raises(ValueError):
+        controller.update_settings(fps=0)
+    with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
+        controller.update_settings(self=1)
 
 
 def test_settings_updated_names_each_bad_field():

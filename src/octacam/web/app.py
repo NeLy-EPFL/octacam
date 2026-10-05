@@ -797,13 +797,14 @@ def create_app(
 
     @app.put("/api/settings")
     def put_settings(patch: dict[str, Any]):
-        """Apply the fields sent; an unknown key or bad value answers 422 with
-        the controller's message (RecordingSettings.updated)."""
+        """Apply the fields sent. An unknown key or bad value answers 422 with
+        the controller's message (RecordingSettings.updated), in any state; a
+        valid change while recording answers 409."""
         try:
             updated = controller.update_settings(**patch)
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from None
-        except (ValueError, TypeError) as e:
+        except ValueError as e:
             raise HTTPException(422, str(e)) from None
         settings = dataclasses.asdict(updated)
         state.broadcast_threadsafe("settings", settings)
