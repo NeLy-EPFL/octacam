@@ -40,8 +40,9 @@ FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
 
-# The config's ffmpeg_params: encoder output args, spliced verbatim after the
-# derived rawvideo input args.
+# The config's ffmpeg_params: the encoder's output args, run through
+# ffmpeg.output_args (the 4:2:0/full-range policy) after the derived rawvideo
+# input args.
 DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
 
 # GPU capture (record.save_method = "nvenc", or any *_nvenc encoder). NVENC
