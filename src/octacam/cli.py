@@ -2197,8 +2197,9 @@ def record(
         typer.Option(
             "--yes",
             "-y",
-            help="Don't prompt: if a serial plugin's board firmware is out of "
-            "date, reflash it before recording (also lets a headless run flash).",
+            help="Don't prompt: reflash a serial plugin's board that runs an old "
+            "build of its firmware before recording (a blank or foreign board is "
+            "only warned about).",
         ),
     ] = False,
     force: Annotated[
@@ -2471,9 +2472,10 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
 
 
 def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
-    """At record start, offer to reflash a stale board: prompt on a TTY;
-    headless, flash only under ``--yes`` or ``auto_flash`` and only a board known
-    to run an old build of this sketch (never a blank or foreign one)."""
+    """At record start, offer to reflash a stale board: prompt on a TTY unless
+    ``--yes``; under ``--yes``, or headless with ``auto_flash``, flash without
+    asking, but only a board known to run an old build of this sketch (never a
+    blank or foreign one); otherwise warn."""
     interactive = sys.stdin.isatty()
     for p in plugins.plugins:
         if p.firmware is None:
@@ -2491,9 +2493,7 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
         auto = bool(prov.get("auto_flash"))
         msg = f"{p.name}: board firmware on {device} is out of date — {prov.get('detail', '')}"
         do_flash = False
-        if interactive and can:
-            # Asked even under --yes, against its "Don't prompt" help: a known
-            # mismatch, kept until it is fixed on purpose.
+        if interactive and can and not assume_yes:
             console = _stderr_console()
             console.print(f"[yellow]{msg}[/yellow]")
             do_flash = _confirm_flash(console, prov, assume_yes=False)

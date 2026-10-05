@@ -2337,14 +2337,33 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
         Confirm, "ask", lambda prompt, **kw: asked.append(prompt) or answer
     )
     plugin = _StaleBoardPlugin(auto_flash=False, state="unidentified")
-    # Today --yes does not skip the question on a tty, though its help says
-    # "Don't prompt": a known bug this pins until it is fixed on purpose.
-    _preflight_firmware(PluginManager([plugin]), assume_yes=True)
+    _preflight_firmware(PluginManager([plugin]), assume_yes=False)
     assert asked == ["Upload the current firmware to /dev/ttyACM0?"]
     assert plugin.flashed == (1 if answer else 0)
     err = " ".join(capsys.readouterr().err.split())
     assert "board firmware on /dev/ttyACM0 is out of date" in err
     assert "the board sent no identity" in err
+
+
+@pytest.mark.parametrize("interactive", [True, False], ids=["tty", "headless"])
+@pytest.mark.parametrize("state", ["outdated", "unidentified"])
+def test_record_preflight_yes_never_prompts_or_flashes_a_blank_board(
+    monkeypatch, caplog, interactive, state
+):
+    from rich.prompt import Confirm
+
+    from octacam.cli import _preflight_firmware
+
+    def ask(prompt, **kw):
+        raise AssertionError(f"--yes prompted: {prompt}")
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: interactive))
+    monkeypatch.setattr(Confirm, "ask", ask)
+    plugin = _StaleBoardPlugin(auto_flash=False, state=state)
+    _preflight_firmware(PluginManager([plugin]), assume_yes=True)
+    assert plugin.flashed == (1 if state == "outdated" else 0)
+    if state == "unidentified":
+        assert "run `octacam flash` to reflash. Continuing WITHOUT reflashing" in caplog.text
 
 
 # --- record closes the cameras on every exit before the controller owns them --
