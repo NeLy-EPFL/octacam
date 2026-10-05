@@ -758,9 +758,9 @@ class RecordingController:
             return dataclasses.replace(self._settings)
 
     def update_settings(self, /, **changes) -> RecordingSettings:
-        """Apply settings changes (:meth:`RecordingSettings.updated`). A bad
-        change is a ValueError in any state; a valid one is refused
-        (RuntimeError) while a recording is active or starting."""
+        """Apply settings changes (:meth:`RecordingSettings.updated`). A change
+        that fails validation is a ValueError in any state; a valid one is
+        refused (RuntimeError) while a recording is active or starting."""
         with self._lock:
             settings = self._settings.updated(**changes)
             if self.recording_active:

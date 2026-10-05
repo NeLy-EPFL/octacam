@@ -797,9 +797,10 @@ def create_app(
 
     @app.put("/api/settings")
     def put_settings(patch: dict[str, Any]):
-        """Apply the fields sent. An unknown key or bad value answers 422 with
-        the controller's message (RecordingSettings.updated), in any state; a
-        valid change while recording answers 409."""
+        """Apply the fields sent. An unknown key or a value that fails
+        validation answers 422 with the controller's message
+        (RecordingSettings.updated), in any state; a RuntimeError (a valid
+        change while recording or starting) answers 409."""
         try:
             updated = controller.update_settings(**patch)
         except RuntimeError as e:
