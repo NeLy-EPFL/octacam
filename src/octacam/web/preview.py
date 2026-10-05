@@ -181,7 +181,7 @@ def _variants(
     return groups
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class EncodeJob:
     """One camera's frame and everything its encode needs, taken on the event
     loop, so the executor thread touches no shared state or camera."""
@@ -246,8 +246,14 @@ async def preview_loop(
                 continue
             numbers[index] = numbers.get(index, 0) + 1
             jobs.append(EncodeJob(
-                index, frame, groups, numbers[index], time.time_ns(),
-                camera.resulting_fps, camera.dropped_count, recording,
+                camera=index,
+                frame=frame,
+                groups=groups,
+                number=numbers[index],
+                timestamp_ns=time.time_ns(),
+                fps=camera.resulting_fps,
+                dropped=camera.dropped_count,
+                recording=recording,
             ))
         if not jobs:
             continue
