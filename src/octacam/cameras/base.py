@@ -601,7 +601,7 @@ class Camera:
         unreadable exposure None."""
         with self._param_lock:
             try:
-                exposure: float | None = float(self._backend.read_node("exposure").value)
+                exposure: float | None = float(self._backend.read_feature("ExposureTime").value)  # type: ignore[arg-type]
             except Exception:
                 exposure = None
             try:
