@@ -702,17 +702,23 @@ class RecordingController:
         offsets)."""
         return self._reconfigure(index, scope, lambda camera: camera.set_feature(name, value))
 
-    def reset_camera_feature(
-        self, index: int, name: str, pfs_by_serial: dict[str, str], scope: str = "selected"
-    ) -> dict:
+    def reset_camera_feature(self, index: int, name: str, scope: str = "selected") -> dict:
         """Reset one feature to its saved-config value (else its factory default)."""
         return self._reconfigure(
             index,
             scope,
-            lambda camera: camera.reset_feature(
-                name, pfs_by_serial.get(camera.serial_number, "")
-            ),
+            lambda camera: camera.reset_feature(name, self._saved_params(camera)),
         )
+
+    def _saved_params(self, camera) -> str:
+        """``camera``'s parameter file text in the config dir ("" without one)."""
+        if self._config_dir is None:
+            return ""
+        path = self._config_dir / f"{camera.serial_number}.{camera.extension}"
+        try:
+            return path.read_text()
+        except OSError:
+            return ""
 
     def execute_camera_command(self, index: int, name: str) -> dict:
         """Execute a command node on one camera; refreshes its feature list."""

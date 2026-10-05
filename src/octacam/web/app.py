@@ -869,13 +869,9 @@ def create_app(
 
     @app.post("/api/cameras/{index}/features/reset")
     def reset_camera_feature(index: int, payload: CameraFeatureReset):
-        pfs_by_serial = config_writer.read_pfs_files(
-            _require_config_dir(), controller.camera_system.extensions
-        )
+        _require_config_dir()
         with _http_errors():
-            result = controller.reset_camera_feature(
-                index, payload.name, pfs_by_serial, payload.scope
-            )
+            result = controller.reset_camera_feature(index, payload.name, payload.scope)
         _broadcast_features_dirty(result)
         return result
 

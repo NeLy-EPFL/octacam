@@ -30,7 +30,8 @@ def client(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
+    # As cli.gui does: the app and the controller share the config dir.
+    controller = RecordingController(system, settings, config_dir=tmp_path)
     controller.start_preview()
     app = create_app(controller, config, config_dir=str(tmp_path))
     try:
@@ -1156,18 +1157,21 @@ def test_camera_command_endpoint(client):
 
 
 def test_camera_feature_reset_prefers_config(client, tmp_path):
-    # Save the current params so a per-serial config file exists to reset to.
-    client.post("/api/config/save", json={"target": "active", "save_display": False})
     baseline = None
     for f in client.get("/api/cameras/0/features").json()["features"]:
         if f["name"] == "ExposureTime":
             baseline = f["value"]
     assert baseline is not None
+    # Save a value other than the first-seen one, so the reset can only find it
+    # in the camera's parameter file.
+    saved = baseline + 500.0
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
     client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
     r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
     assert r.status_code == 200, r.text
     restored = {f["name"]: f for f in r.json()["updated"][0]["features"]}["ExposureTime"]["value"]
-    assert abs(restored - baseline) < 2.0
+    assert abs(restored - saved) < 2.0
 
 
 def test_camera_features_locked_while_recording(client):
