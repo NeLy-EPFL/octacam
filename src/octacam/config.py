@@ -251,9 +251,9 @@ def increment_trailing_number(text: str) -> str:
     return f"{text[: last.start()]}{int(last.group()) + 1:03d}{text[last.end() :]}"
 
 
-def resolve_dir_template(template: str, when: time.struct_time | None = None) -> str:
+def resolve_dir_template(template: str) -> str:
     """Resolve a directory template (strftime ``%``-codes) to an absolute path."""
-    return normalize_dir(_apply_template(template, when or time.localtime()))
+    return normalize_dir(_apply_template(template, time.localtime()))
 
 
 class SavePath(NamedTuple):
@@ -265,12 +265,10 @@ class SavePath(NamedTuple):
     relative: str
 
 
-def resolve_save_path(
-    record: RecordConfig, when: time.struct_time | None = None
-) -> SavePath:
-    """``record.directory``/``relative_directory``, both expanded at the one
-    moment ``when``."""
-    when = when or time.localtime()
+def resolve_save_path(record: RecordConfig) -> SavePath:
+    """``record.directory``/``relative_directory``, both expanded now, at one
+    moment."""
+    when = time.localtime()
     base = _apply_template(record.directory, when)
     relative = _apply_template(record.relative_directory, when)
     return SavePath(compose_save_dir(base, relative), normalize_dir(base), relative)

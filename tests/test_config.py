@@ -44,7 +44,9 @@ def test_writer_queue_size_default_and_floor():
     assert RecordConfig(writer_queue_size=-10).writer_queue_size == 1
 
 
-def test_parses_emulate_basler_config():
+def test_parses_emulate_basler_config(monkeypatch):
+    epoch = time.localtime(0)
+    monkeypatch.setattr(time, "localtime", lambda *_a: epoch)
     config = load_config_dir(REPO_ROOT / "configs" / "emulate_basler")
     assert config.record.fps == 30.0
     assert config.record.duration == 1.0
@@ -55,21 +57,22 @@ def test_parses_emulate_basler_config():
     # directory/relative_directory carry strftime codes that are only expanded
     # at record time via resolve_save_path, not at parse time.
     assert "%y" in config.record.relative_directory
-    save_dir = resolve_save_path(config.record, when=time.localtime(0)).save_dir
+    save_dir = resolve_save_path(config.record).save_dir
     assert "%y" not in save_dir
-    assert time.strftime("%y%m%d", time.localtime(0)) in save_dir
+    assert time.strftime("%y%m%d", epoch) in save_dir
 
 
-def test_resolve_save_path_expands_both_parts_at_one_moment():
+def test_resolve_save_path_expands_both_parts_at_one_moment(monkeypatch):
+    # Each read of the clock a year later: a second read would split the parts.
+    moments = iter(time.strptime(f"{year}-12-31", "%Y-%m-%d") for year in (2025, 2026))
+    monkeypatch.setattr(time, "localtime", lambda *_a: next(moments))
     home = os.path.expanduser("~")
-    record = RecordConfig(directory="~/data/%Y", relative_directory="%m%d/001")
-    path = resolve_save_path(record, when=time.localtime(0))
-    epoch = time.localtime(0)
-    year, day = time.strftime("%Y", epoch), time.strftime("%m%d", epoch)
-    assert path.directory == f"{home}/data/{year}"
+    record = RecordConfig(directory="~/data/%Y", relative_directory="%Y%m%d/001")
+    path = resolve_save_path(record)
+    assert path.directory == f"{home}/data/2025"
     # Kept relative: the transfer mirrors it under its destination.
-    assert path.relative == f"{day}/001"
-    assert path.save_dir == f"{home}/data/{year}/{day}/001"
+    assert path.relative == "20251231/001"
+    assert path.save_dir == f"{home}/data/2025/20251231/001"
     assert resolve_save_path(RecordConfig(directory="/d")).save_dir == "/d"
 
 
