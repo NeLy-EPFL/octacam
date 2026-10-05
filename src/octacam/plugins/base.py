@@ -1,10 +1,6 @@
-"""The plugin contract and the manager that fans hooks out to the plugins.
-
-Hooks run synchronously and must be thread-safe. ``on_first_frame`` and
-``on_recording_stop`` run on the controller's monitor thread, ``on_first_frame``
-at the countdown's t0, so it must not block. The start and preview hooks run on
-the caller's thread, off the controller lock.
-"""
+"""The plugin contract and the manager that calls it. Hooks must be thread-safe:
+on_first_frame (at the countdown's t0: never block) and on_recording_stop run on
+the monitor thread, the start and preview hooks off the controller lock."""
 
 from __future__ import annotations
 
@@ -24,27 +20,21 @@ log = logging.getLogger("octacam")
 
 
 class Plugin:
-    """Every hook the core calls, each a no-op by default. A hook's ``params`` is
-    this plugin's slice of the start request, or None without one."""
+    """The hooks the core calls, all no-ops by default except the firmware pair.
+    A hook's ``params`` is this plugin's slice of the start request, or None."""
 
     name: str = "plugin"
-    # The trigger-generating plugin (triggerbox). A managed recording counts
-    # frames against its trigger_train and primes with prime_trigger; a managed
-    # preview runs on its trigger from on_preview_start to on_preview_stop, which
-    # also runs before a record grab starts, so on_recording_start arms idle cameras.
+    # Drives the managed trigger. A recording counts frames against its
+    # trigger_train; on_preview_stop runs before the record grab starts, so
+    # on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
-    # JS/CSS served under /plugins/<name>/ (<name>.js, optional <name>.css);
-    # None = no UI.
-    web_dir: ClassVar[Path | None] = None
-    # A serial-hardware plugin's board firmware, and the port it opens when the
-    # config names none; None for any other plugin.
+    web_dir: ClassVar[Path | None] = None  # serves <name>.js (+ <name>.css)
+    # A serial plugin's board firmware, its default port, and the port the config
+    # names (a path or "auto"; `octacam flash --device` replaces it before setup).
     firmware: ClassVar[FirmwareSpec | None] = None
     default_device: ClassVar[str | None] = None
-    # The port the config names (a path or "auto"); `octacam flash --device`
-    # replaces it before setup.
     configured_device: str | None = None
-    # Set by PluginManager.attach.
-    controller: RecordingController | None = None
+    controller: RecordingController | None = None  # set by PluginManager.attach
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
         """Push ``payload`` to every GUI client as ``topic``; a no-op until attached."""
@@ -53,8 +43,6 @@ class Plugin:
     def from_options(cls, options: dict) -> Plugin:
         """The plugin a ``[plugins.options]`` table configures; raises if it can't."""
         return cls()
-
-    # ---- process lifecycle ----
 
     def setup(self) -> None:
         pass
@@ -67,8 +55,6 @@ class Plugin:
 
     def status(self) -> dict:
         return {}
-
-    # ---- recording lifecycle ----
 
     def on_recording_start(self, params: dict | None) -> None:
         pass
@@ -85,12 +71,9 @@ class Plugin:
         return None
 
     def snapshot_options(self, params: dict | None) -> dict | None:
-        """The ``[[plugins]]`` options that reproduce this plugin's live state in
-        the recording's config snapshot; None when the configured ones do.
-        Called under the controller lock: no I/O."""
+        """The ``[[plugins]]`` options reproducing this plugin's live state in the
+        config snapshot, None when the configured ones do. No I/O: under the lock."""
         return None
-
-    # ---- the trigger (generates_trigger) ----
 
     def on_preview_start(self, params: dict | None) -> None:
         pass
@@ -100,30 +83,25 @@ class Plugin:
 
     def trigger_train(self, params: dict | None) -> dict | None:
         """The exact ``{"period_ns", "count"}`` on_recording_start emits for
-        these params, which the recording counts frames against. Pure: called
-        under the controller lock."""
+        these params. Pure: called under the controller lock."""
         return None
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
-        """Emit ``pulses`` sacrificial pulses on the camera lines, lights dark,
-        and return once they are out; True if it did. Called off the lock,
-        before on_recording_start (see "Priming" in CLAUDE.md)."""
+        """Emit ``pulses`` sacrificial camera pulses, lights dark, and return once
+        they are out; True if it did. Off the lock, before on_recording_start."""
         return False
-
-    # ---- web ----
 
     def api_router(self) -> APIRouter | None:
         return None
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """True if the message was this plugin's. ``client_id`` names the socket,
-        so per-connection state (a hold-to-jog) stays with it."""
+        """True if the message was this plugin's; ``client_id`` names the socket."""
         return False
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
 
-    # ---- board firmware (firmware is not None) ----
+    # Implemented exactly when firmware is not None.
 
     def firmware_provisioning(self) -> dict:
         """FirmwareProvisioner.provisioning for this plugin's board."""
@@ -147,8 +125,6 @@ class PluginManager:
         controller: RecordingController | None = None,
         broadcast: Callable[[str, dict], None] | None = None,
     ) -> None:
-        """Give every plugin the controller (RecordingController.__init__) or
-        the web app's broadcast (create_app)."""
         for plugin in self.plugins:
             if controller is not None:
                 plugin.controller = controller
@@ -157,19 +133,17 @@ class PluginManager:
 
     @staticmethod
     def _slice(plugin: Plugin, params: dict | None) -> dict | None:
-        """``plugin``'s slice of a ``{plugin name: slice}`` request; a slice
-        that is not a table counts as none."""
         slice_ = (params or {}).get(plugin.name)
         return slice_ if isinstance(slice_, dict) else None
 
     @staticmethod
     def _call(plugin: Plugin, hook: Callable[..., Any], *args, default=None) -> Any:
-        """``hook(*args)``, a bound method of ``plugin``; ``default`` when it raises."""
         try:
             return hook(*args)
         except Exception:
             # A partialmethod or decorator-object hook has no __name__.
-            log.exception("Plugin %s.%s failed", plugin.name, getattr(hook, "__name__", hook))
+            name = getattr(hook, "__name__", hook)
+            log.exception("Plugin %s.%s failed", plugin.name, name)
             return default
 
     def setup_all(self) -> None:
@@ -212,18 +186,15 @@ class PluginManager:
             self._call(plugin, plugin.on_ws_disconnect, client_id)
 
     def trigger_plugin(self) -> Plugin | None:
-        """The first plugin that generates the trigger, else None."""
         return next((p for p in self.plugins if p.generates_trigger), None)
 
     def trigger_train(self, params: dict | None) -> dict | None:
-        """The train the trigger plugin's recording arm emits, else None."""
         plugin = self.trigger_plugin()
         if plugin is None:
             return None
         return self._call(plugin, plugin.trigger_train, self._slice(plugin, params))
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
-        """Have the trigger plugin emit ``pulses`` priming pulses; True if it did."""
         plugin = self.trigger_plugin()
         if plugin is None:
             return False
@@ -231,8 +202,8 @@ class PluginManager:
         return bool(self._call(plugin, plugin.prime_trigger, slice_, pulses))
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
-        """Each plugin's headless start slice, keyed by name as the GUI sends
-        them; plugins returning None are left out."""
+        """Each plugin's non-None headless start slice, keyed by name as the GUI
+        sends them."""
         params: dict = {}
         for plugin in self.plugins:
             slice_ = self._call(plugin, plugin.default_start_params, fps, duration_s)
@@ -241,8 +212,8 @@ class PluginManager:
         return params
 
     def snapshot_options(self, params: dict | None) -> dict[str, dict]:
-        """Every plugin's snapshot options by name, empty when its config already
-        reproduces it (so one enabled with ``--plugin`` is listed too)."""
+        """Every plugin's snapshot options by name, ``{}`` when its config
+        reproduces it."""
         result: dict[str, dict] = {}
         for plugin in self.plugins:
             slice_ = self._slice(plugin, params)
