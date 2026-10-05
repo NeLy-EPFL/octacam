@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -7,10 +8,13 @@ import pytest
 from octacam.config import (
     GuiConfig,
     RecordConfig,
+    compose_save_dir,
     duration_to_seconds,
+    increment_trailing_number,
     load_config_dir,
+    normalize_dir,
     parse_config,
-    resolve_save_dir,
+    resolve_save_path,
     safe_segment,
 )
 from octacam.writer import DEFAULT_FFMPEG_PARAMS
@@ -49,11 +53,47 @@ def test_parses_emulate_basler_config():
     assert config.cameras[0].name == "camera_LF"
     assert config.cameras[7].window_height == 0.666667
     # directory/relative_directory carry strftime codes that are only expanded
-    # at record time via resolve_save_dir, not at parse time.
+    # at record time via resolve_save_path, not at parse time.
     assert "%y" in config.record.relative_directory
-    save_dir = resolve_save_dir(config.record, when=time.localtime(0))
+    save_dir = resolve_save_path(config.record, when=time.localtime(0)).save_dir
     assert "%y" not in save_dir
     assert time.strftime("%y%m%d", time.localtime(0)) in save_dir
+
+
+def test_resolve_save_path_expands_both_parts_at_one_moment():
+    home = os.path.expanduser("~")
+    record = RecordConfig(directory="~/data/%Y", relative_directory="%m%d/001")
+    path = resolve_save_path(record, when=time.localtime(0))
+    epoch = time.localtime(0)
+    year, day = time.strftime("%Y", epoch), time.strftime("%m%d", epoch)
+    assert path.directory == f"{home}/data/{year}"
+    # Kept relative: the transfer mirrors it under its destination.
+    assert path.relative == f"{day}/001"
+    assert path.save_dir == f"{home}/data/{year}/{day}/001"
+    assert resolve_save_path(RecordConfig(directory="/d")).save_dir == "/d"
+
+
+def test_compose_save_dir():
+    assert compose_save_dir("/base", "run/001") == "/base/run/001"
+    assert compose_save_dir("/base", "") == "/base"
+    # An absolute relative part discards the base.
+    assert compose_save_dir("/base", "/elsewhere/001") == "/elsewhere/001"
+
+
+def test_normalize_dir():
+    home = os.path.expanduser("~")
+    assert normalize_dir(" ~/data ") == f"{home}/data"
+    assert normalize_dir("/a/b") == "/a/b"
+    assert normalize_dir("rel") == f"{os.getcwd()}/rel"
+    assert normalize_dir("a\\b").endswith("/a/b")
+
+
+def test_increment_trailing_number():
+    assert increment_trailing_number("/data/001-bhv") == "/data/002-bhv"
+    assert increment_trailing_number("/d/240101_/Fly1/009") == "/d/240101_/Fly1/010"
+    assert increment_trailing_number("/data/run007/trial003") == "/data/run007/trial004"
+    assert increment_trailing_number("/data/999") == "/data/1000"
+    assert increment_trailing_number("/data/no-number") == "/data/no-number"
 
 
 def test_duplicate_serial_skipped(tmp_path):

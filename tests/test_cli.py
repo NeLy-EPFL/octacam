@@ -339,9 +339,6 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
             _FACADE_CALLS.append("controller.close")
 
     monkeypatch.setattr("octacam.controller.RecordingController", FakeController)
-    monkeypatch.setattr(
-        "octacam.controller.normalize_save_dir", lambda s: s, raising=False
-    )
 
     result = runner.invoke(app, ["record", str(tmp_path)])
     assert result.exit_code != 0  # the RuntimeError from join() propagates

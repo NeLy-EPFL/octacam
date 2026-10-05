@@ -13,8 +13,6 @@ from octacam.controller import (
     RecordingSettings,
     StartResult,
     capture_frame_count,
-    increment_trailing_number,
-    normalize_save_dir,
 )
 from octacam.transform import DisplayTransform
 
@@ -326,18 +324,34 @@ def test_record_config_values_covers_every_record_setting():
     assert set(RecordConfig.model_fields) == reproduced | excluded
 
 
-def test_increment_trailing_number():
-    assert increment_trailing_number("/data/001-bhv") == "/data/002-bhv"
-    assert increment_trailing_number("/d/240101_/Fly1/009") == "/d/240101_/Fly1/010"
-    assert increment_trailing_number("/data/run007/trial003") == "/data/run007/trial004"
-    assert increment_trailing_number("/data/999") == "/data/1000"
-    assert increment_trailing_number("/data/no-number") == "/data/no-number"
+def test_next_take_bumps_the_relative_part_else_save_dir():
+    split = RecordingSettings(
+        record_directory="/base", relative_directory="day/009", save_dir="/base/day/009"
+    ).next_take()
+    assert split.relative_directory == "day/010"
+    assert split.save_dir == "/base/day/010"
+    lone = RecordingSettings(save_dir="/data/001-bhv").next_take()
+    assert lone.save_dir == "/data/002-bhv"
 
 
-def test_normalize_save_dir():
-    home = os.path.expanduser("~")
-    assert normalize_save_dir(" ~/data ") == f"{home}/data"
-    assert normalize_save_dir("/a/b").startswith("/a/b")
+def test_with_save_dir_clears_the_split():
+    settings = RecordingSettings(
+        record_directory="/base", relative_directory="day/001", save_dir="/base/day/001"
+    ).with_save_dir(" ~/other ")
+    assert settings.save_dir == f"{os.path.expanduser('~')}/other"
+    assert (settings.record_directory, settings.relative_directory) == ("", "")
+
+
+def test_relative_save_dir():
+    # The explicit relative part, else save_dir under the base, else its name.
+    assert RecordingSettings(
+        record_directory="/b", relative_directory="day/001", save_dir="/b/day/001"
+    ).relative_save_dir() == "day/001"
+    under = RecordingSettings(record_directory="/b", save_dir="/b/x/002")
+    assert under.relative_save_dir() == "x/002"
+    outside = RecordingSettings(record_directory="/b", save_dir="/out/003")
+    assert outside.relative_save_dir() == "003"
+    assert RecordingSettings(save_dir="/out/004").relative_save_dir() == "004"
 
 
 def test_capture_frame_count():
@@ -426,7 +440,7 @@ def test_update_settings_validation():
 
 def test_update_settings_lone_save_dir_clears_split_halves():
     # Setting save_dir alone (no record_directory/relative_directory in the same
-    # patch) must clear the stale split halves — otherwise _relative_directory
+    # patch) must clear the stale split halves — otherwise relative_save_dir
     # keeps preferring the old relative_directory and the post-recording increment
     # recomposes save_dir from it, discarding the explicitly set path.
     import threading

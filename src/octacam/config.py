@@ -8,10 +8,11 @@ to its default (``_lenient_validate``). A file that does not parse at all raises
 import datetime
 import logging
 import os
+import re
 import shlex
 import time
 from pathlib import Path
-from typing import Annotated, Literal, TypeVar
+from typing import Annotated, Literal, NamedTuple, TypeVar
 
 from pydantic import (
     AfterValidator,
@@ -100,7 +101,7 @@ class RecordConfig(BaseModel):
     """The ``[record]`` section: how and where recordings are captured.
 
     ``directory``/``relative_directory`` are path templates resolved at record
-    start: they accept strftime ``%``-codes (see :func:`resolve_save_dir`).
+    start: they accept strftime ``%``-codes (see :func:`resolve_save_path`).
     ``ffmpeg_params`` is the verbatim encoder arg string used when
     ``save_method == "ffmpeg"``.
     """
@@ -209,10 +210,11 @@ class OctacamConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Save-directory templating (resolved at record start)
+# Save paths (resolved at record start)
 # ---------------------------------------------------------------------------
 
 _DURATION_UNIT_SECONDS = {"seconds": 1.0, "minutes": 60.0, "hours": 3600.0}
+_TRAILING_NUMBER_RE = re.compile(r"\d{3}")
 
 
 def duration_to_seconds(duration: float, unit: str, fps: float) -> float:
@@ -232,41 +234,49 @@ def _apply_template(text: str, when: time.struct_time) -> str:
         return text
 
 
-def _normalize_dir(text: str) -> str:
+def normalize_dir(text: str) -> str:
     """Strip, expand ``~``, make absolute, use forward slashes."""
     return str(Path(text.strip()).expanduser().absolute()).replace("\\", "/")
 
 
+def compose_save_dir(base: str, relative: str) -> str:
+    """``base``/``relative``, normalized; an absolute ``relative`` discards the
+    base."""
+    return normalize_dir(os.path.join(base, relative) if relative else base)
+
+
+def increment_trailing_number(text: str) -> str:
+    """Increment the last 3-digit group: 001-bhv -> 002-bhv (else unchanged)."""
+    matches = list(_TRAILING_NUMBER_RE.finditer(text))
+    if not matches:
+        return text
+    last = matches[-1]
+    return f"{text[: last.start()]}{int(last.group()) + 1:03d}{text[last.end() :]}"
+
+
 def resolve_dir_template(template: str, when: time.struct_time | None = None) -> str:
     """Resolve a directory template (strftime ``%``-codes) to an absolute path."""
-    when = when or time.localtime()
-    return _normalize_dir(_apply_template(template, when))
+    return normalize_dir(_apply_template(template, when or time.localtime()))
 
 
-def resolve_record_directory(
+class SavePath(NamedTuple):
+    """Where a recording goes: ``save_dir`` is ``directory``/``relative``."""
+
+    save_dir: str
+    directory: str
+    # Kept relative: the transfer mirrors it under its destination.
+    relative: str
+
+
+def resolve_save_path(
     record: RecordConfig, when: time.struct_time | None = None
-) -> str:
-    """Resolve just ``record.directory`` (the base the save dir sits under)."""
-    return resolve_dir_template(record.directory, when)
-
-
-def resolve_relative_directory(
-    record: RecordConfig, when: time.struct_time | None = None
-) -> str:
-    """Resolve ``record.relative_directory``, kept relative (the transfer mirrors
-    it under its destination)."""
-    when = when or time.localtime()
-    return _apply_template(record.relative_directory, when)
-
-
-def resolve_save_dir(record: RecordConfig, when: time.struct_time | None = None) -> str:
-    """The absolute save directory, ``directory``/``relative_directory``, both
-    expanded at the one moment ``when``."""
+) -> SavePath:
+    """``record.directory``/``relative_directory``, both expanded at the one
+    moment ``when``."""
     when = when or time.localtime()
     base = _apply_template(record.directory, when)
-    rel = _apply_template(record.relative_directory, when)
-    combined = os.path.join(base, rel) if rel else base
-    return _normalize_dir(combined)
+    relative = _apply_template(record.relative_directory, when)
+    return SavePath(compose_save_dir(base, relative), normalize_dir(base), relative)
 
 
 def _parse_visualization(src: object) -> list[VisualizationConfig]:

@@ -245,23 +245,18 @@ def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
     ``[transcode]``/``[transfer]`` values seed the GUI's Process fields, which
     are baked into each recording's config snapshot for ``octacam process``
     (``transfer`` is ``None`` when the rig has no ``[transfer]`` section)."""
-    from octacam.config import (
-        duration_to_seconds,
-        resolve_record_directory,
-        resolve_relative_directory,
-        resolve_save_dir,
-    )
+    from octacam.config import duration_to_seconds, resolve_save_path
     from octacam.controller import RecordingSettings
 
-    when = time.localtime()
+    path = resolve_save_path(record)
     return RecordingSettings(
         fps=record.fps,
         duration_s=duration_to_seconds(
             record.duration, record.duration_unit, record.fps
         ),
-        save_dir=resolve_save_dir(record, when),
-        record_directory=resolve_record_directory(record, when),
-        relative_directory=resolve_relative_directory(record, when),
+        save_dir=path.save_dir,
+        record_directory=path.directory,
+        relative_directory=path.relative,
         trigger_source=record.trigger_source,
         preview_trigger_source=record.preview_trigger_source,
         save_method=record.save_method,
@@ -1248,7 +1243,7 @@ def _doctor_config(report: _Report, config_dir: Path):
         find_config_file,
         load_config_dir,
         resolve_dir_template,
-        resolve_save_dir,
+        resolve_save_path,
     )
 
     report.section(f"Config ({config_dir})")
@@ -1270,7 +1265,7 @@ def _doctor_config(report: _Report, config_dir: Path):
         f"{cfg_file.name} loaded (backend={cfg.backend}, "
         f"{len(cfg.cameras)} camera(s) declared)",
     )
-    report.add("info", f"next recording → {resolve_save_dir(cfg.record)}")
+    report.add("info", f"next recording → {resolve_save_path(cfg.record).save_dir}")
     if cfg.transfer and cfg.transfer.directory:
         report.add("info", f"transfer → {resolve_dir_template(cfg.transfer.directory)}")
     else:
@@ -1309,10 +1304,11 @@ def _doctor_cameras_vs_config(
 
 
 def _doctor_storage(report: _Report, cfg) -> None:
-    from octacam.config import resolve_dir_template, resolve_save_dir
+    from octacam.config import resolve_dir_template, resolve_save_path
 
     report.section("Storage & transfer")
-    _report_free_space(report, Path(resolve_save_dir(cfg.record)), "record dir")
+    save_dir = Path(resolve_save_path(cfg.record).save_dir)
+    _report_free_space(report, save_dir, "record dir")
     transfer = cfg.transfer
     if transfer is None or not transfer.directory:
         report.add("info", "no [transfer] destination configured")
@@ -2258,7 +2254,7 @@ def record(
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
-    from octacam.controller import RecordingController, normalize_save_dir
+    from octacam.controller import RecordingController
     from octacam.plugins import build_plugins
 
     config_dir = _resolve_config_dir(config_dir)
@@ -2277,9 +2273,7 @@ def record(
     if output is not None:
         # Bypasses the template; the summary's relative_directory falls back to
         # the folder name.
-        settings.save_dir = normalize_save_dir(str(output))
-        settings.record_directory = ""
-        settings.relative_directory = ""
+        settings = settings.with_save_dir(str(output))
 
     _warn_if_transcoding()
 

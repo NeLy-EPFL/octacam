@@ -21,7 +21,6 @@ import datetime
 import json
 import logging
 import os
-import re
 import shlex
 import shutil
 import threading
@@ -35,7 +34,12 @@ import numpy as np
 
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
-from octacam.config import safe_segment
+from octacam.config import (
+    compose_save_dir,
+    increment_trailing_number,
+    normalize_dir,
+    safe_segment,
+)
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (
@@ -86,36 +90,6 @@ TRAIN_END_MARGIN_S = 0.3
 # is in timestamps.npz); the counts next to them are never capped.
 SUMMARY_INDEX_LIMIT = 1000
 
-_TRAILING_NUMBER_RE = re.compile(r"\d{3}")
-
-
-def increment_trailing_number(text: str) -> str:
-    """Increment the last 3-digit group: 001-bhv -> 002-bhv (else unchanged)."""
-    matches = list(_TRAILING_NUMBER_RE.finditer(text))
-    if not matches:
-        return text
-    last = matches[-1]
-    incremented = f"{int(last.group()) + 1:03d}"
-    return text[: last.start()] + incremented + text[last.end() :]
-
-
-def normalize_save_dir(text: str) -> str:
-    """Strip, expand ``~``, make absolute, use forward slashes."""
-    path = Path(text.strip()).expanduser()
-    return str(path.absolute()).replace("\\", "/")
-
-
-def compose_save_dir(record_directory: str, relative_directory: str) -> str:
-    """Join a base directory and relative sub-path into a normalized save_dir.
-
-    Mirrors config.resolve_save_dir's join semantics (an absolute
-    relative_directory discards the base) so the live-edited GUI values and the
-    config-resolved ones land on the same path."""
-    rel = relative_directory.strip()
-    combined = os.path.join(record_directory, rel) if rel else record_directory
-    return normalize_save_dir(combined)
-
-
 @dataclass
 class RecordingSettings:
     fps: float = 100.0
@@ -153,6 +127,45 @@ class RecordingSettings:
         else:
             return video_format
         return dataclasses.replace(video_format, ffmpeg_params=params)
+
+    def with_save_dir(self, path: str) -> "RecordingSettings":
+        """An explicit save dir (``--output``, a lone GUI edit). It clears the
+        split, or the transfer and next_take would recompose the old path."""
+        return dataclasses.replace(
+            self,
+            save_dir=normalize_dir(path),
+            record_directory="",
+            relative_directory="",
+        )
+
+    def next_take(self) -> "RecordingSettings":
+        """The next recording's folder: the relative part's trailing number
+        bumped, else save_dir's."""
+        if not self.relative_directory.strip():
+            return dataclasses.replace(
+                self, save_dir=increment_trailing_number(self.save_dir)
+            )
+        relative = increment_trailing_number(self.relative_directory)
+        return dataclasses.replace(
+            self,
+            relative_directory=relative,
+            save_dir=compose_save_dir(self.record_directory, relative),
+        )
+
+    def relative_save_dir(self) -> str:
+        """The recording folder relative to the base directory: the explicit
+        ``relative_directory``, else save_dir relative to the base, else (no
+        base, or a folder outside it such as an --output override) its name."""
+        if self.relative_directory.strip():
+            return self.relative_directory
+        if self.record_directory:
+            try:
+                rel = os.path.relpath(self.save_dir, self.record_directory)
+                if not rel.startswith(".."):
+                    return rel
+            except ValueError:  # e.g. different drives on Windows
+                pass
+        return Path(self.save_dir).name
 
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:
@@ -430,7 +443,7 @@ def build_recording_summary(
         "ffmpeg_params": settings.video_format().ffmpeg_params,
         "record_form": settings.record_form,
         # Resolved now, so a transfer on a later day never re-templates the date.
-        "relative_directory": _relative_directory(settings),
+        "relative_directory": settings.relative_save_dir(),
         "pulse_train": (
             {**pulse_clock.to_dict(), "primed": primed_pulses}
             if pulse_clock is not None
@@ -478,23 +491,6 @@ def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
         for key, (values, dtype) in series.items():
             arrays[f"{camera.name}/{key}"] = np.asarray(values[:n], dtype=dtype)
     return arrays
-
-
-def _relative_directory(settings: RecordingSettings) -> str:
-    """The recording folder relative to the base directory: the explicit
-    ``relative_directory``, else save_dir relative to the base, else (no base, or
-    a folder outside it such as an --output override) the folder's name."""
-    if settings.relative_directory.strip():
-        return settings.relative_directory
-    base = settings.record_directory
-    if base:
-        try:
-            rel = os.path.relpath(settings.save_dir, base)
-            if not rel.startswith(".."):
-                return rel
-        except ValueError:  # e.g. different drives on Windows
-            pass
-    return Path(settings.save_dir).name
 
 
 class RecordingController:
@@ -761,26 +757,14 @@ class RecordingController:
                 except ValueError as e:
                     raise ValueError(f"invalid transcode_ffmpeg_params: {e}") from e
             if "record_directory" in changes:
-                changes["record_directory"] = normalize_save_dir(
-                    changes["record_directory"]
-                )
-            if "save_dir" in changes:
-                changes["save_dir"] = normalize_save_dir(changes["save_dir"])
+                changes["record_directory"] = normalize_dir(changes["record_directory"])
             merged = dataclasses.replace(self._settings, **changes)
             if "record_directory" in changes or "relative_directory" in changes:
-                merged = dataclasses.replace(
-                    merged,
-                    save_dir=compose_save_dir(
-                        merged.record_directory, merged.relative_directory
-                    ),
+                merged.save_dir = compose_save_dir(
+                    merged.record_directory, merged.relative_directory
                 )
             elif "save_dir" in changes:
-                # A lone save_dir edit clears the split halves, as --output does:
-                # the transfer and the post-recording increment would otherwise
-                # recompose the old path from them.
-                merged = dataclasses.replace(
-                    merged, record_directory="", relative_directory=""
-                )
+                merged = merged.with_save_dir(merged.save_dir)
             self._settings = merged
             if "fps" in changes:
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
@@ -800,7 +784,7 @@ class RecordingController:
         return new_settings
 
     def validate_save_dir(self, path_str: str) -> dict:
-        resolved = Path(normalize_save_dir(path_str))
+        resolved = Path(normalize_dir(path_str))
         parent = next((p for p in [resolved, *resolved.parents] if p.exists()), None)
         free_bytes = shutil.disk_usage(parent).free if parent else 0
         return {
@@ -820,7 +804,7 @@ class RecordingController:
         out.
         """
         raw = (path_str or "").strip() or (self._settings.save_dir or "")
-        base = Path(normalize_save_dir(raw)) if raw.strip() else Path.home()
+        base = Path(normalize_dir(raw)) if raw.strip() else Path.home()
         current = next(
             (p for p in [base, *base.parents] if p.is_dir()),
             Path(base.anchor or "/"),
@@ -1588,26 +1572,7 @@ class RecordingController:
                 self._deadline = None
                 aborted = self._aborted
                 if not aborted:
-                    # The next recording gets a fresh folder: bump the trailing
-                    # number of the relative part, else of save_dir.
-                    if self._settings.relative_directory.strip():
-                        next_rel = increment_trailing_number(
-                            self._settings.relative_directory
-                        )
-                        self._settings = dataclasses.replace(
-                            self._settings,
-                            relative_directory=next_rel,
-                            save_dir=compose_save_dir(
-                                self._settings.record_directory, next_rel
-                            ),
-                        )
-                    else:
-                        self._settings = dataclasses.replace(
-                            self._settings,
-                            save_dir=increment_trailing_number(
-                                self._settings.save_dir
-                            ),
-                        )
+                    self._settings = self._settings.next_take()
                 # A camera dropped mid-recording can make the re-arm raise: go
                 # idle rather than stay "finishing", and still disarm below.
                 try:
