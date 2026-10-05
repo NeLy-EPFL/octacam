@@ -51,7 +51,6 @@ from octacam.controller import (
     StartResult,
     sanitize_camera_name,
 )
-from octacam.plugins.base import PluginManager
 from octacam.transform import RECORDING_INFO_DIRNAME
 from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
 
@@ -448,7 +447,6 @@ class _AppState:
         self,
         controller: RecordingController,
         config: OctacamConfig,
-        plugins: PluginManager,
         config_dir: str = "",
     ):
         self.controller = controller
@@ -459,7 +457,7 @@ class _AppState:
         self.raw_config = (
             config_writer.load_raw_config(config_dir) if config_dir else {}
         )
-        self.plugins = plugins
+        self.plugins = controller.plugins
         # {name: assets dir} of the plugins with a web UI, set once by create_app.
         self.plugin_web: dict[str, Path] = {}
         # Set by POST /api/shutdown ("Shut down & process"); cli.gui's teardown then
@@ -750,13 +748,12 @@ def _http_errors():
 def create_app(
     controller: RecordingController,
     config: OctacamConfig,
-    plugins: PluginManager | None = None,
     config_dir: str = "",
     shutdown_callback: Callable[[], None] = _default_shutdown,
 ) -> FastAPI:
-    plugins = plugins if plugins is not None else PluginManager([])
-    state = _AppState(controller, config, plugins, config_dir)
-
+    """The GUI's app for ``controller``, serving the plugins it was built with."""
+    state = _AppState(controller, config, config_dir)
+    plugins = state.plugins
     plugins.attach(broadcast=state.broadcast_threadsafe)
 
     # Resolved once, so the mounts and /api/system agree on which plugins have a

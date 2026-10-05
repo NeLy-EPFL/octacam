@@ -32,7 +32,7 @@ def client(tmp_path):
     )
     controller = RecordingController(system, settings)
     controller.start_preview()
-    app = create_app(controller, config, None, config_dir=str(tmp_path))
+    app = create_app(controller, config, config_dir=str(tmp_path))
     try:
         with TestClient(app) as test_client:
             test_client.controller = controller
@@ -57,7 +57,6 @@ def shutdown_client(tmp_path):
     app = create_app(
         controller,
         config,
-        None,
         config_dir=str(tmp_path),
         shutdown_callback=shutdown,
     )
@@ -157,7 +156,7 @@ def test_deferred_startup_serves_then_fills_in(tmp_path):
     assert len(pending) == 0
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
     controller = RecordingController(pending, settings, ready=False)
-    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
     try:
         with TestClient(app) as client:
             sys0 = client.get("/api/system").json()
@@ -458,7 +457,8 @@ def test_websocket_preview_and_telemetry(client):
 
 
 def test_plugin_contributions_wired_into_app(tmp_path):
-    """A loaded plugin's router, status, and WS handler reach the app."""
+    """A loaded plugin's router, status, and WS handler reach the app, and the
+    plugin gets the controller and a broadcast that reaches the GUI clients."""
     from fastapi import APIRouter
 
     from octacam.plugins.base import Plugin, PluginManager
@@ -485,6 +485,7 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             if message.get("type") != "stubjog":
                 return False
             self.jogs.append((message.get("n"), client_id))
+            self.broadcast("stub_state", {"n": message.get("n")})
             return True
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
@@ -492,12 +493,11 @@ def test_plugin_contributions_wired_into_app(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
-    controller.start_preview()
     stub = StubPlugin()
-    app = create_app(
-        controller, OctacamConfig(), PluginManager([stub]), config_dir=str(tmp_path)
-    )
+    controller = RecordingController(system, settings, PluginManager([stub]))
+    controller.start_preview()
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    assert stub.controller is controller
     try:
         with TestClient(app) as client:
             # generic plugin status surfaced on /api/system
@@ -508,7 +508,15 @@ def test_plugin_contributions_wired_into_app(tmp_path):
             # WS messages are dispatched to the plugin with the client id
             with client.websocket_connect("/api/ws") as ws:
                 ws.send_text(json.dumps({"type": "stubjog", "n": 5}))
-                wait_until(lambda: stub.jogs, timeout=3, interval=0.05)
+                for _ in range(200):
+                    message = ws.receive()
+                    if message.get("text"):
+                        payload = json.loads(message["text"])
+                        if payload["type"] == "stub_state":
+                            break
+                else:
+                    pytest.fail("the plugin's broadcast never reached the client")
+                assert payload == {"type": "stub_state", "n": 5}
             assert len(stub.jogs) == 1
             n, client_id = stub.jogs[0]
             assert n == 5
@@ -532,14 +540,9 @@ def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
+    controller = RecordingController(system, settings, PluginManager([RaisingPlugin()]))
     controller.start_preview()
-    app = create_app(
-        controller,
-        OctacamConfig(),
-        PluginManager([RaisingPlugin()]),
-        config_dir=str(tmp_path),
-    )
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
     try:
         with TestClient(app) as client:
             with client.websocket_connect("/api/ws") as ws:
@@ -578,14 +581,9 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
+    controller = RecordingController(system, settings, PluginManager([StubWebPlugin()]))
     controller.start_preview()
-    app = create_app(
-        controller,
-        OctacamConfig(),
-        PluginManager([StubWebPlugin()]),
-        config_dir=str(tmp_path),
-    )
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
     try:
         with TestClient(app) as client:
             # /api/system advertises the entry module + css under the plugin entry
@@ -861,7 +859,7 @@ def _fake_rig_client(tmp_path, serials):
     system = CameraSystem(serials, backend="fake")
     settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
     controller = RecordingController(system, settings)
-    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
     try:
         with TestClient(app) as test_client:
             yield test_client
@@ -1178,7 +1176,7 @@ def _save_client(tmp_path, config_dir):
     )
     controller = RecordingController(system, settings)
     controller.start_preview()
-    app = create_app(controller, config, None, config_dir=str(config_dir))
+    app = create_app(controller, config, config_dir=str(config_dir))
     return controller, app
 
 

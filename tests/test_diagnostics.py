@@ -762,7 +762,7 @@ def test_diagnostics_rest_endpoints(fake_system, tmp_path):
     settings = RecordingSettings(fps=80.0, save_dir=str(tmp_path / "rec"))
     controller = RecordingController(fake_system, settings)
     controller.start_preview()
-    app = create_app(controller, OctacamConfig(), None, config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
     try:
         with TestClient(app) as client:
             # Request validation (extra="forbid" + positive-value validators).
