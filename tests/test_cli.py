@@ -2247,7 +2247,8 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
         Confirm, "ask", lambda prompt, **kw: asked.append(prompt) or answer
     )
     plugin = _StaleBoardPlugin(auto_flash=False, state="unidentified")
-    # --yes does not skip the question on a tty.
+    # Today --yes does not skip the question on a tty, though its help says
+    # "Don't prompt": a known bug this pins until it is fixed on purpose.
     _preflight_firmware(PluginManager([plugin]), assume_yes=True)
     assert asked == ["Upload the current firmware to /dev/ttyACM0?"]
     assert plugin.flashed == (1 if answer else 0)

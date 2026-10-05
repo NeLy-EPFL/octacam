@@ -2536,7 +2536,8 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
         msg = f"{p.name}: board firmware on {device} is out of date — {prov.get('detail', '')}"
         do_flash = False
         if interactive and can:
-            # On a tty the operator decides, even under --yes.
+            # Asked even under --yes, against its "Don't prompt" help: a known
+            # mismatch, kept until it is fixed on purpose.
             console = _stderr_console()
             console.print(f"[yellow]{msg}[/yellow]")
             do_flash = _confirm_flash(console, prov, assume_yes=False)
