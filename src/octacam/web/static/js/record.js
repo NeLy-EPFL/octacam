@@ -306,17 +306,12 @@ export class RecordTab {
   // A persistent banner naming the cameras whose writer failed (data may be
   // lost); an empty list hides it.
   setWriterFailure(failedNames) {
-    const el = this.writerAlert;
-    if (!el) return;
-    if (failedNames && failedNames.length) {
-      el.textContent =
-        `⚠ Save failed: ${failedNames.join(", ")} — the recording may be ` +
-        "incomplete. See the event log / server log.";
-      el.classList.remove("hidden");
-    } else {
-      el.textContent = "";
-      el.classList.add("hidden");
-    }
+    const failed = failedNames.length > 0;
+    this.writerAlert.classList.toggle("hidden", !failed);
+    this.writerAlert.textContent = failed
+      ? `⚠ Save failed: ${failedNames.join(", ")} — the recording may be ` +
+        "incomplete. See the event log / server log."
+      : "";
   }
 
   // ------------------------------------------------------------ render

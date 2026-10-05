@@ -45,12 +45,12 @@ export function initShortcuts({ grid, tabs }) {
   // record/theme/save buttons may sit in a hidden panel); fireVisible() is for
   // controls in blocks that are hidden unless relevant (plugin status/flash).
   const fire = (id) => {
-    const el = byId(id);
-    if (el && !el.disabled) el.click();
+    const ctl = byId(id);
+    if (ctl && !ctl.disabled) ctl.click();
   };
   const fireVisible = (id) => {
-    const el = byId(id);
-    if (el && !el.disabled && el.offsetParent !== null) el.click();
+    const ctl = byId(id);
+    if (ctl && !ctl.disabled && ctl.offsetParent !== null) ctl.click();
   };
 
   const activeButton = () => byId("tabs").querySelector("button[data-tab].active");
@@ -225,10 +225,10 @@ export function initShortcuts({ grid, tabs }) {
   // their own title (the theme toggle) have no `hint`.
   for (const b of bindings) {
     if (!b.hint) continue;
-    const el = byId(b.hint);
-    if (el && el.title && !el.dataset.kbdHinted) {
-      el.title = `${el.title} (${b.caps.join("+")})`;
-      el.dataset.kbdHinted = "1";
+    const ctl = byId(b.hint);
+    if (ctl && ctl.title && !ctl.dataset.kbdHinted) {
+      ctl.title = `${ctl.title} (${b.caps.join("+")})`;
+      ctl.dataset.kbdHinted = "1";
     }
   }
 

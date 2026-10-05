@@ -472,7 +472,7 @@ body {
 .serial-port-row { flex: none; display: flex; align-items: center; gap: 4px; }
 
 /* Firmware "out of date — Flash firmware" banner, shared by serial-plugin tabs
-   (js/firmware-flash.js). Amber = attention, distinct from the red link-error
+   (js/serial.js). Amber = attention, distinct from the red link-error
    .plugin-status above. */
 .fw-flash {
   display: flex;
