@@ -74,12 +74,19 @@ QUEUE_SATURATION_FRACTION = 0.75
 STABILITY_MARGIN = 0.05
 FIND_MAX_ITERATIONS = 4
 
-# Bottleneck labels, as the report and the GUI show them.
+# Bottleneck kinds, and the label the CLI and the GUI show for each.
 ACQUISITION = "acquisition"
 TRANSFER = "transfer"
 ENCODE = "encode"
 HOST = "host"
 NONE = "none"
+BOTTLENECK_LABELS = {
+    ACQUISITION: "acquisition (the camera can't deliver frames fast enough)",
+    TRANSFER: "transfer (the cameras share more bus bandwidth than the link provides)",
+    ENCODE: "encoding (the encoder can't keep up)",
+    HOST: "host contention (CPU / GIL)",
+    NONE: "none",
+}
 
 # Concurrent acquisition below this fraction of the solo rate means the cameras
 # slow each other down. The acquisition sweep runs no encoder and the SDKs
@@ -200,9 +207,10 @@ class CameraTrial:
         }
 
 
-def _slowest(fps: dict[str, float]) -> float:
-    """The slowest camera's rate, or inf when none was measured."""
-    return min(fps.values(), default=float("inf"))
+def _slowest(rates: str) -> property:
+    """A property: the slowest camera's rate in the *rates* field, or inf when
+    none was measured."""
+    return property(lambda self: min(getattr(self, rates).values(), default=math.inf))
 
 
 @dataclass
@@ -217,21 +225,10 @@ class Ceilings:
     freerun_fps: dict[str, float] = field(default_factory=dict)
     grab_solo_fps: dict[str, float] = field(default_factory=dict)
 
-    @property
-    def grab_min(self) -> float:
-        return _slowest(self.grab_fps)
-
-    @property
-    def encode_min(self) -> float:
-        return _slowest(self.encode_fps)
-
-    @property
-    def freerun_min(self) -> float:
-        return _slowest(self.freerun_fps)
-
-    @property
-    def grab_solo_min(self) -> float:
-        return _slowest(self.grab_solo_fps)
+    grab_min = _slowest("grab_fps")
+    encode_min = _slowest("encode_fps")
+    freerun_min = _slowest("freerun_fps")
+    grab_solo_min = _slowest("grab_solo_fps")
 
     @property
     def bus_contended(self) -> bool:
@@ -291,6 +288,10 @@ class DiagnosticReport:
     cpu_percent: float | None = None
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def bottleneck_label(self) -> str:
+        return BOTTLENECK_LABELS[self.bottleneck]
+
     def to_dict(self) -> dict:
         return {
             "backend": self.backend,
@@ -306,6 +307,7 @@ class DiagnosticReport:
             "drop_rate": round(self.drop_rate, 5),
             "achievable": self.achievable,
             "bottleneck": self.bottleneck,
+            "bottleneck_label": self.bottleneck_label,
             "ceilings": self.ceilings.to_dict() if self.ceilings else None,
             "predicted_max_fps": _finite(self.predicted_max_fps),
             "measured_max_fps": _finite(self.measured_max_fps),

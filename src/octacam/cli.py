@@ -2583,18 +2583,6 @@ def flash(
 # ---------------------------------------------------------------------------
 
 
-def _bottleneck_label(bottleneck: str) -> str:
-    from octacam import diagnostics as diag
-
-    return {
-        diag.ACQUISITION: "acquisition (camera can't deliver fast enough)",
-        diag.TRANSFER: "transfer (cameras share more bus bandwidth than the link provides)",
-        diag.ENCODE: "encoding (the encoder can't keep up)",
-        diag.HOST: "host contention (CPU / GIL)",
-        diag.NONE: "none",
-    }.get(bottleneck, bottleneck)
-
-
 class _BenchmarkProgressBar:
     """Benchmark progress bar over diagnose's seconds budget: a ticker advances
     it in real time toward the current step's end and never moves it back."""
@@ -2710,7 +2698,7 @@ def _render_benchmark(report) -> None:
         console.print(
             Text(
                 f"  ✗ {r.target_fps:g} fps is NOT achievable — "
-                f"limited by {_bottleneck_label(r.bottleneck)}",
+                f"limited by {r.bottleneck_label}",
                 style="bold red",
             )
         )

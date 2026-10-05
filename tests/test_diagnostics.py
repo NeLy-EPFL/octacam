@@ -365,8 +365,9 @@ def test_diagnose_report_structure_null_sink(fake_system):
         assert set(trial.stages) == {"acquire", "transform", "enqueue", "encode"}
 
     # The whole report must serialize as strict JSON (no Infinity/NaN tokens).
-    payload = json.dumps(report.to_dict(), allow_nan=False)
-    assert json.loads(payload)["bottleneck"] == "none"
+    payload = json.loads(json.dumps(report.to_dict(), allow_nan=False))
+    assert payload["bottleneck"] == "none"
+    assert payload["bottleneck_label"] == dg.BOTTLENECK_LABELS[dg.NONE]
 
 
 def test_diagnose_leaves_cameras_stopped(fake_system):

@@ -1246,6 +1246,7 @@ def test_benchmark_queue_peaks_are_of_the_benchmarked_writer_queue(page):
         "drop_rate": 0.0,
         "achievable": True,
         "bottleneck": "none",
+        "bottleneck_label": "none",
         "ceilings": None,
         "predicted_max_fps": 90.0,
         "measured_max_fps": None,
@@ -1274,3 +1275,32 @@ def test_benchmark_queue_peaks_are_of_the_benchmarked_writer_queue(page):
     )
     assert "3 of 7" in cells  # the end-to-end trial
     assert "5 of 7" in cells  # the free-run trial
+
+
+def test_benchmark_progress_only_grows_and_the_verdict_names_the_reports_label(page):
+    """The bar eases toward each step's end of the seconds budget and never
+    moves back; the verdict shows the label the report ships."""
+    out = page.evaluate(
+        """async () => {
+            const m = await import('./js/diagnose.js');
+            const tab = new m.BenchmarkTab({ notify: () => {} });
+            const fill = document.getElementById('bench-progress-fill');
+            const widths = [];
+            for (const [elapsed_s, step_s] of [[0, 2], [2, 3], [1, 1]]) {
+                tab.applyProgress(
+                    { phase: 'P', detail: '', elapsed_s, step_s, total_s: 10 });
+                widths.push(fill.style.width);
+            }
+            const label = document.getElementById('bench-progress-label').textContent;
+            tab.applyReport({
+                target_fps: 60, achievable: false, bottleneck: 'encode',
+                bottleneck_label: 'encoding (x)', ceilings: null, trials: [],
+                writer_queue_size: 7,
+            });
+            const verdict = document.querySelector('.bench-verdict').textContent;
+            return { widths, label, verdict };
+        }"""
+    )
+    assert out["widths"] == ["20%", "50%", "50%"]
+    assert out["label"] == "P · about 9 s left"
+    assert out["verdict"].endswith("limited by encoding (x)")

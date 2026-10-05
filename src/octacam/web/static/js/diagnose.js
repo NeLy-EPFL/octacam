@@ -2,14 +2,6 @@
 
 import { api } from "./util.js";
 
-const BOTTLENECK_LABEL = {
-  acquisition: "acquisition — the camera can't deliver frames fast enough",
-  transfer: "transfer — the cameras share more bus bandwidth than the link provides",
-  encode: "encoding — the encoder can't keep up",
-  host: "host contention — CPU / GIL",
-  none: "none",
-};
-
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -187,9 +179,9 @@ export class BenchmarkTab {
       verdict.textContent = `✓ ${fmt(rep.target_fps, 0)} fps is achievable`;
     } else {
       verdict.classList.add("bad");
-      const label = BOTTLENECK_LABEL[rep.bottleneck] || rep.bottleneck;
       verdict.textContent =
-        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — limited by ${label}`;
+        `✗ ${fmt(rep.target_fps, 0)} fps is not achievable — ` +
+        `limited by ${rep.bottleneck_label}`;
     }
     nodes.push(verdict);
 
