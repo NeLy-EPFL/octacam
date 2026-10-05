@@ -292,7 +292,8 @@ def resolve_save_path(record: RecordConfig) -> SavePath:
 
 @dataclass
 class RecordingSettings:
-    """The live Record and Process settings; :meth:`updated` checks the
+    """The live Record and Process settings (the ``[record]`` fields as
+    :class:`RecordConfig` documents them); :meth:`updated` checks the
     constraints declared here."""
 
     fps: PositiveFloat = 100.0
@@ -305,10 +306,8 @@ class RecordingSettings:
     trigger_source: TriggerSource = "software"
     preview_trigger_source: PreviewTriggerSource = "auto"
     save_method: SaveMethod = "ffmpeg"
-    # Encoder args per method, kept apart so switching keeps both presets.
     ffmpeg_params: FfmpegArgs = DEFAULT_FFMPEG_PARAMS
     nvenc_params: FfmpegArgs = NVENC_H264_PARAMS
-    # None = the GPU's detected session cap; cameras beyond it encode on CPU.
     max_nvenc_sessions: Annotated[StrictInt, Field(ge=0)] | None = None
     writer_queue_size: Annotated[StrictInt, Field(ge=1)] = 64
     record_form: RecordForm = "display"
@@ -449,6 +448,11 @@ class RecordingSettings:
 
 _SETTINGS = TypeAdapter(RecordingSettings)
 _SETTINGS_FIELDS = frozenset(f.name for f in dataclasses.fields(RecordingSettings))
+
+
+# ---------------------------------------------------------------------------
+# Parsing
+# ---------------------------------------------------------------------------
 
 
 def _parse_visualization(src: object) -> list[VisualizationConfig]:
