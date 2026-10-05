@@ -322,19 +322,7 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
     monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
 
-    class FakePlugins:
-        plugins: list = []
-
-        def setup_all(self):
-            _FACADE_CALLS.append("setup_all")
-
-        def teardown_all(self):
-            _FACADE_CALLS.append("teardown_all")
-
-        def default_start_params(self, *_a, **_k):
-            return {}
-
-    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: FakePlugins())
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
 
     class FakeController:
         def __init__(self, *a, **k):
