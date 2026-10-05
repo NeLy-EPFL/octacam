@@ -1071,7 +1071,8 @@ def test_doctor_probe_serial_skips_busy_port(emulated_rig, monkeypatch):
     )
     result = runner.invoke(app, ["doctor", "--probe-serial"])
     assert result.exit_code == 0, result.output
-    assert "port in use" in result.output
+    # The plugins never lock their port, so the holder is not an octacam session.
+    assert "port in use (held exclusively by another process)" in " ".join(result.output.split())
 
 
 def test_build_config_doc_includes_plugins():

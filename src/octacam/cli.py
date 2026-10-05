@@ -1446,7 +1446,7 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
         if ident.busy:
             report.add(
                 "info",
-                f"{p.device}: port in use (held by a running session); "
+                f"{p.device}: port in use (held exclusively by another process); "
                 "skipped identity probe",
             )
             continue
