@@ -39,16 +39,9 @@ from starlette.websockets import WebSocketState
 
 import octacam
 from octacam import config_writer, updates
-from octacam.config import (
-    ConfigError,
-    OctacamConfig,
-    find_config_file,
-    parse_config,
-    safe_segment,
-)
+from octacam.config import OctacamConfig, safe_segment
 from octacam.controller import RecordingController, StartResult
 from octacam.ffmpeg import nvenc_max_sessions
-from octacam.transform import RECORDING_INFO_DIRNAME
 from octacam.writer import FORMATS, NVENC_H264_PARAMS
 
 log = logging.getLogger("octacam")
@@ -902,12 +895,6 @@ def create_app(
         _broadcast_features_dirty(result)
         return result
 
-    def _preset_anchor() -> Path:
-        """The directory a config saved as new goes next to: the config dir, or the
-        recording folder for a session relaunched from a recording."""
-        active = Path(config_dir)
-        return active.parent if active.name == RECORDING_INFO_DIRNAME else active
-
     @app.post("/api/config/save")
     def save_config(req: SaveConfigRequest):
         active = _require_config_dir()
@@ -916,32 +903,17 @@ def create_app(
         # A node-map snapshot would contend with the record grab loops.
         if controller.recording_active:
             raise HTTPException(409, "Cannot save the config while recording")
-
         try:
-            pfs = controller.export_camera_params() if req.save_sensor else {}
-            doc = (
-                config_writer.merge_camera_display(
-                    state.raw_config, [c.model_dump() for c in req.cameras]
-                )
-                if req.save_display
-                else None
+            saved = config_writer.save_rig_config(
+                controller,
+                active,
+                state.raw_config,
+                [c.model_dump() for c in req.cameras],
+                new_name=(req.name or "") if req.target == "new" else None,
+                overwrite=req.overwrite,
+                sensor=req.save_sensor,
+                display=req.save_display,
             )
-            if req.target == "active":
-                target = active
-            else:
-                target = config_writer.resolve_new_config_dir(
-                    _preset_anchor(), req.name or "", overwrite=req.overwrite
-                )
-                target.mkdir(parents=True, exist_ok=True)
-                config_writer.copy_auxiliary_pfs(
-                    active, target, set(pfs), controller.camera_system.extensions
-                )
-            if req.save_sensor:
-                config_writer.write_pfs_files(
-                    target, pfs, controller.camera_system.extension_by_serial()
-                )
-            if req.save_display and doc is not None:
-                config_writer.write_config(target, doc)
         except RuntimeError as e:  # recording started between the check and save
             raise HTTPException(409, str(e)) from None
         except ValueError as e:  # invalid new-config name
@@ -954,24 +926,15 @@ def create_app(
             raise HTTPException(403, f"Config directory is not writable: {e}") from None
         except OSError as e:
             raise HTTPException(500, f"Failed to write config: {e}") from None
-
-        # A saved active config goes live ("new" is write-only), with its display
-        # transforms, which recordings bake in.
-        if req.target == "active" and req.save_display and doc is not None:
-            state.raw_config = doc
-            try:
-                state.config = parse_config(find_config_file(active))
-            except ConfigError as e:
-                # Unexpected (written from a validated document); the save succeeded.
-                log.error("Saved config did not parse back; keeping the live one: %s", e)
-            else:
-                controller.camera_system.apply_display_config(state.config.cameras)
-
+        if saved.raw is not None:
+            state.raw_config = saved.raw
+        if saved.config is not None:
+            state.config = saved.config
         return {
             "status": "ok",
-            "config_dir": str(target),
+            "config_dir": str(saved.directory),
             "target": req.target,
-            "cameras_written": sorted(pfs),
+            "cameras_written": saved.cameras_written,
         }
 
     @app.post("/api/save-dir/validate")

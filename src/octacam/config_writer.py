@@ -8,23 +8,33 @@ they were; every file is written atomically.
 
 import contextlib
 import copy
+import dataclasses
 import datetime
+import logging
 import os
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from octacam._compat import tomllib
 from octacam.config import (
+    ConfigError,
+    OctacamConfig,
     duration_to_seconds,
     find_config_file,
+    parse_config,
     parse_record_section,
     safe_segment,
 )
 from octacam.plugins import canonical_name
 from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
-from octacam.transform import DisplayTransform
+from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
+
+if TYPE_CHECKING:
+    from octacam.controller import RecordingController
+
+log = logging.getLogger("octacam")
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (
@@ -433,8 +443,12 @@ def copy_auxiliary_pfs(
 def resolve_new_config_dir(
     active_dir: str | Path, name: str, *, overwrite: bool = False
 ) -> Path:
-    """Resolve a new config dir as a sibling of the active one (where presets live)."""
-    target = Path(active_dir).parent / safe_segment(name, "config name")
+    """Resolve a new config dir beside the active one, where presets live; for a
+    session relaunched from a recording (its ``octacam_recording`` subfolder),
+    beside the recording folder."""
+    active = Path(active_dir)
+    anchor = active.parent if active.name == RECORDING_INFO_DIRNAME else active
+    target = anchor.parent / safe_segment(name, "config name")
     if target.exists() and not overwrite:
         raise FileExistsError(target)
     return target
@@ -449,3 +463,64 @@ def load_raw_config(config_dir: str | Path) -> dict:
         return tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError:
         return {}
+
+
+# ----------------------------------------------------------------- GUI save
+
+
+@dataclasses.dataclass(frozen=True)
+class SavedConfig:
+    """What :func:`save_rig_config` wrote. ``raw`` is set when the active
+    config's TOML was rewritten (it is now the document a save patches) and
+    ``config`` when that file also parsed back (it is now live)."""
+
+    directory: Path
+    cameras_written: list[str]
+    raw: dict | None = None
+    config: OctacamConfig | None = None
+
+
+def save_rig_config(
+    controller: "RecordingController",
+    active_dir: Path,
+    raw: dict,
+    cameras: list[dict],
+    *,
+    new_name: str | None = None,
+    overwrite: bool = False,
+    sensor: bool = True,
+    display: bool = True,
+) -> SavedConfig:
+    """Save the cameras' parameter files (``sensor``) and their display settings
+    patched into ``raw`` (``display``) to ``active_dir``, or to a new config dir
+    ``new_name`` (with the auxiliary parameter files, so it is complete).
+
+    A saved active config goes live: its cameras get its display transforms,
+    which recordings bake in, and its ROI centering. Raises RuntimeError while
+    recording, ValueError for a bad name, FileExistsError for an existing new
+    dir without ``overwrite``, and OSError when a write fails."""
+    system = controller.camera_system
+    params = controller.export_camera_params() if sensor else {}
+    doc = merge_camera_display(raw, cameras) if display else None
+    if new_name is None:
+        target = active_dir
+    else:
+        target = resolve_new_config_dir(active_dir, new_name, overwrite=overwrite)
+        target.mkdir(parents=True, exist_ok=True)
+        copy_auxiliary_pfs(active_dir, target, set(params), system.extensions)
+    if sensor:
+        write_pfs_files(target, params, system.extension_by_serial())
+    written = sorted(params)
+    if doc is None:
+        return SavedConfig(target, written)
+    write_config(target, doc)
+    if new_name is not None:  # a new config is written, never adopted
+        return SavedConfig(target, written)
+    try:
+        config = parse_config(find_config_file(target))
+    except ConfigError as e:
+        # Unexpected (written from a validated document); the save succeeded.
+        log.error("Saved config did not parse back; keeping the live one: %s", e)
+        return SavedConfig(target, written, raw=doc)
+    system.apply_display_config(config.cameras)
+    return SavedConfig(target, written, raw=doc, config=config)
