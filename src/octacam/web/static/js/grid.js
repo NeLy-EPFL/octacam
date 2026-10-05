@@ -3,7 +3,7 @@
 // Drag the title bar to move, an edge or corner to resize; double-click the
 // title (or click its button) to maximize. Clicking a tile raises it.
 
-import { api, clamp } from "./util.js";
+import { clamp, request } from "./util.js";
 
 // A camera has a manual layout if it has a valid position or a valid size;
 // each falls back to a default on its own.
@@ -17,6 +17,18 @@ const DRAG_THRESHOLD = 4;
 const ZOOM_MAX = 8;
 const ZOOM_STEP = 1.15;
 const norm360 = (deg) => ((deg % 360) + 360) % 360;
+
+// A tile's displayed transform: the configured base composed with the
+// browser-only runtime rotate/flip, in the shape the server stores.
+function effectiveTransform(t) {
+  const b = t.cam.transform;
+  const r = t.runtime;
+  return {
+    scale_x: (b.scale_x || 1) * r.fx,
+    scale_y: (b.scale_y || 1) * r.fy,
+    rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
+  };
+}
 
 export class CameraGrid {
   constructor(container, cameras, { onSelect, onRename, onViewChange } = {}) {
@@ -336,13 +348,7 @@ export class CameraGrid {
   // Mirror the on-screen transform to the server so a "display"-form recording
   // bakes in what is shown. Fire-and-forget: a 409 while recording is ignored.
   _pushTransform(t) {
-    const b = t.cam.transform;
-    const r = t.runtime;
-    api("PUT", `/api/cameras/${t.index}/transform`, {
-      scale_x: (b.scale_x || 1) * r.fx,
-      scale_y: (b.scale_y || 1) * r.fy,
-      rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
-    }).catch(() => {});
+    request("PUT", `/api/cameras/${t.index}/transform`, effectiveTransform(t));
   }
 
   handleFrame(frame) {
@@ -424,10 +430,7 @@ export class CameraGrid {
   }
 
   _applyTransform(t) {
-    const b = t.cam.transform;
-    const sx = (b.scale_x || 1) * t.runtime.fx;
-    const sy = (b.scale_y || 1) * t.runtime.fy;
-    const deg = (b.rotation_deg || 0) + t.runtime.rot;
+    const { scale_x: sx, scale_y: sy, rotation_deg: deg } = effectiveTransform(t);
     // The canvas holds the crop. Offset it in pre-rotation sensor space
     // (innermost; CSS applies the rightmost function first) so the rotate/flip
     // still pivots about the sensor center, then zoom and pan in screen space.
@@ -450,11 +453,10 @@ export class CameraGrid {
     const bw = t.body.clientWidth;
     const bh = t.body.clientHeight;
     if (!bw || !bh) return;
-    const b = t.cam.transform;
-    const theta =
-      (((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180;
-    const effW = sw * Math.abs(b.scale_x || 1);
-    const effH = sh * Math.abs(b.scale_y || 1);
+    const eff = effectiveTransform(t);
+    const theta = (eff.rotation_deg * Math.PI) / 180;
+    const effW = sw * Math.abs(eff.scale_x);
+    const effH = sh * Math.abs(eff.scale_y);
     const c = Math.abs(Math.cos(theta));
     const s = Math.abs(Math.sin(theta));
     const boundW = effW * c + effH * s;
@@ -542,10 +544,8 @@ export class CameraGrid {
     if (!k || !sw || !sh) return null;
     const bw = t.body.clientWidth;
     const bh = t.body.clientHeight;
-    const b = t.cam.transform;
-    const sx = (b.scale_x || 1) * t.runtime.fx;
-    const sy = (b.scale_y || 1) * t.runtime.fy;
-    const rad = -(((b.rotation_deg || 0) + t.runtime.rot) * Math.PI) / 180; // inverse
+    const { scale_x: sx, scale_y: sy, rotation_deg: deg } = effectiveTransform(t);
+    const rad = -(deg * Math.PI) / 180; // inverse
     const cos = Math.cos(rad);
     const sin = Math.sin(rad);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -651,116 +651,78 @@ export class CameraGrid {
 
   // Drag the title bar to move the window, kept fully inside the grid.
   _onMoveStart(e, tile) {
-    if (e.button !== 0 || tile.maximized) return;
-    this._ensureMaterialized();
-    const cr = this.container.getBoundingClientRect();
-    const l = tile.cam.layout;
-    const start = {
-      x: e.clientX,
-      y: e.clientY,
-      lx: hasPos(l) ? l.window_x : 0,
-      ly: hasPos(l) ? l.window_y : 0,
-      lw: hasSize(l) ? l.window_width : 1 / 3,
-      lh: hasSize(l) ? l.window_height : 1 / 3,
-      moved: false,
-    };
-    const move = (ev) => {
-      if (
-        !start.moved &&
-        Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD
-      ) {
-        return;
-      }
-      start.moved = true;
-      const dx = (ev.clientX - start.x) / cr.width;
-      const dy = (ev.clientY - start.y) / cr.height;
-      tile.cam.layout = {
-        window_x: clamp(start.lx + dx, 0, 1 - start.lw),
-        window_y: clamp(start.ly + dy, 0, 1 - start.lh),
-        window_width: start.lw,
-        window_height: start.lh,
-      };
-      this._applyTileBox(tile);
-    };
-    this._startDrag(e, tile, start, move);
+    this._drag(e, tile, (s, dx, dy) => ({
+      window_x: clamp(s.lx + dx, 0, 1 - s.lw),
+      window_y: clamp(s.ly + dy, 0, 1 - s.lh),
+      window_width: s.lw,
+      window_height: s.lh,
+    }));
   }
 
   // Drag an edge/corner handle to resize; `dir` combines n/s/e/w.
   _onResizeStart(e, tile, dir) {
-    if (e.button !== 0 || tile.maximized) return;
-    e.stopPropagation(); // a handle drag must not also move or select the tile
-    this._ensureMaterialized();
     const MIN = 0.05;
+    const started = this._drag(e, tile, (s, dx, dy) => {
+      let { lx, ly, lw, lh } = s;
+      if (dir.includes("e")) lw = clamp(s.lw + dx, MIN, 1 - s.lx);
+      if (dir.includes("s")) lh = clamp(s.lh + dy, MIN, 1 - s.ly);
+      if (dir.includes("w")) {
+        lx = clamp(s.lx + dx, 0, s.lx + s.lw - MIN);
+        lw = s.lx + s.lw - lx;
+      }
+      if (dir.includes("n")) {
+        ly = clamp(s.ly + dy, 0, s.ly + s.lh - MIN);
+        lh = s.ly + s.lh - ly;
+      }
+      return { window_x: lx, window_y: ly, window_width: lw, window_height: lh };
+    });
+    if (started) e.stopPropagation(); // a handle drag must not also move or select the tile
+  }
+
+  // The pointer loop for move/resize. `layoutAt(start, dx, dy)` maps the
+  // pointer's travel (in grid fractions) from the start layout to the tile's
+  // new one. A travel under DRAG_THRESHOLD is a click; a real drag swallows its
+  // trailing click so it doesn't also select the tile. Returns whether a drag
+  // started (not on a maximized tile or another button).
+  _drag(e, tile, layoutAt) {
+    if (e.button !== 0 || tile.maximized) return false;
+    this._ensureMaterialized();
+    this._raise(tile);
     const cr = this.container.getBoundingClientRect();
     const l = tile.cam.layout;
     const start = {
-      x: e.clientX,
-      y: e.clientY,
       lx: hasPos(l) ? l.window_x : 0,
       ly: hasPos(l) ? l.window_y : 0,
       lw: hasSize(l) ? l.window_width : 1 / 3,
       lh: hasSize(l) ? l.window_height : 1 / 3,
-      moved: false,
     };
-    const move = (ev) => {
-      if (
-        !start.moved &&
-        Math.hypot(ev.clientX - start.x, ev.clientY - start.y) < DRAG_THRESHOLD
-      ) {
-        return;
-      }
-      start.moved = true;
-      const dx = (ev.clientX - start.x) / cr.width;
-      const dy = (ev.clientY - start.y) / cr.height;
-      let { lx, ly, lw, lh } = start;
-      if (dir.includes("e")) lw = clamp(start.lw + dx, MIN, 1 - start.lx);
-      if (dir.includes("s")) lh = clamp(start.lh + dy, MIN, 1 - start.ly);
-      if (dir.includes("w")) {
-        const nx = clamp(start.lx + dx, 0, start.lx + start.lw - MIN);
-        lx = nx;
-        lw = start.lx + start.lw - nx;
-      }
-      if (dir.includes("n")) {
-        const ny = clamp(start.ly + dy, 0, start.ly + start.lh - MIN);
-        ly = ny;
-        lh = start.ly + start.lh - ny;
-      }
-      tile.cam.layout = {
-        window_x: lx,
-        window_y: ly,
-        window_width: lw,
-        window_height: lh,
-      };
-      this._applyTileBox(tile);
-    };
-    this._startDrag(e, tile, start, move);
-  }
-
-  // Pointer loop for move/resize: run `move` on each step, and swallow the
-  // trailing click of a real drag so it doesn't also select the tile.
-  _startDrag(e, tile, start, move) {
-    this._raise(tile);
+    const { clientX: x0, clientY: y0, pointerId } = e;
     // Capture only past the drag threshold: capturing on pointerdown retargets
     // the click and dblclick to the tile, swallowing the rename and maximize
     // double-clicks.
-    let captured = false;
+    let moved = false;
     const onMove = (ev) => {
-      move(ev);
-      if (start.moved && !captured) {
-        captured = true;
-        tile.el.setPointerCapture(e.pointerId);
+      if (!moved) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < DRAG_THRESHOLD) return;
+        moved = true;
+        tile.el.setPointerCapture(pointerId);
       }
+      tile.cam.layout = layoutAt(start, (ev.clientX - x0) / cr.width, (ev.clientY - y0) / cr.height);
+      this._applyTileBox(tile);
     };
     const up = () => {
       tile.el.removeEventListener("pointermove", onMove);
       tile.el.removeEventListener("pointerup", up);
       tile.el.removeEventListener("pointercancel", up);
-      if (captured) tile.el.releasePointerCapture?.(e.pointerId);
-      if (start.moved) tile.suppressClick = true;
+      if (moved) {
+        tile.el.releasePointerCapture?.(pointerId);
+        tile.suppressClick = true;
+      }
     };
     tile.el.addEventListener("pointermove", onMove);
     tile.el.addEventListener("pointerup", up);
     tile.el.addEventListener("pointercancel", up);
+    return true;
   }
 
   // ------------------------------------------------ display-param capture
@@ -769,15 +731,11 @@ export class CameraGrid {
   // browser-only runtime rotate/flip, plus the current layout fractions.
   getDisplayParams() {
     return this.tiles.map((t) => {
-      const b = t.cam.transform;
-      const r = t.runtime;
       const l = t.cam.layout;
       return {
         serial: t.cam.serial,
         name: t.cam.name,
-        scale_x: (b.scale_x || 1) * r.fx,
-        scale_y: (b.scale_y || 1) * r.fy,
-        rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
+        ...effectiveTransform(t),
         window_x: l.window_x,
         window_y: l.window_y,
         window_width: l.window_width,
@@ -793,13 +751,7 @@ export class CameraGrid {
   // double-applied; the on-screen result is unchanged.
   commitRuntime() {
     for (const t of this.tiles) {
-      const b = t.cam.transform;
-      const r = t.runtime;
-      t.cam.transform = {
-        scale_x: (b.scale_x || 1) * r.fx,
-        scale_y: (b.scale_y || 1) * r.fy,
-        rotation_deg: norm360((b.rotation_deg || 0) + r.rot),
-      };
+      t.cam.transform = effectiveTransform(t);
       t.runtime = { rot: 0, fx: 1, fy: 1 };
       this._applyTransform(t);
       this._layoutCanvas(t);

@@ -1467,3 +1467,39 @@ def test_serial_tab_firmware_banner_follows_readiness_and_busy_board(page):
     page.evaluate("() => window.__st.applyState({ ready: false })")
     page.evaluate("() => { window.__st.busy = false; window.__st.refresh(); }")
     assert _hidden(page, "#probe-fw-flash")
+
+
+def test_grid_title_drag_moves_only_past_the_threshold(page):
+    """A press that travels under the drag threshold stays a click (it selects
+    the tile and leaves the layout alone); a real drag moves the window and
+    swallows its trailing click."""
+    page.evaluate(
+        """async () => {
+            const m = await import('./js/grid.js');
+            const cam = {
+                serial: 'S0', name: 'C0', width: 640, height: 480, transform: {},
+                layout: { window_x: 0.1, window_y: 0.1, window_width: 0.3, window_height: 0.3 },
+            };
+            window.__grid = new m.CameraGrid(document.getElementById('grid'), [cam]);
+        }"""
+    )
+    box = page.locator(".tile-title").bounding_box()
+    x, y = box["x"] + 40, box["y"] + box["height"] / 2
+    layout = "() => ({ ...window.__grid.tiles[0].cam.layout })"
+
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 2, y + 1)
+    page.mouse.up()
+    assert page.evaluate(layout)["window_x"] == 0.1
+    assert page.evaluate("() => window.__grid.selected") == 0
+
+    page.evaluate("() => { window.__grid.selected = -1; }")
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 60, y + 30, steps=4)
+    page.mouse.up()
+    moved = page.evaluate(layout)
+    assert moved["window_x"] > 0.1 and moved["window_y"] > 0.1
+    assert moved["window_width"] == 0.3
+    assert page.evaluate("() => window.__grid.selected") == -1  # the drag's click is swallowed
