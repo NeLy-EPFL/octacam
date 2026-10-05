@@ -747,46 +747,19 @@ class TriggerboxPlugin(Plugin):
 
     # -------------------------------------------------- camera exposure timings
 
-    @staticmethod
-    def _read_exposure_us(camera) -> float | None:
-        try:
-            value = camera.read_param("exposure").get("value")
-        except Exception:
-            return None
-        try:
-            return float(value) if value is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _read_trigger_delay_us(camera) -> float:
-        try:
-            value = camera.read_feature("TriggerDelay").get("value")
-        except Exception:
-            return 0.0
-        try:
-            return float(value) if value is not None else 0.0
-        except (TypeError, ValueError):
-            return 0.0
-
     def _camera_timings(self) -> list[CameraTiming]:
         """The live cameras' timings (the controller's), for the auto duty."""
-        controller = self.controller
-        if controller is None:
-            return []
-        try:
-            cameras = list(enumerate(controller.camera_system))
-        except Exception:
-            log.debug("triggerbox: camera enumeration failed", exc_info=True)
+        if self.controller is None:
             return []
         timings: list[CameraTiming] = []
-        for index, camera in cameras:
+        for index, camera in enumerate(self.controller.camera_system):
+            delay, exposure = camera.trigger_window_us()
             timings.append(
                 CameraTiming(
                     index=index,
-                    name=getattr(camera, "name", "") or f"cam{index}",
-                    exposure_us=self._read_exposure_us(camera),
-                    trigger_delay_us=self._read_trigger_delay_us(camera),
+                    name=camera.name or f"cam{index}",
+                    exposure_us=exposure,
+                    trigger_delay_us=delay,
                 )
             )
         return timings

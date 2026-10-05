@@ -672,6 +672,21 @@ class Camera:
                 "writable": writable,
             }
 
+    def trigger_window_us(self) -> tuple[float, float | None]:
+        """``(trigger delay, exposure)`` in µs: the exposure a trigger opens, for
+        a strobe sized to cover it. A delay the camera lacks reads 0, an
+        unreadable exposure None."""
+        with self._param_lock:
+            try:
+                exposure: float | None = float(self._backend.read_node("exposure").value)
+            except Exception:
+                exposure = None
+            try:
+                delay = self._backend.read_feature("TriggerDelay").value
+            except Exception:
+                delay = None
+        return (float(delay) if isinstance(delay, (int, float)) else 0.0, exposure)
+
     def set_geometry(
         self, *, width: int | None = None, height: int | None = None
     ) -> None:

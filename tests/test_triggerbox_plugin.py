@@ -16,6 +16,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
+from octacam.cameras.base import Camera
+from octacam.cameras.fake import FakeBackend
 from octacam.plugins import build_plugins, plugin_class
 from octacam.plugins.base import PluginManager
 from octacam.plugins.triggerbox import (
@@ -173,21 +175,13 @@ class FakeLink:
 
 
 class FakeCamera:
-    def __init__(self, name, exposure_us, trigger_delay_us=0.0, has_delay=True):
+    def __init__(self, name, exposure_us, trigger_delay_us=0.0):
         self.name = name
         self._exposure = exposure_us
         self._delay = trigger_delay_us
-        self._has_delay = has_delay
 
-    def read_param(self, name):
-        assert name == "exposure"
-        return {"value": self._exposure}
-
-    def read_feature(self, name):
-        assert name == "TriggerDelay"
-        if not self._has_delay:
-            raise RuntimeError("node unavailable on this model")
-        return {"value": self._delay}
+    def trigger_window_us(self):
+        return (self._delay, self._exposure)
 
 
 class FakeController:
@@ -348,15 +342,16 @@ def test_auto_duty_skips_camera_without_exposure_but_uses_others():
     assert _last_arm(link)["lights"][0][3] == 1500
 
 
-def test_auto_duty_reads_trigger_delay_zero_when_unavailable():
+def test_auto_duty_reads_a_real_camera_without_a_trigger_delay():
+    # The fake backend has ExposureTime (5000 µs) and no TriggerDelay node.
+    camera = Camera(FakeBackend("FAKE-0"))
+    assert camera.trigger_window_us() == (0.0, 5000.0)
     plugin, link = _plugin_with_fake(
         lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}], strobe_guard_us=0
     )
-    PluginManager([plugin]).attach(
-        controller=FakeController([FakeCamera("a", 1000, 999, has_delay=False)])
-    )
+    PluginManager([plugin]).attach(controller=FakeController([camera]))
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
-    assert _last_arm(link)["lights"][0][3] == 1000  # delay treated as 0
+    assert _last_arm(link)["lights"][0][3] == 5000  # delay treated as 0
 
 
 def test_auto_duty_without_controller_falls_back_to_manual(caplog):
