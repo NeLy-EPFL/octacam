@@ -114,10 +114,10 @@ def test_jobs_control_failures(cache_dir, monkeypatch, verb, message):
     assert message in refused.output
 
 
-# ------------------------------------------------------------- _pause_gate
+# ------------------------------------------------------------- pause_gate
 
 
-class _FakeReporter:
+class _FakeReporter(pj.NullReporter):
     def __init__(self):
         self.calls = []
 
@@ -130,9 +130,9 @@ def test_pause_gate_blocks_then_resumes(monkeypatch):
 
     seq = iter([True, True, False])  # capture active twice, then clears
     monkeypatch.setattr(session_cache, "capture_active", lambda: next(seq, False))
-    monkeypatch.setattr(cli.time, "sleep", lambda s: None)  # don't actually wait
+    monkeypatch.setattr(pj.time, "sleep", lambda s: None)  # don't actually wait
     reporter = _FakeReporter()
-    cli._pause_gate(reporter, None, unit="file")
+    pj.pause_gate(reporter, unit="file")
     assert (True, "capture-active") in reporter.calls
     assert reporter.calls[-1] == (False, None)  # cleared on resume
 
@@ -142,14 +142,28 @@ def test_pause_gate_reports_both_reasons(cache_dir, monkeypatch):
 
     jd = pj.job_dir("j")
     jd.mkdir(parents=True)
-    pj.pause(pj.JobStatus(job_id="j"))  # manual flag set
+    status = pj.JobStatus(job_id="j")
+    pj.pause(status)  # manual flag set
     seq = iter([True, False])
     monkeypatch.setattr(session_cache, "capture_active", lambda: next(seq, False))
-    monkeypatch.setattr(pj, "is_manually_paused", lambda d: False)
-    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    reporter = _FakeReporter()
-    cli._pause_gate(reporter, jd, unit="file")
-    assert reporter.calls[0] == (True, "capture-active")
+    reasons = []
+
+    def sleep(_seconds):
+        reasons.append(pj.read_status(jd).paused_reason)
+        pj.resume(status)
+
+    monkeypatch.setattr(pj.time, "sleep", sleep)
+    pj.pause_gate(pj.JobReporter(jd, status), unit="file")
+    assert reasons == ["capture-active+manual"]
+    assert pj.read_status(jd).paused is False
+
+
+def test_pause_gate_ignore_capture_never_waits_on_a_capture(monkeypatch):
+    from octacam import session_cache
+
+    monkeypatch.setattr(session_cache, "capture_active", lambda: True)
+    monkeypatch.setattr(pj.time, "sleep", lambda s: pytest.fail("must not wait"))
+    pj.pause_gate(pj.NullReporter(), unit="file", ignore_capture=True)
 
 
 def test_pause_gate_does_not_swallow_interrupt(monkeypatch):
@@ -160,9 +174,9 @@ def test_pause_gate_does_not_swallow_interrupt(monkeypatch):
     def raise_ki(_):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.time, "sleep", raise_ki)
+    monkeypatch.setattr(pj.time, "sleep", raise_ki)
     with pytest.raises(KeyboardInterrupt):
-        cli._pause_gate(None, None, unit="file")
+        pj.pause_gate(pj.NullReporter(), unit="file")
 
 
 # ------------------------------------------------------------- _finish_gui_session

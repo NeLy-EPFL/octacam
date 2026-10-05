@@ -1,4 +1,5 @@
-"""Detached ``octacam process`` jobs: spawn, track, attach, pause, cancel.
+"""Detached ``octacam process`` jobs: spawn, track, attach, pause, cancel; and
+the run side every process run uses (its reporter and the pause gate).
 
 ``--detach`` re-execs ``octacam process`` in its own session, so it survives a
 dropped ``ssh``, with its output in a per-job ``log.txt``. The worker keeps a
@@ -21,6 +22,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -296,12 +298,38 @@ def spawn_detached(
 
 
 # ---------------------------------------------------------------------------
-# Worker side (used by the detached child running `octacam process --_job-dir`)
+# Run side: the reporter, a detached child's worker, the pause gate
 # ---------------------------------------------------------------------------
 
 
-class JobReporter:
-    """Best-effort status/log updates written by the running worker."""
+class NullReporter:
+    """Where a run reports its progress. This one drops every report: no
+    detached job records the run, and nothing pauses it by hand."""
+
+    def begin_phase(self, phase: str, total: int) -> None:
+        pass
+
+    def item_started(self, index: int, total: int, path: str | os.PathLike[str]) -> None:
+        pass
+
+    def item_done(self) -> None:
+        pass
+
+    def set_paused(self, flag: bool, reason: str | None) -> None:
+        pass
+
+    def manually_paused(self) -> bool:
+        return False
+
+    def transcode_progress(self, index: int, total: int) -> ProgressCallback | None:
+        return None
+
+    def transfer_progress(self, index: int, total: int) -> TransferCallback | None:
+        return None
+
+
+class JobReporter(NullReporter):
+    """A detached job's progress, written (best effort) to its status.json."""
 
     def __init__(self, jd: Path, status: JobStatus) -> None:
         self._dir = jd
@@ -344,6 +372,9 @@ class JobReporter:
         self._status.paused = flag
         self._status.paused_reason = reason
         self._flush(force=True)
+
+    def manually_paused(self) -> bool:
+        return is_manually_paused(self._dir)
 
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
         """A transcode.ProgressCallback refining within-file transcode percent."""
@@ -435,6 +466,55 @@ def worker_start(jd: Path) -> Worker:
         raise JobLockError(status.error) from e
     write_status(jd, status)
     return Worker(jd, lock_handle, status)
+
+
+@contextlib.contextmanager
+def worker(jd: Path | None) -> Iterator[NullReporter]:
+    """The run's reporter. A detached job's run (*jd*) holds the job lock and
+    ends as done, cancelled (a Ctrl-C, 130) or failed (the exit message, else
+    the exception). Raises JobLockError when the lock cannot be taken."""
+    if jd is None:
+        yield NullReporter()
+        return
+    job = worker_start(jd)
+    try:
+        yield job.reporter
+    except KeyboardInterrupt:
+        job.finish(CANCELLED, 130)
+        raise
+    except SystemExit as e:
+        job.finish(FAILED, 1, e.code if isinstance(e.code, str) else "process failed")
+        raise
+    except BaseException as e:
+        job.finish(FAILED, 1, repr(e))
+        raise
+    job.finish(DONE, 0)
+
+
+def pause_gate(reporter: NullReporter, *, unit: str, ignore_capture: bool = False) -> None:
+    """Block at a work-unit boundary while a gui/record holds the cameras or the
+    job is paused by hand, polling every second.
+
+    A cancel or Ctrl-C interrupts the sleep. The capture pause has no timeout,
+    so ``ignore_capture`` is the operator's only way past it."""
+    announced = False
+    while True:
+        reasons = []
+        if not ignore_capture and session_cache.capture_active():
+            reasons.append("capture-active")
+        if reporter.manually_paused():
+            reasons.append("manual")
+        if not reasons:
+            break
+        reason = "+".join(reasons)
+        if not announced:
+            log.info("Paused before next %s — %s. Resumes automatically.", unit, reason)
+            announced = True
+        reporter.set_paused(True, reason)
+        time.sleep(1.0)
+    if announced:
+        reporter.set_paused(False, None)
+        log.info("Resumed processing.")
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 """The detached-processing job store (octacam.process_jobs) + worker path."""
 
+import contextlib
 import json
 import os
 import signal
@@ -418,6 +419,41 @@ def test_worker_start_succeeds_normally(cache_dir):
         assert pj.is_live(jd)
     finally:
         worker._release()
+
+
+@pytest.mark.parametrize(
+    ("raised", "state", "exit_code", "error"),
+    [
+        (None, pj.DONE, 0, None),
+        (KeyboardInterrupt(), pj.CANCELLED, 130, None),
+        (SystemExit("2 file(s) failed to transcode"), pj.FAILED, 1, "2 file(s) failed to transcode"),
+        (SystemExit(3), pj.FAILED, 1, "process failed"),
+        (RuntimeError("boom"), pj.FAILED, 1, "RuntimeError('boom')"),
+    ],
+    ids=["done", "ctrl-c", "exit-message", "exit-code", "exception"],
+)
+def test_worker_records_how_the_run_ended(cache_dir, raised, state, exit_code, error):
+    jd = pj.jobs_dir() / "20260101T000000-4"
+    jd.mkdir(parents=True)
+    pj.pause(_job(jd.name))
+    with pytest.raises(type(raised)) if raised else contextlib.nullcontext():
+        with pj.worker(jd) as reporter:
+            assert isinstance(reporter, pj.JobReporter)
+            assert pj.is_live(jd)
+            if raised:
+                raise raised
+    status = pj.read_status(jd)
+    assert (status.state, status.exit_code, status.error) == (state, exit_code, error)
+    assert not pj.is_live(jd)  # the lock is released
+    assert not pj.is_manually_paused(jd)
+
+
+def test_worker_without_a_job_reports_nowhere(cache_dir):
+    with pj.worker(None) as reporter:
+        assert type(reporter) is pj.NullReporter
+        assert not reporter.manually_paused()
+        assert reporter.transcode_progress(1, 1) is None
+    assert pj.list_jobs() == []
 
 
 def test_age_survives_a_naive_timestamp():
