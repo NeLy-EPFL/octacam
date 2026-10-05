@@ -16,7 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from octacam._compat import tomllib
-from octacam.config import duration_to_seconds, find_config_file, parse_record_section
+from octacam.config import (
+    duration_to_seconds,
+    find_config_file,
+    parse_record_section,
+    safe_segment,
+)
 from octacam.plugins import canonical_name
 from octacam.transform import DisplayTransform
 from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
@@ -425,27 +430,11 @@ def copy_auxiliary_pfs(
 # ----------------------------------------------------------------- new config dir
 
 
-def safe_config_name(name: str) -> str:
-    """Validate a new-config folder name as a single, safe path segment."""
-    candidate = (name or "").strip()
-    if (
-        not candidate
-        or candidate in (".", "..")
-        or "/" in candidate
-        or "\\" in candidate
-        or os.sep in candidate
-        or (os.altsep and os.altsep in candidate)
-        or Path(candidate).name != candidate
-    ):
-        raise ValueError(f"Invalid config name: {name!r}")
-    return candidate
-
-
 def resolve_new_config_dir(
     active_dir: str | Path, name: str, *, overwrite: bool = False
 ) -> Path:
     """Resolve a new config dir as a sibling of the active one (where presets live)."""
-    target = Path(active_dir).parent / safe_config_name(name)
+    target = Path(active_dir).parent / safe_segment(name, "config name")
     if target.exists() and not overwrite:
         raise FileExistsError(target)
     return target

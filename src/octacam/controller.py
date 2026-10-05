@@ -35,6 +35,7 @@ import numpy as np
 
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
+from octacam.config import safe_segment
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (
@@ -113,24 +114,6 @@ def compose_save_dir(record_directory: str, relative_directory: str) -> str:
     rel = relative_directory.strip()
     combined = os.path.join(record_directory, rel) if rel else record_directory
     return normalize_save_dir(combined)
-
-
-def sanitize_camera_name(name: str) -> str:
-    """Validate a camera name as its video's filename stem (``<name>.<ext>``):
-    non-blank, a single path segment, no ``.``/``..``. Raises ValueError (kept
-    apart from config_writer.safe_config_name for its camera-specific message)."""
-    clean = (name or "").strip()
-    if (
-        not clean
-        or clean in (".", "..")
-        or "/" in clean
-        or "\\" in clean
-        or os.sep in clean
-        or (os.altsep and os.altsep in clean)
-        or Path(clean).name != clean
-    ):
-        raise ValueError(f"Invalid camera name: {name!r}")
-    return clean
 
 
 @dataclass
@@ -950,7 +933,7 @@ class RecordingController:
     def set_camera_name(self, index: int, name: str) -> dict:
         """Rename one camera, in memory (a GUI save persists it). The name is
         its video's filename, so it must be safe and unique across the rig."""
-        clean = sanitize_camera_name(name)
+        clean = safe_segment(name, "camera name")
         with self._lock:
             self._require_camera_control(
                 "Camera names are locked while recording", recording_only=True

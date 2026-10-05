@@ -1766,7 +1766,7 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
     the detected or typed serials; [] means every camera detected at record time."""
     from rich.prompt import Confirm, Prompt
 
-    from octacam.config import _is_safe_camera_name
+    from octacam.config import is_safe_segment
 
     serials = [serial for serial, _model in detected]
     if not serials and Confirm.ask(
@@ -1800,7 +1800,7 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
             if not name:
                 entries.append({"serial_number": serial})
                 break
-            if not _is_safe_camera_name(name):
+            if not is_safe_segment(name):
                 console.print(
                     r"    [red]Invalid name[/red] — no '/', '\', '.' or '..'."
                 )

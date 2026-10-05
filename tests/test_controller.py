@@ -15,7 +15,6 @@ from octacam.controller import (
     capture_frame_count,
     increment_trailing_number,
     normalize_save_dir,
-    sanitize_camera_name,
 )
 from octacam.transform import DisplayTransform
 
@@ -456,14 +455,6 @@ def test_update_settings_lone_save_dir_clears_split_halves():
     assert merged.record_directory == "/b"
     assert merged.relative_directory == "run/002"
     assert merged.save_dir.endswith("/b/run/002")
-
-
-def test_sanitize_camera_name():
-    assert sanitize_camera_name("  cam left  ") == "cam left"
-    assert sanitize_camera_name("cam_01") == "cam_01"
-    for bad in ("", "   ", ".", "..", "a/b", "a\\b"):
-        with pytest.raises(ValueError):
-            sanitize_camera_name(bad)
 
 
 def test_browse_directory(tmp_path):

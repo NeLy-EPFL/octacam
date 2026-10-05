@@ -154,13 +154,13 @@ def test_visualization_and_transfer_sections_roundtrip():
 
 
 @pytest.mark.parametrize("name", ["", "  ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
-def test_safe_config_name_rejects(name):
-    with pytest.raises(ValueError):
-        cw.safe_config_name(name)
+def test_new_config_dir_rejects_unsafe_names(tmp_path, name):
+    with pytest.raises(ValueError, match="^Invalid config name: "):
+        cw.resolve_new_config_dir(tmp_path / "active", name)
 
 
-def test_safe_config_name_accepts():
-    assert cw.safe_config_name(" my_rig ") == "my_rig"
+def test_new_config_dir_name_is_stripped(tmp_path):
+    assert cw.resolve_new_config_dir(tmp_path / "active", " my_rig ") == tmp_path / "my_rig"
 
 
 def test_resolve_new_config_dir_collision(tmp_path):

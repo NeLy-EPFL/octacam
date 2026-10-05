@@ -419,17 +419,24 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
     return result
 
 
-def _is_safe_camera_name(name: str) -> bool:
-    """Whether ``name`` is usable as a video filename stem: one path segment,
-    no traversal (as ``controller.sanitize_camera_name`` checks; duplicated so
-    config imports neither the controller nor the camera layer, which import
-    it)."""
+def is_safe_segment(name: str) -> bool:
+    """Whether ``name`` is one path segment, usable as a filename stem or folder
+    name: non-blank, no separator, no ``.``/``..``."""
     return (
-        name not in (".", "..")
+        name not in ("", ".", "..")
         and "/" not in name
         and "\\" not in name
         and Path(name).name == name
     )
+
+
+def safe_segment(name: str, what: str) -> str:
+    """``name`` stripped, or ``ValueError("Invalid <what>: ...")`` unless that is
+    a safe path segment (:func:`is_safe_segment`)."""
+    clean = (name or "").strip()
+    if not is_safe_segment(clean):
+        raise ValueError(f"Invalid {what}: {name!r}")
+    return clean
 
 
 def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
@@ -468,7 +475,7 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
             f'the {index}th entry of "cameras"',
             CameraConfig(serial_number=serial_number),
         )
-        if camera.name and not _is_safe_camera_name(camera.name):
+        if camera.name and not is_safe_segment(camera.name):
             log.warning(
                 'Ignoring unsafe "name" %r in the %dth entry of "cameras"; '
                 "falling back to the serial number",

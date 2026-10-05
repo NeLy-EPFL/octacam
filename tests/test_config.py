@@ -11,6 +11,7 @@ from octacam.config import (
     load_config_dir,
     parse_config,
     resolve_save_dir,
+    safe_segment,
 )
 from octacam.writer import DEFAULT_FFMPEG_PARAMS
 
@@ -98,6 +99,17 @@ def test_unsafe_camera_name_dropped(tmp_path):
     assert [c.serial_number for c in config.cameras] == ["a", "b"]
     assert config.cameras[0].name == ""
     assert config.cameras[1].name == "ok"
+
+
+@pytest.mark.parametrize("name", ["", "   ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
+def test_safe_segment_rejects(name):
+    with pytest.raises(ValueError, match="^Invalid camera name: "):
+        safe_segment(name, "camera name")
+
+
+def test_safe_segment_strips():
+    assert safe_segment("  cam left  ", "camera name") == "cam left"
+    assert safe_segment("cam_01", "camera name") == "cam_01"
 
 
 def test_center_flags_parse(tmp_path):

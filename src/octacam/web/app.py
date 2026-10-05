@@ -44,12 +44,9 @@ from octacam.config import (
     OctacamConfig,
     find_config_file,
     parse_config,
+    safe_segment,
 )
-from octacam.controller import (
-    RecordingController,
-    StartResult,
-    sanitize_camera_name,
-)
+from octacam.controller import RecordingController, StartResult
 from octacam.transform import RECORDING_INFO_DIRNAME
 from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
 
@@ -329,7 +326,7 @@ class CameraDisplayParams(BaseModel):
     @classmethod
     def _safe_name(cls, value: str | None) -> str | None:
         # A video filename stem: the live rename's rules apply.
-        return sanitize_camera_name(value) if value is not None else None
+        return safe_segment(value, "camera name") if value is not None else None
 
 
 class SaveConfigRequest(BaseModel):
