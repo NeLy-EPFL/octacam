@@ -1649,28 +1649,43 @@ def test_parse_views_is_tolerant():
     assert parse_views({}) == {}
 
 
-def test_hub_keeps_the_newest_message_per_type_and_key():
+def test_client_keeps_the_newest_message_per_type_and_key():
     """A client keeps one pending message per (type, key) and every event."""
+    from octacam.web.hub import Client
+
+    client = Client(Mock())
+    for kind, text, key in [
+        ("camera_name", "a", 0),
+        ("camera_name", "b", 1),
+        ("camera_name", "c", 0),
+        ("state", "1", None),
+        ("state", "2", None),
+        ("event", "x", None),
+        ("event", "y", None),
+    ]:
+        client.queue(kind, text, key)
+    assert list(client.texts.values()) == ["c", "b", "2"]
+    assert list(client.events) == ["x", "y"]
+
+
+def test_hub_publish_forwards_the_key_from_another_thread():
     from octacam.web.hub import Client, Hub
 
     hub = Hub()
     client = Client(Mock())
     hub.clients.add(client)
-    hub.broadcast("camera_name", {"index": 0, "name": "a"}, key=0)
-    hub.broadcast("camera_name", {"index": 1, "name": "b"}, key=1)
-    hub.broadcast("camera_name", {"index": 0, "name": "c"}, key=0)
-    hub.broadcast("state", {"n": 1})
-    hub.broadcast("state", {"n": 2})
-    hub.broadcast("event", {"message": "x"})
-    hub.broadcast("event", {"message": "y"})
 
-    pending = [json.loads(text) for text in client.texts.values()]
-    assert pending == [
-        {"type": "camera_name", "index": 0, "name": "c"},
-        {"type": "camera_name", "index": 1, "name": "b"},
-        {"type": "state", "n": 2},
-    ]
-    assert [json.loads(text)["message"] for text in client.events] == ["x", "y"]
+    def publish():
+        for index in (0, 1):
+            hub.publish("camera_features_dirty", {"index": index}, key=index)
+
+    async def main():
+        hub.loop = asyncio.get_running_loop()
+        await hub.loop.run_in_executor(None, publish)
+        await asyncio.sleep(0)  # run the queued callbacks
+
+    asyncio.run(main())
+    assert [json.loads(text)["index"] for text in client.texts.values()] == [0, 1]
 
 
 def test_cap_variants_bounds_encode_count():

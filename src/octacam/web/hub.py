@@ -95,9 +95,9 @@ class Hub:
             return
         loop.call_soon_threadsafe(self._queue, type, to_json(type, payload), key)
 
-    def broadcast(self, type: str, payload: dict, key: Hashable = None) -> None:
+    def broadcast(self, type: str, payload: dict) -> None:
         """:meth:`publish` from the event-loop thread, queued at once."""
-        self._queue(type, to_json(type, payload), key)
+        self._queue(type, to_json(type, payload), None)
 
     def _queue(self, type: str, text: str, key: Hashable) -> None:
         for client in list(self.clients):
