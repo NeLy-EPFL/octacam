@@ -11,7 +11,7 @@ import copy
 import dataclasses
 import datetime
 import os
-import tempfile
+import uuid
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -352,19 +352,22 @@ def with_plugin_options(raw: dict, options_by_name: Mapping[str, dict]) -> dict:
 
 
 def atomic_write_text(path: str | Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically (temp file on the same dir + rename)."""
+    """Write ``text`` to ``path`` atomically (temp file on the same dir + rename).
+
+    The temp is created like any other file, so the result gets the umask's
+    permissions: a config another user or a share must read is never 0600."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".octacam-", suffix=".tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with open(tmp, "x") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
         raise
 
 
