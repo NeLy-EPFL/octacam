@@ -150,18 +150,29 @@ def test_transcode_file_sizes_an_encoded_inputs_bar_from_frames(tmp_path, monkey
     assert captured["total_frames"] is None  # no count: an indeterminate bar
 
 
+def _no_ffmpeg(*args, **kwargs):
+    raise RuntimeError("no ffmpeg")
+
+
 @pytest.mark.parametrize("suffix", [".mkv", ".raw"])
-def test_transcode_file_with_no_argv_leaves_the_folder_alone(tmp_path, suffix):
-    # Bad quoting fails before a temp exists, so no orphan sweep runs either.
+@pytest.mark.parametrize(
+    "params, missing_ffmpeg, error",
+    [("-c:v 'bad", False, ValueError), ("-c:v libx264", True, RuntimeError)],
+    ids=["bad-quoting", "no-ffmpeg"],
+)
+def test_transcode_file_with_no_argv_leaves_the_folder_alone(
+    tmp_path, monkeypatch, suffix, params, missing_ffmpeg, error
+):
+    # The argv fails before a temp exists, so no orphan sweep runs either.
+    if missing_ffmpeg:
+        monkeypatch.setattr("octacam.transcode.find_ffmpeg", _no_ffmpeg)
     src = tmp_path / f"cam{suffix}"
     _write_raw(src, _frame(16, 12))
     orphan = tmp_path / f".cam{PARTIAL_INFIX}.1.deadbeef.mp4"
     orphan.write_bytes(b"")
     before = sorted(tmp_path.iterdir())
-    with pytest.raises(ValueError):
-        transcode_file(
-            src, tmp_path / "cam.mp4", "-c:v 'bad", width=16, height=12, fps=10.0
-        )
+    with pytest.raises(error):
+        transcode_file(src, tmp_path / "cam.mp4", params, width=16, height=12, fps=10.0)
     assert sorted(tmp_path.iterdir()) == before
 
 
