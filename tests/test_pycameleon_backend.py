@@ -7,6 +7,11 @@ import types
 import numpy as np
 
 from octacam.cameras._genicam_config import parse_config
+from octacam.cameras._trigger_handoff import (
+    DRAIN_POLL_MS,
+    PRIMING_ANSWER_TIMEOUT_S,
+    SoftwareTrigger,
+)
 from octacam.cameras.pycameleon import (
     PycameleonBackend,
     enumerate_pycameleon,
@@ -292,6 +297,29 @@ def test_unpulsed_fetches_answer_no_trigger():
     cam.receive_async = reject
     assert backend.retrieve_external(100, lambda: True) is None
     assert backend.last_trigger_index is None and cam.executed == []
+    backend.stop_grab()
+
+
+def test_a_drain_fetch_only_polls():
+    # After a trigger is given up on, an idle loop fetches its late image with a
+    # short poll: a receive for the loop's whole timeout would make the next
+    # trigger stale.
+    backend, _cam = _open_backend()
+    now = [0]
+    backend.trigger = SoftwareTrigger(backend.serial_number, lambda: now[0])
+    timeouts: list[int] = []
+
+    def receive(timeout_ms):
+        timeouts.append(timeout_ms)
+        return None  # no image
+
+    backend._receive_bounded = receive
+    backend.start_grab_preview()
+    backend.trigger_once()
+    assert backend.retrieve(500, lambda: True) is None  # fired; no image
+    now[0] += int(2 * PRIMING_ANSWER_TIMEOUT_S * 1e9)  # given up on
+    assert backend.retrieve(500, lambda: True) is None  # nothing pending: a drain
+    assert timeouts == [500, DRAIN_POLL_MS]
     backend.stop_grab()
 
 
