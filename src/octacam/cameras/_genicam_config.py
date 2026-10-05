@@ -341,13 +341,13 @@ def normalize_trigger_source(text: str, original_source: str | None) -> str:
 
 class GenICamTriggerConfig:
     """The SFNC trigger chain and TSV persistence of the flir, spinnaker and
-    pycameleon backends, mixed in beside
-    :class:`~octacam.cameras._trigger_handoff.SoftwareTriggerHandoff`. The backend
-    supplies ``_serial``, ``is_open`` and the typed getters and setters.
+    pycameleon backends, mixed in before
+    :class:`~octacam.cameras.base.CameraBackend`. The backend supplies
+    ``_serial``, ``is_open`` and the typed getters and setters.
     """
 
     # For the type checker only: nothing is created at runtime, so the MRO finds
-    # the backend's and the hand-off's implementations.
+    # the backend's implementations.
     _serial: str
     _original_trigger_source: str | None
 
@@ -356,7 +356,6 @@ class GenICamTriggerConfig:
         def _set_enum(self, name: str, value: str, /) -> None: ...
         def _get_enum(self, name: str, /) -> str | None: ...
         def is_open(self) -> bool: ...
-        def _bump_trigger(self) -> None: ...
 
     # ----------------------------------------------------------- triggering
 
@@ -396,9 +395,6 @@ class GenICamTriggerConfig:
         self._set_enum("TriggerMode", "On")
         self._set_enum("TriggerSource", "Software")
         self._enable_trigger_overlap()
-
-    def trigger_once(self) -> None:
-        self._bump_trigger()  # no device call: retrieve() fires it (_trigger_handoff)
 
     def begin_freerun(self, fps: float | None = None) -> bool:
         """TriggerMode Off, capped at ``fps`` when given; False if refused. Arming

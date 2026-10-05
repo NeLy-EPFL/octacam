@@ -28,11 +28,10 @@ from octacam.cameras._genicam_config import (
     fewer_stream_buffers,
     normalize_trigger_source,
 )
-from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
-    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
+    CameraBackend,
     FeatureInfo,
     Frame,
     NodeInfo,
@@ -803,7 +802,7 @@ def ensure_available() -> None:
     _spin()
 
 
-class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
+class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
     """A single FLIR camera driven through the Spinnaker C API via ctypes."""
 
     extension = "txt"
@@ -812,7 +811,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._cam: Any = cam  # an opaque spinCamera handle; None once closed
         self._nodemap: Any = None
         self._stream_nodemap: Any = None
-        self._serial = _spin().read_serial(cam)
+        super().__init__(_spin().read_serial(cam))
         self._original_trigger_source: str | None = None
         # Incomplete images, as in FlirBackend.
         self._incomplete_images = 0
@@ -820,11 +819,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._grab_incomplete = 0
         self._grab_incomplete_logged = 0
         self._incomplete_logged_at = 0.0
-        self._init_trigger_handoff()
-
-    @property
-    def serial_number(self) -> str:
-        return self._serial
 
     # ------------------------------------------------------------- lifecycle
 
@@ -878,7 +872,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         if cam is None:
             return
         spin = _spin()
-        self._end_grab()
+        self.trigger.end_grab()
         try:
             if spin.camera_is_streaming(cam):
                 spin.end_acquisition(cam)
@@ -907,12 +901,6 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             return _spin().camera_is_initialized(self._cam)
         except Exception:
             return False
-
-    def is_grabbing(self) -> bool:
-        return self._cam is not None and self._grabbing
-
-    def grab_locked_features(self) -> frozenset[str]:
-        return GEOMETRY_FEATURES  # the ROI offsets stay writable mid-grab
 
     def width(self) -> int:
         return int(_spin().read_number(self._nodemap, "Width", True).value)
@@ -1000,7 +988,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         cam = self._cam
-        if cam is None or not self._grabbing:
+        if cam is None or not self.trigger.grabbing:
             return None
         return self._fetch_image(cam, timeout_ms, wants_array)
 
@@ -1065,7 +1053,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                     continue
                 log.error("Failed to start streaming on camera %s: %s", self._serial, e)
                 raise
-        self._begin_grab()
+        self.trigger.begin_grab()
 
     def start_grab_preview(self) -> None:
         self._begin_incomplete_log(record=False)
@@ -1110,7 +1098,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
-        self._end_grab()
+        self.trigger.end_grab()
         cam = self._cam
         if cam is None:
             return
@@ -1124,21 +1112,21 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        fire = self._claim_trigger(timeout_ms)
+        fire = self.trigger.claim(timeout_ms)
         if fire is None:
             return None
         cam = self._cam
-        if cam is None or not self._grabbing:
+        if cam is None or not self.trigger.grabbing:
             return None
         spin = _spin()
         if fire:
             try:
                 spin.execute_command(self._nodemap, "TriggerSoftware")
             except BackendError:
-                self._trigger_unfired()
+                self.trigger.unfired()
                 return None
         return self._fetch_image(
-            cam, self._fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+            cam, self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
         )
 
     def _fetch_image(
@@ -1154,7 +1142,7 @@ class SpinnakerBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
                 stamp = None if spin.image_incomplete(image) else int(spin.image_timestamp(image))
             except Exception:
                 stamp = None
-            self._trigger_answered(stamp)
+            self.trigger.answered(stamp)
         try:
             if spin.image_incomplete(image):
                 self._count_incomplete()

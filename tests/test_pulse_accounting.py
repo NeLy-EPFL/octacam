@@ -328,7 +328,7 @@ def test_an_image_later_than_its_deadline_cannot_answer_a_later_trigger(
         expected = video[row - 1] if dropped[row] else row % 256
         assert video[row] == expected, (row, video[max(0, row - 3) : row + 3])
     backend = _backend(fake_system, "FAKE-1")
-    assert backend.stale_images >= 1
+    assert backend.trigger.stale_images >= 1
 
 
 def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp_path):
@@ -344,7 +344,7 @@ def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp
         backend.ignore_first_silently = True
         backend.fetch_blocks = True
     slow = _backend(fake_system, "FAKE-1")
-    claim = slow._claim_trigger
+    claim = slow.trigger.claim
     claims = []
 
     def stalled(timeout_ms):
@@ -355,7 +355,7 @@ def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp
                 time.sleep(0.06)
         return fire
 
-    slow._claim_trigger = stalled
+    slow.trigger.claim = stalled
     save_dir, summary, arrays, _ = _record(fake_system, tmp_path, trigger_source="software")
     bad = _cam(summary, "FAKE-1")
     assert bad["frames"] == 50 and bad["missed_pulses"] <= 4, bad
@@ -842,7 +842,7 @@ def test_an_image_that_never_arrives_is_given_up_on(
     missed = bad["missed_pulse_indices"]
     # 10 and the pulses within the 0.1 s deadline after it (5 periods), no more.
     assert missed[0] == 10 and missed[-1] <= 16, missed
-    assert bad_backend.unanswered_triggers == 1
+    assert bad_backend.trigger.unanswered_triggers == 1
     np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(count))
     good, video = _frames(save_dir, "FAKE-0"), _frames(save_dir, "FAKE-1")
     for k in range(count):
@@ -877,7 +877,9 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
         assert wait_until(
-            lambda: backend._pending == 0 and bool(backend._outstanding), interval=0.001
+            lambda: backend.trigger.pending == 0
+            and backend.trigger.fired_index is not None,
+            interval=0.001,
         )
         assert camera.primed_frames == 3
         backend.late_triggers = {}

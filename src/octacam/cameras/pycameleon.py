@@ -16,11 +16,10 @@ from typing import Any
 import numpy as np
 
 from octacam.cameras._genicam_config import GenICamTriggerConfig
-from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
-    GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
+    CameraBackend,
     FeatureInfo,
     Frame,
     NodeInfo,
@@ -58,14 +57,14 @@ def ensure_available() -> None:
     _pycameleon()
 
 
-class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
+class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
     """A single USB3-Vision camera driven through pycameleon/libusb."""
 
     extension = "txt"
 
     def __init__(self, cam):
         self._cam: Any = cam  # a PyCameleonCamera; None once closed
-        self._serial = _read_serial(cam)
+        super().__init__(_read_serial(cam))
         self._open = False
         self._original_trigger_source: str | None = None
         # The GenApi XML, read from the camera on the first open; a re-open loads it.
@@ -75,11 +74,6 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self._recv_loop: asyncio.AbstractEventLoop | None = None
         # Every device call holds it. Reentrant: open() sets Mono8 through _set_enum.
         self._lock = threading.RLock()
-        self._init_trigger_handoff()
-
-    @property
-    def serial_number(self) -> str:
-        return self._serial
 
     # ------------------------------------------------------------- lifecycle
 
@@ -120,12 +114,6 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
 
     def is_open(self) -> bool:
         return self._cam is not None and self._open
-
-    def is_grabbing(self) -> bool:
-        return self._grabbing
-
-    def grab_locked_features(self) -> frozenset[str]:
-        return GEOMETRY_FEATURES
 
     def width(self) -> int:
         with self._lock:
@@ -243,7 +231,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         with self._lock:
-            if not self._grabbing or self._receiver is None or self._cam is None:
+            if not self.trigger.grabbing or self._receiver is None or self._cam is None:
                 return None
             try:
                 array = self._receive_bounded(timeout_ms)
@@ -264,7 +252,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
             except Exception as e:
                 log.error("Failed to start streaming on camera %s: %s", self._serial, e)
                 raise BackendError(str(e)) from e
-        self._begin_grab()
+        self.trigger.begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start_streaming()
@@ -274,7 +262,7 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         return True
 
     def stop_grab(self) -> None:
-        if not self._end_grab():
+        if not self.trigger.end_grab():
             return
         with self._lock:
             if self._receiver is not None:
@@ -288,30 +276,30 @@ class PycameleonBackend(GenICamTriggerConfig, SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         # Fire and receive under one hold of the device lock (exclusive borrow).
-        fire = self._claim_trigger(timeout_ms)
+        fire = self.trigger.claim(timeout_ms)
         if fire is None:
             return None
         with self._lock:
-            if not self._grabbing or self._receiver is None or self._cam is None:
+            if not self.trigger.grabbing or self._receiver is None or self._cam is None:
                 return None
             if fire:
                 try:
                     self._cam.execute("TriggerSoftware")
                 except Exception as e:
                     log.debug("trigger failed on camera %s: %s", self._serial, e)
-                    self._trigger_unfired()
+                    self.trigger.unfired()
                     return None
             try:
-                array = self._receive_bounded(self._fetch_timeout_ms(timeout_ms))
+                array = self._receive_bounded(self.trigger.fetch_timeout_ms(timeout_ms))
             except Exception as e:
                 # A payload cameleon rejected (short, a trailer error) is this
                 # backend's incomplete image: it answers its trigger.
                 log.debug("receive failed on camera %s: %s", self._serial, e)
-                self._trigger_answered()
+                self.trigger.answered()
                 return None
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
-        self._trigger_answered()
+        self.trigger.answered()
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)
 

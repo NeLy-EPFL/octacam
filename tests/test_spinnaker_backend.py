@@ -576,7 +576,7 @@ def test_trigger_once_is_a_pure_bump_not_a_device_call():
     assert backend.is_grabbing()
     backend.trigger_once()
     assert nm.TriggerSoftware.executed == 0  # NOT fired yet — retrieve fires it
-    assert backend._pending == 1
+    assert backend.trigger.pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
 
@@ -592,7 +592,7 @@ def test_retrieve_fires_trigger_and_returns_frame():
     array, timestamp = frame
     assert timestamp == 123 and array.shape == (2, 3)
     assert nm.TriggerSoftware.executed == 1  # retrieve fired the device trigger
-    assert backend._pending == 0  # consumed
+    assert backend.trigger.pending == 0  # consumed
     assert image.released  # every image is released
 
 

@@ -10,13 +10,14 @@ turn into ``ValueError``.
 import logging
 import threading
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar, Protocol
+from typing import ClassVar
 
 import numpy as np
 
-from octacam.cameras._trigger_handoff import PRIMING_TRIGGER
+from octacam.cameras._trigger_handoff import PRIMING_TRIGGER, SoftwareTrigger
 from octacam.pulses import Assignment, PulseClock, PulseTracker
 from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.writer import AsyncFrameWriter, VideoFormat
@@ -197,72 +198,122 @@ def curated_write_feature(backend, name: str, value: object) -> None:
 Frame = tuple[np.ndarray | None, int]
 
 
-class CameraBackend(Protocol):
-    """The SDK-specific seam the concrete :class:`Camera` drives.
+class CameraBackend(ABC):
+    """One physical camera behind its SDK, as :class:`Camera` drives it.
 
-    Implementations wrap a single physical camera. Methods that touch the
-    device raise :class:`BackendError` on SDK failure.
+    Device methods raise :class:`BackendError` on SDK failure. The retrieve
+    methods never raise: None on a device error or a stop race, since an
+    exception would kill the grab thread and orphan its writer. ``trigger`` is
+    the camera's software-trigger hand-off; its grab flag is ``is_grabbing``.
     """
 
-    extension: ClassVar[str]
+    extension: ClassVar[str]  # the parameter-file suffix, no dot
+
+    def __init__(self, serial: str):
+        self._serial = serial
+        self.trigger = SoftwareTrigger(serial)
 
     @property
-    def serial_number(self) -> str: ...
+    def serial_number(self) -> str:
+        return self._serial
+
+    def is_grabbing(self) -> bool:
+        return self.trigger.grabbing
+
+    def trigger_once(self) -> None:
+        """Offer one software trigger. No device call: ``retrieve`` fires it on
+        the camera's own thread (see :mod:`octacam.cameras._trigger_handoff`)."""
+        self.trigger.offer()
+
+    def configure_trigger_period(self, period_s: float | None) -> None:
+        self.trigger.configure_period(period_s)
+
+    def restart_trigger_sequence(self) -> None:
+        self.trigger.restart_sequence()
+
+    @property
+    def last_trigger_index(self) -> int | None:
+        """The trigger the latest retrieved image answers (see
+        :attr:`SoftwareTrigger.last_index`)."""
+        return self.trigger.last_index
+
+    def grab_locked_features(self) -> frozenset[str]:
+        """Nodes writable only while not grabbing; Camera writes them through a
+        preview grab cycle."""
+        return GEOMETRY_FEATURES
+
+    def stream_statistics(self) -> dict[str, int]:
+        """The SDK's transport counters, where it has any."""
+        return {}
+
+    def retrieve_external(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """One frame of an externally triggered recording: the un-gated fetch."""
+        return self.retrieve_freerun(timeout_ms, wants_array)
+
+    @abstractmethod
     def open(self) -> None: ...
+    @abstractmethod
     def close(self) -> None: ...
+    @abstractmethod
     def is_open(self) -> bool: ...
-    def is_grabbing(self) -> bool: ...
+    @abstractmethod
     def width(self) -> int: ...
+    @abstractmethod
     def height(self) -> int: ...
 
+    @abstractmethod
     def read_node(self, name: str) -> NodeInfo: ...
+    @abstractmethod
     def write_node(self, name: str, value: float) -> None: ...
 
     # The node map (Camera tab), by GenApi node name; the backend coerces
     # ``value`` to the node's type.
+    @abstractmethod
     def list_features(self) -> list[FeatureInfo]: ...
+    @abstractmethod
     def read_feature(self, name: str) -> FeatureInfo: ...
+    @abstractmethod
     def write_feature(self, name: str, value: object) -> None: ...
+    @abstractmethod
     def execute_command(self, name: str) -> None: ...
 
-    # Nodes writable only while not grabbing: Width/Height everywhere, plus the
-    # ROI offsets on Basler. Camera writes them through a preview grab cycle.
-    def grab_locked_features(self) -> frozenset[str]: ...
-
+    @abstractmethod
     def load_params(self, config_str: str) -> None: ...
+    @abstractmethod
     def save_params(self) -> str: ...
 
     # Saved config text -> {node: value string} ({} if unparseable), for the
     # per-field reset.
+    @abstractmethod
     def config_values(self, config_str: str) -> dict[str, str]: ...
 
+    @abstractmethod
     def enable_frame_trigger(self) -> None: ...
+    @abstractmethod
     def set_trigger_source(self, use_software: bool) -> None: ...
+    @abstractmethod
     def begin_software_trigger_preview(self) -> None: ...
-    def trigger_once(self) -> None: ...
 
     # Free run: uncapped with ``fps=None`` (the benchmark's ceiling), else capped
     # at ``fps`` (free-run preview). False when the backend cannot arm it.
+    @abstractmethod
     def begin_freerun(self, fps: float | None = None) -> bool: ...
+    @abstractmethod
     def retrieve_freerun(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
 
+    @abstractmethod
     def start_grab_preview(self) -> None: ...
+    @abstractmethod
     def start_grab_record(self) -> bool: ...
+    @abstractmethod
     def stop_grab(self) -> None: ...
 
-    # retrieve, retrieve_freerun and retrieve_external never raise: None on a
-    # device error or a stop race, since an exception would kill the grab thread
-    # and orphan its writer.
+    @abstractmethod
     def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
-
-    # Optional; the external record loop falls back to retrieve_freerun. Only the
-    # fake implements it, modeling the external source so that a recording with
-    # no pulses yields nothing.
-    def retrieve_external(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None: ...
 
@@ -632,11 +683,6 @@ class Camera:
 
     # ------------------------------------------------- full device node map
 
-    def _grab_locked_features(self) -> frozenset[str]:
-        """Nodes writable only while not grabbing (Width/Height by default)."""
-        getter = getattr(self._backend, "grab_locked_features", None)
-        return frozenset(getter()) if getter else GEOMETRY_FEATURES
-
     def _annotate(self, feature: FeatureInfo, grab_locked: frozenset[str]) -> FeatureInfo:
         """Apply octacam's policy to one backend feature: managed nodes and an
         auto-centered offset are read-only, a grab-locked node is editable while
@@ -656,14 +702,14 @@ class Camera:
         """Every node the backend exposes, annotated with octacam's policy."""
         with self._param_lock:
             features = self._backend.list_features()
-            grab_locked = self._grab_locked_features()
+            grab_locked = self._backend.grab_locked_features()
         return [self._annotate(f, grab_locked).as_dict() for f in features]
 
     def read_feature(self, name: str) -> dict:
         """One node's current descriptor, annotated with octacam's policy."""
         with self._param_lock:
             feature = self._backend.read_feature(name)
-            grab_locked = self._grab_locked_features()
+            grab_locked = self._backend.grab_locked_features()
         return self._annotate(feature, grab_locked).as_dict()
 
     def _centered_offset(self, node_name: str) -> int | None:
@@ -734,7 +780,7 @@ class Camera:
         with self._param_lock:
             setattr(self, f"center_{axis}", bool(enabled))
             if enabled:
-                if OFFSET_FEATURES.keys() & self._grab_locked_features():
+                if OFFSET_FEATURES.keys() & self._backend.grab_locked_features():
                     self._run_stopped(self._recenter_offsets_locked)
                 else:
                     self._recenter_offsets_locked()
@@ -754,7 +800,7 @@ class Camera:
             self.set_geometry(height=int(float(value)))  # type: ignore[arg-type]
             return
         with self._param_lock:
-            if name in self._grab_locked_features():
+            if name in self._backend.grab_locked_features():
                 self._write_feature_stopped(name, value)
             else:
                 try:
@@ -823,7 +869,7 @@ class Camera:
             mode = "software"
             self._backend.begin_software_trigger_preview()
         self._reset_series()  # so preview never shows a stale recording count
-        self._configure_trigger_period(None)  # no recording counts preview triggers
+        self._backend.configure_trigger_period(None)  # no recording counts preview triggers
         self._backend.start_grab_preview()
         self._thread = threading.Thread(
             target=self._preview_loop, args=(mode,), daemon=True
@@ -895,7 +941,7 @@ class Camera:
                 if software_trigger and pulse_clock is not None and pulse_clock.period_ns
                 else None
             )
-            self._configure_trigger_period(software_period)
+            self._backend.configure_trigger_period(software_period)
             if not self._backend.start_grab_record():
                 log.error(
                     "Failed to start grabbing for recording on camera %s",
@@ -918,17 +964,10 @@ class Camera:
         self._thread.start()
         return True
 
-    def _configure_trigger_period(self, period_s: float | None) -> None:
-        configure = getattr(self._backend, "configure_trigger_period", None)
-        if callable(configure):
-            configure(period_s)
-
     def arm_counting(self) -> None:
         """End the priming ``hold``: the next trigger is the recording's first,
         and a software-trigger sequence restarts so it is trigger 0."""
-        restart = getattr(self._backend, "restart_trigger_sequence", None)
-        if callable(restart):
-            restart()
+        self._backend.restart_trigger_sequence()
         self._armed.set()
 
     def stop(self, fill_to: int | None = None) -> None:
@@ -986,17 +1025,11 @@ class Camera:
         backend.stop_grab()
 
     def _read_stream_statistics(self) -> dict[str, int]:
-        reader = getattr(self._backend, "stream_statistics", None)
-        if not callable(reader):
-            return {}
         try:
-            stats = reader()
+            return self._backend.stream_statistics()
         except Exception as e:  # diagnostics must never break a recording
             log.debug("Could not read stream statistics of %s: %s", self.serial_number, e)
             return {}
-        if not isinstance(stats, dict):
-            return {}
-        return {str(k): int(v) for k, v in stats.items() if isinstance(v, int)}
 
     def _reset_series(self) -> None:
         self._timestamps.clear()
@@ -1091,12 +1124,7 @@ class Camera:
         tracker = self._tracker
         clock = self._pulse_clock
         assert tracker is not None and clock is not None
-        if software_trigger:
-            retrieve = backend.retrieve
-        else:
-            retrieve = getattr(backend, "retrieve_external", None) or (
-                backend.retrieve_freerun
-            )
+        retrieve = backend.retrieve if software_trigger else backend.retrieve_external
         # Frames owed to the video and not yet queued (fills, refused frames):
         # they ride on the next queued frame or on close, so the video keeps one
         # frame per pulse.
@@ -1136,7 +1164,7 @@ class Camera:
                 continue
             # Read after the armed check: an image answered before the sequence
             # restart reports PRIMING_TRIGGER however late this read comes.
-            index = getattr(backend, "last_trigger_index", None)
+            index = backend.last_trigger_index
             if index is not None and index < 0:
                 # Answers no trigger of the recording (see _trigger_handoff).
                 if index == PRIMING_TRIGGER:

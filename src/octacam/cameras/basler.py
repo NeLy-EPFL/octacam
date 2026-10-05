@@ -17,11 +17,11 @@ from typing import Any
 
 from pypylon import genicam, pylon
 
-from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
 from octacam.cameras.base import (
     GEOMETRY_FEATURES,
     PARAM_NODES,
     BackendError,
+    CameraBackend,
     FeatureInfo,
     Frame,
     NodeInfo,
@@ -172,7 +172,7 @@ def _drop_empty_pfs_values(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class BaslerBackend(SoftwareTriggerHandoff):
+class BaslerBackend(CameraBackend):
     """A single Basler camera, driven through pypylon."""
 
     extension = "pfs"
@@ -180,17 +180,12 @@ class BaslerBackend(SoftwareTriggerHandoff):
     def __init__(self, device):
         self.raw: Any = pylon.InstantCamera(device)  # None once closed
         info = self.raw.GetDeviceInfo()
-        self._serial = str(info.GetSerialNumber())
+        super().__init__(str(info.GetSerialNumber()))
         # Whether grab timestamps count ns (USB3 Vision; a GigE camera's count ticks).
         self._stamps_ns = info.GetDeviceClass() == "BaslerUsb"
         self._original_trigger_source: str | None = None
         # Grabs pylon flagged failed (bandwidth gaps, packet loss).
         self._incomplete_grabs = 0
-        self._init_trigger_handoff()
-
-    @property
-    def serial_number(self) -> str:
-        return self._serial
 
     def open(self) -> None:
         try:
@@ -204,6 +199,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
         # after it segfaults. Close() alone does not detach the device.
         if self.raw is None:  # a second close() is a no-op
             return
+        self.trigger.end_grab()
         try:
             if self.raw.IsGrabbing():
                 self.raw.StopGrabbing()
@@ -217,9 +213,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
 
     def is_open(self) -> bool:
         return self.raw is not None and self.raw.IsOpen()
-
-    def is_grabbing(self) -> bool:
-        return self.raw is not None and self._grabbing
 
     def grab_locked_features(self) -> frozenset[str]:
         # pylon locks the whole ROI while grabbing (TLParamsLocked), offsets too.
@@ -407,9 +400,6 @@ class BaslerBackend(SoftwareTriggerHandoff):
         self.raw.TriggerMode.Value = "On"
         self.raw.TriggerSource.Value = "Software"
 
-    def trigger_once(self) -> None:
-        self._bump_trigger()  # no device call: retrieve() fires it (_trigger_handoff)
-
     def _apply_freerun_cap(self, fps: float) -> None:
         """Best-effort: cap the free-run rate at ``fps`` (SFNC nodes on the ace)."""
         try:
@@ -455,7 +445,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         raw = self.raw
-        if raw is None or not self._grabbing:
+        if raw is None or not self.trigger.grabbing:
             return None
         try:
             result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
@@ -520,7 +510,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
                 self._serial,
             )
             raise BackendError(str(e)) from e
-        self._begin_grab()
+        self.trigger.begin_grab()
 
     def start_grab_preview(self) -> None:
         self._start_grabbing(pylon.GrabStrategy_LatestImageOnly)
@@ -544,29 +534,29 @@ class BaslerBackend(SoftwareTriggerHandoff):
         return ready
 
     def stop_grab(self) -> None:
-        self._end_grab()
+        self.trigger.end_grab()
         if self.raw is not None:
             self.raw.StopGrabbing()
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        fire = self._claim_trigger(timeout_ms)
+        fire = self.trigger.claim(timeout_ms)
         if fire is None:
             return None
         raw = self.raw
-        if raw is None or not self._grabbing:
+        if raw is None or not self.trigger.grabbing:
             return None
         if fire:
             try:
                 raw.ExecuteSoftwareTrigger()
             except genicam.GenericException:
-                self._trigger_unfired()
+                self.trigger.unfired()
                 return None
         # RetrieveResult raises, not just times out, on an unplug or a transport error.
         try:
             result = raw.RetrieveResult(
-                self._fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
+                self.trigger.fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
             )
         except genicam.GenericException:
             return None
@@ -576,7 +566,7 @@ class BaslerBackend(SoftwareTriggerHandoff):
                 return None
             succeeded = result.GrabSucceeded()
             # A failed grab answers its trigger too; the clock check needs ns.
-            self._trigger_answered(
+            self.trigger.answered(
                 int(result.TimeStamp) if succeeded and self._stamps_ns else None
             )
             if not succeeded:

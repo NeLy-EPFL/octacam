@@ -161,7 +161,7 @@ def test_triggering_sets_software_and_defers_execute():
     # (the execute happens in retrieve, so it can't race a concurrent receive()).
     backend.trigger_once()
     assert cam.executed == []
-    assert backend._pending == 1
+    assert backend.trigger.pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
     assert not cam.streaming

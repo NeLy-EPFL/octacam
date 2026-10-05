@@ -381,7 +381,7 @@ class CameraSystem:
             # PENDING_MAX and drop the rest.
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
-                if all(getattr(c.backend, "_pending", 0) == 0 for c in self.cameras):
+                if all(c.backend.trigger.pending == 0 for c in self.cameras):
                     break
                 time.sleep(0.002)
             time.sleep(interval)

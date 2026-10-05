@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 
 import pytest
 from helpers import wait_until
@@ -187,25 +188,33 @@ def test_teardown_backend_noop_for_non_session_backends():
 
 # --------------------------------------------------------------------------
 # Basler backend unit tests (pypylon imports here — genicam.GenericException is
-# the real SDK exception type — but no camera is present, so the raw device is
-# faked and the backend is built without __init__'s InstantCamera construction).
+# the real SDK exception type — but no camera is present, so pylon's
+# InstantCamera is replaced by a faked raw device).
 # --------------------------------------------------------------------------
 
 
-def _make_basler_backend(raw):
+class _Raw:
+    """A pylon InstantCamera stand-in: a GigE camera (timestamps in ticks)."""
+
+    def GetDeviceInfo(self):
+        return types.SimpleNamespace(
+            GetSerialNumber=lambda: "test-basler", GetDeviceClass=lambda: "BaslerGigE"
+        )
+
+
+@pytest.fixture
+def make_basler_backend(monkeypatch):
     pytest.importorskip("pypylon")
-    from octacam.cameras.basler import BaslerBackend
+    from octacam.cameras import basler
 
-    be = BaslerBackend.__new__(BaslerBackend)
-    be._init_trigger_handoff()
-    be._serial = "test-basler"
-    be._stamps_ns = False
-    be._incomplete_grabs = 0
-    be.raw = raw
-    return be
+    def make(raw):
+        monkeypatch.setattr(basler.pylon, "InstantCamera", lambda _device: raw)
+        return basler.BaslerBackend(None)
+
+    return make
 
 
-class _FakeBaslerRaw:
+class _FakeBaslerRaw(_Raw):
     def __init__(self, *, ready=True, ready_raises=False):
         self._ready = ready
         self._ready_raises = ready_raises
@@ -226,37 +235,37 @@ class _FakeBaslerRaw:
         return self._ready
 
 
-def test_basler_start_grab_record_stops_on_ready_timeout():
+def test_basler_start_grab_record_stops_on_ready_timeout(make_basler_backend):
     # A False ready gate must leave the camera NOT grabbing (base.start_record
     # does no stop_grab on a False return), else it wedges the device.
     raw = _FakeBaslerRaw(ready=False)
-    be = _make_basler_backend(raw)
+    be = make_basler_backend(raw)
     assert be.start_grab_record() is False
     assert be.is_grabbing() is False
     assert raw.stop_grabbing_calls == 1
 
 
-def test_basler_start_grab_record_stops_on_ready_raise():
-    # A raising ready gate must also flip _grabbing off before re-raising.
+def test_basler_start_grab_record_stops_on_ready_raise(make_basler_backend):
+    # A raising ready gate must also end the grab before re-raising.
     from pypylon import genicam
 
     raw = _FakeBaslerRaw(ready_raises=True)
-    be = _make_basler_backend(raw)
+    be = make_basler_backend(raw)
     with pytest.raises(genicam.GenericException):
         be.start_grab_record()
     assert be.is_grabbing() is False
     assert raw.stop_grabbing_calls == 1
 
 
-def test_basler_start_grab_record_stays_grabbing_when_ready():
+def test_basler_start_grab_record_stays_grabbing_when_ready(make_basler_backend):
     raw = _FakeBaslerRaw(ready=True)
-    be = _make_basler_backend(raw)
+    be = make_basler_backend(raw)
     assert be.start_grab_record() is True
     assert be.is_grabbing() is True
     assert raw.stop_grabbing_calls == 0
 
 
-class _RaisingRetrieveRaw:
+class _RaisingRetrieveRaw(_Raw):
     """A grabbing raw whose RetrieveResult raises a device-level SDK error."""
 
     def ExecuteSoftwareTrigger(self):
@@ -268,18 +277,18 @@ class _RaisingRetrieveRaw:
         raise genicam.GenericException("device removed", "test", 0)
 
 
-def test_basler_retrieve_swallows_device_error():
+def test_basler_retrieve_swallows_device_error(make_basler_backend):
     # A device error out of RetrieveResult must become one lost frame (None),
     # never propagate into the grab loop and orphan the ffmpeg writer.
-    be = _make_basler_backend(_RaisingRetrieveRaw())
-    be._begin_grab()  # arm the hand-off
-    be._pending = 1  # one pending trigger so _wait_pending returns True
+    be = make_basler_backend(_RaisingRetrieveRaw())
+    be.trigger.begin_grab()
+    be.trigger_once()  # one pending trigger, so retrieve fires and fetches
     assert be.retrieve(50, lambda: True) is None
 
 
-def test_basler_retrieve_freerun_swallows_device_error():
-    be = _make_basler_backend(_RaisingRetrieveRaw())
-    be._begin_grab()
+def test_basler_retrieve_freerun_swallows_device_error(make_basler_backend):
+    be = make_basler_backend(_RaisingRetrieveRaw())
+    be.trigger.begin_grab()
     assert be.retrieve_freerun(50, lambda: True) is None
 
 
@@ -299,7 +308,7 @@ class _GrabResult:
         pass
 
 
-class _LateImageRaw:
+class _LateImageRaw(_Raw):
     """A raw whose RetrieveResult hands out queued results (an empty one: the
     fetch timed out) and counts the software triggers fired."""
 
@@ -314,16 +323,16 @@ class _LateImageRaw:
         return self.results.pop(0) if self.results else _GrabResult(valid=False)
 
 
-def test_basler_retrieve_credits_a_late_image_to_its_own_trigger():
+def test_basler_retrieve_credits_a_late_image_to_its_own_trigger(make_basler_backend):
     # Trigger 0's image misses the fetch after it. The next retrieve must not
     # fire trigger 1 — it would then fetch image 0 and credit it to trigger 1,
     # putting every later frame a pulse late — but only fetch.
     raw = _LateImageRaw([_GrabResult(valid=False), _GrabResult(timestamp=111)])
-    be = _make_basler_backend(raw)
-    be._begin_grab()
-    be._bump_trigger()
+    be = make_basler_backend(raw)
+    be.trigger.begin_grab()
+    be.trigger_once()
     assert be.retrieve(50, lambda: True) is None  # fired 0; its image is late
-    be._bump_trigger()
+    be.trigger_once()
     frame = be.retrieve(50, lambda: True)
     assert frame is not None and frame[1] == 111
     assert raw.fired == 1 and be.last_trigger_index == 0
@@ -331,190 +340,6 @@ def test_basler_retrieve_credits_a_late_image_to_its_own_trigger():
     frame = be.retrieve(50, lambda: True)  # now trigger 1 fires
     assert frame is not None and frame[1] == 222
     assert raw.fired == 2 and be.last_trigger_index == 1
-
-
-# --- the software-trigger hand-off's pairing (cameras/_trigger_handoff.py) --- #
-
-
-def _handoff():
-    from octacam.cameras._trigger_handoff import SoftwareTriggerHandoff
-
-    class _Handoff(SoftwareTriggerHandoff):
-        _serial = "test-handoff"
-
-    h = _Handoff()
-    h._init_trigger_handoff()
-    h._begin_grab()
-    return h
-
-
-def test_handoff_fires_nothing_while_a_trigger_awaits_its_image():
-    h = _handoff()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True  # fire trigger 0
-    h._bump_trigger()
-    assert h._claim_trigger(10) is False  # 0 unanswered: fetch only
-    assert h._claim_trigger(10) is False
-    h._trigger_answered()
-    assert h.last_trigger_index == 0
-    assert h._claim_trigger(10) is True  # trigger 1 fires now
-    h._trigger_answered()
-    assert h.last_trigger_index == 1
-
-
-def test_handoff_gives_up_on_a_trigger_past_its_answer_deadline(monkeypatch):
-    import octacam.cameras._trigger_handoff as handoff
-
-    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
-    h = _handoff()
-    h.restart_trigger_sequence()  # a recording counts: the long deadline applies
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    h._bump_trigger()
-    assert h._claim_trigger(10) is False
-    time.sleep(0.03)
-    assert h._claim_trigger(10) is True  # 0 given up on; 1 fires
-    h._trigger_answered()
-    assert h.last_trigger_index == 1 and h.unanswered_triggers == 1
-    # A late image of the abandoned trigger answers nothing outstanding.
-    h._trigger_answered()
-    assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
-
-
-def test_handoff_a_silent_camera_costs_only_the_short_deadline_until_it_answers(
-    monkeypatch,
-):
-    # A Grasshopper3 silently ignores its first triggers after acquisition start:
-    # before the grab's first answer (and before a recording counts) each costs
-    # only PRIMING_ANSWER_TIMEOUT_S and is not reported as unanswered. After the
-    # first answer a silent trigger may be a late image: the long deadline.
-    import octacam.cameras._trigger_handoff as handoff
-
-    monkeypatch.setattr(handoff, "PRIMING_ANSWER_TIMEOUT_S", 0.02)
-    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 5.0)
-    h = _handoff()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True  # ignored by the camera
-    h._bump_trigger()
-    time.sleep(0.03)
-    assert h._claim_trigger(10) is True  # 0 given up on after the short deadline
-    assert h.unanswered_triggers == 0  # expected, not reported
-    h._trigger_answered()
-    assert h.last_trigger_index == 1
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    h._bump_trigger()
-    time.sleep(0.03)
-    assert h._claim_trigger(10) is False  # now patient: 2 may still be on its way
-
-
-def test_handoff_an_image_older_than_its_trigger_answers_nothing(monkeypatch):
-    # The camera clock says when an image was exposed: one exposed before the
-    # trigger it would answer was fired is a late image of a trigger already
-    # given up on. It answers nothing; the trigger keeps waiting for its own.
-    import octacam.cameras._trigger_handoff as handoff
-
-    h = _handoff()
-    h.restart_trigger_sequence()
-    offset = 5_000_000_000  # camera clock ahead of the host's by 5 s
-    for _ in range(10):
-        h._bump_trigger()
-        assert h._claim_trigger(10) is True
-        fired = h._outstanding[0][4]
-        h._trigger_answered(fired + offset + 1_000_000)  # exposed 1 ms after firing
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    fired = h._outstanding[0][4]
-    h._trigger_answered(fired + offset - 200_000_000)  # exposed 0.2 s before firing
-    assert h.last_trigger_index == handoff.UNMATCHED_TRIGGER
-    assert h.stale_images == 1 and len(h._outstanding) == 1
-    h._trigger_answered(fired + offset + 1_000_000)  # its own image
-    assert h.last_trigger_index == 10 and not h._outstanding
-
-
-def test_handoff_trusts_no_reference_of_too_few_answers_and_heals_a_bad_one(monkeypatch):
-    import octacam.cameras._trigger_handoff as handoff
-
-    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.02)
-    h = _handoff()
-    h.restart_trigger_sequence()
-    offset = 5_000_000_000
-
-    def answer(extra_ns):
-        h._bump_trigger()
-        assert h._claim_trigger(10) is True
-        h._trigger_answered(h._outstanding[0][4] + offset + extra_ns)
-
-    answer(200_000_000)  # one answer inflated by a 0.2 s host stall
-    answer(1_000_000)  # a normal one: too few answers to judge it by
-    assert h.last_trigger_index == 1 and h.stale_images == 0
-    # A reference gone wrong (8 inflated answers): the normal image is rejected,
-    # its trigger is given up on, and the reference is cleared, not trusted.
-    for _ in range(8):
-        answer(200_000_000)
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    h._trigger_answered(h._outstanding[0][4] + offset + 1_000_000)
-    assert h.stale_images == 1
-    time.sleep(0.03)
-    h._bump_trigger()
-    h._claim_trigger(10)  # expires the rejected trigger
-    assert not h._offsets
-
-
-def test_handoff_drops_a_trigger_left_pending_for_half_a_period(monkeypatch):
-    # While a recording counts at a low rate, a trigger left pending behind an
-    # unanswered one must be dropped once it is half a period old — not fired a
-    # whole period late under its own pulse number.
-    import octacam.cameras._trigger_handoff as handoff
-
-    monkeypatch.setattr(handoff, "ANSWER_TIMEOUT_S", 0.05)
-    h = _handoff()
-    h.configure_trigger_period(0.2)  # deadline max(0.05, 2P) = 0.4 s; stale 0.1 s
-    h.restart_trigger_sequence()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True  # never answered
-    time.sleep(0.2)
-    h._bump_trigger()  # due now; it will wait out the deadline behind trigger 0
-    time.sleep(0.25)
-    # 0 given up on, 1 too stale to fire: dropped; with nothing left to fire the
-    # grab loop only fetches, in case 0's image is merely late.
-    assert h._claim_trigger(10) is False
-    assert h.stale_triggers == 1 and h.unanswered_triggers == 1 and not h._outstanding
-
-
-def test_handoff_a_trigger_the_device_refused_is_not_outstanding():
-    h = _handoff()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    h._trigger_unfired()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True  # nothing to wait for
-    h._trigger_answered()
-    assert h.last_trigger_index == 1
-
-
-def test_handoff_an_answer_to_a_trigger_from_before_the_restart_is_priming():
-    from octacam.cameras._trigger_handoff import PRIMING_TRIGGER
-
-    h = _handoff()
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True  # a priming trigger, image still due
-    h.restart_trigger_sequence()
-    h._bump_trigger()  # the recording's trigger 0
-    assert h._claim_trigger(10) is False  # the priming image comes first
-    h._trigger_answered()
-    assert h.last_trigger_index == PRIMING_TRIGGER
-    assert h._claim_trigger(10) is True
-    h._trigger_answered()
-    assert h.last_trigger_index == 0
-    # An image answered before the restart reads as priming, however late the
-    # reader looks.
-    h._bump_trigger()
-    assert h._claim_trigger(10) is True
-    h._trigger_answered()
-    h.restart_trigger_sequence()
-    assert h.last_trigger_index == PRIMING_TRIGGER
 
 
 class _FakeBaslerDevice:
