@@ -159,33 +159,60 @@ def test_attach_gives_every_plugin_the_controller_and_the_broadcast():
 
 
 def test_only_the_trigger_plugin_is_asked_for_the_train_and_priming():
+    asked = []
+
     class Other(Plugin):
         name = "other"
 
         def trigger_train(self, params):
-            raise AssertionError("asked a plugin that does not generate the trigger")
+            asked.append("other.trigger_train")
 
         def prime_trigger(self, params, pulses):
-            raise AssertionError("asked a plugin that does not generate the trigger")
+            asked.append("other.prime_trigger")
 
     class Board(Plugin):
         name = "board"
         generates_trigger = True
 
         def trigger_train(self, params):
+            asked.append(("board.trigger_train", params))
             return {"period_ns": 10_000_000, "count": params["count"]}
 
         def prime_trigger(self, params, pulses):
-            return pulses == 4
+            asked.append(("board.prime_trigger", params, pulses))
+            return True
 
     assert PluginManager([Other()]).trigger_plugin() is None
     assert PluginManager([Other()]).trigger_train({}) is None
     assert PluginManager([Other()]).prime_trigger({}, 4) is False
+    assert asked == []
     board = Board()
     manager = PluginManager([Other(), board])
     assert manager.trigger_plugin() is board
-    assert manager.trigger_train({"board": {"count": 7}})["count"] == 7
-    assert manager.prime_trigger({}, 4) is True
+    params = {"other": {"fps": 1}, "board": {"count": 7, "fps": 50}}
+    assert manager.trigger_train(params)["count"] == 7
+    assert manager.prime_trigger(params, 4) is True
+    # Each gets the board's own slice, and the other plugin is never asked.
+    assert asked == [
+        ("board.trigger_train", {"count": 7, "fps": 50}),
+        ("board.prime_trigger", {"count": 7, "fps": 50}, 4),
+    ]
+
+
+def test_a_raising_trigger_plugin_reads_as_no_train_and_no_priming():
+    class Boom(Plugin):
+        name = "boom"
+        generates_trigger = True
+
+        def trigger_train(self, params):
+            raise RuntimeError("boom")
+
+        def prime_trigger(self, params, pulses):
+            raise RuntimeError("boom")
+
+    manager = PluginManager([Boom()])
+    assert manager.trigger_train({"boom": {}}) is None
+    assert manager.prime_trigger({"boom": {}}, 4) is False
 
 
 def test_a_ws_message_goes_to_the_first_plugin_that_claims_it():

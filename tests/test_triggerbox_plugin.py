@@ -1570,7 +1570,8 @@ def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
     )
     spec = plugin.default_start_params(125.0, 10.0)
     started = time.monotonic()
-    assert plugin.prime_trigger(spec, 4) is True
+    # Through the manager, as the controller primes: the board gets its own slice.
+    assert PluginManager([plugin]).prime_trigger({"triggerbox": spec}, 4) is True
     elapsed = time.monotonic() - started
     arm = _last_arm(link)
     assert arm["lights"] == []  # no light flash before the recording
