@@ -369,15 +369,11 @@ def _patch_one_camera_record(monkeypatch, tmp_path, events):
     def note(step):
         events.append((step, session_cache.capture_active()))
 
-    monkeypatch.setattr(
-        "octacam.plugins.build_plugins",
-        lambda *a, **k: SimpleNamespace(
-            plugins=[],
-            setup_all=lambda: None,
-            teardown_all=lambda: note("teardown_all"),
-            default_start_params=lambda *_a: {},
-        ),
-    )
+    class Plugins(PluginManager):
+        def teardown_all(self):
+            note("teardown_all")
+
+    monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: Plugins())
 
     class FakeController:
         recording_active = False
