@@ -486,6 +486,28 @@ def test_a_spec_without_a_source_checkout_is_never_classified_or_flashed(real_sp
     assert (info["state"], info["sketch_found"], info["can_flash"], info["needs_flash"]) == (
         None, False, False, False
     )
-    assert info["detail"].startswith("the sketch source is not available")
+    assert info["detail"].startswith("the sketch source was not found")
     result = prov.flash()
     assert not result.ok and "sketch source was not found" in result.message
+
+
+@pytest.mark.parametrize(
+    ("sketch", "probed", "detail"),
+    [
+        ("missing", True, "the sketch source could not be read"),
+        ("real", False, "the board has not been probed"),
+    ],
+    ids=["unreadable", "unprobed"],
+)
+def test_an_unclassified_board_says_why(real_spec, tmp_path, sketch, probed, detail):
+    from dataclasses import replace
+
+    spec = real_spec if sketch == "real" else replace(real_spec, sketch_dir=tmp_path / "gone")
+    prov = _provisioner(spec, reopen=lambda: None)
+    if probed:
+        prov.classify("TRIGGERBOX 2 oldbuild")
+    info = prov.provisioning(
+        plugin_name="triggerbox", device="/dev/ttyACM0", firmware=None, firmware_ok=True
+    )
+    assert (info["state"], info["needs_flash"]) == (None, False)
+    assert info["detail"].startswith(detail)

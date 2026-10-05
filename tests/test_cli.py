@@ -2184,11 +2184,38 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())
     assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
-    assert "? unknown — the sketch source is not available" in flat
+    assert "source build: (not available)" in flat
+    assert "? unknown — the sketch source was not found" in flat
     assert "up to date" not in flat
-    assert ("Can't auto-flash" in flat) is (flags != ["--check"])
+    assert ("Flash it manually with arduino-cli" in flat) is (flags != ["--check"])
     assert "uploaded build" not in flat
     assert fake_triggerbox.devices == ["/dev/x"]
+
+
+def test_flash_names_no_missing_source_for_an_unprobed_board():
+    from rich.console import Console
+
+    from octacam import firmware as fw
+    from octacam.cli import _flash_one
+    from octacam.plugins.triggerbox import TriggerboxPlugin
+
+    # The checkout's source is there, but nothing classified the board.
+    provisioner = fw.FirmwareProvisioner(
+        TriggerboxPlugin.firmware,
+        resolve_device=lambda: ("/dev/x", "ok"),
+        reopen=lambda: None,
+        close_link=lambda: None,
+        wait_for_device=lambda device, timeout: True,
+    )
+    prov = provisioner.provisioning(
+        plugin_name="triggerbox", device="/dev/x", firmware=None, firmware_ok=True
+    )
+    console = Console(record=True, width=200)
+    plugin = SimpleNamespace(name="triggerbox", is_ready=lambda: True)
+    assert _flash_one(console, plugin, prov, assume_yes=True, check_only=False) == 1
+    out = console.export_text()
+    assert "? unknown — the board has not been probed" in out
+    assert "OCTACAM_ARDUINO_DIR" not in out
 
 
 def test_flash_reports_a_board_that_does_not_open():

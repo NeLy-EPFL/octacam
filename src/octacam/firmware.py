@@ -487,12 +487,14 @@ class FirmwareProvisioner:
             out.update(self.check.to_dict())
         else:
             out["state"] = None
-            out["detail"] = (
-                "the sketch source is not available, so the board's build can't be "
-                "compared or flashed"
-                if self.needed_build is None
-                else "the board has not been probed"
-            )
+            if self.needed_build is not None:
+                out["detail"] = "the board has not been probed"
+            else:
+                why = "was not found" if self.spec.sketch_dir is None else "could not be read"
+                out["detail"] = (
+                    f"the sketch source {why}, so the board's build can't be compared "
+                    "or flashed"
+                )
             out["needs_flash"] = False
             out["safe_to_auto_flash"] = False
         if extra:

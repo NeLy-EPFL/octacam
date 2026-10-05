@@ -2437,14 +2437,14 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
         )
         return 1
     console.print(f"  board firmware: {prov.get('firmware') or '(no identity reply)'}")
-    console.print(f"  source build:   {prov.get('needed_build') or '(source not found)'}")
-    # An open board is unclassified only without a source build to compare it to.
+    console.print(f"  source build:   {prov.get('needed_build') or '(not available)'}")
+    # An unclassified board is never called up to date; the provisioner says why.
     if prov.get("state") is None:
         console.print(f"  [yellow]? unknown[/yellow] — {prov.get('detail', '')}")
-        if not check_only:
+        if not check_only and prov.get("needed_build") is None:
             console.print(
-                "  [red]Can't auto-flash[/red] (a wheel install without a checkout). "
-                "Flash manually with arduino-cli, or set OCTACAM_ARDUINO_DIR."
+                "  Flash it manually with arduino-cli, or set OCTACAM_ARDUINO_DIR to "
+                "a checkout's arduino/ folder."
             )
         return 1
     if not prov.get("needs_flash"):
