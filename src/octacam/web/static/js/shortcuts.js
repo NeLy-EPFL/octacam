@@ -7,20 +7,7 @@
 //  - Actions click the real control or call the real grid method, so its
 //    gating (`disabled`), labels and confirms apply unchanged.
 
-import { ModalFocus } from "./util.js";
-
-// Digit -> tab in a fixed order, whether the tab sits in the bar or the "⋯"
-// menu. An unloaded plugin's tab is absent, so its digit does nothing.
-const TAB_ORDER = [
-  ["record", "Record"],
-  ["camera", "Camera"],
-  ["view", "View"],
-  ["benchmark", "Benchmark"],
-  ["flywheel", "Flywheel"],
-  ["twophoton", "2-Photon"],
-  ["triggerbox", "triggerbox"],
-];
-const PLUGIN_TABS = new Set(["flywheel", "twophoton", "triggerbox"]);
+import { el, Modal } from "./util.js";
 
 // A slightly coarser step than the wheel's 1.15 so a keypress moves visibly.
 const KBD_ZOOM = 1.3;
@@ -48,9 +35,10 @@ export function keySig(e) {
   return parts.join("+");
 }
 
-// Install the shortcut layer. `grid` takes the preview shortcuts; everything
-// else is reached by id. Returns {openHelp, closeHelp, handleKey}.
-export function initShortcuts({ grid } = {}) {
+// Install the shortcut layer. `grid` takes the preview shortcuts and digit N
+// clicks `tabs.order[N - 1]`, whether that tab sits in the bar or the "⋯"
+// menu; everything else is reached by id.
+export function initShortcuts({ grid, tabs }) {
   const byId = (id) => document.getElementById(id);
 
   // Click a control unless it is disabled. fire() works from any tab (the
@@ -65,10 +53,8 @@ export function initShortcuts({ grid } = {}) {
     if (el && !el.disabled && el.offsetParent !== null) el.click();
   };
 
-  const activeTab = () =>
-    byId("tabs")?.querySelector("button[data-tab].active")?.dataset.tab || null;
-  const clickTab = (name) =>
-    byId("tabs")?.querySelector(`button[data-tab="${name}"]`)?.click();
+  const activeButton = () => byId("tabs").querySelector("button[data-tab].active");
+  const activeTab = () => activeButton()?.dataset.tab || null;
 
   const bindings = [
     // A modifier combo, never a bare key: a stray keystroke must never start or
@@ -132,15 +118,15 @@ export function initShortcuts({ grid } = {}) {
   ];
 
   // Tab switching: one binding per digit, one combined help row.
-  TAB_ORDER.forEach(([name], i) => {
+  for (let i = 0; i < 9; i++) {
     bindings.push({
       section: "Global",
       sigs: [String(i + 1)],
       when: "global",
       hideInHelp: true,
-      run: () => clickTab(name),
+      run: () => tabs.order[i]?.click(),
     });
-  });
+  }
 
   // A tab-scoped binding wins over a global one on the same key.
   const ordered = [...bindings].sort(
@@ -150,7 +136,7 @@ export function initShortcuts({ grid } = {}) {
   const contextMatches = (b, tab) =>
     b.when === "global" ||
     b.when === tab ||
-    (b.when === "plugin" && PLUGIN_TABS.has(tab));
+    (b.when === "plugin" && activeButton()?.dataset.plugin !== undefined);
 
   function suppressed(e) {
     if (e.isComposing) return true;
@@ -186,97 +172,54 @@ export function initShortcuts({ grid } = {}) {
   }
 
   // ---- help overlay ----
-  const overlay = document.createElement("div");
+  const overlay = el("div", "modal hidden");
   overlay.id = "shortcuts-overlay";
-  overlay.className = "modal hidden";
-  const card = document.createElement("div");
-  card.className = "modal-card shortcuts-card";
+  const card = el("div", "modal-card shortcuts-card");
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-modal", "true");
   card.setAttribute("aria-label", "Keyboard shortcuts");
   overlay.appendChild(card);
   document.body.appendChild(overlay);
-  const focus = new ModalFocus(card);
+  const help = new Modal(overlay);
 
   function keyCaps(caps) {
-    const span = document.createElement("span");
-    span.className = "shortcuts-keys";
+    const span = el("span", "shortcuts-keys");
     for (const cap of caps) {
-      if (cap === "–") {
-        const sep = document.createElement("span");
-        sep.className = "shortcuts-sep";
-        sep.textContent = "–";
-        span.appendChild(sep);
-      } else {
-        const kbd = document.createElement("kbd");
-        kbd.textContent = cap;
-        span.appendChild(kbd);
-      }
+      span.appendChild(cap === "–" ? el("span", "shortcuts-sep", "–") : el("kbd", null, cap));
     }
     return span;
   }
 
-  function buildHelp() {
-    card.replaceChildren();
-    const head = document.createElement("div");
-    head.className = "shortcuts-head";
-    const h = document.createElement("h3");
-    h.textContent = "Keyboard shortcuts";
-    const close = document.createElement("button");
+  // Built on open: the tab row names the tabs present then.
+  function openHelp() {
+    const close = el("button", "btn shortcuts-close", "✕");
     close.type = "button";
-    close.className = "btn shortcuts-close";
-    close.textContent = "✕";
     close.title = "Close (Esc)";
-    close.addEventListener("click", closeHelp);
-    head.append(h, close);
-    card.appendChild(head);
+    close.addEventListener("click", () => help.close());
+    const head = el("div", "shortcuts-head");
+    head.append(el("h3", null, "Keyboard shortcuts"), close);
+    card.replaceChildren(head);
 
     const tabRow = {
-      caps: ["1", "–", String(TAB_ORDER.length)],
-      desc: "Switch tab (" + TAB_ORDER.map(([, l]) => l).join(", ") + ")",
+      caps: ["1", "–", String(Math.min(9, tabs.order.length))],
+      desc: "Switch tab (" + tabs.order.map((b) => b.textContent).join(", ") + ")",
     };
-
     for (const section of SECTION_ORDER) {
       const rows = bindings.filter((b) => b.section === section && !b.hideInHelp);
       if (section === "Global") rows.push(tabRow);
       if (!rows.length) continue;
-      const grp = document.createElement("div");
-      grp.className = "shortcuts-group";
-      const st = document.createElement("div");
-      st.className = "shortcuts-group-head";
-      st.textContent = section;
-      grp.appendChild(st);
+      const grp = el("div", "shortcuts-group");
+      grp.appendChild(el("div", "shortcuts-group-head", section));
       for (const r of rows) {
-        const row = document.createElement("div");
-        row.className = "shortcuts-row";
-        const desc = document.createElement("span");
-        desc.className = "shortcuts-desc";
-        desc.textContent = r.desc;
-        row.append(keyCaps(r.caps), desc);
+        const row = el("div", "shortcuts-row");
+        row.append(keyCaps(r.caps), el("span", "shortcuts-desc", r.desc));
         grp.appendChild(row);
       }
       card.appendChild(grp);
     }
+    help.open();
   }
-
-  let helpOpen = false;
-  function openHelp() {
-    if (helpOpen) return;
-    helpOpen = true;
-    overlay.classList.remove("hidden");
-    focus.activate();
-  }
-  function closeHelp() {
-    if (!helpOpen) return;
-    helpOpen = false;
-    overlay.classList.add("hidden");
-    focus.deactivate();
-  }
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) closeHelp();
-  });
   byId("shortcuts-help-btn")?.addEventListener("click", openHelp);
-  buildHelp();
 
   // Append the shortcut to each anchor button's tooltip. Controls that rewrite
   // their own title (the theme toggle) have no `hint`.
@@ -290,11 +233,11 @@ export function initShortcuts({ grid } = {}) {
   }
 
   function handleKey(e) {
-    // The open help overlay swallows every key; '?' or Esc closes it.
-    if (helpOpen) {
-      if (e.key === "Escape" || e.key === "?") {
+    // The open help overlay swallows every key; '?' or Esc (Modal) closes it.
+    if (help.isOpen) {
+      if (e.key === "?") {
         e.preventDefault();
-        closeHelp();
+        help.close();
       }
       return;
     }
@@ -308,6 +251,4 @@ export function initShortcuts({ grid } = {}) {
   }
 
   document.addEventListener("keydown", handleKey);
-
-  return { openHelp, closeHelp, handleKey };
 }

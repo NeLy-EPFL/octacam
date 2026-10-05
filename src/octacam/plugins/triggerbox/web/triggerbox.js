@@ -1,8 +1,8 @@
 // triggerbox tab: camera trigger lines, 3 light channels (off / strobe /
 // continuous / pulse train), arm-with-recording, and a frame-timing diagram of
-// the live camera exposures. Served from /plugins/triggerbox/, so core helpers
-// come in the ctx or by absolute /js/ path.
-import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
+// the live camera exposures.
+import { SerialTab } from "/js/serial.js";
+import { clamp, request } from "/js/util.js";
 
 const STATE_LABELS = {
   idle: "Idle — waiting for arm command",
@@ -48,45 +48,74 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
   );
 }
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
 
-export default class TriggerboxTab {
-  constructor({ notify, status, getRecordSettings, api, clampInput, send }) {
-    this.notify = notify;
-    this.api = api;
-    this.send = send; // pushes a JSON message over the WS (live spec edits)
-    this.clampInput = clampInput;
-    this._getRecordSettings = getRecordSettings;
-    this.ready = Boolean(status?.ready);
-    this.device = status?.device || "";
-    this.firmware = status?.firmware || null;
-    this.firmwareOk = status?.firmware_ok !== false;
-    this.firmwareState = status?.firmware_state || null;
-    this.needsFlash = Boolean(status?.needs_flash);
-    this.canFlash = false; // learned from /api/triggerbox/firmware
-    this.neededBuild = null;
-    this._flashing = false;
-    this.armError = status?.error || null;
-    this.arduinoState = status?.arduino_state || "idle";
-    this.connected = false;
-    this.guardUs = Number.isFinite(status?.guard_us) ? status.guard_us : DEFAULT_GUARD_US;
+const MARKUP = `
+  <div class="col">
+    <div class="row" title="Current state of the Arduino trigger board">
+      <span>Arduino state:</span>
+      <span id="triggerbox-state-value" class="triggerbox-state triggerbox-state--idle"></span>
+    </div>
+    <div id="triggerbox-firmware" class="hint"></div>
+
+    <div class="triggerbox-section">
+      <div class="row triggerbox-section-head">
+        <span>Camera trigger lines</span>
+        <button type="button" id="triggerbox-add-camera" class="btn btn-icon"
+          title="Add a camera trigger line">＋</button>
+      </div>
+      <div id="triggerbox-cameras"></div>
+    </div>
+
+    <div class="triggerbox-section">
+      <div class="row triggerbox-section-head"><span>Light channels</span></div>
+      <div id="triggerbox-lights"></div>
+    </div>
+
+    <div class="triggerbox-timing">
+      <div class="row triggerbox-timing-head">
+        <span>Frame timing</span>
+      </div>
+      <div id="triggerbox-timing-viz" class="triggerbox-timing-viz"></div>
+      <div id="triggerbox-timing-summary" class="hint"></div>
+    </div>
+
+    <p class="hint">
+      FPS and duration come from the Record tab. Each camera line pulses on
+      its pin every frame; each of the three CCS light channels is
+      independent — <strong>off</strong>, a frame-locked <strong>strobe</strong>
+      (Auto sizes the on-time to bracket the longest camera exposure, or set a
+      Manual duty), <strong>continuous</strong>, or an independent optogenetic
+      <strong>pulse train</strong>. When "Arm with recording" is checked the
+      board is armed each time a recording starts. Cameras must be set to
+      external hardware trigger.
+    </p>
+    <label class="center"
+      title="Arm the Arduino automatically when a recording starts">
+      <input type="checkbox" id="triggerbox-arm-with-recording" checked>
+      Arm with recording
+    </label>
+  </div>`;
+
+export default class TriggerboxTab extends SerialTab {
+  static label = "triggerbox";
+  static title = "triggerbox rig: arm the Arduino camera trigger + LED strobe";
+
+  constructor(ctx) {
+    super(ctx, MARKUP);
+    const status = ctx.status;
+    this.send = ctx.send; // pushes a JSON message over the WS (live spec edits)
+    this._getRecordSettings = ctx.getRecordSettings;
+    this.firmwareOk = true;
+    this.error = status.error || null;
+    this.arduinoState = "idle";
+    this.guardUs = Number.isFinite(status.guard_us) ? status.guard_us : DEFAULT_GUARD_US;
     this.exposures = []; // [{index, name, exposure_us, trigger_delay_us}] from /exposures
 
-    this._seedCameras(status?.cameras);
-    this._seedLights(status?.lights);
+    this._seedCameras(status.cameras);
+    this._seedLights(status.lights);
 
-    this.statusBox = document.getElementById("triggerbox-status");
-    this.statusMsg = document.getElementById("triggerbox-status-msg");
-    this.reconnectBtn = document.getElementById("triggerbox-reconnect");
-    this.portSelect = document.getElementById("triggerbox-port");
     this.stateValue = document.getElementById("triggerbox-state-value");
     this.firmwareEl = document.getElementById("triggerbox-firmware");
-    this.fwFlash = document.getElementById("triggerbox-fw-flash");
-    this.fwFlashMsg = document.getElementById("triggerbox-fw-flash-msg");
-    this.fwFlashBtn = document.getElementById("triggerbox-fw-flash-btn");
-    this.fwFlashLog = document.getElementById("triggerbox-fw-flash-log");
     this.camerasEl = document.getElementById("triggerbox-cameras");
     this.lightsEl = document.getElementById("triggerbox-lights");
     this.addCameraBtn = document.getElementById("triggerbox-add-camera");
@@ -94,9 +123,7 @@ export default class TriggerboxTab {
     this.timingSummary = document.getElementById("triggerbox-timing-summary");
     this.armWithRec = document.getElementById("triggerbox-arm-with-recording");
 
-    this.reconnectBtn.addEventListener("click", () => this._reconnect());
-    this.fwFlashBtn?.addEventListener("click", () => this._flash());
-    this.addCameraBtn?.addEventListener("click", () => this._addCamera());
+    this.addCameraBtn.addEventListener("click", () => this._addCamera());
     document.addEventListener("tab-shown", (e) => {
       if (e.detail?.tab === "triggerbox") this._renderTiming();
     });
@@ -108,21 +135,20 @@ export default class TriggerboxTab {
     // so it is redrawn whenever its width changes.
     this._lastVizW = 0;
     this._exposureReloadTimer = null;
-    if (this.timingViz && typeof ResizeObserver !== "undefined") {
-      new ResizeObserver(() => {
-        const w = Math.round(this.timingViz.clientWidth);
-        if (w && w !== this._lastVizW) this._renderTiming();
-      }).observe(this.timingViz);
-    }
+    new ResizeObserver(() => {
+      const w = Math.round(this.timingViz.clientWidth);
+      if (w && w !== this._lastVizW) this._renderTiming();
+    }).observe(this.timingViz);
 
-    this._loadPorts();
     this._renderCameras();
     this._renderLights();
-    this._refresh();
-    this._renderState();
-    this._renderFirmware();
+    this.start(status);
     this._loadExposures();
-    this._loadFirmware();
+  }
+
+  // A flash would cut a running train.
+  boardBusy() {
+    return this.arduinoState === "running";
   }
 
   // --------------------------------------------------------- seeding
@@ -159,10 +185,6 @@ export default class TriggerboxTab {
     }
   }
 
-  async _loadPorts() {
-    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
-  }
-
   _num(v, d) {
     const n = parseFloat(v);
     return Number.isFinite(n) ? Math.max(0, n) : d;
@@ -178,38 +200,27 @@ export default class TriggerboxTab {
 
   setConnected(connected) {
     const became = connected && !this.connected;
-    this.connected = connected;
-    this._refresh();
+    super.setConnected(connected);
     // Debounced: coalesces with the handshake's `system` push.
     if (became) this._scheduleExposureReload();
   }
 
-  applyState(msg) {
-    this.arduinoState = msg.state || "idle";
-    if (msg.device) this.device = msg.device;
-    if ("firmware" in msg) this.firmware = msg.firmware || null;
+  applyLink(msg) {
+    if (msg.arduino_state) this.arduinoState = msg.arduino_state;
     if (typeof msg.firmware_ok === "boolean") this.firmwareOk = msg.firmware_ok;
-    if ("firmware_state" in msg) this.firmwareState = msg.firmware_state || null;
-    if ("needs_flash" in msg) this.needsFlash = Boolean(msg.needs_flash);
-    if (typeof msg.ready === "boolean") this.ready = msg.ready;
-    if ("error" in msg) {
-      const next = msg.error || null;
-      // Toast a newly-raised failure so the operator notices even off-tab.
-      if (next && next !== this.armError) this.notify("error", next);
-      this.armError = next;
-    }
-    this._renderFirmware();
-    this._refresh();
-    this._renderState();
+    super.applyLink(msg);
   }
 
-  // A /api/system plugin status (the init's push or a reconnect), whose state
-  // field is `arduino_state`.
+  applyState(msg) {
+    this.arduinoState = msg.state || "idle";
+    if ("error" in msg) this.toastError(msg.error);
+    super.applyState(msg);
+  }
+
   applyStatus(info) {
-    if (!info) return;
-    this.applyState({ ...info, state: info.arduino_state });
-    // This push is also the only sign that the cameras opened: the
-    // constructor's exposure read may have seen the empty placeholder system.
+    super.applyStatus(info);
+    // The constructor's exposure read may have seen the empty placeholder
+    // camera system.
     this._scheduleExposureReload();
   }
 
@@ -218,8 +229,8 @@ export default class TriggerboxTab {
   // The full arm spec for a recording start, or null when arm-with-recording is
   // unchecked, the link is not open, or the firmware is incompatible.
   getStartParams() {
-    if (!this.ready || !this.firmwareOk || !this.armWithRec?.checked) return null;
-    const s = this._getRecordSettings?.();
+    if (!this.ready || !this.firmwareOk || !this.armWithRec.checked) return null;
+    const s = this._getRecordSettings();
     if (!s) return null;
     const fps = Math.max(1, Math.round(s.fps || 80));
     const duration_ms = Math.max(1, Math.round((s.duration_s || 10) * 1000));
@@ -233,7 +244,6 @@ export default class TriggerboxTab {
   // --------------------------------------------------------- camera rows
 
   _renderCameras() {
-    if (!this.camerasEl) return;
     this.camerasEl.innerHTML = "";
     this.cameras.forEach((cam, i) => {
       const opts = CAMERA_PINS.map(
@@ -279,7 +289,6 @@ export default class TriggerboxTab {
   // --------------------------------------------------------- light cards
 
   _renderLights() {
-    if (!this.lightsEl) return;
     this.lightsEl.innerHTML = "";
     for (const ch of [1, 2, 3]) {
       const l = this.lights[ch];
@@ -363,150 +372,42 @@ export default class TriggerboxTab {
 
   // --------------------------------------------------------- render / gating
 
-  _refresh() {
-    if (this.ready && this.firmwareOk && this.armError) {
-      // The board failed to arm (e.g. a wedged USB link a bus reset couldn't
-      // clear): the recording won't be hardware-triggered.
-      this.statusMsg.textContent = this.armError;
-      this.statusBox.classList.remove("hidden");
-    } else if (this.ready && this.firmwareOk) {
-      this.statusBox.classList.add("hidden");
-    } else if (this.ready && !this.firmwareOk) {
-      this.statusMsg.textContent =
-        `Incompatible firmware${this.firmware ? ` (${this.firmware})` : ""} — ` +
-        `reflash arduino/triggerbox. Arming is disabled.`;
-      this.statusBox.classList.remove("hidden");
-    } else {
-      const where = this.device ? ` (${this.device})` : "";
-      this.statusMsg.textContent =
-        `Serial port${where} is not open — check the Arduino is plugged in ` +
-        `and the device path matches the plugin config, then reconnect.`;
-      this.statusBox.classList.remove("hidden");
+  linkMessage() {
+    if (!this.ready) return super.linkMessage();
+    if (!this.firmwareOk) {
+      const fw = this.fw.firmware;
+      return `Incompatible firmware${fw ? ` (${fw})` : ""} — reflash arduino/triggerbox. Arming is disabled.`;
     }
+    // A failed arm (e.g. a wedged USB link a bus reset couldn't clear): the
+    // recording won't be hardware-triggered.
+    return this.error;
+  }
+
+  refresh() {
+    super.refresh();
     this._applyDisabled();
-    this._renderFlashBanner();
+    this.stateValue.textContent = STATE_LABELS[this.arduinoState] ?? this.arduinoState;
+    this.stateValue.className = `triggerbox-state triggerbox-state--${this.arduinoState}`;
   }
 
   _applyDisabled() {
     const disabled = !this.ready || !this.connected || !this.firmwareOk;
-    for (const el of [this.armWithRec, this.addCameraBtn]) {
-      if (el) el.disabled = disabled;
-    }
+    this.armWithRec.disabled = disabled;
+    this.addCameraBtn.disabled = disabled;
     for (const root of [this.camerasEl, this.lightsEl]) {
-      if (!root) continue;
       for (const el of root.querySelectorAll("input, select, button")) el.disabled = disabled;
     }
   }
 
-  _renderState() {
-    const label = STATE_LABELS[this.arduinoState] ?? this.arduinoState;
-    if (this.stateValue) {
-      this.stateValue.textContent = label;
-      this.stateValue.className = `triggerbox-state triggerbox-state--${this.arduinoState}`;
+  renderFirmware() {
+    super.renderFirmware();
+    const fw = this.fw;
+    let txt = "";
+    if (this.ready && fw.firmware) {
+      txt = `Board firmware: ${fw.firmware}`;
+      if (fw.state === "current") txt += " ✓ up to date";
     }
-  }
-
-  _renderFirmware() {
-    if (this.firmwareEl) {
-      let txt = "";
-      if (this.ready && this.firmware) {
-        txt = `Board firmware: ${this.firmware}`;
-        if (this.firmwareState === "current") txt += " ✓ up to date";
-      }
-      this.firmwareEl.textContent = txt;
-    }
-    this._renderFlashBanner();
-  }
-
-  // Prompt a flash when the board's firmware doesn't match the sketch.
-  _renderFlashBanner() {
-    if (!this.fwFlash) return;
-    const show = this.ready && this.needsFlash && this.arduinoState !== "running";
-    this.fwFlash.classList.toggle("hidden", !show);
-    if (!show) return;
-    let msg;
-    if (this.firmwareState === "wrong_version" || this.firmwareState === "wrong_board") {
-      msg = `Board firmware${this.firmware ? ` (${this.firmware})` : ""} is incompatible — ` +
-        `flash the current triggerbox firmware to enable arming.`;
-    } else if (this.firmwareState === "unidentified") {
-      msg = "The board sent no firmware identity — it may be blank. " +
-        "Flash the triggerbox firmware?";
-    } else {
-      msg = `Board firmware is out of date${this.neededBuild ? ` (current build ${this.neededBuild})` : ""}` +
-        ` — flash the current firmware?`;
-    }
-    if (this.fwFlashMsg) this.fwFlashMsg.textContent = msg;
-    if (this.fwFlashBtn) {
-      this.fwFlashBtn.disabled = !this.canFlash || this._flashing;
-      this.fwFlashBtn.textContent = this._flashing ? "Flashing…" : "Flash firmware";
-      this.fwFlashBtn.title = this.canFlash
-        ? "Compile and upload the current triggerbox firmware to the board"
-        : "arduino-cli or the sketch source is unavailable on the server — flash manually";
-    }
-  }
-
-  async _loadFirmware() {
-    let r;
-    try {
-      r = await this.api("GET", "/api/triggerbox/firmware");
-    } catch {
-      return;
-    }
-    if (!r?.ok || !r.data) return;
-    const d = r.data;
-    if ("state" in d) this.firmwareState = d.state || null;
-    this.needsFlash = Boolean(d.needs_flash);
-    this.canFlash = Boolean(d.can_flash);
-    this.neededBuild = d.needed_build ?? null;
-    if ("firmware" in d) this.firmware = d.firmware || null;
-    this._renderFirmware();
-  }
-
-  async _flash() {
-    if (this._flashing || !this.canFlash) return;
-    const ok = window.confirm(
-      "Compile and upload the current triggerbox firmware to the board?\n\n" +
-        "This takes about a minute; the board will reboot. Don't do this during a recording."
-    );
-    if (!ok) return;
-    this._flashing = true;
-    this._renderFlashBanner();
-    if (this.fwFlashMsg)
-      this.fwFlashMsg.textContent = "Flashing… compiling + uploading (~1 min). The board will reboot.";
-    if (this.fwFlashLog) {
-      this.fwFlashLog.classList.remove("hidden");
-      this.fwFlashLog.textContent = "";
-    }
-    let r;
-    try {
-      r = await this.api("POST", "/api/triggerbox/flash", {});
-    } catch {
-      this._flashing = false;
-      this.notify("error", "Flash failed: server unreachable");
-      this._renderFlashBanner();
-      return;
-    }
-    this._flashing = false;
-    if (!r.ok) {
-      this.notify("error", r.data?.detail || `Flash failed (HTTP ${r.status})`);
-      this._renderFlashBanner();
-      return;
-    }
-    const d = r.data || {};
-    if (this.fwFlashLog && d.log) this.fwFlashLog.textContent = d.log;
-    if ("firmware" in d) this.firmware = d.firmware || null;
-    if (typeof d.firmware_ok === "boolean") this.firmwareOk = d.firmware_ok;
-    if (typeof d.ready === "boolean") this.ready = d.ready;
-    const prov = d.provisioning || {};
-    if ("state" in prov) this.firmwareState = prov.state || null;
-    this.needsFlash = Boolean(prov.needs_flash);
-    if ("can_flash" in prov) this.canFlash = Boolean(prov.can_flash);
-    if ("needed_build" in prov) this.neededBuild = prov.needed_build ?? this.neededBuild;
-    this.notify(d.ok ? "info" : "error", d.message || (d.ok ? "Firmware flashed." : "Flash failed."));
-    this._renderFirmware();
-    this._refresh();
-    this._renderState();
-    this._loadPorts();
+    this.firmwareEl.textContent = txt;
   }
 
   // --------------------------------------------------- exposures + timing
@@ -518,22 +419,16 @@ export default class TriggerboxTab {
   }
 
   async _loadExposures() {
-    let r;
-    try {
-      r = await this.api("GET", "/api/triggerbox/exposures");
-    } catch {
-      this._renderTiming();
-      return;
-    }
-    if (r?.ok && r.data) {
-      this.exposures = Array.isArray(r.data.cameras) ? r.data.cameras : [];
-      if (Number.isFinite(r.data.guard_us)) this.guardUs = r.data.guard_us;
+    const d = await request("GET", "/api/triggerbox/exposures");
+    if (d) {
+      this.exposures = Array.isArray(d.cameras) ? d.cameras : [];
+      if (Number.isFinite(d.guard_us)) this.guardUs = d.guard_us;
     }
     this._renderTiming();
   }
 
   _timingModel() {
-    const s = this._getRecordSettings?.() || {};
+    const s = this._getRecordSettings() || {};
     const fps = Math.max(1, Math.round(s.fps || 80));
     const periodUs = 1e6 / fps;
 
@@ -603,10 +498,9 @@ export default class TriggerboxTab {
   // arms from it and re-strobes to match. The arm-with-recording checkbox
   // gates only the recording arm.
   _pushSpec() {
-    if (!this.send) return;
     clearTimeout(this._pushTimer);
     this._pushTimer = setTimeout(() => {
-      const s = this._getRecordSettings?.();
+      const s = this._getRecordSettings();
       const fps = Math.max(1, Math.round(s?.fps || 80));
       const lights = [1, 2, 3].map((ch) => ({ ...this.lights[ch] }));
       this.send({
@@ -618,7 +512,6 @@ export default class TriggerboxTab {
 
   _renderTiming() {
     this._pushSpec(); // every camera/light edit funnels through here
-    if (!this.timingViz) return;
     const m = this._timingModel();
     // A hidden tab measures 0: keep the last known width.
     const cw = Math.round(this.timingViz.clientWidth) || this._lastVizW || 240;
@@ -628,7 +521,6 @@ export default class TriggerboxTab {
   }
 
   _renderSummary(m) {
-    if (!this.timingSummary) return;
     const nLed = m.rows.filter((r) => r.kind === "led").length;
     const nPulse = m.rows.filter((r) => r.kind === "pulse").length;
     const parts = [
@@ -781,50 +673,5 @@ export default class TriggerboxTab {
       `<svg viewBox="0 0 ${width} ${H}" width="${width}" height="${H}" class="tb-svg" ` +
       `role="img" aria-label="triggerbox frame timing diagram">${g.join("")}${labels.join("")}</svg>`
     );
-  }
-
-  // --------------------------------------------------------- reconnect
-
-  async _reconnect() {
-    this.reconnectBtn.disabled = true;
-    const device = this.portSelect?.value || "";
-    let r;
-    try {
-      r = await this.api("POST", "/api/triggerbox/reconnect", device ? { device } : {});
-    } catch {
-      this.reconnectBtn.disabled = false;
-      this.notify("error", "Reconnect failed: server unreachable");
-      return;
-    }
-    this.reconnectBtn.disabled = false;
-    if (!r.ok) {
-      this.notify("error", r.data?.detail || `Reconnect failed (HTTP ${r.status})`);
-      return;
-    }
-    this.ready = Boolean(r.data?.ready);
-    if (r.data?.device) this.device = r.data.device;
-    this.firmware = r.data?.firmware || null;
-    this.armError = null; // a reconnect clears a stale arm failure
-    if (typeof r.data?.firmware_ok === "boolean") this.firmwareOk = r.data.firmware_ok;
-    if ("firmware_state" in (r.data || {})) this.firmwareState = r.data.firmware_state || null;
-    if ("needs_flash" in (r.data || {})) this.needsFlash = Boolean(r.data.needs_flash);
-    if (r.data?.arduino_state) {
-      this.arduinoState = r.data.arduino_state;
-      this._renderState();
-    }
-    this._renderFirmware();
-    this._refresh();
-    this._loadPorts();
-    this._loadFirmware();
-    if (this.ready && this.firmwareOk) {
-      this.notify("info", `Serial port ${this.device} connected.`);
-    } else if (this.ready && !this.firmwareOk) {
-      this.notify("warning", `Connected, but ${this.firmware || "firmware"} is incompatible — reflash triggerbox.`);
-    } else {
-      this.notify(
-        "warning",
-        r.data?.error ? `Serial port still unavailable: ${r.data.error}` : "Serial port still unavailable."
-      );
-    }
   }
 }

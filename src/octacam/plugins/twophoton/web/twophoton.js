@@ -1,7 +1,5 @@
-// 2-Photon tab: Arduino trigger status and arm-with-recording. Served from
-// /plugins/twophoton/, so core helpers come in the ctx or by absolute /js/ path.
-import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
-import { FirmwareFlash } from "/js/firmware-flash.js";
+// 2-Photon tab: Arduino trigger status and arm-with-recording.
+import { SerialTab } from "/js/serial.js";
 
 const STATE_LABELS = {
   idle:      "Idle — waiting for arm command",
@@ -10,165 +8,69 @@ const STATE_LABELS = {
   done:      "Done",
 };
 
-export default class TwoPhotonTab {
-  constructor({ notify, status, getRecordSettings, api }) {
-    this.notify = notify;
-    this.api = api;
-    this._getRecordSettings = getRecordSettings;
-    this.ready = Boolean(status?.ready);
-    this.device = status?.device || "";
-    this.arduinoState = status?.arduino_state || "idle";
-    this.connected = false;
+const MARKUP = `
+  <div class="col">
+    <div class="row" title="Current state of the Arduino trigger board">
+      <span>Arduino state:</span>
+      <span id="twophoton-state-value" class="twophoton-state twophoton-state--idle"></span>
+    </div>
+    <p class="hint">
+      FPS and duration are taken from the Record tab settings.
+      When "Arm with recording" is checked, the Arduino is armed
+      automatically each time a recording starts, then waits for the
+      ThorSync rising edge before emitting camera trigger pulses.
+    </p>
+    <label class="center"
+      title="Arm the Arduino automatically when a recording starts">
+      <input type="checkbox" id="twophoton-arm-with-recording" checked>
+      Arm with recording
+    </label>
+  </div>`;
 
-    this.statusBox     = document.getElementById("twophoton-status");
-    this.statusMsg     = document.getElementById("twophoton-status-msg");
-    this.reconnectBtn  = document.getElementById("twophoton-reconnect");
-    this.portSelect    = document.getElementById("twophoton-port");
-    this.stateLabel    = document.getElementById("twophoton-state-label");
-    this.stateValue    = document.getElementById("twophoton-state-value");
-    this.armWithRec    = document.getElementById("twophoton-arm-with-recording");
+export default class TwoPhotonTab extends SerialTab {
+  static label = "2-Photon";
+  static title = "2-photon rig: arm the Arduino hardware trigger (ThorSync)";
 
-    this.reconnectBtn.addEventListener("click", () => this._reconnect());
-
-    // Hidden while armed or triggered: a flash would interrupt a capture.
-    this.fw = new FirmwareFlash({
-      api: this.api,
-      notify: this.notify,
-      prefix: "twophoton",
-      ids: {
-        banner: "twophoton-fw-flash",
-        msg: "twophoton-fw-flash-msg",
-        btn: "twophoton-fw-flash-btn",
-        log: "twophoton-fw-flash-log",
-      },
-      isActive: () => this.arduinoState === "armed" || this.arduinoState === "triggered",
-    });
-    this.fw.setReady(this.ready);
-    this.fw.applyState(status);
-
-    this._loadPorts();
-    this._refresh();
-    this._renderState();
-    this.fw.load();
+  constructor(ctx) {
+    super(ctx, MARKUP);
+    this._getRecordSettings = ctx.getRecordSettings;
+    this.arduinoState = "idle";
+    this.stateValue = document.getElementById("twophoton-state-value");
+    this.armWithRec = document.getElementById("twophoton-arm-with-recording");
+    this.start(ctx.status);
   }
 
-  async _loadPorts() {
-    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
+  // A flash would interrupt a capture.
+  boardBusy() {
+    return this.arduinoState === "armed" || this.arduinoState === "triggered";
   }
 
-  // -------------------------------------------------- WS / connection state
-
-  setConnected(connected) {
-    this.connected = connected;
-    this._refresh();
+  applyLink(msg) {
+    if (msg.arduino_state) this.arduinoState = msg.arduino_state;
+    super.applyLink(msg);
   }
 
-  // A "twophoton_state" WS message.
   applyState(msg) {
     this.arduinoState = msg.state || "idle";
-    if (msg.device) this.device = msg.device;
-    // Every push carries link readiness, so a port that dies mid-session
-    // disables arming instead of arming a dead link.
-    if (typeof msg.ready === "boolean") {
-      this.ready = msg.ready;
-      this._refresh();
-    }
-    // An arm failure means the cameras wait on a trigger that never fires:
-    // notify once per distinct error.
-    if (msg.error) {
-      if (msg.error !== this._lastShownError) {
-        this._lastShownError = msg.error;
-        this.notify("error", msg.error);
-      }
-    } else {
-      this._lastShownError = null;
-    }
-    this.fw.applyState(msg);
-    this._renderState();
+    // An arm failure means the cameras wait on a trigger that never fires.
+    this.toastError(msg.error);
+    super.applyState(msg);
   }
-
-  // A /api/system plugin status (the init's push or a reconnect), whose state
-  // field is `arduino_state`.
-  applyStatus(info) {
-    if (!info) return;
-    this.applyState({ ...info, state: info.arduino_state });
-  }
-
-  // --------------------------------------------------------- start params
 
   // {fps, duration_ms} for the recording start, or null when not arming.
   getStartParams() {
-    if (!this.ready || !this.armWithRec?.checked) return null;
-    const s = this._getRecordSettings?.();
+    if (!this.ready || !this.armWithRec.checked) return null;
+    const s = this._getRecordSettings();
     if (!s) return null;
     const fps = Math.max(1, Math.round(s.fps || 100));
     const duration_ms = Math.max(1, Math.round((s.duration_s || 10) * 1000));
     return { fps, duration_ms };
   }
 
-  // --------------------------------------------------------- render
-
-  _refresh() {
-    if (this.ready) {
-      this.statusBox.classList.add("hidden");
-    } else {
-      const where = this.device ? ` (${this.device})` : "";
-      this.statusMsg.textContent =
-        `Serial port${where} is not open — check the Arduino is plugged in ` +
-        `and the device path matches the plugin config, then reconnect.`;
-      this.statusBox.classList.remove("hidden");
-    }
-    if (this.armWithRec) {
-      this.armWithRec.disabled = !this.ready || !this.connected;
-    }
-  }
-
-  _renderState() {
-    const label = STATE_LABELS[this.arduinoState] ?? this.arduinoState;
-    if (this.stateValue) {
-      this.stateValue.textContent = label;
-      this.stateValue.className = `twophoton-state twophoton-state--${this.arduinoState}`;
-    }
-  }
-
-  // --------------------------------------------------------- reconnect
-
-  async _reconnect() {
-    this.reconnectBtn.disabled = true;
-    // No selection reopens the configured device.
-    const device = this.portSelect?.value || "";
-    let r;
-    try {
-      r = await this.api("POST", "/api/twophoton/reconnect", device ? { device } : {});
-    } catch {
-      this.reconnectBtn.disabled = false;
-      this.notify("error", "Reconnect failed: server unreachable");
-      return;
-    }
-    this.reconnectBtn.disabled = false;
-    if (!r.ok) {
-      this.notify("error", r.data?.detail || `Reconnect failed (HTTP ${r.status})`);
-      return;
-    }
-    this.ready = Boolean(r.data?.ready);
-    if (r.data?.device) this.device = r.data.device;
-    if (r.data?.arduino_state) {
-      this.arduinoState = r.data.arduino_state;
-      this._renderState();
-    }
-    this.fw.applyState(r.data);
-    this.fw.load();
-    this._refresh();
-    this._loadPorts(); // refresh the list + selection after the attempt
-    if (this.ready) {
-      this.notify("info", `Serial port ${this.device} connected.`);
-    } else {
-      this.notify(
-        "warning",
-        r.data?.error
-          ? `Serial port still unavailable: ${r.data.error}`
-          : "Serial port still unavailable."
-      );
-    }
+  refresh() {
+    super.refresh();
+    this.armWithRec.disabled = !this.ready || !this.connected;
+    this.stateValue.textContent = STATE_LABELS[this.arduinoState] ?? this.arduinoState;
+    this.stateValue.className = `twophoton-state twophoton-state--${this.arduinoState}`;
   }
 }

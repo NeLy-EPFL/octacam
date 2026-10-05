@@ -66,53 +66,6 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Modal focus: activate() moves focus into the card and traps Tab there;
-// deactivate() gives focus back to the opener.
-export class ModalFocus {
-  constructor(card) {
-    this.card = card;
-    this.opener = null;
-    this._onKey = (e) => {
-      if (e.key !== "Tab") return;
-      const items = this._focusable();
-      if (!items.length) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-  }
-
-  // Visible, enabled, focusable descendants in DOM order (offsetParent is null
-  // for display:none subtrees, so a hidden row's field is skipped).
-  _focusable() {
-    const sel =
-      'a[href], button:not(:disabled), input:not(:disabled), ' +
-      'select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
-    return [...this.card.querySelectorAll(sel)].filter(
-      (n) => n.offsetParent !== null
-    );
-  }
-
-  activate(first) {
-    this.opener = document.activeElement;
-    this.card.addEventListener("keydown", this._onKey);
-    (first || this._focusable()[0] || this.card).focus();
-  }
-
-  deactivate() {
-    this.card.removeEventListener("keydown", this._onKey);
-    const opener = this.opener;
-    this.opener = null;
-    if (opener && typeof opener.focus === "function") opener.focus();
-  }
-}
-
 // A .modal overlay: open() shows it, moves focus into its card and traps Tab
 // there; close() hides it and gives focus back to the opener. A backdrop click
 // or Escape calls dismiss(), which a subclass overrides to resolve a choice.

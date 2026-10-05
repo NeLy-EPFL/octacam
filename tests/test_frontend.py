@@ -395,11 +395,12 @@ def init_shortcuts(page: Page) -> None:
     page.evaluate(
         """async () => {
             const m = await import('./js/shortcuts.js');
+            const t = await import('./js/tabs.js');
             window.__calls = [];
             const grid = new Proxy({}, {
                 get: (_, k) => (...args) => { window.__calls.push([k, ...args]); },
             });
-            window.__sc = m.initShortcuts({ grid });
+            m.initShortcuts({ grid, tabs: new t.TabBar(document.getElementById("tabs")) });
         }"""
     )
 
@@ -491,9 +492,9 @@ def test_view_shortcut_scoped_to_active_tab(page):
     ]
 
 
-def test_digit_switches_tab_by_fixed_order(page):
-    """Digit 3 clicks the View tab button (3rd in the fixed order), independent
-    of overflow-menu packing."""
+def test_digit_switches_tab_by_tab_order(page):
+    """Digit 3 clicks the View tab button (3rd in the tab bar's order),
+    independent of overflow-menu packing."""
     init_shortcuts(page)
     clicks = page.evaluate(
         """() => {
@@ -1161,6 +1162,10 @@ def test_flywheel_tab_seeds_its_loop_from_the_configured_command(
             "ccw": True,
             "cw": False,
         }
+        # The module owns its tab: the button is added after the core tabs.
+        assert page.eval_on_selector_all(
+            "#tabs button[data-tab]", "els => els.map(e => e.textContent)"
+        ) == ["Record", "Camera", "View", "Benchmark", "Flywheel"]
     finally:
         page.close()
 
@@ -1304,3 +1309,161 @@ def test_benchmark_progress_only_grows_and_the_verdict_names_the_reports_label(p
     assert out["widths"] == ["20%", "50%", "50%"]
     assert out["label"] == "P · about 9 s left"
     assert out["verdict"].endswith("limited by encoding (x)")
+
+
+# --- shared helpers (util.js) and the plugin-tab base (serial.js) ----------- #
+
+
+def test_store_never_throws_when_storage_is_unavailable(page):
+    """A private window or sandbox makes localStorage throw: a read is null and
+    a write is dropped, so a remembered preference can never break a tab."""
+    result = page.evaluate(
+        """async () => {
+            const { store } = await import('./js/util.js');
+            const saved = Object.getOwnPropertyDescriptor(window, 'localStorage');
+            Object.defineProperty(window, 'localStorage', {
+                configurable: true, get() { throw new Error('denied'); },
+            });
+            try {
+                store.set('octacam.x', 1);
+                return store.get('octacam.x');
+            } finally {
+                Object.defineProperty(window, 'localStorage', saved);
+            }
+        }"""
+    )
+    assert result is None
+
+
+def test_request_returns_the_body_or_notifies_and_returns_null(page):
+    result = page.evaluate(
+        """async () => {
+            const { request } = await import('./js/util.js');
+            const notes = [];
+            const notify = (level, msg) => notes.push([level, msg]);
+            const opts = { action: 'Thing', notify };
+            const reply = (ok, status, body) => async () =>
+                ({ ok, status, json: async () => body });
+            window.fetch = reply(true, 200, { a: 1 });
+            const ok = await request('GET', '/x', undefined, opts);
+            window.fetch = reply(false, 422, { detail: 'bad value' });
+            const rejected = await request('PUT', '/x', {}, opts);
+            window.fetch = reply(false, 500, null);
+            const failed = await request('PUT', '/x', {}, opts);
+            window.fetch = async () => { throw new TypeError('offline'); };
+            const unreachable = await request('PUT', '/x', {}, opts);
+            return { ok, rejected, failed, unreachable, notes };
+        }"""
+    )
+    assert result["ok"] == {"a": 1}
+    assert result["rejected"] is result["failed"] is result["unreachable"] is None
+    assert result["notes"] == [
+        ["error", "bad value"],
+        ["error", "Thing failed (HTTP 500)"],
+        ["error", "Thing failed: server unreachable"],
+    ]
+
+
+def test_modal_dismisses_on_escape_and_backdrop_and_returns_focus(page):
+    result = page.evaluate(
+        """async () => {
+            const { Modal } = await import('./js/util.js');
+            const overlay = document.getElementById('dir-dialog');
+            const modal = new Modal(overlay);
+            const opener = document.getElementById('shutdown-btn');
+            opener.focus();
+            modal.open();
+            const inside = overlay.contains(document.activeElement);
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            const afterEscape = { hidden: !modal.isOpen, focus: document.activeElement === opener };
+            modal.open();
+            overlay.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            return { inside, afterEscape, afterBackdrop: !modal.isOpen };
+        }"""
+    )
+    assert result == {
+        "inside": True,
+        "afterEscape": {"hidden": True, "focus": True},
+        "afterBackdrop": True,
+    }
+
+
+def _make_serial_tab(page: Page, status: dict) -> None:
+    """A minimal SerialTab subclass ("probe") in a fresh panel as window.__st,
+    against a fetch stub that records each request in window.__reqs."""
+    page.evaluate(
+        """async (status) => {
+            window.__reqs = [];
+            window.__notes = [];
+            window.__replies = {
+                '/api/serial/ports': { ports: [
+                    { device: '/dev/ttyS0', board_name: 'UART', likely_microcontroller: false },
+                    { device: '/dev/ttyUSB0', board_name: 'CH340', likely_microcontroller: true },
+                    { device: '/dev/ttyACM0', board_name: 'Nano', likely_microcontroller: true,
+                      likely_arduino: true },
+                ] },
+                '/api/probe/firmware': { state: 'outdated', needs_flash: true,
+                    can_flash: true, needed_build: 'b2' },
+                '/api/probe/reconnect': { ready: true, device: '/dev/ttyACM0', error: null },
+            };
+            window.fetch = async (url, opts) => {
+                window.__reqs.push([opts?.method || 'GET', url, opts?.body ? JSON.parse(opts.body) : null]);
+                return { ok: true, status: 200, json: async () => window.__replies[url] ?? {} };
+            };
+            const { SerialTab } = await import('/js/serial.js');
+            class Probe extends SerialTab {
+                constructor(ctx) { super(ctx, '<p id="probe-body"></p>'); this.busy = false; this.start(ctx.status); }
+                boardBusy() { return this.busy; }
+            }
+            const panel = document.createElement('section');
+            document.body.appendChild(panel);
+            window.__st = new Probe({
+                name: 'probe', panel, status,
+                notify: (level, msg) => window.__notes.push([level, msg]),
+            });
+            await new Promise((r) => setTimeout(r, 0));
+        }""",
+        status,
+    )
+
+
+def test_serial_tab_renders_the_link_block_ports_and_reconnects(page):
+    """The shared block every plugin tab shows: a not-open notice naming the
+    device, a port picker listing microcontrollers Arduinos first (the current
+    device always present), and a Reconnect that posts the picked port."""
+    _make_serial_tab(page, {"ready": False, "device": "/dev/ttyACM9"})
+    assert not _hidden(page, "#probe-status")
+    assert "(/dev/ttyACM9) is not open" in prop(page, "#probe-status-msg", "e => e.textContent")
+    assert page.eval_on_selector_all("#probe-port option", "els => els.map(e => e.value)") == [
+        "/dev/ttyACM9",
+        "/dev/ttyACM0",
+        "/dev/ttyUSB0",
+    ]
+    assert prop(page, "#probe-body", "e => e !== null")
+
+    page.evaluate(
+        """async () => {
+            document.getElementById('probe-port').value = '/dev/ttyACM0';
+            await window.__st.reconnect();
+        }"""
+    )
+    assert ["POST", "/api/probe/reconnect", {"device": "/dev/ttyACM0"}] in page.evaluate(
+        "() => window.__reqs"
+    )
+    assert _hidden(page, "#probe-status")
+    assert page.evaluate("() => window.__notes") == [
+        ["info", "Serial port /dev/ttyACM0 connected."]
+    ]
+
+
+def test_serial_tab_firmware_banner_follows_readiness_and_busy_board(page):
+    _make_serial_tab(page, {"ready": True, "device": "/dev/ttyACM0", "needs_flash": True})
+    assert not _hidden(page, "#probe-fw-flash")
+    assert "current build b2" in prop(page, "#probe-fw-flash-msg", "e => e.textContent")
+    assert prop(page, "#probe-fw-flash-btn", "e => e.disabled") is False
+    # A busy board (armed, jogging, running) hides it: a flash would interrupt it.
+    page.evaluate("() => { window.__st.busy = true; window.__st.refresh(); }")
+    assert _hidden(page, "#probe-fw-flash")
+    page.evaluate("() => window.__st.applyState({ ready: false })")
+    page.evaluate("() => { window.__st.busy = false; window.__st.refresh(); }")
+    assert _hidden(page, "#probe-fw-flash")
