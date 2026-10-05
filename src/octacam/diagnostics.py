@@ -50,7 +50,12 @@ from octacam.cameras.base import (
 )
 from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.trigger import PreciseTimer
-from octacam.writer import AsyncFrameWriter, VideoFormat, resolve_capture_formats
+from octacam.writer import (
+    AsyncFrameWriter,
+    VideoFormat,
+    WriteResult,
+    resolve_capture_formats,
+)
 
 if TYPE_CHECKING:
     from octacam.cameras.system import CameraSystem
@@ -637,13 +642,13 @@ def measure_encode_ceiling(
             try:
                 warm_deadline = time.perf_counter() + warmup_s
                 while time.perf_counter() < warm_deadline and not _cancelled(cancel):
-                    if not writer.write(frame):
+                    if writer.write(frame) is not WriteResult.WRITTEN:
                         time.sleep(0.0005)
                 base = writer.frames_written
                 t0 = time.perf_counter()
                 deadline = t0 + duration_s
                 while time.perf_counter() < deadline and not _cancelled(cancel):
-                    if not writer.write(frame):
+                    if writer.write(frame) is not WriteResult.WRITTEN:
                         time.sleep(0.0005)
                 # Read before close(), which drains the queue past the window.
                 window = time.perf_counter() - t0
@@ -752,7 +757,7 @@ def _trial_grab(
             array = apply_display_transform(array, transform)
             accum.transform_ns.append(time.perf_counter_ns() - t2)
         t3 = time.perf_counter_ns()
-        accepted = accum.writer.write(array)
+        accepted = accum.writer.write(array) is WriteResult.WRITTEN
         accum.enqueue_ns.append(time.perf_counter_ns() - t3)
         if not accepted:
             accum.dropped += 1

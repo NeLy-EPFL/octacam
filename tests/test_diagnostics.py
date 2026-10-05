@@ -19,6 +19,7 @@ from octacam import diagnostics as dg
 from octacam.cameras import CameraSystem
 from octacam.config import RecordingSettings
 from octacam.controller import RecordingController, StartResult
+from octacam.writer import WriteResult
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
@@ -334,7 +335,7 @@ def test_null_writer_counts_frames():
     assert w.open("ignored", 100.0, (16, 16))
     frame = np.zeros((16, 16), dtype=np.uint8)
     for _ in range(5):
-        assert w.write(frame)
+        assert w.write(frame) is WriteResult.WRITTEN
     w.close()
     assert w.frames_written == 5
 

@@ -25,7 +25,7 @@ from octacam.config import RecordingSettings
 from octacam.controller import RecordingController
 from octacam.plugins.base import Plugin, PluginManager
 from octacam.pulses import PulseClock
-from octacam.writer import FORMATS
+from octacam.writer import FORMATS, WriteResult
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 # Where a recording writes everything but its videos (transform.
@@ -741,7 +741,7 @@ def test_a_frame_the_writer_refuses_is_filled(fake_system, tmp_path):
 
         def refusing(frame, fill_before=0):
             calls["n"] += 1
-            return False if calls["n"] == 20 else write(frame, fill_before)
+            return WriteResult.REFUSED if calls["n"] == 20 else write(frame, fill_before)
 
         writer.write = refusing
         return ok

@@ -18,6 +18,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from octacam.ffmpeg import (
@@ -63,6 +64,14 @@ def _write_all(file, frame) -> None:
         view = view[n:]
 
 
+class WriteResult(Enum):
+    """What :meth:`AsyncFrameWriter.write` did with a frame."""
+
+    WRITTEN = "written"  # queued, with its fills
+    REFUSED = "refused"  # not queued: the caller owes it (and its fills) as fills
+    SKIPPED = "skipped"  # not queued under sustained overload: never fill it
+
+
 class AsyncFrameWriter:
     """Bounded-queue writer; subclasses implement _open_sink/_write_frame/_close_sink.
 
@@ -88,6 +97,10 @@ class AsyncFrameWriter:
         # counter has a single writer thread, so their difference is race-free.
         self._accepted = 0
         self.frames_written = 0
+        # The overload policy (see write): refusals since the sink last caught
+        # up, and whether they ever outran a queue's worth.
+        self._refused_run = 0
+        self._overloaded = False
         # With ``profile``: each frame's sink write time (ns) and the queue's
         # high-water depth.
         self.encode_ns_samples: list[int] = []
@@ -98,8 +111,7 @@ class AsyncFrameWriter:
         """How many items the queue holds before :meth:`write` refuses one."""
         return self._max_queue_size
 
-    @property
-    def backlog(self) -> int:
+    def _backlog(self) -> int:
         """Frames accepted but not yet handed to the sink, fills included (the
         queue's item count hides the fills that ride on each item)."""
         return max(0, self._accepted - self.frames_written)
@@ -110,6 +122,8 @@ class AsyncFrameWriter:
         self.failed = False
         self._accepted = 0
         self.frames_written = 0
+        self._refused_run = 0
+        self._overloaded = False
         self.encode_ns_samples = []
         self.max_queue_depth = 0
         try:
@@ -129,11 +143,31 @@ class AsyncFrameWriter:
         self._running = True
         return True
 
-    def write(self, frame, fill_before: int = 0) -> bool:
-        """Enqueue a frame, preceded by ``fill_before`` repeats of the previous
-        one; returns False if it was dropped (and with it, the fill)."""
-        if not self._running or self.failed:
-            return False
+    def write(self, frame, fill_before: int = 0) -> WriteResult:
+        """Enqueue a frame, preceded by ``fill_before`` repeats of the previous one.
+
+        A frame the queue cannot take is REFUSED (with its fill), until more
+        than a queue's worth is refused before the sink catches up (its backlog
+        back to half a queue): from then on such a frame is SKIPPED. A fill
+        costs a real write, so filling a sustained encoder or disk shortfall
+        snowballs (real frames decay toward zero and close() writes the
+        backlog). A failed sink only ever refuses.
+        """
+        if self._running and not self.failed and self._enqueue(frame, fill_before):
+            result = WriteResult.WRITTEN
+        elif self.failed or (
+            not self._overloaded and self._refused_run < self._max_queue_size
+        ):
+            self._refused_run += 1
+            result = WriteResult.REFUSED
+        else:
+            self._overloaded = True
+            result = WriteResult.SKIPPED
+        if self._refused_run and self._backlog() <= self._max_queue_size // 2:
+            self._refused_run = 0  # caught up: that stall was transient
+        return result
+
+    def _enqueue(self, frame, fill_before: int) -> bool:
         if self._profile:
             self.max_queue_depth = max(self.max_queue_depth, self._queue.qsize())
         try:

@@ -14,7 +14,10 @@ from octacam.writer import (
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
+    WriteResult,
 )
+
+WRITTEN, REFUSED, SKIPPED = WriteResult.WRITTEN, WriteResult.REFUSED, WriteResult.SKIPPED
 
 WIDTH, HEIGHT = 64, 48
 
@@ -53,7 +56,7 @@ def test_ffmpeg_writer_lossless_roundtrip(tmp_path):
     )
     assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
     for frame in frames:
-        assert writer.write(frame)
+        assert writer.write(frame) is WRITTEN
         time.sleep(0.002)  # pace like a camera; a 0-delay burst would
         # legitimately overflow the bounded queue (drop-on-full)
     writer.close()
@@ -137,7 +140,7 @@ def test_open_releases_the_sink_when_the_writer_thread_fails(tmp_path, monkeypat
     writer = RawVideoWriter()
     assert writer.open(str(tmp_path / "cam.raw"), 30.0, (WIDTH, HEIGHT)) is False
     assert writer._file is None
-    assert not writer.write(np.zeros((HEIGHT, WIDTH), np.uint8))
+    assert writer.write(np.zeros((HEIGHT, WIDTH), np.uint8)) is REFUSED
     writer.close()
 
 
@@ -147,7 +150,7 @@ def test_raw_writer_and_transcode_roundtrip(tmp_path):
     writer = RawVideoWriter()
     assert writer.open(str(out), 25.0, (WIDTH, HEIGHT))
     for frame in frames:
-        assert writer.write(frame)
+        assert writer.write(frame) is WRITTEN
         time.sleep(0.002)
     writer.close()
 
@@ -186,9 +189,9 @@ def test_drop_on_full_then_drain_on_close(tmp_path):
     writer = _SlowSink(max_queue_size=2)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
     results = [writer.write(frame) for frame in synthetic_frames(10)]
-    assert not all(results)  # the slow sink forces drops
+    assert REFUSED in results  # the slow sink forces drops
     writer.close()
-    assert len(writer.written) == sum(results)  # queued frames were drained
+    assert len(writer.written) == results.count(WRITTEN)  # queued frames were drained
 
 
 def test_format_registry_creates_writers():
@@ -247,7 +250,7 @@ def test_capture_pipes_rawvideo_into_the_configured_encoder(tmp_path, monkeypatc
     )
     assert writer.open(str(out), 30.0, (WIDTH, HEIGHT))
     for frame in synthetic_frames(3):
-        assert writer.write(frame)
+        assert writer.write(frame) is WRITTEN
     writer.close()
     assert not writer.failed, writer.error_tail
     # The first find_ffmpeg() in a process also runs the bundled ffmpeg -version.
@@ -290,9 +293,9 @@ def test_fill_before_repeats_the_previous_frame():
     writer = _ListSink(max_queue_size=10)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
     a, b, c = synthetic_frames(3)
-    assert writer.write(a)
-    assert writer.write(b, fill_before=2)
-    assert writer.write(c)
+    assert writer.write(a) is WRITTEN
+    assert writer.write(b, fill_before=2) is WRITTEN
+    assert writer.write(c) is WRITTEN
     writer.close(fill_after=1)
     assert [id(f) for f in writer.written] == [id(a), id(a), id(a), id(b), id(c), id(c)]
     assert writer.frames_written == 6
@@ -304,7 +307,7 @@ def test_a_leading_fill_repeats_the_first_frame():
     writer = _ListSink(max_queue_size=10)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
     (a,) = synthetic_frames(1)
-    assert writer.write(a, fill_before=2)
+    assert writer.write(a, fill_before=2) is WRITTEN
     writer.close()
     assert [id(f) for f in writer.written] == [id(a)] * 3
 
@@ -317,7 +320,7 @@ def test_a_fill_is_never_dropped_on_its_own():
     frames = synthetic_frames(6)
     owed, accepted = 0, 0
     for frame in frames:
-        if writer.write(frame, fill_before=owed):
+        if writer.write(frame, fill_before=owed) is WRITTEN:
             accepted += 1 + owed
             owed = 0
         else:
@@ -333,9 +336,11 @@ class _GatedSink(AsyncFrameWriter):
         import threading
 
         self.gate = threading.Semaphore(0)
+        self.entered = 0  # frames the sink has taken, written or held at the gate
         self.written = []
 
     def _write_frame(self, frame):
+        self.entered += 1
         self.gate.acquire()
         self.written.append(frame)
 
@@ -343,22 +348,86 @@ class _GatedSink(AsyncFrameWriter):
         pass
 
 
-def test_backlog_counts_the_fills_riding_on_each_queued_frame():
-    # The grab loop tells a transient stall from a sustained shortfall by how
-    # far behind the encoder is, and the queue's item count hides the fills.
-    writer = _GatedSink(max_queue_size=4)
-    assert writer.max_queue_size == 4
+def _gated(max_queue_size):
+    """A gated writer holding its first frame at the gate, so its queue has room
+    for exactly ``max_queue_size`` more."""
+    writer = _GatedSink(max_queue_size=max_queue_size)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
-    a, b = synthetic_frames(2)
-    assert writer.backlog == 0
-    assert writer.write(a)
-    assert writer.write(b, fill_before=3)
-    assert writer.backlog == 5
-    for _ in range(3):
+    assert writer.write(synthetic_frames(1)[0]) is WRITTEN
+    _held(writer)
+    return writer
+
+
+def _held(writer):
+    """Wait until the sink holds the next frame at its gate."""
+    assert wait_until(
+        lambda: writer.entered > writer.frames_written, timeout=2.0, interval=0.001
+    )
+
+
+def _let_through(writer, n):
+    """Let ``n`` more frames reach the sink and wait until they have."""
+    target = writer.frames_written + n
+    for _ in range(n):
         writer.gate.release()
-    wait_until(lambda: writer.frames_written >= 3, timeout=2.0, interval=0.001)
-    assert writer.backlog == 2
-    for _ in range(2):
+    assert wait_until(
+        lambda: writer.frames_written >= target, timeout=2.0, interval=0.001
+    )
+
+
+def _finish(writer):
+    for _ in range(64):
         writer.gate.release()
     writer.close()
-    assert writer.backlog == 0 and writer.frames_written == 5
+
+
+def test_a_transient_stall_is_refused_however_often_it_recurs():
+    # Each stall refuses fewer frames than the queue holds and the sink catches
+    # up before the next one: every refused frame is owed (filled), none skipped.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    for _ in range(3):
+        assert [writer.write(frame) for _ in range(8)] == [WRITTEN] * 4 + [REFUSED] * 4
+        _let_through(writer, 5)
+        assert writer.write(frame) is WRITTEN  # caught up: the refusal run restarts
+        _held(writer)
+    _finish(writer)
+
+
+def test_a_sustained_shortfall_is_skipped_for_the_rest_of_the_file():
+    # More than a queue's worth refused before the sink catches up: filling it
+    # would snowball, so every later refusal is skipped, even after a catch-up.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    assert [writer.write(frame) for _ in range(9)] == (
+        [WRITTEN] * 4 + [REFUSED] * 4 + [SKIPPED]
+    )
+    _let_through(writer, 5)
+    assert writer.write(frame) is WRITTEN
+    _held(writer)
+    assert [writer.write(frame) for _ in range(5)] == [WRITTEN] * 4 + [SKIPPED]
+    _finish(writer)
+
+
+def test_the_catch_up_counts_the_fills_riding_on_each_queued_frame():
+    # One queued frame carrying three fills is four frames behind, not one: the
+    # sink has not caught up, so the refusal run stands.
+    writer = _gated(4)
+    frame = synthetic_frames(1)[0]
+    assert [writer.write(frame) for _ in range(7)] == [WRITTEN] * 4 + [REFUSED] * 3
+    _let_through(writer, 4)
+    _held(writer)
+    assert writer.write(frame, fill_before=3) is WRITTEN
+    assert [writer.write(frame) for _ in range(5)] == [WRITTEN] * 3 + [REFUSED, SKIPPED]
+    _finish(writer)
+    assert writer.frames_written == 4 + 1 + 4 + 3
+
+
+def test_a_failed_sink_only_ever_refuses():
+    writer = _FailingSink(fail_after=0, max_queue_size=1)
+    assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
+    frame = synthetic_frames(1)[0]
+    assert writer.write(frame) is WRITTEN
+    assert wait_until(lambda: writer.failed, timeout=2.0, interval=0.001)
+    assert {writer.write(frame) for _ in range(10)} == {REFUSED}
+    writer.close()

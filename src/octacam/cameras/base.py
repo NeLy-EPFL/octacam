@@ -20,7 +20,7 @@ import numpy as np
 from octacam.cameras._trigger_handoff import PRIMING_TRIGGER, SoftwareTrigger
 from octacam.pulses import Assignment, PulseClock, PulseTracker
 from octacam.transform import DisplayTransform, apply_display_transform
-from octacam.writer import AsyncFrameWriter, VideoFormat
+from octacam.writer import AsyncFrameWriter, VideoFormat, WriteResult
 
 log = logging.getLogger("octacam")
 
@@ -1099,16 +1099,6 @@ class Camera:
         owed = 0
         writer = self._video_writer
         assert writer is not None
-        # Writer overload: a fill costs as much to encode as a real frame, so
-        # filling a sustained shortfall snowballs (real frames decay toward zero
-        # and close() encodes the backlog). Once more than a queue's worth is
-        # refused before the writer catches up (backlog <= half a queue), refused
-        # frames are skipped for the rest of the take: no video frame, no row.
-        # Camera-side misses are still filled; a failed writer is reconciled at
-        # the end instead.
-        queue_size = writer.max_queue_size
-        refused_run = 0
-        overloaded = False
         last_primed_ts: int | None = None
         straggler_ns = max(
             PRIME_STRAGGLER_NS, int(PRIME_STRAGGLER_PERIODS * clock.period_ns)
@@ -1188,13 +1178,11 @@ class Camera:
 
             # The preview gets the raw array: the browser applies the transform.
             to_write = apply_display_transform(array, transform) if transform else array
-            written = writer.write(to_write, fill_before=owed)
-            skipped = False
-            if written:
+            result = writer.write(to_write, fill_before=owed)
+            if result is WriteResult.WRITTEN:
                 owed = 0
-            elif writer.failed or (not overloaded and refused_run < queue_size):
+            elif result is WriteResult.REFUSED:
                 owed += 1
-                refused_run += 1
                 self._writer_dropped += 1
                 log.warning(
                     "Frame for pulse %d dropped for camera %s (writer queue full); "
@@ -1203,8 +1191,7 @@ class Camera:
                     self.serial_number,
                 )
             else:
-                if not overloaded:
-                    overloaded = True
+                if not self._writer_skipped:
                     log.error(
                         "Camera %s: the video writer cannot keep up — %d frames "
                         "refused before it caught up. From pulse %d on, a frame it "
@@ -1214,19 +1201,16 @@ class Camera:
                         "slower than the camera: use a faster save method or disk, "
                         "or a lower frame rate.",
                         self.serial_number,
-                        refused_run,
+                        writer.max_queue_size,
                         pulse,
                     )
                 self._writer_skipped.append(pulse)
-                skipped = True
-            if refused_run and writer.backlog <= queue_size // 2:
-                refused_run = 0  # the writer caught up: that stall was transient
-            if not skipped:  # a skipped frame has no video frame, so no row
+            if result is not WriteResult.SKIPPED:  # a skipped frame has no row
                 self._append_row(
                     stamp,
                     pulse,
                     missed=False,
-                    dropped=not written,
+                    dropped=result is WriteResult.REFUSED,
                     arrival=arrival,
                     unstamped=not timestamp,
                 )
