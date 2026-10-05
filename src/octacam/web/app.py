@@ -47,8 +47,9 @@ from octacam.config import (
     safe_segment,
 )
 from octacam.controller import RecordingController, StartResult
+from octacam.ffmpeg import nvenc_max_sessions
 from octacam.transform import RECORDING_INFO_DIRNAME
-from octacam.writer import FORMATS, NVENC_H264_PARAMS, nvenc_max_sessions
+from octacam.writer import FORMATS, NVENC_H264_PARAMS
 
 log = logging.getLogger("octacam")
 

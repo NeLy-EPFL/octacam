@@ -11,17 +11,17 @@ import json
 import numpy as np
 import pytest
 
+from octacam import ffmpeg as ff
 from octacam import writer as w
 from octacam.config import RecordConfig, RecordingSettings
 from octacam.controller import RecordingController
+from octacam.ffmpeg import encoder_of, nvenc_encoder
 from octacam.transform import recording_summary_path
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     FORMATS,
     NVENC_H264_PARAMS,
     cpu_fallback_format,
-    encoder_of,
-    nvenc_encoder,
     resolve_capture_formats,
 )
 
@@ -30,7 +30,7 @@ FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
 def _nvenc_available() -> bool:
     try:
-        w.find_ffmpeg(require_encoder="h264_nvenc")
+        ff.find_ffmpeg(require_encoder="h264_nvenc")
         return True
     except RuntimeError:
         return False
@@ -49,7 +49,7 @@ def probe_caches(monkeypatch):
     cleared: a re-probe while another process holds the GPU's NVENC sessions
     would cache "unavailable" for every later test."""
     for name in ("ffmpeg_encoder_works", "_ffmpeg_for_encoder", "_nvenc_session_cap"):
-        monkeypatch.setattr(w, name, functools.cache(getattr(w, name).__wrapped__))
+        monkeypatch.setattr(ff, name, functools.cache(getattr(ff, name).__wrapped__))
 
 
 # --- encoder parsing --------------------------------------------------------
@@ -78,9 +78,9 @@ def test_encoder_of_and_nvenc_encoder(params, encoder, nvenc):
 def test_find_ffmpeg_default_needs_no_probe(monkeypatch):
     # The historical no-arg path must never run a capability probe.
     monkeypatch.setattr(
-        w, "ffmpeg_encoder_works", lambda *a, **k: pytest.fail("probed")
+        ff, "ffmpeg_encoder_works", lambda *a, **k: pytest.fail("probed")
     )
-    assert w.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
+    assert ff.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
 
 
 def test_find_ffmpeg_override_skips_the_search(monkeypatch):
@@ -91,27 +91,27 @@ def test_find_ffmpeg_override_skips_the_search(monkeypatch):
     monkeypatch.setattr(
         imageio_ffmpeg, "get_ffmpeg_exe", lambda: pytest.fail("searched")
     )
-    assert w.find_ffmpeg() == "/pinned/ffmpeg"
+    assert ff.find_ffmpeg() == "/pinned/ffmpeg"
 
 
 def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
     monkeypatch.setattr(
-        w, "_ffmpeg_candidates", lambda: ["/no/nvenc", "/has/nvenc", "/also"]
+        ff, "_ffmpeg_candidates", lambda: ["/no/nvenc", "/has/nvenc", "/also"]
     )
-    monkeypatch.setattr(w, "ffmpeg_encoder_works", lambda exe, enc: exe == "/has/nvenc")
-    assert w.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
+    monkeypatch.setattr(ff, "ffmpeg_encoder_works", lambda exe, enc: exe == "/has/nvenc")
+    assert ff.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
     # Cached: a second call must not recompute the candidate list.
     monkeypatch.setattr(
-        w, "_ffmpeg_candidates", lambda: pytest.fail("recomputed after cache")
+        ff, "_ffmpeg_candidates", lambda: pytest.fail("recomputed after cache")
     )
-    assert w.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
+    assert ff.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
 
 
 def test_find_ffmpeg_require_encoder_raises_when_none(monkeypatch, probe_caches):
-    monkeypatch.setattr(w, "_ffmpeg_candidates", lambda: ["/a", "/b"])
-    monkeypatch.setattr(w, "ffmpeg_encoder_works", lambda exe, enc: False)
+    monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: ["/a", "/b"])
+    monkeypatch.setattr(ff, "ffmpeg_encoder_works", lambda exe, enc: False)
     with pytest.raises(RuntimeError, match="h264_nvenc"):
-        w.find_ffmpeg(require_encoder="h264_nvenc")
+        ff.find_ffmpeg(require_encoder="h264_nvenc")
 
 
 # --- resolve_capture_formats ------------------------------------------------
@@ -196,13 +196,13 @@ def test_resolve_auto_inconclusive_probe_does_not_force_cpu(monkeypatch):
 def test_nvenc_max_sessions_is_cached(monkeypatch, probe_caches):
     calls = []
     monkeypatch.setattr(
-        w,
+        ff,
         "probe_nvenc_max_sessions",
         lambda encoder="h264_nvenc": (calls.append(encoder), 5)[1],
     )
-    assert w.nvenc_max_sessions("h264_nvenc") == 5
-    assert w.nvenc_max_sessions("h264_nvenc") == 5  # served from cache
-    assert w.nvenc_max_sessions() == 5  # the default encoder is the same entry
+    assert ff.nvenc_max_sessions("h264_nvenc") == 5
+    assert ff.nvenc_max_sessions("h264_nvenc") == 5  # served from cache
+    assert ff.nvenc_max_sessions() == 5  # the default encoder is the same entry
     assert calls == ["h264_nvenc"]  # probed exactly once
 
 
@@ -398,14 +398,16 @@ def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(
     # libx264 — and warn. Exercises the controller's nvenc path (resolve fallback
     # + summary None-branch) with no real GPU, by mocking NVENC as unavailable
     # while keeping a real ffmpeg for the CPU encode.
-    real_find = w.find_ffmpeg
+    real_find = ff.find_ffmpeg
 
     def _no_nvenc(require_encoder=None):
         if require_encoder:  # any *_nvenc probe fails
             raise RuntimeError("no nvenc in this test")
         return real_find(None)  # real ffmpeg for the libx264 path
 
+    # The writer's format resolution and sinks, and the controller's session probe.
     monkeypatch.setattr(w, "find_ffmpeg", _no_nvenc)
+    monkeypatch.setattr(ff, "find_ffmpeg", _no_nvenc)
     system = _fake_nvenc_system(tmp_path)
     save_dir = tmp_path / "rec"
     settings = RecordingSettings(
@@ -445,7 +447,7 @@ def test_fake_recording_with_nvenc(tmp_path):
         assert "h264_nvenc" in summary["ffmpeg_params"]
         # max_nvenc_sessions defaulted to auto (None); the summary resolves it to
         # the detected cap actually used.
-        assert summary["max_nvenc_sessions"] == w.nvenc_max_sessions()
+        assert summary["max_nvenc_sessions"] == ff.nvenc_max_sessions()
         assert all(c["frames"] > 0 for c in summary["cameras"])
         videos = sorted(save_dir.glob("*.mkv"))
         assert len(videos) == 2 and all(v.stat().st_size > 0 for v in videos)

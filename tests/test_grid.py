@@ -2,7 +2,7 @@
 
 The grid is the one path that defaults to a YUV pixel format (for browser /
 QuickTime playback), so it must force full colour range or it loses the
-0-255 → 16-235 squeeze on every cell. See writer._color_range_args.
+0-255 → 16-235 squeeze on every cell. See ffmpeg.color_range_args.
 """
 
 import logging
@@ -12,8 +12,9 @@ import subprocess
 import numpy as np
 import pytest
 
+from octacam.ffmpeg import find_ffmpeg
 from octacam.grid import build_grid_video
-from octacam.writer import find_ffmpeg, transcode_raw
+from octacam.writer import transcode_raw
 
 pytest.importorskip("cv2")  # parity with the other ffmpeg-backed suites
 
@@ -378,7 +379,7 @@ def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
     # whatever older ffprobe happens to come first on $PATH.
     import stat
 
-    from octacam.writer import find_ffprobe
+    from octacam.ffmpeg import find_ffprobe
 
     bindir = tmp_path / "bin"
     bindir.mkdir()

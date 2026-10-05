@@ -33,6 +33,7 @@ import numpy as np
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.config import RecordingSettings, normalize_dir, safe_segment
+from octacam.ffmpeg import encoder_of, nvenc_max_sessions
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
 from octacam.transform import (
@@ -42,7 +43,7 @@ from octacam.transform import (
     TIMESTAMPS_FILENAME,
     DisplayTransform,
 )
-from octacam.writer import encoder_of, nvenc_max_sessions, resolve_capture_formats
+from octacam.writer import resolve_capture_formats
 
 log = logging.getLogger("octacam")
 

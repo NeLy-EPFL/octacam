@@ -124,6 +124,20 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     assert args[args.index("-pix_fmt") + 1] == "gray"
 
 
+def test_transcode_file_gives_the_4_2_0_rule_its_frame_size(tmp_path, monkeypatch):
+    # An encoded input's gray output turns yuv420p only with a known (even)
+    # size: without one an odd side cannot be ruled out.
+    captured = {}
+    monkeypatch.setattr(
+        "octacam.writer._run_ffmpeg", lambda args, *a, **k: captured.update(args=args)
+    )
+    src, out = tmp_path / "in.mkv", tmp_path / "out.mp4"
+    transcode_file(src, out, "-c:v libx264 -pix_fmt gray")
+    assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "gray"
+    transcode_file(src, out, "-c:v libx264 -pix_fmt gray", width=64, height=48)
+    assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "yuv420p"
+
+
 def test_transcode_raw_without_geometry_raises(tmp_path):
     # A .raw carries no geometry of its own; without width/height/fps (from the
     # recording summary) it cannot be laid out, so the encode refuses rather than
@@ -132,6 +146,9 @@ def test_transcode_raw_without_geometry_raises(tmp_path):
     _write_raw(raw, _frame(16, 12))
     with pytest.raises(FileNotFoundError):
         transcode_raw(raw, output=tmp_path / "cam.mp4")
+    # A partial geometry is still insufficient.
+    with pytest.raises(FileNotFoundError):
+        transcode_raw(raw, output=tmp_path / "cam.mp4", width=16, height=12)
 
 
 def test_transcode_raw_refuses_an_unknown_pixel_format(tmp_path):

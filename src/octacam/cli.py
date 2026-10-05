@@ -1116,11 +1116,8 @@ def _doctor_backends(
 
 
 def _doctor_encoding(report: _Report) -> None:
-    from octacam.writer import (
-        DEFAULT_FFMPEG_PARAMS,
-        DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-        find_ffmpeg,
-    )
+    from octacam.ffmpeg import find_ffmpeg
+    from octacam.writer import DEFAULT_FFMPEG_PARAMS, DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
     report.section("Encoding toolchain")
     try:
@@ -1156,11 +1153,8 @@ def _doctor_encoding(report: _Report) -> None:
 
 def _doctor_gpu_encoding(report: _Report) -> None:
     """Report GPU (NVIDIA NVENC) encode availability — the opt-in save_method="nvenc"."""
-    from octacam.writer import (
-        NVENC_H264_PARAMS,
-        find_ffmpeg,
-        probe_nvenc_max_sessions,
-    )
+    from octacam.ffmpeg import find_ffmpeg, probe_nvenc_max_sessions
+    from octacam.writer import NVENC_H264_PARAMS
 
     gpus = _nvidia_gpus()
     if not gpus:

@@ -1,15 +1,10 @@
-"""Video writers, offline transcodes and the ffmpeg toolchain behind them.
+"""Video writers and the offline transcodes of ``octacam process``.
 
 A capture writer runs its sink on a thread behind a bounded queue, so write()
-never blocks the grab loop: it refuses a frame when the queue is full or the
-sink has failed. FfmpegVideoWriter pipes Mono8 frames into an ffmpeg child,
-which encodes outside the GIL; RawVideoWriter dumps them for ``octacam
-process`` to transcode (the geometry is in the recording summary).
-
-Every ffmpeg launch but the capture pipe runs with ``-nostdin`` and
-``stdin=DEVNULL``. With a terminal on stdin ffmpeg turns echo off to read keys
-and restores it only on a clean exit, so a killed ffmpeg, or concurrent ones
-racing to restore it, would leave the user's shell echo-off.
+never blocks the grab loop: it refuses a frame when the queue is full or the sink
+has failed. FfmpegVideoWriter pipes Mono8 frames into an ffmpeg child, which
+encodes outside the GIL; RawVideoWriter dumps them for ``octacam process`` to
+transcode (the geometry is in the recording summary).
 """
 
 # The sink handles (_queue/_proc/_file) exist only between open() and close(),
@@ -18,19 +13,16 @@ racing to restore it, would leave the user's shell echo-off.
 
 import contextlib
 import errno
-import functools
 import glob
 import logging
 import os
 import queue
-import shlex
-import shutil
 import subprocess
 import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +30,18 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - POSIX only; see _partial_is_live
     fcntl = None  # type: ignore[assignment]
+
+from octacam.ffmpeg import (
+    DEFAULT_PIX_FMT,
+    find_ffmpeg,
+    nvenc_encoder,
+    nvenc_max_sessions,
+    output_args,
+    pix_fmt_of,
+    quiet_argv,
+    rawvideo_input_args,
+    split_opts,
+)
 
 log = logging.getLogger("octacam")
 
@@ -48,21 +52,17 @@ FINALIZE_TIMEOUT_S = 120  # max wait for ffmpeg to flush after stdin closes
 # 8 parallel ultrafast encoders sustain >1200 fps in total at 1080p).
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
-# Not "gray": 4:0:0 H.264 decodes as flat gray on NVIDIA hardware decoders
-# (see _playable_pix_fmt).
-DEFAULT_PIX_FMT = "yuv420p"
 
 # The config's ffmpeg_params: encoder output args, spliced verbatim after the
-# derived input args (build_encode_args). The offline transcode re-encodes harder.
+# derived rawvideo input args. The offline transcode re-encodes harder.
 DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
 DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
     f"-c:v libx264 -preset veryslow -crf 20 -pix_fmt {DEFAULT_PIX_FMT}"
 )
 
 # GPU capture (record.save_method = "nvenc", or any *_nvenc encoder). NVENC
-# rejects 4:0:0, so yuv420p, which the full-range helpers (_full_range_vf,
-# _color_range_args) keep at 0-255 luma. NVENC ignores -crf, and -cq 16 matches
-# libx264's -crf 18; -bf 0 buffers no B-frames.
+# rejects 4:0:0, so yuv420p, which output_args keeps at 0-255 luma. NVENC
+# ignores -crf, and -cq 16 matches libx264's -crf 18; -bf 0 buffers no B-frames.
 # Cameras past the GPU's session limit fall back to libx264
 # (resolve_capture_formats).
 NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
@@ -70,31 +70,6 @@ NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -p
 # Recorded pixel format -> (ffmpeg rawvideo pixel format, bytes per pixel).
 # Every backend records Mono8.
 _RAW_PIXEL_FORMATS = {"Mono8": ("gray", 1)}
-
-
-def _is_limited_range_yuv(pix_fmt: str) -> bool:
-    """True for YUV formats that default to limited range (16-235 luma), which
-    would irreversibly squeeze full-range camera frames; ``gray`` and ``yuvj*``
-    are full range."""
-    return pix_fmt.startswith("yuv") and not pix_fmt.startswith("yuvj")
-
-
-def _color_range_args(pix_fmt: str) -> list[str]:
-    """``-color_range pc`` for limited-range YUV, tagging the stream full range.
-
-    Only a tag: ffmpeg 7 does not convert the pixels on it, so every encode also
-    applies :func:`_full_range_vf`.
-    """
-    return ["-color_range", "pc"] if _is_limited_range_yuv(pix_fmt) else []
-
-
-def _full_range_vf(pix_fmt: str, vf: str = "") -> str:
-    """*vf* plus ``scale=out_range=full`` for limited-range YUV, so the gray→YUV
-    conversion keeps 0-255 luma; pair it with :func:`_color_range_args`."""
-    if not _is_limited_range_yuv(pix_fmt):
-        return vf
-    frag = "scale=out_range=full"
-    return f"{vf},{frag}" if vf else frag
 
 
 @dataclass(frozen=True)
@@ -111,326 +86,6 @@ class TranscodeProgress:
 
 
 ProgressCallback = Callable[[TranscodeProgress], None]
-
-
-_VIDEO_CODEC_FLAGS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
-
-
-def encoder_of(ffmpeg_params: str) -> str | None:
-    """The video encoder named by an ffmpeg_params string (after -c:v), or None."""
-    try:
-        tokens = shlex.split(ffmpeg_params)
-    except ValueError:
-        return None
-    return _extract_opt(tokens, _VIDEO_CODEC_FLAGS)
-
-
-def nvenc_encoder(ffmpeg_params: str) -> str | None:
-    """The ``*_nvenc`` encoder *ffmpeg_params* names, or None. Only these need
-    :func:`find_ffmpeg`'s capability search: the bundled ffmpeg lacks them and a
-    stale driver can fail to run them."""
-    encoder = encoder_of(ffmpeg_params)
-    return encoder if encoder and encoder.endswith("_nvenc") else None
-
-
-def _ffmpeg_candidates() -> Iterator[str]:
-    """ffmpeg executables, most preferred first, realpath-deduped:
-    $OCTACAM_FFMPEG, the bundled imageio binary, then every ffmpeg on $PATH
-    (where a working NVENC lives: the bundled one has none). Lazy, so taking
-    the first never runs the bundled binary's validation behind an override."""
-
-    def found() -> Iterator[str]:
-        env = os.environ.get("OCTACAM_FFMPEG")
-        if env:
-            yield env
-        try:
-            import imageio_ffmpeg
-
-            bundled = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception as e:  # pragma: no cover - depends on environment
-            log.debug("imageio-ffmpeg unavailable: %s", e)
-        else:
-            yield bundled
-        for directory in os.get_exec_path():  # os.defpath without $PATH
-            exe = shutil.which("ffmpeg", path=directory) if directory else None
-            if exe:
-                yield exe
-
-    seen: set[str] = set()
-    for exe in found():
-        try:
-            key = os.path.realpath(exe)
-        except OSError:
-            key = exe
-        if key not in seen:
-            seen.add(key)
-            yield exe
-
-
-@functools.cache
-def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
-    """Whether *exe* can run *encoder* on this machine (cached): a real one-frame
-    encode, since an ffmpeg newer than the NVIDIA driver lists h264_nvenc yet
-    fails to run it."""
-    ok = False
-    try:
-        proc = subprocess.run(
-            [
-                exe, "-nostdin", "-hide_banner", "-loglevel", "error",
-                # NVENC fails to init below a minimum frame size.
-                "-f", "lavfi", "-i", "color=c=black:s=256x256:r=5",
-                "-frames:v", "1", "-c:v", encoder, "-f", "null", "-",
-            ],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=30,
-        )  # fmt: skip
-        ok = proc.returncode == 0
-    except (OSError, subprocess.SubprocessError) as e:
-        log.debug("encoder probe failed for %s / %s: %s", exe, encoder, e)
-    return ok
-
-
-def probe_nvenc_max_sessions(
-    encoder: str = "h264_nvenc", ceiling: int = 12
-) -> int | None:
-    """How many concurrent NVENC sessions this GPU allows, or None without an
-    NVENC-capable ffmpeg.
-
-    Counts which of *ceiling* overlapping encodes initialize (*ceiling* means at
-    least that many; GeForce drivers allow 8 to 12). It loads the GPU briefly,
-    and under-counts, but never disturbs, the sessions a live recording holds
-    (``octacam doctor`` runs it).
-    """
-    try:
-        exe = find_ffmpeg(require_encoder=encoder)
-    except RuntimeError:
-        return None
-    procs: list[subprocess.Popen] = []
-    for _ in range(max(1, ceiling)):
-        try:
-            proc = subprocess.Popen(
-                [
-                    exe, "-nostdin", "-hide_banner", "-loglevel", "error", "-re",
-                    "-f", "lavfi", "-i", "testsrc=size=256x256:rate=10",
-                    "-t", "2", "-c:v", encoder, "-f", "null", "-",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )  # fmt: skip
-        except OSError:
-            break
-        procs.append(proc)
-    ok = 0
-    for proc in procs:
-        try:
-            if proc.wait(timeout=30) == 0:
-                ok += 1
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-    return ok
-
-
-def nvenc_max_sessions(encoder: str = "h264_nvenc") -> int | None:
-    """:func:`probe_nvenc_max_sessions`, once per process. Call it before any
-    record session is open (the controller's off-lock warm-up does)."""
-    return _nvenc_session_cap(encoder)
-
-
-# Keyed by the resolved encoder: functools.cache would key nvenc_max_sessions()
-# and nvenc_max_sessions("h264_nvenc") apart and probe the GPU twice.
-@functools.cache
-def _nvenc_session_cap(encoder: str) -> int | None:
-    return probe_nvenc_max_sessions(encoder)
-
-
-def find_ffmpeg(require_encoder: str | None = None) -> str:
-    """The preferred ffmpeg (see :func:`_ffmpeg_candidates`), or with
-    *require_encoder* the first that can run it (:func:`ffmpeg_encoder_works`).
-    Raises RuntimeError when none qualifies, so a caller can fall back to the CPU.
-    """
-    if require_encoder is not None:
-        return _ffmpeg_for_encoder(require_encoder)
-    exe = next(iter(_ffmpeg_candidates()), None)
-    if exe is None:
-        raise RuntimeError(
-            "No ffmpeg executable found: install the imageio-ffmpeg package or "
-            "a system ffmpeg, or set OCTACAM_FFMPEG."
-        )
-    return exe
-
-
-@functools.cache
-def _ffmpeg_for_encoder(encoder: str) -> str:
-    """The first candidate ffmpeg that runs ``encoder`` (cached); a failure
-    (RuntimeError) is not cached, so a later call searches again."""
-    for exe in _ffmpeg_candidates():
-        if ffmpeg_encoder_works(exe, encoder):
-            return exe
-    raise RuntimeError(
-        f"no ffmpeg with a working {encoder} encoder was found "
-        f"(install a system ffmpeg built with {encoder} and a matching "
-        "NVIDIA driver, or set OCTACAM_FFMPEG to one)."
-    )
-
-
-def find_ffprobe() -> str:
-    """$OCTACAM_FFPROBE, else the ffprobe beside :func:`find_ffmpeg`'s (so the
-    probe and the encode share a build), else $PATH's.
-
-    imageio-ffmpeg bundles no ffprobe, so without a system ffmpeg this raises
-    RuntimeError; a caller that can do without (the grid) catches it.
-    """
-    exe = os.environ.get("OCTACAM_FFPROBE")
-    if exe:
-        return exe
-    try:
-        sibling = Path(find_ffmpeg()).with_name(
-            "ffprobe.exe" if os.name == "nt" else "ffprobe"
-        )
-    except RuntimeError:
-        sibling = None
-    if sibling is not None and os.path.isfile(sibling) and os.access(sibling, os.X_OK):
-        return str(sibling)
-    exe = shutil.which("ffprobe")
-    if exe:
-        return exe
-    raise RuntimeError(
-        "No ffprobe executable found: install a system ffmpeg (the bundled "
-        "imageio-ffmpeg binary ships ffmpeg only, without ffprobe), or set "
-        "OCTACAM_FFPROBE."
-    )
-
-
-def _extract_opt(tokens: list[str], names: tuple[str, ...]) -> str | None:
-    """Return the value token following the first of ``names`` in ``tokens``."""
-    for i, tok in enumerate(tokens):
-        if tok in names and i + 1 < len(tokens):
-            return tokens[i + 1]
-    return None
-
-
-def _split_opts(
-    tokens: list[str], names: tuple[str, ...], flags: tuple[str, ...] = ()
-) -> tuple[list[str], list[str]]:
-    """Split ``tokens`` into the rest and the values of the ``names`` options.
-
-    ``flags`` (options that take no value) are dropped too.
-    """
-    rest: list[str] = []
-    values: list[str] = []
-    it = iter(tokens)
-    for tok in it:
-        if tok in names:
-            value = next(it, None)
-            if value is not None:
-                values.append(value)
-        elif tok not in flags:
-            rest.append(tok)
-    return rest, values
-
-
-_PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
-_VF_OPTS = ("-vf", "-filter:v")
-_VIDEO_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
-# Software encoders whose monochrome (4:0:0) output hardware decoders mishandle.
-_MONO_UNSAFE_ENCODERS = ("libx264", "libx265")
-_warned_pix_fmt: set[str] = set()
-
-
-def _playable_pix_fmt(tokens: list[str], frame_size: tuple[int, int] | None) -> list[str]:
-    """Swap a libx264/libx265 4:0:0 (``gray``) output for full-range 4:2:0.
-
-    NVIDIA's hardware decoder (VLC's default there) shows 4:0:0 H.264 as flat
-    gray; full-range yuv420p decodes to the same pixels everywhere. This seam
-    fixes every config and snapshot still saying ``gray``. 4:2:0 cannot code an
-    odd side, so such a frame stays (or falls back to) 4:0:0; an unknown size is
-    left as configured.
-    """
-    if _extract_opt(tokens, _VIDEO_CODEC_OPTS) not in _MONO_UNSAFE_ENCODERS:
-        return tokens
-    pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS)
-    if frame_size is None or pix_fmt not in ("gray", "yuv420p"):
-        return tokens
-    even = frame_size[0] % 2 == 0 and frame_size[1] % 2 == 0
-    target = "yuv420p" if even else "gray"
-    if pix_fmt == target:
-        return tokens
-    if target not in _warned_pix_fmt:
-        _warned_pix_fmt.add(target)
-        if even:
-            log.info(
-                "Writing -pix_fmt gray as full-range yuv420p: monochrome (4:0:0) "
-                "H.264 shows as flat gray frames in hardware decoders (VLC on "
-                "NVIDIA); the pixel values are unchanged"
-            )
-        else:
-            log.warning(
-                "Writing %dx%d frames as -pix_fmt gray (4:0:0): yuv420p cannot code "
-                "an odd width or height. Hardware decoders (VLC on NVIDIA) may show "
-                "these videos as flat gray; disable hardware decoding to view them",
-                *frame_size,
-            )
-    i = next(i for i, tok in enumerate(tokens) if tok in _PIX_FMT_OPTS)
-    return [*tokens[: i + 1], target, *tokens[i + 2 :]]
-
-
-def _output_args(
-    ffmpeg_params: str, frame_size: tuple[int, int] | None = None
-) -> tuple[list[str], str, list[str]]:
-    """Split *ffmpeg_params* into (encoder tokens, one -vf chain, -color_range
-    args): the pixel format made playable (:func:`_playable_pix_fmt`), the
-    user's filter merged with the full-range conversion. Every encode uses it.
-    """
-    tokens = _playable_pix_fmt(shlex.split(ffmpeg_params), frame_size)
-    out_pix_fmt = _extract_opt(tokens, _PIX_FMT_OPTS) or ""
-    # ffmpeg takes one -vf (the last), so a user filter merges into ours.
-    tokens, user_vfs = _split_opts(tokens, _VF_OPTS)
-    merged_vf = _full_range_vf(out_pix_fmt, user_vfs[-1] if user_vfs else "")
-    return tokens, merged_vf, _color_range_args(out_pix_fmt)
-
-
-def build_encode_args(
-    ffmpeg: str,
-    output: str,
-    fps: float,
-    width: int,
-    height: int,
-    ffmpeg_params: str,
-    *,
-    source: str = "pipe:0",
-    input_pix_fmt: str = "gray",
-) -> list[str]:
-    """ffmpeg argv encoding a rawvideo stream from *source*: input args from the
-    geometry, output args from :func:`_output_args`.
-
-    ffprobe reports 4:0:0 and 4:2:0 H.264 alike (yuvj420p); x264's log says
-    which was written.
-    """
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, (width, height))
-    return [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-f",
-        "rawvideo",
-        "-pixel_format",
-        input_pix_fmt,
-        "-video_size",
-        f"{width}x{height}",
-        "-framerate",
-        f"{fps:g}",
-        "-i",
-        source,
-        *(["-vf", merged_vf] if merged_vf else []),
-        *tokens,
-        *color_args,
-        "-y",
-        str(output),
-    ]
 
 
 def _write_all(file, frame) -> None:
@@ -610,14 +265,17 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
     def _open_sink(self, filename, fps, frame_size):
         width, height = frame_size
-        args = build_encode_args(
+        # No -nostdin (see octacam.ffmpeg): stdin is the frame pipe.
+        args = [
             find_ffmpeg(require_encoder=nvenc_encoder(self.ffmpeg_params)),
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            *rawvideo_input_args(width, height, fps),
+            *output_args(self.ffmpeg_params, (width, height)),
+            "-y",
             filename,
-            fps,
-            width,
-            height,
-            self.ffmpeg_params,
-        )
+        ]
         self._filename = filename
         self._stderr_tail.clear()
         # bufsize=0: frames go straight to the pipe (no Python-side
@@ -751,11 +409,7 @@ FORMATS: dict[str, VideoFormat] = {
 def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
     """A libx264 VideoFormat for a camera that gets no NVENC session, keeping
     *base*'s container and ``-pix_fmt`` so a mixed GPU+CPU take is uniform."""
-    try:
-        tokens = shlex.split(base.ffmpeg_params)
-    except ValueError:
-        tokens = []
-    pix_fmt = _extract_opt(tokens, ("-pix_fmt", "-pixel_format")) or DEFAULT_PIX_FMT
+    pix_fmt = pix_fmt_of(base.ffmpeg_params) or DEFAULT_PIX_FMT
     return VideoFormat(
         save_method="ffmpeg",
         extension=base.extension,
@@ -955,16 +609,16 @@ def transcode_raw(
     if total_frames is None and width and height:
         total_frames = raw_path.stat().st_size // (width * height * bytes_per_pixel)
     with _atomic_output(output) as tmp:
-        args = build_encode_args(
+        args = [
             find_ffmpeg(),
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            *rawvideo_input_args(width, height, fps, str(raw_path), input_pix_fmt),
+            *output_args(ffmpeg_params, (width, height)),
+            "-y",
             str(tmp),
-            fps,
-            width,
-            height,
-            ffmpeg_params,
-            source=str(raw_path),
-            input_pix_fmt=input_pix_fmt,
-        )
+        ]
         _run_ffmpeg(
             args,
             raw_path,
@@ -989,14 +643,13 @@ def transcode_encoded(
     """Re-encode an mkv/mp4 to *output*, never stream-copying: captures use a
     fast preset, and this offline pass is where a slow one pays off.
 
-    *width*/*height* let a gray output become 4:2:0 (:func:`_playable_pix_fmt`);
-    *total_frames* sizes the bar.
+    *width*/*height* let a gray output become 4:2:0 (see
+    :func:`octacam.ffmpeg.output_args`); *total_frames* sizes the bar.
     """
     src = Path(src)
     output = Path(output)
     ffmpeg = find_ffmpeg()
     frame_size = (width, height) if width and height else None
-    tokens, merged_vf, color_args = _output_args(ffmpeg_params, frame_size)
     with _atomic_output(output) as tmp:
         args = [
             ffmpeg,
@@ -1006,9 +659,7 @@ def transcode_encoded(
             "-y",
             "-i",
             str(src),
-            *(["-vf", merged_vf] if merged_vf else []),
-            *tokens,
-            *color_args,
+            *output_args(ffmpeg_params, frame_size),
             str(tmp),
         ]
         _run_ffmpeg(
@@ -1066,21 +717,19 @@ def transcode_file(
 
 
 def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
-    """Replace the builders' reporting flags with the output mode's: a quiet
+    """*args* with its reporting flags replaced by the output mode's: a quiet
     ffmpeg writing ``-progress`` for octacam's bar, or with *raw_output*
-    ffmpeg's own ``-stats`` at info level."""
-    cleaned, _ = _split_opts(
+    ffmpeg's own ``-stats`` at info level. Both run off the tty (raw mode only
+    loses ffmpeg's 'q' key)."""
+    cleaned, _ = split_opts(
         args[1:],
         ("-loglevel", "-progress"),
-        flags=("-hide_banner", "-stats", "-nostats"),
+        flags=("-nostdin", "-hide_banner", "-stats", "-nostats"),
     )
-    # -nostdin in both modes (see the module docstring): raw mode only loses
-    # ffmpeg's 'q' key.
     if raw_output:
-        flags = ["-nostdin", "-hide_banner", "-loglevel", "info", "-stats"]
+        flags = ["-hide_banner", "-loglevel", "info", "-stats"]
     else:
         flags = [
-            "-nostdin",
             "-hide_banner",
             "-loglevel",
             "warning",
@@ -1088,7 +737,7 @@ def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
             "-progress",
             "pipe:1",
         ]
-    return [args[0], *flags, *cleaned]
+    return quiet_argv(args[0], *flags, *cleaned)
 
 
 def _to_int(value: str, default: int) -> int:

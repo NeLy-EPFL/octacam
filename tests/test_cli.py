@@ -965,13 +965,13 @@ def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
     # plain doctor run on a GPU-less box never emits it (a vacuous check). Force the
     # GPU-present path so the section runs to its end: the NVENC-params line (the new
     # last line) proves we got there, and the hint must be gone.
-    import octacam.writer as writer
+    import octacam.ffmpeg as ff
     from octacam.cli import _doctor_gpu_encoding, _Report
 
     monkeypatch.setattr("octacam.cli._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
     monkeypatch.setattr("octacam.cli._ffmpeg_version", lambda exe: "n7.1")
-    monkeypatch.setattr(writer, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(writer, "probe_nvenc_max_sessions", lambda: None)
+    monkeypatch.setattr(ff, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(ff, "probe_nvenc_max_sessions", lambda: None)
 
     report = _Report()
     report.section("Encoding toolchain")

@@ -22,15 +22,18 @@ import shlex
 import subprocess
 from pathlib import Path
 
+from octacam.ffmpeg import (
+    color_range_args,
+    find_ffmpeg,
+    find_ffprobe,
+    is_limited_range_yuv,
+    split_opts,
+)
 from octacam.writer import (
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     ProgressCallback,
     _atomic_output,
-    _color_range_args,
     _run_ffmpeg,
-    _split_opts,
-    find_ffmpeg,
-    find_ffprobe,
 )
 
 log = logging.getLogger("octacam")
@@ -66,7 +69,8 @@ def _fps_value(fps_str: str) -> float:
 def _probe_video(path: Path, ffprobe: str) -> tuple[int, int, str, float]:
     """(width, height, fps fraction, duration s) of *path*'s video stream.
 
-    Off the tty like every ffmpeg launch (see :mod:`octacam.writer`).
+    Off the tty like every ffmpeg launch (see :mod:`octacam.ffmpeg`); ffprobe
+    has no ``-nostdin``, so only ``stdin=DEVNULL``.
     """
     result = subprocess.run(
         [
@@ -137,11 +141,11 @@ def _filtergraph(rows: int, cols: int, width: int, height: int, pix_fmt: str) ->
     Each cell is converted to *pix_fmt* first: xstack's implicit conversion of
     full-range camera videos and limited-range lavfi cells mis-tags the range
     (washed out in VLC, stalling in QuickTime). ``out_range=full`` keeps 0-255
-    luma for limited-range YUV (see writer._color_range_args), so the pad's bars
+    luma for limited-range YUV (see ffmpeg.color_range_args), so the pad's bars
     are true black. ``force_divisible_by=2`` keeps a letterboxed camera's fitted
     size even, as yuv420p needs.
     """
-    scale_range = ":out_range=full" if _color_range_args(pix_fmt) else ""
+    scale_range = ":out_range=full" if is_limited_range_yuv(pix_fmt) else ""
     n_cells = rows * cols
     parts = [
         f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease:"
@@ -177,7 +181,7 @@ def _grid_command(
         else:
             cmd += ["-i", str(path)]
     # The grid owns its pixel format and filters; ffmpeg_params picks the encoder.
-    encoder, _ = _split_opts(
+    encoder, _ = split_opts(
         shlex.split(ffmpeg_params or DEFAULT_TRANSCODE_FFMPEG_PARAMS),
         ("-pix_fmt", "-pixel_format", "-vf", "-filter:v"),
     )
@@ -192,7 +196,7 @@ def _grid_command(
         *encoder,
         "-pix_fmt",
         pix_fmt,
-        *_color_range_args(pix_fmt),
+        *color_range_args(pix_fmt),
     ]
 
 
