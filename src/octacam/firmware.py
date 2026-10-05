@@ -494,6 +494,10 @@ class FirmwareProvisioner:
                 out["detail"] = (
                     f"the sketch source {why}, so the board's build can't be compared "
                     "or flashed"
+                    if firmware_ok
+                    else f"the board does not run {self.spec.banner_prefix} "
+                    f"v{self.spec.protocol_version} firmware (arming is disabled); the "
+                    f"sketch source {why}, so it can't be flashed"
                 )
             out["needs_flash"] = False
             out["safe_to_auto_flash"] = False

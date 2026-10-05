@@ -2440,7 +2440,12 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
     console.print(f"  source build:   {prov.get('needed_build') or '(not available)'}")
     # An unclassified board is never called up to date; the provisioner says why.
     if prov.get("state") is None:
-        console.print(f"  [yellow]? unknown[/yellow] — {prov.get('detail', '')}")
+        verdict = (
+            "[yellow]? unknown[/yellow]"
+            if prov.get("firmware_ok")
+            else "[red]✗ incompatible firmware[/red]"
+        )
+        console.print(f"  {verdict} — {prov.get('detail', '')}")
         if not check_only and prov.get("needed_build") is None:
             console.print(
                 "  Flash it manually with arduino-cli, or set OCTACAM_ARDUINO_DIR to "

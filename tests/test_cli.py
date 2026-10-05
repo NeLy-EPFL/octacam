@@ -2164,18 +2164,22 @@ def test_flash_warns_before_overwriting_an_unidentified_board(fake_triggerbox):
     assert "skipped" in flat
 
 
-@pytest.mark.parametrize("flags", [[], ["--yes"], ["--check"]], ids=["ask", "yes", "check"])
-def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
-    fake_triggerbox, monkeypatch, flags
-):
+@pytest.fixture
+def no_sketch(monkeypatch):
+    """A wheel install: no source build to compare the board against or flash."""
     from dataclasses import replace
 
     from octacam.plugins.triggerbox import TriggerboxPlugin
 
-    # A wheel install: no source build to compare the board against or flash.
     monkeypatch.setattr(
         TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
     )
+
+
+@pytest.mark.parametrize("flags", [[], ["--yes"], ["--check"]], ids=["ask", "yes", "check"])
+def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
+    fake_triggerbox, no_sketch, flags
+):
     result = runner.invoke(
         app,
         ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
@@ -2190,6 +2194,26 @@ def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
     assert ("Flash it manually with arduino-cli" in flat) is (flags != ["--check"])
     assert "uploaded build" not in flat
     assert fake_triggerbox.devices == ["/dev/x"]
+
+
+@pytest.mark.parametrize("flags", [["--yes"], ["--check"]], ids=["yes", "check"])
+@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc", "TRIGGERBOX 3 x"])
+def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
+    fake_triggerbox, no_sketch, flags, banner
+):
+    fake_triggerbox.banner = banner
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
+         *flags],
+    )
+    assert result.exit_code == 1, result.output
+    flat = " ".join(result.output.split())
+    assert (
+        "✗ incompatible firmware — the board does not run TRIGGERBOX v2 firmware "
+        "(arming is disabled); the sketch source was not found"
+    ) in flat
+    assert "? unknown" not in flat
 
 
 def test_flash_names_no_missing_source_for_an_unprobed_board():
