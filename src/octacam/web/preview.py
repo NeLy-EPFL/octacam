@@ -245,6 +245,7 @@ async def preview_loop(
             if frame is None:
                 continue
             numbers[index] = numbers.get(index, 0) + 1
+            take = camera.take  # read once: a preview start clears it
             jobs.append(EncodeJob(
                 camera=index,
                 frame=frame,
@@ -252,7 +253,7 @@ async def preview_loop(
                 number=numbers[index],
                 timestamp_ns=time.time_ns(),
                 fps=camera.frame_for_display.fps,
-                dropped=camera.take.dropped_count if camera.take else 0,
+                dropped=take.dropped_count if take else 0,
                 recording=recording,
             ))
         if not jobs:
