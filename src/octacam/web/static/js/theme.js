@@ -2,23 +2,9 @@
 // data-theme="light" on <html>. An inline script in index.html applies the
 // saved choice before first paint; this module owns the toggle and saves it.
 
+import { store } from "./util.js";
+
 const KEY = "octacam.theme";
-
-const readSaved = () => {
-  try {
-    return localStorage.getItem(KEY);
-  } catch {
-    return null; // storage unavailable (private mode / sandbox)
-  }
-};
-
-const writeSaved = (t) => {
-  try {
-    localStorage.setItem(KEY, t);
-  } catch {
-    // storage unavailable (private mode / sandbox) — choice just won't persist
-  }
-};
 
 // Set by initTheme, so applyConfigTheme can refresh the icon.
 let renderToggle = () => {};
@@ -49,7 +35,7 @@ export function initTheme() {
   btn?.addEventListener("click", () => {
     const next = isLight() ? "dark" : "light";
     applyLight(next === "light");
-    writeSaved(next);
+    store.set(KEY, next);
     renderToggle();
   });
 }
@@ -57,7 +43,7 @@ export function initTheme() {
 // Apply the rig's default theme ([gui].theme) once the config has loaded,
 // unless this browser saved its own choice.
 export function applyConfigTheme(theme) {
-  if (readSaved()) return;
+  if (store.get(KEY)) return;
   applyLight(theme === "light");
   renderToggle();
 }

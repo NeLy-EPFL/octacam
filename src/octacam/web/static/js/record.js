@@ -1,27 +1,11 @@
 // Record tab: settings inputs, start/stop button state machine, status line.
 
-import { api, clamp, clampInput, formatBytes, formatHMS } from "./util.js";
+import { api, clamp, clampInput, formatBytes, formatHMS, store } from "./util.js";
 
 const BUSY_STATES = new Set(["waiting", "recording", "finishing"]);
 
 // The Advanced-options switch is remembered per browser; off by default.
 const ADV_KEY = "octacam.record.advanced";
-
-function readAdvancedPref() {
-  try {
-    return localStorage.getItem(ADV_KEY) === "1";
-  } catch {
-    return false; // storage unavailable (private mode / sandbox)
-  }
-}
-
-function writeAdvancedPref(open) {
-  try {
-    localStorage.setItem(ADV_KEY, open ? "1" : "0");
-  } catch {
-    // storage unavailable — the choice just won't persist
-  }
-}
 
 function trimNum(v) {
   return String(Math.round(v * 1000) / 1000);
@@ -202,13 +186,13 @@ export class RecordTab {
 
   // The rows inside keep their own `hidden` state (_syncSaveMethodFields).
   _initAdvancedToggle() {
-    const open = readAdvancedPref();
+    const open = store.get(ADV_KEY) === "1";
     this.advancedToggle.checked = open;
     this.advancedSection.hidden = !open;
     this.advancedToggle.addEventListener("change", () => {
       const shown = this.advancedToggle.checked;
       this.advancedSection.hidden = !shown;
-      writeAdvancedPref(shown);
+      store.set(ADV_KEY, shown ? "1" : "0");
     });
   }
 

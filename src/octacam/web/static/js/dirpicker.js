@@ -1,11 +1,12 @@
 // Directory picker: the save directory is a path on the server, so browse it
 // through /api/browse one level at a time.
 
-import { api, ModalFocus } from "./util.js";
+import { el, Modal, request } from "./util.js";
 
-export class DirPicker {
+export class DirPicker extends Modal {
   // `getStart()` is the path to open at; blank opens the save directory.
   constructor({ notify, onPick, getStart }) {
+    super(document.getElementById("dir-dialog"));
     this.notify = notify;
     this.onPick = onPick;
     this.getStart = getStart;
@@ -13,8 +14,6 @@ export class DirPicker {
     this.parent = null;
     this.busy = false;
 
-    this.dialog = document.getElementById("dir-dialog");
-    this.focus = new ModalFocus(this.dialog.querySelector(".modal-card"));
     this.pathEl = document.getElementById("dir-current");
     this.list = document.getElementById("dir-list");
     this.upBtn = document.getElementById("dir-up");
@@ -31,14 +30,6 @@ export class DirPicker {
     this.upBtn.addEventListener("click", () => {
       if (this.parent != null) this._load(this.parent);
     });
-    this.dialog.addEventListener("click", (e) => {
-      if (e.target === this.dialog) this.close();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !this.dialog.classList.contains("hidden")) {
-        this.close();
-      }
-    });
   }
 
   setConnected(connected) {
@@ -49,44 +40,30 @@ export class DirPicker {
   async open() {
     this.error.textContent = "";
     this.newName.value = "";
-    this.dialog.classList.remove("hidden");
-    this.focus.activate();
+    super.open();
     await this._load(this.getStart?.() ?? "");
-  }
-
-  close() {
-    if (this.dialog.classList.contains("hidden")) return;
-    this.dialog.classList.add("hidden");
-    this.focus.deactivate();
   }
 
   async _load(path) {
     this.busy = true;
     this._syncButtons();
-    let r;
-    try {
-      r = await api("POST", "/api/browse", { path });
-    } catch {
-      this.error.textContent = "Browse failed: server unreachable.";
-      this.busy = false;
-      this._syncButtons();
-      return;
-    }
+    const d = await request("POST", "/api/browse", { path }, {
+      action: "Browse",
+      notify: (_, msg) => (this.error.textContent = msg),
+    });
     this.busy = false;
-    if (!r.ok || !r.data) {
-      this.error.textContent =
-        r.data?.detail || `Browse failed (HTTP ${r.status})`;
+    if (!d) {
       this._syncButtons();
       return;
     }
     this.error.textContent = "";
-    this.path = r.data.path;
-    this.parent = r.data.parent;
+    this.path = d.path;
+    this.parent = d.parent;
     this.pathEl.textContent = this.path;
     this.pathEl.title = this.path;
-    this._renderList(r.data.entries || []);
+    this._renderList(d.entries || []);
     this._syncButtons();
-    if (r.data.writable === false) {
+    if (d.writable === false) {
       this.error.textContent = "This folder is not writable.";
     }
   }
@@ -94,20 +71,13 @@ export class DirPicker {
   _renderList(entries) {
     this.list.replaceChildren(
       ...entries.map((name) => {
-        const btn = document.createElement("button");
+        const btn = el("button", "dir-entry", name);
         btn.type = "button";
-        btn.className = "dir-entry";
-        btn.textContent = name;
         btn.addEventListener("click", () => this._descend(name));
         return btn;
       })
     );
-    if (!entries.length) {
-      const empty = document.createElement("div");
-      empty.className = "dir-empty";
-      empty.textContent = "No subfolders";
-      this.list.appendChild(empty);
-    }
+    if (!entries.length) this.list.appendChild(el("div", "dir-empty", "No subfolders"));
   }
 
   _syncButtons() {

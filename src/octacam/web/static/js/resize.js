@@ -1,24 +1,10 @@
 // Sidebar resizer: dragging the gutter sets --sidebar-width (read by #sidebar
 // and the connection banner), remembered across reloads.
 
+import { store } from "./util.js";
+
 const MIN = 240;
 const KEY = "octacam.sidebarWidth";
-
-const readSaved = () => {
-  try {
-    return Number(localStorage.getItem(KEY));
-  } catch {
-    return NaN;
-  }
-};
-
-const writeSaved = (w) => {
-  try {
-    localStorage.setItem(KEY, String(w));
-  } catch {
-    // storage unavailable (private mode / sandbox) — width just won't persist
-  }
-};
 
 export function initSidebarResize() {
   const root = document.documentElement;
@@ -36,7 +22,7 @@ export function initSidebarResize() {
     parseInt(getComputedStyle(root).getPropertyValue("--sidebar-width"), 10);
 
   // Restore a previously chosen width, re-clamped to the current viewport.
-  const saved = readSaved();
+  const saved = Number(store.get(KEY));
   if (Number.isFinite(saved) && saved > 0) apply(clampW(saved));
 
   let active = false;
@@ -59,7 +45,7 @@ export function initSidebarResize() {
     handle.classList.remove("dragging");
     document.body.style.cursor = "";
     const w = current();
-    if (Number.isFinite(w)) writeSaved(w);
+    if (Number.isFinite(w)) store.set(KEY, w);
   };
   handle.addEventListener("pointerup", end);
   handle.addEventListener("pointercancel", end);
