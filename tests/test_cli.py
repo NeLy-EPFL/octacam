@@ -1178,7 +1178,7 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
     monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
 
     before_mp4 = (folder / "camera_LF.mp4").read_bytes()
@@ -1221,7 +1221,7 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
     monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
@@ -1239,7 +1239,7 @@ def test_process_dry_run_lists_leftover_outputs_as_work(
     _make_recording(folder, with_outputs=True)
     _age(folder / "camera_LF.mp4", 10)
     _age(folder / "grid.mp4", 20)
-    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+    _forbid(monkeypatch, "octacam.transcode.transcode_file", "octacam.grid.build_grid_video")
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--dry-run"])
 
@@ -1266,7 +1266,7 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
     monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--force"])
@@ -1294,7 +1294,7 @@ def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypat
         calls["grid"] += 1
         return output
 
-    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
     monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
@@ -1328,7 +1328,7 @@ def test_process_transfers_skipped_outputs(tmp_path, monkeypatch):
     def fake_grid(folder, layout=None, output=None, **kwargs):
         raise AssertionError("grid should be skipped, not run")
 
-    monkeypatch.setattr("octacam.writer.transcode_file", fake_transcode)
+    monkeypatch.setattr("octacam.transcode.transcode_file", fake_transcode)
     monkeypatch.setattr("octacam.grid.build_grid_video", fake_grid)
 
     result = runner.invoke(app, ["process", str(folder)])
@@ -1377,7 +1377,7 @@ def test_process_dry_run_plans_every_step_without_running_any(
     _make_recording(folder, with_outputs=False, extra_toml=_transfer_toml(dest_root))
     _forbid(
         monkeypatch,
-        "octacam.writer.transcode_file",
+        "octacam.transcode.transcode_file",
         # Its input isn't transcoded yet, so there is nothing to probe.
         "octacam.grid.build_grid_video",
         "octacam.cli._delete_source_files",
@@ -1414,7 +1414,7 @@ def test_process_dry_run_previews_a_grid_whose_inputs_exist(
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
     (folder / "grid.mp4").unlink()
-    _forbid(monkeypatch, "octacam.writer.transcode_file")
+    _forbid(monkeypatch, "octacam.transcode.transcode_file")
     dry_runs = []
 
     def fake_grid(folder, layout=None, output=None, **kwargs):
@@ -1445,7 +1445,7 @@ def test_process_dry_run_never_waits_on_a_live_capture(
         monkeypatch,
         "octacam.cli._pause_gate",
         "octacam.session_cache.mark_transcode_active",
-        "octacam.writer.transcode_file",
+        "octacam.transcode.transcode_file",
         "octacam.grid.build_grid_video",
     )
 
@@ -1463,7 +1463,7 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
-    _forbid(monkeypatch, "octacam.writer.transcode_file", "octacam.grid.build_grid_video")
+    _forbid(monkeypatch, "octacam.transcode.transcode_file", "octacam.grid.build_grid_video")
     finish = runner.invoke(app, ["process", str(folder)])
     assert finish.exit_code == 0, finish.output
     process_log.clear()
@@ -1488,7 +1488,7 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
 
 def test_progress_bar_labels_a_grid_encode(tmp_path):
     from octacam.cli import _FileProgressBar
-    from octacam.writer import TranscodeProgress
+    from octacam.transcode import TranscodeProgress
 
     bar = _FileProgressBar(2)
     on_progress = bar.file(2, tmp_path / "run1", "grid: ")

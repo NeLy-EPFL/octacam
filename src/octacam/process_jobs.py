@@ -31,8 +31,8 @@ from octacam import session_cache
 if TYPE_CHECKING:
     from rich.console import Console
 
+    from octacam.transcode import ProgressCallback, TranscodeProgress
     from octacam.transfer import TransferCallback, TransferProgress
-    from octacam.writer import ProgressCallback, TranscodeProgress
 
 log = logging.getLogger("octacam")
 
@@ -367,7 +367,7 @@ class JobReporter:
         self._flush(force=True)
 
     def transcode_progress(self, index: int, total: int) -> ProgressCallback:
-        """A writer.ProgressCallback refining within-file transcode percent."""
+        """A transcode.ProgressCallback refining within-file transcode percent."""
         base = index - 1
 
         def _cb(prog: TranscodeProgress) -> None:

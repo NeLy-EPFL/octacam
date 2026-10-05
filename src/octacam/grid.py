@@ -29,11 +29,11 @@ from octacam.ffmpeg import (
     is_limited_range_yuv,
     split_opts,
 )
-from octacam.writer import (
+from octacam.transcode import (
     DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     ProgressCallback,
-    _atomic_output,
-    _run_ffmpeg,
+    atomic_output,
+    run_ffmpeg,
 )
 
 log = logging.getLogger("octacam")
@@ -252,8 +252,8 @@ def build_grid_video(
     log.info("Generating grid video → %s", output)
     try:
         # A partial grid.mp4 must never pass for a finished one.
-        with _atomic_output(output) as tmp:
-            _run_ffmpeg(
+        with atomic_output(output) as tmp:
+            run_ffmpeg(
                 [*cmd, str(tmp)],
                 folder,
                 on_progress=on_progress,

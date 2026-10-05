@@ -23,8 +23,8 @@ from octacam.config import (
     safe_segment,
 )
 from octacam.plugins import canonical_name
+from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 from octacam.transform import DisplayTransform
-from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (

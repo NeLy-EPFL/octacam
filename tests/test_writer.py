@@ -7,13 +7,13 @@ import numpy as np
 import pytest
 from helpers import wait_until
 
+from octacam.transcode import transcode_file
 from octacam.writer import (
     DEFAULT_CRF,
     FORMATS,
     AsyncFrameWriter,
     FfmpegVideoWriter,
     RawVideoWriter,
-    transcode_file,
 )
 
 WIDTH, HEIGHT = 64, 48

@@ -14,7 +14,7 @@ import pytest
 
 from octacam.ffmpeg import find_ffmpeg
 from octacam.grid import build_grid_video
-from octacam.writer import transcode_raw
+from octacam.transcode import transcode_raw
 
 pytest.importorskip("cv2")  # parity with the other ffmpeg-backed suites
 

@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 
     from octacam.config import OctacamConfig, RecordConfig
     from octacam.process_jobs import JobReporter, JobStatus
+    from octacam.transcode import ProgressCallback
     from octacam.transfer import TransferCallback
-    from octacam.writer import ProgressCallback
 
 import typer
 
@@ -1117,7 +1117,8 @@ def _doctor_backends(
 
 def _doctor_encoding(report: _Report) -> None:
     from octacam.ffmpeg import find_ffmpeg
-    from octacam.writer import DEFAULT_FFMPEG_PARAMS, DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    from octacam.writer import DEFAULT_FFMPEG_PARAMS
 
     report.section("Encoding toolchain")
     try:
@@ -3066,12 +3067,12 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     loose .mkv/.raw without one are transcoded with defaults and a warning. An
     ``octacam_recording`` folder named directly means its recording, and a
     recursive walk never enters one."""
+    from octacam.transcode import is_partial_transcode
     from octacam.transform import (
         RECORDING_INFO_DIRNAME,
         RECORDING_SUMMARY_FILENAME,
         recording_summary_path,
     )
-    from octacam.writer import is_partial_transcode
 
     jobs: dict[Path, TranscodeJob] = {}
 
@@ -3287,7 +3288,7 @@ class _FileProgressBar:
 
     def file(self, index: int, path: Path, label: str = "") -> "ProgressCallback":
         """Start the bar for one ffmpeg encode and return its progress callback."""
-        from octacam.writer import TranscodeProgress
+        from octacam.transcode import TranscodeProgress
 
         task = self._start(f"[{index}/{self._total_files}] {label}{path.name}", None)
 
@@ -3964,7 +3965,7 @@ def process(
     skipped.
     """
     from octacam import process_jobs, session_cache
-    from octacam.writer import is_partial_transcode, transcode_file
+    from octacam.transcode import is_partial_transcode, transcode_file
 
     do_transcode = not no_transcode
     do_grid = not no_grid

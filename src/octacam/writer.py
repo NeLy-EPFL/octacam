@@ -1,35 +1,24 @@
-"""Video writers and the offline transcodes of ``octacam process``.
+"""Capture writers: the per-camera video sinks a recording writes into.
 
-A capture writer runs its sink on a thread behind a bounded queue, so write()
-never blocks the grab loop: it refuses a frame when the queue is full or the sink
-has failed. FfmpegVideoWriter pipes Mono8 frames into an ffmpeg child, which
-encodes outside the GIL; RawVideoWriter dumps them for ``octacam process`` to
-transcode (the geometry is in the recording summary).
+A writer runs its sink on a thread behind a bounded queue, so write() never
+blocks the grab loop: it refuses a frame when the queue is full or the sink has
+failed. FfmpegVideoWriter pipes Mono8 frames into an ffmpeg child, which encodes
+outside the GIL; RawVideoWriter dumps them for ``octacam process`` to transcode
+(the geometry is in the recording summary).
 """
 
 # The sink handles (_queue/_proc/_file) exist only between open() and close(),
 # which pyright cannot follow across methods.
 # pyright: reportOptionalMemberAccess=false
 
-import contextlib
-import errno
-import glob
 import logging
-import os
 import queue
 import subprocess
 import threading
 import time
-import uuid
 from collections import deque
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - POSIX only; see _partial_is_live
-    fcntl = None  # type: ignore[assignment]
 
 from octacam.ffmpeg import (
     DEFAULT_PIX_FMT,
@@ -38,9 +27,7 @@ from octacam.ffmpeg import (
     nvenc_max_sessions,
     output_args,
     pix_fmt_of,
-    quiet_argv,
     rawvideo_input_args,
-    split_opts,
 )
 
 log = logging.getLogger("octacam")
@@ -54,11 +41,8 @@ DEFAULT_CRF = 18
 DEFAULT_PRESET = "ultrafast"
 
 # The config's ffmpeg_params: encoder output args, spliced verbatim after the
-# derived rawvideo input args. The offline transcode re-encodes harder.
+# derived rawvideo input args.
 DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
-DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
-    f"-c:v libx264 -preset veryslow -crf 20 -pix_fmt {DEFAULT_PIX_FMT}"
-)
 
 # GPU capture (record.save_method = "nvenc", or any *_nvenc encoder). NVENC
 # rejects 4:0:0, so yuv420p, which output_args keeps at 0-255 luma. NVENC
@@ -66,26 +50,6 @@ DEFAULT_TRANSCODE_FFMPEG_PARAMS = (
 # Cameras past the GPU's session limit fall back to libx264
 # (resolve_capture_formats).
 NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
-
-# Recorded pixel format -> (ffmpeg rawvideo pixel format, bytes per pixel).
-# Every backend records Mono8.
-_RAW_PIXEL_FORMATS = {"Mono8": ("gray", 1)}
-
-
-@dataclass(frozen=True)
-class TranscodeProgress:
-    """One block of ffmpeg's ``-progress`` stream. ``total_frames`` is None when
-    unknown (an indeterminate bar); ``fps``/``speed`` are 0.0 until measured."""
-
-    frame: int
-    fps: float
-    out_time_s: float
-    speed: float
-    total_frames: int | None
-    done: bool
-
-
-ProgressCallback = Callable[[TranscodeProgress], None]
 
 
 def _write_all(file, frame) -> None:
@@ -462,382 +426,3 @@ def resolve_capture_formats(
             "allows more (see `octacam doctor`)."
         )
     return formats, warnings
-
-
-# Tags a transcode's temp (see _partial_path), which folder scans skip.
-PARTIAL_INFIX = ".octacam-part"
-
-
-# Without flock, a temp idle this long is an orphan. Generous: deleting a live
-# temp is worse than keeping a dead one, and a live ffmpeg touches it every few
-# seconds.
-_PARTIAL_IDLE_S = 6 * 3600
-
-
-def _partial_path(output: Path) -> Path:
-    """A hidden temp beside *output*: the same directory (an atomic rename), the
-    real extension last (ffmpeg picks the muxer from it), and pid+uuid so two
-    runs over one folder never share a temp or rename the other's."""
-    return output.with_name(
-        f".{output.stem}{PARTIAL_INFIX}.{os.getpid()}.{uuid.uuid4().hex}"
-        f"{output.suffix}"
-    )
-
-
-def _partial_glob(output: Path) -> str:
-    """Glob for every temp of *output*, the pid-less ``.<stem>.octacam-part<ext>``
-    included. Escaped: unescaped, a camera ``cam[1]`` would match (and sweep)
-    ``cam1``'s temp."""
-    return f".{glob.escape(output.stem)}{PARTIAL_INFIX}*{glob.escape(output.suffix)}"
-
-
-def is_partial_transcode(path: Path) -> bool:
-    """True for a transcode temp (see :func:`_partial_path`), which a hard kill
-    can leave behind."""
-    return PARTIAL_INFIX in path.name
-
-
-def _partial_is_live(path: Path) -> bool:
-    """Whether a process still writes *path*: :func:`_atomic_output` holds a
-    flock on its temp while it owns it, so a lockable temp is an orphan. Without
-    flock (some network mounts), an idle-mtime test. Anything uninspectable is
-    live, so the sweep only ever errs toward keeping."""
-    if fcntl is None:  # pragma: no cover - POSIX only
-        return _partial_is_recent(path)
-    try:
-        handle = open(path, "r+")
-    except OSError:
-        return True
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
-                return True  # a live _atomic_output holds it
-            return _partial_is_recent(path)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return False
-    finally:
-        with contextlib.suppress(OSError):
-            handle.close()
-
-
-def _partial_is_recent(path: Path) -> bool:
-    try:
-        return time.time() - path.stat().st_mtime < _PARTIAL_IDLE_S
-    except OSError:
-        return True
-
-
-def _sweep_orphan_partials(output: Path, keep: Path) -> None:
-    """Delete *output*'s temps whose writer is gone, never a live one or *keep*."""
-    try:
-        stale_paths = list(output.parent.glob(_partial_glob(output)))
-    except OSError:
-        return
-    for stale in stale_paths:
-        if stale == keep:
-            continue
-        try:
-            if not _partial_is_live(stale):
-                stale.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-@contextlib.contextmanager
-def _atomic_output(output: Path):
-    """Yield a temp to encode into, renamed onto *output* only on success.
-
-    Any exception, Ctrl-C included, deletes the temp, so a partial encode never
-    appears at *output* or replaces it. The temp is created and flock-ed before
-    ffmpeg runs (every caller passes ``-y``), so a concurrent run can tell it
-    from an orphan.
-    """
-    tmp = _partial_path(output)
-    try:
-        lock = open(tmp, "w")
-    except OSError:
-        # Let the encode fail with the real error (read-only dir, ENOSPC).
-        lock = None
-    if lock is not None and fcntl is not None:
-        with contextlib.suppress(OSError):
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        _sweep_orphan_partials(output, keep=tmp)
-        try:
-            yield tmp
-            os.replace(tmp, output)  # inside the try: a failed rename cleans up
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
-    finally:
-        if lock is not None:
-            with contextlib.suppress(OSError):
-                lock.close()
-
-
-def transcode_raw(
-    raw_path: Path,
-    output: Path | None = None,
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    fps: float | None = None,
-    pixel_format: str = "Mono8",
-    frames: int | None = None,
-    on_progress: ProgressCallback | None = None,
-    raw_output: bool = False,
-) -> Path:
-    """Encode a .raw dump to *output* (default ``<raw>.mkv``).
-
-    The stream has no geometry: *width*/*height*/*fps* come from the recording
-    summary and are required. *frames* (else the file size) sizes the bar.
-    """
-    raw_path = Path(raw_path)
-    output = Path(output) if output else raw_path.with_suffix(".mkv")
-    if width is None or height is None or fps is None:
-        raise FileNotFoundError(
-            f"no recording_summary.json geometry for {raw_path}; cannot "
-            "determine width/height/fps to transcode the raw stream"
-        )
-    if pixel_format not in _RAW_PIXEL_FORMATS:
-        raise ValueError(f"cannot transcode {pixel_format} raw video from {raw_path}")
-    input_pix_fmt, bytes_per_pixel = _RAW_PIXEL_FORMATS[pixel_format]
-    total_frames = frames
-    if total_frames is None and width and height:
-        total_frames = raw_path.stat().st_size // (width * height * bytes_per_pixel)
-    with _atomic_output(output) as tmp:
-        args = [
-            find_ffmpeg(),
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            *rawvideo_input_args(width, height, fps, str(raw_path), input_pix_fmt),
-            *output_args(ffmpeg_params, (width, height)),
-            "-y",
-            str(tmp),
-        ]
-        _run_ffmpeg(
-            args,
-            raw_path,
-            on_progress=on_progress,
-            total_frames=total_frames,
-            raw_output=raw_output,
-        )
-    return output
-
-
-def transcode_encoded(
-    src: Path,
-    output: Path,
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    total_frames: int | None = None,
-    on_progress: ProgressCallback | None = None,
-    raw_output: bool = False,
-) -> Path:
-    """Re-encode an mkv/mp4 to *output*, never stream-copying: captures use a
-    fast preset, and this offline pass is where a slow one pays off.
-
-    *width*/*height* let a gray output become 4:2:0 (see
-    :func:`octacam.ffmpeg.output_args`); *total_frames* sizes the bar.
-    """
-    src = Path(src)
-    output = Path(output)
-    ffmpeg = find_ffmpeg()
-    frame_size = (width, height) if width and height else None
-    with _atomic_output(output) as tmp:
-        args = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-y",
-            "-i",
-            str(src),
-            *output_args(ffmpeg_params, frame_size),
-            str(tmp),
-        ]
-        _run_ffmpeg(
-            args,
-            src,
-            on_progress=on_progress,
-            total_frames=total_frames,
-            raw_output=raw_output,
-        )
-    return output
-
-
-def transcode_file(
-    input_path: Path,
-    output: Path,
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS,
-    *,
-    width: int | None = None,
-    height: int | None = None,
-    fps: float | None = None,
-    pixel_format: str = "Mono8",
-    frames: int | None = None,
-    total_frames: int | None = None,
-    on_progress: ProgressCallback | None = None,
-    raw_output: bool = False,
-) -> Path:
-    """Transcode one ``.raw``/``.mkv``/``.mp4`` to *output* (its extension picks
-    the container). A ``.raw`` takes geometry and *frames* from the summary; an
-    encoded input uses *width*/*height* only for its output pixel format and
-    *total_frames* for the bar."""
-    input_path = Path(input_path)
-    if input_path.suffix == ".raw":
-        return transcode_raw(
-            input_path,
-            output=output,
-            ffmpeg_params=ffmpeg_params,
-            width=width,
-            height=height,
-            fps=fps,
-            pixel_format=pixel_format,
-            frames=frames,
-            on_progress=on_progress,
-            raw_output=raw_output,
-        )
-    return transcode_encoded(
-        input_path,
-        output,
-        ffmpeg_params=ffmpeg_params,
-        width=width,
-        height=height,
-        total_frames=total_frames,
-        on_progress=on_progress,
-        raw_output=raw_output,
-    )
-
-
-def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
-    """*args* with its reporting flags replaced by the output mode's: a quiet
-    ffmpeg writing ``-progress`` for octacam's bar, or with *raw_output*
-    ffmpeg's own ``-stats`` at info level. Both run off the tty (raw mode only
-    loses ffmpeg's 'q' key)."""
-    cleaned, _ = split_opts(
-        args[1:],
-        ("-loglevel", "-progress"),
-        flags=("-nostdin", "-hide_banner", "-stats", "-nostats"),
-    )
-    if raw_output:
-        flags = ["-hide_banner", "-loglevel", "info", "-stats"]
-    else:
-        flags = [
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-nostats",
-            "-progress",
-            "pipe:1",
-        ]
-    return quiet_argv(args[0], *flags, *cleaned)
-
-
-def _to_int(value: str, default: int) -> int:
-    try:
-        return int(value)
-    except ValueError:  # ffmpeg prints "N/A" before the first measurement
-        return default
-
-
-def _to_float(value: str, default: float) -> float:
-    try:
-        return float(value)
-    except ValueError:
-        return default
-
-
-def _parse_progress(
-    stream, on_progress: ProgressCallback, total_frames: int | None
-) -> None:
-    """Emit one TranscodeProgress per ``-progress`` block (closed by a
-    ``progress=`` line); a field ffmpeg reports as ``N/A`` keeps its value."""
-    frame = 0
-    fps = 0.0
-    out_time_s = 0.0
-    speed = 0.0
-    for line in stream:
-        key, sep, value = line.strip().partition("=")
-        if not sep:
-            continue
-        value = value.strip()
-        if key == "frame":
-            frame = _to_int(value, frame)
-        elif key == "fps":
-            fps = _to_float(value, fps)
-        elif key == "out_time_us":
-            out_time_s = _to_float(value, out_time_s * 1e6) / 1e6
-        elif key == "speed":
-            speed = _to_float(value.rstrip("x"), speed)
-        elif key == "progress":
-            on_progress(
-                TranscodeProgress(
-                    frame, fps, out_time_s, speed, total_frames, value == "end"
-                )
-            )
-
-
-def _drain_into(stream, sink: deque[str]) -> None:
-    with stream:
-        for line in stream:
-            text = line.rstrip()
-            if text:
-                sink.append(text)
-
-
-def _run_ffmpeg(
-    args: list[str],
-    src: Path,
-    *,
-    on_progress: ProgressCallback | None = None,
-    total_frames: int | None = None,
-    raw_output: bool = False,
-) -> None:
-    """Run an ffmpeg transcode of *src*, raising RuntimeError on failure. With
-    *raw_output* ffmpeg paints the terminal itself; otherwise its progress feeds
-    *on_progress* and its stderr is shown only on failure."""
-    args = _reporting_args(args, raw_output)
-    if raw_output:
-        returncode = subprocess.run(args, stdin=subprocess.DEVNULL).returncode
-        if returncode != 0:
-            raise RuntimeError(f"ffmpeg failed for {src} (exit code {returncode})")
-        return
-
-    proc = subprocess.Popen(
-        args,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert proc.stdout is not None and proc.stderr is not None  # PIPE => set
-    stderr_tail: deque[str] = deque(maxlen=40)
-    # Drained on its own thread, so a chatty ffmpeg never stalls on a full pipe.
-    stderr_thread = threading.Thread(
-        target=_drain_into, args=(proc.stderr, stderr_tail), daemon=True
-    )
-    stderr_thread.start()
-    try:
-        if on_progress is not None:
-            _parse_progress(proc.stdout, on_progress, total_frames)
-        else:
-            for _ in proc.stdout:  # drain so a full pipe never stalls ffmpeg
-                pass
-    except BaseException:
-        # A Ctrl-C or a raising callback takes ffmpeg down too.
-        proc.kill()
-        raise
-    finally:
-        proc.stdout.close()
-        returncode = proc.wait()
-        stderr_thread.join(timeout=2)
-    if returncode != 0:
-        tail = "\n".join(stderr_tail).strip()
-        raise RuntimeError(f"ffmpeg failed for {src}: {tail}")

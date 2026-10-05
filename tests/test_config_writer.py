@@ -283,7 +283,7 @@ def test_with_process_params_noop_when_values_match():
 
 
 def test_with_process_params_adds_sections_only_when_diverging():
-    from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
     # No [transcode]/[transfer] and default/blank values -> no sections added,
     # so a rig without a transfer destination never grows an empty one.

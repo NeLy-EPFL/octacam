@@ -15,7 +15,7 @@ from octacam.ffmpeg import (
     rawvideo_input_args,
     split_opts,
 )
-from octacam.writer import transcode_file
+from octacam.transcode import transcode_file
 
 
 def test_rawvideo_input_args_carry_the_geometry():
@@ -203,7 +203,7 @@ def test_ffmpeg_launches_never_grab_the_tty(monkeypatch):
     # launch must keep ffmpeg off the tty: -nostdin in the args AND
     # stdin=subprocess.DEVNULL. (The capture pipe is exempt: its stdin is the
     # frame pipe.)
-    from octacam.writer import _reporting_args
+    from octacam.transcode import _reporting_args
 
     def assert_off_tty(cmd, kwargs, what):
         assert "-nostdin" in cmd, f"{what}: missing -nostdin in {cmd}"

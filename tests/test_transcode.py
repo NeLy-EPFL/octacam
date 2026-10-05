@@ -1,4 +1,4 @@
-"""`octacam process`: writer dispatch + CLI folder/file/summary resolution."""
+"""`octacam process`: the transcoder + CLI folder/file/summary resolution."""
 
 import json
 
@@ -7,16 +7,19 @@ import pytest
 from typer.testing import CliRunner
 
 from octacam.cli import app
-from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
-from octacam.writer import (
+from octacam.transcode import (
+    PARTIAL_INFIX,
     TranscodeProgress,
     _parse_progress,
+    _partial_path,
     _reporting_args,
+    atomic_output,
     is_partial_transcode,
     transcode_encoded,
     transcode_file,
     transcode_raw,
 )
+from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
 
 runner = CliRunner()
 cv2 = pytest.importorskip("cv2")
@@ -82,7 +85,7 @@ def _summary(folder, cameras, fps_target=10.0, *, nested=False):
     )
 
 
-# ------------------------------------------------------------------ writer
+# -------------------------------------------------------------- transcoder
 
 
 def test_transcode_file_raw_to_mp4(tmp_path):
@@ -110,7 +113,7 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
         captured["args"] = args
         open(args[-1], "wb").close()  # a real run leaves the output file in place
 
-    monkeypatch.setattr("octacam.writer._run_ffmpeg", fake_run)
+    monkeypatch.setattr("octacam.transcode.run_ffmpeg", fake_run)
     transcode_encoded(
         tmp_path / "cam.mkv",
         tmp_path / "cam.mp4",
@@ -129,7 +132,7 @@ def test_transcode_file_gives_the_4_2_0_rule_its_frame_size(tmp_path, monkeypatc
     # size: without one an odd side cannot be ruled out.
     captured = {}
     monkeypatch.setattr(
-        "octacam.writer._run_ffmpeg", lambda args, *a, **k: captured.update(args=args)
+        "octacam.transcode.run_ffmpeg", lambda args, *a, **k: captured.update(args=args)
     )
     src, out = tmp_path / "in.mkv", tmp_path / "out.mp4"
     transcode_file(src, out, "-c:v libx264 -pix_fmt gray")
@@ -330,7 +333,7 @@ def test_interrupt_does_not_clobber_existing_output(tmp_path):
 
 def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
     # transcode_encoded (re-encode of an already-encoded source) shares
-    # _atomic_output, so an interrupt mid-re-encode must also leave no output
+    # atomic_output, so an interrupt mid-re-encode must also leave no output
     # and no temp behind.
     src = _make_mkv(tmp_path / "cam.mkv", _frame(64, 48))
     out = tmp_path / "out.mp4"
@@ -769,10 +772,10 @@ def test_process_cli_octacam_progress_style_is_default(tmp_path):
 
 
 def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
-    # Ctrl-C mid-batch through the REAL transcode_file/_atomic_output path: stop
+    # Ctrl-C mid-batch through the REAL transcode_file/atomic_output path: stop
     # cleanly with the SIGINT exit code, keep the finished file's renamed output,
     # and leave the interrupted file with neither a final nor a temp artifact.
-    import octacam.writer as writer
+    import octacam.transcode as transcode
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "a.raw", frame)
@@ -789,7 +792,7 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
         if len(calls) == 2:
             raise KeyboardInterrupt  # ...then Ctrl-C lands during the 2nd file
 
-    monkeypatch.setattr(writer, "_run_ffmpeg", fake_run_ffmpeg)
+    monkeypatch.setattr(transcode, "run_ffmpeg", fake_run_ffmpeg)
     result = _run(str(tmp_path), "--no-grid", "--no-transfer")
     assert result.exit_code == 130, result.output  # 128 + SIGINT
     assert len(calls) == 2  # stopped at the interrupted file, no further jobs
@@ -802,8 +805,8 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
 def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
     # The --progress-style ffmpeg path runs ffmpeg via subprocess.run (not Popen);
     # a Ctrl-C there must still discard the partial temp — the cleanup lives in
-    # _atomic_output, wrapping both progress modes.
-    import octacam.writer as writer
+    # atomic_output, wrapping both progress modes.
+    import octacam.transcode as transcode
 
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
@@ -812,7 +815,7 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
         open(args[-1], "wb").close()  # ffmpeg wrote a partial file...
         raise KeyboardInterrupt  # ...then the terminal's SIGINT arrives
 
-    monkeypatch.setattr(writer.subprocess, "run", fake_run)
+    monkeypatch.setattr(transcode.subprocess, "run", fake_run)
     with pytest.raises(KeyboardInterrupt):
         transcode_raw(
             raw,
@@ -830,7 +833,6 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
 def test_transcode_skips_orphaned_partial_files(tmp_path):
     # A partial temp file a hard kill orphaned must not be picked up as a job.
     from octacam.cli import _transcode_jobs
-    from octacam.writer import _partial_path
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam.raw", frame)
@@ -856,15 +858,13 @@ def test_process_cli_rejects_unknown_progress_style(tmp_path):
 
 # --- concurrent transcodes of one output -------------------------------------
 # The transcode temp name used to be deterministic (".<stem>.octacam-part<ext>")
-# and _atomic_output unlinked it on entry, so two `octacam process` runs over one
+# and atomic_output unlinked it on entry, so two `octacam process` runs over one
 # folder — trivially, `--last` in two terminals — each destroyed the other's
 # in-flight temp and then renamed a file it had not written onto the output.
 # octacam.transfer._temp_path had already solved exactly this with pid+uuid.
 
 
 def test_partial_path_is_unique_but_still_muxer_inferable(tmp_path):
-    from octacam.writer import PARTIAL_INFIX, _partial_path
-
     out = tmp_path / "cam.mp4"
     a, b = _partial_path(out), _partial_path(out)
     assert a != b, "two runs must not share one temp name"
@@ -877,13 +877,11 @@ def test_partial_path_is_unique_but_still_muxer_inferable(tmp_path):
 
 
 def test_concurrent_atomic_outputs_do_not_clobber_each_other(tmp_path):
-    from octacam.writer import _atomic_output
-
     out = tmp_path / "cam.mp4"
-    with _atomic_output(out) as first:
+    with atomic_output(out) as first:
         first.write_bytes(b"AAAA")
         # A second run starting while the first is still encoding.
-        with _atomic_output(out) as second:
+        with atomic_output(out) as second:
             assert second != first
             assert first.exists(), "the second run deleted the first's live temp"
             assert first.read_bytes() == b"AAAA"
@@ -899,8 +897,6 @@ def test_orphaned_partials_are_still_reclaimed(tmp_path):
     # Uniqueness must not turn every hard kill into permanently leaked disk:
     # a temp nobody holds open is an orphan and is reclaimed on the next run,
     # including one left by the older deterministic-name octacam.
-    from octacam.writer import PARTIAL_INFIX, _atomic_output, _partial_path
-
     out = tmp_path / "cam.mp4"
     orphan = _partial_path(out)
     orphan.write_bytes(b"x" * 64)
@@ -910,7 +906,7 @@ def test_orphaned_partials_are_still_reclaimed(tmp_path):
     other_orphan = _partial_path(other)
     other_orphan.write_bytes(b"z" * 64)
 
-    with _atomic_output(out) as tmp:
+    with atomic_output(out) as tmp:
         assert not orphan.exists(), "orphan not reclaimed"
         assert not legacy.exists(), "legacy-format orphan not reclaimed"
         assert other_orphan.exists(), "swept a different output's temp"
@@ -958,14 +954,12 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     # A camera name only has to be a single path segment, so "cam[1]" is legal.
     # Unescaped, its sweep pattern is a character class matching "cam1" — which
     # would delete a *different* camera's in-flight temp.
-    from octacam.writer import _atomic_output, _partial_path
-
     bracket = tmp_path / "cam[1].mp4"
     plain = tmp_path / "cam1.mp4"
     victim = _partial_path(plain)
     victim.write_bytes(b"another camera's work")
 
-    with _atomic_output(bracket) as tmp:
+    with atomic_output(bracket) as tmp:
         assert victim.exists(), "sweep matched the wrong camera's temp"
         tmp.write_bytes(b"ok")
     assert bracket.read_bytes() == b"ok"
@@ -974,7 +968,7 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     # ...and its own orphans are still reclaimed.
     own = _partial_path(bracket)
     own.write_bytes(b"orphan")
-    with _atomic_output(bracket) as tmp:
+    with atomic_output(bracket) as tmp:
         assert not own.exists()
         tmp.write_bytes(b"ok2")
     assert bracket.read_bytes() == b"ok2"

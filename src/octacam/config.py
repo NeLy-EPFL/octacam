@@ -33,6 +33,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from octacam._compat import tomllib
+from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 from octacam.transform import (
     RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
@@ -40,7 +41,6 @@ from octacam.transform import (
 )
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
-    DEFAULT_TRANSCODE_FFMPEG_PARAMS,
     FORMATS,
     NVENC_H264_PARAMS,
     VideoFormat,
