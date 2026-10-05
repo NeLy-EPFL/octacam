@@ -715,11 +715,14 @@ def test_retrieve_accepts_non_mono8_frame_when_array_not_wanted():
 
 
 def test_close_deinits_releases_and_is_idempotent():
-    backend, cam = _open_backend()
+    backend, cam = _grabbing_backend()
     backend.close()
-    assert not backend.is_open()
+    assert not backend.is_open() and not backend.is_grabbing()
     assert cam.initialized is False and cam.released is True
     backend.close()  # second close is a no-op
+    backend.trigger.begin_grab()  # a stop race: the hand-off still reads grabbing
+    backend.trigger_once()
+    assert backend.retrieve(10, lambda: True) is None
 
 
 def test_enumerate_selects_requested_and_releases_the_rest(fake_facade):

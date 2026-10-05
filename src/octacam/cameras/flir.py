@@ -554,6 +554,8 @@ class FlirBackend(GenICamTriggerConfig, CameraBackend):
                 pass
 
     def _fire_trigger(self) -> bool:
+        if self._cam is None:
+            return False
         spin = _spin()
         try:
             spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()

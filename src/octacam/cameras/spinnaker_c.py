@@ -1063,6 +1063,8 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
             pass
 
     def _fire_trigger(self) -> bool:
+        if self._cam is None:
+            return False
         try:
             _spin().execute_command(self._nodemap, "TriggerSoftware")
         except BackendError:

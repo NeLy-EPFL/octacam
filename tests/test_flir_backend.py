@@ -177,6 +177,7 @@ def backend(monkeypatch):
             CBooleanPtr=_identity,
             CEnumerationPtr=_identity,
             CStringPtr=_identity,
+            CCommandPtr=_identity,
         ),
     )
     cam = SimpleNamespace(
@@ -328,6 +329,37 @@ def test_a_mono8_frame_is_copied_with_its_timestamp(backend, monkeypatch):
     array, timestamp = fetch(wants_array=True)
     assert array.dtype == np.uint8 and array is not image.array and timestamp == 7
     assert image.released == 1
+    assert backend.last_trigger_index is None  # a free-run frame answers no trigger
+
+
+class CommandNode:
+    def __init__(self, refusals=0):
+        self.refusals = refusals
+        self.executed = 0
+
+    def Execute(self):
+        if self.refusals:
+            self.refusals -= 1
+            raise FakeSpinnakerException("TriggerSoftware is not writable")
+        self.executed += 1
+
+
+def _software_grab(backend, monkeypatch, image, refusals=0):
+    """A started record grab whose TriggerSoftware node counts its executions."""
+    _grab(backend, monkeypatch, image, record=True)
+    command = CommandNode(refusals)
+    backend._cam.GetNodeMap().nodes["TriggerSoftware"] = command
+    return command
+
+
+def test_close_mid_grab_ends_it_and_retrieve_stays_quiet(backend, monkeypatch):
+    _software_grab(backend, monkeypatch, FakeImage())
+    backend.close()
+    assert backend.is_grabbing() is False
+    backend.trigger.begin_grab()  # a stop race: the hand-off still reads grabbing
+    backend.trigger_once()
+    assert backend.retrieve(10, lambda: True) is None
+    assert backend.retrieve_freerun(10, lambda: True) is None
 
 
 # ------------------------------------------------------ incomplete-image log
