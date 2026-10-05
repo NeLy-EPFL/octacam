@@ -57,24 +57,24 @@ def create_app(
     hub = Hub()
     plugins = controller.plugins
     plugins.attach(broadcast=hub.publish)
+    # Resolved once, so the mounts and /api/system agree on which plugins have a UI.
+    plugin_web: dict[str, Path] = {}
     for p in plugins.plugins:
-        if p.web_dir is not None and not p.web_dir.is_dir():
+        if p.web_dir is None:
+            continue
+        if not p.web_dir.is_dir():
             log.warning(
                 "Plugin %r: web_dir %s does not exist; skipping", p.name, p.web_dir
             )
+            continue
+        plugin_web[p.name] = p.web_dir
     state = AppState(
         controller,
         hub,
         config,
         config_dir,
         raw_config=config_writer.load_raw_config(config_dir) if config_dir else {},
-        # Resolved once, so the mounts and /api/system agree on which plugins
-        # have a UI.
-        plugin_web={
-            p.name: p.web_dir
-            for p in plugins.plugins
-            if p.web_dir is not None and p.web_dir.is_dir()
-        },
+        plugin_web=plugin_web,
     )
 
     @contextlib.asynccontextmanager
