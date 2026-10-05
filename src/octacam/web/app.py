@@ -50,10 +50,11 @@ def _default_shutdown() -> None:
 def create_app(
     controller: RecordingController,
     config: OctacamConfig,
-    config_dir: str = "",
     shutdown_callback: Callable[[], None] = _default_shutdown,
 ) -> FastAPI:
-    """The GUI's app for ``controller``, serving the plugins it was built with."""
+    """The GUI's app for ``controller``, serving the plugins it was built with
+    and saving to its config dir."""
+    config_dir = str(controller.config_dir or "")
     hub = Hub()
     plugins = controller.plugins
     plugins.attach(broadcast=hub.publish)

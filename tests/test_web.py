@@ -31,10 +31,9 @@ def client(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    # As cli.gui does: the app and the controller share the config dir.
     controller = RecordingController(system, settings, config_dir=tmp_path)
     controller.start_preview()
-    app = create_app(controller, config, config_dir=str(tmp_path))
+    app = create_app(controller, config)
     try:
         with TestClient(app) as test_client:
             test_client.controller = controller
@@ -53,13 +52,12 @@ def shutdown_client(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
+    controller = RecordingController(system, settings, config_dir=tmp_path)
     controller.start_preview()
     shutdown = Mock()
     app = create_app(
         controller,
         config,
-        config_dir=str(tmp_path),
         shutdown_callback=shutdown,
     )
     try:
@@ -157,8 +155,8 @@ def test_deferred_startup_serves_then_fills_in(tmp_path):
     pending = CameraSystem.pending()
     assert len(pending) == 0
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
-    controller = RecordingController(pending, settings, ready=False)
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    controller = RecordingController(pending, settings, config_dir=tmp_path, ready=False)
+    app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
             sys0 = client.get("/api/system").json()
@@ -544,9 +542,11 @@ def test_plugin_contributions_wired_into_app(tmp_path):
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
     stub = StubPlugin()
-    controller = RecordingController(system, settings, PluginManager([stub]))
+    controller = RecordingController(
+        system, settings, PluginManager([stub]), config_dir=tmp_path
+    )
     controller.start_preview()
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig())
     assert stub.controller is controller
     try:
         with TestClient(app) as client:
@@ -597,9 +597,11 @@ def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings, PluginManager([RaisingPlugin()]))
+    controller = RecordingController(
+        system, settings, PluginManager([RaisingPlugin()]), config_dir=tmp_path
+    )
     controller.start_preview()
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
             with client.websocket_connect("/api/ws") as ws:
@@ -638,9 +640,11 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings, PluginManager([StubWebPlugin()]))
+    controller = RecordingController(
+        system, settings, PluginManager([StubWebPlugin()]), config_dir=tmp_path
+    )
     controller.start_preview()
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
             # /api/system advertises the entry module + css under the plugin entry
@@ -673,9 +677,11 @@ def test_plugin_with_a_missing_web_dir_gets_no_ui_and_a_warning(tmp_path, caplog
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
-    controller = RecordingController(system, settings, PluginManager([StubWebPlugin()]))
+    controller = RecordingController(
+        system, settings, PluginManager([StubWebPlugin()]), config_dir=tmp_path
+    )
     try:
-        app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+        app = create_app(controller, OctacamConfig())
         assert "web_dir" in caplog.text and "does not exist" in caplog.text
         with TestClient(app) as client:
             assert "web" not in client.get("/api/system").json()["plugins"]["stub"]
@@ -960,8 +966,8 @@ def _fake_rig_client(tmp_path, serials):
     """A client for a rig of fake cameras whose config lists ``serials``."""
     system = CameraSystem(serials, backend="fake")
     settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
-    controller = RecordingController(system, settings)
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    controller = RecordingController(system, settings, config_dir=tmp_path)
+    app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as test_client:
             yield test_client
@@ -1310,7 +1316,7 @@ def test_camera_feature_reset_reads_the_file_the_camera_loads(tmp_path):
     assert system.extensions == ("fake", "pfs")
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
     controller = RecordingController(system, settings, config_dir=tmp_path)
-    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
             baseline = _exposure(client)
@@ -1353,9 +1359,9 @@ def _save_client(tmp_path, config_dir):
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
-    controller = RecordingController(system, settings)
+    controller = RecordingController(system, settings, config_dir=config_dir)
     controller.start_preview()
-    app = create_app(controller, config, config_dir=str(config_dir))
+    app = create_app(controller, config)
     return controller, app
 
 

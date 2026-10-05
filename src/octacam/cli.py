@@ -544,7 +544,7 @@ def gui(
     app = None
     init_thread: threading.Thread | None = None
     try:
-        app = create_app(controller, config, config_dir=str(config_dir))
+        app = create_app(controller, config)
         init_thread = threading.Thread(
             target=_initialize_rig,
             args=(app.state.app_state,),
