@@ -245,7 +245,7 @@ def record(
     )
 
     # 0 frames (usually a trigger that never fired) fails the exit code.
-    empty = [c.name for c in system if c.frames_recorded == 0]
+    empty = [c.name for c in system if c.take is None or c.take.frames == 0]
     if empty:
         sys.exit(
             f"{len(empty)} camera(s) recorded 0 frames ({', '.join(empty)}); "

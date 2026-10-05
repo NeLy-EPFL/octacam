@@ -2,9 +2,9 @@
 which stage limits it.
 
 It drives the real ``CameraBackend.retrieve`` and the real writers, but in loops
-of its own: it deliberately re-implements the grab loop rather than reuse
-``Camera._record_loop``, so the record path carries no instrumentation and each
-ceiling is measured in isolation. Its only seams into the record path, the
+of its own: it deliberately re-implements the grab loop rather than reuse the
+record loop (``CameraTake``), so the record path carries no instrumentation and
+each ceiling is measured in isolation. Its only seams into the record path, the
 read-only ``Camera.backend`` and ``AsyncFrameWriter(profile=...)``, cost a
 recording nothing.
 
@@ -42,12 +42,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from octacam.cameras.base import (
-    GRAB_TIMEOUT_MS,
-    WRITER_QUEUE_SIZE,
-    Camera,
-    CameraBackend,
-)
+from octacam.cameras.base import WRITER_QUEUE_SIZE, Camera, CameraBackend
+from octacam.cameras.take import GRAB_TIMEOUT_MS
 from octacam.transform import DisplayTransform, apply_display_transform
 from octacam.trigger import PreciseTimer
 from octacam.writer import (
@@ -385,7 +381,7 @@ def _wait(seconds: float, cancel: threading.Event | None) -> None:
 
 def _baked_transform(camera: Camera, record_form: str) -> DisplayTransform | None:
     """The display transform a recording bakes into *camera*'s frames, if any (as
-    :meth:`Camera.start_record` decides)."""
+    a ``CameraTake`` decides)."""
     if record_form == "display" and not camera.display_transform.is_identity:
         return camera.display_transform
     return None

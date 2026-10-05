@@ -30,6 +30,7 @@ import numpy as np
 
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
+from octacam.cameras.take import CameraStats, CameraTake
 from octacam.config import RecordingSettings, normalize_dir, safe_segment
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
@@ -270,6 +271,7 @@ class RecordingController:
         self._sync: dict | None = None
         self._completed: bool | None = None  # ran to its end (None: no take yet)
         self._recording_cameras: list[str] = []  # whose record grab started
+        self._camera_takes: list[CameraTake] = []  # every camera's, in camera order
         self._delivery_profiles: dict[str, DeliveryProfile | None] = {}  # by serial
         self._train_end: float | None = None  # monotonic, once the train started
         # Bumped per countdown, so a client that missed the states between two
@@ -748,6 +750,7 @@ class RecordingController:
             self._completed = None
             self._train_end = None
             self._recording_cameras = []
+            self._camera_takes = []
             self._delivery_profiles = profiles
             hooks_timeout_s = start_sequence_timeout_s(clock.period_ns, prime)
             # Under the lock only in the rare race where the export was skipped.
@@ -774,12 +777,14 @@ class RecordingController:
                     save_dir,
                     settings.fps,
                     formats,
-                    settings.record_form,
-                    use_software_trigger=use_software_trigger,
+                    clock,
+                    record_form=settings.record_form,
                     writer_queue_size=settings.writer_queue_size,
-                    pulse_clock=clock,
                     hold=prime,
                 )
+                self._camera_takes = [
+                    camera.take for camera in self.camera_system if camera.take is not None
+                ]
             except Exception as e:
                 # Some cameras may already be writing with no monitor to stop
                 # them: stop them all and fall into the preview re-arm below.
@@ -811,7 +816,9 @@ class RecordingController:
                 # keeps its geometry and stays transcodable if the process dies
                 # before teardown rewrites it.
                 self._snapshot_config(plugin_params, camera_params)
-                self._write_recording_summary(aborted=True)
+                self._write_recording_summary(
+                    True, [take.stats() for take in self._camera_takes]
+                )
 
                 self._aborted = False
                 self._stop_event.clear()
@@ -843,7 +850,8 @@ class RecordingController:
         try:
             if prime and not self._stop_event.is_set():
                 self._prime_cameras(settings, plugin_params, started, clock.period_ns)
-                self.camera_system.arm_counting()
+                for take in self._camera_takes:
+                    take.arm_counting()
             if not self._stop_event.is_set():
                 if use_software_trigger:
                     self.camera_system.start_software_trigger(settings.duration_s)
@@ -916,9 +924,9 @@ class RecordingController:
         """Recording cameras that have answered no priming pulse yet (a camera
         whose record grab failed to start can never answer one)."""
         return [
-            camera.name
-            for camera in self.camera_system
-            if camera.name in recording and camera.primed_frames == 0
+            take.name
+            for take in self._camera_takes
+            if take.name in recording and take.primed_frames == 0
         ]
 
     def _resume_preview(self) -> str | None:
@@ -1145,8 +1153,9 @@ class RecordingController:
             # (a camera that missed its last pulses cannot know it before then);
             # the duration's deadline is only the backstop.
             reported: dict[str, int] = {}
+            takes = self._camera_takes
             while not self._stop_event.is_set():
-                if self.camera_system.all_pulses_complete:
+                if takes and all(take.tracker.complete for take in takes):
                     break
                 train_end = self._train_end
                 if train_end is not None and time.monotonic() >= train_end:
@@ -1172,12 +1181,13 @@ class RecordingController:
         clock = self._pulse_clock
         fill_to = clock.count if completed and clock is not None and clock.fill else None
         self.camera_system.stop(fill_to)
-        self._sync = self._check_sync(completed)
+        stats = [take.stats() for take in self._camera_takes]
+        self._sync = self._check_sync(stats, completed)
         for message in self._sync["warnings"]:
             self._event("warning", message)
         for message in self._sync["notes"]:
             self._event("info", message)
-        for camera in self.camera_system:
+        for camera in stats:
             if camera.writer_failed:
                 self._event(
                     "error",
@@ -1187,7 +1197,7 @@ class RecordingController:
 
         # A camera without frames wrote an empty file and its writer did not
         # fail, so say it here (usually an external trigger that never fired).
-        empty = [c.name for c in self.camera_system if c.frames_recorded == 0]
+        empty = [camera.name for camera in stats if camera.frames == 0]
         if empty:
             self._event(
                 "error",
@@ -1203,9 +1213,9 @@ class RecordingController:
 
         # The grab threads are joined (stats final) and save_dir is still this
         # recording's (it is incremented below).
-        self._write_recording_summary(self._aborted)
+        self._write_recording_summary(self._aborted, stats)
         if self._settings.save_frame_timestamps:
-            self._write_timestamps()
+            self._write_timestamps(stats)
         self._note_in_session_cache()
 
         # The state leaves the active set below, before the off-lock disarm and
@@ -1244,25 +1254,25 @@ class RecordingController:
 
     def _report_missed_pulses(self, reported: dict[str, int]) -> None:
         """Tell the operator, while recording, that a camera is missing pulses."""
-        for camera in self.camera_system:
-            missed = camera.missed_pulses
-            before = reported.get(camera.name, 0)
+        for take in self._camera_takes:
+            missed = list(take.tracker.missed)
+            before = reported.get(take.name, 0)
             if len(missed) > before:
-                reported[camera.name] = len(missed)
+                reported[take.name] = len(missed)
                 new = missed[before:]
                 shown = ", ".join(str(p) for p in new[:5]) + (" …" if len(new) > 5 else "")
                 self._event(
                     "warning",
-                    f"Camera {camera.name} missed trigger pulse(s) {shown} "
+                    f"Camera {take.name} missed trigger pulse(s) {shown} "
                     f"({len(missed)} so far)"
                     + (
                         "; filled with the previous frame to keep the cameras aligned"
-                        if camera.pulse_clock is not None and camera.pulse_clock.fill
+                        if take.clock.fill
                         else ""
                     ),
                 )
 
-    def _check_sync(self, completed: bool) -> dict:
+    def _check_sync(self, stats: list[CameraStats], completed: bool) -> dict:
         """Whether frame k is the same trigger pulse in every camera, and why not.
 
         Fills keep the cameras aligned, so missed pulses and writer drops are
@@ -1282,9 +1292,7 @@ class RecordingController:
         notes: list[str] = []
         offsets: dict[str, int | None] = {}
         ok = True
-        not_started = [
-            c.name for c in self.camera_system if c.name not in self._recording_cameras
-        ]
+        not_started = [c.name for c in stats if c.name not in self._recording_cameras]
         if not_started:
             ok = False
             warnings.append(
@@ -1292,9 +1300,7 @@ class RecordingController:
                 "has no video from them"
             )
         silent = [
-            c.name
-            for c in self.camera_system
-            if c.name in self._recording_cameras and not c.frames_recorded
+            c.name for c in stats if c.name in self._recording_cameras and not c.frames
         ]
         if silent:
             ok = False
@@ -1302,7 +1308,7 @@ class RecordingController:
                 f"Camera(s) {', '.join(silent)} recorded no frame: there is no video "
                 "to align with the other cameras"
             )
-        cams = [c for c in self.camera_system if c.frames_recorded]
+        cams = [c for c in stats if c.frames]
         for camera in cams:
             name = camera.name
             missed = camera.missed_pulses
@@ -1331,7 +1337,7 @@ class RecordingController:
             if camera.writer_skipped:
                 ok = False
                 warnings.append(
-                    f"Camera {name}: {camera.writer_skipped} frame(s) the writer "
+                    f"Camera {name}: {len(camera.writer_skipped)} frame(s) the writer "
                     "could not accept were skipped, not filled (the encoder or disk "
                     "could not keep up), so video frame k is no longer pulse k; map "
                     f"frames to pulses with pulse_index in {TIMESTAMPS_FILENAME}"
@@ -1350,7 +1356,7 @@ class RecordingController:
                 )
             if camera.unclocked_frames:
                 ok = False
-                real_frames = camera.frames_recorded - len(camera.dropped_indices)
+                real_frames = camera.frames - len(camera.dropped_indices)
                 if camera.unclocked_frames < real_frames:
                     # A stray frame without a timestamp on a clocked camera: it
                     # was placed as the next pulse, so only a miss right before
@@ -1372,7 +1378,7 @@ class RecordingController:
                     "(corrected; not a lost frame)"
                 )
         if completed and clock is not None and clock.fill and clock.count:
-            short = [c.name for c in cams if c.frames_recorded != clock.count]
+            short = [c.name for c in cams if c.frames != clock.count]
             if short:
                 ok = False
                 warnings.append(
@@ -1390,9 +1396,7 @@ class RecordingController:
         for camera in cams:
             rows = [
                 (arrival, pulse)
-                for arrival, pulse in zip(
-                    camera.frame_arrival_ns, camera.frame_pulse_index, strict=False
-                )
+                for arrival, pulse in zip(camera.arrival_ns, camera.pulse_index, strict=False)
                 if arrival
             ][:16]
             if period and len(rows) >= 4:
@@ -1404,7 +1408,7 @@ class RecordingController:
         groups: dict[DeliveryProfile | str, list[str]] = {}
         for camera in cams:
             if camera.name in delays:
-                profile = self._delivery_profiles.get(camera.serial_number)
+                profile = self._delivery_profiles.get(camera.serial)
                 key = profile if profile is not None else camera.name
                 groups.setdefault(key, []).append(camera.name)
         for members in groups.values():
@@ -1578,14 +1582,14 @@ class RecordingController:
         except Exception:
             log.exception("Failed to save the camera parameter files to %s", info_dir)
 
-    def _write_recording_summary(self, aborted: bool) -> None:
+    def _write_recording_summary(self, aborted: bool, stats: list[CameraStats]) -> None:
         """Write the summary (its ``file`` entries name videos in the recording
         folder)."""
         folder = self._settings.save_dir
         try:
             summary = build_recording_summary(
                 self._settings,
-                list(self.camera_system),
+                stats,
                 self._recording_start_wall_ns,
                 aborted,
                 pulse_clock=self._pulse_clock,
@@ -1597,11 +1601,11 @@ class RecordingController:
         except Exception:
             log.exception("Failed to write the recording summary in %s", folder)
 
-    def _write_timestamps(self) -> None:
+    def _write_timestamps(self, stats: list[CameraStats]) -> None:
         """Write every camera's per-frame series into ``timestamps.npz``."""
         folder = self._settings.save_dir
         try:
-            arrays = build_timestamps_arrays(list(self.camera_system))
+            arrays = build_timestamps_arrays(stats)
             log.info("Wrote frame timestamps: %s", write_timestamps(folder, arrays))
         except Exception:
             log.exception("Failed to write the frame timestamps in %s", folder)
@@ -1617,7 +1621,7 @@ class RecordingController:
             log.exception("Failed to note %s in the recording cache", folder)
 
     def _count_started(self) -> int:
-        return sum(1 for camera in self.camera_system if camera.started)
+        return sum(1 for take in self._camera_takes if take.started)
 
     # ---------------------------------------------------------------- status
 
@@ -1629,6 +1633,7 @@ class RecordingController:
             if self._state == "recording" and self._deadline is not None:
                 remaining_ms = max(0, round((self._deadline - time.monotonic()) * 1000))
                 recording_id = self._recording_seq
+            failed = {take.serial for take in self._camera_takes if take.writer.failed}
         try:
             free_bytes = shutil.disk_usage(
                 next(
@@ -1650,15 +1655,22 @@ class RecordingController:
             "disk_free_bytes": free_bytes,
             "settings": dataclasses.asdict(settings),
             "cameras": [
-                {
-                    "name": camera.name,
-                    "serial": camera.serial_number,
-                    "fps": round(camera.resulting_fps, 2),
-                    "frames": camera.frames_recorded,
-                    "dropped": camera.dropped_count,
-                    "missed": camera.missed_count,
-                    "writer_failed": camera.writer_failed,
-                }
+                _camera_status(camera, camera.serial_number in failed)
                 for camera in self.camera_system
             ],
         }
+
+
+def _camera_status(camera, writer_failed: bool) -> dict:
+    """One camera's telemetry: the fps readout and its take's live counts (0
+    without one: the preview never shows a stale recording's)."""
+    take = camera.take
+    return {
+        "name": camera.name,
+        "serial": camera.serial_number,
+        "fps": round(camera.frame_for_display.fps, 2),
+        "frames": take.frames if take else 0,
+        "dropped": take.dropped_count if take else 0,
+        "missed": len(take.tracker.missed) if take else 0,
+        "writer_failed": writer_failed,
+    }

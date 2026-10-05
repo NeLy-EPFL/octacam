@@ -13,8 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from octacam.cameras.base import WRITER_QUEUE_SIZE, BackendError, Camera
 from octacam.cameras.registry import (
     BackendSpec,
@@ -305,14 +303,14 @@ class CameraSystem:
         save_dir: str | Path,
         fps: float,
         video_format: VideoFormat | list[VideoFormat],
+        clock: PulseClock,
+        *,
         record_form: str = "display",
-        use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
-        max_frames: int | None = None,
-        pulse_clock: PulseClock | None = None,
         hold: bool = False,
     ) -> list[str]:
-        """Start recording on every camera; return the names that started.
+        """Start a take on every camera (each camera's ``take``, even one that
+        fails to start); return the names that started.
 
         Arguments as :meth:`Camera.start_record`. ``video_format`` is one format,
         or one per camera in ``self.cameras`` order (a GPU recording's overflow
@@ -339,11 +337,9 @@ class CameraSystem:
                 str(save_path),
                 fps,
                 fmt,
-                record_form,
-                software_trigger=use_software_trigger,
+                clock,
+                record_form=record_form,
                 queue_size=writer_queue_size,
-                max_frames=max_frames,
-                pulse_clock=pulse_clock,
                 hold=hold,
             )
 
@@ -378,21 +374,6 @@ class CameraSystem:
         for camera in self.cameras:
             camera.set_trigger_source(use_software_trigger)
 
-    @property
-    def all_cameras_started(self) -> bool:
-        return all(camera.started for camera in self.cameras)
-
-    def get_frames_and_fps(self) -> list[tuple[np.ndarray | None, float]]:
-        return [
-            (camera.frame_for_display.pop(), camera.resulting_fps)
-            for camera in self.cameras
-        ]
-
-    def arm_counting(self) -> None:
-        """Start counting pulses on every camera (ends a priming hold)."""
-        for camera in self.cameras:
-            camera.arm_counting()
-
     def prime_software_trigger(self, pulses: int, fps: float, timeout_s: float = 1.0) -> None:
         """Fire ``pulses`` sacrificial software triggers at every camera (a GS3
         ignores its first triggers after acquisition start); their frames are
@@ -410,14 +391,9 @@ class CameraSystem:
                 time.sleep(0.002)
             time.sleep(interval)
 
-    @property
-    def all_pulses_complete(self) -> bool:
-        """True once every camera has accounted for its train's last pulse."""
-        return bool(self.cameras) and all(c.pulses_complete for c in self.cameras)
-
     def stop(self, fill_to: int | None = None) -> None:
-        """Stop every grab loop. ``fill_to`` (a completed train's pulse count)
-        pads each recording camera's video to that many frames."""
+        """Stop and join every grab loop. ``fill_to`` (a completed train's pulse
+        count) pads each recording camera's video to that many frames."""
         for camera in self.cameras:
             camera.stop(fill_to)
         for camera in self.cameras:

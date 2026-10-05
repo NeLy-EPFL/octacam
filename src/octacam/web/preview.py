@@ -251,8 +251,8 @@ async def preview_loop(
                 groups=groups,
                 number=numbers[index],
                 timestamp_ns=time.time_ns(),
-                fps=camera.resulting_fps,
-                dropped=camera.dropped_count,
+                fps=camera.frame_for_display.fps,
+                dropped=camera.take.dropped_count if camera.take else 0,
                 recording=recording,
             ))
         if not jobs:

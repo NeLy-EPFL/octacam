@@ -102,8 +102,7 @@ def test_writer_queue_size_reaches_each_writer(fake_system, tmp_path):
     # Writers are open the moment start_recording() returns ok (created under the
     # controller lock), before the countdown ends — inspect them now.
     for camera in fake_system:
-        assert camera._video_writer is not None
-        assert camera._video_writer._max_queue_size == 7
+        assert camera.take.writer.max_queue_size == 7
     controller.join(timeout=20)
 
 

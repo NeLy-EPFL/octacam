@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-from helpers import wait_until
+from helpers import camera_stats, wait_until
 
 import octacam.cameras._trigger_handoff as handoff
 import octacam.controller as controller_module
@@ -735,7 +735,7 @@ def test_a_frame_the_writer_refuses_is_filled(fake_system, tmp_path):
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write = writer.write
         calls = {"n": 0}
 
@@ -870,9 +870,8 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
     backend, camera = _direct_camera("FAKE-P")
     path = tmp_path / "cam.raw"
     clock = PulseClock(PERIOD_NS, count=10, source="software")
-    assert camera.start_record(
-        str(path), FPS, FORMATS["raw"], pulse_clock=clock, hold=True
-    )
+    assert camera.start_record(str(path), FPS, FORMATS["raw"], clock, hold=True)
+    take = camera.take
     try:
         backend.late_triggers = {3: 100}  # ~100 fetches late: well after the arm
         for _ in range(4):
@@ -883,19 +882,20 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
             and backend.trigger.fired_index is not None,
             interval=0.001,
         )
-        assert camera.primed_frames == 3
+        assert take.primed_frames == 3
         backend.late_triggers = {}
-        camera.arm_counting()
-        assert wait_until(lambda: camera.primed_frames == 4, interval=0.001)
+        take.arm_counting()
+        assert wait_until(lambda: take.primed_frames == 4, interval=0.001)
         for _ in range(10):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
-        assert wait_until(lambda: camera.pulses_complete, interval=0.001)
+        assert wait_until(lambda: take.tracker.complete, interval=0.001)
     finally:
         camera.stop(fill_to=10)
         camera.join()
-    assert camera.primed_frames == 4 and camera.missed_pulses == []
-    assert camera.frame_pulse_index == list(range(10))
+    stats = take.stats()
+    assert stats.primed_frames == 4 and stats.missed_pulses == []
+    assert stats.pulse_index == list(range(10))
     video = np.fromfile(path, dtype=np.uint8).reshape(-1, H, W)
     np.testing.assert_array_equal(video[:, 0, 0], np.arange(10))
 
@@ -916,35 +916,30 @@ def test_a_buffered_priming_frame_is_a_straggler_at_low_fps(tmp_path):
     backend.retrieve_external = retrieve_external
     path = tmp_path / "cam.raw"
     clock = PulseClock(period, count=5, source="managed")
-    assert camera.start_record(
-        str(path),
-        10.0,
-        FORMATS["raw"],
-        software_trigger=False,
-        pulse_clock=clock,
-        hold=True,
-    )
+    assert camera.start_record(str(path), 10.0, FORMATS["raw"], clock, hold=True)
+    take = camera.take
     try:
         for _ in range(3):
             camera.trigger_once()
             time.sleep(0.01)
-        assert wait_until(lambda: camera.primed_frames == 3, interval=0.001)
+        assert wait_until(lambda: take.primed_frames == 3, interval=0.001)
         # The fourth priming pulse's frame: exposed a period after the third,
         # still in the SDK's buffer when counting starts.
         stamp = backend._clock_t0 + 3 * period
-        camera.arm_counting()
+        take.arm_counting()
         buffered.append((np.full((H, W), 3, dtype=np.uint8), stamp))
-        assert wait_until(lambda: camera.primed_frames == 4, interval=0.001)
+        assert wait_until(lambda: take.primed_frames == 4, interval=0.001)
         for _ in range(5):
             camera.trigger_once()
             time.sleep(0.01)
-        assert wait_until(lambda: camera.pulses_complete, interval=0.001)
+        assert wait_until(lambda: take.tracker.complete, interval=0.001)
     finally:
         camera.stop(fill_to=5)
         camera.join()
-    assert camera.primed_frames == 4 and camera.missed_pulses == []
-    assert camera.frame_pulse_index == list(range(5))
-    assert camera.extra_frames == 0
+    stats = take.stats()
+    assert stats.primed_frames == 4 and stats.missed_pulses == []
+    assert stats.pulse_index == list(range(5))
+    assert stats.extra_frames == 0
 
 
 # --- stray zero timestamps and fill timestamps -------------------------------- #
@@ -1040,13 +1035,7 @@ def test_fills_of_a_host_clocked_camera_are_host_time(fake_system, tmp_path):
 
 
 def test_mean_fps_of_a_series_that_runs_backward_is_zero():
-    from octacam.cameras.base import Camera
-    from octacam.cameras.fake import FakeBackend
-
-    backend: Any = FakeBackend("FAKE-T")
-    camera = Camera(backend)
-    camera._timestamps[:] = [3_600_000_000_000, 0]
-    assert camera.mean_fps == 0.0
+    assert camera_stats(timestamp_ns=[3_600_000_000_000, 0]).mean_fps == 0.0
 
 
 # --- writer overload: a sustained shortfall is skipped, not filled ------------- #
@@ -1066,7 +1055,7 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write_frame = writer._write_frame
 
         def slow(frame):
@@ -1086,8 +1075,8 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
     )
     count = summary["pulse_train"]["count"]
     cam = _cam(summary, "FAKE-0")
-    skipped = camera.writer_skipped_pulses
-    assert camera.writer_skipped == len(skipped) > 0
+    skipped = camera.take.stats().writer_skipped
+    assert len(skipped) > 0
     # The summary carries them, and the recording is no longer frame k = pulse k.
     assert cam["writer_skipped"] == len(skipped)
     assert cam["writer_skipped_pulse_indices"] == skipped[:1000]
@@ -1107,7 +1096,7 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
     # The other camera is untouched.
     assert _cam(summary, "FAKE-1")["frames"] == count
     other = next(c for c in fake_system if c.serial_number == "FAKE-1")
-    assert other.writer_skipped == 0
+    assert other.take.stats().writer_skipped == []
 
 
 def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
@@ -1121,7 +1110,7 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write_frame = writer._write_frame
         writes = {"n": 0}
 
@@ -1144,7 +1133,7 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
     )
     count = summary["pulse_train"]["count"]
     cam = _cam(summary, "FAKE-0")
-    assert camera.writer_skipped == 0
+    assert camera.take.stats().writer_skipped == []
     assert cam["writer_dropped"] > queue_size
     assert cam["frames"] == count and len(_frames(save_dir, "FAKE-0")) == count
     np.testing.assert_array_equal(arrays["FAKE-0/pulse_index"], np.arange(count))

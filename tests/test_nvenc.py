@@ -327,11 +327,13 @@ def test_summary_omits_sessions_for_non_nvenc():
 
 def test_start_record_rejects_wrong_length_format_list():
     from octacam.cameras import CameraSystem
+    from octacam.pulses import PulseClock
 
     system = CameraSystem(FAKE_SERIALS, backend="fake")
+    clock = PulseClock(33_333_333, 30, "software")
     try:
         with pytest.raises(ValueError, match="formats for"):
-            system.start_record("/tmp/x", 30.0, [FORMATS["ffmpeg"]])  # 1 fmt, 2 cams
+            system.start_record("/tmp/x", 30.0, [FORMATS["ffmpeg"]], clock)  # 1 fmt, 2 cams
     finally:
         system.close()
 

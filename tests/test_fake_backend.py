@@ -225,6 +225,7 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
     # start_record must be logged-and-skipped, not re-raised — the other cameras
     # have already launched their grab thread + ffmpeg child, so propagating would
     # abandon them half-started (and violates start_record's documented contract).
+    from octacam.pulses import PulseClock
     from octacam.writer import FORMATS
 
     system = CameraSystem(FAKE_SERIALS, backend="fake")
@@ -238,7 +239,8 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
             raise RuntimeError("insufficient resources")
 
         monkeypatch.setattr(bad, "start_record", boom)
-        started = system.start_record(tmp_path, 100.0, FORMATS["raw"])
+        clock = PulseClock(10_000_000, None, "external", fill=False)
+        started = system.start_record(tmp_path, 100.0, FORMATS["raw"], clock)
         assert started == [good.name]  # good camera started; no exception propagated
     finally:
         system.close()
@@ -282,9 +284,9 @@ def test_open_phase_raises_only_when_every_camera_fails(monkeypatch):
 
 
 def test_preview_bounds_the_timestamp_series(tmp_path):
-    # Regression (base.py:1006): a continuously-running preview (the GUI's idle
-    # steady state) must not grow self._timestamps without bound. The series is
-    # trimmed to PREVIEW_TIMESTAMPS_MAX while the rolling fps readout keeps working.
+    # A continuously-running preview (the GUI's idle steady state) must not grow
+    # its timestamp series without bound: it keeps PREVIEW_TIMESTAMPS_MAX while
+    # the rolling fps readout keeps working.
     from octacam.cameras.base import PREVIEW_TIMESTAMPS_MAX
 
     system = CameraSystem(FAKE_SERIALS, backend="fake")
@@ -293,14 +295,17 @@ def test_preview_bounds_the_timestamp_series(tmp_path):
         system.start_preview("free_running", fps=2000.0)
         cam = system.camera_at(0)
         deadline = time.monotonic() + 3.0
-        while cam.frames_recorded < PREVIEW_TIMESTAMPS_MAX and time.monotonic() < deadline:
+        while (
+            len(cam.preview_timestamps) < PREVIEW_TIMESTAMPS_MAX
+            and time.monotonic() < deadline
+        ):
             cam.frame_for_display.pop()  # drain the display slot so pushes flow
             time.sleep(0.01)
-        assert cam.frames_recorded >= PREVIEW_TIMESTAMPS_MAX
-        assert cam.resulting_fps > 0  # readout still computed from the tail
+        assert len(cam.preview_timestamps) >= PREVIEW_TIMESTAMPS_MAX
+        assert cam.frame_for_display.fps > 0  # readout still computed from the tail
         # Keep grabbing well past the cap; without trimming this would be hundreds.
         time.sleep(0.2)
-        assert cam.frames_recorded <= PREVIEW_TIMESTAMPS_MAX + 1
+        assert len(cam.preview_timestamps) <= PREVIEW_TIMESTAMPS_MAX + 1
     finally:
         system.close()
 
@@ -328,11 +333,11 @@ def test_start_preview_falls_back_to_software_when_freerun_unavailable(
         assert cam.backend.is_grabbing()
         # The fallback is a software-trigger preview: frames arrive on a trigger.
         deadline = time.monotonic() + 2.0
-        while cam.frames_recorded < 1 and time.monotonic() < deadline:
+        while not cam.preview_timestamps and time.monotonic() < deadline:
             cam.trigger_once()
             cam.frame_for_display.pop()
             time.sleep(0.02)
-        assert cam.frames_recorded >= 1  # frames flowed via the software fallback
+        assert cam.preview_timestamps  # frames flowed via the software fallback
     finally:
         system.close()
 

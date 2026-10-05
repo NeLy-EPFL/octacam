@@ -20,6 +20,7 @@ import numpy as np
 from octacam.ffmpeg import encoder_of, nvenc_max_sessions
 
 if TYPE_CHECKING:
+    from octacam.cameras.take import CameraStats
     from octacam.config import RecordingSettings
     from octacam.pulses import PulseClock
 
@@ -182,7 +183,7 @@ def _capped(indices: list[int]) -> list[int]:
 
 def build_recording_summary(
     settings: RecordingSettings,
-    cameras,
+    cameras: list[CameraStats],
     start_wall_ns: int,
     aborted: bool,
     pulse_clock: PulseClock | None = None,
@@ -190,7 +191,7 @@ def build_recording_summary(
     primed_pulses: int = 0,
     completed: bool | None = None,
 ) -> dict:
-    """The recording_summary.json payload, from finished camera stats (no I/O).
+    """The recording_summary.json payload, from each camera's stats (no I/O).
 
     ``transform_applied`` is true only when the transform was baked into the
     video (display form and a non-identity transform)."""
@@ -204,27 +205,27 @@ def build_recording_summary(
     )
     cams = []
     for camera in cameras:
-        transform = camera.display_transform
-        applied = settings.record_form == "display" and not transform.is_identity
-        size = camera.recorded_frame_size
+        applied = settings.record_form == "display" and not camera.transform.is_identity
+        size = camera.frame_size
+        dropped = camera.dropped_indices
         missed, late = camera.missed_pulses, camera.late_pulses
         cams.append(
             {
                 "name": camera.name,
-                "serial": camera.serial_number,
+                "serial": camera.serial,
                 "file": f"{camera.name}.{extension}",
                 "width": size[0] if size else None,
                 "height": size[1] if size else None,
                 "pixel_format": camera.pixel_format,
                 "fps": round(camera.mean_fps, 3),
-                "frames": camera.frames_recorded,
-                "dropped": camera.dropped_count,
-                "dropped_indices": _capped(camera.dropped_indices),
+                "frames": camera.frames,
+                "dropped": len(dropped),
+                "dropped_indices": _capped(dropped),
                 "missed_pulses": len(missed),
                 "missed_pulse_indices": _capped(missed),
                 "writer_dropped": camera.writer_dropped,
-                "writer_skipped": camera.writer_skipped,
-                "writer_skipped_pulse_indices": _capped(camera.writer_skipped_pulses),
+                "writer_skipped": len(camera.writer_skipped),
+                "writer_skipped_pulse_indices": _capped(camera.writer_skipped),
                 "late_frames": len(late),
                 "late_pulse_indices": _capped(late),
                 "extra_frames": camera.extra_frames,
@@ -232,17 +233,17 @@ def build_recording_summary(
                 "clock_mismatch": camera.clock_mismatch,
                 "timestamp_glitches": camera.timestamp_glitches,
                 "unclocked_frames": camera.unclocked_frames,
-                "stream": camera.stream_statistics,
+                "stream": camera.stream,
                 "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
                     camera.name
                 ),
                 "start_timestamp_ns": camera.start_timestamp_ns,
                 "timestamp_source": _timestamp_source(
-                    camera.frames_recorded, camera.host_fallback_count
+                    camera.frames, camera.host_fallback_count
                 ),
                 "host_fallback_count": camera.host_fallback_count,
                 "writer_failed": camera.writer_failed,
-                "transform": transform.to_dict(),
+                "transform": camera.transform.to_dict(),
                 "transform_applied": applied,
             }
         )
@@ -288,8 +289,8 @@ def build_recording_summary(
     return summary
 
 
-def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
-    """The ``timestamps.npz`` arrays, from finished camera stats (no I/O).
+def build_timestamps_arrays(cameras: list[CameraStats]) -> dict[str, np.ndarray]:
+    """The ``timestamps.npz`` arrays, from each camera's stats (no I/O).
 
     Per camera, one entry per video frame: ``"<name>/timestamp_ns"`` (int64; a
     fill carries the time its pulse was due), ``"<name>/dropped"`` (bool: a
@@ -300,11 +301,11 @@ def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
     arrays: dict[str, np.ndarray] = {}
     for camera in cameras:
         series = {
-            "timestamp_ns": (camera.frame_timestamps, np.int64),
-            "dropped": (camera.frame_dropped, bool),
-            "missed": (camera.frame_missed, bool),
-            "pulse_index": (camera.frame_pulse_index, np.int64),
-            "arrival_ns": (camera.frame_arrival_ns, np.int64),
+            "timestamp_ns": (camera.timestamp_ns, np.int64),
+            "dropped": (camera.dropped, bool),
+            "missed": (camera.missed, bool),
+            "pulse_index": (camera.pulse_index, np.int64),
+            "arrival_ns": (camera.arrival_ns, np.int64),
         }
         n = min(len(values) for values, _dtype in series.values())
         for key, (values, dtype) in series.items():

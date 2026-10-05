@@ -147,9 +147,11 @@ def test_free_running_preview_caps_the_backend_and_flows_frames(make_controller)
     # retrieve_freerun actually delivers frames — timestamps accumulate even with
     # no display consumer popping the single-slot handoff.
     wait_until(
-        lambda: any(c.frames_recorded > 1 for c in system), timeout=3.0, interval=0.05
+        lambda: any(len(c.preview_timestamps) > 1 for c in system),
+        timeout=3.0,
+        interval=0.05,
     )
-    assert any(c.frames_recorded > 1 for c in system)
+    assert any(len(c.preview_timestamps) > 1 for c in system)
 
 
 def test_software_preview_does_not_freerun(make_controller):

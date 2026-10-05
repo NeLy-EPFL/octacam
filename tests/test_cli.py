@@ -338,7 +338,7 @@ def _patch_one_camera_record(monkeypatch, tmp_path, events):
     from octacam import session_cache
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
-    cam = SimpleNamespace(serial_number="s1", name="cam1", frames_recorded=1)
+    cam = SimpleNamespace(serial_number="s1", name="cam1", take=SimpleNamespace(frames=1))
     config = OctacamConfig(
         cameras=[CameraConfig(serial_number="s1", name="cam1")],
         backend="fake",
