@@ -251,8 +251,8 @@ def _nvenc_session_cap(encoder: str) -> int | None:
 
 # --- options -------------------------------------------------------------------
 
-_PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
-_VF_OPTS = ("-vf", "-filter:v")
+PIX_FMT_OPTS = ("-pix_fmt", "-pixel_format")
+VF_OPTS = ("-vf", "-filter:v")
 # The video-codec spellings encoder_of reads, and those the 4:0:0 rule reads.
 _VIDEO_CODEC_FLAGS = ("-c:v", "-codec:v", "-vcodec", "-c:v:0")
 _VIDEO_CODEC_OPTS = ("-c:v", "-codec:v", "-vcodec", "-c", "-codec")
@@ -297,7 +297,7 @@ def encoder_of(ffmpeg_params: str) -> str | None:
 
 def pix_fmt_of(ffmpeg_params: str) -> str | None:
     """The output pixel format an ffmpeg_params string names, or None."""
-    return _param_value(ffmpeg_params, _PIX_FMT_OPTS)
+    return _param_value(ffmpeg_params, PIX_FMT_OPTS)
 
 
 def nvenc_encoder(ffmpeg_params: str) -> str | None:
@@ -350,7 +350,7 @@ def _playable_pix_fmt(
     """
     if _first_value(tokens, _VIDEO_CODEC_OPTS) not in _MONO_UNSAFE_ENCODERS:
         return tokens
-    pix_fmt = _first_value(tokens, _PIX_FMT_OPTS)
+    pix_fmt = _first_value(tokens, PIX_FMT_OPTS)
     if frame_size is None or pix_fmt not in ("gray", "yuv420p"):
         return tokens
     even = frame_size[0] % 2 == 0 and frame_size[1] % 2 == 0
@@ -372,7 +372,7 @@ def _playable_pix_fmt(
                 "these videos as flat gray; disable hardware decoding to view them",
                 *frame_size,
             )
-    i = next(i for i, tok in enumerate(tokens) if tok in _PIX_FMT_OPTS)
+    i = next(i for i, tok in enumerate(tokens) if tok in PIX_FMT_OPTS)
     return [*tokens[: i + 1], target, *tokens[i + 2 :]]
 
 
@@ -387,8 +387,8 @@ def output_args(
     which was written.
     """
     tokens = _playable_pix_fmt(shlex.split(ffmpeg_params), frame_size)
-    out_pix_fmt = _first_value(tokens, _PIX_FMT_OPTS) or ""
-    tokens, user_vfs = split_opts(tokens, _VF_OPTS)
+    out_pix_fmt = _first_value(tokens, PIX_FMT_OPTS) or ""
+    tokens, user_vfs = split_opts(tokens, VF_OPTS)
     vf = _full_range_vf(out_pix_fmt, user_vfs[-1] if user_vfs else "")
     return [*(["-vf", vf] if vf else []), *tokens, *color_range_args(out_pix_fmt)]
 

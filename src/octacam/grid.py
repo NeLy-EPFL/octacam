@@ -23,6 +23,8 @@ import subprocess
 from pathlib import Path
 
 from octacam.ffmpeg import (
+    PIX_FMT_OPTS,
+    VF_OPTS,
     color_range_args,
     find_ffmpeg,
     find_ffprobe,
@@ -183,7 +185,7 @@ def _grid_command(
     # The grid owns its pixel format and filters; ffmpeg_params picks the encoder.
     encoder, _ = split_opts(
         shlex.split(ffmpeg_params or DEFAULT_TRANSCODE_FFMPEG_PARAMS),
-        ("-pix_fmt", "-pixel_format", "-vf", "-filter:v"),
+        PIX_FMT_OPTS + VF_OPTS,
     )
     return [
         *cmd,
