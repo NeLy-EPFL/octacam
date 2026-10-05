@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from rich.progress import TaskID
 
     from octacam.config import OctacamConfig, RecordConfig
-    from octacam.controller import RecordingSettings
     from octacam.process_jobs import JobReporter, JobStatus
     from octacam.transfer import TransferCallback
     from octacam.writer import ProgressCallback
@@ -233,43 +232,6 @@ def _resolve_config_dir(config_dir: Path) -> Path:
             resolved,
         )
     return resolved
-
-
-def _settings_from_record(record, transcode, transfer) -> "RecordingSettings":
-    """Build RecordingSettings from the config's record/transcode/transfer sections.
-
-    Resolves the templated save directory at *this* moment (a single ``when``
-    snapshot so directory and relative_directory share one date) and translates
-    the config's ``save_transformed``/``save_timestamps`` booleans to the
-    internal ``record_form``/``save_frame_timestamps`` vocabulary. The
-    ``[transcode]``/``[transfer]`` values seed the GUI's Process fields, which
-    are baked into each recording's config snapshot for ``octacam process``
-    (``transfer`` is ``None`` when the rig has no ``[transfer]`` section)."""
-    from octacam.config import duration_to_seconds, resolve_save_path
-    from octacam.controller import RecordingSettings
-
-    path = resolve_save_path(record)
-    return RecordingSettings(
-        fps=record.fps,
-        duration_s=duration_to_seconds(
-            record.duration, record.duration_unit, record.fps
-        ),
-        save_dir=path.save_dir,
-        record_directory=path.directory,
-        relative_directory=path.relative,
-        trigger_source=record.trigger_source,
-        preview_trigger_source=record.preview_trigger_source,
-        save_method=record.save_method,
-        ffmpeg_params=record.ffmpeg_params,
-        nvenc_params=record.nvenc_params,
-        max_nvenc_sessions=record.max_nvenc_sessions,
-        writer_queue_size=record.writer_queue_size,
-        record_form="display" if record.save_transformed else "sensor",
-        save_frame_timestamps=record.save_timestamps,
-        transcode_ffmpeg_params=transcode.ffmpeg_params,
-        transfer_directory=transfer.directory if transfer else "",
-        transfer_checksum=transfer.checksum if transfer else True,
-    )
 
 
 def _in_ssh_session() -> bool:
@@ -485,7 +447,7 @@ def gui(
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
-    from octacam.controller import RecordingController
+    from octacam.controller import RecordingController, RecordingSettings
     from octacam.plugins import build_plugins
     from octacam.web.app import create_app
 
@@ -513,7 +475,7 @@ def gui(
 
     plugins = build_plugins(config, _resolve_enabled(enabled_plugins, no_plugins))
 
-    settings = _settings_from_record(config.record, config.transcode, config.transfer)
+    settings = RecordingSettings.from_config(config)
     # Tags every recording of this run, for `octacam process --last session`.
     session_id = session_cache.new_session_id()
     # Serve first: the controller starts on a hardware-free placeholder
@@ -2254,20 +2216,13 @@ def record(
     from octacam import session_cache
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
-    from octacam.controller import RecordingController
+    from octacam.controller import RecordingController, RecordingSettings
     from octacam.plugins import build_plugins
 
     config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
 
-    # The fps override applies before the save-dir template resolves.
-    record_cfg = (
-        config.record.model_copy(update={"fps": fps})
-        if fps is not None
-        else config.record
-    )
-
-    settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
+    settings = RecordingSettings.from_config(config, fps=fps)
     if duration is not None:
         settings.duration_s = duration
     if output is not None:
@@ -2992,15 +2947,11 @@ def benchmark(
     from octacam import diagnostics as diag
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
     from octacam.config import load_config_dir
+    from octacam.controller import RecordingSettings
 
     config_dir = _resolve_config_dir(config_dir)
     config = load_config_dir(config_dir)
-    record_cfg = (
-        config.record.model_copy(update={"fps": fps})
-        if fps is not None
-        else config.record
-    )
-    settings = _settings_from_record(record_cfg, config.transcode, config.transfer)
+    settings = RecordingSettings.from_config(config, fps=fps)
     if record_form is not None:
         settings.record_form = record_form.value
 

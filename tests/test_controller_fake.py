@@ -153,10 +153,8 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
 
 
 def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path):
-    from octacam.cli import _settings_from_record
     from octacam.config import load_config_dir, resolve_config_dir
     from octacam.config_writer import read_pfs_files, write_config
-    from octacam.controller import record_config_values
     from octacam.plugins import PluginManager
     from octacam.plugins.base import Plugin
 
@@ -208,8 +206,8 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
     # subfolder) as the setup that was recorded, not the rig file's values, and
     # keeps the path templates for a fresh folder...
     config = load_config_dir(resolve_config_dir(save_dir))
-    reloaded = _settings_from_record(config.record, config.transcode, config.transfer)
-    assert record_config_values(reloaded) == record_config_values(settings)
+    reloaded = RecordingSettings.from_config(config)
+    assert reloaded.record_config_values() == settings.record_config_values()
     assert config.record.directory == "~/data/%y%m%d"
     assert config.record.relative_directory == "Fly1/001"
     assert [(p.name, p.options) for p in config.plugins] == [

@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -313,15 +314,46 @@ def test_record_config_values_covers_every_record_setting():
     # out — otherwise a recording made with it would relaunch with the rig
     # file's value instead of its own.
     from octacam.config import RecordConfig
-    from octacam.controller import record_config_values
 
-    reproduced = set(record_config_values(RecordingSettings()))
+    reproduced = set(RecordingSettings().record_config_values())
     # duration_s stands in for the duration/unit pair (config_writer picks a unit).
     reproduced = (reproduced - {"duration_s"}) | {"duration", "duration_unit"}
     # The save path templates are kept as written, so a relaunch resolves a fresh
     # dated folder; the path a recording used is in its summary.
     excluded = {"directory", "relative_directory"}
     assert set(RecordConfig.model_fields) == reproduced | excluded
+
+
+def test_from_config_takes_the_config_as_it_loads():
+    from octacam.config import OctacamConfig, RecordConfig, TransferConfig
+
+    config = OctacamConfig(
+        record=RecordConfig(
+            fps=50.0,
+            duration=100.0,
+            duration_unit="frames",
+            directory="/data/%Y",
+            relative_directory="Fly1/001",
+            save_transformed=False,
+            save_timestamps=True,
+        ),
+        transfer=TransferConfig(directory="/store", checksum=False),
+    )
+    settings = RecordingSettings.from_config(config)
+    year = time.strftime("%Y")
+    assert (settings.fps, settings.duration_s) == (50.0, 2.0)
+    assert settings.record_directory == f"/data/{year}"
+    assert settings.relative_directory == "Fly1/001"
+    assert settings.save_dir == f"/data/{year}/Fly1/001"
+    assert (settings.record_form, settings.save_frame_timestamps) == ("sensor", True)
+    assert settings.transfer_directory == "/store"
+    assert settings.transfer_checksum is False
+    # The fps override applies before a frame-count duration converts.
+    overridden = RecordingSettings.from_config(config, fps=100.0)
+    assert (overridden.fps, overridden.duration_s) == (100.0, 1.0)
+    # No [transfer]: no transfer, and checksums on for a later one.
+    bare = RecordingSettings.from_config(OctacamConfig())
+    assert (bare.transfer_directory, bare.transfer_checksum) == ("", True)
 
 
 def test_next_take_bumps_the_relative_part_else_save_dir():

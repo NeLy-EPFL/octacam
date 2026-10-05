@@ -164,8 +164,7 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error_type, expected)
     # background init calls controller.fail_init with a clean message (not a raw
     # SDK traceback), the server stays up, and the browser shows the reason.
     import octacam.cameras as cameras_mod
-    from octacam.config import CameraConfig, OctacamConfig
-    from octacam.controller import RecordingSettings
+    from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     message = "The device is controlled by another application."
     expected = expected.format(e=error_type(message))
@@ -185,14 +184,12 @@ def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error_type, expected)
     monkeypatch.setattr("octacam.cameras.CameraSystem", BusyCameraSystem)
 
     config = OctacamConfig(
-        cameras=[CameraConfig(serial_number="0815-0000", name="cam0")], backend="fake"
+        cameras=[CameraConfig(serial_number="0815-0000", name="cam0")],
+        backend="fake",
+        record=RecordConfig(directory=str(tmp_path / "rec")),
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
-    monkeypatch.setattr(
-        "octacam.cli._settings_from_record",
-        lambda *a, **k: RecordingSettings(save_dir=str(tmp_path / "rec")),
-    )
 
     captured = {}
 
@@ -267,11 +264,14 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
     # raises, the finally must still run controller.close() and
     # plugins.teardown_all() so nothing is left half-initialized.
     import octacam.cli as cli_mod
+    from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     _FACADE_CALLS.clear()
     cam = SimpleNamespace(serial_number="s1", name="cam1")
-    config = SimpleNamespace(
-        cameras=[cam], backend="fake", record=None, transcode=None, transfer=None
+    config = OctacamConfig(
+        cameras=[CameraConfig(serial_number="s1", name="cam1")],
+        backend="fake",
+        record=RecordConfig(directory=str(tmp_path / "rec")),
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
@@ -290,7 +290,6 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
         raise RuntimeError("create_app failed")
 
     monkeypatch.setattr("octacam.web.app.create_app", _boom)
-    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: object())
     monkeypatch.setattr(cli_mod, "_print_transcode_hints", lambda *a, **k: None)
 
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
@@ -306,21 +305,20 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     # aborts+joins the daemon monitor so metadata/timestamps are written, then
     # closes cameras once) — never a bare system.close() that races the monitor.
     import octacam.cli as cli_mod
+    from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     _FACADE_CALLS.clear()
     cam = SimpleNamespace(serial_number="s1", name="cam1")
-    config = SimpleNamespace(
-        cameras=[cam], backend="fake", record=object(), transcode=None, transfer=None
+    config = OctacamConfig(
+        cameras=[CameraConfig(serial_number="s1", name="cam1")],
+        backend="fake",
+        record=RecordConfig(
+            directory=str(tmp_path / "does-not-exist"), fps=10.0, duration=1.0
+        ),
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
 
-    settings = SimpleNamespace(
-        save_dir=str(tmp_path / "does-not-exist"),
-        duration_s=1.0,
-        fps=10.0,
-    )
-    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
     monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
 
     monkeypatch.setattr("octacam.plugins.build_plugins", lambda *a, **k: _FakePlugins())
@@ -351,17 +349,16 @@ def _patch_one_camera_record(monkeypatch, tmp_path, events):
     with whether the capture marker was live then."""
     import octacam.cli as cli_mod
     from octacam import session_cache
-    from octacam.config import CameraConfig, OctacamConfig
-    from octacam.controller import RecordingSettings
+    from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     cam = SimpleNamespace(serial_number="s1", name="cam1", frames_recorded=1)
     config = OctacamConfig(
-        cameras=[CameraConfig(serial_number="s1", name="cam1")], backend="fake"
+        cameras=[CameraConfig(serial_number="s1", name="cam1")],
+        backend="fake",
+        record=RecordConfig(directory=str(tmp_path / "take"), save_method="raw"),
     )
     monkeypatch.setattr("octacam.config.load_config_dir", lambda _dir: config)
     monkeypatch.setattr("octacam.cameras.CameraSystem", _fake_camera_system(cam))
-    settings = RecordingSettings(save_dir=str(tmp_path / "take"), save_method="raw")
-    monkeypatch.setattr(cli_mod, "_settings_from_record", lambda *a, **k: settings)
     monkeypatch.setattr(cli_mod, "_preflight_firmware", lambda *a, **k: None)
 
     def note(step):

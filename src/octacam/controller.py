@@ -36,12 +36,15 @@ from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.config import (
     FfmpegArgs,
+    OctacamConfig,
     PreviewTriggerSource,
     SaveMethod,
     TriggerSource,
     compose_save_dir,
+    duration_to_seconds,
     increment_trailing_number,
     normalize_dir,
+    resolve_save_path,
     safe_segment,
 )
 from octacam.plugins.base import PluginManager
@@ -124,6 +127,56 @@ class RecordingSettings:
     transcode_ffmpeg_params: FfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
     transfer_directory: str = ""
     transfer_checksum: bool = True
+
+    @classmethod
+    def from_config(
+        cls, config: OctacamConfig, *, fps: float | None = None
+    ) -> "RecordingSettings":
+        """The settings ``config`` loads as (its tolerance stands: nothing is
+        re-checked), with the save dirs resolved now. ``fps`` overrides the
+        config's, before a frame-count duration converts at it."""
+        record, transfer = config.record, config.transfer
+        fps = record.fps if fps is None else fps
+        path = resolve_save_path(record)
+        return cls(
+            fps=fps,
+            duration_s=duration_to_seconds(record.duration, record.duration_unit, fps),
+            save_dir=path.save_dir,
+            record_directory=path.directory,
+            relative_directory=path.relative,
+            trigger_source=record.trigger_source,
+            preview_trigger_source=record.preview_trigger_source,
+            save_method=record.save_method,
+            ffmpeg_params=record.ffmpeg_params,
+            nvenc_params=record.nvenc_params,
+            max_nvenc_sessions=record.max_nvenc_sessions,
+            writer_queue_size=record.writer_queue_size,
+            record_form="display" if record.save_transformed else "sensor",
+            save_frame_timestamps=record.save_timestamps,
+            transcode_ffmpeg_params=config.transcode.ffmpeg_params,
+            transfer_directory=transfer.directory if transfer else "",
+            transfer_checksum=transfer.checksum if transfer else True,
+        )
+
+    def record_config_values(self) -> dict:
+        """The settings as ``[record]`` keys, the inverse of :meth:`from_config`
+        with ``duration_s`` for ``duration``/``duration_unit``
+        (config_writer.with_record_settings). The save path is left out: a
+        snapshot keeps the config's templates so a relaunch resolves a fresh
+        folder, and the path a recording used is in its summary."""
+        return {
+            "fps": self.fps,
+            "duration_s": self.duration_s,
+            "trigger_source": self.trigger_source,
+            "preview_trigger_source": self.preview_trigger_source,
+            "save_method": self.save_method,
+            "ffmpeg_params": self.ffmpeg_params,
+            "nvenc_params": self.nvenc_params,
+            "max_nvenc_sessions": self.max_nvenc_sessions,
+            "writer_queue_size": self.writer_queue_size,
+            "save_transformed": self.record_form == "display",
+            "save_timestamps": self.save_frame_timestamps,
+        }
 
     def updated(self, **changes) -> "RecordingSettings":
         """A copy with ``changes`` validated and applied, else ValueError naming
@@ -256,29 +309,6 @@ def start_sequence_timeout_s(period_ns: int, primed: bool) -> float:
         return START_HOOKS_TIMEOUT_S
     priming = PRIME_BUDGET_S + PRIME_PULSES * period_ns / 1e9 + prime_settle_s(period_ns)
     return START_HOOKS_TIMEOUT_S + priming
-
-
-def record_config_values(settings: RecordingSettings) -> dict:
-    """The recording settings as ``[record]`` config keys, for the config snapshot.
-
-    The inverse of ``cli._settings_from_record``, with ``duration_s`` standing in
-    for ``duration``/``duration_unit`` (see config_writer.with_record_settings).
-    The save path is not included: the snapshot keeps the config's
-    directory/relative_directory templates so a relaunch resolves a fresh
-    folder, and the path this recording used is in its summary."""
-    return {
-        "fps": settings.fps,
-        "duration_s": settings.duration_s,
-        "trigger_source": settings.trigger_source,
-        "preview_trigger_source": settings.preview_trigger_source,
-        "save_method": settings.save_method,
-        "ffmpeg_params": settings.ffmpeg_params,
-        "nvenc_params": settings.nvenc_params,
-        "max_nvenc_sessions": settings.max_nvenc_sessions,
-        "writer_queue_size": settings.writer_queue_size,
-        "save_transformed": settings.record_form == "display",
-        "save_timestamps": settings.save_frame_timestamps,
-    }
 
 
 class StartResult:
@@ -1871,7 +1901,7 @@ class RecordingController:
                 transfer_checksum=s.transfer_checksum,
             )
             patched = config_writer.with_record_settings(
-                patched, record_config_values(s)
+                patched, s.record_config_values()
             )
             patched = config_writer.with_plugin_options(
                 patched, self.plugins.snapshot_options(plugin_params)
