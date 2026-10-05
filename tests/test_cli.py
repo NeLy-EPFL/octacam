@@ -15,8 +15,8 @@ from helpers import wait_until
 from typer.testing import CliRunner
 
 import octacam
-from octacam.cameras import BackendError, BackendUnavailable
 from octacam import locks
+from octacam.cameras import BackendError, BackendUnavailable
 from octacam.cli import (
     _browser_skip_reason,
     _build_config_doc,
