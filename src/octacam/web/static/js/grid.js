@@ -3,7 +3,7 @@
 // Drag the title bar to move, an edge or corner to resize; double-click the
 // title (or click its button) to maximize. Clicking a tile raises it.
 
-import { clamp, request } from "./util.js";
+import { clamp, el, request } from "./util.js";
 
 // A camera has a manual layout if it has a valid position or a valid size;
 // each falls back to a default on its own.
@@ -65,9 +65,8 @@ export class CameraGrid {
     const index = this.tiles.length;
     this.indexBySerial.set(cam.serial, index);
 
-    const el = document.createElement("div");
-    el.className = "tile";
-    el.innerHTML = `
+    const root = el("div", "tile");
+    root.innerHTML = `
       <div class="tile-title" title="Drag to move; double-click to maximize">
         <span class="tile-name"></span>
         <span class="tile-stats">
@@ -87,24 +86,24 @@ export class CameraGrid {
       <div class="tile-resize w" data-dir="w"></div>
       <div class="tile-resize se" data-dir="se" title="Drag to resize"></div>
       <div class="tile-resize sw" data-dir="sw" title="Drag to resize"></div>`;
-    const nameEl = el.querySelector(".tile-name");
+    const nameEl = root.querySelector(".tile-name");
     nameEl.textContent = cam.name;
     nameEl.title = `serial ${cam.serial}`;
-    this.container.appendChild(el);
+    this.container.appendChild(root);
 
-    const canvas = el.querySelector("canvas");
+    const canvas = root.querySelector("canvas");
     const tile = {
       cam,
       index,
-      el,
+      el: root,
       canvas,
       ctx: canvas.getContext("2d"),
-      body: el.querySelector(".tile-body"),
+      body: root.querySelector(".tile-body"),
       nameEl,
-      fpsEl: el.querySelector(".tile-fps"),
-      droppedEl: el.querySelector(".tile-dropped"),
-      failEl: el.querySelector(".tile-fail"),
-      maxBtn: el.querySelector(".tile-max"),
+      fpsEl: root.querySelector(".tile-fps"),
+      droppedEl: root.querySelector(".tile-dropped"),
+      failEl: root.querySelector(".tile-fail"),
+      maxBtn: root.querySelector(".tile-max"),
       runtime: { rot: 0, fx: 1, fy: 1 },
       // natW/natH: the decoded JPEG's size; sensorW/sensorH: the full sensor,
       // used for all layout math; crop*: the sensor rectangle the frame covers
@@ -134,16 +133,16 @@ export class CameraGrid {
     this.tiles.push(tile);
 
     // A click selects the tile; a drag sets suppressClick so it doesn't.
-    el.addEventListener("click", () => {
+    root.addEventListener("click", () => {
       if (tile.suppressClick) {
         tile.suppressClick = false;
         return;
       }
       this.select(index);
     });
-    el.addEventListener("pointerdown", () => this._raise(tile));
+    root.addEventListener("pointerdown", () => this._raise(tile));
 
-    const title = el.querySelector(".tile-title");
+    const title = root.querySelector(".tile-title");
     title.addEventListener("pointerdown", (e) => this._onMoveStart(e, tile));
     // Double-click the title bar (but not the name, where it renames) maximizes.
     title.addEventListener("dblclick", (e) => {
@@ -159,7 +158,7 @@ export class CameraGrid {
       e.stopPropagation();
       this.toggleMaximize(tile);
     });
-    for (const h of el.querySelectorAll(".tile-resize")) {
+    for (const h of root.querySelectorAll(".tile-resize")) {
       h.addEventListener("pointerdown", (e) =>
         this._onResizeStart(e, tile, h.dataset.dir)
       );
@@ -267,9 +266,8 @@ export class CameraGrid {
     if (this._renameLocked || this._nameEdit) return;
 
     const title = tile.el.querySelector(".tile-title");
-    const input = document.createElement("input");
+    const input = el("input", "tile-name-edit");
     input.type = "text";
-    input.className = "tile-name-edit";
     input.value = tile.cam.name;
     input.spellcheck = false;
     input.maxLength = 64;

@@ -1,6 +1,8 @@
 // View tab: a per-camera selector (kept in sync with the grid and the Camera
 // tab), runtime rotate/flip transforms, and the crosshair toggle.
 
+import { el } from "./util.js";
+
 export class ViewTab {
   // `cameras` is the /api/system camera list; `grid` is the CameraGrid;
   // `onSelect(index)` propagates a picker change to the grid (and from there
@@ -12,9 +14,8 @@ export class ViewTab {
     this.target = document.getElementById("view-target");
 
     for (const cam of cameras) {
-      const opt = document.createElement("option");
+      const opt = el("option", null, cam.name);
       opt.value = String(cam.index);
-      opt.textContent = cam.name;
       this.target.appendChild(opt);
     }
 
