@@ -1601,6 +1601,14 @@ def test_config_wizard_writes_roundtrippable_config(tmp_path):
     )
     assert result.exit_code == 0, result.output
     assert (target / "octacam_config.toml").exists()
+    # The choices are the config's own vocabulary (config.SaveMethod, ...).
+    for choices in (
+        "[frames/seconds/minutes/hours]",
+        "[software/managed/external]",
+        "[auto/software/free_running]",
+        "[ffmpeg/nvenc/raw]",
+    ):
+        assert choices in result.output
 
     cfg = load_config_dir(target)
     assert cfg.backend == "fake"

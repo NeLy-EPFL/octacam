@@ -16,7 +16,7 @@ import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, get_args
 
 from octacam._compat import StrEnum
 
@@ -1800,7 +1800,13 @@ def _prompt_record(console) -> "RecordConfig":
     """Prompt for the [record] section, defaulting every field to the schema default."""
     from rich.prompt import FloatPrompt, Prompt
 
-    from octacam.config import RecordConfig
+    from octacam.config import (
+        DurationUnit,
+        PreviewTriggerSource,
+        RecordConfig,
+        SaveMethod,
+        TriggerSource,
+    )
 
     d = RecordConfig()
     fps = FloatPrompt.ask("Frame rate (fps)", default=d.fps, console=console)
@@ -1809,19 +1815,19 @@ def _prompt_record(console) -> "RecordConfig":
     )
     duration_unit = Prompt.ask(
         "Duration unit",
-        choices=["frames", "seconds", "minutes", "hours"],
+        choices=list(get_args(DurationUnit)),
         default=d.duration_unit,
         console=console,
     )
     trigger_source = Prompt.ask(
         "Trigger source",
-        choices=["software", "managed", "external"],
+        choices=list(get_args(TriggerSource)),
         default=d.trigger_source,
         console=console,
     )
     preview_trigger_source = Prompt.ask(
         "Preview trigger source (auto = mirror the recording trigger)",
-        choices=["auto", "software", "free_running"],
+        choices=list(get_args(PreviewTriggerSource)),
         default=d.preview_trigger_source,
         console=console,
     )
@@ -1835,7 +1841,7 @@ def _prompt_record(console) -> "RecordConfig":
     )
     save_method = Prompt.ask(
         "Save method (ffmpeg=CPU x264, nvenc=NVIDIA GPU, raw=Mono8 dump)",
-        choices=["ffmpeg", "nvenc", "raw"],
+        choices=list(get_args(SaveMethod)),
         default=d.save_method,
         console=console,
     )

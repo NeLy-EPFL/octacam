@@ -73,12 +73,13 @@ def _at_least(floor: int) -> AfterValidator:
 # writer splits them at open.
 ScalarStr = Annotated[str, BeforeValidator(_scalar_str)]
 FfmpegArgs = Annotated[str, AfterValidator(_split_ffmpeg_args)]
+DurationUnit = Literal["frames", "seconds", "minutes", "hours"]
 TriggerSource = Literal["software", "managed", "external"]
 # "auto" mirrors trigger_source (RecordingController._effective_preview_mode).
 PreviewTriggerSource = Literal["auto", "software", "free_running"]
 # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU, cameras beyond
 # max_nvenc_sessions on CPU; "raw" = Mono8 dump, transcoded later.
-SaveMethod = Literal["ffmpeg", "raw", "nvenc"]
+SaveMethod = Literal["ffmpeg", "nvenc", "raw"]
 _ScalarFfmpegArgs = Annotated[FfmpegArgs, BeforeValidator(_scalar_str)]
 
 
@@ -104,7 +105,7 @@ class RecordConfig(BaseModel):
 
     fps: float = 100.0
     duration: float = 5.0
-    duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
+    duration_unit: DurationUnit = "seconds"
     trigger_source: TriggerSource = "software"
     preview_trigger_source: PreviewTriggerSource = "auto"
     directory: ScalarStr = "./"
