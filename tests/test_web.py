@@ -440,6 +440,28 @@ def test_websocket_replays_event_backlog(client):
     assert "second historical event" in seen
 
 
+def test_websocket_handshake_order(client):
+    # The GUI builds its grid from `system`, so it comes first; the benchmark
+    # replay and the event backlog follow the state and settings.
+    controller = client.controller
+    controller._last_diagnostic = {"backend": "primed"}
+    controller._event("info", "backlog event")
+
+    order = []  # message types up to the replayed event
+    with client.websocket_connect("/api/ws") as ws:
+        for _ in range(200):
+            message = ws.receive()
+            if message.get("text"):
+                payload = json.loads(message["text"])
+                order.append(payload["type"])
+                if payload.get("message") == "backlog event":
+                    break
+        else:
+            pytest.fail(f"the event backlog was never replayed: {order}")
+    handshake = [t for t in order if t in ("system", "state", "settings", "diagnostics")]
+    assert handshake == ["system", "state", "settings", "diagnostics"], order
+
+
 def test_websocket_preview_and_telemetry(client):
     import cv2
 
