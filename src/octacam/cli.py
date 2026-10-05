@@ -2450,11 +2450,27 @@ def _flashable_plugins(plugins, only: str | None):
     return out
 
 
+def _confirm_flash(console, prov: dict, *, assume_yes: bool, indent: str = "") -> bool:
+    """Whether to upload to this board: ``assume_yes``, else the operator's
+    answer. A board that sent no identity is warned about first, since a flash
+    overwrites whatever it runs."""
+    from rich.prompt import Confirm
+
+    if prov.get("state") == "unidentified":
+        console.print(
+            f"{indent}[yellow]⚠ the board sent no identity[/yellow] — flashing "
+            "overwrites whatever is on it; only proceed if this is the right board."
+        )
+    return assume_yes or Confirm.ask(
+        f"{indent}Upload the current firmware to {prov.get('device')}?",
+        default=False,
+        console=console,
+    )
+
+
 def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: bool) -> int:
     """Report one board's firmware and, unless --check, offer to flash it.
     Returns 0 when up to date or flashed, else 1."""
-    from rich.prompt import Confirm
-
     device = prov.get("device")
     console.print()
     console.print(f"[bold]{plugin.name}[/bold] — {device or 'no device'}")
@@ -2489,14 +2505,7 @@ def _flash_one(console, plugin, prov: dict, *, assume_yes: bool, check_only: boo
         else:
             console.print("  [red]Can't auto-flash on this host.[/red]")
         return 1
-    if prov.get("state") == "unidentified":
-        console.print(
-            "  [yellow]⚠ the board sent no identity[/yellow] — flashing overwrites "
-            "whatever is on it; only proceed if this is the right board."
-        )
-    if not assume_yes and not Confirm.ask(
-        f"  Upload the current firmware to {device}?", default=False, console=console
-    ):
+    if not _confirm_flash(console, prov, assume_yes=assume_yes, indent="  "):
         console.print("  skipped — the board keeps its current firmware.")
         return 1
     console.print("  Flashing (compile + upload, ~1 min; the board reboots at the end)…")
@@ -2513,7 +2522,6 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
     headless, flash only under ``--yes`` or ``auto_flash`` and only a board known
     to run an old build of this sketch (never a blank or foreign one)."""
     interactive = sys.stdin.isatty()
-    console = None
     for p in plugins.plugins:
         if p.firmware is None:
             continue
@@ -2531,19 +2539,10 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
         msg = f"{p.name}: board firmware on {device} is out of date — {prov.get('detail', '')}"
         do_flash = False
         if interactive and can:
-            from rich.console import Console
-            from rich.prompt import Confirm
-
-            console = console or Console(stderr=True)
+            # On a tty the operator decides, even under --yes.
+            console = _stderr_console()
             console.print(f"[yellow]{msg}[/yellow]")
-            if prov.get("state") == "unidentified":
-                console.print(
-                    "[yellow]  no identity — flashing overwrites whatever is on the "
-                    "board[/yellow]"
-                )
-            do_flash = Confirm.ask(
-                f"Upload the current firmware to {device} now?", default=False, console=console
-            )
+            do_flash = _confirm_flash(console, prov, assume_yes=False)
         elif (assume_yes or auto) and can and safe:
             do_flash = True
         else:

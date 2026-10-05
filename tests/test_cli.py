@@ -2076,6 +2076,19 @@ def test_flash_reports_a_stale_board_and_flashes_it_unless_checking(
     assert fake_triggerbox.devices == ["/dev/ttyFAKE7"] * (2 if flashed else 1)
 
 
+def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
+    fake_triggerbox.banner = None
+    result = runner.invoke(
+        app,
+        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
+         "--yes"],
+    )
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "the board sent no identity" in flat
+    assert "Upload the current firmware" not in flat
+
+
 def test_flash_leaves_a_current_board_alone(fake_triggerbox):
     fake_triggerbox.banner = f"TRIGGERBOX 2 {_current_triggerbox_build()}"
     result = runner.invoke(
@@ -2219,11 +2232,11 @@ def test_record_preflight_asks_on_a_tty_and_warns_of_an_unidentified_board(
     plugin = _StaleBoardPlugin(auto_flash=False, state="unidentified")
     # --yes does not skip the question on a tty.
     _preflight_firmware(PluginManager([plugin]), assume_yes=True)
-    assert asked == ["Upload the current firmware to /dev/ttyACM0 now?"]
+    assert asked == ["Upload the current firmware to /dev/ttyACM0?"]
     assert plugin.flashed == (1 if answer else 0)
     err = " ".join(capsys.readouterr().err.split())
     assert "board firmware on /dev/ttyACM0 is out of date" in err
-    assert "no identity" in err
+    assert "the board sent no identity" in err
 
 
 # --- record closes the cameras on every exit before the controller owns them --
