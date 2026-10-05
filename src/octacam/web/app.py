@@ -12,17 +12,13 @@ import contextlib
 import dataclasses
 import json
 import logging
-import math
 import os
 import signal
-import struct
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
-import numpy as np
 from fastapi import (
     BackgroundTasks,
     FastAPI,
@@ -39,6 +35,7 @@ from octacam import config_writer, updates
 from octacam.config import OctacamConfig, safe_segment
 from octacam.controller import RecordingController, StartResult
 from octacam.web.hub import EVENT_BACKLOG_REPLAY, Client, Hub, to_json
+from octacam.web.preview import parse_views, preview_loop
 from octacam.ffmpeg import nvenc_max_sessions
 from octacam.writer import FORMATS, NVENC_H264_PARAMS
 
@@ -46,24 +43,6 @@ log = logging.getLogger("octacam")
 
 STATIC_DIR = Path(__file__).parent / "static"
 TELEMETRY_INTERVAL_S = 0.5
-# Longest preview edge of an unfocused tile; only a focused (maximized or
-# zoomed) tile may go finer.
-PREVIEW_MAX_DIM = 640
-# A focused tile's cap while recording, so a preview encode cannot starve the writers.
-PREVIEW_FOCUS_MAX_DIM_RECORDING = 1280
-# Distinct resolutions of one camera encoded per tick; extra requests fall back
-# to the baseline (_cap_variants), so clients cannot multiply the encode cost.
-MAX_PREVIEW_VARIANTS_PER_CAMERA = 4
-JPEG_QUALITY = 75
-# Preview frame header, version 2 (little-endian; ws.js rejects other versions):
-#   u8  version (2) | u8 kind (1) | u8 camera | u8 flags(bit0=recording)
-#   u32 frame number | u64 timestamp ns | f32 fps | u32 dropped total
-#   u16 crop_x | u16 crop_y | u16 crop_w | u16 crop_h   (sensor px covered)
-#   u16 sensor_w | u16 sensor_h                          (full sensor size)
-# The crop rect (the whole sensor when uncropped) lets the client place the
-# image under its display transform.
-FRAME_HEADER = struct.Struct("<BBBBIQfIHHHHHH")
-FRAME_VERSION = 2
 
 
 class _NoCacheStaticFiles(StaticFiles):
@@ -74,81 +53,6 @@ class _NoCacheStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache"
         return response
-
-
-@dataclasses.dataclass(frozen=True)
-class _ViewSpec:
-    """What one client needs of one camera; the default is the baseline preview.
-
-    ``want`` False skips the camera for that client (hidden behind a maximized
-    tile). ``need`` is the longest source edge in px it can display (None: the
-    baseline); ``full`` marks a focused tile, which may exceed
-    ``PREVIEW_MAX_DIM``; ``crop`` (x, y, w, h in sensor px) asks for that region
-    only."""
-
-    want: bool = True
-    need: int | None = None
-    full: bool = False
-    crop: tuple[int, int, int, int] | None = None
-
-
-_DEFAULT_VIEW = _ViewSpec()
-
-
-def _parse_crop(crop) -> tuple[int, int, int, int] | None:
-    """A {"x","y","w","h"} dict as an int tuple; None if absent, malformed or empty."""
-    if not isinstance(crop, dict):
-        return None
-    try:
-        x, y = int(crop["x"]), int(crop["y"])
-        w, h = int(crop["w"]), int(crop["h"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if w <= 0 or h <= 0 or x < 0 or y < 0:
-        return None
-    return (x, y, w, h)
-
-
-def _clamp_crop(
-    crop: tuple[int, int, int, int] | None, width: int, height: int
-) -> tuple[int, int, int, int]:
-    """Clamp a crop to the sensor (the whole sensor for None). The header carries
-    the clamped rect: the client places what was sent, not what it asked for."""
-    if crop is None:
-        return (0, 0, width, height)
-    x, y, w, h = crop
-    x = max(0, min(int(x), max(0, width - 1)))
-    y = max(0, min(int(y), max(0, height - 1)))
-    w = max(1, min(int(w), width - x))
-    h = max(1, min(int(h), height - y))
-    return (x, y, w, h)
-
-
-def _preview_factor(
-    sensor_long: int, region_long: int, spec: _ViewSpec, recording: bool
-) -> int:
-    """Integer decimation of the encoded region (the sensor, or a crop of it).
-
-    Without ``need``: the baseline ``ceil(sensor_long / PREVIEW_MAX_DIM)``. An
-    unfocused tile may only go coarser; a focused one may go down to 1:1, capped
-    at ``PREVIEW_FOCUS_MAX_DIM_RECORDING`` while recording."""
-    sensor_long = max(sensor_long, 1)
-    region_long = max(region_long, 1)
-    baseline = max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM))
-    if spec.need is None:
-        return baseline
-    need = max(1, spec.need)
-    if not spec.full:
-        # Never sharper than the baseline, or one HiDPI client would upgrade
-        # every camera.
-        return max(baseline, max(1, round(region_long / need)))
-    # round() matches the request, erring toward full detail.
-    need = min(need, region_long)
-    factor = max(1, round(region_long / need))
-    if recording:
-        # ceil, not round: a hard cap (round could overshoot it by up to ~1.5x).
-        factor = max(factor, math.ceil(region_long / PREVIEW_FOCUS_MAX_DIM_RECORDING))
-    return factor
 
 
 class SaveDirValidateRequest(BaseModel):
@@ -305,38 +209,6 @@ class SaveConfigRequest(BaseModel):
         return self
 
 
-def _parse_views(message: dict) -> dict[int, _ViewSpec]:
-    """The view specs a ``{"type": "view"}`` message sets, by camera index. A
-    malformed entry is skipped, never raised: that would tear down the socket."""
-    cameras = message.get("cameras")
-    if not isinstance(cameras, dict):
-        return {}
-    views = {}
-    for key, spec in cameras.items():
-        try:
-            index = int(key)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(spec, dict):
-            continue
-        need = spec.get("need")
-        if need is not None:
-            try:
-                need = int(need)
-            except (TypeError, ValueError):
-                need = None
-            else:
-                if need <= 0:
-                    need = None
-        views[index] = _ViewSpec(
-            want=bool(spec.get("want", True)),
-            need=need,
-            full=bool(spec.get("full", False)),
-            crop=_parse_crop(spec.get("crop")),
-        )
-    return views
-
-
 class _AppState:
     def __init__(
         self,
@@ -359,7 +231,6 @@ class _AppState:
         # starts a detached processing job.
         self.process_after = False
         self.hub = Hub()
-        self._frame_counters: dict[int, int] = {}
         # The update banner's notice; None until the background check returns.
         self._update_notice: updates.UpdateNotice | None = None
 
@@ -457,123 +328,6 @@ class _AppState:
 
     # ----------------------------------------------------- background tasks
 
-    async def preview_loop(self) -> None:
-        interval = max(self.config.gui.display_refresh_interval_ms, 10) / 1000
-        loop = asyncio.get_running_loop()
-        while True:
-            await asyncio.sleep(interval)
-            clients = list(self.hub.clients)
-            if not clients:
-                continue
-            recording = self.controller.recording_active
-            # Group the ready clients that want each camera by (crop, factor):
-            # each variant is encoded once and shared, and a camera no ready
-            # client wants is neither popped nor encoded.
-            jobs = []
-            for index, camera in enumerate(self.controller.camera_system):
-                width, height = camera.width, camera.height
-                sensor_long = max(width, height)
-                groups: dict[tuple, list[Client]] = {}
-                for client in clients:
-                    if not client.is_ready_for(index):
-                        continue
-                    spec = client.views.get(index, _DEFAULT_VIEW)
-                    if not spec.want:
-                        continue
-                    region = _clamp_crop(spec.crop, width, height)
-                    region_long = max(region[2], region[3])
-                    factor = _preview_factor(sensor_long, region_long, spec, recording)
-                    groups.setdefault((region, factor), []).append(client)
-                if not groups:
-                    continue
-                self._cap_variants(groups, width, height, sensor_long)
-                frame = camera.frame_for_display.pop()
-                if frame is None:
-                    continue
-                # Frame number and telemetry are taken here, on the event-loop
-                # thread, so the encode workers mutate nothing.
-                count = self._frame_counters.get(index, 0) + 1
-                self._frame_counters[index] = count
-                jobs.append((
-                    index,
-                    frame,
-                    groups,
-                    count,
-                    time.time_ns(),
-                    camera.resulting_fps,
-                    camera.dropped_count,
-                ))
-            if not jobs:
-                continue
-            # One executor task per camera: cv2.imencode releases the GIL, so a
-            # tick costs the slowest camera, not the sum (eight focused 2048²
-            # cameras: 85 ms serial vs 14 ms parallel, against a 33 ms refresh).
-            flags = 1 if recording else 0
-            batches = await asyncio.gather(*[
-                loop.run_in_executor(None, self._encode_camera, job, flags)
-                for job in jobs
-            ])
-            for messages in batches:
-                for camera_index, message, group in messages:
-                    for client in group:
-                        client.queue_frame(camera_index, message)
-
-    @staticmethod
-    def _cap_variants(
-        groups: dict[tuple, list[Client]],
-        width: int,
-        height: int,
-        sensor_long: int,
-    ) -> None:
-        """Keep the cheapest variants and demote the rest to the whole-sensor
-        baseline. Two different crops are never merged (a client would see the
-        wrong region): demotion only widens a crop to the full frame."""
-        if len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA:
-            return
-
-        def output_pixels(key):  # encode cost proxy
-            (_, _, w, h), factor = key
-            return (w // factor + 1) * (h // factor + 1)
-
-        cheapest = sorted(groups, key=output_pixels)
-        keep = set(cheapest[: MAX_PREVIEW_VARIANTS_PER_CAMERA - 1])
-        baseline = ((0, 0, width, height), max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM)))
-        bucket = groups.setdefault(baseline, [])
-        for key in cheapest[MAX_PREVIEW_VARIANTS_PER_CAMERA - 1 :]:
-            if key in keep or key == baseline:
-                continue
-            bucket.extend(groups.pop(key))
-
-    @staticmethod
-    def _encode_camera(job, flags: int) -> list[tuple[int, bytes, list[Client]]]:
-        """Encode every variant of one camera's frame, on an executor thread.
-        Everything arrives by value: it touches no shared state or camera."""
-        import cv2
-
-        index, frame, groups, count, timestamp, fps, dropped = job
-        frame_h, frame_w = frame.shape
-        messages = []
-        for (region, factor), group in groups.items():
-            # The popped frame can differ from camera.width/height across a
-            # geometry change, and numpy would clip silently.
-            x, y, w, h = _clamp_crop(region, frame_w, frame_h)
-            whole = (x, y, w, h) == (0, 0, frame_w, frame_h)
-            if factor > 1 or not whole:
-                sub = np.ascontiguousarray(frame[y : y + h : factor, x : x + w : factor])
-            else:
-                sub = np.ascontiguousarray(frame)
-            ok, jpeg = cv2.imencode(
-                ".jpg", sub, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-            )
-            if not ok:
-                continue
-            header = FRAME_HEADER.pack(
-                FRAME_VERSION, 1, index, flags, count, timestamp, fps, dropped,
-                x, y, w, h, frame_w, frame_h,
-            )
-            messages.append((index, header + jpeg.tobytes(), group))
-        return messages
-
     async def telemetry_loop(self) -> None:
         loop = asyncio.get_running_loop()
         while True:
@@ -634,8 +388,9 @@ def create_app(
     async def lifespan(app: FastAPI):
         hub.loop = asyncio.get_running_loop()
         controller.add_listener(hub.publish)
+        interval = max(state.config.gui.display_refresh_interval_ms, 10) / 1000
         tasks = [
-            asyncio.create_task(state.preview_loop()),
+            asyncio.create_task(preview_loop(hub, controller, interval)),
             asyncio.create_task(state.telemetry_loop()),
         ]
         yield
@@ -929,7 +684,7 @@ def create_app(
                 # "view" is the core's: cheap dict work, handled inline, never
                 # offered to plugins.
                 if isinstance(message, dict) and message.get("type") == "view":
-                    client.views.update(_parse_views(message))
+                    client.views.update(parse_views(message))
                     continue
                 # In the executor: a plugin's hook may block on I/O. A raising
                 # hook is logged, so a bad message cannot kill the socket.

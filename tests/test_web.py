@@ -16,7 +16,8 @@ from octacam.cameras import CameraSystem
 from octacam.config import OctacamConfig, RecordingSettings
 from octacam.controller import RecordingController
 from octacam.transform import RECORDING_INFO_DIRNAME
-from octacam.web.app import FRAME_HEADER, create_app
+from octacam.web.app import create_app
+from octacam.web.preview import FRAME_HEADER
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
 
@@ -1438,37 +1439,37 @@ def test_preview_factor_policy():
     """Adaptive decimation: a client that sends nothing is unchanged; a normal
     tile may only go coarser than the 640 baseline; a focused tile may go
     finer, bounded to a mid resolution while recording."""
-    from octacam.web.app import _DEFAULT_VIEW, _preview_factor, _ViewSpec
+    from octacam.web.preview import DEFAULT_VIEW, ViewSpec, _preview_factor
 
     L = 2048  # sensor long edge; baseline ceil(2048/640) = 4
     # Default/legacy spec == today's baseline (backward compatible).
-    assert _preview_factor(L, L, _DEFAULT_VIEW, False) == 4
+    assert _preview_factor(L, L, DEFAULT_VIEW, False) == 4
     # A small unfocused tile sends less data (coarser)...
-    assert _preview_factor(L, L, _ViewSpec(need=300), False) == 7
+    assert _preview_factor(L, L, ViewSpec(need=300), False) == 7
     # ...but a large unfocused tile is still capped at the baseline, so a HiDPI
     # client can't silently upgrade every camera above today's cost.
-    assert _preview_factor(L, L, _ViewSpec(need=1500), False) == 4
+    assert _preview_factor(L, L, ViewSpec(need=1500), False) == 4
     # A focused (maximized) tile may exceed the baseline, up to the sensor.
-    assert _preview_factor(L, L, _ViewSpec(need=1500, full=True), False) == 1
-    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), False) == 1
+    assert _preview_factor(L, L, ViewSpec(need=1500, full=True), False) == 1
+    assert _preview_factor(L, L, ViewSpec(need=100000, full=True), False) == 1
     # While recording, a focused tile is bounded so the preview encode can't
     # starve the writer (ceil(2048/1280) = 2 -> 1024 px <= 1280 cap)...
-    assert _preview_factor(L, L, _ViewSpec(need=100000, full=True), True) == 2
+    assert _preview_factor(L, L, ViewSpec(need=100000, full=True), True) == 2
     # ...and the cap is a true ceiling for mid-band regions too (round() would
     # leak factor 1 = full res).
-    assert _preview_factor(1600, 1600, _ViewSpec(need=100000, full=True), True) == 2
+    assert _preview_factor(1600, 1600, ViewSpec(need=100000, full=True), True) == 2
     # A cropped focused tile picks the factor from the CROP's long edge (2nd
     # arg), not the sensor's, so a small crop is delivered near 1:1 (full detail)
     # while a bigger crop still decimates to about the requested size.
-    assert _preview_factor(L, 400, _ViewSpec(need=400, full=True), False) == 1
-    assert _preview_factor(L, 800, _ViewSpec(need=400, full=True), False) == 2
+    assert _preview_factor(L, 400, ViewSpec(need=400, full=True), False) == 1
+    assert _preview_factor(L, 800, ViewSpec(need=400, full=True), False) == 2
 
 
 def test_parse_views_is_tolerant():
     """A view message's specs are read per camera, and garbage never raises."""
-    from octacam.web.app import _parse_views, _ViewSpec
+    from octacam.web.preview import ViewSpec, parse_views
 
-    views = _parse_views(
+    views = parse_views(
         {
             "type": "view",
             "cameras": {
@@ -1482,14 +1483,14 @@ def test_parse_views_is_tolerant():
             },
         }
     )
-    assert views[0] == _ViewSpec(want=True, need=512, full=True, crop=(10, 20, 300, 400))
+    assert views[0] == ViewSpec(want=True, need=512, full=True, crop=(10, 20, 300, 400))
     assert views[1].want is False
     assert views[2].need is None
     assert views[4].crop is None  # malformed crop dropped
     assert set(views) == {0, 1, 2, 4}
     # Malformed top-level payloads are ignored, not raised.
-    assert _parse_views({"cameras": "nope"}) == {}
-    assert _parse_views({}) == {}
+    assert parse_views({"cameras": "nope"}) == {}
+    assert parse_views({}) == {}
 
 
 def test_hub_keeps_the_newest_message_per_type_and_key():
@@ -1520,10 +1521,10 @@ def test_cap_variants_bounds_encode_count():
     """Beyond the per-camera cap, the priciest extra variants are demoted to the
     shared full-frame baseline (never cross-merged), so encode count stays
     bounded and no client is dropped."""
-    from octacam.web.app import (
+    from octacam.web.preview import (
         MAX_PREVIEW_VARIANTS_PER_CAMERA,
         PREVIEW_MAX_DIM,
-        _AppState,
+        _cap_variants,
     )
 
     W = H = 2048
@@ -1539,7 +1540,7 @@ def test_cap_variants_bounds_encode_count():
         ((0, 0, 800, 800), 1): ["f"],
     }
     total = sum(len(v) for v in groups.values())
-    _AppState._cap_variants(groups, W, H, W)
+    _cap_variants(groups, W, H, W)
     assert len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA
     assert sum(len(v) for v in groups.values()) == total  # nobody dropped
     assert baseline_key in groups  # demotion target survives
@@ -1682,19 +1683,21 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
     touch no shared state and no camera object — that is what lets the cameras
     encode concurrently while cv2 has the GIL released.
     """
-    from octacam.web.app import FRAME_VERSION, _AppState
+    from octacam.web.preview import FRAME_VERSION, EncodeJob, _encode_camera
 
     frame = (np.random.rand(64, 64) * 255).astype(np.uint8)
     groups = {
         ((0, 0, 64, 64), 1): ["client-a"],
         ((0, 0, 32, 32), 1): ["client-b"],  # a distinct crop -> its own encode
     }
-    job = (1, frame, groups, 7, 123456789, 42.5, 3)
-    messages = _AppState._encode_camera(job, 1)
+    job = EncodeJob(
+        camera=1, frame=frame, groups=groups, number=7, timestamp_ns=123456789,
+        fps=42.5, dropped=3, recording=True,
+    )
+    messages = _encode_camera(job)
 
     assert len(messages) == 2  # one encode per distinct variant
-    for camera_index, message, group in messages:
-        assert camera_index == 1
+    for message, group in messages:
         fields = FRAME_HEADER.unpack(message[: FRAME_HEADER.size])
         version, kind, cam, flags, count, ts, fps, dropped = fields[:8]
         assert (version, kind, cam, flags) == (FRAME_VERSION, 1, 1, 1)
@@ -1704,11 +1707,11 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
         assert abs(fps - 42.5) < 1e-3
         assert group and group[0] in ("client-a", "client-b")
     # The two variants carry different crop rects (never cross-merged).
-    rects = {FRAME_HEADER.unpack(m[: FRAME_HEADER.size])[8:12] for _, m, _ in messages}
+    rects = {FRAME_HEADER.unpack(m[: FRAME_HEADER.size])[8:12] for m, _ in messages}
     assert rects == {(0, 0, 64, 64), (0, 0, 32, 32)}
 
 
-def test_preview_tick_encodes_cameras_concurrently(client):
+def test_preview_tick_encodes_cameras_concurrently(client, monkeypatch):
     """One executor task per camera, not one task encoding them in sequence.
 
     cv2.imencode releases the GIL, so per-camera dispatch makes a tick cost the
@@ -1720,35 +1723,32 @@ def test_preview_tick_encodes_cameras_concurrently(client):
     """
     import threading
 
-    from octacam.web.app import _AppState
+    from octacam.web import preview
 
     live = 0
     peak = 0
     seen_cameras = set()
     lock = threading.Lock()
-    real = _AppState._encode_camera
+    real = preview._encode_camera
 
-    def instrumented(job, flags):
+    def instrumented(job):
         nonlocal live, peak
         with lock:
             live += 1
             peak = max(peak, live)
-            seen_cameras.add(job[0])
+            seen_cameras.add(job.camera)
         try:
             time.sleep(0.03)  # wide enough for a concurrent partner to overlap
-            return real(job, flags)
+            return real(job)
         finally:
             with lock:
                 live -= 1
 
-    _AppState._encode_camera = staticmethod(instrumented)
-    try:
-        with client.websocket_connect("/api/ws") as ws:
-            deadline = time.monotonic() + 15
-            while time.monotonic() < deadline and (peak < 2 or len(seen_cameras) < 2):
-                ws.receive()
-    finally:
-        _AppState._encode_camera = staticmethod(real)
+    monkeypatch.setattr(preview, "_encode_camera", instrumented)
+    with client.websocket_connect("/api/ws") as ws:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and (peak < 2 or len(seen_cameras) < 2):
+            ws.receive()
 
     assert seen_cameras == {0, 1}, seen_cameras
     assert peak == 2, f"cameras were encoded serially (peak concurrency {peak})"
