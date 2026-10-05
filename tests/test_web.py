@@ -1175,6 +1175,24 @@ def test_camera_feature_reset_prefers_config(client, tmp_path):
     assert abs(restored - saved) < 2.0
 
 
+def _exposure(client) -> float:
+    """Camera 0's ExposureTime as the Camera tab reads it (which caches it as
+    the first-seen value)."""
+    return _exposure_in(client.get("/api/cameras/0/features").json()["features"])
+
+
+def _exposure_in(features: list[dict]) -> float:
+    return {f["name"]: f["value"] for f in features}["ExposureTime"]
+
+
+def test_camera_feature_reset_without_a_saved_file_restores_the_first_seen_value(client):
+    baseline = _exposure(client)
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
+    r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+    assert r.status_code == 200, r.text
+    assert abs(_exposure_in(r.json()["updated"][0]["features"]) - baseline) < 2.0
+
+
 def test_camera_feature_reset_needs_a_config_dir(tmp_path):
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
@@ -1184,6 +1202,33 @@ def test_camera_feature_reset_needs_a_config_dir(tmp_path):
             r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
             assert r.status_code == 400
             assert r.json()["detail"] == "No config directory is set for this session"
+    finally:
+        controller.close()
+
+
+def test_camera_feature_reset_reads_the_file_the_camera_loads(tmp_path):
+    # A mixed rig has two suffixes in play: a stale FAKE-0.pfs must not shadow
+    # the FAKE-0.fake that CameraSystem.load_config gives the fake camera.
+    system = CameraSystem(["FAKE-0"], backend="fake")
+    system.cameras += CameraSystem(EMULATED_SERIALS[:1], backend="basler").cameras
+    assert system.extensions == ("fake", "pfs")
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    controller = RecordingController(system, settings, config_dir=tmp_path)
+    app = create_app(controller, OctacamConfig(), config_dir=str(tmp_path))
+    try:
+        with TestClient(app) as client:
+            baseline = _exposure(client)
+            saved = baseline + 500.0
+            client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
+            r = client.post("/api/config/save", json={"target": "active", "save_display": False})
+            assert r.json()["cameras_written"] == sorted(["FAKE-0", EMULATED_SERIALS[0]])
+            (tmp_path / "FAKE-0.pfs").write_text(f"ExposureTime\t{baseline + 3000.0}\n")
+            client.put(
+                "/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0}
+            )
+            r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+            assert r.status_code == 200, r.text
+            assert abs(_exposure_in(r.json()["updated"][0]["features"]) - saved) < 2.0
     finally:
         controller.close()
 
