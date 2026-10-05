@@ -219,20 +219,21 @@ class RecordingController:
     def _busy_reason(self, *, benchmark: bool = False) -> str | None:
         """Why a recording (or a benchmark) cannot claim the cameras now, else
         None. Caller holds the lock."""
-        if self.recording_active:
-            return "Recording in progress"
-        if self.diagnosing:
-            if benchmark:
-                return "A benchmark is already running"
-            return "A benchmark is in progress"
-        if self._reconfiguring:
-            return "Camera reconfiguration in progress"
-        if self._tearing_down:
-            return "Previous recording is still finishing"
-        if self._starting:
-            if benchmark:
-                return "A recording is starting"
-            return "Recording is already starting"
+        # (busy, the reason a recording is told, a benchmark's if it differs)
+        reasons = (
+            (self.recording_active, "Recording in progress", None),
+            (
+                self.diagnosing,
+                "A benchmark is in progress",
+                "A benchmark is already running",
+            ),
+            (self._reconfiguring, "Camera reconfiguration in progress", None),
+            (self._tearing_down, "Previous recording is still finishing", None),
+            (self._starting, "Recording is already starting", "A recording is starting"),
+        )
+        for busy, reason, benchmark_reason in reasons:
+            if busy:
+                return (benchmark_reason or reason) if benchmark else reason
         return None
 
     def get_settings(self) -> RecordingSettings:
