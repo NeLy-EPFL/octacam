@@ -274,18 +274,24 @@ def test_system_and_settings_endpoints(client):
         client.put("/api/settings", json={"max_nvenc_sessions": -1}).status_code == 422
     )
 
-    assert client.put("/api/settings", json={"fps": -1}).status_code == 422
-    assert client.put("/api/settings", json={"bogus": 1}).status_code == 422
+    # A bad value or unknown key answers 422 with a message naming it, which the
+    # Record tab shows as is.
+    bad_fps = client.put("/api/settings", json={"fps": -1})
+    assert bad_fps.status_code == 422 and bad_fps.json()["detail"].startswith("fps: ")
+    bogus = client.put("/api/settings", json={"bogus": 1})
+    assert bogus.status_code == 422 and "bogus" in bogus.json()["detail"]
     assert client.put("/api/settings", json={"crf": 18}).status_code == 422
+    assert client.put("/api/settings", json={"fps": None}).status_code == 422
+    assert client.put("/api/settings", json=[1]).status_code == 422
 
-    # writer_queue_size round-trips; sub-1 values are rejected (422). (A JSON
-    # bool coerces to int at the SettingsPatch boundary, so it is not tested
-    # here; the controller guard rejects a real bool — see test_controller.)
+    # writer_queue_size round-trips; sub-1 and non-integer values are rejected.
     assert settings["writer_queue_size"] == 64
     wq = client.put("/api/settings", json={"writer_queue_size": 128})
     assert wq.status_code == 200 and wq.json()["writer_queue_size"] == 128
     assert client.put("/api/settings", json={"writer_queue_size": 0}).status_code == 422
     assert client.put("/api/settings", json={"writer_queue_size": -1}).status_code == 422
+    as_bool = client.put("/api/settings", json={"writer_queue_size": True})
+    assert as_bool.status_code == 422
 
     validation = client.post(
         "/api/save-dir/validate", json={"path": "~/somewhere"}

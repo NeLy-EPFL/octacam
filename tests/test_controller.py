@@ -438,6 +438,33 @@ def test_update_settings_validation():
         controller.update_settings(fps=10.0)
 
 
+def test_settings_updated_names_each_bad_field():
+    settings = RecordingSettings()
+    with pytest.raises(ValueError, match=r"^Unknown settings: \['codec'\]$"):
+        settings.updated(codec="vp9")
+    with pytest.raises(ValueError, match="^fps: ") as error:
+        settings.updated(fps=0, duration_s=5.0)
+    assert "duration_s" not in str(error.value)
+    with pytest.raises(ValueError, match="^save_method: "):
+        settings.updated(save_method="vp9")
+    with pytest.raises(ValueError, match="^transcode_ffmpeg_params: bad quoting"):
+        settings.updated(transcode_ffmpeg_params='a "b')
+    with pytest.raises(ValueError, match="^save_dir: "):
+        settings.updated(save_dir=None)
+    # The changed fields only: a config value the GUI would refuse (fps 0, as
+    # the tolerant config loads it) must not block editing another field.
+    assert RecordingSettings(fps=0.0).updated(duration_s=5.0).duration_s == 5.0
+
+
+def test_save_methods_are_the_writer_formats():
+    from typing import get_args
+
+    from octacam.config import SaveMethod
+    from octacam.writer import FORMATS
+
+    assert set(get_args(SaveMethod)) == set(FORMATS)
+
+
 def test_update_settings_lone_save_dir_clears_split_halves():
     # Setting save_dir alone (no record_directory/relative_directory in the same
     # patch) must clear the stale split halves — otherwise relative_save_dir

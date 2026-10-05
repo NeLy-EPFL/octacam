@@ -162,38 +162,6 @@ def _preview_factor(
     return factor
 
 
-class SettingsPatch(BaseModel):
-    """Partial update for RecordingSettings; unknown keys are rejected (422).
-
-    Cross-field rules (fps > 0, known save_method, …) stay in
-    RecordingController.update_settings — only the fields actually sent are
-    forwarded, via model_dump(exclude_unset=True). Editing record_directory or
-    relative_directory recomposes save_dir server-side (the two halves of the
-    split save path). The transcode_*/transfer_* fields are the Process
-    section's post-recording knobs, baked into each recording's config snapshot
-    for `octacam process`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    fps: float | None = None
-    duration_s: float | None = None
-    save_dir: str | None = None
-    record_directory: str | None = None
-    relative_directory: str | None = None
-    trigger_source: str | None = None
-    preview_trigger_source: str | None = None
-    save_method: str | None = None
-    ffmpeg_params: str | None = None
-    nvenc_params: str | None = None
-    max_nvenc_sessions: int | None = None
-    writer_queue_size: int | None = None
-    record_form: str | None = None
-    save_frame_timestamps: bool | None = None
-    transcode_ffmpeg_params: str | None = None
-    transfer_directory: str | None = None
-    transfer_checksum: bool | None = None
-
-
 class SaveDirValidateRequest(BaseModel):
     path: str
 
@@ -828,9 +796,11 @@ def create_app(
         return dataclasses.asdict(controller.get_settings())
 
     @app.put("/api/settings")
-    def put_settings(patch: SettingsPatch):
+    def put_settings(patch: dict[str, Any]):
+        """Apply the fields sent; an unknown key or bad value answers 422 with
+        the controller's message (RecordingSettings.updated)."""
         try:
-            updated = controller.update_settings(**patch.model_dump(exclude_unset=True))
+            updated = controller.update_settings(**patch)
         except RuntimeError as e:
             raise HTTPException(409, str(e)) from None
         except (ValueError, TypeError) as e:

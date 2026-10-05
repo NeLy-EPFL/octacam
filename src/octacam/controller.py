@@ -21,20 +21,24 @@ import datetime
 import json
 import logging
 import os
-import shlex
 import shutil
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 import numpy as np
+from pydantic import Field, PositiveFloat, StrictInt, TypeAdapter, ValidationError
 
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.config import (
+    FfmpegArgs,
+    PreviewTriggerSource,
+    SaveMethod,
+    TriggerSource,
     compose_save_dir,
     increment_trailing_number,
     normalize_dir,
@@ -90,33 +94,62 @@ TRAIN_END_MARGIN_S = 0.3
 # is in timestamps.npz); the counts next to them are never capped.
 SUMMARY_INDEX_LIMIT = 1000
 
+
 @dataclass
 class RecordingSettings:
-    fps: float = 100.0
-    duration_s: float = 20.0
+    """The live Record and Process settings; :meth:`updated` checks the
+    constraints declared here."""
+
+    fps: PositiveFloat = 100.0
+    duration_s: PositiveFloat = 20.0
     save_dir: str = "./"
     # save_dir is record_directory/relative_directory once either is set; the
     # transfer mirrors relative_directory (else save_dir's basename).
     record_directory: str = ""
     relative_directory: str = ""
-    trigger_source: str = "software"  # "software" | "managed" | "external"
-    # "auto" mirrors trigger_source (see _effective_preview_mode).
-    preview_trigger_source: str = "auto"  # "auto" | "software" | "free_running"
-    save_method: str = "ffmpeg"  # "ffmpeg" (CPU) | "nvenc" (GPU) | "raw"
+    trigger_source: TriggerSource = "software"
+    preview_trigger_source: PreviewTriggerSource = "auto"
+    save_method: SaveMethod = "ffmpeg"
     # Encoder args per method, kept apart so switching keeps both presets.
-    ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    nvenc_params: str = NVENC_H264_PARAMS
+    ffmpeg_params: FfmpegArgs = DEFAULT_FFMPEG_PARAMS
+    nvenc_params: FfmpegArgs = NVENC_H264_PARAMS
     # None = the GPU's detected session cap; cameras beyond it encode on CPU.
-    max_nvenc_sessions: int | None = None
-    writer_queue_size: int = 64
+    max_nvenc_sessions: Annotated[StrictInt, Field(ge=0)] | None = None
+    writer_queue_size: Annotated[StrictInt, Field(ge=1)] = 64
     # "display" bakes the display transform into the video; "sensor" does not.
-    record_form: str = "display"
+    record_form: Literal["display", "sensor"] = "display"
     save_frame_timestamps: bool = False
     # `octacam process` params: unused during capture, patched into each
     # recording's config snapshot. An empty transfer_directory skips the transfer.
-    transcode_ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
+    transcode_ffmpeg_params: FfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
     transfer_directory: str = ""
     transfer_checksum: bool = True
+
+    def updated(self, **changes) -> "RecordingSettings":
+        """A copy with ``changes`` validated and applied, else ValueError naming
+        each bad field. A ``record_directory`` or ``relative_directory`` edit
+        recomposes save_dir from the split; a lone ``save_dir`` clears it."""
+        unknown = changes.keys() - _SETTINGS_FIELDS
+        if unknown:
+            raise ValueError(f"Unknown settings: {sorted(unknown)}")
+        try:
+            # Only the changed fields: a config value the GUI would refuse
+            # (fps 0) must not block editing another one.
+            valid = _SETTINGS.validate_python(changes)
+        except ValidationError as e:
+            raise ValueError(
+                "; ".join(f"{err['loc'][0]}: {err['msg']}" for err in e.errors())
+            ) from None
+        new = dataclasses.replace(self, **{key: getattr(valid, key) for key in changes})
+        if "record_directory" in changes:
+            new.record_directory = normalize_dir(new.record_directory)
+        if "record_directory" in changes or "relative_directory" in changes:
+            new.save_dir = compose_save_dir(
+                new.record_directory, new.relative_directory
+            )
+        elif "save_dir" in changes:
+            new = new.with_save_dir(new.save_dir)
+        return new
 
     def video_format(self) -> VideoFormat:
         video_format = FORMATS[self.save_method]
@@ -167,6 +200,10 @@ class RecordingSettings:
                 pass
         return Path(self.save_dir).name
 
+
+
+_SETTINGS = TypeAdapter(RecordingSettings)
+_SETTINGS_FIELDS = frozenset(f.name for f in dataclasses.fields(RecordingSettings))
 
 def capture_frame_count(settings: RecordingSettings) -> int | None:
     """``round(fps * duration)``, the pulses an octacam-driven trigger emits, so
@@ -689,83 +726,15 @@ class RecordingController:
             return dataclasses.replace(self._settings)
 
     def update_settings(self, **changes) -> RecordingSettings:
-        """Apply settings changes; rejected while a recording is active."""
+        """Apply settings changes (:meth:`RecordingSettings.updated`); refused
+        while a recording is active or starting."""
         with self._lock:
             if self.recording_active:
                 raise RuntimeError("Settings are locked while recording")
             if self._starting:
                 # A change could re-arm the preview under the starting recording.
                 raise RuntimeError("Settings are locked while a recording is starting")
-            unknown = set(changes) - {
-                f.name for f in dataclasses.fields(RecordingSettings)
-            }
-            if unknown:
-                raise ValueError(f"Unknown settings: {sorted(unknown)}")
-            if "save_method" in changes and changes["save_method"] not in FORMATS:
-                raise ValueError(f"Unknown save_method: {changes['save_method']}")
-            # None = auto-detect the GPU session cap; an int caps it explicitly.
-            if (
-                "max_nvenc_sessions" in changes
-                and changes["max_nvenc_sessions"] is not None
-                and (
-                    not isinstance(changes["max_nvenc_sessions"], int)
-                    or isinstance(changes["max_nvenc_sessions"], bool)
-                    or changes["max_nvenc_sessions"] < 0
-                )
-            ):
-                raise ValueError(
-                    "max_nvenc_sessions must be a non-negative integer or None"
-                )
-            for key in ("ffmpeg_params", "nvenc_params"):
-                if key in changes:
-                    try:
-                        shlex.split(changes[key])
-                    except ValueError as e:
-                        raise ValueError(f"invalid {key}: {e}") from e
-            if "fps" in changes and not changes["fps"] > 0:
-                raise ValueError("fps must be > 0")
-            if "duration_s" in changes and not changes["duration_s"] > 0:
-                raise ValueError("duration_s must be > 0")
-            if "trigger_source" in changes and changes["trigger_source"] not in (
-                "software",
-                "managed",
-                "external",
-            ):
-                raise ValueError("trigger_source must be software, managed or external")
-            if "preview_trigger_source" in changes and changes[
-                "preview_trigger_source"
-            ] not in ("auto", "software", "free_running"):
-                raise ValueError(
-                    "preview_trigger_source must be auto, software or free_running"
-                )
-            if "record_form" in changes and changes["record_form"] not in (
-                "display",
-                "sensor",
-            ):
-                raise ValueError("record_form must be display or sensor")
-            if "writer_queue_size" in changes and (
-                not isinstance(changes["writer_queue_size"], int)
-                or isinstance(changes["writer_queue_size"], bool)
-                or changes["writer_queue_size"] < 1
-            ):
-                raise ValueError("writer_queue_size must be an integer >= 1")
-            if "transcode_ffmpeg_params" in changes:
-                # Unparseable args would silently fall back to the default when
-                # `octacam process` loads the snapshot.
-                try:
-                    shlex.split(changes["transcode_ffmpeg_params"])
-                except ValueError as e:
-                    raise ValueError(f"invalid transcode_ffmpeg_params: {e}") from e
-            if "record_directory" in changes:
-                changes["record_directory"] = normalize_dir(changes["record_directory"])
-            merged = dataclasses.replace(self._settings, **changes)
-            if "record_directory" in changes or "relative_directory" in changes:
-                merged.save_dir = compose_save_dir(
-                    merged.record_directory, merged.relative_directory
-                )
-            elif "save_dir" in changes:
-                merged = merged.with_save_dir(merged.save_dir)
-            self._settings = merged
+            self._settings = self._settings.updated(**changes)
             if "fps" in changes:
                 self.camera_system.set_software_trigger_frequency(self._settings.fps)
             # Re-arm the preview when its trigger changes; a software preview
