@@ -325,20 +325,20 @@ def test_system_and_settings_endpoints(client):
 def test_nvenc_capabilities_endpoint(client, monkeypatch):
     # The GUI fetches this lazily to show/default the GPU session cap. Mock the
     # detector so the test never loads the GPU.
-    import octacam.web.app as appmod
+    from octacam.web import system
 
-    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": 6)
+    monkeypatch.setattr(system, "nvenc_max_sessions", lambda encoder="h264_nvenc": 6)
     data = client.get("/api/nvenc/capabilities").json()
     assert data["available"] is True
     assert data["max_sessions"] == 6
     assert data["encoder"] == "h264_nvenc"
-    assert data["default_params"] == appmod.NVENC_H264_PARAMS
+    assert data["default_params"] == system.NVENC_H264_PARAMS
 
 
 def test_nvenc_capabilities_unavailable(client, monkeypatch):
-    import octacam.web.app as appmod
+    from octacam.web import system
 
-    monkeypatch.setattr(appmod, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
+    monkeypatch.setattr(system, "nvenc_max_sessions", lambda encoder="h264_nvenc": None)
     data = client.get("/api/nvenc/capabilities").json()
     assert data["available"] is False and data["max_sessions"] is None
 
@@ -1650,7 +1650,7 @@ def test_view_message_server_side_crop(client):
 
 def test_system_update_check_makes_no_network_call(client):
     state = client.app.state.app_state
-    assert wait_until(lambda: state.update_status() is not None)
+    assert wait_until(lambda: state.update_notice is not None)
     data = client.get("/api/system").json()
     assert data["update"]["latest"] is None and data["update"]["available"] is False
     assert data["update"]["note"] == "update check disabled"
@@ -1661,8 +1661,8 @@ def test_system_surfaces_injected_update_notice(client):
 
     state = client.app.state.app_state
     # Inject after the background check has stored its own notice.
-    wait_until(lambda: state.update_status() is not None)
-    state._update_notice = UpdateNotice(
+    wait_until(lambda: state.update_notice is not None)
+    state.update_notice = UpdateNotice(
         current="0.3.0",
         latest="0.9.0",
         update_available=True,
