@@ -37,7 +37,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable
 
 log = logging.getLogger("octacam")
 
@@ -1238,3 +1238,11 @@ def teardown() -> None:
 
 # For paths that enumerate without a CameraSystem (doctor, an aborted run).
 atexit.register(teardown)
+
+SPEC = BackendSpec(
+    enumerate_spinnaker,
+    SpinnakerBackend,
+    ensure_available=ensure_available,
+    read_model=read_model,
+    teardown=teardown,
+)

@@ -17,10 +17,10 @@ import numpy as np
 
 from octacam.cameras.base import WRITER_QUEUE_SIZE, BackendError, Camera
 from octacam.cameras.registry import (
+    BackendSpec,
     BackendUnavailable,
     resolve_backend_names,
     select_backend,
-    teardown_backend,
 )
 from octacam.pulses import PulseClock
 from octacam.transform import DisplayTransform, from_camera_config
@@ -51,7 +51,7 @@ class CameraSystem:
 
         # "auto" sweeps every installed backend, so one rig can mix vendors.
         self.backend = backend
-        self._backends_used: set[str] = set()
+        self._teardowns: list[Callable[[], None]] = []  # of the tiers enumerated
 
         if _defer_open:  # see pending()
             return
@@ -121,34 +121,32 @@ class CameraSystem:
         (present but unusable) claims it without being opened. Results come in
         requested order.
         """
-        active = []  # (name, enumerate_fn, factory), in cascade priority order
+        active: list[tuple[str, BackendSpec]] = []  # in cascade priority order
         unavailable: list[BackendUnavailable] = []
         for name in resolve_backend_names(backend):
             try:
-                enumerate_fn, make_backend, _extension = select_backend(name)
+                active.append((name, select_backend(name)))
             except BackendUnavailable as e:
                 unavailable.append(e)
-                continue
-            active.append((name, enumerate_fn, make_backend))
         if not active:
             if unavailable:
                 raise unavailable[0]
             raise BackendUnavailable(backend, "no camera backend is available")
 
-        self._backends_used = {name for name, _fn, _mk in active}
+        self._teardowns = [spec.teardown for _name, spec in active if spec.teardown]
 
         claimed_by: dict[str, str] = {}  # serial -> the tier that claimed it
         found: dict[str, tuple[str, object, Callable]] = {}
-        for name, enumerate_fn, make_backend in active:
+        for name, spec in active:
             # Quiet: most absent serials belong to another tier.
-            for serial, handle in enumerate_fn(
+            for serial, handle in spec.enumerate(
                 requested_serial_numbers, warn_missing=False
             ):
                 if serial in claimed_by:
                     continue  # a higher-priority tier already owns this camera
                 claimed_by[serial] = name
                 if handle is not None:
-                    found[serial] = (serial, handle, make_backend)
+                    found[serial] = (serial, handle, spec.factory)
         if not requested_serial_numbers:
             entries = list(found.values())
         else:
@@ -172,8 +170,8 @@ class CameraSystem:
 
     def _teardown_backends(self) -> None:
         """Release session resources for every backend we enumerated."""
-        for name in self._backends_used:
-            teardown_backend(name)
+        for teardown in self._teardowns:
+            teardown()
 
     @property
     def extensions(self) -> tuple[str, ...]:

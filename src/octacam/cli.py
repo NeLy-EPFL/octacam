@@ -716,25 +716,21 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
     (so a Basler served by the vendor tier is not also listed under the pycameleon
     floor) — mirroring how :class:`CameraSystem` opens them. Basler goes through
     the pylon TL factory directly so model names come along; every other backend
-    exposes an optional module-level ``read_model(handle)`` (the model-name
-    analogue of its serial read, from the same pre-Init transport-layer node), so
-    doctor can label its cameras too — a backend without one simply yields
-    ``None``. Enumeration never opens/grabs a device, so this is safe alongside a
-    live session."""
-    import importlib
-
+    labels its cameras through its spec's ``read_model`` (None without one).
+    Enumeration never opens/grabs a device, so this is safe alongside a live
+    session."""
     from octacam.cameras import select_backend
+    from octacam.cameras.registry import is_auto
 
-    key = (name or "auto").strip().lower()
-    if key in ("auto", "all", ""):
+    if is_auto(name):
         return [(serial, model) for serial, _backend, model in _cascade_assignment()]
-    if key == "basler":
+    if name.strip().lower() == "basler":
         from octacam.cameras.basler import tl_factory
 
         devices = tl_factory().EnumerateDevices()
         return [(str(d.GetSerialNumber()), str(d.GetModelName())) for d in devices]
-    enumerate_fn, _factory, _extension = select_backend(name)
-    read_model = getattr(importlib.import_module(enumerate_fn.__module__), "read_model", None)
+    spec = select_backend(name)
+    read_model = spec.read_model
 
     def _model(handle) -> str | None:
         if read_model is None:
@@ -744,7 +740,7 @@ def _enumerate_backend(name: str) -> list[tuple[str, str | None]]:
         except Exception:  # a model read must never fail enumeration
             return None
 
-    return [(str(serial), _model(handle)) for serial, handle in enumerate_fn(None)]
+    return [(str(serial), _model(handle)) for serial, handle in spec.enumerate(None)]
 
 
 def _cascade_assignment() -> list[tuple[str, str, str | None]]:
@@ -776,10 +772,9 @@ class _CameraScan:
     race the import lock; the workers only scan."""
 
     def __init__(self, only_backend: str | None) -> None:
-        from octacam.cameras.registry import BACKENDS, CASCADE, select_backend
+        from octacam.cameras.registry import BACKENDS, CASCADE, is_auto, select_backend
 
-        key = (only_backend or "").strip().lower()
-        self.only = key if key and key not in ("auto", "all") else None
+        self.only = None if is_auto(only_backend) else (only_backend or "").strip().lower()
         # The backends _doctor_backends reports on (fake, being synthetic, only
         # when named): it calls get() for each, and a miss reads as a failed scan.
         display = [self.only] if self.only else [b for b in BACKENDS if b != "fake"]
@@ -855,9 +850,11 @@ class _CameraScan:
     def detected_serials(self, backend: str | None) -> set[str]:
         """Serials to cross-check the config against: the cascade under ``auto``;
         a backend the scan skipped is enumerated live (and may raise)."""
-        key = (backend or "auto").strip().lower()
-        if key in ("auto", "all", ""):
+        from octacam.cameras.registry import is_auto
+
+        if is_auto(backend):
             return {serial for serial, _backend, _model in self.cascade()}
+        key = (backend or "").strip().lower()
         if key in self._cams or key in self._errs:
             return {serial for serial, _model in self.get(key)}
         return {serial for serial, _model in _enumerate_backend(key)}
@@ -1290,8 +1287,10 @@ def _doctor_cameras_vs_config(
     if not declared:
         report.add("info", "config declares no serials; all detected cameras are used")
         return
+    from octacam.cameras.registry import is_auto
+
     backend = only_backend or cfg.backend
-    where = "across all backends" if backend in ("auto", "all", "") else f"on {backend}"
+    where = "across all backends" if is_auto(backend) else f"on {backend}"
     try:
         detected = scan.detected_serials(backend)
     except Exception as e:
@@ -1744,12 +1743,12 @@ def doctor(
 def _resolve_backend(console, cli_backend: str | None) -> str:
     """The wizard's backend, without prompting: ``auto`` (every installed
     backend, so mixed vendors just work) unless ``--backend`` pins one."""
-    from octacam.cameras.registry import BACKENDS, available_backends
+    from octacam.cameras.registry import BACKENDS, available_backends, is_auto
 
     if cli_backend is not None:
-        key = cli_backend.strip().lower()
-        if key in ("auto", "all"):
+        if is_auto(cli_backend):
             return "auto"
+        key = cli_backend.strip().lower()
         if key not in BACKENDS:
             raise typer.BadParameter(
                 f"unknown backend {cli_backend!r}; expected 'auto' or one of "
@@ -1773,7 +1772,9 @@ def _resolve_backend(console, cli_backend: str | None) -> str:
 def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
     """Print and return ``[(serial, model|None)]`` for *backend* (``auto``
     sweeps the cascade); [] if none or enumeration fails."""
-    label = "" if backend in ("auto", "all", "") else f"{backend} "
+    from octacam.cameras.registry import is_auto
+
+    label = "" if is_auto(backend) else f"{backend} "
     try:
         cams = _enumerate_backend(backend)
     except Exception as e:
@@ -2012,10 +2013,11 @@ def _build_config_doc(
 ) -> dict:
     """The raw-TOML dict for the config writer. ``backend`` is written only when
     pinned (``auto`` stays implicit); empty sections are omitted."""
+    from octacam.cameras.registry import is_auto
     from octacam.config import TranscodeConfig
 
     doc: dict = {}
-    if backend not in ("auto", "all", ""):
+    if not is_auto(backend):
         doc["backend"] = backend
     doc["record"] = record_cfg.model_dump()
     doc["transcode"] = TranscodeConfig().model_dump()

@@ -24,6 +24,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
+from octacam.cameras.registry import BackendSpec
 
 log = logging.getLogger("octacam")
 
@@ -564,3 +565,6 @@ def enumerate_fake(
             continue
         out.append((serial, serial))
     return out
+
+
+SPEC = BackendSpec(enumerate_fake, FakeBackend)

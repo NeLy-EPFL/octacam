@@ -27,7 +27,7 @@ from octacam.cameras.base import (
     curated_read_feature,
     curated_write_feature,
 )
-from octacam.cameras.registry import BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable
 
 try:  # pycameleon is a core dep, but keep the import defensive like the others.
     import pycameleon
@@ -382,3 +382,11 @@ def enumerate_pycameleon(
             continue
         out.append((serial, cam))
     return out
+
+
+SPEC = BackendSpec(
+    enumerate_pycameleon,
+    PycameleonBackend,
+    ensure_available=ensure_available,
+    read_model=read_model,
+)

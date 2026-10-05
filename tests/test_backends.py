@@ -19,10 +19,11 @@ from octacam.cameras import select_backend
 from octacam.cameras.registry import (
     BACKENDS,
     CASCADE,
+    BackendSpec,
     BackendUnavailable,
     available_backends,
+    is_auto,
     resolve_backend_names,
-    teardown_backend,
 )
 
 
@@ -95,6 +96,11 @@ def test_resolve_backend_names_auto_is_available_cascade():
     assert "pycameleon" in available
 
 
+def test_is_auto_matches_the_cascade_selectors():
+    assert all(is_auto(name) for name in ("auto", " ALL ", "", None))
+    assert not any(is_auto(name) for name in ("basler", "fake", "automatic"))
+
+
 def test_resolve_backend_names_concrete_is_single():
     assert resolve_backend_names("basler") == ["basler"]
     assert resolve_backend_names("FLIR") == ["flir"]
@@ -104,17 +110,17 @@ def test_resolve_backend_names_concrete_is_single():
 
 
 def test_select_fake_backend():
-    enumerate_fn, factory, extension = select_backend("fake")
-    assert extension == "fake"
-    assert callable(enumerate_fn) and callable(factory)
+    spec = select_backend("fake")
+    assert spec.factory.extension == "fake"
+    assert callable(spec.enumerate) and spec.teardown is None
 
 
 def test_select_pycameleon_backend():
     # pycameleon is a core dependency, so selecting it always works and it
     # persists parameters as native GenApi TSV (shared _genicam_config format).
-    enumerate_fn, factory, extension = select_backend("pycameleon")
-    assert extension == "txt"
-    assert callable(enumerate_fn) and callable(factory)
+    spec = select_backend("pycameleon")
+    assert spec.factory.extension == "txt"
+    assert callable(spec.enumerate) and callable(spec.read_model)
 
 
 def test_select_harvesters_backend_raises():
@@ -180,10 +186,16 @@ def test_select_flir_without_pyspin_raises():
         select_backend("flir")
 
 
-def test_teardown_backend_noop_for_non_session_backends():
-    teardown_backend("basler")  # must not raise
-    teardown_backend("fake")
-    teardown_backend("pycameleon")
+def test_only_the_spinnaker_tiers_hold_session_state():
+    # flir and spinnaker hold the Spinnaker System until every camera is closed;
+    # the other backends have nothing to release.
+    for name in ("basler", "fake", "pycameleon"):
+        assert select_backend(name).teardown is None
+    import octacam.cameras.flir as flir
+    import octacam.cameras.spinnaker_c as spinnaker_c
+
+    assert flir.SPEC.teardown is flir.teardown
+    assert spinnaker_c.SPEC.teardown is spinnaker_c.teardown
 
 
 # --------------------------------------------------------------------------
@@ -558,10 +570,8 @@ def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):
     monkeypatch.setattr(
         sysmod,
         "select_backend",
-        lambda name: (
-            (top_enum if name == "top" else floor_enum),
-            (lambda h: object()),
-            "x",
+        lambda name: BackendSpec(
+            top_enum if name == "top" else floor_enum, lambda h: object()
         ),
     )
     sys = CameraSystem.pending()  # hardware-free shell; _enumerate opens nothing
@@ -580,7 +590,7 @@ def test_single_backend_filters_declined_camera(monkeypatch):
 
     monkeypatch.setattr(sysmod, "resolve_backend_names", lambda _b: ["solo"])
     monkeypatch.setattr(
-        sysmod, "select_backend", lambda _n: (only_enum, (lambda h: object()), "x")
+        sysmod, "select_backend", lambda _n: BackendSpec(only_enum, lambda h: object())
     )
     sys = CameraSystem.pending()
     serials = [serial for serial, _h, _mk in sys._enumerate("solo", None)]
@@ -711,7 +721,7 @@ def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch)
     monkeypatch.setattr(
         sysmod,
         "select_backend",
-        lambda name: (make_enum(name, tiers[name]), (lambda h: object()), "x"),
+        lambda name: BackendSpec(make_enum(name, tiers[name]), lambda h: object()),
     )
     system = CameraSystem.pending()
     entries = system._enumerate("auto", ["SN1", "SN4"])

@@ -875,7 +875,7 @@ def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
 
 def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     # End-to-end of the asymmetry fix: the REAL _enumerate_backend generic path
-    # must resolve the backend's module-level read_model (by module, by name) and
+    # must resolve the backend's read_model through its registry spec and
     # map each enumerated handle to its model. Driven through pycameleon (always
     # available) with fake handles, so the whole glue runs — not a monkeypatched
     # stand-in. A regressed read_model lookup / handle→model mapping fails here.

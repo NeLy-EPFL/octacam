@@ -29,7 +29,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
-from octacam.cameras.registry import BackendUnavailable
+from octacam.cameras.registry import BackendSpec, BackendUnavailable
 
 try:  # PySpin ships with the Spinnaker SDK and is not pip-installable.
     import PySpin  # type: ignore
@@ -737,3 +737,11 @@ def teardown() -> None:
 
 # For paths that enumerate without a CameraSystem (doctor, an aborted run).
 atexit.register(teardown)
+
+SPEC = BackendSpec(
+    enumerate_flir,
+    FlirBackend,
+    ensure_available=ensure_available,
+    read_model=read_model,
+    teardown=teardown,
+)

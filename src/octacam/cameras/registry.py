@@ -1,14 +1,37 @@
 """Camera backend selection and the ``auto`` cascade.
 
-A backend name resolves to its enumeration function, backend class and
-parameter-file extension. Each backend module is imported only when selected,
-and a missing SDK raises :class:`BackendUnavailable`, not a raw ``ImportError``.
+Each backend module declares a module-level :data:`SPEC` (a :class:`BackendSpec`)
+and is imported only when selected; a missing SDK raises
+:class:`BackendUnavailable`, not a raw ``ImportError``.
 """
 
 import importlib
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-BACKENDS = ("basler", "flir", "spinnaker", "pycameleon", "fake")
+if TYPE_CHECKING:
+    from octacam.cameras.base import CameraBackend
+
+# Backend name -> (module, why it cannot be imported).
+_MODULES = {
+    "basler": ("octacam.cameras.basler", "the 'pypylon' package is not installed"),
+    "flir": (
+        "octacam.cameras.flir",
+        "the Spinnaker SDK and its PySpin wheel must be installed "
+        "(they are not on PyPI; see the README)",
+    ),
+    "spinnaker": (
+        "octacam.cameras.spinnaker_c",
+        "the Spinnaker SDK (libSpinnaker_C.so) is not installed",
+    ),
+    "pycameleon": (
+        "octacam.cameras.pycameleon",
+        "the 'pycameleon' package is not installed",
+    ),
+    "fake": ("octacam.cameras.fake", "the fake backend module failed to import"),
+}
+BACKENDS = tuple(_MODULES)
 
 # "auto": each camera is claimed by the first tier here that enumerates its
 # serial (CameraSystem._enumerate). Vendor SDKs first; ``spinnaker`` (the
@@ -28,72 +51,40 @@ class BackendUnavailable(RuntimeError):
         super().__init__(message)
 
 
-def select_backend(name: str) -> tuple[Callable, Callable, str]:
-    """Resolve ``name`` to ``(enumerate_fn, backend_factory, extension)``.
+@dataclass(frozen=True)
+class BackendSpec:
+    """What the registry reaches in one backend module.
 
-    ``enumerate_fn(requested_serials, *, warn_missing=True)`` returns
-    ``[(serial, handle), ...]``; ``extension`` has no dot. Every backend must
-    accept ``warn_missing``: the cascade offers each tier the rig's serials with
-    ``warn_missing=False``, since a tier also sees serials another one owns.
+    ``enumerate(requested_serials, *, warn_missing=True)`` returns ``[(serial,
+    handle), ...]``; a None handle is a camera present but unusable, claimed
+    without being opened. ``factory`` builds the backend from a handle.
     """
+
+    enumerate: Callable[..., list[tuple[str, Any]]]
+    factory: Callable[[Any], "CameraBackend"]
+    # Raises BackendUnavailable when the module imports but its SDK is missing.
+    ensure_available: Callable[[], None] | None = None
+    # The model name from a handle without opening the camera (for doctor).
+    read_model: Callable[[Any], str | None] | None = None
+    # Releases session-wide SDK state once every camera is closed.
+    teardown: Callable[[], None] | None = None
+
+
+def select_backend(name: str) -> BackendSpec:
+    """The :class:`BackendSpec` of ``name`` (case-insensitive; empty is basler),
+    its SDK imported."""
     key = (name or "basler").strip().lower()
-    if key == "basler":
-        try:
-            basler = importlib.import_module("octacam.cameras.basler")
-        except ImportError as e:
-            raise BackendUnavailable(
-                "basler", "the 'pypylon' package is not installed"
-            ) from e
-        return (
-            basler.enumerate_basler,
-            basler.BaslerBackend,
-            basler.BaslerBackend.extension,
-        )
-    if key == "fake":
-        try:
-            fake = importlib.import_module("octacam.cameras.fake")
-        except ImportError as e:  # pragma: no cover - fake has no hard deps
-            raise BackendUnavailable("fake", str(e)) from e
-        return fake.enumerate_fake, fake.FakeBackend, fake.FakeBackend.extension
-    if key == "flir":
-        try:
-            flir = importlib.import_module("octacam.cameras.flir")
-        except ImportError as e:
-            raise BackendUnavailable(
-                "flir",
-                "the Spinnaker SDK and its PySpin wheel must be installed "
-                "(they are not on PyPI; see the README)",
-            ) from e
-        flir.ensure_available()
-        return flir.enumerate_flir, flir.FlirBackend, flir.FlirBackend.extension
-    if key == "spinnaker":
-        try:
-            spinnaker = importlib.import_module("octacam.cameras.spinnaker_c")
-        except ImportError as e:  # pragma: no cover - module has no import-time deps
-            raise BackendUnavailable(
-                "spinnaker",
-                "the Spinnaker SDK (libSpinnaker_C.so) is not installed",
-            ) from e
-        spinnaker.ensure_available()
-        return (
-            spinnaker.enumerate_spinnaker,
-            spinnaker.SpinnakerBackend,
-            spinnaker.SpinnakerBackend.extension,
-        )
-    if key == "pycameleon":
-        try:
-            pycameleon = importlib.import_module("octacam.cameras.pycameleon")
-        except ImportError as e:
-            raise BackendUnavailable(
-                "pycameleon", "the 'pycameleon' package is not installed"
-            ) from e
-        pycameleon.ensure_available()
-        return (
-            pycameleon.enumerate_pycameleon,
-            pycameleon.PycameleonBackend,
-            pycameleon.PycameleonBackend.extension,
-        )
-    raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
+    if key not in _MODULES:
+        raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
+    module_name, missing = _MODULES[key]
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as e:
+        raise BackendUnavailable(key, missing) from e
+    spec: BackendSpec = module.SPEC
+    if spec.ensure_available is not None:
+        spec.ensure_available()
+    return spec
 
 
 def available_backends() -> list[str]:
@@ -108,30 +99,14 @@ def available_backends() -> list[str]:
     return out
 
 
+def is_auto(name: str | None) -> bool:
+    """Whether a backend selector means the cascade: ``auto``, ``all`` or empty."""
+    return (name or "").strip().lower() in ("auto", "all", "")
+
+
 def resolve_backend_names(name: str | None) -> list[str]:
-    """``auto``, ``all`` or empty: :func:`available_backends`; else ``[name]``."""
-    key = (name or "auto").strip().lower()
-    if key in ("auto", "all", ""):
+    """The cascade's :func:`available_backends` for :func:`is_auto`, else
+    ``[name]``."""
+    if is_auto(name):
         return available_backends()
-    return [key]
-
-
-# Backends holding the Spinnaker System singleton, released by each module's
-# teardown() once every camera is closed.
-_TEARDOWN_MODULES = {
-    "flir": "octacam.cameras.flir",
-    "spinnaker": "octacam.cameras.spinnaker_c",
-}
-
-
-def teardown_backend(name: str) -> None:
-    """Release ``name``'s session-wide SDK resources (a no-op for most)."""
-    key = (name or "basler").strip().lower()
-    module = _TEARDOWN_MODULES.get(key)
-    if module is None:
-        return
-    try:
-        mod = importlib.import_module(module)
-    except ImportError:  # pragma: no cover - nothing to release if it never loaded
-        return
-    mod.teardown()
+    return [(name or "").strip().lower()]

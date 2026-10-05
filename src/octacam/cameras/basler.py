@@ -27,6 +27,7 @@ from octacam.cameras.base import (
     NodeInfo,
     coerce_bool,
 )
+from octacam.cameras.registry import BackendSpec
 
 log = logging.getLogger("octacam")
 
@@ -776,3 +777,6 @@ def enumerate_basler(
         results[serial] = None
 
     return [(serial, results[serial]) for serial, _device in wanted]
+
+
+SPEC = BackendSpec(enumerate_basler, BaslerBackend)

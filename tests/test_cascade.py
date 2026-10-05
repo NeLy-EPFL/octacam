@@ -6,6 +6,7 @@ a camera served by a vendor SDK is not also opened by the pycameleon floor.
 """
 
 import octacam.cameras.system as system_mod
+from octacam.cameras.registry import BackendSpec
 from octacam.cameras.system import CameraSystem
 
 
@@ -32,7 +33,7 @@ def _fake_backends(monkeypatch, layout: dict[str, list[str]]):
                 return [(s, by[s]) for s in requested if s in by]
             return pairs
 
-        return enumerate_fn, factories[name], "json"
+        return BackendSpec(enumerate_fn, factories[name])
 
     monkeypatch.setattr(system_mod, "resolve_backend_names", fake_resolve)
     monkeypatch.setattr(system_mod, "select_backend", fake_select)
