@@ -493,14 +493,6 @@ class FlirBackend(GenICamTriggerConfig, CameraBackend):
         except spin.SpinnakerException as e:
             raise BackendError(str(e)) from e
 
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        cam = self._cam
-        if cam is None or not self.trigger.grabbing:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
-
     # ------------------------------------------------------------- grabbing
 
     def stream_statistics(self) -> dict[str, int]:
@@ -605,31 +597,20 @@ class FlirBackend(GenICamTriggerConfig, CameraBackend):
             except Exception:
                 pass
 
-    def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
+    def _fire_trigger(self) -> bool:
         spin = _spin()
-        fire = self.trigger.claim(timeout_ms)
-        if fire is None:
-            return None
-        cam = self._cam
-        if cam is None or not self.trigger.grabbing:
-            return None
-        if fire:
-            try:
-                spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
-            except spin.SpinnakerException:
-                self.trigger.unfired()
-                return None
-        return self._fetch_image(
-            cam, self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
-        )
+        try:
+            spin.CCommandPtr(self._nodemap().GetNode("TriggerSoftware")).Execute()
+        except spin.SpinnakerException:
+            return False
+        return True
 
-    def _fetch_image(
-        self, cam, timeout_ms, wants_array, answers_trigger: bool = False
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
     ) -> Frame | None:
-        # One image, or None. ``answers_trigger``: the software-trigger path, where
-        # any image the SDK hands over answers the oldest fired trigger.
+        cam = self._cam
+        if cam is None:
+            return None
         spin = _spin()
         try:
             image = cam.GetNextImage(timeout_ms)

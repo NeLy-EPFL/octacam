@@ -227,22 +227,6 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
     def execute_command(self, name: str) -> None:
         raise BackendError("command execution is not supported on this backend")
 
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        with self._lock:
-            if not self.trigger.grabbing or self._receiver is None or self._cam is None:
-                return None
-            try:
-                array = self._receive_bounded(timeout_ms)
-            except Exception as e:
-                log.debug("receive failed on camera %s: %s", self._serial, e)
-                return None
-        if array is None:
-            return None  # timed out; the grab loop re-checks the stop flag
-        out = np.array(array, copy=True) if wants_array() else None
-        return (out, 0)
-
     # ------------------------------------------------------------- grabbing
 
     def _start_streaming(self) -> None:
@@ -272,34 +256,56 @@ class PycameleonBackend(GenICamTriggerConfig, CameraBackend):
                     pass
                 self._receiver = None
 
+    def _streaming(self) -> bool:
+        """A live grab with a receiver (caller holds ``_lock``)."""
+        return self.trigger.grabbing and self._receiver is not None and self._cam is not None
+
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # Fire and receive under one hold of the device lock (exclusive borrow).
+        # CameraBackend.retrieve, with the fire and the receive under one hold of
+        # the device lock (exclusive borrow).
         fire = self.trigger.claim(timeout_ms)
         if fire is None:
             return None
         with self._lock:
-            if not self.trigger.grabbing or self._receiver is None or self._cam is None:
+            if not self._streaming():
                 return None
-            if fire:
-                try:
-                    self._cam.execute("TriggerSoftware")
-                except Exception as e:
-                    log.debug("trigger failed on camera %s: %s", self._serial, e)
-                    self.trigger.unfired()
-                    return None
+            if fire and not self._fire_trigger():
+                self.trigger.unfired()
+                return None
+            return self._fetch(
+                self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+            )
+
+    def _fire_trigger(self) -> bool:
+        with self._lock:
             try:
-                array = self._receive_bounded(self.trigger.fetch_timeout_ms(timeout_ms))
+                self._cam.execute("TriggerSoftware")
+            except Exception as e:
+                log.debug("trigger failed on camera %s: %s", self._serial, e)
+                return False
+            return True
+
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        with self._lock:
+            if not self._streaming():
+                return None
+            try:
+                array = self._receive_bounded(timeout_ms)
             except Exception as e:
                 # A payload cameleon rejected (short, a trailer error) is this
                 # backend's incomplete image: it answers its trigger.
                 log.debug("receive failed on camera %s: %s", self._serial, e)
-                self.trigger.answered()
+                if answers_trigger:
+                    self.trigger.answered()
                 return None
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
-        self.trigger.answered()
+        if answers_trigger:
+            self.trigger.answered()
         out = np.array(array, copy=True) if wants_array() else None
         return (out, 0)
 

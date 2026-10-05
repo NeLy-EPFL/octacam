@@ -441,28 +441,6 @@ class BaslerBackend(CameraBackend):
             log.debug("free-run unsupported on camera %s: %s", self._serial, e)
             return False
 
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        raw = self.raw
-        if raw is None or not self.trigger.grabbing:
-            return None
-        try:
-            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
-        except genicam.GenericException:
-            return None
-        try:
-            if not result.IsValid():
-                return None
-            if not result.GrabSucceeded():
-                self._count_incomplete(result)
-                return None
-            return (result.Array if wants_array() else None, result.TimeStamp)
-        except genicam.GenericException:
-            return None
-        finally:
-            result.Release()
-
     def _count_incomplete(self, result) -> None:
         """Count a failed grab, logging its cause rate-limited."""
         self._incomplete_grabs += 1
@@ -538,26 +516,25 @@ class BaslerBackend(CameraBackend):
         if self.raw is not None:
             self.raw.StopGrabbing()
 
-    def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        fire = self.trigger.claim(timeout_ms)
-        if fire is None:
-            return None
+    def _fire_trigger(self) -> bool:
         raw = self.raw
-        if raw is None or not self.trigger.grabbing:
+        if raw is None:
+            return False
+        try:
+            raw.ExecuteSoftwareTrigger()
+        except genicam.GenericException:
+            return False
+        return True
+
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        raw = self.raw
+        if raw is None:
             return None
-        if fire:
-            try:
-                raw.ExecuteSoftwareTrigger()
-            except genicam.GenericException:
-                self.trigger.unfired()
-                return None
         # RetrieveResult raises, not just times out, on an unplug or a transport error.
         try:
-            result = raw.RetrieveResult(
-                self.trigger.fetch_timeout_ms(timeout_ms), pylon.TimeoutHandling_Return
-            )
+            result = raw.RetrieveResult(timeout_ms, pylon.TimeoutHandling_Return)
         except genicam.GenericException:
             return None
         try:
@@ -565,16 +542,16 @@ class BaslerBackend(CameraBackend):
             if not result.IsValid():
                 return None
             succeeded = result.GrabSucceeded()
-            # A failed grab answers its trigger too; the clock check needs ns.
-            self.trigger.answered(
-                int(result.TimeStamp) if succeeded and self._stamps_ns else None
-            )
+            if answers_trigger:
+                # A failed grab answers its trigger too; the clock check needs ns.
+                self.trigger.answered(
+                    int(result.TimeStamp) if succeeded and self._stamps_ns else None
+                )
             if not succeeded:
                 self._count_incomplete(result)
                 return None
             timestamp = result.TimeStamp
-            array = result.Array if wants_array() else None
-            return (array, timestamp)
+            return (result.Array if wants_array() else None, timestamp)
         except genicam.GenericException:
             return None
         finally:

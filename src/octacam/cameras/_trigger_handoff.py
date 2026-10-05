@@ -4,7 +4,8 @@ The shared :class:`~octacam.trigger.PreciseTimer` calls ``trigger_once`` on ever
 camera from one thread, so a device trigger there would let a slow camera delay
 every other one (a 100 fps Basler fell to ~82 fps behind two FLIRs). Instead
 ``trigger_once`` only offers a trigger to the camera's :class:`SoftwareTrigger`,
-and the camera's own ``retrieve`` claims it, fires it and fetches its image::
+and the camera's own :meth:`~octacam.cameras.base.CameraBackend.retrieve` claims
+it, fires it and fetches its image::
 
     fire = trigger.claim(timeout_ms)
     if fire is None:

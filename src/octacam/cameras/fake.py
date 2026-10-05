@@ -169,8 +169,10 @@ class FakeBackend(CameraBackend):
         self.fetch_blocks = False
         self._clock_t0 = 1_000_000_000_000
         self._triggers_since_grab = 0
-        # Images exposed but not yet fetched, oldest first.
+        # Images exposed but not yet fetched, oldest first, and whether the next
+        # fetch reports an incomplete image (a missed trigger).
         self._device_images: list[_Image] = []
+        self._incomplete = False
 
     def open(self) -> None:
         self._open = True
@@ -405,6 +407,7 @@ class FakeBackend(CameraBackend):
         self._preview_grab = True
         self._triggers_since_grab = 0
         self._device_images.clear()
+        self._incomplete = False
         self.trigger.begin_grab()
 
     def start_grab_record(self) -> bool:
@@ -433,40 +436,25 @@ class FakeBackend(CameraBackend):
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
-        # A frame shows its trigger's sequence number (mod 256), so a test can
-        # tell which pulse a video frame really is.
-        period = self.hardware_period_ns
-        if period:
-            return self._retrieve_clocked(timeout_ms, wants_array, period)
-        fire = self.trigger.claim(timeout_ms)
-        if fire is None:
-            return None
-        if fire and not self._expose():
-            return None
-        image = self._fetch(self.trigger.fetch_timeout_ms(timeout_ms))
-        if image is None:
-            return None
-        array = _render(self.width(), self.height(), image.seq) if wants_array() else None
-        return (array, image.stamp)
+        if self.hardware_period_ns:
+            return self._retrieve_clocked(timeout_ms, wants_array, self.hardware_period_ns)
+        return super().retrieve(timeout_ms, wants_array)
 
-    def _expose(self) -> bool:
+    def _fire_trigger(self) -> bool:
         """The device's response to the trigger just fired (the newest
-        outstanding one). False when no image will come of it."""
+        outstanding one); False only when the grab restarted under it."""
         seq = self.trigger.fired_index
-        if seq is None:  # the grab restarted under us: nothing fired
+        if seq is None:
             return False
         self._triggers_since_grab += 1
-        if self._triggers_since_grab <= self.ignore_first_triggers and (
-            self.ignore_first_silently
-        ):
+        ignored = self._triggers_since_grab <= self.ignore_first_triggers
+        if ignored and self.ignore_first_silently:
             return True  # nothing will arrive, and nothing says so
-        if self._triggers_since_grab <= self.ignore_first_triggers or (
-            seq in self.miss_triggers
-        ):
-            # No frame, and the SDK says so at once (like an incomplete image):
+        if ignored or seq in self.miss_triggers:
+            # No frame, and the SDK says so at once, like an incomplete image:
             # the trigger is answered, and the next one can fire.
-            self.trigger.answered()
-            return False
+            self._incomplete = True
+            return True
         if seq in self.lost_triggers:
             return True  # nothing will arrive; the hand-off gives up on it
         latency = self.latency_by_fire.get(self._triggers_since_grab, self.image_latency_s)
@@ -480,10 +468,28 @@ class FakeBackend(CameraBackend):
         )
         return True
 
-    def _fetch(self, timeout_ms: int) -> _Image | None:
-        """One fetch from the device's image queue: the image it hands over,
-        which answers the oldest outstanding trigger, or None. A wait ends early
-        on a trigger offer or the grab's end (see SoftwareTrigger.wait)."""
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        # A frame shows its trigger's sequence number (mod 256), so a test can
+        # tell which pulse a video frame really is.
+        if self._incomplete:
+            self._incomplete = False
+            if answers_trigger:
+                self.trigger.answered()
+            return None
+        image = self._next_image(timeout_ms)
+        if image is None:
+            return None
+        if answers_trigger:
+            self.trigger.answered(image.stamp)
+        array = _render(self.width(), self.height(), image.seq) if wants_array() else None
+        return (array, image.stamp)
+
+    def _next_image(self, timeout_ms: int) -> _Image | None:
+        """One fetch from the device's image queue: the image it hands over, or
+        None. A wait ends early on a trigger offer or the grab's end (see
+        SoftwareTrigger.wait)."""
         head = self._device_images[0] if self._device_images else None
         if head is None or not head.ready(time.monotonic()):
             if head is not None and head.misses > 0:
@@ -500,9 +506,7 @@ class FakeBackend(CameraBackend):
                 self.trigger.wait(until - now)
             else:
                 return None
-        image = self._device_images.pop(0)
-        self.trigger.answered(image.stamp)
-        return image
+        return self._device_images.pop(0)
 
     def _retrieve_clocked(
         self, timeout_ms: int, wants_array: Callable[[], bool], period_ns: int

@@ -246,11 +246,48 @@ class CameraBackend(ABC):
         """The SDK's transport counters, where it has any."""
         return {}
 
+    def retrieve(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """One software-triggered frame: fire a claimed trigger, then fetch at
+        most one image, which answers the oldest outstanding trigger."""
+        fire = self.trigger.claim(timeout_ms)
+        if fire is None or not self.trigger.grabbing:
+            return None
+        if fire and not self._fire_trigger():
+            self.trigger.unfired()
+            return None
+        return self._fetch(
+            self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
+        )
+
+    def retrieve_freerun(
+        self, timeout_ms: int, wants_array: Callable[[], bool]
+    ) -> Frame | None:
+        """One frame the camera made on its own clock (free run, or a hardware
+        trigger): the un-gated fetch."""
+        if not self.trigger.grabbing:
+            return None
+        return self._fetch(timeout_ms, wants_array, answers_trigger=False)
+
     def retrieve_external(
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         """One frame of an externally triggered recording: the un-gated fetch."""
         return self.retrieve_freerun(timeout_ms, wants_array)
+
+    @abstractmethod
+    def _fire_trigger(self) -> bool:
+        """Fire one device software trigger; False if the device refused it."""
+
+    @abstractmethod
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
+    ) -> Frame | None:
+        """At most one image within ``timeout_ms``, its array only if
+        ``wants_array()``; None on a timeout or an unusable image. With
+        ``answers_trigger``, any image the SDK hands over, incomplete too, is
+        reported to ``trigger.answered`` (with its timestamp if that counts ns)."""
 
     @abstractmethod
     def open(self) -> None: ...
@@ -300,10 +337,6 @@ class CameraBackend(ABC):
     # at ``fps`` (free-run preview). False when the backend cannot arm it.
     @abstractmethod
     def begin_freerun(self, fps: float | None = None) -> bool: ...
-    @abstractmethod
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
 
     @abstractmethod
     def start_grab_preview(self) -> None: ...
@@ -311,11 +344,6 @@ class CameraBackend(ABC):
     def start_grab_record(self) -> bool: ...
     @abstractmethod
     def stop_grab(self) -> None: ...
-
-    @abstractmethod
-    def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None: ...
 
 
 def snap_value(value: float, info: NodeInfo) -> float:

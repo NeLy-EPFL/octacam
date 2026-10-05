@@ -984,14 +984,6 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
             dump_config(self, model), self._original_trigger_source
         )
 
-    def retrieve_freerun(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        cam = self._cam
-        if cam is None or not self.trigger.grabbing:
-            return None
-        return self._fetch_image(cam, timeout_ms, wants_array)
-
     # ------------------------------------------------------------- grabbing
 
     def stream_statistics(self) -> dict[str, int]:
@@ -1109,30 +1101,19 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
         except Exception:
             pass
 
-    def retrieve(
-        self, timeout_ms: int, wants_array: Callable[[], bool]
-    ) -> Frame | None:
-        fire = self.trigger.claim(timeout_ms)
-        if fire is None:
-            return None
-        cam = self._cam
-        if cam is None or not self.trigger.grabbing:
-            return None
-        spin = _spin()
-        if fire:
-            try:
-                spin.execute_command(self._nodemap, "TriggerSoftware")
-            except BackendError:
-                self.trigger.unfired()
-                return None
-        return self._fetch_image(
-            cam, self.trigger.fetch_timeout_ms(timeout_ms), wants_array, answers_trigger=True
-        )
+    def _fire_trigger(self) -> bool:
+        try:
+            _spin().execute_command(self._nodemap, "TriggerSoftware")
+        except BackendError:
+            return False
+        return True
 
-    def _fetch_image(
-        self, cam, timeout_ms: int, wants_array, answers_trigger: bool = False
+    def _fetch(
+        self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
     ) -> Frame | None:
-        # One image, or None; ``answers_trigger`` as in FlirBackend._fetch_image.
+        cam = self._cam
+        if cam is None:
+            return None
         spin = _spin()
         image = spin.get_next_image(cam, timeout_ms)
         if image is None:

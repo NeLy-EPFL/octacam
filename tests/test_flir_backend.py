@@ -11,6 +11,7 @@ smaller than Max = 1770`` on Height), and it is reproduced here in pure Python.
 import logging
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import octacam.cameras.flir as flir
@@ -278,11 +279,12 @@ def test_save_params_round_trips_the_roi(backend):
     assert values["OffsetY"] == "256"
 
 
-# ------------------------------------------------------ incomplete-image log
+# ------------------------------------------------------------- frame fetch
 class FakeImage:
-    def __init__(self, incomplete=True):
+    def __init__(self, incomplete=False, array=None):
         self.incomplete = incomplete
-        self.released = False
+        self.array = array
+        self.released = 0
 
     def IsIncomplete(self):
         return self.incomplete
@@ -290,19 +292,44 @@ class FakeImage:
     def GetTimeStamp(self):
         return 7
 
+    def GetNDArray(self):
+        return self.array
+
     def Release(self):
-        self.released = True
+        self.released += 1
 
 
-def _grab(backend, monkeypatch, *, record):
-    """Start a (native-free) grab and return a fetch of one incomplete image."""
-    monkeypatch.setattr(backend, "_begin_acquisition", lambda *args, **kwargs: None)
+def _grab(backend, monkeypatch, image, *, record=False):
+    """Start a (native-free) grab and return a free-run fetch of ``image``."""
+    monkeypatch.setattr(
+        backend, "_begin_acquisition", lambda *a, **k: backend.trigger.begin_grab()
+    )
     if record:
         backend.start_grab_record()
     else:
         backend.start_grab_preview()
-    cam = SimpleNamespace(GetNextImage=lambda _timeout: FakeImage())
-    return lambda: backend._fetch_image(cam, 100, lambda: False)
+    backend._cam.GetNextImage = lambda _timeout: image
+    return lambda wants_array=False: backend.retrieve_freerun(100, lambda: wants_array)
+
+
+def test_a_non_mono8_frame_is_dropped_and_released(backend, monkeypatch):
+    # A 2-D uint16 frame (the Mono8 set failed) passes an ndim check alone and
+    # would be recorded as garbage; the itemsize guard drops it.
+    image = FakeImage(array=np.zeros((4, 4), dtype=np.uint16))
+    fetch = _grab(backend, monkeypatch, image)
+    assert fetch(wants_array=True) is None
+    assert image.released == 1
+
+
+def test_a_mono8_frame_is_copied_with_its_timestamp(backend, monkeypatch):
+    image = FakeImage(array=np.zeros((4, 4), dtype=np.uint8))
+    fetch = _grab(backend, monkeypatch, image)
+    array, timestamp = fetch(wants_array=True)
+    assert array.dtype == np.uint8 and array is not image.array and timestamp == 7
+    assert image.released == 1
+
+
+# ------------------------------------------------------ incomplete-image log
 
 
 def _incomplete_logs(records):
@@ -314,13 +341,13 @@ def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeyp
     # counted, but a record grab logs only its first until the report interval.
     caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
-    fetch = _grab(backend, monkeypatch, record=True)
+    fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
     assert all(fetch() is None for _ in range(250))
     assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 250}
     logs = _incomplete_logs(caplog.records)
     assert len(logs) == 1 and logs[0][0] == logging.WARNING
     # A new grab logs its own first one again; the total runs on.
-    fetch = _grab(backend, monkeypatch, record=True)
+    fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
     assert fetch() is None and fetch() is None
     assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 252}
     assert len(_incomplete_logs(caplog.records)) == 2
@@ -329,7 +356,7 @@ def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeyp
 def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
-    fetch = _grab(backend, monkeypatch, record=False)
+    fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True))
     for _ in range(5):
         fetch()
     logs = _incomplete_logs(caplog.records)
@@ -340,7 +367,7 @@ def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, caplo
 def test_incomplete_image_reports_carry_the_grabs_running_total(backend, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
-    fetch = _grab(backend, monkeypatch, record=True)
+    fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
     for _ in range(3):
         fetch()
     messages = [m for _, m in _incomplete_logs(caplog.records)]
