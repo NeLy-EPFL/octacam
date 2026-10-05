@@ -2088,7 +2088,7 @@ def _current_triggerbox_build():
 def fake_triggerbox(monkeypatch):
     """The triggerbox link, faked at the class: the board answers ``banner`` and
     ``devices`` lists every port the plugin opened."""
-    from octacam.plugins.triggerbox import TriggerboxLink
+    from octacam.plugins.triggerbox.protocol import TriggerboxLink
 
     board = SimpleNamespace(open=False, banner="TRIGGERBOX 2 oldbuild", devices=[])
 
@@ -2179,7 +2179,7 @@ def no_sketch(monkeypatch):
     """A wheel install: no source build to compare the board against or flash."""
     from dataclasses import replace
 
-    from octacam.plugins.triggerbox import TriggerboxPlugin
+    from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 
     monkeypatch.setattr(
         TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
@@ -2231,7 +2231,7 @@ def test_flash_names_no_missing_source_for_an_unprobed_board():
     from rich.console import Console
 
     from octacam.cli import _flash_one
-    from octacam.plugins.triggerbox import TriggerboxPlugin
+    from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 
     # The checkout's source is there, but nothing classified the board.
     prov = TriggerboxPlugin(device="/dev/x").firmware_provisioning()
@@ -2288,7 +2288,7 @@ def test_doctor_probe_without_the_sketch_checks_the_banner_name(
 ):
     from dataclasses import replace
 
-    from octacam.plugins.triggerbox import TriggerboxPlugin
+    from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 
     # A wheel install: no source build to compare, only the board's name.
     monkeypatch.setattr(

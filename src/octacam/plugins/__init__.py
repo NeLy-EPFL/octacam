@@ -19,7 +19,7 @@ log = logging.getLogger("octacam")
 _PLUGINS = {
     "flywheel": "octacam.plugins.flywheel:FlywheelPlugin",
     "twophoton": "octacam.plugins.twophoton:TwoPhotonPlugin",
-    "triggerbox": "octacam.plugins.triggerbox:TriggerboxPlugin",
+    "triggerbox": "octacam.plugins.triggerbox.plugin:TriggerboxPlugin",
 }
 
 # Old plugin names, still loaded (with a warning) so no rig loses its plugin.

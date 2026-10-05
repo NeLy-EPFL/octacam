@@ -18,20 +18,19 @@ from helpers import wait_until
 
 from octacam.cameras.base import Camera
 from octacam.cameras.fake import FakeBackend
-from octacam.plugins import build_plugins, plugin_class, triggerbox
+from octacam.plugins import build_plugins, plugin_class
 from octacam.plugins.base import PluginManager
-from octacam.plugins.triggerbox import (
+from octacam.plugins.triggerbox import protocol
+from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
+from octacam.plugins.triggerbox.protocol import (
     PIN_LABELS,
     PROTOCOL_VERSION,
     ArmSpec,
     LightChannel,
     TriggerboxLink,
-    TriggerboxPlugin,
-    period_us,
     pin_id,
-    plan_train,
-    pulse_count,
 )
+from octacam.plugins.triggerbox.train import period_us, plan_train, pulse_count
 
 ARM_MAGIC = 0xA5
 CANCEL_MAGIC = 0xCA
@@ -694,7 +693,7 @@ def test_link_arm_classifies_outcomes(monkeypatch):
     assert link.arm(_ARM) == "write_failed"
     link.fail_writes = False
     link.acks = False
-    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(protocol, "ACK_TIMEOUT_S", 0.02)
     assert link.arm(_ARM) == "timeout"
 
 
@@ -707,7 +706,7 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     plugin, link = _plugin_with_fake()
     PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
-    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(protocol, "ACK_TIMEOUT_S", 0.03)
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert calls == [DEVICE]  # a USB-reset recovery was attempted
     assert link.opens >= 1 and link.closes >= 1  # link was cycled
@@ -738,7 +737,7 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
     PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
     # The first arm times out quickly, then recovery re-arms.
-    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(protocol, "ACK_TIMEOUT_S", 0.2)
 
     # Ack only the SECOND arm (after the USB-reset recovery), simulating a board
     # that comes back to life once its link is reset.
@@ -974,7 +973,7 @@ def _noop():
 def test_link_arm_writes_exact_bytes(monkeypatch):
     fake = _FakeSerial()
     _use_fake_serial(monkeypatch, fake)
-    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(protocol, "ACK_TIMEOUT_S", 0.05)
     link = TriggerboxLink(lambda t: None, _noop)
     link.open(DEVICE, 115200)
     try:
@@ -1317,7 +1316,7 @@ def _fw_emitted(period, line, end_us):
 
 def _fw_ends(duration_ms):
     """The earliest and latest idle of a run of ``duration_ms``."""
-    from octacam.plugins.triggerbox import RUN_END_EARLY_US, RUN_END_LATE_US
+    from octacam.plugins.triggerbox.train import RUN_END_EARLY_US, RUN_END_LATE_US
 
     return duration_ms * 1000 - 1000 - RUN_END_EARLY_US, duration_ms * 1000 + RUN_END_LATE_US
 
@@ -1363,7 +1362,7 @@ def test_plan_train_counts_what_the_board_emits_at_every_gui_fps():
     # last pulse from the next frame edge the plan is exact (every line gets
     # exactly `count` complete pulses, whatever the run clock's phase); below
     # 400 fps that is always the requested count.
-    from octacam.plugins.triggerbox import MAX_COUNT_SHIFT
+    from octacam.plugins.triggerbox.train import MAX_COUNT_SHIFT
 
     for fps in range(1, 1001):
         period = period_us(fps)
@@ -1395,7 +1394,7 @@ def test_plan_train_counts_what_the_board_emits_at_every_gui_fps():
 def test_plan_train_misses_no_exact_count(fps):
     # Brute force over counts and durations with the board model: an exact plan
     # exists within the shift iff the planner finds one, at the smallest shift.
-    from octacam.plugins.triggerbox import MAX_COUNT_SHIFT
+    from octacam.plugins.triggerbox.train import MAX_COUNT_SHIFT
 
     period = period_us(fps)
     for duration_ms in (1000, 10_000, 12_345):
