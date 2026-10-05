@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import time
@@ -13,6 +14,7 @@ from octacam.config import (
     RecordForm,
     RecordingSettings,
     SaveMethod,
+    TranscodeConfig,
     TransferConfig,
     compose_save_dir,
     duration_to_seconds,
@@ -512,27 +514,47 @@ def test_from_config_takes_the_config_as_it_loads(monkeypatch):
     moment = time.localtime(0)
     monkeypatch.setattr(time, "localtime", lambda *_a: moment)
 
+    # Every value off its default, so a dropped mapping fails.
     config = OctacamConfig(
         record=RecordConfig(
             fps=50.0,
             duration=100.0,
             duration_unit="frames",
+            trigger_source="managed",
+            preview_trigger_source="free_running",
             directory="/data/%Y",
             relative_directory="Fly1/001",
+            save_method="nvenc",
+            ffmpeg_params="-c:v libx264 -crf 23",
+            nvenc_params="-c:v hevc_nvenc -cq 20",
+            max_nvenc_sessions=3,
+            writer_queue_size=12,
             save_transformed=False,
             save_timestamps=True,
         ),
+        transcode=TranscodeConfig(ffmpeg_params="-c:v libx265"),
         transfer=TransferConfig(directory="/store", checksum=False),
     )
-    settings = RecordingSettings.from_config(config)
     year = time.strftime("%Y", moment)
-    assert (settings.fps, settings.duration_s) == (50.0, 2.0)
-    assert settings.record_directory == f"/data/{year}"
-    assert settings.relative_directory == "Fly1/001"
-    assert settings.save_dir == f"/data/{year}/Fly1/001"
-    assert (settings.record_form, settings.save_frame_timestamps) == ("sensor", True)
-    assert settings.transfer_directory == "/store"
-    assert settings.transfer_checksum is False
+    assert dataclasses.asdict(RecordingSettings.from_config(config)) == {
+        "fps": 50.0,
+        "duration_s": 2.0,
+        "save_dir": f"/data/{year}/Fly1/001",
+        "record_directory": f"/data/{year}",
+        "relative_directory": "Fly1/001",
+        "trigger_source": "managed",
+        "preview_trigger_source": "free_running",
+        "save_method": "nvenc",
+        "ffmpeg_params": "-c:v libx264 -crf 23",
+        "nvenc_params": "-c:v hevc_nvenc -cq 20",
+        "max_nvenc_sessions": 3,
+        "writer_queue_size": 12,
+        "record_form": "sensor",
+        "save_frame_timestamps": True,
+        "transcode_ffmpeg_params": "-c:v libx265",
+        "transfer_directory": "/store",
+        "transfer_checksum": False,
+    }
     # The fps override applies before a frame-count duration converts.
     overridden = RecordingSettings.from_config(config, fps=100.0)
     assert (overridden.fps, overridden.duration_s) == (100.0, 1.0)
@@ -578,9 +600,11 @@ def test_updated_composes_save_dir_from_the_split():
     # An absolute relative part discards the base.
     for relative in ("/elsewhere/001", " /elsewhere/001"):
         assert settings.updated(relative_directory=relative).save_dir == "/elsewhere/001"
-    assert settings.updated(record_directory=" ~/b ").save_dir == (
-        f"{os.path.expanduser('~')}/b"
-    )
+    # The base is stored normalized: the GUI shows it and relative_save_dir
+    # measures against it.
+    based = settings.updated(record_directory=" ~/b ")
+    home = os.path.expanduser("~")
+    assert (based.record_directory, based.save_dir) == (f"{home}/b", f"{home}/b")
 
 
 def test_with_save_dir_clears_the_split():
