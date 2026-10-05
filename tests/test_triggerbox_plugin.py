@@ -1178,9 +1178,11 @@ def test_identify_unidentified_proceeds_but_flags_flash():
 @pytest.fixture
 def no_source_checkout(monkeypatch):
     """A wheel install: the plugin's firmware has no sketch to fingerprint or flash."""
-    import octacam.plugins.triggerbox as tb
-
-    monkeypatch.setattr(tb, "_FIRMWARE", replace(tb._FIRMWARE, sketch_dir=None))
+    monkeypatch.setattr(
+        TriggerboxPlugin,
+        "firmware",
+        replace(TriggerboxPlugin.firmware, sketch_dir=None),
+    )
 
 
 def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):

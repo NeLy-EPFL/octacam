@@ -116,14 +116,6 @@ _REJECT_REASONS = {
 }
 
 _EXPECTED_BANNER = "TRIGGERBOX"
-_FIRMWARE = fw.FirmwareSpec(
-    name="triggerbox",
-    sketch_dir=fw.resolve_sketch_dir("triggerbox"),
-    fqbn="arduino:esp32:nano_nora",
-    banner_prefix=_EXPECTED_BANNER,
-    protocol_version=_PROTOCOL_VERSION,
-    build_define="TRIGGERBOX_FW_BUILD",
-)
 
 
 def _u16(v) -> int:
@@ -599,7 +591,14 @@ class TriggerboxPlugin(Plugin):
     name = "triggerbox"
     generates_trigger = True
     web_dir = Path(__file__).parent / "web"
-    firmware = _FIRMWARE
+    firmware = fw.FirmwareSpec(
+        name="triggerbox",
+        sketch_dir=fw.resolve_sketch_dir("triggerbox"),
+        fqbn="arduino:esp32:nano_nora",
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="TRIGGERBOX_FW_BUILD",
+    )
     default_device = DEFAULT_DEVICE
 
     def __init__(
@@ -641,7 +640,7 @@ class TriggerboxPlugin(Plugin):
             on_reject=self._on_arduino_reject,
         )
         self._fw = fw.FirmwareProvisioner(
-            _FIRMWARE,
+            self.firmware,
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=lambda: self._open(allow_recovery=False),
             close_link=lambda: self._link.close(),

@@ -56,14 +56,6 @@ _STATUS_BYTES = frozenset(b"ATD")
 # Starts with '2', never a status byte, so the reader tells the two apart.
 _EXPECTED_BANNER = "2PHOTON"
 _PROTOCOL_VERSION = 1
-_FIRMWARE = fw.FirmwareSpec(
-    name="twophoton",
-    sketch_dir=fw.resolve_sketch_dir("2photon_trigger"),
-    fqbn="arduino:avr:mega",  # Arduino Mega 2560
-    banner_prefix=_EXPECTED_BANNER,
-    protocol_version=_PROTOCOL_VERSION,
-    build_define="TWOPHOTON_FW_BUILD",
-)
 
 
 @dataclass
@@ -158,7 +150,14 @@ class TwoPhotonPlugin(Plugin):
 
     name = "twophoton"
     web_dir = Path(__file__).parent / "web"
-    firmware = _FIRMWARE
+    firmware = fw.FirmwareSpec(
+        name="twophoton",
+        sketch_dir=fw.resolve_sketch_dir("2photon_trigger"),
+        fqbn="arduino:avr:mega",  # Arduino Mega 2560
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="TWOPHOTON_FW_BUILD",
+    )
     default_device = DEFAULT_DEVICE
 
     def __init__(
@@ -183,7 +182,7 @@ class TwoPhotonPlugin(Plugin):
             self._on_arduino_status, on_broken=self._on_link_broken
         )
         self._fw = fw.FirmwareProvisioner(
-            _FIRMWARE,
+            self.firmware,
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=self._open,
             close_link=lambda: self._link.close(),

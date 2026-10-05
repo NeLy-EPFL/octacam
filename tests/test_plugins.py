@@ -4,7 +4,7 @@ import pytest
 
 import octacam.plugins as plugins_mod
 from octacam.config import OctacamConfig, PluginConfig
-from octacam.plugins import available_plugins, build_plugins
+from octacam.plugins import available_plugins, build_plugins, plugin_class
 from octacam.plugins.base import Plugin, PluginManager
 
 
@@ -87,6 +87,30 @@ def test_available_plugins_describes_bundled_flywheel():
     info = infos["flywheel"]
     assert info.available is True
     assert info.summary  # first line of the module docstring
+
+
+_BUNDLED = [
+    # name, generates_trigger, default_device, banner_prefix
+    ("flywheel", False, "/dev/ttyACM0", "FLYWHEEL"),
+    ("twophoton", False, "/dev/arduinoCams", "2PHOTON"),
+    ("triggerbox", True, "/dev/ttyACM0", "TRIGGERBOX"),
+]
+
+
+def test_every_bundled_plugin_is_listed():
+    assert [row[0] for row in _BUNDLED] == list(plugins_mod._PLUGINS)
+
+
+@pytest.mark.parametrize(("name", "trigger", "device", "banner"), _BUNDLED)
+def test_a_bundled_plugin_declares_its_facts(name, trigger, device, banner):
+    cls = plugin_class(name)
+    assert cls.name == name
+    assert cls.generates_trigger is trigger
+    assert cls.web_dir is not None and (cls.web_dir / f"{name}.js").is_file()
+    assert cls.default_device == device
+    assert cls.firmware is not None and cls.firmware.banner_prefix == banner
+    # The spec the CLI and doctor read is the one the plugin provisions with.
+    assert cls.from_options({})._fw.spec == cls.firmware
 
 
 def test_dispatch_swallows_plugin_exceptions():

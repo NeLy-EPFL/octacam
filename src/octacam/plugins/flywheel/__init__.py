@@ -63,14 +63,6 @@ _IDENTIFY_MARKER = 0xFFFF
 _EXPECTED_BANNER = "FLYWHEEL"
 _DEFAULT_FQBN = "arduino:avr:uno"  # the `fqbn` option overrides it
 _PROTOCOL_VERSION = 1
-_FIRMWARE = fw.FirmwareSpec(
-    name="flywheel",
-    sketch_dir=fw.resolve_sketch_dir("stepper_motor"),
-    fqbn=_DEFAULT_FQBN,
-    banner_prefix=_EXPECTED_BANNER,
-    protocol_version=_PROTOCOL_VERSION,
-    build_define="FLYWHEEL_FW_BUILD",
-)
 
 
 @dataclass
@@ -290,7 +282,14 @@ class JogClock:
 class FlywheelPlugin(Plugin):
     name = "flywheel"
     web_dir = Path(__file__).parent / "web"
-    firmware = _FIRMWARE
+    firmware = fw.FirmwareSpec(
+        name="flywheel",
+        sketch_dir=fw.resolve_sketch_dir("stepper_motor"),
+        fqbn=_DEFAULT_FQBN,
+        banner_prefix=_EXPECTED_BANNER,
+        protocol_version=_PROTOCOL_VERSION,
+        build_define="FLYWHEEL_FW_BUILD",
+    )
     default_device = DEFAULT_DEVICE
 
     def __init__(
@@ -313,7 +312,7 @@ class FlywheelPlugin(Plugin):
         self._last_error: str | None = None
         self._link = SerialLink()
         self._fw = fw.FirmwareProvisioner(
-            replace(_FIRMWARE, fqbn=fqbn),
+            replace(self.firmware, fqbn=fqbn),
             resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=self._open,
             close_link=lambda: self._link.close(),
