@@ -7,8 +7,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from octacam.web.state import AppState
 from octacam.ffmpeg import nvenc_max_sessions
+from octacam.web.state import AppState
 from octacam.writer import NVENC_H264_PARAMS
 
 
