@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from octacam.cli import app
 from octacam.files import PARTIAL_INFIX, is_partial, partial_path
+from octacam.recording_format import RECORDING_INFO_DIRNAME
 from octacam.transcode import (
     TranscodeProgress,
     _parse_progress,
@@ -15,7 +16,7 @@ from octacam.transcode import (
     atomic_output,
     transcode_file,
 )
-from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
+from octacam.transform import DisplayTransform
 
 runner = CliRunner()
 cv2 = pytest.importorskip("cv2")

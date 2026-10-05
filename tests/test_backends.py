@@ -35,7 +35,7 @@ def test_param_file_extensions_cover_every_backend():
     from pathlib import Path
 
     import octacam.cameras
-    from octacam.transform import PARAM_FILE_EXTENSIONS
+    from octacam.recording_format import PARAM_FILE_EXTENSIONS
 
     found = set()
     for source in Path(octacam.cameras.__file__).parent.glob("*.py"):

@@ -16,7 +16,7 @@ from octacam import writer as w
 from octacam.config import RecordConfig, RecordingSettings
 from octacam.controller import RecordingController
 from octacam.ffmpeg import encoder_of, nvenc_encoder
-from octacam.transform import recording_summary_path
+from octacam.recording_format import recording_summary_path
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     FORMATS,
@@ -277,9 +277,9 @@ def test_config_nvenc_params_rejects_bad_quoting():
 
 
 def test_summary_resolves_auto_sessions_to_detected(monkeypatch):
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
-    monkeypatch.setattr("octacam.controller.nvenc_max_sessions", lambda encoder="h264_nvenc": 7)
+    monkeypatch.setattr("octacam.recording_format.nvenc_max_sessions", lambda encoder="h264_nvenc": 7)
     s = RecordingSettings(save_method="nvenc", max_nvenc_sessions=None)
     summary = build_recording_summary(s, [], 0, aborted=False)
     assert summary["max_nvenc_sessions"] == 7  # None (auto) -> detected
@@ -288,11 +288,11 @@ def test_summary_resolves_auto_sessions_to_detected(monkeypatch):
 def test_summary_auto_uses_the_configured_encoder(monkeypatch):
     # The detector is keyed by the encoder nvenc_params names, not the h264
     # default, so a custom hevc_nvenc config resolves (and cache-hits) correctly.
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
     seen = []
     monkeypatch.setattr(
-        "octacam.controller.nvenc_max_sessions",
+        "octacam.recording_format.nvenc_max_sessions",
         lambda encoder="h264_nvenc": (seen.append(encoder), 4)[1],
     )
     s = RecordingSettings(
@@ -305,18 +305,18 @@ def test_summary_auto_uses_the_configured_encoder(monkeypatch):
 
 def test_summary_uses_explicit_session_cap(monkeypatch):
     # An explicit int is recorded verbatim; the detector is never consulted.
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
     def _boom(encoder="h264_nvenc"):
         raise AssertionError("must not probe when the cap is explicit")
 
-    monkeypatch.setattr("octacam.controller.nvenc_max_sessions", _boom)
+    monkeypatch.setattr("octacam.recording_format.nvenc_max_sessions", _boom)
     s = RecordingSettings(save_method="nvenc", max_nvenc_sessions=3)
     assert build_recording_summary(s, [], 0, aborted=False)["max_nvenc_sessions"] == 3
 
 
 def test_summary_omits_sessions_for_non_nvenc():
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
     s = RecordingSettings(save_method="ffmpeg")
     assert "max_nvenc_sessions" not in build_recording_summary(s, [], 0, aborted=False)

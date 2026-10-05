@@ -33,12 +33,12 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from octacam._compat import tomllib
-from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
-from octacam.transform import (
+from octacam.recording_format import (
     RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
     recording_info_dir,
 )
+from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
 from octacam.writer import (
     DEFAULT_FFMPEG_PARAMS,
     FORMATS,
@@ -765,7 +765,7 @@ def resolve_config_dir(config_dir: str | Path) -> Path:
     A recording's ``octacam_recording`` subfolder is a config directory, used
     when the folder has no config of its own, or only an older flat take's
     snapshot (a flat summary beside it) the subfolder superseded
-    (:func:`octacam.transform.recording_info_dir`). A rig config directory that
+    (:func:`octacam.recording_format.recording_info_dir`). A rig config directory that
     was recorded into has no flat summary and keeps its own config."""
     config_dir = Path(config_dir)
     nested = config_dir / RECORDING_INFO_DIRNAME

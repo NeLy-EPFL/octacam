@@ -15,7 +15,7 @@ from helpers import wait_until
 from octacam.cameras import CameraSystem
 from octacam.config import OctacamConfig, RecordingSettings
 from octacam.controller import RecordingController
-from octacam.transform import RECORDING_INFO_DIRNAME
+from octacam.recording_format import RECORDING_INFO_DIRNAME
 from octacam.web.app import create_app
 from octacam.web.preview import FRAME_HEADER
 

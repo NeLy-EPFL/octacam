@@ -312,7 +312,7 @@ def test_recording_layout_keeps_only_videos_at_the_top(fake_system, tmp_path):
     import numpy as np
 
     from octacam.config import load_config_dir, resolve_config_dir
-    from octacam.transform import recording_info_dir, recording_summary_path
+    from octacam.recording_format import recording_info_dir, recording_summary_path
 
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
@@ -360,7 +360,7 @@ def test_recording_over_an_older_flat_take_leaves_its_files_alone(
     fake_system, tmp_path
 ):
     from octacam.config import load_config_dir
-    from octacam.transform import recording_info_dir, recording_summary_path
+    from octacam.recording_format import recording_info_dir, recording_summary_path
 
     # A folder holding a take recorded before the subfolder existed.
     save_dir = tmp_path / "rec" / "001"

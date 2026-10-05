@@ -16,7 +16,7 @@ from octacam.controller import (
 from octacam.transform import DisplayTransform
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
-# Where a recording writes everything but its videos (transform.
+# Where a recording writes everything but its videos (recording_format.
 # RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
 INFO_DIR = "octacam_recording"
 
@@ -61,7 +61,7 @@ def _finished_camera(name="cam0", **fields):
 
 
 def test_build_recording_summary():
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
     cam = _finished_camera(
         serial_number="S0",
@@ -231,7 +231,7 @@ def test_check_sync_flags_frames_the_writer_skipped():
     assert not sync["ok"]
     (warning,) = sync["warnings"]
     assert "f1" in warning and "2 frame(s)" in warning and "pulse_index" in warning
-    from octacam.controller import build_recording_summary
+    from octacam.recording_format import build_recording_summary
 
     summary = build_recording_summary(
         RecordingSettings(fps=125.0), cams, 0, aborted=False, sync=sync
@@ -249,7 +249,7 @@ def test_check_sync_flags_a_recording_camera_with_no_frame():
 
 
 def test_timestamp_source_derivation():
-    from octacam.controller import _timestamp_source
+    from octacam.recording_format import _timestamp_source
 
     assert _timestamp_source(0, 0) is None  # no frames
     assert _timestamp_source(500, 0) == "hardware"  # never fell back
@@ -260,7 +260,7 @@ def test_timestamp_source_derivation():
 def test_build_timestamps_arrays():
     import numpy as np
 
-    from octacam.controller import build_timestamps_arrays
+    from octacam.recording_format import build_timestamps_arrays
 
     def camera(name, timestamps, dropped):
         n = len(timestamps)

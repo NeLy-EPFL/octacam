@@ -7,11 +7,16 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner
 
-from octacam.check import check_recording, find_recordings
+from octacam.check import check_recording, check_recordings
 from octacam.cli import app
-from octacam.transform import RECORDING_INFO_DIRNAME
+from octacam.recording_format import RECORDING_INFO_DIRNAME
 
 P = 8_000_000  # 125 fps
+
+
+def _found(paths):
+    """The recordings `octacam check` finds at *paths*, in its order."""
+    return [result.folder for result in check_recordings(paths)]
 
 
 def _write(
@@ -115,10 +120,10 @@ def test_recorded_accounting_is_reported_as_filled(tmp_path):
     assert any("filled with the previous frame" in w for w in result.warnings)
 
 
-def test_find_recordings_walks_directories(tmp_path):
+def test_check_recordings_walks_directories_in_natural_order(tmp_path):
     for name in ("Fly2/001", "Fly10/001", "Fly1/001"):
         _write(tmp_path / name, {"top": _train(10)})
-    found = [p.relative_to(tmp_path).as_posix() for p in find_recordings([tmp_path])]
+    found = [p.relative_to(tmp_path).as_posix() for p in _found([tmp_path])]
     assert found == ["Fly1/001", "Fly2/001", "Fly10/001"]
 
 
@@ -140,10 +145,10 @@ def test_a_summary_or_subfolder_path_names_the_recording_folder(tmp_path):
     info = rec / RECORDING_INFO_DIRNAME
     for path in (rec, info, info / "recording_summary.json"):
         assert check_recording(path).folder == rec, path
-        assert find_recordings([path]) == [rec], path
+        assert _found([path]) == [rec], path
     flat = _write(tmp_path / "flat", {"top": _train(100)})
     assert check_recording(flat / "recording_summary.json").folder == flat
-    assert find_recordings([flat / "recording_summary.json"]) == [flat]
+    assert _found([flat / "recording_summary.json"]) == [flat]
 
 
 def test_the_newer_nested_take_is_checked_not_the_older_flat_one(tmp_path):
@@ -151,7 +156,7 @@ def test_the_newer_nested_take_is_checked_not_the_older_flat_one(tmp_path):
     # subfolder, and only the new take's summary and timestamps are read.
     rec = _write(tmp_path / "rec", {"top": _train(500, missed={100}), "bottom": _train(500)})
     _write(rec, {"top": _train(500), "bottom": _train(500)}, nested=True)
-    assert find_recordings([tmp_path]) == [rec]
+    assert _found([tmp_path]) == [rec]
     result = check_recording(rec)
     assert result.ok, result.problems
     # The subfolder's take has no timestamps.npz: the flat one's is not borrowed.
@@ -160,12 +165,12 @@ def test_the_newer_nested_take_is_checked_not_the_older_flat_one(tmp_path):
     assert any("no timestamps.npz data" in w for w in result.warnings)
 
 
-def test_find_recordings_walks_a_mixed_tree(tmp_path):
+def test_check_recordings_walks_a_mixed_tree(tmp_path):
     _write(tmp_path / "Fly1" / "001", {"top": _train(10)})
     _write(tmp_path / "Fly1" / "002", {"top": _train(10)}, nested=True)
     _write(tmp_path / "Fly10" / "001", {"top": _train(10)}, nested=True)
     (tmp_path / "Fly2" / RECORDING_INFO_DIRNAME).mkdir(parents=True)  # no summary
-    found = [p.relative_to(tmp_path).as_posix() for p in find_recordings([tmp_path])]
+    found = [p.relative_to(tmp_path).as_posix() for p in _found([tmp_path])]
     assert found == ["Fly1/001", "Fly1/002", "Fly10/001"]
 
     runner = CliRunner()
@@ -632,7 +637,7 @@ def test_a_fake_recording_checks_the_same_with_or_without_timestamps(
     assert (info / "timestamps.npz").exists() == save_timestamps
     assert not (tmp_path / "rec" / "recording_summary.json").exists()
     assert not (tmp_path / "rec" / "timestamps.npz").exists()
-    assert find_recordings([tmp_path]) == [tmp_path / "rec"]
+    assert _found([tmp_path]) == [tmp_path / "rec"]
     result = check_recording(tmp_path / "rec")
     assert result.ok, result.problems
     source = "recorded" if save_timestamps else "summary"

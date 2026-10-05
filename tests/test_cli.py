@@ -1134,7 +1134,7 @@ def _make_recording(folder, *, with_outputs, extra_toml="", visualization=True):
     *visualization* is off, a ``[[visualization]]`` entry is appended to it so the
     grid step has something to build.
     """
-    from octacam.transform import RECORDING_SUMMARY_FILENAME
+    from octacam.recording_format import RECORDING_SUMMARY_FILENAME
 
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "camera_LF.mkv").write_bytes(b"source-bytes")
@@ -1832,7 +1832,10 @@ def _layout_recording(folder, *, nested, toml=None):
     """A recording folder in either layout: a summary and, when *toml* is
     given, a config snapshot, both flat or in the ``octacam_recording``
     subfolder (*nested*). Returns the directory holding them."""
-    from octacam.transform import RECORDING_INFO_DIRNAME, RECORDING_SUMMARY_FILENAME
+    from octacam.recording_format import (
+        RECORDING_INFO_DIRNAME,
+        RECORDING_SUMMARY_FILENAME,
+    )
 
     info = folder / RECORDING_INFO_DIRNAME if nested else folder
     info.mkdir(parents=True, exist_ok=True)
@@ -1885,7 +1888,7 @@ def test_find_recording_dirs_hints_recursive_for_nested_layout(tmp_path):
 
 def test_find_recording_dirs_info_dir_named_directly_means_its_recording(tmp_path):
     from octacam.cli import _find_recording_dirs
-    from octacam.transform import RECORDING_INFO_DIRNAME
+    from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True)
@@ -1932,7 +1935,10 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
 ):
     # The no-transcode path discovers recordings via _find_recording_dirs and
     # reads the summary's relative_directory for the transfer destination.
-    from octacam.transform import RECORDING_INFO_DIRNAME, RECORDING_SUMMARY_FILENAME
+    from octacam.recording_format import (
+        RECORDING_INFO_DIRNAME,
+        RECORDING_SUMMARY_FILENAME,
+    )
 
     rec = tmp_path / "data" / "rec"
     dest = tmp_path / "archive"
@@ -1965,7 +1971,7 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
 
 def test_resolve_config_dir_redirects_a_recording_folder(tmp_path):
     from octacam.cli import _resolve_config_dir
-    from octacam.transform import RECORDING_INFO_DIRNAME
+    from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")
@@ -1983,7 +1989,7 @@ def test_resolve_config_dir_redirects_a_recording_folder(tmp_path):
 def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch):
     # The instance lock is the first thing keyed on the resolved dir; refusing it
     # stops the launch before any hardware is touched.
-    from octacam.transform import RECORDING_INFO_DIRNAME
+    from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")
@@ -2003,7 +2009,7 @@ def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch)
 def test_record_and_benchmark_load_a_recording_folders_snapshot(
     tmp_path, monkeypatch, command
 ):
-    from octacam.transform import RECORDING_INFO_DIRNAME
+    from octacam.recording_format import RECORDING_INFO_DIRNAME
 
     rec = tmp_path / "rec"
     _layout_recording(rec, nested=True, toml="")

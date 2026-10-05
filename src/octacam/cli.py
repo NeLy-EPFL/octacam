@@ -2306,7 +2306,7 @@ def record(
             plugins.teardown_all()
 
     # stdout lists just the videos (scriptable); the info folder goes to stderr.
-    from octacam.transform import recording_info_dir
+    from octacam.recording_format import recording_info_dir
 
     extension = settings.video_format().extension
     for camera in system:
@@ -2983,12 +2983,14 @@ def benchmark(
         raise typer.Exit(1)
 
 
-def _read_summary(path: Path) -> dict | None:
-    """Load a recording_summary.json, or None (with a warning) if unreadable."""
+def _read_summary(folder: Path) -> dict | None:
+    """*folder*'s summary, or None (with a warning) if unreadable."""
+    from octacam.recording_format import read_summary, recording_summary_path
+
     try:
-        return json.loads(path.read_text())
+        return read_summary(folder)
     except (OSError, ValueError) as e:
-        log.warning("Could not read %s: %s", path, e)
+        log.warning("Could not read %s: %s", recording_summary_path(folder), e)
         return None
 
 
@@ -3025,10 +3027,11 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     ``octacam_recording`` folder named directly means its recording, and a
     recursive walk never enters one."""
     from octacam.files import is_partial
-    from octacam.transform import (
-        RECORDING_INFO_DIRNAME,
+    from octacam.recording_format import (
         RECORDING_SUMMARY_FILENAME,
+        recording_folder,
         recording_summary_path,
+        walk_folders,
     )
 
     jobs: dict[Path, TranscodeJob] = {}
@@ -3059,7 +3062,7 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
     def handle_dir(directory: Path) -> None:
         summary_path = recording_summary_path(directory)
         if summary_path.exists():
-            data = _read_summary(summary_path)
+            data = _read_summary(directory)
             if data is not None:
                 fps_target = data.get("fps_target")
                 for entry in data.get("cameras", []):
@@ -3089,27 +3092,20 @@ def _transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
         for video in loose:
             add(TranscodeJob(input_path=video))
 
-    for path in paths:
-        if path.is_dir() and path.name == RECORDING_INFO_DIRNAME:
-            log.info("%s is part of the recording in %s", path, path.parent)
-            path = path.parent
+    for raw in paths:
+        path = recording_folder(raw)
+        if path != raw:
+            log.info("%s is part of the recording in %s", raw, path)
         if path.is_dir():
-            handle_dir(path)
-            if recursive:
-                for sub in sorted(path.rglob("*")):
-                    # octacam_recording holds metadata, never videos.
-                    if sub.is_dir() and RECORDING_INFO_DIRNAME not in (
-                        sub.relative_to(path).parts
-                    ):
-                        handle_dir(sub)
+            for directory in walk_folders(path) if recursive else [path]:
+                handle_dir(directory)
         elif is_partial(path):  # an orphan from a hard kill
             log.warning("Skipping orphaned partial transcode: %s", path)
         else:
             entry = None
             fps_target = None
-            summary_path = recording_summary_path(path.parent)
-            if summary_path.exists():
-                data = _read_summary(summary_path)
+            if recording_summary_path(path.parent).exists():
+                data = _read_summary(path.parent)
                 if data is not None:
                     fps_target = data.get("fps_target")
                     entry = next(
@@ -3297,62 +3293,40 @@ class _FileProgressBar:
 
 
 def _find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
-    """Collect the recordings (either layout) at *roots*, or under them when
-    *recursive*, deduped. An ``octacam_recording`` root means its recording.
+    """The recordings (either layout) at *roots*, or under them when
+    *recursive*, deduped (see :func:`~octacam.recording_format.find_recordings`).
 
     A root that is not a recording is warned about and skipped, so a stray
     folder never aborts the batch; if nothing is left and recordings lie
     beneath, the exit suggests ``-r``."""
-    from octacam.transform import (
-        RECORDING_INFO_DIRNAME,
+    from octacam.recording_format import (
         RECORDING_SUMMARY_FILENAME,
-        find_recording_dirs,
+        find_recordings,
         is_recording_dir,
+        recording_folder,
     )
 
-    seen: set[Path] = set()
-    result: list[Path] = []
-
-    def _add(p: Path) -> None:
-        key = p.resolve()
-        if key not in seen:
-            seen.add(key)
-            result.append(p)
-
-    def _nested_recordings(root: Path) -> list[Path]:
-        return [sub for sub in find_recording_dirs(root) if sub != root]
-
-    def _recording_root(root: Path) -> Path:
-        if root.name == RECORDING_INFO_DIRNAME and is_recording_dir(root.parent):
-            log.info("%s is part of the recording in %s", root, root.parent)
-            return root.parent
-        return root
-
+    result = find_recordings(roots, recursive)
     saw_nested = False
     for root in roots:
-        root = _recording_root(root)
-        if recursive:
-            if is_recording_dir(root):
-                _add(root)
-            for sub in _nested_recordings(root):
-                _add(sub)
+        folder = recording_folder(root)
+        if folder != root:
+            log.info("%s is part of the recording in %s", root, folder)
+        if recursive or is_recording_dir(folder):
             continue
-        if is_recording_dir(root):
-            _add(root)
-            continue
-        nested = _nested_recordings(root)
+        nested = find_recordings([folder], recursive=True)
         if nested:
             saw_nested = True
             log.warning(
                 "%s is not a recording directory; %d recording(s) found beneath "
                 "it — pass -r/--recursive to include them. Skipping.",
-                root,
+                folder,
                 len(nested),
             )
         else:
             log.warning(
                 "%s is not a recording directory (no %s). Skipping.",
-                root,
+                folder,
                 RECORDING_SUMMARY_FILENAME,
             )
 
@@ -3369,7 +3343,7 @@ def _config_for_recording(folder: Path, cli_config_dir: Path | None):
     """The config governing one recording: its own snapshot (either layout),
     else ``--config``, else built-in defaults."""
     from octacam.config import OctacamConfig, find_config_file, load_config_dir
-    from octacam.transform import recording_info_dir
+    from octacam.recording_format import recording_info_dir
 
     info_dir = recording_info_dir(folder)
     if find_config_file(info_dir).exists():
@@ -3392,8 +3366,6 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
     """Where one folder transfers to (None to skip): its summary's
     ``relative_directory`` under ``transfer.directory``."""
     from octacam.config import resolve_dir_template
-    from octacam.transform import recording_summary_path
-
     transfer = cfg.transfer
     if transfer is None or not transfer.directory:
         log.warning(
@@ -3401,7 +3373,7 @@ def _transfer_dest(cfg, folder: Path) -> Path | None:
         )
         return None
     base = resolve_dir_template(transfer.directory)
-    summary = _read_summary(recording_summary_path(folder)) or {}
+    summary = _read_summary(folder) or {}
     rel = summary.get("relative_directory") or folder.name
     return Path(base) / rel
 
@@ -3729,13 +3701,12 @@ def check(
     from rich.console import Console
     from rich.text import Text
 
-    from octacam.check import check_recording, find_recordings
+    from octacam.check import check_recordings
 
-    folders = find_recordings(paths or [Path(".")])
-    if not folders:
-        sys.exit("No recording folders (recording_summary.json) found.")
     # A damaged recording is reported as a problem, never raised.
-    results = [check_recording(folder, fps) for folder in folders]
+    results = check_recordings(paths or [Path(".")], fps)
+    if not results:
+        sys.exit("No recording folders (recording_summary.json) found.")
     if as_json:
         typer.echo(json.dumps([r.to_dict() for r in results], indent=2))
     else:

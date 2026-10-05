@@ -17,8 +17,6 @@ GUI's status and its Stop button.
 
 import contextlib
 import dataclasses
-import datetime
-import json
 import logging
 import os
 import shutil
@@ -33,16 +31,18 @@ import numpy as np
 from octacam import config_writer, session_cache
 from octacam.cameras import CameraSystem
 from octacam.config import RecordingSettings, normalize_dir, safe_segment
-from octacam.ffmpeg import encoder_of, nvenc_max_sessions
 from octacam.plugins.base import PluginManager
 from octacam.pulses import PulseClock
-from octacam.transform import (
+from octacam.recording_format import (
     CONFIG_SNAPSHOT_FILENAME,
     RECORDING_INFO_DIRNAME,
-    RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
-    DisplayTransform,
+    build_recording_summary,
+    build_timestamps_arrays,
+    write_summary,
+    write_timestamps,
 )
+from octacam.transform import DisplayTransform
 from octacam.writer import resolve_capture_formats
 
 log = logging.getLogger("octacam")
@@ -71,11 +71,6 @@ PRIME_SETTLE_PERIODS = 4
 # A counted train is over this long after its last pulse was due (a GS3
 # delivers ~10-30 ms after its pulse); the take then stops on the train's end.
 TRAIN_END_MARGIN_S = 0.3
-# Summary lists of per-pulse indices are capped at this length (the full series
-# is in timestamps.npz); the counts next to them are never capped.
-SUMMARY_INDEX_LIMIT = 1000
-
-
 def capture_frame_count(settings: RecordingSettings) -> int | None:
     """``round(fps * duration)``, the pulses an octacam-driven trigger emits, so
     no camera's grab loop takes a trailing pulse the others miss at teardown.
@@ -144,49 +139,6 @@ class StartResult:
         return self.status == self.OK
 
 
-_DROPPED_FRAMES_NOTE = (
-    "Every frame is assigned to the trigger pulse that exposed it, from the "
-    "camera's hardware timestamps (or, under a software trigger, the trigger's "
-    "sequence number). `missed_pulses` lists pulses the camera delivered no frame "
-    "for (a missed trigger, or a frame lost in transport — `stream` shows the "
-    "SDK's own loss counters) and `writer_dropped` counts frames the writer queue "
-    "could not accept. On an octacam-driven train (software/managed) both are "
-    "filled with the previous frame, so video frame k is pulse k in every camera "
-    "and `dropped`/`dropped_indices` count/list those filled frames; "
-    "timestamps.npz marks them per frame (`dropped`, `missed`) with each frame's "
-    "`pulse_index`. On an external trigger missed pulses are reported only. "
-    "`writer_skipped` counts frames the writer could not accept that were skipped "
-    "instead of filled (a sustained encoder or disk shortfall): after one, video "
-    "frame k is no longer pulse k, so map frames to pulses with `pulse_index`. "
-    "`late_pulse_indices` are frames exposed markedly after their pulse."
-)
-
-_TIMESTAMP_NOTE = (
-    "Per-camera `timestamp_source` records where each camera's per-frame "
-    "timestamps came from. `hardware` = the camera/SDK timestamp (a free-running "
-    "counter with a per-camera epoch — precise for relative timing, but NOT "
-    "wall-clock and NOT aligned across cameras). `host` = host `time.time_ns()` "
-    "(UTC wall clock; used when the backend supplies none). The full per-frame "
-    f"series is written to {TIMESTAMPS_FILENAME} when save_timestamps is on."
-)
-
-
-def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
-    """``"hardware"``, ``"host"`` (a backend without timestamps, e.g.
-    pycameleon) or ``"mixed"`` (stray zero timestamps); None without frames."""
-    if frames <= 0:
-        return None
-    if host_fallback_count <= 0:
-        return "hardware"
-    if host_fallback_count >= frames:
-        return "host"
-    return "mixed"
-
-
-def _capped(indices: list[int]) -> list[int]:
-    return list(indices[:SUMMARY_INDEX_LIMIT])
-
-
 class DeliveryProfile(NamedTuple):
     """What a frame's trigger-to-host delay depends on (see
     RecordingController._check_sync)."""
@@ -244,138 +196,6 @@ def _unlike_profiles_note(groups: dict[DeliveryProfile | str, list[str]]) -> str
         "different delays. Only cameras alike in model, frame size, pixel format "
         "and exposure are compared."
     )
-
-
-def build_recording_summary(
-    settings: RecordingSettings,
-    cameras,
-    start_wall_ns: int,
-    aborted: bool,
-    pulse_clock: PulseClock | None = None,
-    sync: dict | None = None,
-    primed_pulses: int = 0,
-    completed: bool | None = None,
-) -> dict:
-    """The recording_summary.json payload, from finished camera stats (no I/O).
-
-    ``transform_applied`` is true only when the transform was baked into the
-    video (display form and a non-identity transform)."""
-    extension = settings.video_format().extension
-    start_iso = (
-        datetime.datetime.fromtimestamp(
-            start_wall_ns / 1e9, tz=datetime.timezone.utc
-        ).isoformat()
-        if start_wall_ns
-        else None
-    )
-    cams = []
-    for camera in cameras:
-        transform = camera.display_transform
-        applied = settings.record_form == "display" and not transform.is_identity
-        size = camera.recorded_frame_size
-        missed, late = camera.missed_pulses, camera.late_pulses
-        cams.append(
-            {
-                "name": camera.name,
-                "serial": camera.serial_number,
-                "file": f"{camera.name}.{extension}",
-                "width": size[0] if size else None,
-                "height": size[1] if size else None,
-                "pixel_format": camera.pixel_format,
-                "fps": round(camera.mean_fps, 3),
-                "frames": camera.frames_recorded,
-                "dropped": camera.dropped_count,
-                "dropped_indices": _capped(camera.dropped_indices),
-                "missed_pulses": len(missed),
-                "missed_pulse_indices": _capped(missed),
-                "writer_dropped": camera.writer_dropped,
-                "writer_skipped": camera.writer_skipped,
-                "writer_skipped_pulse_indices": _capped(camera.writer_skipped_pulses),
-                "late_frames": len(late),
-                "late_pulse_indices": _capped(late),
-                "extra_frames": camera.extra_frames,
-                "primed_frames": camera.primed_frames,
-                "clock_mismatch": camera.clock_mismatch,
-                "timestamp_glitches": camera.timestamp_glitches,
-                "unclocked_frames": camera.unclocked_frames,
-                "stream": camera.stream_statistics,
-                "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
-                    camera.name
-                ),
-                "start_timestamp_ns": camera.start_timestamp_ns,
-                "timestamp_source": _timestamp_source(
-                    camera.frames_recorded, camera.host_fallback_count
-                ),
-                "host_fallback_count": camera.host_fallback_count,
-                "writer_failed": camera.writer_failed,
-                "transform": transform.to_dict(),
-                "transform_applied": applied,
-            }
-        )
-    summary = {
-        "schema_version": 4,
-        "start_time": start_iso,
-        "start_time_ns": start_wall_ns or None,
-        "aborted": aborted,
-        # Ran to its end, not stopped: octacam check tells an early stop from
-        # cameras that disagree by it.
-        "completed": completed,
-        "fps_target": settings.fps,
-        "duration_s": settings.duration_s,
-        "trigger_source": settings.trigger_source,
-        "save_method": settings.save_method,
-        # The args of the encoder used (nvenc's for save_method="nvenc").
-        "ffmpeg_params": settings.video_format().ffmpeg_params,
-        "record_form": settings.record_form,
-        # Resolved now, so a transfer on a later day never re-templates the date.
-        "relative_directory": settings.relative_save_dir(),
-        "pulse_train": (
-            {**pulse_clock.to_dict(), "primed": primed_pulses}
-            if pulse_clock is not None
-            else None
-        ),
-        "sync": {
-            "ok": (sync or {}).get("ok", True),
-            "warnings": list((sync or {}).get("warnings", [])),
-            "notes": list((sync or {}).get("notes", [])),
-        },
-        "dropped_frames_note": _DROPPED_FRAMES_NOTE,
-        "timestamp_note": _TIMESTAMP_NOTE,
-        "cameras": cams,
-    }
-    if settings.save_method == "nvenc":
-        # Cameras beyond the cap encoded on CPU. Auto (None) resolves to the cap
-        # the off-lock warm-up cached for this encoder: never a fresh GPU probe.
-        cap = settings.max_nvenc_sessions
-        if cap is None:
-            encoder = encoder_of(settings.video_format().ffmpeg_params) or "h264_nvenc"
-            cap = nvenc_max_sessions(encoder)
-        summary["max_nvenc_sessions"] = cap
-    return summary
-
-
-def build_timestamps_arrays(cameras) -> dict[str, np.ndarray]:
-    """The ``timestamps.npz`` arrays, from finished camera stats (no I/O).
-
-    Per camera, one entry per video frame: ``"<name>/timestamp_ns"`` (int64; a
-    fill carries the time its pulse was due), ``"<name>/dropped"`` (bool: a
-    fill), ``"<name>/missed"`` (bool: of those, a pulse the camera never
-    delivered), ``"<name>/pulse_index"`` (int64) and ``"<name>/arrival_ns"``
-    (int64: host wall-clock delivery, 0 for a fill). A camera's series are
-    truncated to their shortest."""
-    arrays: dict[str, np.ndarray] = {}
-    for camera in cameras:
-        series = {
-            "timestamp_ns": (camera.frame_timestamps, np.int64),
-            "dropped": (camera.frame_dropped, bool),
-            "missed": (camera.frame_missed, bool),
-            "pulse_index": (camera.frame_pulse_index, np.int64),
-            "arrival_ns": (camera.frame_arrival_ns, np.int64),
-        }
-        n = min(len(values) for values, _dtype in series.values())
-        for key, (values, dtype) in series.items():
-            arrays[f"{camera.name}/{key}"] = np.asarray(values[:n], dtype=dtype)
-    return arrays
 
 
 class RecordingController:
@@ -1759,11 +1579,10 @@ class RecordingController:
             log.exception("Failed to save the camera parameter files to %s", info_dir)
 
     def _write_recording_summary(self, aborted: bool) -> None:
-        """Write recording_summary.json (its ``file`` entries name videos in the
-        recording folder)."""
-        path = self._recording_info_dir() / RECORDING_SUMMARY_FILENAME
+        """Write the summary (its ``file`` entries name videos in the recording
+        folder)."""
+        folder = self._settings.save_dir
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             summary = build_recording_summary(
                 self._settings,
                 list(self.camera_system),
@@ -1774,21 +1593,18 @@ class RecordingController:
                 primed_pulses=self._primed_pulses,
                 completed=self._completed,
             )
-            path.write_text(json.dumps(summary, indent=2) + "\n")
-            log.info("Wrote recording summary: %s", path)
+            log.info("Wrote recording summary: %s", write_summary(folder, summary))
         except Exception:
-            log.exception("Failed to write recording summary to %s", path)
+            log.exception("Failed to write the recording summary in %s", folder)
 
     def _write_timestamps(self) -> None:
         """Write every camera's per-frame series into ``timestamps.npz``."""
-        path = self._recording_info_dir() / TIMESTAMPS_FILENAME
+        folder = self._settings.save_dir
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             arrays = build_timestamps_arrays(list(self.camera_system))
-            np.savez_compressed(path, **arrays)
-            log.info("Wrote frame timestamps: %s", path)
+            log.info("Wrote frame timestamps: %s", write_timestamps(folder, arrays))
         except Exception:
-            log.exception("Failed to write frame timestamps to %s", path)
+            log.exception("Failed to write the frame timestamps in %s", folder)
 
     def _note_in_session_cache(self) -> None:
         """Note the recording's folder in the session cache (`octacam process

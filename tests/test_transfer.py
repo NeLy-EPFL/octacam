@@ -12,14 +12,14 @@ import pytest
 
 from octacam import transfer as transfer_mod
 from octacam.files import PARTIAL_INFIX
-from octacam.transfer import TransferResult, transfer_folder
-from octacam.transform import (
+from octacam.recording_format import (
     CONFIG_SNAPSHOT_FILENAME,
     RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
     recording_info_dir,
 )
+from octacam.transfer import TransferResult, transfer_folder
 
 TEMP_GLOB = f".*{PARTIAL_INFIX}*"
 

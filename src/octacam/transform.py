@@ -1,5 +1,4 @@
-"""Display transforms (rotation + flips) baked into recorded video, and the
-recording folder's on-disk vocabulary.
+"""Display transforms (rotation + flips) baked into recorded video.
 
 The GUI shows each camera through the CSS transform ``scale(sx, sy)
 rotate(deg)`` (``web/static/js/grid.js``). CSS composes right-to-left, so a
@@ -12,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -21,73 +19,6 @@ if TYPE_CHECKING:
     from octacam.config import CameraConfig
 
 log = logging.getLogger("octacam")
-
-RECORDING_SUMMARY_FILENAME = "recording_summary.json"
-# Every camera's per-frame series (opt-in: record.save_timestamps).
-TIMESTAMPS_FILENAME = "timestamps.npz"
-# The rig config with the live settings, beside each camera's parameter file
-# (``<serial>.<ext>``): a config directory a session can relaunch from.
-CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
-
-# Every camera backend's parameter-file suffix (``CameraBackend.extension``):
-# Basler .pfs, the GenApi-TSV backends .txt, and the synthetic ``fake``. Listed
-# here so the transfer step can carry a snapshot's camera files without importing
-# a vendor SDK; tests/test_backends.py keeps it in step with the backends.
-PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
-
-# The subfolder holding all of the above, so a recording folder shows just its
-# videos. Older recordings keep them flat beside the videos; readers go through
-# recording_info_dir(), which answers for either layout.
-RECORDING_INFO_DIRNAME = "octacam_recording"
-
-
-def recording_info_dir(folder: str | Path) -> Path:
-    """The directory holding *folder*'s summary, timestamps, config snapshot and
-    camera parameter files: the ``octacam_recording`` subfolder, or *folder* for
-    an older flat recording.
-
-    The summary decides, and the subfolder's wins over a flat one (an older take
-    in the same folder). Without a summary, the subfolder if it exists.
-    """
-    folder = Path(folder)
-    nested = folder / RECORDING_INFO_DIRNAME
-    if (nested / RECORDING_SUMMARY_FILENAME).is_file():
-        return nested
-    if (folder / RECORDING_SUMMARY_FILENAME).is_file():
-        return folder
-    return nested if nested.is_dir() else folder
-
-
-def recording_summary_path(folder: str | Path) -> Path:
-    """Where the recording in *folder* keeps its summary (either layout)."""
-    return recording_info_dir(folder) / RECORDING_SUMMARY_FILENAME
-
-
-def is_recording_dir(folder: str | Path) -> bool:
-    """Whether *folder* has a summary (either layout); an ``octacam_recording``
-    subfolder is never a recording folder itself."""
-    folder = Path(folder)
-    if folder.name == RECORDING_INFO_DIRNAME:
-        return False
-    return recording_summary_path(folder).is_file()
-
-
-def recording_folder_of(summary_path: str | Path) -> Path:
-    """The recording folder a summary file belongs to: its directory, or that
-    directory's parent when the summary sits in the ``octacam_recording``
-    subfolder."""
-    parent = Path(summary_path).parent
-    return parent.parent if parent.name == RECORDING_INFO_DIRNAME else parent
-
-
-def find_recording_dirs(root: str | Path) -> list[Path]:
-    """Every recording folder at or under *root*, in either layout, sorted."""
-    root = Path(root)
-    if not root.is_dir():
-        return []
-    return sorted(
-        {recording_folder_of(p) for p in root.rglob(RECORDING_SUMMARY_FILENAME)}
-    )
 
 
 @dataclass(frozen=True)

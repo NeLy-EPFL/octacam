@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from octacam.files import partial_glob, partial_path
-from octacam.transform import (
+from octacam.recording_format import (
     CONFIG_SNAPSHOT_FILENAME,
     PARAM_FILE_EXTENSIONS,
     RECORDING_SUMMARY_FILENAME,
@@ -227,7 +227,7 @@ def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
 
 def _metadata_files(folder: Path) -> list[Path]:
     """The summary, timestamps, config snapshot and camera parameter files, from
-    :func:`~octacam.transform.recording_info_dir` only: a folder recorded into
+    :func:`~octacam.recording_format.recording_info_dir` only: a folder recorded into
     again carries the new take's metadata, not an older flat take's leftovers."""
     info = recording_info_dir(folder)
     names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]

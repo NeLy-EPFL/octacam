@@ -22,8 +22,9 @@ from octacam.config import (
 )
 from octacam.files import atomic_write_text
 from octacam.plugins import canonical_name
+from octacam.recording_format import recording_folder
 from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
-from octacam.transform import RECORDING_INFO_DIRNAME, DisplayTransform
+from octacam.transform import DisplayTransform
 
 if TYPE_CHECKING:
     from octacam.controller import RecordingController
@@ -396,8 +397,7 @@ def resolve_new_config_dir(
     """Resolve a new config dir beside the active one, where presets live; for a
     session relaunched from a recording (its ``octacam_recording`` subfolder),
     beside the recording folder."""
-    active = Path(active_dir)
-    anchor = active.parent if active.name == RECORDING_INFO_DIRNAME else active
+    anchor = recording_folder(active_dir)
     target = anchor.parent / safe_segment(name, "config name")
     if target.exists() and not overwrite:
         raise FileExistsError(target)

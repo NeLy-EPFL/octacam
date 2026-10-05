@@ -20,7 +20,6 @@ scan still covers the others.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -29,13 +28,12 @@ from pathlib import Path
 import numpy as np
 
 from octacam.pulses import TimestampReport, analyze_timestamps, estimate_offset
-from octacam.transform import (
-    RECORDING_INFO_DIRNAME,
+from octacam.recording_format import (
     RECORDING_SUMMARY_FILENAME,
     TIMESTAMPS_FILENAME,
-    find_recording_dirs,
-    is_recording_dir,
-    recording_folder_of,
+    find_recordings,
+    read_summary,
+    recording_folder,
     recording_info_dir,
 )
 
@@ -118,30 +116,11 @@ def _natural_key(path: Path) -> list:
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(path))]
 
 
-def _recording_folder(path: Path) -> Path:
-    """The recording folder *path* names: a summary file or a recording's
-    ``octacam_recording`` subfolder stands for the recording folder around it,
-    anything else for itself."""
-    if path.name == RECORDING_SUMMARY_FILENAME and path.is_file():
-        return recording_folder_of(path)
-    if path.name == RECORDING_INFO_DIRNAME and (
-        path / RECORDING_SUMMARY_FILENAME
-    ).is_file():
-        return path.parent
-    return path
-
-
-def find_recordings(paths) -> list[Path]:
-    """Every recording folder at or under ``paths``, sorted naturally. A path
-    may also name a summary file or an ``octacam_recording`` subfolder."""
-    found: set[Path] = set()
-    for raw in paths:
-        path = _recording_folder(Path(raw))
-        if is_recording_dir(path):
-            found.add(path)
-        elif path.is_dir():
-            found.update(find_recording_dirs(path))
-    return sorted(found, key=_natural_key)
+def check_recordings(paths, fps: float | None = None) -> list[RecordingCheck]:
+    """Check every recording at or under *paths* (each may also name a summary
+    file or an ``octacam_recording`` subfolder), in natural order."""
+    folders = sorted(find_recordings(paths, recursive=True), key=_natural_key)
+    return [check_recording(folder, fps) for folder in folders]
 
 
 def _after_frame(missed: list[int]) -> list[int]:
@@ -186,13 +165,9 @@ def _unreadable(folder: Path, fps: float | None, what: str) -> RecordingCheck:
 def check_recording(folder: str | Path, fps: float | None = None) -> RecordingCheck:
     """Check one recording folder (or its summary file or subfolder). A damaged
     recording is reported as an "unreadable: ..." problem, never raised."""
-    folder = _recording_folder(Path(folder))
+    folder = recording_folder(folder)
     try:
-        summary = json.loads(
-            (recording_info_dir(folder) / RECORDING_SUMMARY_FILENAME).read_text()
-        )
-        if not isinstance(summary, dict):
-            raise ValueError("not a JSON object")
+        summary = read_summary(folder)
     except Exception as e:
         return _unreadable(folder, fps, f"{RECORDING_SUMMARY_FILENAME} ({_error(e)})")
     try:

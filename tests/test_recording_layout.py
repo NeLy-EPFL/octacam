@@ -4,20 +4,20 @@ A recording folder shows only its videos; the summary, the timestamps, the
 config snapshot and the camera parameter files sit in its
 ``octacam_recording`` subfolder. Recordings made before that keep them flat
 beside the videos, and every reader must accept both. These pin the shared
-helpers in :mod:`octacam.transform` and :func:`octacam.config.resolve_config_dir`
+helpers in :mod:`octacam.recording_format` and :func:`octacam.config.resolve_config_dir`
 that every reader goes through.
 """
 
 from pathlib import Path
 
 from octacam.config import find_config_file, resolve_config_dir
-from octacam.transform import (
+from octacam.recording_format import (
     CONFIG_SNAPSHOT_FILENAME,
     RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
-    find_recording_dirs,
+    find_recordings,
     is_recording_dir,
-    recording_folder_of,
+    recording_folder,
     recording_info_dir,
     recording_summary_path,
 )
@@ -102,40 +102,54 @@ def test_the_subfolder_itself_is_not_a_recording(tmp_path):
     assert not is_recording_dir(rec / RECORDING_INFO_DIRNAME)
 
 
-def test_recording_folder_of_maps_a_summary_back(tmp_path):
+def test_recording_folder_maps_a_summary_or_subfolder_back(tmp_path):
     flat = _flat(tmp_path / "flat")
     nested = _nested(tmp_path / "nested")
-    assert recording_folder_of(flat / RECORDING_SUMMARY_FILENAME) == flat
-    assert (
-        recording_folder_of(nested / RECORDING_INFO_DIRNAME / RECORDING_SUMMARY_FILENAME)
-        == nested
-    )
-    # Pure path arithmetic: the file need not exist.
-    assert recording_folder_of("/a/b/octacam_recording/x.json") == Path("/a/b")
+    info = nested / RECORDING_INFO_DIRNAME
+    assert recording_folder(flat / RECORDING_SUMMARY_FILENAME) == flat
+    assert recording_folder(info / RECORDING_SUMMARY_FILENAME) == nested
+    assert recording_folder(info) == nested
+    assert recording_folder(nested) == nested
+    assert recording_folder(nested / "camera_0.mp4") == nested / "camera_0.mp4"
+    # Pure path arithmetic: nothing need exist.
+    assert recording_folder("/a/b/octacam_recording") == Path("/a/b")
 
 
-# ------------------------------------------------------ find_recording_dirs
+# ---------------------------------------------------------- find_recordings
 
 
-def test_find_recording_dirs_on_a_mixed_tree(tmp_path):
+def test_find_recordings_on_a_mixed_tree(tmp_path):
     _flat(tmp_path / "exp" / "Fly1" / "001")
     _nested(tmp_path / "exp" / "Fly1" / "002")
     _nested(_flat(tmp_path / "exp" / "Fly2" / "001"))  # both layouts: listed once
     _nested(tmp_path / "exp" / "Fly2" / "002", summary=False)  # no summary
     (tmp_path / "exp" / "notes").mkdir()
+    # Metadata only: a summary under a recording's subfolder is never a recording.
+    _flat(tmp_path / "exp" / "Fly1" / "001" / RECORDING_INFO_DIRNAME / "stray")
 
-    found = [p.relative_to(tmp_path).as_posix() for p in find_recording_dirs(tmp_path)]
+    found = find_recordings([tmp_path], recursive=True)
 
-    assert found == ["exp/Fly1/001", "exp/Fly1/002", "exp/Fly2/001"]
-    assert not any(p.name == RECORDING_INFO_DIRNAME for p in find_recording_dirs(tmp_path))
+    assert [p.relative_to(tmp_path).as_posix() for p in found] == [
+        "exp/Fly1/001",
+        "exp/Fly1/002",
+        "exp/Fly2/001",
+    ]
+    assert find_recordings([tmp_path], recursive=False) == []
 
 
-def test_find_recording_dirs_at_a_recording_and_off_the_tree(tmp_path):
+def test_find_recordings_at_a_recording_and_off_the_tree(tmp_path):
     rec = _nested(tmp_path / "rec")
-    assert find_recording_dirs(rec) == [rec]
-    assert find_recording_dirs(tmp_path / "missing") == []
-    summary = rec / RECORDING_INFO_DIRNAME / RECORDING_SUMMARY_FILENAME
-    assert find_recording_dirs(summary) == []  # a file is not a tree
+    info = rec / RECORDING_INFO_DIRNAME
+    for recursive in (False, True):
+        for path in (rec, info, info / RECORDING_SUMMARY_FILENAME):
+            assert find_recordings([path], recursive) == [rec], path
+        assert find_recordings([tmp_path / "missing"], recursive) == []
+    # Deduplicated across spellings, in the order given.
+    other = _flat(tmp_path / "other")
+    assert find_recordings([other, rec, info, tmp_path / "rec" / ".." / "rec"], False) == [
+        other,
+        rec,
+    ]
 
 
 # ------------------------------------------------------- resolve_config_dir
