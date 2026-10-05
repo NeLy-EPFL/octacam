@@ -109,10 +109,15 @@ def test_close_runs_each_enumerated_tiers_teardown_once(monkeypatch):
     # CameraSystem.close releases each tier it enumerated, after the cameras.
     from octacam.cameras.fake import FakeBackend
 
-    calls: list[str] = []
+    calls: list[tuple[str, bool]] = []
 
     def tier(serials, name=None):
-        teardown = (lambda: calls.append(name)) if name else None
+        # Each teardown records whether the camera was still open when it ran.
+        teardown = (
+            (lambda: calls.append((name, system.camera_at(0).backend.is_open())))
+            if name
+            else None
+        )
         return BackendSpec(
             lambda _requested: [(s, s) for s in serials], FakeBackend, teardown=teardown
         )
@@ -127,4 +132,4 @@ def test_close_runs_each_enumerated_tiers_teardown_once(monkeypatch):
     system = CameraSystem(["FAKE-0"])
     assert len(system) == 1 and calls == []
     system.close()
-    assert calls == ["vendor", "floor"]
+    assert calls == [("vendor", False), ("floor", False)]
