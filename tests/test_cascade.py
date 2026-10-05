@@ -102,3 +102,29 @@ def test_a_serial_requested_twice_is_opened_once(monkeypatch):
     _fake_backends(monkeypatch, {"vendor": ["A"], "floor": ["A", "B"]})
     entries = _enumerate(requested=["A", "B", "A"])
     assert [serial for serial, _h, _f in entries] == ["A", "B"]
+
+
+def test_close_runs_each_enumerated_tiers_teardown_once(monkeypatch):
+    # The Spinnaker tiers hold their System until every camera is closed:
+    # CameraSystem.close releases each tier it enumerated, after the cameras.
+    from octacam.cameras.fake import FakeBackend
+
+    calls: list[str] = []
+
+    def tier(serials, name=None):
+        teardown = (lambda: calls.append(name)) if name else None
+        return BackendSpec(
+            lambda _requested: [(s, s) for s in serials], FakeBackend, teardown=teardown
+        )
+
+    specs = {
+        "vendor": tier(["FAKE-0"], "vendor"),
+        "floor": tier([], "floor"),
+        "plain": tier([]),
+    }
+    monkeypatch.setattr(system_mod, "resolve_backend_names", lambda _s: list(specs))
+    monkeypatch.setattr(system_mod, "select_backend", specs.__getitem__)
+    system = CameraSystem(["FAKE-0"])
+    assert len(system) == 1 and calls == []
+    system.close()
+    assert calls == ["vendor", "floor"]
