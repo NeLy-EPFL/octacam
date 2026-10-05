@@ -233,7 +233,10 @@ def run_ffmpeg(
     """Run the ffmpeg argv *args* (executable first) for *src*, raising
     RuntimeError on failure. With *raw_output* ffmpeg paints the terminal
     itself; otherwise its progress feeds *on_progress* and its stderr is shown
-    only on failure."""
+    only on failure.
+
+    It owns the reporting flags (-nostdin, -hide_banner, -loglevel, -progress,
+    -stats, -nostats) and drops any in *args*: pass only inputs and outputs."""
     args = _reporting_args(args, raw_output)
     if raw_output:
         returncode = subprocess.run(args, stdin=subprocess.DEVNULL).returncode
