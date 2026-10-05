@@ -77,8 +77,10 @@ def test_backends_and_cascade_membership():
 
 
 def test_select_unknown_backend_raises():
-    with pytest.raises(BackendUnavailable):
-        select_backend("nikon")
+    # An empty selector means the cascade (is_auto), never one backend.
+    for name in ("nikon", "", "auto"):
+        with pytest.raises(BackendUnavailable):
+            select_backend(name)
 
 
 def test_resolve_backend_names_auto_is_available_cascade():

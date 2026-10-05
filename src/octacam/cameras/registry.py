@@ -82,9 +82,9 @@ def select_serials(detected, requested: list[str] | None) -> list[str]:
 
 
 def select_backend(name: str) -> BackendSpec:
-    """The :class:`BackendSpec` of ``name`` (case-insensitive; empty is basler),
-    its SDK imported."""
-    key = (name or "basler").strip().lower()
+    """The :class:`BackendSpec` of ``name`` (case-insensitive), its SDK
+    imported."""
+    key = name.strip().lower()
     if key not in _MODULES:
         raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
     module_name, missing = _MODULES[key]
