@@ -14,14 +14,13 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
 
     from octacam.controller import RecordingController
-    from octacam.firmware import FirmwareSpec, FlashResult
 
 log = logging.getLogger("octacam")
 
 
 class Plugin:
-    """The hooks the core calls, all no-ops by default except the firmware pair.
-    A hook's ``params`` is this plugin's slice of the start request, or None."""
+    """The hooks the core calls, all no-ops by default. A hook's ``params`` is
+    this plugin's slice of the start request, or None."""
 
     name: str = "plugin"
     # Drives the managed trigger. A recording counts frames against its
@@ -29,11 +28,6 @@ class Plugin:
     # on_recording_start arms idle cameras.
     generates_trigger: ClassVar[bool] = False
     web_dir: ClassVar[Path | None] = None  # serves <name>.js (+ <name>.css)
-    # A serial plugin's board firmware, its default port, and the port the config
-    # names (a path or "auto"; `octacam flash --device` replaces it before setup).
-    firmware: ClassVar[FirmwareSpec | None] = None
-    default_device: ClassVar[str | None] = None
-    configured_device: str | None = None
     controller: RecordingController | None = None  # set by PluginManager.attach
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
@@ -100,16 +94,6 @@ class Plugin:
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
-
-    # Implemented exactly when firmware is not None.
-
-    def firmware_provisioning(self) -> dict:
-        """FirmwareProvisioner.provisioning for this plugin's board."""
-        raise NotImplementedError
-
-    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> FlashResult:
-        """Upload the current firmware (FirmwareProvisioner.flash); never raises."""
-        raise NotImplementedError
 
 
 class PluginManager:

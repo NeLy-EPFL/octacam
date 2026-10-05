@@ -1,5 +1,8 @@
 """Plugin registry + manager behavior."""
 
+import threading
+from dataclasses import replace
+
 import pytest
 
 import octacam.plugins as plugins_mod
@@ -7,6 +10,7 @@ from octacam import firmware as fw
 from octacam.config import OctacamConfig, PluginConfig
 from octacam.plugins import available_plugins, build_plugins, plugin_class
 from octacam.plugins.base import Plugin, PluginManager
+from octacam.plugins.flywheel import FlywheelLink
 
 
 class SpyPlugin(Plugin):
@@ -358,12 +362,14 @@ def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
     assert (info.available, info.detail) == (False, "module failed to import")
 
 
-class _FakeLink:
-    """Stand-in for flywheel.SerialLink so tests need no real serial device."""
+class _FakeLink(FlywheelLink):
+    """The flywheel link over no port; ``fail`` makes open() raise it."""
 
     def __init__(self):
+        super().__init__(lambda: None)
         self._open = False
         self.fail: Exception | None = None
+        self.banner: str | None = None
 
     def open(self, device, baud):
         self._open = False  # the real open() closes any prior link first
@@ -378,8 +384,8 @@ class _FakeLink:
     def is_open(self):
         return self._open
 
-    def identify(self, banner_prefix, timeout=0.5):
-        return None  # no board / no banner in these open-path tests
+    def identify(self, timeout=0.5):
+        return self.banner
 
 
 def test_flywheel_open_reports_success_and_failure():
@@ -454,3 +460,90 @@ def test_setup_teardown_order():
         ("teardown", "b"),  # reverse order on teardown
         ("teardown", "a"),
     ]
+
+
+# --- SerialPlugin: firmware provisioning around the plugin's own link ---------
+
+
+def _flywheel(banner=None):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    plugin = FlywheelPlugin(device="/dev/test")
+    plugin._link = link = _FakeLink()
+    link.banner = banner
+    plugin._open()
+    return plugin, link
+
+
+def test_a_flash_holds_the_port_lock_from_close_to_reopen(monkeypatch):
+    plugin, link = _flywheel("FLYWHEEL 1 oldbuild")
+    taken: list[bool] = []
+
+    def upload(spec, port, needed_build, **kwargs):
+        assert not link.is_open  # the port is closed for the upload
+        other = threading.Thread(
+            target=lambda: taken.append(plugin.port_lock.acquire(blocking=False))
+        )
+        other.start()
+        other.join()
+        link.banner = f"FLYWHEEL 1 {needed_build}"
+        return fw.FlashResult(True, "uploaded", build=needed_build)
+
+    monkeypatch.setattr(fw, "flash", upload)
+    assert plugin.flash_firmware().ok
+    assert taken == [False]  # nothing else could seize the port mid-upload
+    # The reopen re-took the (re-entrant) lock and re-identified the board.
+    assert plugin.firmware_check.state is fw.FirmwareState.CURRENT
+
+
+def test_a_flash_whose_reopen_fails_drops_the_stale_check():
+    """A landed upload must not keep reporting the board out of date."""
+    plugin, link = _flywheel("FLYWHEEL 1 oldbuild")
+    assert plugin.firmware_check.needs_flash
+    link.fail = OSError("gone")  # the board does not come back
+    result = plugin.flash_firmware()
+    assert result.ok
+    assert plugin.firmware_check is None
+    assert "could not be reopened" in result.message
+
+
+def test_a_plugin_without_a_source_checkout_never_classifies_or_flashes(monkeypatch):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    monkeypatch.setattr(
+        FlywheelPlugin, "firmware", replace(FlywheelPlugin.firmware, sketch_dir=None)
+    )
+    plugin, _link = _flywheel("FLYWHEEL 1 oldbuild")
+    assert plugin.firmware_check is None and plugin.firmware_ok
+    info = plugin.firmware_provisioning()
+    assert (info["state"], info["needed_build"], info["can_flash"], info["needs_flash"]) == (
+        None, None, False, False
+    )
+    assert info["detail"].startswith("the sketch source was not found")
+    result = plugin.flash_firmware()
+    assert not result.ok and "sketch source was not found" in result.message
+
+
+@pytest.mark.parametrize(
+    ("sketch", "probed", "detail"),
+    [
+        ("missing", True, "the sketch source could not be read"),
+        ("real", False, "the board has not been probed"),
+    ],
+    ids=["unreadable", "unprobed"],
+)
+def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, detail):
+    from octacam.plugins.flywheel import FlywheelPlugin
+
+    if sketch == "missing":
+        monkeypatch.setattr(
+            FlywheelPlugin, "firmware",
+            replace(FlywheelPlugin.firmware, sketch_dir=tmp_path / "gone"),
+        )
+    plugin = FlywheelPlugin(device="/dev/test")
+    plugin._link = _FakeLink()
+    if probed:
+        plugin._open()
+    info = plugin.firmware_provisioning()
+    assert (info["state"], info["needs_flash"]) == (None, False)
+    assert info["detail"].startswith(detail)

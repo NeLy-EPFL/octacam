@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from rich.progress import TaskID
 
     from octacam.config import OctacamConfig, RecordConfig
+    from octacam.plugins.serial import SerialPlugin
     from octacam.process_jobs import JobReporter, JobStatus
     from octacam.transcode import ProgressCallback
     from octacam.transfer import TransferCallback
@@ -1272,16 +1273,17 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             report.add("ok", f"config enables {name!r} (available)")
 
 
-def _serial_plugin(name: str):
+def _serial_plugin(name: str) -> "type[SerialPlugin] | None":
     """The class of the serial-hardware plugin *name* (one with board firmware),
     or None for any other name and for a module that fails to import."""
     from octacam.plugins import plugin_class
+    from octacam.plugins.serial import SerialPlugin
 
     try:
         cls = plugin_class(name)
     except Exception:
         return None
-    return cls if cls.firmware is not None else None
+    return cls if issubclass(cls, SerialPlugin) else None
 
 
 def _configured_device(pc) -> tuple[str | None, bool]:
@@ -2345,11 +2347,12 @@ def _load_config_or_empty(config_dir: Path | None) -> "OctacamConfig":
         return OctacamConfig()
 
 
-def _flashable_plugins(plugins, only: str | None):
+def _flashable_plugins(plugins, only: str | None) -> "list[SerialPlugin]":
     """The plugins with board firmware, optionally filtered to one."""
     from octacam.plugins import canonical_name
+    from octacam.plugins.serial import SerialPlugin
 
-    out = [p for p in plugins.plugins if p.firmware is not None]
+    out = [p for p in plugins.plugins if isinstance(p, SerialPlugin)]
     if only:
         # build_plugins loaded an alias (arduino) under its current name.
         out = [p for p in out if p.name == canonical_name(only)]
@@ -2437,9 +2440,11 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
     ``--yes``; under ``--yes``, or headless with ``auto_flash``, flash without
     asking, but only a board known to run an old build of this sketch (never a
     blank or foreign one); otherwise warn."""
+    from octacam.plugins.serial import SerialPlugin
+
     interactive = sys.stdin.isatty()
     for p in plugins.plugins:
-        if p.firmware is None:
+        if not isinstance(p, SerialPlugin):
             continue
         try:
             prov = p.firmware_provisioning()

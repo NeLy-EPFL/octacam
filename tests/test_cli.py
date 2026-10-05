@@ -27,7 +27,8 @@ from octacam.cli import (
     app,
 )
 from octacam.firmware import FirmwareSpec
-from octacam.plugins.base import Plugin, PluginManager
+from octacam.plugins.base import PluginManager
+from octacam.plugins.serial import SerialPlugin
 
 runner = CliRunner()
 
@@ -2229,21 +2230,11 @@ def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
 def test_flash_names_no_missing_source_for_an_unprobed_board():
     from rich.console import Console
 
-    from octacam import firmware as fw
     from octacam.cli import _flash_one
     from octacam.plugins.triggerbox import TriggerboxPlugin
 
     # The checkout's source is there, but nothing classified the board.
-    provisioner = fw.FirmwareProvisioner(
-        TriggerboxPlugin.firmware,
-        resolve_device=lambda: ("/dev/x", "ok"),
-        reopen=lambda: None,
-        close_link=lambda: None,
-        wait_for_device=lambda device, timeout: True,
-    )
-    prov = provisioner.provisioning(
-        plugin_name="triggerbox", device="/dev/x", firmware=None, firmware_ok=True
-    )
+    prov = TriggerboxPlugin(device="/dev/x").firmware_provisioning()
     console = Console(record=True, width=200)
     plugin = SimpleNamespace(name="triggerbox", is_ready=lambda: True)
     assert _flash_one(console, plugin, prov, assume_yes=True, check_only=False) == 1
@@ -2336,7 +2327,7 @@ def _doctor_probe_triggerbox(monkeypatch, tmp_path, banner) -> str:
 # --- record's firmware preflight ----------------------------------------------
 
 
-class _StaleBoardPlugin(Plugin):
+class _StaleBoardPlugin(SerialPlugin):
     """A serial plugin whose board runs an old build of its own sketch (or, with
     ``state="unidentified"``, sent no banner)."""
 

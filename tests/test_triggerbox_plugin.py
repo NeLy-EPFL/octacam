@@ -18,11 +18,11 @@ from helpers import wait_until
 
 from octacam.cameras.base import Camera
 from octacam.cameras.fake import FakeBackend
-from octacam.plugins import build_plugins, plugin_class
+from octacam.plugins import build_plugins, plugin_class, triggerbox
 from octacam.plugins.base import PluginManager
 from octacam.plugins.triggerbox import (
-    _PROTOCOL_VERSION,
     PIN_LABELS,
+    PROTOCOL_VERSION,
     ArmSpec,
     LightChannel,
     TriggerboxLink,
@@ -98,32 +98,34 @@ def _decode_frame(raw: bytes) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class FakeLink:
-    """Records writes and answers like the board: 'R' to an arm (``E<reject>``
-    when ``reject`` is set), 'D' once a finite run is over, 'C' to a cancel.
-    Answers come at once, or from a timer ``delay_s`` later ('D' after the run's
-    real duration); ``acks = False`` silences the board."""
+class FakeLink(TriggerboxLink):
+    """The real link over no port: it records what is written and answers like
+    the board, 'R' to an arm (``E<reject_code>`` when that is set), 'D' once a
+    finite run is over, 'C' to a cancel, and ``banner`` to identify. Answers come
+    at once, or from a timer ``delay_s`` later ('D' after the run's real
+    duration); ``acks = False`` silences the board."""
 
-    def __init__(self, on_status, on_reject, is_open: bool = True, delay_s: float | None = None):
-        self._on_status = on_status
-        self._on_reject = on_reject
+    def __init__(self, plugin, is_open: bool = True, delay_s: float | None = None):
+        super().__init__(plugin._on_state, plugin._on_link_broken)
         self._open = is_open
         self._lock = threading.Lock()
         self.written: list[bytes] = []
         self.fail_writes = False  # simulate a wedged link (write returns False)
         self.acks = True
-        self.reject: str | None = None
+        self.reject_code: str | None = None
+        self.banner: str | None = None
         self.delay_s = delay_s
         self.opens = 0
         self.closes = 0
 
-    def _answer(self, callback, token: str, after_s: float = 0.0) -> None:
+    def _answer(self, token: str, after_s: float = 0.0) -> None:
         if not self.acks:
             return
+        line = f"{token}\n".encode()
         if self.delay_s is None:
-            callback(token)
+            self._feed(line)
         else:
-            timer = threading.Timer(self.delay_s + after_s, callback, (token,))
+            timer = threading.Timer(self.delay_s + after_s, self._feed, (line,))
             timer.daemon = True
             timer.start()
 
@@ -139,35 +141,26 @@ class FakeLink:
         self._open = False
         self.closes += 1
 
-    def send_arm(self, spec: ArmSpec) -> bool:
+    def identify(self, timeout: float = 0.5):
+        self.identity = self.banner
+        return self.banner
+
+    def _write(self, data: bytes) -> bool:
         with self._lock:
             if not self._open or self.fail_writes:
                 return False
-            self.written.append(spec.to_bytes())
-        if self.reject is not None:
-            self._answer(self._on_reject, self.reject)
-        else:
-            self._answer(self._on_status, "R")
-            if spec.duration_ms:
-                self._answer(self._on_status, "D", spec.duration_ms / 1000)
+            self.written.append(data)
+        if data[0] == ARM_MAGIC:
+            if self.reject_code is not None:
+                self._answer("E" + self.reject_code)
+            else:
+                self._answer("R")
+                duration_ms = _decode_frame(data)["duration_ms"]
+                if duration_ms:
+                    self._answer("D", duration_ms / 1000)
+        elif data == bytes([CANCEL_MAGIC]):
+            self._answer("C")
         return True
-
-    def send_cancel(self) -> None:
-        with self._lock:
-            if not self._open:
-                return
-            self.written.append(bytes([CANCEL_MAGIC]))
-        self._answer(self._on_status, "C")
-
-    def send_identify(self) -> None:
-        pass
-
-    def identify(self, timeout: float = 0.5):
-        return getattr(self, "banner", None)
-
-    @property
-    def identity(self):
-        return getattr(self, "banner", None)
 
     def snapshot(self) -> list[bytes]:
         with self._lock:
@@ -192,9 +185,7 @@ class FakeController:
 
 
 def _fake_link(plugin: TriggerboxPlugin, is_open: bool = True, **kwargs) -> FakeLink:
-    link = FakeLink(
-        plugin._on_arduino_status, plugin._on_arduino_reject, is_open=is_open, **kwargs
-    )
+    link = FakeLink(plugin, is_open=is_open, **kwargs)
     plugin._link = link
     return link
 
@@ -225,7 +216,7 @@ def test_arm_spec_to_bytes_layout_and_checksum():
     raw = arm.to_bytes()
     assert len(raw) == 4 + (8 + 5 + 18) + 1
     dec = _decode_frame(raw)  # asserts checksum + length invariants internally
-    assert dec["version"] == _PROTOCOL_VERSION
+    assert dec["version"] == PROTOCOL_VERSION
     assert dec["fps"] == 80 and dec["duration_ms"] == 5000
     assert dec["cams"] == [(pin_id("D13"), 500, 0)]
     assert dec["lights"] == [(pin_id("D5"), 1, 0, 2500, 0, 0)]
@@ -572,16 +563,16 @@ def test_on_recording_start_reports_and_skips_when_link_closed():
     assert not link.snapshot()  # nothing armed
     # Surfaced to the operator (not just logged), so a frozen preview/recording
     # has a visible cause.
-    assert plugin._last_error and "not connected" in plugin._last_error
+    assert plugin.last_error and "not connected" in plugin.last_error
 
 
 def test_on_recording_start_reports_and_skips_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
-    plugin._firmware_ok = False
-    plugin._banner = "OTHERBOARD 1"
+    plugin.firmware_ok = False
+    plugin.banner = "OTHERBOARD 1"
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert not link.snapshot()
-    assert plugin._last_error and "incompatible" in plugin._last_error
+    assert plugin.last_error and "incompatible" in plugin.last_error
 
 
 def test_on_recording_stop_sends_cancel():
@@ -589,7 +580,7 @@ def test_on_recording_stop_sends_cancel():
     plugin.on_recording_stop(aborted=False)
     assert link.snapshot() == [bytes([CANCEL_MAGIC])]
     plugin.on_recording_stop(aborted=True)
-    assert plugin._arduino_state == "idle"
+    assert plugin.board_state == "idle"
 
 
 def test_default_start_params_shape():
@@ -691,18 +682,20 @@ def test_snapshot_options_all_lights_off_reloads_as_off():
 # ===========================================================================
 
 
-def test_arm_and_wait_classifies_outcomes():
+_ARM = ArmSpec(80, 0, [(11, 500, 0)], [])
+
+
+def test_link_arm_classifies_outcomes(monkeypatch):
     plugin, link = _plugin_with_fake(delay_s=0.01)  # answers arrive during the wait
-    arm = plugin._build_arm_spec(80, 1000, plugin._cameras, plugin._lights)
-    assert plugin._arm_and_wait(arm) == "ok"
-    link.reject = "d"
-    assert plugin._arm_and_wait(arm) == "reject"
+    assert link.arm(_ARM) == "ok"
+    link.reject_code = "d"
+    assert link.arm(_ARM) == "reject" and link.reject == "d"
     link.fail_writes = True
-    assert plugin._arm_and_wait(arm) == "write_failed"
+    assert link.arm(_ARM) == "write_failed"
     link.fail_writes = False
     link.acks = False
-    plugin._ack_timeout_s = 0.02
-    assert plugin._arm_and_wait(arm) == "timeout"
+    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.02)
+    assert link.arm(_ARM) == "timeout"
 
 
 def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
@@ -714,7 +707,7 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     plugin, link = _plugin_with_fake()
     PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
-    plugin._ack_timeout_s = 0.03
+    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.03)
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert calls == [DEVICE]  # a USB-reset recovery was attempted
     assert link.opens >= 1 and link.closes >= 1  # link was cycled
@@ -744,20 +737,21 @@ def test_arm_recovery_success_rearms_and_clears_error(monkeypatch):
     bc = _Broadcasts()
     PluginManager([plugin]).attach(broadcast=bc)
     link.acks = False
-    plugin._ack_timeout_s = 0.2  # first arm times out quickly, then recovery re-arms
+    # The first arm times out quickly, then recovery re-arms.
+    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.2)
 
     # Ack only the SECOND arm (after the USB-reset recovery), simulating a board
     # that comes back to life once its link is reset.
     def ack():
         if wait_until(lambda: len(link.snapshot()) >= 2, timeout=2.0, interval=0.001):
-            plugin._on_arduino_status("R")
+            link._feed(b"R\n")
 
     t = threading.Thread(target=ack)
     t.start()
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     t.join(timeout=3.0)
-    assert plugin._armed_event.is_set()
-    assert plugin._last_error is None  # the successful re-arm cleared the error
+    assert link._answered.is_set()
+    assert plugin.last_error is None  # the successful re-arm cleared the error
 
 
 def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
@@ -766,9 +760,9 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1])
     plugin, link = _plugin_with_fake()
-    link.reject = "r"  # reserved pin
+    link.reject_code = "r"  # reserved pin
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
-    assert plugin._last_error and "REJECTED" in plugin._last_error
+    assert plugin.last_error and "REJECTED" in plugin.last_error
     assert calls == []  # a protocol reject is not a wedge; no USB reset
 
 
@@ -792,7 +786,7 @@ def test_recover_usb_holds_port_lock(monkeypatch):
         plugin._recover_usb("test wedge")
         done.set()
 
-    with plugin._fw.port_lock:
+    with plugin.port_lock:
         t = threading.Thread(target=worker)
         t.start()
         assert started.wait(1.0)
@@ -804,46 +798,45 @@ def test_recover_usb_holds_port_lock(monkeypatch):
     assert reset_calls == [DEVICE]  # proceeded once the lock was released
 
 
-def test_arm_and_wait_serialized_by_arm_lock():
+def test_link_arms_are_serialized():
     # The clear+send+wait window is serialized, so two concurrent arms cannot
     # take each other's ack or reject.
     plugin, link = _plugin_with_fake()
     gate = threading.Event()
     in_send = threading.Event()
 
-    def blocking_send(spec):
+    def blocking_write(data):
         in_send.set()
         gate.wait(2.0)
-        plugin._on_arduino_status("R")
+        link._feed(b"R\n")
         return True
 
-    link.send_arm = blocking_send
-    arm = plugin._build_arm_spec(80, 1000, plugin._cameras, plugin._lights)
-    t = threading.Thread(target=lambda: plugin._arm_and_wait(arm))
+    link._write = blocking_write
+    t = threading.Thread(target=lambda: link.arm(_ARM))
     t.start()
     try:
         assert in_send.wait(1.0)  # arm A is inside the locked send window
         # A holds _arm_lock across the whole send+wait, so a concurrent acquire fails.
-        assert plugin._arm_lock.acquire(blocking=False) is False
+        assert link._arm_lock.acquire(blocking=False) is False
     finally:
         gate.set()
     t.join(timeout=2.0)
     # Once A finished the lock is free again.
-    assert plugin._arm_lock.acquire(blocking=False) is True
-    plugin._arm_lock.release()
+    assert link._arm_lock.acquire(blocking=False) is True
+    link._arm_lock.release()
 
 
 def test_on_recording_start_no_warning_when_ack_arrives(caplog):
     plugin, link = _plugin_with_fake(delay_s=0.005)
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
-    assert plugin._armed_event.is_set()
-    assert plugin._last_error is None  # a clean ack reports no failure
+    assert link._answered.is_set()
+    assert plugin.last_error is None  # a clean ack reports no failure
     assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
 def test_on_recording_start_logs_firmware_reject(caplog):
     plugin, link = _plugin_with_fake()
-    link.reject = "p"  # unknown pin id
+    link.reject_code = "p"  # unknown pin id
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert any("REJECTED" in m and "unknown pin" in m for m in caplog.messages)
 
@@ -871,7 +864,7 @@ def test_status_reports_cameras_and_lights():
 
 def test_status_surfaces_last_error():
     plugin, _link = _plugin_with_fake()
-    plugin._last_error = "the board did not arm"
+    plugin.last_error = "the board did not arm"
     assert plugin.status()["error"] == "the board did not arm"
 
 
@@ -974,15 +967,20 @@ def _use_fake_serial(monkeypatch, fake: _FakeSerial) -> None:
     monkeypatch.setattr(serial, "Serial", lambda *a, **k: fake)
 
 
-def test_link_send_arm_writes_exact_bytes(monkeypatch):
+def _noop():
+    pass
+
+
+def test_link_arm_writes_exact_bytes(monkeypatch):
     fake = _FakeSerial()
     _use_fake_serial(monkeypatch, fake)
-    link = TriggerboxLink(on_status=lambda t: None)
+    monkeypatch.setattr(triggerbox, "ACK_TIMEOUT_S", 0.05)
+    link = TriggerboxLink(lambda t: None, _noop)
     link.open(DEVICE, 115200)
     try:
         arm = ArmSpec(80, 5000, [(11, 500, 0)], [(3, 1, 0, 2500, 0, 0)])
-        link.send_arm(arm)
-        assert wait_until(lambda: bytes(fake.written) == arm.to_bytes())
+        assert link.arm(arm) == "timeout"  # no board answers
+        assert bytes(fake.written) == arm.to_bytes()
     finally:
         link.close()
 
@@ -991,13 +989,12 @@ def test_link_parses_status_and_reject_tokens(monkeypatch):
     fake = _FakeSerial()
     _use_fake_serial(monkeypatch, fake)
     states: list[str] = []
-    rejects: list[str] = []
-    link = TriggerboxLink(on_status=states.append, on_reject=rejects.append)
+    link = TriggerboxLink(states.append, _noop)
     link.open(DEVICE, 115200)
     try:
         fake.feed(b"R\nTRIGGERBOX 2\nEp\nD\nC\n")
         assert wait_until(lambda: states == ["R", "D", "C"])
-        assert rejects == ["p"]
+        assert link.reject == "p"
         assert link.identity == "TRIGGERBOX 2"
     finally:
         link.close()
@@ -1007,7 +1004,7 @@ def test_link_reassembles_split_tokens(monkeypatch):
     fake = _FakeSerial()
     _use_fake_serial(monkeypatch, fake)
     states: list[str] = []
-    link = TriggerboxLink(on_status=states.append)
+    link = TriggerboxLink(states.append, _noop)
     link.open(DEVICE, 115200)
     try:
         fake.feed(b"R")
@@ -1022,7 +1019,7 @@ def test_link_read_error_marks_broken(monkeypatch):
     fake.raise_on_read = serial.SerialException("unplugged")
     _use_fake_serial(monkeypatch, fake)
     broken = threading.Event()
-    link = TriggerboxLink(on_status=lambda t: None, on_broken=broken.set)
+    link = TriggerboxLink(lambda t: None, broken.set)
     link.open(DEVICE, 115200)
     try:
         assert broken.wait(1.0)
@@ -1032,7 +1029,7 @@ def test_link_read_error_marks_broken(monkeypatch):
 
 
 def test_link_is_open_false_when_never_opened():
-    link = TriggerboxLink(on_status=lambda t: None)
+    link = TriggerboxLink(lambda t: None, _noop)
     assert link.is_open is False
 
 
@@ -1044,25 +1041,25 @@ def test_link_is_open_false_when_never_opened():
 def test_verify_identity_accepts_triggerbox_v2():
     plugin, link = _plugin_with_fake()
     link.banner = "TRIGGERBOX 2"
-    plugin._verify_identity()
-    assert plugin._banner == "TRIGGERBOX 2" and plugin._firmware_ok is True
+    plugin._identify()
+    assert plugin.banner == "TRIGGERBOX 2" and plugin.firmware_ok is True
 
 
 def test_verify_identity_refuses_foreign_board(caplog):
     plugin, link = _plugin_with_fake()
     link.banner = "OTHERBOARD 1"
-    plugin._verify_identity()
-    assert plugin._firmware_ok is False
+    plugin._identify()
+    assert plugin.firmware_ok is False
     assert any("reflash to TRIGGERBOX" in m for m in caplog.messages)
 
 
 def test_verify_identity_warns_on_version_mismatch(caplog):
     plugin, link = _plugin_with_fake()
     link.banner = "TRIGGERBOX 1"
-    plugin._verify_identity()
+    plugin._identify()
     # A v1 board can't parse a v2 arm packet, so arming is disabled and a reflash
     # is offered (better than arming and getting a guaranteed protocol reject).
-    assert plugin._firmware_ok is False
+    assert plugin.firmware_ok is False
     assert plugin.firmware_provisioning()["state"] == "wrong_version"
     assert any("reflash" in m for m in caplog.messages)
 
@@ -1070,8 +1067,8 @@ def test_verify_identity_warns_on_version_mismatch(caplog):
 def test_verify_identity_proceeds_without_banner():
     plugin, link = _plugin_with_fake()
     link.banner = None
-    plugin._verify_identity()
-    assert plugin._firmware_ok is True
+    plugin._identify()
+    assert plugin.firmware_ok is True
 
 
 def test_open_attempts_usb_reset_when_board_is_silent(monkeypatch):
@@ -1093,7 +1090,7 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
     link.banner = "TRIGGERBOX 2"
     plugin._open()
     assert calls == []  # a healthy identify never triggers a reset
-    assert plugin._banner == "TRIGGERBOX 2"
+    assert plugin.banner == "TRIGGERBOX 2"
 
 
 # ===========================================================================
@@ -1123,13 +1120,13 @@ import octacam.firmware as fw_mod  # noqa: E402
 def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
     """Set the board's identity banner and run the plugin's classification."""
     link.banner = banner
-    plugin._verify_identity()
+    plugin._identify()
 
 
 def test_identify_current_build_is_up_to_date():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin._fw.needed_build}")
-    assert plugin._firmware_ok
+    _verify_with_banner(plugin, link, f"TRIGGERBOX 2 {plugin.needed_build}")
+    assert plugin.firmware_ok
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "current"
     assert prov["needs_flash"] is False
@@ -1138,7 +1135,7 @@ def test_identify_current_build_is_up_to_date():
 def test_identify_outdated_build_still_arms():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # no build tag = pre-fingerprint flash
-    assert plugin._firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
+    assert plugin.firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "outdated"
     assert prov["needs_flash"] is True
@@ -1147,14 +1144,14 @@ def test_identify_outdated_build_still_arms():
 def test_identify_wrong_version_disables_arming():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 1 abc1234")
-    assert plugin._firmware_ok is False
+    assert plugin.firmware_ok is False
     assert plugin.firmware_provisioning()["state"] == "wrong_version"
 
 
 def test_identify_foreign_board_disables_arming_and_needs_confirm():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "OTHERBOARD 1")
-    assert plugin._firmware_ok is False
+    assert plugin.firmware_ok is False
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "wrong_board"
     # A foreign board is flashable but never auto-flashed without confirmation.
@@ -1164,7 +1161,7 @@ def test_identify_foreign_board_disables_arming_and_needs_confirm():
 def test_identify_unidentified_proceeds_but_flags_flash():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, None)
-    assert plugin._firmware_ok  # unknown -> proceed (may be a slow link)
+    assert plugin.firmware_ok  # unknown -> proceed (may be a slow link)
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "unidentified"
     assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
@@ -1184,10 +1181,10 @@ def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):
     plugin, link = _plugin_with_fake()
     assert plugin.firmware_provisioning()["needed_build"] is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
-    assert plugin._firmware_ok  # name+version compatible; no flash offer
-    assert plugin._fw.check is None
+    assert plugin.firmware_ok  # name+version compatible; no flash offer
+    assert plugin.firmware_check is None
     _verify_with_banner(plugin, link, "TRIGGERBOX 1")
-    assert plugin._firmware_ok is False
+    assert plugin.firmware_ok is False
 
 
 def test_broadcast_includes_firmware_state():
@@ -1195,7 +1192,7 @@ def test_broadcast_includes_firmware_state():
     bc = _Broadcasts()
     PluginManager([plugin]).attach(broadcast=bc)
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
-    plugin._broadcast_state()
+    plugin._push_state()
     last = bc.msgs[-1]
     assert last["firmware_state"] == "outdated"
     assert last["needs_flash"] is True
@@ -1205,17 +1202,17 @@ def test_flash_firmware_success_updates_state():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # start out of date
     # After the (faked) upload the board reports the current build on re-identify.
-    link.banner = f"TRIGGERBOX 2 {plugin._fw.needed_build}"
+    link.banner = f"TRIGGERBOX 2 {plugin.needed_build}"
     result = plugin.flash_firmware()
     assert result.ok
-    assert plugin._firmware_ok
+    assert plugin.firmware_ok
     assert plugin.firmware_provisioning()["needs_flash"] is False
     assert link.closes >= 1 and link.opens >= 1  # link cycled for the upload
 
 
 def test_flash_firmware_refused_while_running():
     plugin, link = _plugin_with_fake()
-    plugin._arduino_state = "running"
+    plugin.board_state = "running"
     result = plugin.flash_firmware()
     assert not result.ok
     assert "running" in result.message
@@ -1247,7 +1244,7 @@ def test_flash_firmware_failure_is_reported(monkeypatch):
     )
     result = plugin.flash_firmware()
     assert not result.ok
-    assert plugin._last_error == result.message  # surfaced to the GUI
+    assert plugin.last_error == result.message  # surfaced to the GUI
 
 
 def test_firmware_endpoint():
@@ -1257,13 +1254,13 @@ def test_firmware_endpoint():
     assert body["state"] == "outdated"
     assert body["needs_flash"] is True
     assert body["can_flash"] is True
-    assert body["needed_build"] == plugin._fw.needed_build
+    assert body["needed_build"] == plugin.needed_build
 
 
 def test_flash_endpoint():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
-    link.banner = f"TRIGGERBOX 2 {plugin._fw.needed_build}"
+    link.banner = f"TRIGGERBOX 2 {plugin.needed_build}"
     body = _test_client(plugin).post("/api/triggerbox/flash", json={}).json()
     assert body["ok"] is True
     assert body["provisioning"]["needs_flash"] is False
@@ -1273,7 +1270,7 @@ def test_flash_endpoint():
 def test_build_reads_auto_flash_option():
     assert TriggerboxPlugin.from_options({"device": DEVICE}).firmware_provisioning()["auto_flash"] is False
     plugin = TriggerboxPlugin.from_options({"device": DEVICE, "auto_flash": True})
-    assert plugin._auto_flash is True
+    assert plugin.auto_flash is True
     assert plugin.firmware_provisioning()["auto_flash"] is True
 
 
@@ -1553,9 +1550,7 @@ def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
 def _realtime_plugin(**options):
     """A plugin whose fake board answers from a timer, as the reader thread would."""
     plugin = TriggerboxPlugin.from_options({"device": DEVICE, **options})
-    link = _fake_link(plugin, delay_s=0.005)
-    plugin._ack_timeout_s = 0.5
-    return plugin, link
+    return plugin, _fake_link(plugin, delay_s=0.005)
 
 
 def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
@@ -1585,9 +1580,9 @@ def test_prime_trigger_declines_without_a_camera_line_or_a_board():
 
 def test_on_preview_stop_waits_for_the_boards_cancel_ack():
     plugin, link = _realtime_plugin()
-    plugin._idle_event.clear()
+    link._idle.clear()
     plugin.on_preview_stop()
-    assert plugin._idle_event.is_set()  # returned only once 'C' arrived
+    assert link._idle.is_set()  # returned only once 'C' arrived
     assert link.snapshot()[-1] == bytes([CANCEL_MAGIC])
 
 
@@ -1636,7 +1631,7 @@ def test_status_tokens_arrive_without_waiting_for_the_port_timeout(monkeypatch):
     fake = _BlockingSerial()
     _use_fake_serial(monkeypatch, fake)
     seen = []
-    link = TriggerboxLink(on_status=lambda t: seen.append((time.monotonic(), t)))
+    link = TriggerboxLink(lambda t: seen.append((time.monotonic(), t)), _noop)
     link.open(DEVICE, 115200)
     try:
         time.sleep(0.05)

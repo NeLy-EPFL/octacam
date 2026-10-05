@@ -25,14 +25,14 @@ channels 1 and 2 strobing at ``default_duty_percent``. An auto-duty strobe stays
 on for ``max(TriggerDelay + ExposureTime) + strobe_guard_us`` over the live
 cameras. Recordings use ``trigger_source = "managed"``.
 
-Wire protocol v2, host -> Arduino (little-endian):
+Wire protocol v2, host -> board (little-endian):
   [0xA5][version u8 = 2][payload_len u16][payload][xor u8]  arm
   [0xCA]                                                    cancel
   [0x3F] '?'                                                identify
   payload = fps u16 | duration_ms u32 | n_cam u8 | n_light u8
             | n_cam x (pin_id u8, pulse_us u16, delay_us u16)
             | n_light x (pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32)
-Arduino -> host, newline-terminated: "R" running, "D" done, "C" cancelled or
+Board -> host, newline-terminated: "R" running, "D" done, "C" cancelled or
 idle, "E<c>" rejected, "TRIGGERBOX <version> <build>" the identify reply.
 """
 
@@ -42,29 +42,21 @@ import logging
 import math
 import struct
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-import serial
-
 from octacam import firmware as fw
-from octacam import serial_ports
-from octacam.plugins._serial_link import SerialReaderLink
-from octacam.plugins.base import Plugin
+from octacam.plugins.serial import SerialLink, SerialPlugin
 
 log = logging.getLogger("octacam")
 
-DEFAULT_DEVICE = "/dev/ttyACM0"
-DEFAULT_BAUD = 115200
-DEFAULT_FPS = 80
-DEFAULT_DURATION_MS = 10_000
+PROTOCOL_VERSION = 2
+BANNER = "TRIGGERBOX"
+MAX_FPS = 5000
+MAX_CAM = 12
+MAX_LIGHT = 3
 DEFAULT_DUTY_PERCENT = 20.0
-DEFAULT_CAM_PULSE_US = 0  # 0 → firmware default pulse width
-DEFAULT_DUTY_AUTO = False
-# Added to the longest TriggerDelay + ExposureTime by an auto-duty strobe, for
-# trigger latency and jitter at the exposure's end (TriggerDelay covers its start).
-DEFAULT_STROBE_GUARD_US = 100
 
 # How long an arm waits for the board's 'R' (or 'E').
 ACK_TIMEOUT_S = 1.0
@@ -72,14 +64,8 @@ ACK_TIMEOUT_S = 1.0
 # starts, or a last preview pulse reaches a camera that is already counting.
 CANCEL_ACK_TIMEOUT_S = 0.3
 
-# ---- Wire protocol v2 (must match triggerbox.ino) --------------------------
-# SerialReaderLink sends the cancel and identify bytes.
 _ARM_MAGIC = 0xA5
-_PROTOCOL_VERSION = 2
-_MAX_FPS = 5000
-_MAX_CAM = 12
-_MAX_LIGHT = 3
-
+_CANCEL_MAGIC = 0xCA
 _HDR = struct.Struct("<BBH")      # magic u8, version u8, payload_len u16
 _FIXED = struct.Struct("<HIBB")   # fps u16, duration_ms u32, n_cam u8, n_light u8
 _CAM = struct.Struct("<BHH")      # pin_id u8, pulse_us u16, delay_us u16
@@ -92,18 +78,16 @@ PIN_LABELS = (
     "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11",
     "D12", "D13", "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7",
 )
-_RESERVED_PINS = frozenset({"D2", "D3", "D4"})
+RESERVED_PINS = frozenset({"D2", "D3", "D4"})
 # CCS light channel (1/2/3) → default board pin.
 LIGHT_PIN_BY_CHANNEL = {1: "D5", 2: "D6", 3: "D7"}
 
 # Light modes (name ↔ wire value). "pulse" is accepted as an alias of pulse_train.
-_LIGHT_MODE_IDS = {"off": 0, "strobe": 1, "continuous": 2, "pulse_train": 3, "pulse": 3}
-_LIGHT_MODE_NAMES = {0: "off", 1: "strobe", 2: "continuous", 3: "pulse_train"}
-
-_STATE_LABELS: dict[str, str] = {"R": "running", "D": "done", "C": "idle"}
+LIGHT_MODE_IDS = {"off": 0, "strobe": 1, "continuous": 2, "pulse_train": 3, "pulse": 3}
+LIGHT_MODE_NAMES = {0: "off", 1: "strobe", 2: "continuous", 3: "pulse_train"}
 
 # The firmware's 'E<c>' reject codes.
-_REJECT_REASONS = {
+REJECT_REASONS = {
     "v": "protocol version mismatch",
     "c": "checksum",
     "o": "too many cameras/lights (oversize)",
@@ -115,8 +99,6 @@ _REJECT_REASONS = {
     "m": "unknown light mode",
 }
 
-_EXPECTED_BANNER = "TRIGGERBOX"
-
 
 def _u16(v) -> int:
     return max(0, min(0xFFFF, int(v)))
@@ -126,23 +108,156 @@ def _u32(v) -> int:
     return max(0, min(0xFFFF_FFFF, int(v)))
 
 
-def _coerce_int(value, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _coerce_float(value, default: float) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def pin_id(label: str) -> int:
     """Index of a pin label in PIN_LABELS. Raises ValueError if unknown."""
     return PIN_LABELS.index(str(label).upper())
+
+
+@dataclass
+class CameraLine:
+    """One camera-trigger output line."""
+
+    pin: str = "D13"
+    pulse_us: int = 0  # 0 → firmware default (500 µs)
+    delay_us: int = 0
+
+    def record(self) -> tuple[int, int, int]:
+        return (pin_id(self.pin), _u16(self.pulse_us), _u16(self.delay_us))
+
+
+@dataclass
+class LightChannel:
+    """One CCS light channel; ``channel`` only picks the default pin."""
+
+    channel: int = 1
+    pin: str = "D5"
+    mode: str = "off"
+    # strobe
+    duty_mode: str = "manual"  # "auto" | "manual"
+    duty_percent: float = DEFAULT_DUTY_PERCENT
+    delay_us: int = 0
+    # pulse_train
+    freq_hz: float = 10.0
+    pulse_us: int = 1000
+    start_delay_ms: float = 0.0
+    train_ms: float = 0.0
+
+    def wants_auto(self) -> bool:
+        return self.mode == "strobe" and self.duty_mode == "auto"
+
+    def resolve(self, period_us: float, auto_led_on_us: float | None) -> tuple:
+        """The wire record ``(pin_id, mode, p0, p1, p2, p3)``. An auto strobe
+        takes ``auto_led_on_us``, or its manual duty when that is None."""
+        pid = pin_id(self.pin)
+        mode = LIGHT_MODE_IDS.get(self.mode, 0)
+        if mode == 1:  # strobe
+            if self.duty_mode == "auto" and auto_led_on_us is not None:
+                on_us = int(math.ceil(auto_led_on_us))
+            else:
+                duty = max(0.0, min(100.0, self.duty_percent))
+                on_us = int(round(duty / 100.0 * period_us))
+            return (pid, 1, _u32(self.delay_us), _u32(on_us), 0, 0)
+        if mode == 2:  # continuous
+            return (pid, 2, 0, 0, 0, 0)
+        if mode == 3:  # pulse_train
+            interval = int(round(1_000_000.0 / self.freq_hz)) if self.freq_hz > 0 else 0
+            return (
+                pid,
+                3,
+                _u32(self.pulse_us),
+                _u32(interval),
+                _u32(int(round(self.start_delay_ms * 1000))),
+                _u32(int(round(self.train_ms * 1000))),
+            )
+        return (pid, 0, 0, 0, 0, 0)  # off
+
+
+@dataclass
+class ArmSpec:
+    """An arm packet: fps, duration and the outputs' wire records."""
+
+    fps: int
+    duration_ms: int
+    cameras: list[tuple]  # (pin_id, pulse_us, delay_us)
+    lights: list[tuple]   # (pin_id, mode, p0, p1, p2, p3)
+
+    def to_bytes(self) -> bytes:
+        payload = _FIXED.pack(self.fps, self.duration_ms, len(self.cameras), len(self.lights))
+        for rec in self.cameras:
+            payload += _CAM.pack(*rec)
+        for rec in self.lights:
+            payload += _LIGHT.pack(*rec)
+        # Checksum spans version + payload_len + payload (framing/desync guard).
+        body = bytes([PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
+        checksum = 0
+        for byte in body:
+            checksum ^= byte
+        return _HDR.pack(_ARM_MAGIC, PROTOCOL_VERSION, len(payload)) + payload + bytes([checksum])
+
+
+class TriggerboxLink(SerialLink):
+    """The serial link to the triggerbox. It owns the board's answers: arms and
+    cancels are serialized, ack wait included, so concurrent ones (a preview
+    re-arm and a recording arm) cannot take each other's answer."""
+
+    name = "triggerbox"
+    banner_prefix = BANNER
+
+    def __init__(self, on_state: Callable[[str], None], on_broken: Callable[[], None]):
+        super().__init__(on_broken)
+        self._on_state = on_state  # 'R', 'D' or 'C', after its event is set
+        self._arm_lock = threading.Lock()
+        self._answered = threading.Event()  # 'R' or 'E<c>' to the last arm
+        self._done = threading.Event()  # 'D': the last arm's run is over
+        self._idle = threading.Event()  # 'C' to the last cancel
+        self._events = {"R": self._answered, "D": self._done, "C": self._idle}
+        self.reject: str | None = None  # the last arm's reject code
+
+    def arm(self, spec: ArmSpec) -> str:
+        """Send an arm: ``"ok"`` ('R'), ``"reject"`` ('E<c>', code in
+        :attr:`reject`), ``"timeout"`` or ``"write_failed"`` (a wedged or closed link)."""
+        with self._arm_lock:
+            self._answered.clear()
+            self._done.clear()
+            self.reject = None
+            if not self._write(spec.to_bytes()):
+                return "write_failed"
+            if not self._answered.wait(ACK_TIMEOUT_S):
+                return "timeout"
+            return "reject" if self.reject is not None else "ok"
+
+    def cancel(self) -> bool:
+        """Cancel the run and wait (bounded) for the board's 'C'; True if it
+        answered or the link is closed."""
+        with self._arm_lock:
+            self._idle.clear()
+            self.send_cancel()
+            if not self.is_open:
+                return True
+            return self._idle.wait(min(ACK_TIMEOUT_S, CANCEL_ACK_TIMEOUT_S))
+
+    def send_cancel(self) -> None:
+        """Cancel without waiting; an idle board ignores it."""
+        self._write(bytes([_CANCEL_MAGIC]))
+
+    def wait_done(self, timeout_s: float) -> bool:
+        """Wait for the end of the run the last arm started."""
+        return self._done.wait(timeout_s)
+
+    def _feed(self, chunk: bytes) -> None:
+        for token in self._lines(chunk):
+            if self._identified(token):
+                continue
+            event = self._events.get(token)
+            if event is not None:
+                event.set()
+                self._dispatch(self._on_state, token)
+            elif token[0] == "E":
+                self.reject = token[1:]
+                self._answered.set()
+
+
+# ---- Finite trains (must model triggerbox.ino) ------------------------------
 
 
 def period_us(fps: int) -> int:
@@ -158,7 +273,6 @@ def pulse_count(fps: int, duration_ms: int) -> int:
     return max(1, round(duration_ms * fps / 1000))
 
 
-# ---- Finite trains (must model triggerbox.ino) ------------------------------
 # prepare_outputs() clamps every camera line with the firmware's default and
 # minimum pulse width (kDefaultCamPulseUs / kMinCamPulseUs).
 _FW_DEFAULT_PULSE_US = 500
@@ -198,6 +312,35 @@ class TrainPlan:
     certain: bool = True
     lights_cut: tuple[tuple[int, int], ...] = ()
     light_overrun: bool = False
+
+    def warnings(self, fps: int, lights) -> list[str]:
+        """Where this train cannot end cleanly at *fps*, for the operator;
+        ``lights`` are the arm's light records."""
+        if not self.exact:
+            # The lights end wherever the camera pulses let them.
+            return [
+                f"at {fps} fps the board's millisecond run clock cannot end the "
+                "train cleanly after its last pulse (that needs about 1 ms between "
+                "the last camera pulse's end and the next frame edge): "
+                + (
+                    "the last camera pulse may be cut short"
+                    if self.certain
+                    else "the last pulse may be lost, or one more may start, and the "
+                    "recording then reports a missed pulse or an extra frame"
+                )
+            ]
+        warnings = [
+            f"the train's last strobe on {PIN_LABELS[lights[index][0]]} may end up "
+            f"to {cut_us} µs early: it runs too close to the next frame edge for the "
+            "run to end after it, so the last frame may be under-lit"
+            for index, cut_us in self.lights_cut
+        ]
+        if self.light_overrun:
+            warnings.append(
+                "a strobe may flash once after the train: a camera line's delay "
+                "keeps the run going past that strobe's next edge"
+            )
+        return warnings
 
 
 def _camera_pulses(period: int, cameras) -> list[tuple[int, int]]:
@@ -366,89 +509,31 @@ def _place_train_end(period: int, count: int, lo: int, hi: int, lights) -> Train
     )
 
 
-# ---- Output specs: config entries and their wire records -------------------
+# ---- Plugin -----------------------------------------------------------------
+
+DEFAULT_DEVICE = "/dev/ttyACM0"
+DEFAULT_BAUD = 115200
+DEFAULT_FPS = 80
+DEFAULT_DURATION_MS = 10_000
+DEFAULT_CAM_PULSE_US = 0  # 0 → firmware default pulse width
+DEFAULT_DUTY_AUTO = False
+# Added to the longest TriggerDelay + ExposureTime by an auto-duty strobe, for
+# trigger latency and jitter at the exposure's end (TriggerDelay covers its start).
+DEFAULT_STROBE_GUARD_US = 100
 
 
-@dataclass
-class CameraLine:
-    """One camera-trigger output line."""
-
-    pin: str = "D13"
-    pulse_us: int = 0  # 0 → firmware default (500 µs)
-    delay_us: int = 0
-
-    def record(self) -> tuple[int, int, int]:
-        return (pin_id(self.pin), _u16(self.pulse_us), _u16(self.delay_us))
+def _coerce_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
-@dataclass
-class LightChannel:
-    """One CCS light channel; ``channel`` only picks the default pin."""
-
-    channel: int = 1
-    pin: str = "D5"
-    mode: str = "off"
-    # strobe
-    duty_mode: str = "manual"  # "auto" | "manual"
-    duty_percent: float = DEFAULT_DUTY_PERCENT
-    delay_us: int = 0
-    # pulse_train
-    freq_hz: float = 10.0
-    pulse_us: int = 1000
-    start_delay_ms: float = 0.0
-    train_ms: float = 0.0
-
-    def wants_auto(self) -> bool:
-        return self.mode == "strobe" and self.duty_mode == "auto"
-
-    def resolve(self, period_us: float, auto_led_on_us: float | None) -> tuple:
-        """The wire record ``(pin_id, mode, p0, p1, p2, p3)``. An auto strobe
-        takes ``auto_led_on_us``, or its manual duty when that is None."""
-        pid = pin_id(self.pin)
-        mode = _LIGHT_MODE_IDS.get(self.mode, 0)
-        if mode == 1:  # strobe
-            if self.duty_mode == "auto" and auto_led_on_us is not None:
-                on_us = int(math.ceil(auto_led_on_us))
-            else:
-                duty = max(0.0, min(100.0, self.duty_percent))
-                on_us = int(round(duty / 100.0 * period_us))
-            return (pid, 1, _u32(self.delay_us), _u32(on_us), 0, 0)
-        if mode == 2:  # continuous
-            return (pid, 2, 0, 0, 0, 0)
-        if mode == 3:  # pulse_train
-            interval = int(round(1_000_000.0 / self.freq_hz)) if self.freq_hz > 0 else 0
-            return (
-                pid,
-                3,
-                _u32(self.pulse_us),
-                _u32(interval),
-                _u32(int(round(self.start_delay_ms * 1000))),
-                _u32(int(round(self.train_ms * 1000))),
-            )
-        return (pid, 0, 0, 0, 0, 0)  # off
-
-
-@dataclass
-class ArmSpec:
-    """An arm packet: fps, duration and the outputs' wire records."""
-
-    fps: int
-    duration_ms: int
-    cameras: list[tuple]  # (pin_id, pulse_us, delay_us)
-    lights: list[tuple]   # (pin_id, mode, p0, p1, p2, p3)
-
-    def to_bytes(self) -> bytes:
-        payload = _FIXED.pack(self.fps, self.duration_ms, len(self.cameras), len(self.lights))
-        for rec in self.cameras:
-            payload += _CAM.pack(*rec)
-        for rec in self.lights:
-            payload += _LIGHT.pack(*rec)
-        # Checksum spans version + payload_len + payload (framing/desync guard).
-        body = bytes([_PROTOCOL_VERSION]) + struct.pack("<H", len(payload)) + payload
-        checksum = 0
-        for byte in body:
-            checksum ^= byte
-        return _HDR.pack(_ARM_MAGIC, _PROTOCOL_VERSION, len(payload)) + payload + bytes([checksum])
+def _coerce_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _camera_from_dict(d, default_pulse: int) -> CameraLine | None:
@@ -459,7 +544,7 @@ def _camera_from_dict(d, default_pulse: int) -> CameraLine | None:
     if pin not in PIN_LABELS:
         log.warning("triggerbox: unknown camera pin %r; using D13", pin)
         pin = "D13"
-    elif pin in _RESERVED_PINS:
+    elif pin in RESERVED_PINS:
         log.warning("triggerbox: camera pin %s is reserved for the status LED; "
                     "the board will reject it", pin)
     return CameraLine(
@@ -482,10 +567,10 @@ def _light_from_dict(d, default_duty_percent: float, default_duty_auto: bool) ->
         log.warning("triggerbox: unknown light pin %r; using %s", pin, LIGHT_PIN_BY_CHANNEL[channel])
         pin = LIGHT_PIN_BY_CHANNEL[channel]
     mode = str(d.get("mode", "off")).lower()
-    if mode not in _LIGHT_MODE_IDS:
+    if mode not in LIGHT_MODE_IDS:
         log.warning("triggerbox: unknown light mode %r; using off", mode)
         mode = "off"
-    mode = _LIGHT_MODE_NAMES[_LIGHT_MODE_IDS[mode]]  # canonicalize (pulse → pulse_train)
+    mode = LIGHT_MODE_NAMES[LIGHT_MODE_IDS[mode]]  # canonicalize (pulse → pulse_train)
     duty_mode = str(d.get("duty_mode", "auto" if default_duty_auto else "manual")).lower()
     if duty_mode not in ("auto", "manual"):
         duty_mode = "manual"
@@ -504,87 +589,19 @@ def _light_from_dict(d, default_duty_percent: float, default_duty_auto: bool) ->
 
 
 def _cameras_from(raw: list, default_pulse: int) -> list[CameraLine]:
-    lines = (_camera_from_dict(entry, default_pulse) for entry in raw[:_MAX_CAM])
+    lines = (_camera_from_dict(entry, default_pulse) for entry in raw[:MAX_CAM])
     return [line for line in lines if line is not None]
 
 
 def _lights_from(raw: list, default_duty_percent: float, default_duty_auto: bool) -> list[LightChannel]:
     lights = (
         _light_from_dict(entry, default_duty_percent, default_duty_auto)
-        for entry in raw[:_MAX_LIGHT]
+        for entry in raw[:MAX_LIGHT]
     )
     return [light for light in lights if light is not None]
 
 
-@dataclass
-class CameraTiming:
-    """One camera's exposure-timing slice, read live for a strobe's auto duty."""
-
-    index: int
-    name: str
-    exposure_us: float | None
-    trigger_delay_us: float
-
-    @property
-    def coverage_us(self) -> float | None:
-        if self.exposure_us is None:
-            return None
-        return self.trigger_delay_us + self.exposure_us
-
-
-# ---- Serial link ------------------------------------------------------------
-
-
-class TriggerboxLink(SerialReaderLink):
-    """The serial link to the triggerbox."""
-
-    log_prefix = "triggerbox"
-    reader_name = "triggerbox-reader"
-    expected_banner = _EXPECTED_BANNER
-
-    def send_arm(self, spec: ArmSpec) -> bool:
-        return self._write(spec.to_bytes())
-
-    def _read_loop(self) -> None:
-        buf = bytearray()
-        while not self._reader_stop.is_set():
-            s = self._serial
-            if s is None or not s.is_open:
-                break
-            try:
-                chunk = self._read_chunk(s)
-            except serial.SerialException:
-                if not self._reader_stop.is_set():
-                    self._mark_broken()
-                break
-            except Exception:
-                if not self._reader_stop.is_set():
-                    log.debug("triggerbox: read error in reader thread", exc_info=True)
-                    self._mark_broken()
-                break
-            if not chunk:
-                continue
-            buf.extend(chunk)
-            while b"\n" in buf:
-                line, _, rest = buf.partition(b"\n")
-                del buf[:]
-                buf.extend(rest)
-                token = line.decode("ascii", "replace").strip()
-                if not token:
-                    continue
-                if token.upper().startswith(self.expected_banner):
-                    self._identity = token
-                    self._identity_event.set()
-                elif token in _STATE_LABELS:
-                    self._dispatch(self._on_status, token)
-                elif token[0] == "E":
-                    self._dispatch(self._on_reject, token[1:])
-
-
-# ---- Plugin -----------------------------------------------------------------
-
-
-class TriggerboxPlugin(Plugin):
+class TriggerboxPlugin(SerialPlugin):
     """Arms the board with the fps, duration and every camera line and light
     channel; the board then runs them on its own clock."""
 
@@ -595,11 +612,15 @@ class TriggerboxPlugin(Plugin):
         name="triggerbox",
         sketch_dir=fw.resolve_sketch_dir("triggerbox"),
         fqbn="arduino:esp32:nano_nora",
-        banner_prefix=_EXPECTED_BANNER,
-        protocol_version=_PROTOCOL_VERSION,
+        banner_prefix=BANNER,
+        protocol_version=PROTOCOL_VERSION,
         build_define="TRIGGERBOX_FW_BUILD",
     )
     default_device = DEFAULT_DEVICE
+    reconnect_path = "/api/triggerbox/reconnect"
+    state_topic = "triggerbox_state"
+    recover_silent = True
+    _link: TriggerboxLink
 
     def __init__(
         self,
@@ -615,12 +636,12 @@ class TriggerboxPlugin(Plugin):
         cameras: list[CameraLine] | None = None,
         lights: list[LightChannel] | None = None,
     ):
-        self.configured_device = device
-        self.device = device
-        self.baud = baud
-        self._banner: str | None = None
-        self._firmware_ok = True
-        self._auto_flash = bool(auto_flash)
+        super().__init__(
+            TriggerboxLink(self._on_state, self._on_link_broken),
+            device=device,
+            baud=baud,
+            auto_flash=bool(auto_flash),
+        )
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
         self._default_duty_percent = default_duty_percent
@@ -634,29 +655,6 @@ class TriggerboxPlugin(Plugin):
         self._configured_lights = [replace(lt) for lt in self._lights]
         # A tab edit re-arms the board only during an (indefinite) preview arm.
         self._preview_armed = False
-        self._link = TriggerboxLink(
-            self._on_arduino_status,
-            on_broken=self._on_link_broken,
-            on_reject=self._on_arduino_reject,
-        )
-        assert self.firmware is not None
-        self._fw = fw.FirmwareProvisioner(
-            self.firmware,
-            resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
-            reopen=lambda: self._open(allow_recovery=False),
-            close_link=lambda: self._link.close(),
-            wait_for_device=serial_ports.wait_for_device,
-            is_busy=self._fw_is_busy,
-        )
-        self._arduino_state = "idle"
-        # Set by the board's 'D' (run over), 'C' (cancelled), 'R' or 'E' (arm answered).
-        self._done_event = threading.Event()
-        self._idle_event = threading.Event()
-        self._armed_event = threading.Event()
-        self._arm_lock = threading.Lock()  # see _arm_and_wait
-        self._last_reject: str | None = None
-        self._last_error: str | None = None
-        self._ack_timeout_s = ACK_TIMEOUT_S
 
     @classmethod
     def from_options(cls, options: dict) -> TriggerboxPlugin:
@@ -735,60 +733,60 @@ class TriggerboxPlugin(Plugin):
             lights=lights,
         )
 
-    def _fw_is_busy(self) -> tuple[bool, str]:
-        """Refuse to flash while a recording runs or the board is armed. The
-        controller's state comes first: it flips before the board's 'R' arrives."""
+    def busy_reason(self) -> str | None:
+        # The controller's state comes first: it flips before the board's 'R' arrives.
         controller = self.controller
         if controller is not None and controller.recording_active:
-            return True, "refusing to flash while a recording is active — stop it first"
-        if self._arduino_state == "running":
-            return True, "refusing to flash while the board is armed/running — stop the recording first"
-        return False, ""
+            return "refusing to flash while a recording is active — stop it first"
+        if self.board_state == "running":
+            return "refusing to flash while the board is armed/running — stop the recording first"
+        return None
 
-    # -------------------------------------------------- camera exposure timings
+    def _on_state(self, token: str) -> None:
+        state = {"R": "running", "D": "done", "C": "idle"}[token]
+        if state == "running":
+            self.last_error = None  # an arm took
+        self._set_state(state)
 
-    def _camera_timings(self) -> list[CameraTiming]:
-        """The live cameras' timings (the controller's), for the auto duty."""
+    def _on_link_broken(self) -> None:
+        self._set_state("idle")
+
+    def teardown(self) -> None:
+        self._link.send_cancel()
+        self._link.close()
+        self.board_state = "idle"
+
+    def status(self) -> dict:
+        return {
+            **super().status(),
+            "guard_us": self._strobe_guard_us,
+            "cameras": [asdict(c) for c in self._cameras],
+            "lights": [asdict(lt) for lt in self._lights],
+        }
+
+    # -------------------------------------------------- spec -> arm packet
+
+    def _camera_windows(self) -> list[tuple[str, float, float | None]]:
+        """``(name, trigger delay, exposure)`` µs of each live camera (the
+        controller's), for the auto strobe duty."""
         if self.controller is None:
             return []
-        timings: list[CameraTiming] = []
-        for index, camera in enumerate(self.controller.camera_system):
-            delay, exposure = camera.trigger_window_us()
-            timings.append(
-                CameraTiming(
-                    index=index,
-                    name=camera.name or f"cam{index}",
-                    exposure_us=exposure,
-                    trigger_delay_us=delay,
-                )
-            )
-        return timings
+        return [
+            (camera.name or f"cam{index}", *camera.trigger_window_us())
+            for index, camera in enumerate(self.controller.camera_system)
+        ]
 
     def _auto_led_on_us(self) -> float | None:
         """The strobe on-time covering the longest exposure plus the guard, or
         None when no exposure can be read."""
         coverages = [
-            c for c in (t.coverage_us for t in self._camera_timings()) if c is not None
+            delay + exposure
+            for _name, delay, exposure in self._camera_windows()
+            if exposure is not None
         ]
         if not coverages:
             return None
         return max(coverages) + self._strobe_guard_us
-
-    def _build_arm_spec(
-        self, fps: int, duration_ms: int, cams: list[CameraLine], lights: list[LightChannel]
-    ) -> ArmSpec:
-        period_us = 1_000_000.0 / max(1, fps)
-        auto_led_on_us: float | None = None
-        if any(lt.wants_auto() for lt in lights):
-            auto_led_on_us = self._auto_led_on_us()
-            if auto_led_on_us is None:
-                log.warning(
-                    "triggerbox: auto strobe duty requested but no camera exposure "
-                    "could be read; falling back to the manual duty percent"
-                )
-        cam_recs = [c.record() for c in cams[:_MAX_CAM]]
-        light_recs = [lt.resolve(period_us, auto_led_on_us) for lt in lights[:_MAX_LIGHT]]
-        return ArmSpec(fps=fps, duration_ms=duration_ms, cameras=cam_recs, lights=light_recs)
 
     def _cameras_from_spec(self, spec: dict) -> list[CameraLine]:
         raw = spec.get("cameras")
@@ -802,204 +800,28 @@ class TriggerboxPlugin(Plugin):
             return _lights_from(raw, self._default_duty_percent, self._default_duty_auto)
         return [replace(lt) for lt in self._lights]
 
-    # -------------------------------------------------- state / broadcast
-
-    def _on_arduino_status(self, token: str) -> None:
-        state = _STATE_LABELS.get(token, "idle")
-        if state == "running":
-            self._armed_event.set()
-        elif token == "D":
-            self._done_event.set()
-        elif token == "C":
-            self._idle_event.set()
-        self._set_arduino_state(state)
-
-    def _on_arduino_reject(self, code: str) -> None:
-        self._last_reject = code
-        self._armed_event.set()  # _arm_and_wait then returns "reject"
-
-    def _on_link_broken(self) -> None:
-        self._set_arduino_state("idle")
-
-    def _set_arduino_state(self, state: str) -> None:
-        self._arduino_state = state
-        if state == "running":
-            self._last_error = None  # an arm took
-        self._broadcast_state()
-
-    def _report_error(self, msg: str) -> None:
-        """Log an arm or link failure and show it in the GUI: otherwise the
-        cameras just wait, with no visible cause."""
-        log.error("triggerbox: %s", msg)
-        self._last_error = msg
-        self._broadcast_state()
-
-    def _broadcast_state(self) -> None:
-        check = self._fw.check
-        self.broadcast(
-            "triggerbox_state",
-            {
-                "state": self._arduino_state,
-                "device": self.device,
-                "ready": self._link.is_open,
-                "firmware": self._banner,
-                "firmware_ok": self._firmware_ok,
-                "firmware_state": check.state.value if check else None,
-                "needs_flash": bool(check and check.needs_flash),
-                "error": self._last_error,
-            },
+    def _spec_duration_ms(self, spec: dict) -> int:
+        return max(
+            1,
+            min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms)),
         )
 
-    # -------------------------------------------------- process lifecycle
-
-    def setup(self) -> None:
-        self._open()
-
-    def _open(self, *, allow_recovery: bool = True) -> str | None:
-        """(Re)open the link and read the banner; the error message, or None."""
-        with self._fw.port_lock:
-            self._banner = None
-            self._firmware_ok = True
-            self._last_error = None
-            device, reason = serial_ports.resolve_device(self.configured_device)
-            if device is None:
-                log.warning("triggerbox: %s", reason)
-                return reason
-            if device != self.device:
-                log.info("triggerbox: %s", reason)
-                self.device = device
-            try:
-                self._link.open(device, self.baud)
-            except Exception as e:
-                msg = serial_ports.explain_open_failure(device, e)
-                log.warning("triggerbox: %s", msg)
-                return msg
-            log.info("triggerbox: opened %s @ %d", device, self.baud)
-            self._verify_identity()
-            # A healthy board always answers; a silent one may be wedged.
-            if self._banner is None and allow_recovery:
-                if self._recover_usb("the board did not answer an identity query"):
-                    self._verify_identity()
-            return None
-
-    def _recover_usb(self, why: str) -> bool:
-        """Close, reset the USB device (serial_ports.reset_usb_device) and reopen;
-        whether the link is open again. Holds the port lock throughout, so a
-        flash cannot take the tty in between."""
-        with self._fw.port_lock:
-            device = self.device
-            log.warning(
-                "triggerbox: %s; attempting a USB bus reset on %s to recover", why, device
-            )
-            self._link.close()
-            ok, msg = serial_ports.reset_usb_device(device)
-            log.warning("triggerbox: %s", msg)
-            if ok:
-                serial_ports.wait_for_device(device, timeout=3.0)
-            try:
-                self._link.open(device, self.baud)
-            except Exception as e:
-                log.warning(
-                    "triggerbox: reopen after USB reset failed: %s",
-                    serial_ports.explain_open_failure(device, e),
-                )
-                return False
-            if self._link.is_open:
-                log.info("triggerbox: reopened %s after USB reset", device)
-            return self._link.is_open
-
-    def _banner_arm_compatible(self, banner: str | None) -> bool:
-        """Without the sketch source: compatible unless the banner names another
-        firmware or protocol version."""
-        if not banner:
-            return True
-        name, version, _ = fw.parse_banner(banner)
-        if name != _EXPECTED_BANNER.upper():
-            return False
-        return version is None or version == _PROTOCOL_VERSION
-
-    def _verify_identity(self) -> None:
-        """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
-        arms (a reflash is only offered), a foreign or wrong-version one does not."""
-        banner = self._link.identify()
-        self._banner = banner
-        check = self._fw.classify(banner)
-        if check is None:
-            self._firmware_ok = self._banner_arm_compatible(banner)
-            if banner is None:
-                log.info("triggerbox: no firmware identity from %s; proceeding", self.device)
-            elif not self._firmware_ok:
-                log.warning(
-                    "triggerbox: %s reports firmware %r incompatible with protocol "
-                    "v%d; arming is disabled", self.device, banner, _PROTOCOL_VERSION,
-                )
-            return
-        self._firmware_ok = fw.arm_compatible(check)
-        S = fw.FirmwareState
-        if check.state is S.CURRENT:
-            log.info("triggerbox: %s firmware %s", self.device, check.detail)
-        elif check.state is S.OUTDATED:
-            log.warning(
-                "triggerbox: %s is out of date — %s; run `octacam flash` (or the "
-                "Flash firmware button) to upload the current build. Arming still works.",
-                self.device, check.detail,
-            )
-        elif check.state is S.UNIDENTIFIED:
-            log.info(
-                "triggerbox: %s sent no firmware identity (%s); proceeding",
-                self.device, check.detail,
-            )
-        else:  # WRONG_VERSION / WRONG_BOARD — not armable
-            log.warning(
-                "triggerbox: %s — %s; reflash to TRIGGERBOX %d (arming is disabled). "
-                "Run `octacam flash` or use the Flash firmware button.",
-                self.device, check.detail, _PROTOCOL_VERSION,
-            )
-
-    def teardown(self) -> None:
-        self._link.send_cancel()
-        self._link.close()
-        self._arduino_state = "idle"
-
-    def is_ready(self) -> bool:
-        return self._link.is_open
-
-    def status(self) -> dict:
-        check = self._fw.check
-        return {
-            "device": self.device,
-            "arduino_state": self._arduino_state,
-            "firmware": self._banner,
-            "firmware_ok": self._firmware_ok,
-            "firmware_state": check.state.value if check else None,
-            "needs_flash": bool(check and check.needs_flash),
-            "error": self._last_error,
-            "guard_us": self._strobe_guard_us,
-            "cameras": [asdict(c) for c in self._cameras],
-            "lights": [asdict(lt) for lt in self._lights],
-        }
-
-    # -------------------------------------------------- firmware provisioning
-
-    def firmware_provisioning(self) -> dict:
-        """The firmware picture for ``octacam flash`` and the GUI."""
-        return self._fw.provisioning(
-            plugin_name=self.name,
-            device=self.device,
-            firmware=self._banner,
-            firmware_ok=self._firmware_ok,
-            extra={"auto_flash": self._auto_flash},
+    def _resolve_arm(
+        self,
+        spec: dict,
+        lights: Sequence[LightChannel] = (),
+        auto_led_on_us: float | None = None,
+    ) -> ArmSpec:
+        """The packet a start slice arms, running until cancelled (duration 0):
+        its fps and camera lines, and *lights* with an auto strobe on for
+        *auto_led_on_us* (its manual duty when None). Pure: no camera reads."""
+        fps = max(1, min(MAX_FPS, _coerce_int(spec.get("fps"), self._default_fps)))
+        return ArmSpec(
+            fps=fps,
+            duration_ms=0,
+            cameras=[c.record() for c in self._cameras_from_spec(spec)[:MAX_CAM]],
+            lights=[lt.resolve(1_000_000.0 / fps, auto_led_on_us) for lt in lights[:MAX_LIGHT]],
         )
-
-    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> fw.FlashResult:
-        """Upload the current firmware (FirmwareProvisioner.flash). Never raises."""
-        result = self._fw.flash(on_line=on_line)
-        if result.ok:
-            self._arduino_state = "idle"  # the board rebooted after the upload
-        else:  # the reopen cleared it
-            self._last_error = result.message
-        self._broadcast_state()
-        return result
 
     # -------------------------------------------------- recording lifecycle
 
@@ -1029,101 +851,6 @@ class TriggerboxPlugin(Plugin):
             "lights": [asdict(lt) for lt in lights],
         }
 
-    def on_recording_start(self, params: dict | None) -> None:
-        """Arm the board when the start request holds a triggerbox slice."""
-        self._preview_armed = False
-        if params is not None:
-            self._arm_from_spec(params, duration_ms=None, context="recording")
-
-    def _arm_from_spec(
-        self, spec: dict, *, duration_ms: int | None, context: str
-    ) -> None:
-        """Arm the board from a slice. ``duration_ms=None`` plans a recording's
-        finite train from the slice, ``0`` runs until cancelled (a preview).
-        ``context`` only words the messages: a preview gets the same packet, so
-        it strobes as the recording will."""
-        subject = (
-            "external-triggered cameras" if context == "recording" else "preview"
-        )
-        if not self._link.is_open:
-            self._report_error(
-                f"the board on {self.device} is not connected; {subject} will not "
-                "be triggered (cameras wait for a trigger that never fires). "
-                "Check the cable / reconnect the board."
-            )
-            return
-        if not self._firmware_ok:
-            self._report_error(
-                f"the firmware on {self.device} ({self._banner!r}) is incompatible; "
-                f"{subject} will not be triggered. Reflash arduino/triggerbox to "
-                f"TRIGGERBOX {_PROTOCOL_VERSION}."
-            )
-            return
-
-        fps = self._spec_fps(spec)
-        cams = self._cameras_from_spec(spec)
-        lights = self._lights_from_spec(spec)
-        plan: TrainPlan | None = None
-        try:
-            arm = self._build_arm_spec(fps, duration_ms or 0, cams, lights)
-            if duration_ms is None:  # a recording: plan the train trigger_train counts
-                wanted = pulse_count(fps, self._spec_duration_ms(spec))
-                plan = plan_train(fps, wanted, arm.cameras, arm.lights)
-                arm = replace(arm, duration_ms=min(0xFFFF_FFFF, plan.duration_ms))
-                self._report_train_plan(fps, wanted, plan, arm)
-            arm.to_bytes()  # it must pack before arming is announced
-        except Exception:
-            log.exception("triggerbox: could not build arm packet; not arming")
-            return
-
-        log.info(
-            "triggerbox: arming %d fps for %s — %d camera line(s), %d light channel(s)",
-            fps,
-            "preview (until cancel)"
-            if arm.duration_ms == 0
-            else f"{plan.count} pulses ({arm.duration_ms} ms)"
-            if plan is not None
-            else f"{arm.duration_ms} ms",
-            len(arm.cameras), len(arm.lights),
-        )
-        result = self._arm_and_wait(arm)
-        # A failed write or a missing ack, never a reject, is a wedged USB link:
-        # one bus reset and re-arm.
-        if result in ("write_failed", "timeout"):
-            what = (
-                "the serial write failed" if result == "write_failed"
-                else f"no acknowledgement within {self._ack_timeout_s:.1f}s"
-            )
-            self._report_error(
-                f"the board on {self.device} did not arm ({what}); {subject} "
-                "will not be triggered. Attempting a USB reset…"
-            )
-            if self._recover_usb("the board stopped responding during arm"):
-                log.info("triggerbox: re-arming %s after USB reset", self.device)
-                result = self._arm_and_wait(arm)
-
-        if result == "reject":
-            reason = _REJECT_REASONS.get((self._last_reject or "")[:1], "unknown")
-            self._report_error(
-                f"{self.device} REJECTED the arm (code {self._last_reject!r}: {reason}); "
-                "the board is not running — cameras will wait for a trigger that never fires"
-            )
-        elif result != "ok":
-            self._report_error(
-                f"the board on {self.device} still did not arm after a USB-reset "
-                f"attempt — {subject} will wait for a trigger that never fires. "
-                "Power-cycle or replug the board and check the cable."
-            )
-
-    def _spec_fps(self, spec: dict) -> int:
-        return max(1, min(_MAX_FPS, _coerce_int(spec.get("fps"), self._default_fps)))
-
-    def _spec_duration_ms(self, spec: dict) -> int:
-        return max(
-            1,
-            min(0xFFFF_FFFF, _coerce_int(spec.get("duration_ms"), self._default_duration_ms)),
-        )
-
     def trigger_train(self, params: dict | None) -> dict | None:
         """The exact period and pulse count on_recording_start emits for
         *params*. The count depends on the camera lines only: the lights' auto
@@ -1131,119 +858,59 @@ class TriggerboxPlugin(Plugin):
         controller lock) must not make."""
         if params is None:
             return None
-        fps = self._spec_fps(params)
-        cameras = [c.record() for c in self._cameras_from_spec(params)[:_MAX_CAM]]
-        plan = plan_train(fps, pulse_count(fps, self._spec_duration_ms(params)), cameras)
-        return {"period_ns": period_us(fps) * 1000, "count": plan.count}
-
-    def _report_train_plan(
-        self, fps: int, wanted: int, plan: TrainPlan, arm: ArmSpec
-    ) -> None:
-        """Tell the operator where a recording's train cannot end cleanly."""
-        if plan.count != wanted:
-            log.info(
-                "triggerbox: at %d fps the board's millisecond run clock cannot end "
-                "a train cleanly after pulse %d; arming %d pulses instead (the "
-                "recording counts %d)", fps, wanted, plan.count, plan.count,
-            )
-        if not plan.exact:
-            log.warning(
-                "triggerbox: at %d fps the board's millisecond run clock cannot end "
-                "the train cleanly after its last pulse (that needs about 1 ms "
-                "between the last camera pulse's end and the next frame edge): %s",
-                fps,
-                "the last camera pulse may be cut short"
-                if plan.certain
-                else "the last pulse may be lost, or one more may start, and the "
-                "recording then reports a missed pulse or an extra frame",
-            )
-            return  # the lights end wherever the camera pulses let them
-        for index, cut_us in plan.lights_cut:
-            log.warning(
-                "triggerbox: the train's last strobe on %s may end up to %d µs "
-                "early: it runs too close to the next frame edge for the run to end "
-                "after it, so the last frame may be under-lit",
-                PIN_LABELS[arm.lights[index][0]], cut_us,
-            )
-        if plan.light_overrun:
-            log.warning(
-                "triggerbox: a strobe may flash once after the train: a camera "
-                "line's delay keeps the run going past that strobe's next edge"
-            )
+        arm = self._resolve_arm(params)
+        wanted = pulse_count(arm.fps, self._spec_duration_ms(params))
+        plan = plan_train(arm.fps, wanted, arm.cameras)
+        return {"period_ns": period_us(arm.fps) * 1000, "count": plan.count}
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
         """Emit *pulses* sacrificial pulses on the camera lines, lights dark (see
         "Priming" in CLAUDE.md). Returns once the board reports the burst done,
         or once it is cancelled, so the train starts on a fresh clock."""
-        if params is None or not self._link.is_open or not self._firmware_ok:
+        if params is None or not self._link.is_open or not self.firmware_ok:
             return False
-        cams = self._cameras_from_spec(params)
-        if not cams or pulses <= 0:
-            return False
-        fps = self._spec_fps(params)
         try:
-            arm = self._build_arm_spec(fps, 0, cams, [])
-            arm = replace(arm, duration_ms=plan_train(fps, pulses, arm.cameras).duration_ms)
+            arm = self._resolve_arm(params)
+            if not arm.cameras or pulses <= 0:
+                return False
+            arm = replace(arm, duration_ms=plan_train(arm.fps, pulses, arm.cameras).duration_ms)
         except Exception:
             log.exception("triggerbox: could not build the priming packet")
             return False
-        self._done_event.clear()
-        if self._arm_and_wait(arm) != "ok":
+        if self._link.arm(arm) != "ok":
             return False
-        if not self._done_event.wait(arm.duration_ms / 1000 + self._ack_timeout_s):
+        if not self._link.wait_done(arm.duration_ms / 1000 + ACK_TIMEOUT_S):
             log.warning(
                 "triggerbox: no end-of-run from %s after the priming pulses; "
                 "cancelling", self.device,
             )
-            self._cancel_and_wait()
-        self._set_arduino_state("idle")
+            self._cancel()
+        self._set_state("idle")
         return True
 
-    def _cancel_and_wait(self) -> bool:
-        """Cancel the board and wait (bounded) for its 'C'; True if acknowledged."""
-        with self._arm_lock:
-            self._idle_event.clear()
-            self._link.send_cancel()
-            if not self._link.is_open:
-                return True
-            acked = self._idle_event.wait(min(self._ack_timeout_s, CANCEL_ACK_TIMEOUT_S))
-        if not acked:
-            log.warning("triggerbox: %s did not acknowledge the cancel", self.device)
-        return acked
-
-    def _arm_and_wait(self, arm: ArmSpec) -> str:
-        """Send an arm: ``"ok"`` ('R'), ``"reject"`` ('E<c>'), ``"timeout"`` or
-        ``"write_failed"`` (a wedged or closed link). Arms are serialized, ack wait
-        included, so concurrent ones (a preview re-arm and a recording arm) cannot
-        take each other's answer."""
-        with self._arm_lock:
-            self._armed_event.clear()
-            self._last_reject = None
-            if not self._link.send_arm(arm):
-                return "write_failed"
-            if not self._armed_event.wait(self._ack_timeout_s):
-                return "timeout"
-            return "reject" if self._last_reject is not None else "ok"
+    def on_recording_start(self, params: dict | None) -> None:
+        """Arm the board when the start request holds a triggerbox slice."""
+        self._preview_armed = False
+        if params is not None:
+            self._arm(params, recording=True)
 
     def on_recording_stop(self, aborted: bool) -> None:
         self._link.send_cancel()  # on every end; an idle board ignores it
-        self._set_arduino_state("idle")
-
-    # ----------------------------------------------------------- preview arm
+        self._set_state("idle")
 
     def on_preview_start(self, params: dict | None) -> None:
         """Arm the board until cancelled, with the recording's spec."""
         if params is None:
             return
         self._preview_armed = True
-        self._arm_from_spec(params, duration_ms=0, context="preview")
+        self._arm(params, recording=False)
 
     def on_preview_stop(self) -> None:
         # Waits for the 'C': a recording's record grab starts next and must not
         # see a stray preview pulse.
         self._preview_armed = False
-        self._cancel_and_wait()
-        self._set_arduino_state("idle")
+        self._cancel()
+        self._set_state("idle")
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
         """Adopt a camera/light edit the tab pushes, so the preview arm and the
@@ -1262,67 +929,120 @@ class TriggerboxPlugin(Plugin):
         self._lights = new_lights
         # The tab also pushes on redraws: re-arm only on a real change.
         if changed and self._preview_armed and self._link.is_open:
-            self._arm_from_spec(spec, duration_ms=0, context="preview")
+            self._arm(spec, recording=False)
         return True
+
+    # -------------------------------------------------- arming
+
+    def _arm(self, spec: dict, *, recording: bool) -> None:
+        """Arm the board from a slice: a recording plans its finite train from
+        the slice, a preview runs until cancelled with the same packet otherwise,
+        so it strobes as the recording will."""
+        subject = "external-triggered cameras" if recording else "preview"
+        if not self._link.is_open:
+            self.report_error(
+                f"the board on {self.device} is not connected; {subject} will not "
+                "be triggered (cameras wait for a trigger that never fires). "
+                "Check the cable / reconnect the board."
+            )
+            return
+        if not self.firmware_ok:
+            self.report_error(
+                f"the firmware on {self.device} ({self.banner!r}) is incompatible; "
+                f"{subject} will not be triggered. Reflash arduino/triggerbox to "
+                f"TRIGGERBOX {PROTOCOL_VERSION}."
+            )
+            return
+        try:
+            lights = self._lights_from_spec(spec)
+            auto_led_on_us = None
+            if any(lt.wants_auto() for lt in lights):
+                auto_led_on_us = self._auto_led_on_us()
+                if auto_led_on_us is None:
+                    log.warning(
+                        "triggerbox: auto strobe duty requested but no camera exposure "
+                        "could be read; falling back to the manual duty percent"
+                    )
+            arm = self._resolve_arm(spec, lights, auto_led_on_us)
+            if recording:  # the train trigger_train counts
+                wanted = pulse_count(arm.fps, self._spec_duration_ms(spec))
+                plan = plan_train(arm.fps, wanted, arm.cameras, arm.lights)
+                arm = replace(arm, duration_ms=min(0xFFFF_FFFF, plan.duration_ms))
+                if plan.count != wanted:
+                    log.info(
+                        "triggerbox: at %d fps the board's millisecond run clock "
+                        "cannot end a train cleanly after pulse %d; arming %d pulses "
+                        "instead (the recording counts %d)",
+                        arm.fps, wanted, plan.count, plan.count,
+                    )
+                for warning in plan.warnings(arm.fps, arm.lights):
+                    log.warning("triggerbox: %s", warning)
+                what = f"{plan.count} pulses ({arm.duration_ms} ms)"
+            else:
+                what = "preview (until cancel)"
+            arm.to_bytes()  # it must pack before arming is announced
+        except Exception:
+            log.exception("triggerbox: could not build arm packet; not arming")
+            return
+        log.info(
+            "triggerbox: arming %d fps for %s — %d camera line(s), %d light channel(s)",
+            arm.fps, what, len(arm.cameras), len(arm.lights),
+        )
+        self._send_arm(arm, subject)
+
+    def _send_arm(self, arm: ArmSpec, subject: str) -> None:
+        """Arm and report any failure. A failed write or a missing ack, never a
+        reject, is a wedged USB link: one bus reset and re-arm."""
+        result = self._link.arm(arm)
+        if result in ("write_failed", "timeout"):
+            what = (
+                "the serial write failed" if result == "write_failed"
+                else f"no acknowledgement within {ACK_TIMEOUT_S:.1f}s"
+            )
+            self.report_error(
+                f"the board on {self.device} did not arm ({what}); {subject} "
+                "will not be triggered. Attempting a USB reset…"
+            )
+            if self._recover_usb("the board stopped responding during arm"):
+                log.info("triggerbox: re-arming %s after USB reset", self.device)
+                result = self._link.arm(arm)
+        if result == "reject":
+            code = self._link.reject
+            reason = REJECT_REASONS.get((code or "")[:1], "unknown")
+            self.report_error(
+                f"{self.device} REJECTED the arm (code {code!r}: {reason}); "
+                "the board is not running — cameras will wait for a trigger that never fires"
+            )
+        elif result != "ok":
+            self.report_error(
+                f"the board on {self.device} still did not arm after a USB-reset "
+                f"attempt — {subject} will wait for a trigger that never fires. "
+                "Power-cycle or replug the board and check the cable."
+            )
+
+    def _cancel(self) -> None:
+        if not self._link.cancel():
+            log.warning("triggerbox: %s did not acknowledge the cancel", self.device)
 
     # -------------------------------------------------- web contributions
 
     def api_router(self):
-        from fastapi import APIRouter, Body
-
-        router = APIRouter()
-
-        @router.post("/api/triggerbox/reconnect")
-        def reconnect(payload: dict = Body(default={})):
-            device = payload.get("device") if isinstance(payload, dict) else None
-            if isinstance(device, str) and device.strip():
-                self.configured_device = device.strip()
-            error = self._open()
-            check = self._fw.check
-            return {
-                "ready": self._link.is_open,
-                "device": self.device,
-                "error": error,
-                "arduino_state": self._arduino_state,
-                "firmware": self._banner,
-                "firmware_ok": self._firmware_ok,
-                "firmware_state": check.state.value if check else None,
-                "needs_flash": bool(check and check.needs_flash),
-            }
-
-        @router.get("/api/triggerbox/firmware")
-        def get_firmware():
-            """Firmware state vs. the sketch source + whether octacam can flash it."""
-            return self.firmware_provisioning()
-
-        @router.post("/api/triggerbox/flash")
-        def flash(payload: dict = Body(default={})):
-            """Compile and upload the current firmware, then report the new state.
-            A sync handler, so the tens-of-seconds flash runs on a worker thread."""
-            result = self.flash_firmware()
-            return {
-                **result.to_dict(),
-                "firmware": self._banner,
-                "firmware_ok": self._firmware_ok,
-                "ready": self._link.is_open,
-                "provisioning": self.firmware_provisioning(),
-            }
+        router = super().api_router()
 
         @router.get("/api/triggerbox/exposures")
         def get_exposures():
             """Live per-camera exposure timings for the tab's timing plot."""
-            timings = self._camera_timings()
             return {
                 "guard_us": self._strobe_guard_us,
                 "duty_auto_default": self._default_duty_auto,
                 "cameras": [
                     {
-                        "index": t.index,
-                        "name": t.name,
-                        "exposure_us": t.exposure_us,
-                        "trigger_delay_us": t.trigger_delay_us,
+                        "index": index,
+                        "name": name,
+                        "exposure_us": exposure,
+                        "trigger_delay_us": delay,
                     }
-                    for t in timings
+                    for index, (name, delay, exposure) in enumerate(self._camera_windows())
                 ],
             }
 
