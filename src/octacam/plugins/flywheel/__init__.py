@@ -307,7 +307,7 @@ class FlywheelPlugin(Plugin):
         self._auto_flash = bool(auto_flash)
         # The configured loop; the tab edits its own copy, so this stays the config's.
         self._command = command
-        self._firmware: str | None = None
+        self._banner: str | None = None
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = SerialLink()
@@ -370,7 +370,7 @@ class FlywheelPlugin(Plugin):
         Never raises, so a missing board does not stop the GUI (reconnect
         retries it)."""
         with self._fw.port_lock:
-            self._firmware = None
+            self._banner = None
             self._firmware_ok = True
             self._last_error = None
             device, reason = serial_ports.resolve_device(self.configured_device)
@@ -394,7 +394,7 @@ class FlywheelPlugin(Plugin):
         """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
         takes commands, a foreign or wrong-version one does not."""
         banner = self._link.identify(_EXPECTED_BANNER)
-        self._firmware = banner
+        self._banner = banner
         check = self._fw.classify(banner)
         if check is None:
             if banner:
@@ -415,7 +415,7 @@ class FlywheelPlugin(Plugin):
         return self._fw.provisioning(
             plugin_name=self.name,
             device=self.device,
-            firmware=self._firmware,
+            firmware=self._banner,
             firmware_ok=self._firmware_ok,
             extra={"auto_flash": self._auto_flash},
         )
@@ -445,7 +445,7 @@ class FlywheelPlugin(Plugin):
         check = self._fw.check
         status = {
             "device": self.device,
-            "firmware": self._firmware,
+            "firmware": self._banner,
             "firmware_ok": self._firmware_ok,
             "firmware_state": check.state.value if check else None,
             "needs_flash": bool(check and check.needs_flash),
@@ -506,7 +506,7 @@ class FlywheelPlugin(Plugin):
                 "ready": self._link.is_open,
                 "device": self.device,
                 "error": error,
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
@@ -523,7 +523,7 @@ class FlywheelPlugin(Plugin):
             result = self.flash_firmware()
             return {
                 **result.to_dict(),
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "ready": self._link.is_open,
                 "provisioning": self.firmware_provisioning(),

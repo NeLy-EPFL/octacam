@@ -618,7 +618,7 @@ class TriggerboxPlugin(Plugin):
         self.configured_device = device
         self.device = device
         self.baud = baud
-        self._firmware: str | None = None
+        self._banner: str | None = None
         self._firmware_ok = True
         self._auto_flash = bool(auto_flash)
         self._default_fps = default_fps
@@ -868,7 +868,7 @@ class TriggerboxPlugin(Plugin):
                 "state": self._arduino_state,
                 "device": self.device,
                 "ready": self._link.is_open,
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
@@ -884,7 +884,7 @@ class TriggerboxPlugin(Plugin):
     def _open(self, *, allow_recovery: bool = True) -> str | None:
         """(Re)open the link and read the banner; the error message, or None."""
         with self._fw.port_lock:
-            self._firmware = None
+            self._banner = None
             self._firmware_ok = True
             self._last_error = None
             device, reason = serial_ports.resolve_device(self.configured_device)
@@ -903,7 +903,7 @@ class TriggerboxPlugin(Plugin):
             log.info("triggerbox: opened %s @ %d", device, self.baud)
             self._verify_identity()
             # A healthy board always answers; a silent one may be wedged.
-            if self._firmware is None and allow_recovery:
+            if self._banner is None and allow_recovery:
                 if self._recover_usb("the board did not answer an identity query"):
                     self._verify_identity()
             return None
@@ -948,7 +948,7 @@ class TriggerboxPlugin(Plugin):
         """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
         arms (a reflash is only offered), a foreign or wrong-version one does not."""
         banner = self._link.identify()
-        self._firmware = banner
+        self._banner = banner
         check = self._fw.classify(banner)
         if check is None:
             self._firmware_ok = self._banner_arm_compatible(banner)
@@ -995,7 +995,7 @@ class TriggerboxPlugin(Plugin):
         return {
             "device": self.device,
             "arduino_state": self._arduino_state,
-            "firmware": self._firmware,
+            "firmware": self._banner,
             "firmware_ok": self._firmware_ok,
             "firmware_state": check.state.value if check else None,
             "needs_flash": bool(check and check.needs_flash),
@@ -1012,7 +1012,7 @@ class TriggerboxPlugin(Plugin):
         return self._fw.provisioning(
             plugin_name=self.name,
             device=self.device,
-            firmware=self._firmware,
+            firmware=self._banner,
             firmware_ok=self._firmware_ok,
             extra={"auto_flash": self._auto_flash},
         )
@@ -1080,7 +1080,7 @@ class TriggerboxPlugin(Plugin):
             return
         if not self._firmware_ok:
             self._report_error(
-                f"the firmware on {self.device} ({self._firmware!r}) is incompatible; "
+                f"the firmware on {self.device} ({self._banner!r}) is incompatible; "
                 f"{subject} will not be triggered. Reflash arduino/triggerbox to "
                 f"TRIGGERBOX {_PROTOCOL_VERSION}."
             )
@@ -1310,7 +1310,7 @@ class TriggerboxPlugin(Plugin):
                 "device": self.device,
                 "error": error,
                 "arduino_state": self._arduino_state,
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
@@ -1328,7 +1328,7 @@ class TriggerboxPlugin(Plugin):
             result = self.flash_firmware()
             return {
                 **result.to_dict(),
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "ready": self._link.is_open,
                 "provisioning": self.firmware_provisioning(),

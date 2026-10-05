@@ -175,7 +175,7 @@ class TwoPhotonPlugin(Plugin):
         self._default_fps = default_fps
         self._default_duration_ms = default_duration_ms
         self._auto_flash = bool(auto_flash)
-        self._firmware: str | None = None
+        self._banner: str | None = None
         self._firmware_ok = True
         self._last_error: str | None = None
         self._link = TwoPhotonLink(
@@ -257,7 +257,7 @@ class TwoPhotonPlugin(Plugin):
                 "state": self._arduino_state,
                 "device": self.device,
                 "ready": self._link.is_open,
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
@@ -273,7 +273,7 @@ class TwoPhotonPlugin(Plugin):
     def _open(self) -> str | None:
         """(Re)open the link and read the banner; the error message, or None."""
         with self._fw.port_lock:
-            self._firmware = None
+            self._banner = None
             self._firmware_ok = True
             self._last_error = None
             device, reason = serial_ports.resolve_device(self.configured_device)
@@ -307,7 +307,7 @@ class TwoPhotonPlugin(Plugin):
         """Classify the board's banner: an OUTDATED or UNIDENTIFIED board still
         arms, a foreign or wrong-version one does not."""
         banner = self._link.identify()
-        self._firmware = banner
+        self._banner = banner
         check = self._fw.classify(banner)
         if check is None:
             self._firmware_ok = self._banner_arm_compatible(banner)
@@ -330,7 +330,7 @@ class TwoPhotonPlugin(Plugin):
         return {
             "device": self.device,
             "arduino_state": self._arduino_state,
-            "firmware": self._firmware,
+            "firmware": self._banner,
             "firmware_ok": self._firmware_ok,
             "firmware_state": check.state.value if check else None,
             "needs_flash": bool(check and check.needs_flash),
@@ -344,7 +344,7 @@ class TwoPhotonPlugin(Plugin):
         return self._fw.provisioning(
             plugin_name=self.name,
             device=self.device,
-            firmware=self._firmware,
+            firmware=self._banner,
             firmware_ok=self._firmware_ok,
             extra={"auto_flash": self._auto_flash},
         )
@@ -386,7 +386,7 @@ class TwoPhotonPlugin(Plugin):
             log.error(
                 "2-photon trigger: firmware on %s (%r) is incompatible; refusing to "
                 "arm — reflash with `octacam flash` or the Flash firmware button",
-                self.device, self._firmware,
+                self.device, self._banner,
             )
             return
         log.info(
@@ -440,7 +440,7 @@ class TwoPhotonPlugin(Plugin):
                 "device": self.device,
                 "error": error,
                 "arduino_state": self._arduino_state,
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "firmware_state": check.state.value if check else None,
                 "needs_flash": bool(check and check.needs_flash),
@@ -457,7 +457,7 @@ class TwoPhotonPlugin(Plugin):
             result = self.flash_firmware()
             return {
                 **result.to_dict(),
-                "firmware": self._firmware,
+                "firmware": self._banner,
                 "firmware_ok": self._firmware_ok,
                 "ready": self._link.is_open,
                 "provisioning": self.firmware_provisioning(),

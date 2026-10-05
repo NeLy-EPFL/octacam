@@ -583,7 +583,7 @@ def test_on_recording_start_reports_and_skips_when_link_closed():
 def test_on_recording_start_reports_and_skips_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
     plugin._firmware_ok = False
-    plugin._firmware = "OTHERBOARD 1"
+    plugin._banner = "OTHERBOARD 1"
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert not link.snapshot()
     assert plugin._last_error and "incompatible" in plugin._last_error
@@ -1050,7 +1050,7 @@ def test_verify_identity_accepts_triggerbox_v2():
     plugin, link = _plugin_with_fake()
     link.banner = "TRIGGERBOX 2"
     plugin._verify_identity()
-    assert plugin._firmware == "TRIGGERBOX 2" and plugin._firmware_ok is True
+    assert plugin._banner == "TRIGGERBOX 2" and plugin._firmware_ok is True
 
 
 def test_verify_identity_refuses_foreign_board(caplog):
@@ -1098,7 +1098,7 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
     link.banner = "TRIGGERBOX 2"
     plugin._open()
     assert calls == []  # a healthy identify never triggers a reset
-    assert plugin._firmware == "TRIGGERBOX 2"
+    assert plugin._banner == "TRIGGERBOX 2"
 
 
 # ===========================================================================
