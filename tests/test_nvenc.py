@@ -287,7 +287,7 @@ def test_config_nvenc_params_default_and_custom():
 
 
 def test_config_nvenc_params_rejects_bad_quoting():
-    with pytest.raises(ValueError, match="ffmpeg_params"):
+    with pytest.raises(ValueError, match="nvenc_params"):
         RecordConfig.model_validate({"nvenc_params": '-c:v h264_nvenc "unterminated'})
 
 

@@ -11,9 +11,17 @@ import os
 import shlex
 import time
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Annotated, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    ValidationError,
+    field_validator,
+)
+from pydantic_core import PydanticCustomError
 
 from octacam._compat import tomllib
 from octacam.transform import (
@@ -45,11 +53,37 @@ def _scalar_str(value: object) -> str:
     raise ValueError("expected a string")
 
 
-class CameraConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+def _split_ffmpeg_args(value: str) -> str:
+    try:
+        shlex.split(value)
+    except ValueError as e:
+        raise PydanticCustomError(
+            "ffmpeg_args", "bad quoting ({error})", {"error": str(e)}
+        ) from e
+    return value
 
-    serial_number: str
-    name: str = ""
+
+def _at_least(floor: int) -> AfterValidator:
+    return AfterValidator(lambda value: max(floor, value))
+
+
+# Field types shared by the [record] config and RecordingSettings. A config
+# string field is a ScalarStr; encoder args must split like a shell line, as the
+# writer splits them at open.
+ScalarStr = Annotated[str, BeforeValidator(_scalar_str)]
+FfmpegArgs = Annotated[str, AfterValidator(_split_ffmpeg_args)]
+TriggerSource = Literal["software", "managed", "external"]
+# "auto" mirrors trigger_source (RecordingController._effective_preview_mode).
+PreviewTriggerSource = Literal["auto", "software", "free_running"]
+# "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU, cameras beyond
+# max_nvenc_sessions on CPU; "raw" = Mono8 dump, transcoded later.
+SaveMethod = Literal["ffmpeg", "raw", "nvenc"]
+_ScalarFfmpegArgs = Annotated[FfmpegArgs, BeforeValidator(_scalar_str)]
+
+
+class CameraConfig(BaseModel):
+    serial_number: ScalarStr
+    name: ScalarStr = ""
     scale_x: float = 1.0
     scale_y: float = 1.0
     rotation_deg: float = 0.0
@@ -61,21 +95,6 @@ class CameraConfig(BaseModel):
     center_x: bool = False
     center_y: bool = False
 
-    @field_validator("serial_number", "name", mode="before")
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
-
-
-def _valid_ffmpeg_params(value: str) -> str:
-    """Reject an ffmpeg_params string with bad quoting (the field then keeps its
-    default)."""
-    try:
-        shlex.split(value)
-    except ValueError as e:
-        raise ValueError(f"invalid ffmpeg_params: {e}") from e
-    return value
-
 
 class RecordConfig(BaseModel):
     """The ``[record]`` section: how and where recordings are captured.
@@ -86,76 +105,33 @@ class RecordConfig(BaseModel):
     ``save_method == "ffmpeg"``.
     """
 
-    model_config = ConfigDict(extra="ignore")
-
     fps: float = 100.0
     duration: float = 5.0
     duration_unit: Literal["frames", "seconds", "minutes", "hours"] = "seconds"
-    trigger_source: Literal["software", "managed", "external"] = "software"
-    # "auto" mirrors trigger_source (RecordingController._effective_preview_mode).
-    preview_trigger_source: Literal["auto", "software", "free_running"] = "auto"
-    directory: str = "./"
-    relative_directory: str = ""
-    # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU, cameras beyond
-    # max_nvenc_sessions on CPU; "raw" = Mono8 dump, transcoded later.
-    save_method: Literal["ffmpeg", "raw", "nvenc"] = "ffmpeg"
+    trigger_source: TriggerSource = "software"
+    preview_trigger_source: PreviewTriggerSource = "auto"
+    directory: ScalarStr = "./"
+    relative_directory: ScalarStr = ""
+    save_method: SaveMethod = "ffmpeg"
     # Encoder args per method, kept apart so each preset persists.
-    ffmpeg_params: str = DEFAULT_FFMPEG_PARAMS
-    nvenc_params: str = NVENC_H264_PARAMS
+    ffmpeg_params: _ScalarFfmpegArgs = DEFAULT_FFMPEG_PARAMS
+    nvenc_params: _ScalarFfmpegArgs = NVENC_H264_PARAMS
     # None = the GPU's detected session cap (`octacam doctor` reports it); an
     # int caps it lower.
-    max_nvenc_sessions: int | None = None
+    max_nvenc_sessions: Annotated[int, _at_least(0)] | None = None
     # Frames buffered per camera before the encoder: a deeper queue absorbs a
     # transient encoder stall, at the cost of peak RAM (queue x frame x cameras).
-    writer_queue_size: int = 64
+    # Floored at 1: a queue.Queue(maxsize=0) is unbounded.
+    writer_queue_size: Annotated[int, _at_least(1)] = 64
     # Bake each camera's display transform (rotation, flips) into the video.
     save_transformed: bool = True
     save_timestamps: bool = False
-
-    @field_validator(
-        "directory",
-        "relative_directory",
-        "ffmpeg_params",
-        "nvenc_params",
-        mode="before",
-    )
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
-
-    @field_validator("ffmpeg_params", "nvenc_params")
-    @classmethod
-    def _check_ffmpeg_params(cls, value: str) -> str:
-        return _valid_ffmpeg_params(value)
-
-    @field_validator("max_nvenc_sessions")
-    @classmethod
-    def _floor_nvenc_sessions(cls, value: int | None) -> int | None:
-        return None if value is None else max(0, value)
-
-    @field_validator("writer_queue_size")
-    @classmethod
-    def _floor_writer_queue_size(cls, value: int) -> int:
-        # Floored at 1: a queue.Queue(maxsize=0) is unbounded.
-        return max(1, value)
 
 
 class TranscodeConfig(BaseModel):
     """The ``[transcode]`` section: encoder args for `octacam process`."""
 
-    model_config = ConfigDict(extra="ignore")
-
-    ffmpeg_params: str = DEFAULT_TRANSCODE_FFMPEG_PARAMS
-
-    @field_validator("ffmpeg_params", mode="before")
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
-
-    @field_validator("ffmpeg_params")
-    @classmethod
-    def _check_ffmpeg_params(cls, value: str) -> str:
-        return _valid_ffmpeg_params(value)
+    ffmpeg_params: _ScalarFfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 
 class VisualizationConfig(BaseModel):
@@ -175,16 +151,9 @@ class VisualizationConfig(BaseModel):
         ]
     """
 
-    model_config = ConfigDict(extra="ignore")
-
-    name: str = "grid.mp4"
+    name: ScalarStr = "grid.mp4"
     layout: list[list[str]]
-    ffmpeg_params: str = ""
-
-    @field_validator("name", "ffmpeg_params", mode="before")
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
+    ffmpeg_params: ScalarStr = ""
 
     @field_validator("layout")
     @classmethod
@@ -204,21 +173,12 @@ class TransferConfig(BaseModel):
     ``checksum`` verifies each copy's content (false: its size only).
     """
 
-    model_config = ConfigDict(extra="ignore")
-
-    directory: str = ""
+    directory: ScalarStr = ""
     checksum: bool = True
-
-    @field_validator("directory", mode="before")
-    @classmethod
-    def _as_scalar_str(cls, value: object) -> str:
-        return _scalar_str(value)
 
 
 class GuiConfig(BaseModel):
     """The ``[gui]`` section: pure web-UI render settings (rig-tunable)."""
-
-    model_config = ConfigDict(extra="ignore")
 
     display_refresh_interval_ms: int = 33
     # The rig's default theme; a browser's own choice overrides it.
@@ -230,16 +190,9 @@ class PluginConfig(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
-# "auto" plus registry.BACKENDS, listed here so validating a config imports no
-# camera SDK.
-_BACKENDS = (
-    "auto",
-    "basler",
-    "flir",
-    "spinnaker",
-    "pycameleon",
-    "fake",
-)
+# "auto" plus registry.BACKENDS (test_config keeps them in step), listed here so
+# parsing a config imports no camera layer.
+_BACKENDS = ("auto", "basler", "flir", "spinnaker", "pycameleon", "fake")
 
 
 class OctacamConfig(BaseModel):

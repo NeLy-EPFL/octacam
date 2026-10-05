@@ -261,6 +261,14 @@ def test_unknown_backend_falls_back_to_auto(tmp_path):
     assert load_config_dir(tmp_path).backend == "auto"
 
 
+def test_backend_names_match_the_registry():
+    # config lists the names itself so parsing imports no camera layer.
+    from octacam.cameras import registry
+    from octacam.config import _BACKENDS
+
+    assert _BACKENDS == ("auto", *registry.BACKENDS)
+
+
 def test_transfer_checksum_defaults_true(tmp_path):
     (tmp_path / "octacam_config.toml").write_text(
         '[transfer]\ndirectory = "/mnt/store"\n'
