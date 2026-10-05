@@ -10,6 +10,11 @@ import pytest
 from octacam import serial_ports as sp
 
 
+@pytest.fixture
+def no_usb_reset():
+    """Overrides conftest's stub: this module tests the real reset and wait."""
+
+
 def _port(device, vid=None, pid=None, sn=None, desc="", manuf=None, product=None):
     return SimpleNamespace(
         device=device,
@@ -78,11 +83,6 @@ def test_list_serial_ports_survives_comports_raising(monkeypatch):
         raise OSError("enumeration exploded")
 
     monkeypatch.setattr(sp, "comports", boom)
-    assert sp.list_serial_ports() == []
-
-
-def test_list_serial_ports_without_pyserial(monkeypatch):
-    monkeypatch.setattr(sp, "comports", None)
     assert sp.list_serial_ports() == []
 
 

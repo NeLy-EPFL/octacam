@@ -49,7 +49,7 @@ opens a camera, so it is safe to run while a session is live.
 | `--backend <name>` | Only enumerate this backend (`basler`/`flir`/`spinnaker`/`pycameleon`/`fake`). Default: the whole available cascade. |
 | `--json` | Emit machine-readable JSON instead of the report. |
 | `--check` | Exit non-zero on warnings too (for CI), not only on errors. |
-| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity (skips ports held by a running session; skip if a board may be armed). |
+| `--probe-serial` | Also open each detected serial port briefly to read its firmware identity. It writes to each board, even one a running session holds (the plugins don't lock their port; only a port another process holds exclusively, or on Windows any port in use, is skipped), so skip it while a board may be armed. |
 
 Exits `0` when no errors are found, so it works as a pre-flight check in scripts.
 
@@ -85,7 +85,7 @@ override only the day-to-day values. See [Recording](../guide/recording.md).
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config). |
 | `--output`, `-o` | Save directory, overriding the templated location. |
-| `--yes`, `-y` | Don't prompt: reflash a serial plugin's out-of-date board firmware before recording (also lets a headless run flash). |
+| `--yes`, `-y` | Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about; use `octacam flash`). |
 | `--plugin <name>` | Enable a plugin (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 
@@ -96,7 +96,8 @@ octacam check [PATHS...]
 ```
 
 Screen recording folders — or whole directory trees, searched for
-`recording_summary.json` — for missed trigger pulses, unequal frame counts, a
+`recording_summary.json` (in each recording's `octacam_recording/` subfolder, or
+flat beside the videos in an older recording) — for missed trigger pulses, unequal frame counts, a
 start offset between cameras, late exposures and camera-clock jumps. Reads each
 recording's summary and `timestamps.npz` and never modifies anything: new
 recordings are checked from the recorder's own accounting (the summary alone
@@ -119,7 +120,10 @@ octacam flash [CONFIG_DIR]
 
 Check a serial plugin's board firmware against the bundled Arduino sketch and,
 unless `--check`, compile + upload the current sketch with arduino-cli. Pass
-`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both.
+`CONFIG_DIR` (whose serial plugins to check), `--plugin`, or both. Without the
+sketch source (an install with no checkout), a board's build is unknown and can't
+be flashed here, so a flash exits non-zero; `--check` fails only on a board known
+to be out of date or to run other firmware.
 
 | Option | Purpose |
 | --- | --- |

@@ -1,12 +1,10 @@
 """Trigger-pulse accounting: which trigger pulse exposed each delivered frame.
 
 A hardware-triggered camera that misses a pulse delivers no frame for it, and
-nothing in the frame stream says so: the next frame simply arrives one period
-late. Counting frames therefore cannot tell a camera that captured every pulse
-from one that missed some and caught up on trailing pulses — which is exactly how
-a desynchronized rig used to look healthy. This module recovers the pulse index
-of every frame from the camera's own hardware timestamps, so a miss is detected
-(and can be filled in the video) at the moment it happens.
+nothing in the frame stream says so, so frame counts cannot tell a camera that
+missed pulses (and caught up on trailing ones) from a healthy one. This module
+recovers every frame's pulse index from the camera's hardware timestamps, so a
+miss is detected (and can be filled in the video) as it happens.
 
 :class:`PulseTracker` is the online form, fed one frame at a time by the record
 loop; :func:`analyze_timestamps` runs the same tracker over a saved timestamp
@@ -52,12 +50,8 @@ _PERIOD_WINDOW = 256
 # the camera is reported as not following the trigger clock (a camera free-
 # running at its readout limit, e.g. under a pulse that outlasts its exposure).
 CLOCK_MISMATCH_FRACTION = 0.01
-# A camera-time interval may exceed the host-time interval between the same two
-# deliveries (plus the host backlog, see PulseTracker._host_allows) by this much
-# before the camera clock is treated as having jumped. Only an excess counts:
-# delivery can lag an exposure by any amount (a grab-thread stall the stream
-# buffers absorb), so a camera interval shorter than the host one is late
-# delivery, never a jump.
+# How far a camera interval may exceed the host one (plus the backlog) before
+# the camera clock counts as jumped (PulseTracker._host_allows).
 _GLITCH_TOLERANCE_NS = 1_500_000_000
 
 
@@ -145,11 +139,8 @@ class PulseTracker:
         self._clean_intervals = 0
         self._last_ts: int | None = None
         self._last_host: int | None = None
-        # How much later than its promptest delivery the previous frame reached
-        # the host (camera-to-host latency above the lowest seen): seconds right
-        # after a stall, draining back to ~0 through the burst that follows. A
-        # camera clock slower than the host's adds its drift (ppm of the elapsed
-        # time), which only loosens the jump check by as much.
+        # The previous frame's camera-to-host latency above the lowest seen:
+        # seconds right after a stall, back to ~0 through the burst that follows.
         self._backlog = 0
         self._offset = 0  # folded clock correction added to every timestamp
 

@@ -11,8 +11,10 @@ octacam process <paths…>
 There is no `--config` to pass. Each recording carries an embedded snapshot of
 its rig config (see [Recording](recording.md#the-embedded-config-snapshot)), and
 `process` reads the encoder args, grid layouts, and transfer destination from
-that snapshot. Point it at recording folders (or, with `-r`, parent directories)
-and it does the rest.
+that snapshot. Point it at recording folders — the folders holding the videos —
+(or, with `-r`, parent directories) and it does the rest. The snapshot and
+summary live in each recording's `octacam_recording/` subfolder; older recordings
+that keep them flat beside the videos are processed just the same.
 
 ## The three steps
 
@@ -47,7 +49,9 @@ not the command line. Recordings are reproduced as saved — any display transfo
 was already baked in at record time (see
 [transformed vs raw](recording.md#transformed-vs-raw-frames)).
 
-`process` accepts any mix of recording folders. Already-transcoded outputs are
+`process` accepts any mix of recording folders, of either layout; with `-r` an
+`octacam_recording/` subfolder is never taken for a folder of videos to
+transcode. Already-transcoded outputs are
 skipped unless you pass `--force` — except one left over from an earlier take in
 the same folder (it is older than the video it was made from), which is redone
 with a warning instead of being transferred as this recording's. Pass
@@ -103,11 +107,12 @@ octacam process /data/octacam/260620-wt -r --no-transcode --no-transfer
 
 `process` copies all transcoded mp4s and grid videos to the transfer destination
 (a network share or any writable path), mirroring the recording's directory
-tree. The recording's metadata goes with them: `recording_summary.json`,
-`timestamps.npz`, and its config (the `octacam_config.toml` snapshot and the
-camera parameter files), so the copy can
-[relaunch the same setup](recording.md#the-embedded-config-snapshot). The raw
-capture files (`.mkv` / `.raw`) stay local.
+tree. The recording's `octacam_recording/` subfolder goes with them —
+`recording_summary.json`, `timestamps.npz`, and its config (the
+`octacam_config.toml` snapshot and the camera parameter files) — so the copy can
+[relaunch the same setup](recording.md#the-embedded-config-snapshot). An older
+recording with those files flat beside its videos is transferred flat, as it is.
+The raw capture files (`.mkv` / `.raw`) stay local.
 
 ```toml
 [transfer]

@@ -1,34 +1,33 @@
-"""Write octacam_config.toml (and camera .pfs files) back to disk.
+"""Write octacam_config.toml and camera parameter files back to disk.
 
-The stdlib ships ``tomllib`` for *reading* TOML but no writer, and octacam
-keeps its dependency set deliberately lean, so this module hand-serializes the
-small, fixed config schema (``[record]`` / ``[transcode]`` / ``[gui]`` /
-``[[cameras]]`` / ``[[plugins]]`` / ``[[visualization]]`` / ``[transfer]``).
-
-Two design choices keep saves faithful:
-
-* The writer starts from the **raw parsed TOML** (``tomllib.loads`` of the
-  existing file) and patches only the per-camera display fields the GUI
-  changed. Every other section is preserved verbatim, so a GUI camera-display
-  save never touches (or drops) the record/transcode/visualization/transfer
-  sections, and templated paths like ``record.directory`` stay unexpanded.
-* Every file is written through a temp file + ``os.replace`` so a crash can
-  never leave a truncated config behind.
+The stdlib has no TOML writer, so the config's small fixed schema is
+serialized here. Every edit patches the raw parsed TOML, so the sections it
+does not touch, and templated paths such as ``record.directory``, survive as
+they were; every file is written atomically.
 """
 
-import contextlib
 import copy
+import dataclasses
 import datetime
-import os
-import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from octacam._compat import tomllib
-from octacam.config import duration_to_seconds, find_config_file, parse_record_section
+from octacam.config import (
+    duration_to_seconds,
+    find_config_file,
+    parse_record_section,
+    safe_segment,
+)
+from octacam.files import atomic_write_text
 from octacam.plugins import canonical_name
-from octacam.writer import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+from octacam.recording_format import recording_folder
+from octacam.transcode import DEFAULT_TRANSCODE_FFMPEG_PARAMS
+from octacam.transform import DisplayTransform
+
+if TYPE_CHECKING:
+    from octacam.controller import RecordingController
 
 # Per-camera display fields the GUI may change (sensor params live in .pfs).
 DISPLAY_FIELDS = (
@@ -76,18 +75,14 @@ def _toml_value(value: object) -> str:
         return repr(value)
     if isinstance(value, str):
         return _toml_escape(value)
-    # The reader accepts date/datetime scalars (config.py:_scalar_str coerces an
-    # unquoted, date-like value to text); mirror that here. Check datetime before
-    # date (datetime subclasses date) so full timestamps aren't truncated.
+    # The loader reads an unquoted date-like value as a date (_scalar_str).
     if isinstance(value, (datetime.datetime, datetime.date)):
         return value.isoformat()
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     if isinstance(value, dict):
-        # Inline table: ``{ key = value, ... }``. Used for arrays of tables that
-        # live inside a subtable (e.g. the triggerbox plugin's ``cameras`` /
-        # ``lights`` under ``[plugins.options]``), which _emit_table writes as a
-        # single ``key = [...]`` line rather than as [[header]] arrays.
+        # An inline table: arrays of tables inside a subtable (triggerbox's
+        # ``cameras``/``lights`` under ``[plugins.options]``).
         inner = ", ".join(f"{k} = {_toml_value(v)}" for k, v in value.items())
         return "{" + inner + "}"
     raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")
@@ -96,18 +91,12 @@ def _toml_value(value: object) -> str:
 def _emit_table(
     lines: list[str], header: str, table: dict, *, array: bool = False
 ) -> None:
-    """Emit a ``[header]`` (or ``[[header]]``) table.
-
-    Scalar keys are written before any nested dict so they belong to ``header``
-    and not the subtable; a nested dict becomes a single-bracket ``[header.key]``
-    subtable (the only nesting in this schema is plugin options).
-    """
+    """Emit a ``[header]`` (or ``[[header]]``) table: its keys first, then each
+    nested dict as a ``[header.key]`` subtable."""
     lines.append(f"[[{header}]]" if array else f"[{header}]")
     subtables = [(k, v) for k, v in table.items() if isinstance(v, dict)]
     for key, value in table.items():
-        # TOML has no null; a None-valued field (e.g. record.max_nvenc_sessions
-        # left at auto) is written by *omitting* the key — the loader restores
-        # its default on read.
+        # TOML has no null: omit the key, and the loader restores its default.
         if value is None:
             continue
         if not isinstance(value, dict):
@@ -125,8 +114,7 @@ def _dumps(data: dict) -> str:
         _emit_table(lines, header, table, array=array)
         blocks.append("\n".join(lines))
 
-    # Top-level scalar keys (e.g. ``backend``) must precede any table header in
-    # TOML; preserve them verbatim so a round-trip save never drops them.
+    # Top-level keys (``backend``) must precede every table header.
     scalars = {
         key: value
         for key, value in data.items()
@@ -135,8 +123,6 @@ def _dumps(data: dict) -> str:
     if scalars:
         blocks.append("\n".join(f"{k} = {_toml_value(v)}" for k, v in scalars.items()))
 
-    # Single-table sections, in schema order; each preserved verbatim so a GUI
-    # camera-display save never wipes a section it doesn't touch.
     for header in ("record", "transcode", "gui"):
         table = data.get(header)
         if isinstance(table, dict) and table:
@@ -145,13 +131,10 @@ def _dumps(data: dict) -> str:
         if isinstance(camera, dict):
             block("cameras", camera, array=True)
     for plugin in data.get("plugins", []) or []:
-        # The loader also accepts a bare name (plugins = ["flywheel"]); write it
-        # as a table, since this emits [[plugins]] headers.
-        if isinstance(plugin, str):
+        if isinstance(plugin, str):  # a bare name (plugins = ["flywheel"])
             plugin = {"name": plugin}
         if isinstance(plugin, dict):
             block("plugins", plugin, array=True)
-    # [[visualization]] is an array of tables (multiple named grids).
     for viz in data.get("visualization", []) or []:
         if isinstance(viz, dict):
             block("visualization", viz, array=True)
@@ -207,16 +190,11 @@ def with_process_params(
     transfer_directory: str,
     transfer_checksum: bool,
 ) -> dict:
-    """Return a copy of ``raw`` with the GUI's post-recording params overlaid.
+    """Return a copy of ``raw`` with the live Process-section values as
+    ``[transcode].ffmpeg_params`` and ``[transfer]``.
 
-    Sets ``[transcode].ffmpeg_params`` and ``[transfer].directory``/``checksum``
-    to the live (Process-section) values so the recording folder's config
-    snapshot drives ``octacam process``. Faithfully a *no-op* — the returned dict
-    compares equal to ``raw`` — when the values already match the config, so an
-    untouched snapshot stays a byte-verbatim copy. A missing
-    ``[transcode]``/``[transfer]`` section is created only when a value actually
-    diverges from its config default, so a rig with no ``[transfer]`` and a blank
-    transfer directory never gains an empty section.
+    Equal to ``raw`` when they match what the config loads as, and a missing
+    section is added only for a value that differs from its default.
     """
     doc = copy.deepcopy(raw) if raw else {}
 
@@ -285,6 +263,38 @@ def with_record_settings(raw: dict, live: Mapping[str, Any]) -> dict:
     return doc
 
 
+def with_camera_transforms(raw: dict, transforms: Mapping[str, Mapping[str, Any]]) -> dict:
+    """Return a copy of ``raw`` whose ``[[cameras]]`` carry the live transforms
+    (serial -> :meth:`DisplayTransform.to_dict`).
+
+    A camera is patched only when its transform differs from what the config
+    loads as, and only when the config lists it: adding one would change which
+    cameras the rig opens. A flip is the sign of ``scale_x``/``scale_y``.
+    """
+    doc = copy.deepcopy(raw) if raw else {}
+    cameras = doc.get("cameras")
+    if not isinstance(cameras, list):
+        return doc
+    for entry in cameras:
+        if not isinstance(entry, dict) or "serial_number" not in entry:
+            continue
+        live = transforms.get(str(entry["serial_number"]))
+        if live is None:
+            continue
+        want = DisplayTransform.from_dict(dict(live))
+        scale_x = float(entry.get("scale_x", 1.0)) or 1.0
+        scale_y = float(entry.get("scale_y", 1.0)) or 1.0
+        have = DisplayTransform.from_scale_rotation(
+            scale_x, scale_y, float(entry.get("rotation_deg", 0.0))
+        )
+        if want == have:
+            continue
+        entry["rotation_deg"] = float(want.rotation_deg)
+        entry["scale_x"] = -abs(scale_x) if want.flip_h else abs(scale_x)
+        entry["scale_y"] = -abs(scale_y) if want.flip_v else abs(scale_y)
+    return doc
+
+
 def _duration_in(duration_s: float, unit: str, fps: float) -> tuple[float, str]:
     """``(duration, unit)`` that loads back as exactly ``duration_s``: in ``unit``
     when the value there has at most 3 decimals and converts back exactly, else
@@ -340,23 +350,6 @@ def with_plugin_options(raw: dict, options_by_name: Mapping[str, dict]) -> dict:
 # ----------------------------------------------------------------- file writing
 
 
-def atomic_write_text(path: str | Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically (temp file on the same dir + rename)."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".octacam-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise
-
-
 def write_config(config_dir: str | Path, doc: dict) -> Path:
     """Serialize ``doc`` to ``config_dir/octacam_config.toml`` atomically."""
     path = find_config_file(config_dir)
@@ -364,59 +357,17 @@ def write_config(config_dir: str | Path, doc: dict) -> Path:
     return path
 
 
-def _extensions(extension: str | Iterable[str]) -> tuple[str, ...]:
-    """Normalize an extension argument to a tuple of suffixes.
-
-    A plain string is a single suffix; an iterable (a mixed rig's set of
-    per-vendor suffixes) is used as given. Empty tuples are tolerated (a system
-    with no cameras) — the caller just globs nothing.
-    """
-    if isinstance(extension, str):
-        return (extension,)
-    return tuple(extension)
-
-
 def write_pfs_files(
     target_dir: str | Path,
     pfs_by_serial: dict[str, str],
     extension: str | Mapping[str, str] = "pfs",
 ) -> None:
-    """Write each ``<serial> -> param text`` to ``<serial>.<extension>``.
-
-    ``extension`` is the single suffix for a one-vendor rig, or a
-    ``serial -> suffix`` map for a mixed rig so each camera's params land in its
-    own backend's format (``pfs`` for Basler, ``txt`` for FLIR/GenICam, ...).
-    """
+    """Write each ``<serial> -> param text`` to ``<serial>.<extension>``;
+    ``extension`` is one suffix or a mixed rig's ``serial -> suffix`` map."""
     target_dir = Path(target_dir)
     for serial, text in pfs_by_serial.items():
         ext = extension if isinstance(extension, str) else extension.get(serial, "pfs")
         atomic_write_text(target_dir / f"{serial}.{ext}", text)
-
-
-def read_pfs_files(
-    config_dir: str | Path, extension: str | Iterable[str] = "pfs"
-) -> dict[str, str]:
-    """Map ``<serial> -> param text`` for every per-camera file in ``config_dir``.
-
-    The inverse of :func:`write_pfs_files`, used to reset live cameras back to
-    the parameters the active config shipped. ``extension`` is the backend's
-    parameter-file suffix (``pfs`` for Basler, ``txt`` for FLIR/GenICam, ...), or
-    the set of suffixes for a mixed-vendor rig. Keyed by file stem (the serial for a
-    ``<serial>.<extension>``), so auxiliary files like
-    ``fictrac_camera_config.pfs`` are read too but simply never match a live
-    serial.
-    """
-    config_dir = Path(config_dir)
-    out: dict[str, str] = {}
-    if not config_dir.is_dir():
-        return out
-    for ext in _extensions(extension):
-        for path in sorted(config_dir.glob(f"*.{ext}")):
-            try:
-                out[path.stem] = path.read_text()
-            except OSError:
-                continue
-    return out
 
 
 def copy_auxiliary_pfs(
@@ -425,17 +376,13 @@ def copy_auxiliary_pfs(
     live_serials: set[str],
     extension: str | Iterable[str] = "pfs",
 ) -> None:
-    """Copy per-camera files that are not ``<live-serial>.<extension>`` to a new dir.
-
-    Preserves helper configs (e.g. ``fictrac_camera_config.pfs``) and the
-    parameter files of cameras not currently opened, so the new dir is a
-    complete preset. ``extension`` may be a single suffix or the set of suffixes
-    a mixed-vendor rig uses.
-    """
+    """Copy the parameter files no live camera wrote (auxiliary configs,
+    cameras not opened), so ``target_dir`` is a complete config directory;
+    ``extension`` is one suffix or a mixed rig's suffixes."""
     src_dir, target_dir = Path(src_dir), Path(target_dir)
     if src_dir.resolve() == target_dir.resolve():
         return
-    for ext in _extensions(extension):
+    for ext in (extension,) if isinstance(extension, str) else extension:
         for src in sorted(src_dir.glob(f"*.{ext}")):
             if src.stem not in live_serials:
                 atomic_write_text(target_dir / src.name, src.read_text())
@@ -444,27 +391,14 @@ def copy_auxiliary_pfs(
 # ----------------------------------------------------------------- new config dir
 
 
-def safe_config_name(name: str) -> str:
-    """Validate a new-config folder name as a single, safe path segment."""
-    candidate = (name or "").strip()
-    if (
-        not candidate
-        or candidate in (".", "..")
-        or "/" in candidate
-        or "\\" in candidate
-        or os.sep in candidate
-        or (os.altsep and os.altsep in candidate)
-        or Path(candidate).name != candidate
-    ):
-        raise ValueError(f"Invalid config name: {name!r}")
-    return candidate
-
-
 def resolve_new_config_dir(
     active_dir: str | Path, name: str, *, overwrite: bool = False
 ) -> Path:
-    """Resolve a new config dir as a sibling of the active one (where presets live)."""
-    target = Path(active_dir).parent / safe_config_name(name)
+    """Resolve a new config dir beside the active one, where presets live; for a
+    session relaunched from a recording (its ``octacam_recording`` subfolder),
+    beside the recording folder."""
+    anchor = recording_folder(active_dir)
+    target = anchor.parent / safe_segment(name, "config name")
     if target.exists() and not overwrite:
         raise FileExistsError(target)
     return target
@@ -479,3 +413,50 @@ def load_raw_config(config_dir: str | Path) -> dict:
         return tomllib.loads(path.read_text())
     except tomllib.TOMLDecodeError:
         return {}
+
+
+# ----------------------------------------------------------------- GUI save
+
+
+@dataclasses.dataclass(frozen=True)
+class SavedConfig:
+    """What :func:`save_rig_config` wrote; ``raw`` is the rewritten active config's
+    document, for the caller to adopt (a new config dir is never adopted)."""
+
+    directory: Path
+    cameras_written: list[str]
+    raw: dict | None = None
+
+
+def save_rig_config(
+    controller: "RecordingController",
+    active_dir: Path,
+    raw: dict,
+    cameras: list[dict],
+    *,
+    new_name: str | None = None,
+    overwrite: bool = False,
+    sensor: bool = True,
+    display: bool = True,
+) -> SavedConfig:
+    """Write the cameras' parameter files (``sensor``) and ``raw`` patched with
+    their display settings (``display``) to ``active_dir``, or to a new config
+    dir ``new_name`` with the auxiliary parameter files, so it is complete.
+    Raises RuntimeError while camera control is locked (with ``sensor``; the
+    caller refuses a save while recording), ValueError for a bad name,
+    FileExistsError for an existing new dir without ``overwrite``, and OSError
+    when a write fails."""
+    system = controller.camera_system
+    params = controller.export_camera_params() if sensor else {}
+    doc = merge_camera_display(raw, cameras) if display else None
+    if new_name is None:
+        target = active_dir
+    else:
+        target = resolve_new_config_dir(active_dir, new_name, overwrite=overwrite)
+        target.mkdir(parents=True, exist_ok=True)
+        copy_auxiliary_pfs(active_dir, target, set(params), system.extensions)
+    if sensor:
+        write_pfs_files(target, params, system.extension_by_serial())
+    if doc is not None:
+        write_config(target, doc)
+    return SavedConfig(target, sorted(params), raw=doc if new_name is None else None)

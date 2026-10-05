@@ -2,20 +2,19 @@
 
 The grid is the one path that defaults to a YUV pixel format (for browser /
 QuickTime playback), so it must force full colour range or it loses the
-0-255 → 16-235 squeeze on every cell. See writer._color_range_args.
+0-255 → 16-235 squeeze on every cell. See ffmpeg.color_range_args.
 """
 
 import logging
 import os
 import subprocess
 
-os.environ.setdefault("PYLON_CAMEMU", "2")
-
 import numpy as np
 import pytest
 
+from octacam.ffmpeg import find_ffmpeg
 from octacam.grid import build_grid_video
-from octacam.writer import find_ffmpeg, transcode_raw
+from octacam.transcode import transcode_file
 
 pytest.importorskip("cv2")  # parity with the other ffmpeg-backed suites
 
@@ -32,9 +31,9 @@ def _gray_mp4(folder, name, frame=None):
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.astype(np.uint8).tobytes())
     out = folder / f"{name}.mp4"
-    transcode_raw(
+    transcode_file(
         raw,
-        output=out,
+        out,
         ffmpeg_params=_GRAY_FFMPEG_PARAMS,
         width=W,
         height=H,
@@ -55,9 +54,9 @@ def _gray_mp4_sized(folder, name, w, h, value):
     raw = folder / f"{name}.raw"
     raw.write_bytes(frame.tobytes())
     out = folder / f"{name}.mp4"
-    transcode_raw(
+    transcode_file(
         raw,
-        output=out,
+        out,
         ffmpeg_params=_GRAY_FFMPEG_PARAMS,
         width=w,
         height=h,
@@ -67,47 +66,30 @@ def _gray_mp4_sized(folder, name, w, h, value):
     return out
 
 
-class _ListHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-def _dry_run_cmd(folder, layout, pix_fmt):
+def _dry_run_cmd(caplog, folder, layout, pix_fmt):
     """Return the joined ffmpeg command build_grid_video would run."""
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    prev_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    try:
+    with caplog.at_level(logging.INFO, logger="octacam"):
         build_grid_video(folder, layout=layout, pix_fmt=pix_fmt, dry_run=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(prev_level)
-    cmd = next((m for m in handler.messages if "[dry-run] grid:" in m), None)
-    assert cmd is not None, handler.messages
+    cmd = next((m for m in caplog.messages if "[dry-run] grid:" in m), None)
+    assert cmd is not None, caplog.messages
     return cmd
 
 
-def test_grid_yuv420p_forces_full_range(tmp_path):
+def test_grid_yuv420p_forces_full_range(tmp_path, caplog):
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     # Output stream is tagged full range, and the in-graph gray→yuv conversion
     # is pinned to full range so the luma is never squeezed into 16-235.
     assert "-color_range pc" in cmd
     assert "out_range=full" in cmd
 
 
-def test_grid_gray_adds_no_range_flags(tmp_path):
+def test_grid_gray_adds_no_range_flags(tmp_path, caplog):
     # gray (4:0:0) is already full range — no -color_range / out_range churn.
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "gray")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "gray")
     assert "-color_range" not in cmd
     assert "out_range" not in cmd
 
@@ -257,12 +239,12 @@ def test_fps_value_handles_degenerate_zero_denominator():
     assert _fps_value("30") == 30.0  # bare numerator fallback preserved
 
 
-def test_grid_treats_unprobeable_file_as_black_cell(tmp_path):
+def test_grid_treats_unprobeable_file_as_black_cell(tmp_path, caplog):
     # A present-but-unprobeable mp4 must become a black cell, not abort the whole
     # grid, and the reference geometry/fps comes from the first file that probes.
     _gray_mp4(tmp_path, "a")
     (tmp_path / "b.mp4").write_bytes(b"not a real video")  # present but unprobeable
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     # b is fed as a lavfi black source at the reference size, not as -i b.mp4.
     assert "b.mp4" not in cmd
     assert f"color=black:size={W}x{H}" in cmd
@@ -335,32 +317,22 @@ def test_auto_layout_shapes():
 # transfer.
 
 
-def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch):
+def test_grid_skips_cleanly_when_ffprobe_is_missing(tmp_path, monkeypatch, caplog):
     from octacam import grid as grid_mod
 
     def _no_ffprobe():
         raise RuntimeError("No ffprobe executable found: ...")
 
-    monkeypatch.setattr("octacam.writer.find_ffprobe", _no_ffprobe)
+    monkeypatch.setattr(grid_mod, "find_ffprobe", _no_ffprobe)
     _gray_mp4(tmp_path, "a")
-    # A direct handler, not caplog: another test (the CLI's _setup_logging) may
-    # leave propagate=False on the octacam logger, which empties caplog.
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    prev_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.ERROR)
-    try:
+    with caplog.at_level(logging.ERROR, logger="octacam"):
         out = grid_mod.build_grid_video(tmp_path, layout=[["a", ""]], dry_run=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(prev_level)
     assert out is None  # skipped, not raised
     # ...and the operator is told the real reason, not "no probeable mp4 files".
-    assert any("ffprobe" in m for m in handler.messages), handler.messages
+    assert any("ffprobe" in m for m in caplog.messages), caplog.messages
 
 
-def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch):
+def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch, caplog):
     # A per-file OSError (e.g. the probe binary vanishing mid-run) must degrade
     # that one cell to black, not abort the grid.
     from octacam import grid as grid_mod
@@ -375,7 +347,7 @@ def test_grid_probe_failure_of_one_file_still_builds(tmp_path, monkeypatch):
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
     monkeypatch.setattr(grid_mod, "_probe_video", flaky)
-    cmd = _dry_run_cmd(tmp_path, [["a", "b"]], "yuv420p")
+    cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
     assert "b.mp4" not in cmd
     assert f"color=black:size={W}x{H}" in cmd
 
@@ -402,40 +374,6 @@ def test_probe_runs_off_the_tty_and_is_bounded(tmp_path, monkeypatch):
     assert os.path.isabs(seen["argv0"]), seen["argv0"]
 
 
-def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
-    # A rig pinning OCTACAM_FFMPEG must probe with that build's own ffprobe, not
-    # whatever older ffprobe happens to come first on $PATH.
-    import stat
-
-    from octacam.writer import find_ffprobe
-
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for name in ("ffmpeg", "ffprobe"):
-        exe = bindir / name
-        exe.write_text("#!/bin/sh\nexit 0\n")
-        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.delenv("OCTACAM_FFPROBE", raising=False)
-    monkeypatch.setenv("OCTACAM_FFMPEG", str(bindir / "ffmpeg"))
-    assert find_ffprobe() == str(bindir / "ffprobe")
-
-    # No sibling next to the chosen ffmpeg -> fall back to $PATH...
-    (bindir / "ffprobe").unlink()
-    other = tmp_path / "elsewhere"
-    other.mkdir()
-    path_probe = other / "ffprobe"
-    path_probe.write_text("#!/bin/sh\nexit 0\n")
-    path_probe.chmod(path_probe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", str(other))
-    assert find_ffprobe() == str(path_probe)
-
-    # ...and with neither, a clean RuntimeError the caller can degrade on —
-    # never a bare FileNotFoundError from deep inside the probe.
-    path_probe.unlink()
-    with pytest.raises(RuntimeError, match="No ffprobe"):
-        find_ffprobe()
-
-
 # --- two configured grids must not mark each other stale --------------------- #
 
 
@@ -453,7 +391,8 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
     import os
     import types
 
-    from octacam import cli
+    from octacam.process import ProcessOptions, build_grids
+    from octacam.process_jobs import NullReporter
 
     folder = tmp_path / "run1"
     folder.mkdir()
@@ -481,27 +420,19 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,
     )
-    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
-    # _pause_gate polls a machine-global "capture-active" marker (a live
-    # octacam gui/record on this box), so neutralise it — a unit test must not
-    # block on whatever else is running on the developer's rig.
-    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
-
     built = []
     monkeypatch.setattr(
-        "octacam.grid.build_grid_video",
+        "octacam.process.build_grid_video",
         lambda folder, **kw: built.append(kw["output"].name),
     )
 
     # --no-transcode semantics: every mp4 in the folder, grids included.
-    folder_outputs = {folder: sorted(folder.glob("*.mp4"))}
-    cli._grid_and_transfer(
-        folder_outputs,
-        True,  # do_grid
-        False,  # do_transfer
-        None,
-        False,  # dry_run
-        False,  # show_bar
+    build_grids(
+        {folder: sorted(folder.glob("*.mp4"))},
+        set(),
+        ProcessOptions(),
+        {folder: cfg},
+        NullReporter(),
     )
     assert built == [], f"rebuilt grids that were already current: {built}"
 
@@ -512,7 +443,8 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
     import os
     import types
 
-    from octacam import cli
+    from octacam.process import ProcessOptions, build_grids
+    from octacam.process_jobs import NullReporter
 
     folder = tmp_path / "run1"
     folder.mkdir()
@@ -531,19 +463,17 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,
     )
-    monkeypatch.setattr(cli, "_config_for_recording", lambda *a, **kw: cfg)
-    # _pause_gate polls a machine-global "capture-active" marker (a live
-    # octacam gui/record on this box), so neutralise it — a unit test must not
-    # block on whatever else is running on the developer's rig.
-    monkeypatch.setattr(cli, "_pause_gate", lambda *a, **kw: None)
-
     built = []
     monkeypatch.setattr(
-        "octacam.grid.build_grid_video",
+        "octacam.process.build_grid_video",
         lambda folder, **kw: built.append(kw["output"].name),
     )
 
-    cli._grid_and_transfer(
-        {folder: sorted(folder.glob("*.mp4"))}, True, False, None, False, False
+    build_grids(
+        {folder: sorted(folder.glob("*.mp4"))},
+        set(),
+        ProcessOptions(),
+        {folder: cfg},
+        NullReporter(),
     )
     assert built == ["grid.mp4"]

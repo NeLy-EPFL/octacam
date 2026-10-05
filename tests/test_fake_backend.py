@@ -6,11 +6,7 @@ round-tripping through load_config), and deterministic node behaviour — all in
 pure Python with no hardware.
 """
 
-import os
 
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
-
-import contextlib
 import logging
 import threading
 import time
@@ -18,7 +14,7 @@ import time
 import pytest
 
 from octacam.cameras import CameraSystem
-from octacam.cameras._genicam_config import parse_config
+from octacam.cameras.genicam import parse_config
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
@@ -39,16 +35,11 @@ def test_backend_selected_and_serials(previewing_system):
     assert previewing_system.backend == "fake"
 
 
-def test_read_params_shape(previewing_system):
+def test_read_param_shape(previewing_system):
     cam = previewing_system.camera_at(0)
-    params = cam.read_params()
-    assert set(params) >= {
-        "width",
-        "height",
-        "exposure",
-        "gain",
-        "offset_x",
-        "offset_y",
+    params = {
+        name: cam.read_param(name)
+        for name in ("width", "height", "exposure", "gain", "offset_x", "offset_y")
     }
     width = params["width"]
     assert width["value"] > 0 and width["writable"] is True
@@ -62,26 +53,10 @@ def test_read_param_rejects_unknown(previewing_system):
         previewing_system.camera_at(0).read_param("bogus")
 
 
-def test_set_live_param_echoes_and_snaps(previewing_system):
-    cam = previewing_system.camera_at(0)
-    desc = cam.set_live_param("exposure", 1234.0)
-    assert desc["name"] == "exposure"
-    assert cam.read_param("exposure")["value"] == desc["value"]
-    # out-of-range clamps to the node max rather than crashing
-    high = cam.set_live_param("offset_x", 10**9)["value"]
-    assert high <= cam.read_param("offset_x")["max"]
-
-
-def test_set_live_param_rejects_geometry_name(previewing_system):
-    with pytest.raises(ValueError):
-        previewing_system.camera_at(0).set_live_param("width", 640)
-
-
 def test_set_geometry_resizes_and_keeps_previewing(previewing_system):
     cam = previewing_system.camera_at(0)
     assert cam._backend.is_grabbing()
-    result = cam.set_geometry(width=640, height=480)
-    assert (result["width"], result["height"]) == (640, 480)
+    cam.set_geometry(width=640, height=480)
     assert (cam.width, cam.height) == (640, 480)
     frame = cam.frame_for_display.pop()
     assert frame is not None and frame.shape == (480, 640)
@@ -91,7 +66,7 @@ def test_set_geometry_resizes_and_keeps_previewing(previewing_system):
 
 def test_save_params_round_trips(previewing_system):
     cam = previewing_system.camera_at(0)
-    cam.set_live_param("exposure", 2222.0)
+    cam.set_feature("ExposureTime", 2222.0)
     text = cam.save_params()
     # The fake persists the native GenApi persistence TSV (shared with FLIR).
     values = dict(parse_config(text))
@@ -99,29 +74,6 @@ def test_save_params_round_trips(previewing_system):
     assert "TriggerSource" in values  # the fake stores/round-trips the source
     cam.load_params(text)
     assert abs(cam.read_param("exposure")["value"] - 2222.0) < 1.0
-
-
-def test_reset_params_restores_and_keeps_previewing(previewing_system):
-    cam = previewing_system.camera_at(0)
-    baseline = cam.save_params()
-    original = cam.read_param("exposure")["value"]
-    cam.set_live_param("exposure", original + 1000.0)
-    assert abs(cam.read_param("exposure")["value"] - original) > 1.0
-
-    result = cam.reset_params(baseline)
-    assert cam._backend.is_grabbing()
-    assert abs(result["params"]["exposure"]["value"] - original) < 1.0
-
-
-def test_reset_params_invalid_keeps_previewing(previewing_system):
-    cam = previewing_system.camera_at(0)
-    assert cam._backend.is_grabbing()
-    # Free text with no `name<TAB>value` line is a malformed config, rejected as
-    # a ValueError (the applier raises rather than silently applying nothing).
-    with pytest.raises(ValueError):
-        cam.reset_params("this is not a persistence file")
-    assert cam._backend.is_grabbing()
-    assert cam.frame_for_display.pop() is not None
 
 
 def test_load_params_grows_roi_past_a_previous_sessions_offset(previewing_system):
@@ -144,12 +96,12 @@ def test_load_params_grows_roi_past_a_previous_sessions_offset(previewing_system
     # Rig A: a cropped, vertically offset ROI (as configs/hexaview ships).
     cam.load_params(roi(full_w, full_h - 640, offset_y=278))
     assert (cam.width, cam.height) == (full_w, full_h - 640)
-    assert cam._backend._get_number("OffsetY", True) == 278
+    assert cam._backend.get_node("OffsetY", "int") == 278
 
     # Rig B: the whole sensor back (as configs/triggerbox ships).
     cam.load_params(roi(full_w, full_h))
     assert (cam.width, cam.height) == (full_w, full_h)
-    assert cam._backend._get_number("OffsetY", True) == 0
+    assert cam._backend.get_node("OffsetY", "int") == 0
 
 
 def test_save_all_params_covers_every_camera(previewing_system):
@@ -273,6 +225,7 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
     # start_record must be logged-and-skipped, not re-raised — the other cameras
     # have already launched their grab thread + ffmpeg child, so propagating would
     # abandon them half-started (and violates start_record's documented contract).
+    from octacam.pulses import PulseClock
     from octacam.writer import FORMATS
 
     system = CameraSystem(FAKE_SERIALS, backend="fake")
@@ -286,13 +239,14 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
             raise RuntimeError("insufficient resources")
 
         monkeypatch.setattr(bad, "start_record", boom)
-        started = system.start_record(tmp_path, 100.0, FORMATS["raw"])
+        clock = PulseClock(10_000_000, None, "external", fill=False)
+        started = system.start_record(tmp_path, 100.0, FORMATS["raw"], clock)
         assert started == [good.name]  # good camera started; no exception propagated
     finally:
         system.close()
 
 
-def test_open_phase_skips_one_camera_that_fails_to_open(tmp_path, monkeypatch):
+def test_open_phase_skips_one_camera_that_fails_to_open(tmp_path, monkeypatch, caplog):
     # Regression: a single camera that fails to open must be dropped (logged),
     # not abort the whole rig — mirroring the enumerate "not found" skip and the
     # start_record skip. This is what lets the auto cascade survive a USB3 camera
@@ -308,20 +262,10 @@ def test_open_phase_skips_one_camera_that_fails_to_open(tmp_path, monkeypatch):
         real_open(self)
 
     monkeypatch.setattr(FakeBackend, "open", flaky_open)
-    # Capture on the octacam logger directly, not via caplog: another test (the
-    # CLI's _setup_logging) may leave propagate=False, emptying caplog's capture.
-    msgs: list[str] = []
-    handler = logging.Handler()
-    handler.emit = lambda record: msgs.append(record.getMessage())
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        system = CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
-    finally:
-        logger.removeHandler(handler)
+    system = CameraSystem(["FAKE-0", "FAKE-1"], backend="fake")
     try:
         assert [c.serial_number for c in system] == ["FAKE-0"]  # bad one dropped
-        assert any("FAKE-1" in m for m in msgs)
+        assert any("FAKE-1" in m for m in caplog.messages)
     finally:
         system.close()
 
@@ -340,9 +284,9 @@ def test_open_phase_raises_only_when_every_camera_fails(monkeypatch):
 
 
 def test_preview_bounds_the_timestamp_series(tmp_path):
-    # Regression (base.py:1006): a continuously-running preview (the GUI's idle
-    # steady state) must not grow self._timestamps without bound. The series is
-    # trimmed to PREVIEW_TIMESTAMPS_MAX while the rolling fps readout keeps working.
+    # A continuously-running preview (the GUI's idle steady state) must not grow
+    # its timestamp series without bound: it keeps PREVIEW_TIMESTAMPS_MAX while
+    # the rolling fps readout keeps working.
     from octacam.cameras.base import PREVIEW_TIMESTAMPS_MAX
 
     system = CameraSystem(FAKE_SERIALS, backend="fake")
@@ -351,14 +295,17 @@ def test_preview_bounds_the_timestamp_series(tmp_path):
         system.start_preview("free_running", fps=2000.0)
         cam = system.camera_at(0)
         deadline = time.monotonic() + 3.0
-        while cam.frames_recorded < PREVIEW_TIMESTAMPS_MAX and time.monotonic() < deadline:
+        while (
+            len(cam.preview_timestamps) < PREVIEW_TIMESTAMPS_MAX
+            and time.monotonic() < deadline
+        ):
             cam.frame_for_display.pop()  # drain the display slot so pushes flow
             time.sleep(0.01)
-        assert cam.frames_recorded >= PREVIEW_TIMESTAMPS_MAX
-        assert cam.resulting_fps > 0  # readout still computed from the tail
+        assert len(cam.preview_timestamps) >= PREVIEW_TIMESTAMPS_MAX
+        assert cam.frame_for_display.fps > 0  # readout still computed from the tail
         # Keep grabbing well past the cap; without trimming this would be hundreds.
         time.sleep(0.2)
-        assert cam.frames_recorded <= PREVIEW_TIMESTAMPS_MAX + 1
+        assert len(cam.preview_timestamps) <= PREVIEW_TIMESTAMPS_MAX + 1
     finally:
         system.close()
 
@@ -386,11 +333,11 @@ def test_start_preview_falls_back_to_software_when_freerun_unavailable(
         assert cam.backend.is_grabbing()
         # The fallback is a software-trigger preview: frames arrive on a trigger.
         deadline = time.monotonic() + 2.0
-        while cam.frames_recorded < 1 and time.monotonic() < deadline:
+        while not cam.preview_timestamps and time.monotonic() < deadline:
             cam.trigger_once()
             cam.frame_for_display.pop()
             time.sleep(0.02)
-        assert cam.frames_recorded >= 1  # frames flowed via the software fallback
+        assert cam.preview_timestamps  # frames flowed via the software fallback
     finally:
         system.close()
 
@@ -458,37 +405,7 @@ def test_stop_grab_wakes_a_blocked_managed_preview_retrieve():
 # --- an incomplete rig must not be silent ----------------------------------- #
 
 
-class _OctacamLogCapture(logging.Handler):
-    """Collect records straight off the "octacam" logger.
-
-    caplog attaches to the *root* logger, but octacam.cli sets
-    ``logger.propagate = False`` — so once anything in the session has configured
-    CLI logging, records never reach root and caplog silently sees nothing.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.messages: list[str] = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-@contextlib.contextmanager
-def _octacam_warnings():
-    handler = _OctacamLogCapture()
-    logger = logging.getLogger("octacam")
-    previous = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.WARNING)
-    try:
-        yield handler
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
-
-
-def test_missing_camera_is_recorded_and_reported():
+def test_missing_camera_is_recorded_and_reported(caplog):
     """A rig that opens fewer cameras than its config asks for must say so.
 
     Each individual failure was already logged, but nothing compared the totals,
@@ -496,7 +413,7 @@ def test_missing_camera_is_recorded_and_reported():
     the GUI simply drew a smaller grid and `octacam record` exited 0. The
     recording is then short a camera, which is usually found days later.
     """
-    with _octacam_warnings() as handler:
+    with caplog.at_level(logging.WARNING, logger="octacam"):
         system = CameraSystem(["FAKE-0", "NOT-PRESENT"], backend="fake")
     try:
         assert len(system) == 1
@@ -504,19 +421,19 @@ def test_missing_camera_is_recorded_and_reported():
         assert "NOT-PRESENT" in system.missing
         assert system.requested_serial_numbers == ["FAKE-0", "NOT-PRESENT"]
         assert any(
-            "INCOMPLETE RIG" in m and "NOT-PRESENT" in m for m in handler.messages
-        ), handler.messages
+            "INCOMPLETE RIG" in m and "NOT-PRESENT" in m for m in caplog.messages
+        ), caplog.messages
     finally:
         system.close()
 
 
-def test_complete_rig_is_not_flagged_incomplete():
-    with _octacam_warnings() as handler:
+def test_complete_rig_is_not_flagged_incomplete(caplog):
+    with caplog.at_level(logging.WARNING, logger="octacam"):
         system = CameraSystem(FAKE_SERIALS, backend="fake")
     try:
         assert len(system) == 2
         assert system.incomplete is False
         assert system.missing == {}
-        assert not any("INCOMPLETE RIG" in m for m in handler.messages)
+        assert not any("INCOMPLETE RIG" in m for m in caplog.messages)
     finally:
         system.close()

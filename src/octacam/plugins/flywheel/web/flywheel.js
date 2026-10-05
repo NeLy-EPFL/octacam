@@ -1,51 +1,73 @@
-// Flywheel tab: stepper loop command + hold-to-jog position adjustment.
-//
-// Served from /plugins/flywheel/, so it cannot import core "./util.js" (that
-// would 404). Shared helpers (api, clampInput) are passed in via the ctx the
-// host (app.js) constructs. The serial helpers live at /js/ (absolute path,
-// since a relative import would resolve under /plugins/flywheel/ and 404).
-import { fetchSerialPorts, populatePortSelect } from "/js/serial.js";
-import { FirmwareFlash } from "/js/firmware-flash.js";
+// Flywheel tab: stepper loop command and hold-to-jog.
+import { SerialTab } from "/js/serial.js";
+import { clampInput, request } from "/js/util.js";
 
 const STEPS_PER_REVOLUTION = 4096;
 
-export default class FlywheelTab {
-  constructor({ send, notify, status, api, clampInput }) {
-    this.send = send; // sends a JSON message over the WS
-    this.notify = notify;
-    this.api = api; // shared fetch helper (from util.js, injected by app.js)
-    this.clampInput = clampInput; // shared input clamp helper
+const MARKUP = `
+  <fieldset id="flywheel-fields" disabled>
+    <h3 title="An automated sequence of back-and-forth turntable sweeps">Loop</h3>
+    <div class="row" title="Rotation direction of the first sweep"><span>Initial direction:</span>
+      <span class="radio-group">
+        <label title="Start counter-clockwise"><input type="radio" name="loop-dir" id="loop-dir-ccw" checked> &#8634;</label>
+        <label title="Start clockwise"><input type="radio" name="loop-dir" id="loop-dir-cw"> &#8635;</label>
+      </span>
+    </div>
+    <label class="row" title="Number of motor steps in each sweep"><span>Steps:</span>
+      <input id="loop-steps" type="number" min="2" max="32767" value="4096">
+    </label>
+    <label class="row" title="Delay between motor steps, in microseconds (smaller = faster rotation)"><span>Step interval:</span>
+      <span class="suffixed">
+        <input id="loop-interval" type="number" min="800" max="65535" value="1465">
+        <span class="suffix">&micro;s</span>
+      </span>
+    </label>
+    <label class="row" title="Pause at the end of each sweep before reversing, in milliseconds"><span>Rest duration:</span>
+      <span class="suffixed">
+        <input id="loop-rest" type="number" min="0" max="65535" value="1000">
+        <span class="suffix">ms</span>
+      </span>
+    </label>
+    <label class="row" title="How many sweeps to run in the loop"><span>Repeats:</span>
+      <input id="loop-repeats" type="number" min="1" max="255" value="3">
+    </label>
+    <label class="row" title="Delay before the first sweep starts, in seconds"><span>Initial wait:</span>
+      <span class="suffixed">
+        <input id="loop-wait" type="number" min="0" max="255" value="10">
+        <span class="suffix">s</span>
+      </span>
+    </label>
+    <div id="loop-info"></div>
+    <button type="button" id="loop-execute" class="btn wide"
+      title="Send the configured loop program to the Arduino and run it now">Execute</button>
+    <label class="center" title="Run the loop automatically whenever a recording starts">
+      <input type="checkbox" id="loop-with-recording" checked> Start with recording</label>
+
+    <h3 title="Manually nudge the turntable to a starting position">Adjust position</h3>
+    <label class="row" title="Delay between steps while jogging, in microseconds (smaller = faster)"><span>Step interval:</span>
+      <span class="suffixed">
+        <input id="jog-interval" type="number" min="1000" max="65535" value="2000">
+        <span class="suffix">&micro;s</span>
+      </span>
+    </label>
+    <div class="row" title="Hold a button to rotate the turntable; release to stop"><span>Direction:</span>
+      <span class="btn-pair">
+        <button type="button" id="jog-ccw" class="btn" title="Hold to jog counter-clockwise">&#8634;</button>
+        <button type="button" id="jog-cw" class="btn" title="Hold to jog clockwise">&#8635;</button>
+      </span>
+    </div>
+  </fieldset>`;
+
+export default class FlywheelTab extends SerialTab {
+  static label = "Flywheel";
+  static title = "Drive the turntable stepper via the Flywheel plugin";
+
+  constructor(ctx) {
+    super(ctx, MARKUP, "/api/serial/reconnect");
+    this.send = ctx.send; // sends a JSON message over the WS
     this.jogging = false;
-    // Whether the serial port is open (from /api/system, updated by reconnect),
-    // and whether the control WebSocket is up. Both must hold for the controls
-    // to be usable.
-    this.ready = Boolean(status?.ready);
-    this.device = status?.device || "";
-    this.connected = false;
 
     this.fields = document.getElementById("flywheel-fields");
-    this.statusBox = document.getElementById("flywheel-status");
-    this.statusMsg = document.getElementById("flywheel-status-msg");
-    this.reconnectBtn = document.getElementById("flywheel-reconnect");
-    this.portSelect = document.getElementById("flywheel-port");
-    this.reconnectBtn.addEventListener("click", () => this._reconnect());
-
-    // Firmware "out of date — Flash firmware" banner (shared controller). Hidden
-    // while jogging so a flash (which resets the board) can't interrupt motion.
-    this.fw = new FirmwareFlash({
-      api: this.api,
-      notify: this.notify,
-      prefix: "flywheel",
-      ids: {
-        banner: "flywheel-fw-flash",
-        msg: "flywheel-fw-flash-msg",
-        btn: "flywheel-fw-flash-btn",
-        log: "flywheel-fw-flash-log",
-      },
-      isActive: () => this.jogging,
-    });
-    this.fw.setReady(this.ready);
-
     this.dirCw = document.getElementById("loop-dir-cw");
     this.dirCcw = document.getElementById("loop-dir-ccw");
     this.steps = document.getElementById("loop-steps");
@@ -57,38 +79,31 @@ export default class FlywheelTab {
     this.withRecording = document.getElementById("loop-with-recording");
     this.jogInterval = document.getElementById("jog-interval");
 
-    for (const input of [
-      this.steps,
-      this.interval,
-      this.rest,
-      this.repeats,
-      this.wait,
-    ]) {
+    for (const input of [this.steps, this.interval, this.rest, this.repeats, this.wait]) {
       input.addEventListener("input", () => this.updateInfo());
       input.addEventListener("change", () => {
-        this.clampInput(input);
+        clampInput(input);
         this.updateInfo();
       });
     }
-    document
-      .getElementById("loop-execute")
-      .addEventListener("click", () => this._execute());
+    document.getElementById("loop-execute").addEventListener("click", () => this._execute());
 
     this._setupJog(document.getElementById("jog-ccw"), -1);
     this._setupJog(document.getElementById("jog-cw"), 1);
 
-    this._seedCommand(status?.command);
+    this._seedCommand(ctx.status.command);
     this.updateInfo();
-    this._loadPorts();
-    this._refresh();
-    this.fw.load();
+    this.start(ctx.status);
   }
 
-  // Seed the loop program from the rig's configured command
-  // ([[plugins]] options.command), so a configured loop — or one restored from a
-  // recording's config snapshot — is what the operator sees on load. Absent, the
-  // fields keep the markup's defaults. Only at construction: a later status push
-  // (a reconnect) must never overwrite what the operator is editing.
+  // A flash resets the board.
+  boardBusy() {
+    return this.jogging;
+  }
+
+  // Seed the loop from the configured command (options.command, also restored
+  // from a recording's snapshot). Only at construction: a later status push
+  // must never overwrite what the operator is editing.
   _seedCommand(command) {
     if (!command) return;
     const steps = Number(command.n_steps);
@@ -108,85 +123,18 @@ export default class FlywheelTab {
       if (Number.isFinite(Number(value))) input.value = String(Number(value));
     }
     for (const input of [this.steps, this.interval, this.rest, this.repeats, this.wait]) {
-      this.clampInput(input);
+      clampInput(input);
     }
   }
-
-  // Populate the port dropdown with the currently detected serial ports,
-  // keeping the active device selected.
-  async _loadPorts() {
-    populatePortSelect(this.portSelect, await fetchSerialPorts(this.api), this.device);
-  }
-
-  // ----------------------------------------------------- serial state
 
   setConnected(connected) {
-    this.connected = connected;
     if (!connected) this.stopJog();
-    this._refresh();
+    super.setConnected(connected);
   }
 
-  // Apply a fresh /api/system plugin-status dict (pushed by app.js when the
-  // server's background init finishes opening the serial port after the page
-  // loaded, or on a reconnect), so the controls flip from "not open" to ready
-  // without the operator clicking Reconnect.
-  applyStatus(info) {
-    if (!info) return;
-    this.ready = Boolean(info.ready);
-    if (info.device) this.device = info.device;
-    this._refresh();
-  }
-
-  // Reflect the current (websocket, serial) state in the UI: the loop/jog
-  // controls are usable only when both are up; otherwise show why.
-  _refresh() {
+  refresh() {
+    super.refresh();
     this.fields.disabled = !this.connected || !this.ready;
-    this.fw?.setReady(this.ready);
-    if (this.ready) {
-      this.statusBox.classList.add("hidden");
-    } else {
-      const where = this.device ? ` (${this.device})` : "";
-      this.statusMsg.textContent =
-        `Serial port${where} is not open — check the Arduino is plugged in ` +
-        `and the device path is correct, then reconnect.`;
-      this.statusBox.classList.remove("hidden");
-    }
-  }
-
-  async _reconnect() {
-    this.reconnectBtn.disabled = true;
-    // Connect to the port picked in the dropdown (device override); with no
-    // selection the backend reopens the configured device.
-    const device = this.portSelect?.value || "";
-    let r;
-    try {
-      r = await this.api("POST", "/api/serial/reconnect", device ? { device } : {});
-    } catch {
-      this.reconnectBtn.disabled = false;
-      this.notify("error", "Reconnect failed: server unreachable");
-      return;
-    }
-    this.reconnectBtn.disabled = false;
-    if (!r.ok) {
-      this.notify("error", r.data?.detail || `Reconnect failed (HTTP ${r.status})`);
-      return;
-    }
-    this.ready = Boolean(r.data?.ready);
-    if (r.data?.device) this.device = r.data.device;
-    this.fw.applyResponse(r.data);
-    this.fw.load();
-    this._refresh();
-    this._loadPorts(); // refresh the list + selection after the attempt
-    if (this.ready) {
-      this.notify("info", `Serial port ${this.device} connected.`);
-    } else {
-      this.notify(
-        "warning",
-        r.data?.error
-          ? `Serial port still unavailable: ${r.data.error}`
-          : "Serial port still unavailable."
-      );
-    }
   }
 
   // -------------------------------------------------------------- loop
@@ -222,9 +170,8 @@ export default class FlywheelTab {
     };
   }
 
-  // Params to attach to /api/recording/start under plugin_params.flywheel, or
-  // null. Skipped when the serial port isn't open — there is no board to drive.
-  // Named getStartParams() to match the generic record.js plugin loop.
+  // The recording start's plugin_params.flywheel, or null (also when the port
+  // isn't open: there is no board to drive).
   getStartParams() {
     if (!this.ready) return null;
     return this.withRecording.checked ? this.command() : null;
@@ -247,36 +194,20 @@ export default class FlywheelTab {
     )} s, RPM: ${rpm.toFixed(3)}`;
   }
 
-  async _execute() {
+  _execute() {
     const cmd = this.command();
-    if (!cmd) return;
-    let r;
-    try {
-      r = await this.api("POST", "/api/serial/command", cmd);
-    } catch {
-      this.notify("error", "Serial command failed: server unreachable");
-      return;
-    }
-    if (!r.ok) {
-      this.notify(
-        "error",
-        r.data?.detail || `Serial command failed (HTTP ${r.status})`
-      );
-    }
+    if (cmd) request("POST", "/api/serial/command", cmd, { action: "Serial command", notify: this.notify });
   }
 
   // --------------------------------------------------------------- jog
 
-  // Pressing a button starts the backend pulse clock; releasing stops it. The
-  // clock (not these messages) paces the steps, so we send exactly one start
-  // and one stop per hold — the wrong-frequency creep of the old per-step
-  // setInterval is gone.
+  // A hold sends one start and one stop; the server's pulse clock paces the
+  // steps.
   _setupJog(button, direction) {
     button.addEventListener("pointerdown", (e) => {
       if (this.jogging) return;
-      // Capture the pointer so the hold survives the cursor leaving the
-      // button (no spurious pointerleave stop) and a second jog button
-      // cannot steal events mid-hold.
+      // Capture so the hold survives the cursor leaving the button and the
+      // other jog button can't steal events mid-hold.
       try {
         button.setPointerCapture(e.pointerId);
       } catch {
@@ -287,7 +218,7 @@ export default class FlywheelTab {
         type: "jog",
         action: "start",
         direction,
-        interval_us: this.clampInput(this.jogInterval),
+        interval_us: clampInput(this.jogInterval),
       });
     });
     const stop = (e) => {

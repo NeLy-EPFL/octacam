@@ -1,5 +1,4 @@
-/* Flywheel plugin styles. Served from /plugins/flywheel/ and injected by the
-   plugin loader. Uses the global :root CSS variables defined in core style.css. */
+/* Flywheel tab styles; the colors are core style.css's :root variables. */
 
 #loop-info {
   margin: 8px 0;

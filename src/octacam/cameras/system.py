@@ -1,27 +1,24 @@
 """Multi-camera orchestration, independent of any camera SDK.
 
-``CameraSystem`` enumerates and opens the selected backend's cameras, drives
-them in parallel (each SDK releases the GIL on its blocking calls, so opening /
-loading / starting N cameras takes about one camera's time), and owns the
-shared software-trigger timer. The backend is chosen once at construction; the
-rest of the system only ever sees :class:`~octacam.cameras.base.Camera`.
+``CameraSystem`` enumerates and opens the cameras, drives them in parallel (each
+SDK releases the GIL on its blocking calls, so N cameras take about one camera's
+time) and owns the shared software-trigger timer.
 """
 
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from octacam.cameras.base import WRITER_QUEUE_SIZE, BackendError, Camera
 from octacam.cameras.registry import (
+    BackendSpec,
     BackendUnavailable,
     resolve_backend_names,
     select_backend,
-    teardown_backend,
 )
 from octacam.pulses import PulseClock
 from octacam.transform import DisplayTransform, from_camera_config
@@ -29,7 +26,7 @@ from octacam.trigger import PreciseTimer
 from octacam.writer import VideoFormat
 
 if TYPE_CHECKING:
-    from octacam.config import CameraConfig
+    from octacam.config import CameraConfig, OctacamConfig
 
 log = logging.getLogger("octacam")
 
@@ -45,26 +42,16 @@ class CameraSystem:
         self.cameras: list[Camera] = []
         self._trigger_timer = PreciseTimer(self._trigger_all)
 
-        # What the config asked for, and which of those never came up (serial ->
-        # reason). A rig that opens 7 of 8 cameras still runs — the others are
-        # worth having — but synchronized N-camera capture is the point, so the
-        # shortfall must be visible rather than inferred from a thinner grid.
+        # What the config asked for, and which never came up (serial -> reason):
+        # a 7-of-8 rig runs, but must never look like a healthy one.
         self.requested_serial_numbers: list[str] = list(requested_serial_numbers or [])
         self.missing: dict[str, str] = {}
 
-        # ``backend`` is a selector: "auto" (the default) sweeps every installed
-        # hardware backend so one rig can mix vendors; a concrete name restricts
-        # to it. Track the backends we actually enumerate so close() releases
-        # each one's session resources (only FLIR needs it).
+        # "auto" sweeps every installed backend, so one rig can mix vendors.
         self.backend = backend
-        self._backends_used: set[str] = set()
+        self._teardowns: list[Callable[[], None]] = []  # of the tiers enumerated
 
-        # ``_defer_open`` builds an empty shell that touches no hardware — the GUI
-        # uses it as a placeholder so the web server can bind and serve the page
-        # before the (slow) camera enumeration/open runs on a background thread.
-        # The real system is built with a normal constructor and swapped in via
-        # ``RecordingController.attach_system``. See :meth:`pending`.
-        if _defer_open:
+        if _defer_open:  # see pending()
             return
 
         entries = self._enumerate(backend, requested_serial_numbers)
@@ -74,16 +61,9 @@ class CameraSystem:
         for _serial, handle, make_backend in entries:
             self.cameras.append(Camera(make_backend(handle)))
 
-        # Open in parallel: each open() blocks on USB round-trips with the GIL
-        # released, so 8 cameras open in roughly the time one used to take.
-        # A single camera that fails to open is dropped with a loud message
-        # rather than aborting the whole rig — the others still come up, exactly
-        # as a not-connected serial is skipped during enumeration and a failed
-        # camera is skipped in start_record. This also catches a camera the auto
-        # cascade's pycameleon floor claimed after a vendor tier declined it (a
-        # USB3 link that fell back to USB 2.0 opens on no backend). Only a total
-        # failure (nothing opened) is fatal; it re-raises the first error so the
-        # caller can explain it.
+        # A camera that fails to open (in use by another process, or a USB3 link
+        # that fell back to USB 2.0) is dropped loudly and the rest come up; only
+        # a total failure raises.
         failures = [
             (camera, exc)
             for camera, _result, exc in self._run_parallel(lambda c: c.open())
@@ -102,14 +82,8 @@ class CameraSystem:
         self._warn_if_incomplete()
 
     def _warn_if_incomplete(self) -> None:
-        """Say so, once and loudly, when fewer cameras opened than were asked for.
-
-        Every individual failure is already logged, but those scroll past during
-        startup and nothing compared the totals — so a rig configured for 8 and
-        running on 7 looked identical to a healthy one: the GUI simply drew a
-        smaller grid, and ``octacam record`` exited 0. The recording is then short
-        a camera, which is usually discovered days later.
-        """
+        """Warn once, loudly, when fewer cameras opened than were asked for: the
+        individual failures scroll past at startup."""
         if not self.requested_serial_numbers or not self.missing:
             return
         detail = ", ".join(
@@ -129,16 +103,38 @@ class CameraSystem:
         return bool(self.requested_serial_numbers and self.missing)
 
     @classmethod
-    def pending(cls, backend: str = "auto") -> "CameraSystem":
-        """An empty, hardware-free placeholder for deferred startup.
+    def for_config(
+        cls,
+        config: "OctacamConfig",
+        config_dir: str | Path,
+        backend: str | None = None,
+    ) -> "CameraSystem":
+        """Open the rig *config* describes (through *backend*, else the config's):
+        each camera named, its parameter file loaded and its display settings
+        applied. Raises BackendError when no camera opens.
 
-        Opens no devices and enumerates nothing; ``len()`` is 0 and iterating it
-        yields no cameras, so every consumer (snapshot, the preview loop, the
-        ``/api/system`` descriptor) reports an "initializing" system safely. The
-        GUI holds one of these while it binds the web server, then builds the
-        real :class:`CameraSystem` on a background thread and swaps it in via
-        :meth:`RecordingController.attach_system`.
-        """
+        Any failure closes the cameras before raising: a camera left open to
+        interpreter teardown can crash it (see BaslerBackend.close)."""
+        system = cls(
+            [c.serial_number for c in config.cameras], backend=backend or config.backend
+        )
+        try:
+            if not system.cameras:
+                raise BackendError("no cameras were opened")
+            names = {c.serial_number: c.name for c in config.cameras if c.name}
+            for camera in system.cameras:
+                camera.name = names.get(camera.serial_number, camera.name)
+            system.load_config(config_dir)
+            system.apply_display_config(config.cameras)
+        except BaseException:
+            system.close()
+            raise
+        return system
+
+    @classmethod
+    def pending(cls, backend: str = "auto") -> "CameraSystem":
+        """A hardware-free placeholder with no cameras, which the GUI serves until
+        its init thread swaps in the real system (``attach_system``)."""
         return cls(backend=backend, _defer_open=True)
 
     def _enumerate(
@@ -146,146 +142,64 @@ class CameraSystem:
     ) -> list[tuple[str, object, "Callable"]]:
         """Resolve the selector to ``[(serial, handle, backend_factory), ...]``.
 
-        With a single active backend (a concrete selector, or "auto" resolving to
-        one available tier) the requested serials are passed straight to that
-        backend's enumeration, preserving its ordering and its "not found"
-        warnings. With several active backends (the cascade) each is enumerated
-        in priority order over the *requested* serials (never the whole bus —
-        see the comment below), and a camera is claimed by the *first* backend
-        that reports its serial — a lower tier that also sees an already-claimed
-        serial is skipped, so a camera served by a vendor SDK is never
-        double-opened by the pycameleon floor.
+        Each tier, in cascade order, is offered only the requested serials:
+        enumeration is a device access (Basler's CreateDevice downloads the
+        camera's XML). The first tier to report a serial claims it; a None handle
+        (present but unusable) claims it without being opened. Results come in
+        requested order.
         """
-        active = []  # (name, enumerate_fn, factory), in cascade priority order
+        active: list[tuple[str, BackendSpec]] = []  # in cascade priority order
         unavailable: list[BackendUnavailable] = []
         for name in resolve_backend_names(backend):
             try:
-                enumerate_fn, make_backend, _extension = select_backend(name)
+                active.append((name, select_backend(name)))
             except BackendUnavailable as e:
                 unavailable.append(e)
-                continue
-            active.append((name, enumerate_fn, make_backend))
         if not active:
-            # An explicit backend whose SDK is missing (or an unknown name) must
-            # surface as it did before; "auto" with nothing installed is its own
-            # clear error rather than a silent empty system.
             if unavailable:
                 raise unavailable[0]
             raise BackendUnavailable(backend, "no camera backend is available")
 
-        # Release order matters for FLIR/spinnaker; record every backend we
-        # enumerate (as a set — teardown order is not significant among them).
-        self._backends_used = {name for name, _fn, _mk in active}
+        self._teardowns = [spec.teardown for _name, spec in active if spec.teardown]
 
-        if len(active) == 1:
-            name, enumerate_fn, make_backend = active[0]
-            enumerated = list(enumerate_fn(requested_serial_numbers))
-            entries = [
-                (serial, handle, make_backend)
-                for serial, handle in enumerated
-                if handle is not None  # None = present but unusable (already logged)
-            ]
-            # Record the shortfall here too, not only on the cascade path below:
-            # a rig with one concrete backend is the common case, and it is what
-            # made a missing camera visible as nothing but a smaller grid.
-            if requested_serial_numbers:
-                claimed = {serial for serial, _handle, _mk in entries}
-                unusable = {serial for serial, handle in enumerated if handle is None}
-                for serial in requested_serial_numbers:
-                    if serial in claimed:
-                        continue
-                    self.missing[serial] = (
-                        "detected but unusable"
-                        if serial in unusable
-                        else "not found"
-                    )
-            if entries:
-                log.info("Detected %d camera(s) via %s", len(entries), name)
-            return entries
-
-        # The cascade: enumerate every active tier in priority order and let the
-        # highest one claim each serial. Lower tiers still enumerate (so a camera
-        # a vendor tier missed can fall through) but skip serials already claimed.
-        #
-        # Every tier is offered the rig's *whole* requested serial list, not
-        # None. Enumeration is not free — the Basler tier's CreateDevice
-        # downloads each camera's XML over USB — so enumerating the full bus made
-        # a rig pay for cameras it would never open (a 2-camera FLIR rig paid the
-        # cost of six attached Baslers, and inherited the stall when one of them
-        # was sick). Passing the list also stops the discarded surplus handles
-        # from leaking, since they are never created. warn_missing=False because
-        # most of those serials belong to another tier; the loop below warns once
-        # for a serial that no tier claimed.
-        claimed: set[str] = set()
-        claimed_by: dict[str, str] = {}  # serial -> winning backend name (for logs)
-        collected: list[tuple[str, object, Callable]] = []
-        for name, enumerate_fn, make_backend in active:
-            for serial, handle in enumerate_fn(
-                requested_serial_numbers, warn_missing=False
-            ):
-                if serial in claimed:
+        claimed_by: dict[str, str] = {}  # serial -> the tier that claimed it
+        found: dict[str, tuple[str, object, Callable]] = {}
+        for name, spec in active:
+            for serial, handle in spec.enumerate(requested_serial_numbers):
+                if serial in claimed_by:
                     continue  # a higher-priority tier already owns this camera
-                claimed.add(serial)
-                if handle is None:
-                    # Present but unusable (e.g. a USB3 link that fell back to USB
-                    # 2.0); the backend already logged why. Claim the serial so no
-                    # lower tier pointlessly retries the same broken device, but
-                    # don't collect it for opening.
-                    continue
                 claimed_by[serial] = name
-                collected.append((serial, handle, make_backend))
+                if handle is not None:
+                    found[serial] = (serial, handle, spec.factory)
         if not requested_serial_numbers:
-            self._log_detected(collected, claimed_by)
-            return collected
-        by_serial = {entry[0]: entry for entry in collected}
-        ordered: list[tuple[str, object, Callable]] = []
-        for serial in requested_serial_numbers:
-            entry = by_serial.get(serial)
-            if entry is None:
-                # A claimed-but-unusable serial already logged its real reason;
-                # only warn for one that no tier detected at all.
-                if serial not in claimed:
+            entries = list(found.values())
+        else:
+            entries = []
+            for serial in dict.fromkeys(requested_serial_numbers):
+                if serial in found:
+                    entries.append(found[serial])
+                elif serial in claimed_by:
+                    self.missing[serial] = "detected but unusable"
+                else:
                     log.warning("Camera with serial number %s not found", serial)
                     self.missing[serial] = "not found"
-                else:
-                    self.missing[serial] = "detected but unusable"
-                continue
-            ordered.append(entry)
-        self._log_detected(ordered, claimed_by)
-        return ordered
-
-    @staticmethod
-    def _log_detected(
-        entries: list[tuple[str, object, "Callable"]], claimed_by: dict[str, str]
-    ) -> None:
-        """Log one attributed "Detected N camera(s)" line for the cascade.
-
-        Rolls the per-tier enumeration (each tier logs only at debug) into a
-        single summary that also says which backend won each camera, e.g.
-        ``Detected 3 camera(s): 2 via spinnaker, 1 via basler`` — instead of
-        the several overlapping per-tier counts that confused operators.
-        """
-        if not entries:
-            return
-        counts: dict[str, int] = {}
-        for serial, _handle, _make in entries:
-            name = claimed_by.get(serial, "?")
-            counts[name] = counts.get(name, 0) + 1
-        breakdown = ", ".join(f"{n} via {name}" for name, n in counts.items())
-        log.info("Detected %d camera(s): %s", len(entries), breakdown)
+        if entries and len(active) == 1:
+            log.info("Detected %d camera(s) via %s", len(entries), active[0][0])
+        elif entries:
+            # One line naming each camera's tier (the tiers log only at debug).
+            counts = Counter(claimed_by[serial] for serial, _h, _mk in entries)
+            breakdown = ", ".join(f"{n} via {name}" for name, n in counts.items())
+            log.info("Detected %d camera(s): %s", len(entries), breakdown)
+        return entries
 
     def _teardown_backends(self) -> None:
         """Release session resources for every backend we enumerated."""
-        for name in self._backends_used:
-            teardown_backend(name)
+        for teardown in self._teardowns:
+            teardown()
 
     @property
     def extensions(self) -> tuple[str, ...]:
-        """The distinct parameter-file suffixes across the opened cameras.
-
-        A single-vendor rig has one (``("pfs",)``); a mixed rig has several.
-        Used to glob every camera's parameter files out of a config dir.
-        """
+        """The distinct parameter-file suffixes of the opened cameras."""
         return tuple(sorted({camera.extension for camera in self.cameras}))
 
     def extension_by_serial(self) -> dict[str, str]:
@@ -304,11 +218,8 @@ class CameraSystem:
         return self.cameras[index]
 
     def apply_to_all(self, fn) -> list:
-        """Run fn(camera) across all cameras concurrently, in camera order.
-
-        Raises the first exception (e.g. a rejected parameter value) so the
-        caller can surface it; otherwise returns each camera's result.
-        """
+        """``fn(camera)`` on every camera concurrently: the results in camera
+        order, or the first exception raised."""
         results = []
         for _camera, result, exc in self._run_parallel(fn):
             if exc is not None:
@@ -325,14 +236,8 @@ class CameraSystem:
         return out
 
     def _run_parallel(self, fn):
-        """Call fn(camera) on every camera concurrently, preserving order.
-
-        Returns a list of (camera, result, exception) tuples in self.cameras
-        order; exception is None on success, otherwise the raised exception
-        (result is then None). The SDK releases the GIL during its blocking
-        calls, so the per-camera open / parameter-load / start work overlaps
-        instead of running one camera at a time.
-        """
+        """``fn(camera)`` on every camera concurrently, as ``[(camera, result,
+        exception)]`` in camera order (exception None on success)."""
         if not self.cameras:
             return []
         with ThreadPoolExecutor(
@@ -359,20 +264,13 @@ class CameraSystem:
                 camera.load_params("")
                 log.warning("Parameters file not found at %s", config_path)
 
-        # Loading a config writes many registers over USB per camera; run the
-        # cameras in parallel so the whole load takes one camera's time, not N.
         for _camera, _result, exc in self._run_parallel(load_one):
             if exc is not None:
                 raise exc
 
     def apply_display_config(self, cameras: "list[CameraConfig]") -> None:
-        """Set each camera's display transform and ROI centering from config.
-
-        The transform (rotation/flips) is baked into the video when recording
-        in "display" form; a camera absent from the config keeps the identity.
-        The center_x/center_y flags auto-derive the ROI offsets, applied via
-        set_center so an enabled axis is re-centered immediately.
-        """
+        """Set each camera's display transform and ROI centering from config (an
+        absent camera gets neither); an enabled axis re-centers now."""
         by_serial = {c.serial_number: c for c in cameras}
         for camera in self.cameras:
             cfg = by_serial.get(camera.serial_number)
@@ -392,9 +290,7 @@ class CameraSystem:
                     )
 
     def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
-        """Start preview on every camera in the given trigger mode (see
-        :meth:`Camera.start_preview`): ``"software"``, ``"free_running"`` (rate
-        capped at ``fps``), or ``"managed"`` (octacam-driven hardware trigger)."""
+        """Start preview on every camera (modes: :meth:`Camera.start_preview`)."""
         self.stop()
         for _camera, _result, exc in self._run_parallel(
             lambda camera: camera.start_preview(mode, fps)
@@ -407,30 +303,18 @@ class CameraSystem:
         save_dir: str | Path,
         fps: float,
         video_format: VideoFormat | list[VideoFormat],
+        clock: PulseClock,
+        *,
         record_form: str = "display",
-        use_software_trigger: bool = True,
         writer_queue_size: int = WRITER_QUEUE_SIZE,
-        max_frames: int | None = None,
-        pulse_clock: PulseClock | None = None,
         hold: bool = False,
     ) -> list[str]:
-        """Start recording on all cameras; return the names that started.
+        """Start a take on every camera (each camera's ``take``, even one that
+        fails to start); return the names that started.
 
-        A single camera failing (writer open, trigger-ready timeout, or a
-        start "insufficient resources" error) no longer abandons the others
-        half-started: it is logged and skipped. ``use_software_trigger`` is
-        forwarded so an external-trigger recording fetches frames without the
-        software-trigger hand-off (see :meth:`Camera.start_record`).
-        ``writer_queue_size`` bounds each camera's frame buffer to the encoder.
-        ``pulse_clock`` is the trigger train every camera's frames are assigned
-        to (see :meth:`Camera.start_record`; ``max_frames`` is the legacy fixed
-        frame count it replaces), and ``hold`` has each camera discard frames
-        until :meth:`arm_counting`, for priming.
-
-        ``video_format`` may be a single format used for every camera, or a list
-        with one format per camera (positionally, matching ``self.cameras``) so a
-        GPU recording can encode some cameras on NVENC and the overflow on CPU
-        (see :func:`octacam.writer.resolve_capture_formats`).
+        Arguments as :meth:`Camera.start_record`. ``video_format`` is one format,
+        or one per camera in ``self.cameras`` order (a GPU recording's overflow
+        goes to the CPU, see :func:`octacam.writer.resolve_capture_formats`).
         """
         self.stop()
 
@@ -453,22 +337,16 @@ class CameraSystem:
                 str(save_path),
                 fps,
                 fmt,
-                record_form,
-                software_trigger=use_software_trigger,
+                clock,
+                record_form=record_form,
                 queue_size=writer_queue_size,
-                max_frames=max_frames,
-                pulse_clock=pulse_clock,
                 hold=hold,
             )
 
-        # Start every camera at once so they begin grabbing closer together
-        # (and the operator waits one start, not eight back to back).
         started: list[str] = []
         for camera, ok, exc in self._run_parallel(record_one):
-            # Log-and-skip EVERY per-camera failure (not just BackendError): the
-            # other cameras have already launched their grab thread + ffmpeg
-            # child, so re-raising here would abandon them half-started. An
-            # unexpected (non-BackendError) failure still gets a full traceback.
+            # Log and skip every failure: raising would abandon the others' grab
+            # threads and ffmpeg children half-started.
             if exc is not None:
                 log.error(
                     "Camera %s failed to start recording",
@@ -496,50 +374,26 @@ class CameraSystem:
         for camera in self.cameras:
             camera.set_trigger_source(use_software_trigger)
 
-    @property
-    def all_cameras_started(self) -> bool:
-        return all(camera.started for camera in self.cameras)
-
-    def get_frames_and_fps(self) -> list[tuple[np.ndarray | None, float]]:
-        return [
-            (camera.frame_for_display.pop(), camera.resulting_fps)
-            for camera in self.cameras
-        ]
-
-    def arm_counting(self) -> None:
-        """Start counting pulses on every camera (ends a priming hold)."""
-        for camera in self.cameras:
-            camera.arm_counting()
-
     def prime_software_trigger(self, pulses: int, fps: float, timeout_s: float = 1.0) -> None:
-        """Fire ``pulses`` sacrificial software triggers at every recording camera.
-
-        A camera may ignore the first triggers after its acquisition starts (a
-        FLIR Grasshopper3 ignores two), so a software-triggered recording spends
-        a few before its first counted one; their frames are discarded under the
-        record grab's priming hold. Returns once each camera has fired them."""
+        """Fire ``pulses`` sacrificial software triggers at every camera (a GS3
+        ignores its first triggers after acquisition start); their frames are
+        discarded under the priming hold."""
         interval = 1.0 / fps if fps > 0 else 0.01
         for _ in range(pulses):
             self._trigger_all()
-            # One at a time: the next only once every camera has fired this one.
-            # A camera ignoring its first triggers answers none of them and waits
-            # out each one's (short) answer deadline, so firing at the interval
-            # regardless overflowed the hand-off's backlog and dropped the rest.
+            # One at a time: a camera ignoring its first triggers waits out each
+            # one's answer deadline, so firing at the fps would overflow its
+            # PENDING_MAX and drop the rest.
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
-                if all(getattr(c.backend, "_pending", 0) == 0 for c in self.cameras):
+                if all(c.backend.trigger.pending == 0 for c in self.cameras):
                     break
                 time.sleep(0.002)
             time.sleep(interval)
 
-    @property
-    def all_pulses_complete(self) -> bool:
-        """True once every camera has accounted for its train's last pulse."""
-        return bool(self.cameras) and all(c.pulses_complete for c in self.cameras)
-
     def stop(self, fill_to: int | None = None) -> None:
-        """Stop every grab loop. ``fill_to`` (a completed train's pulse count)
-        pads each recording camera's video to that many frames."""
+        """Stop and join every grab loop. ``fill_to`` (a completed train's pulse
+        count) pads each recording camera's video to that many frames."""
         for camera in self.cameras:
             camera.stop(fill_to)
         for camera in self.cameras:

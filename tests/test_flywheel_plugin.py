@@ -3,37 +3,46 @@
 import threading
 import time
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from helpers import wait_until
 
+from octacam.plugins.base import PluginManager
 from octacam.plugins.flywheel import (
     COMMAND_FIELDS,
     JOG_DEFAULT_INTERVAL_US,
     JOG_MAX_INTERVAL_US,
     JOG_MIN_INTERVAL_US,
     Command,
+    FlywheelLink,
     FlywheelPlugin,
     JogClock,
     _clamp_jog_interval_us,
 )
 
 
-class FakeLink:
-    """Stand-in for SerialLink that records writes (no pyserial needed)."""
+class FakeLink(FlywheelLink):
+    """The real link over no port: it records the commands written and answers
+    identify with ``banner``."""
 
     def __init__(self, is_open=True):
+        super().__init__(lambda: None)
         self._open = is_open
         self._lock = threading.Lock()  # writes arrive from the jog clock thread
         self.written: list[bytes] = []
+        self.banner: str | None = None
 
     @property
     def is_open(self) -> bool:
         return self._open
 
-    def write_command(self, command: Command) -> None:
+    def _write(self, data: bytes) -> bool:
         with self._lock:
-            if self._open:  # mirror SerialLink: writes no-op once closed
-                self.written.append(command.to_bytes())
+            if not self._open:  # writes no-op once closed
+                return False
+            self.written.append(data)
+            return True
 
     def open(self, device, baud) -> None:
         self._open = True
@@ -41,23 +50,13 @@ class FakeLink:
     def close(self) -> None:
         self._open = False
 
-    def identify(self, banner_prefix, timeout=0.5):
-        # Tests set `link.banner` to control the classified firmware state.
-        return getattr(self, "banner", None)
+    def identify(self, timeout=0.5):
+        self.identity = self.banner
+        return self.banner
 
     def snapshot(self) -> list[bytes]:
         with self._lock:
             return list(self.written)
-
-
-def _wait(predicate, timeout=1.0):
-    """Poll until predicate() is true (jog start/stop are non-blocking)."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.005)
-    return False
 
 
 # ------------------------------------------------------------- wire format
@@ -84,9 +83,12 @@ def test_single_step_commands():
     assert Command(n_steps=0).to_bytes() == b"\x00" * 8
 
 
-def test_command_from_payload():
+def test_command_parse():
     payload = dict.fromkeys(COMMAND_FIELDS, 1)
-    assert Command.from_payload(payload) == Command(*([1] * 5))
+    assert Command.parse(payload) == Command(*([1] * 5))
+    assert Command.parse({**payload, "n_repeats": 300}) is None  # > uint8
+    assert Command.parse({**payload, "n_steps": "spin"}) is None
+    assert Command.parse({"n_steps": 1}) is None  # fields missing
 
 
 # --------------------------------------------------------- recording hooks
@@ -97,13 +99,11 @@ def test_on_first_frame_writes_armed_command():
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
         {
-            "flywheel": {
-                "n_steps": -4096,
-                "step_interval_us": 1465,
-                "rest_duration_ms": 1000,
-                "n_repeats": 3,
-                "init_wait_duration_s": 10,
-            }
+            "n_steps": -4096,
+            "step_interval_us": 1465,
+            "rest_duration_ms": 1000,
+            "n_repeats": 3,
+            "init_wait_duration_s": 10,
         }
     )
     assert link.written == [b"\x00\xf0\xb9\x05\xe8\x03\x03\x0a"]
@@ -114,27 +114,23 @@ def test_on_first_frame_without_params_is_noop():
     plugin._link = link = FakeLink()
     plugin.on_first_frame(None)
     plugin.on_first_frame({})
-    plugin.on_first_frame({"other_plugin": {"n_steps": 1}})
-    plugin.on_first_frame({"flywheel": {"bogus": "field"}})  # malformed -> skipped
+    PluginManager([plugin]).on_first_frame({"other_plugin": {"n_steps": 1}})
+    plugin.on_first_frame({"bogus": "field"})  # malformed -> skipped
     assert link.written == []
 
 
 def test_on_first_frame_skips_out_of_range_command():
-    # Fix 8: an out-of-range wire field (n_steps beyond int16, etc.) makes
-    # to_bytes() raise struct.error; the recording path must reject it the same
-    # way the /api/serial/command endpoint does, not let struct.error escape
-    # through write_command and silently drop the stepper motion.
+    # An out-of-range wire field is rejected up front, not left to raise
+    # struct.error in write_command and silently drop the motion.
     plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     plugin.on_first_frame(
         {
-            "flywheel": {
-                "n_steps": 40000,  # > int16 max
-                "step_interval_us": 70000,  # > uint16 max
-                "rest_duration_ms": 0,
-                "n_repeats": 300,  # > uint8 max
-                "init_wait_duration_s": 0,
-            }
+            "n_steps": 40000,  # > int16 max
+            "step_interval_us": 70000,  # > uint16 max
+            "rest_duration_ms": 0,
+            "n_repeats": 300,  # > uint8 max
+            "init_wait_duration_s": 0,
         }
     )  # must not raise
     assert link.snapshot() == []  # invalid command dropped, nothing written
@@ -164,16 +160,14 @@ def _stop_jog(plugin, client_id=1):
 
 def _released(link):
     """True once the clock has stopped and written its coil-release."""
-    return _wait(lambda: link.snapshot()[-1:] == [RELEASE])
+    return wait_until(lambda: link.snapshot()[-1:] == [RELEASE])
 
 
 # --- the configured loop command (config <-> snapshot) -----------------------
 
 
 def _configured(**command):
-    from octacam.plugins.flywheel import _build
-
-    return _build({"device": "/dev/null", "command": command} if command else {})
+    return FlywheelPlugin.from_options({"device": "/dev/null", "command": command} if command else {})
 
 
 _RIG_COMMAND = {
@@ -201,21 +195,19 @@ def test_configured_command_tolerates_a_partial_or_bad_table():
     assert _configured(n_steps=999_999)._command is None
     assert _configured(n_steps="spin")._command is None
 
-    from octacam.plugins.flywheel import _build
-
-    assert _build({"command": ["not", "a", "table"]})._command is None
+    assert FlywheelPlugin.from_options({"command": ["not", "a", "table"]})._command is None
 
 
 def test_snapshot_options_carry_the_armed_loop_command():
     plugin = _configured(**_RIG_COMMAND)
     # Armed with what the config says, or not armed at all: nothing to record.
-    assert plugin.snapshot_options({"flywheel": dict(_RIG_COMMAND)}) is None
+    assert plugin.snapshot_options(dict(_RIG_COMMAND)) is None
     assert plugin.snapshot_options(None) is None
     # Edited in the tab: the snapshot carries what this recording actually ran.
     edited = {**_RIG_COMMAND, "n_repeats": 9}
-    assert plugin.snapshot_options({"flywheel": edited}) == {"command": edited}
+    assert plugin.snapshot_options(edited) == {"command": edited}
     # A rig with no configured command records the armed one too.
-    assert _configured().snapshot_options({"flywheel": edited}) == {"command": edited}
+    assert _configured().snapshot_options(edited) == {"command": edited}
 
 
 def test_clamp_jog_interval():
@@ -245,7 +237,7 @@ def test_jog_direction_sign():
     plugin = FlywheelPlugin()
     plugin._link = link = FakeLink()
     _start_jog(plugin, -1)
-    assert _wait(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
+    assert wait_until(lambda: link.snapshot()[:1] == [Command(n_steps=-1).to_bytes()])
     _stop_jog(plugin)
 
 
@@ -295,11 +287,9 @@ def test_jog_restart_switches_direction():
 
 
 def test_jog_finally_release_is_atomic_with_start():
-    # Fix 9: the generation compare + coil-release write in _run's finally happen
-    # together under _lock, so a concurrent start() (which bumps the generation
-    # under the same lock) can't slip in between the compare and the release. We
-    # observe this by blocking inside the release write and asserting start()'s
-    # lock is unavailable while the release is in flight.
+    # The generation compare and the coil release happen together under _lock,
+    # so a concurrent start() cannot slip in between: block inside the release
+    # write and check the lock is held.
     gate = threading.Event()
     in_release = threading.Event()
 
@@ -325,8 +315,8 @@ def test_jog_finally_release_is_atomic_with_start():
 
 
 def test_jog_superseded_thread_suppresses_release():
-    # Fix 9 (guard still honoured under the lock): a thread whose captured
-    # generation is stale must NOT release coils a newer jog now owns.
+    # A thread whose captured generation is stale must not release coils a
+    # newer jog owns.
     writes: list[bytes] = []
     clock = JogClock(write=lambda cmd: writes.append(cmd.to_bytes()))
     clock._generation = 2  # a newer jog has already taken over
@@ -360,7 +350,7 @@ def test_jog_other_client_disconnect_keeps_it_running():
     time.sleep(0.02)
     assert RELEASE not in link.snapshot()
     n = len(link.snapshot())
-    assert _wait(lambda: len(link.snapshot()) > n)  # A still being pulsed
+    assert wait_until(lambda: len(link.snapshot()) > n)  # A still being pulsed
     plugin.on_ws_disconnect(1)  # the owner drops -> stops
     assert _released(link)
 
@@ -477,25 +467,7 @@ def test_serial_command_endpoint_422_on_bad_payload():
 # Firmware provisioning: identity (sentinel), classification, flash, endpoints
 # ---------------------------------------------------------------------------
 
-import pytest  # noqa: E402
-
-import octacam.firmware as fw_mod  # noqa: E402
-from octacam.plugins.flywheel import _IDENTIFY_MARKER, _build  # noqa: E402
-
-
-@pytest.fixture(autouse=True)
-def _no_real_flash(monkeypatch):
-    """Never shell out to arduino-cli or poll a real /dev node; deterministic can_flash."""
-    monkeypatch.setattr(fw_mod, "arduino_cli_path", lambda: "/fake/arduino-cli")
-    monkeypatch.setattr("octacam.serial_ports.wait_for_device", lambda device, timeout=3.0: True)
-
-    def _fake_flash(spec, port, needed_build, **kwargs):
-        return fw_mod.FlashResult(
-            True, f"uploaded build {needed_build} to {port}", "compiled\nuploaded",
-            build=needed_build,
-        )
-
-    monkeypatch.setattr(fw_mod, "flash", _fake_flash)
+from octacam.plugins.flywheel import _IDENTIFY_MARKER  # noqa: E402
 
 
 def _plugin_with_fake(is_open=True):
@@ -507,7 +479,7 @@ def _plugin_with_fake(is_open=True):
 
 def _verify_with_banner(plugin, link, banner):
     link.banner = banner
-    plugin._verify_identity()
+    plugin._identify()
 
 
 def test_identify_sentinel_is_a_harmless_release_command():
@@ -520,19 +492,19 @@ def test_identify_sentinel_is_a_harmless_release_command():
 
 def test_identify_current_and_outdated():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, f"FLYWHEEL 1 {plugin._fw.needed_build}")
-    assert plugin._firmware_ok
+    _verify_with_banner(plugin, link, f"FLYWHEEL 1 {plugin.needed_build}")
+    assert plugin.firmware_ok
     assert plugin.firmware_provisioning()["state"] == "current"
 
     _verify_with_banner(plugin, link, "FLYWHEEL 1")
-    assert plugin._firmware_ok  # command protocol unchanged -> still drivable
+    assert plugin.firmware_ok  # command protocol unchanged -> still drivable
     assert plugin.firmware_provisioning()["state"] == "outdated"
 
 
 def test_identify_unidentified_still_drives():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, None)  # old firmware: no reply
-    assert plugin._firmware_ok
+    assert plugin.firmware_ok
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "unidentified"
     assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
@@ -541,7 +513,7 @@ def test_identify_unidentified_still_drives():
 def test_flash_firmware_success():
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, None)  # out of date / unidentified
-    link.banner = f"FLYWHEEL 1 {plugin._fw.needed_build}"
+    link.banner = f"FLYWHEEL 1 {plugin.needed_build}"
     result = plugin.flash_firmware()
     assert result.ok
     assert plugin.firmware_provisioning()["needs_flash"] is False
@@ -562,16 +534,16 @@ def test_firmware_and_flash_endpoints():
     body = client.get("/api/flywheel/firmware").json()
     assert body["state"] == "outdated" and body["needs_flash"] is True
 
-    link.banner = f"FLYWHEEL 1 {plugin._fw.needed_build}"
+    link.banner = f"FLYWHEEL 1 {plugin.needed_build}"
     flashed = client.post("/api/flywheel/flash", json={}).json()
     assert flashed["ok"] is True
     assert flashed["provisioning"]["needs_flash"] is False
 
 
 def test_build_reads_fqbn_and_auto_flash():
-    p = _build({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
-    assert p._auto_flash is True
-    assert p._fw.spec.fqbn == "arduino:avr:nano"
+    p = FlywheelPlugin.from_options({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
+    assert p.auto_flash is True
+    assert p.firmware_spec.fqbn == "arduino:avr:nano"
 
 
 # --- headless arming (octacam record) --------------------------------------- #
@@ -597,7 +569,7 @@ def test_default_start_params_returns_the_configured_command():
     slice_ = plugin.default_start_params(fps=100.0, duration_s=10.0)
     assert slice_ == asdict(command)
     # Round-trips through the same path on_first_frame uses.
-    assert Command.from_payload(slice_) == command
+    assert Command.parse(slice_) == command
 
 
 def test_default_start_params_is_none_without_a_configured_command():
@@ -620,6 +592,51 @@ def test_configured_command_arms_on_first_frame_headlessly():
     written = []
     plugin._link = type("L", (), {"write_command": lambda _s, c: written.append(c)})()
 
-    params = {plugin.name: plugin.default_start_params(100.0, 10.0)}
-    plugin.on_first_frame(params)
+    manager = PluginManager([plugin])
+    manager.on_first_frame(manager.default_start_params(100.0, 10.0))
     assert written == [command]
+
+
+class _BoardSerial:
+    """A pyserial double for the stepper board: it answers the identify sentinel
+    with ``banner`` (None: an older, silent firmware) and records the rest."""
+
+    in_waiting = 0
+
+    def __init__(self, banner):
+        self.is_open = True
+        self.commands: list[bytes] = []
+        self._banner = banner
+        self._reply = b""
+
+    def write(self, data) -> int:
+        if bytes(data) == FlywheelLink.identify_query:
+            self._reply = f"{self._banner}\n".encode() if self._banner else b""
+        else:
+            self.commands.append(bytes(data))
+        return len(data)
+
+    def read(self, n: int = 1) -> bytes:
+        reply, self._reply = self._reply, b""
+        if not reply:
+            time.sleep(0.01)
+        return reply
+
+    def close(self) -> None:
+        self.is_open = False
+
+
+@pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc12345", None])
+def test_link_identify_answers_the_sentinel_and_still_takes_commands(monkeypatch, banner):
+    import serial
+
+    board = _BoardSerial(banner)
+    monkeypatch.setattr(serial, "Serial", lambda *a, **k: board)
+    link = FlywheelLink(lambda: None)
+    link.open("/dev/fake", 115200)
+    try:
+        assert link.identify(timeout=0.3) == banner  # blocks for the reply or the timeout
+        link.write_command(Command(n_steps=1))
+        assert board.commands == [Command(n_steps=1).to_bytes()]
+    finally:
+        link.close()

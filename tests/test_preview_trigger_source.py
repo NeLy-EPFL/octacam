@@ -7,16 +7,14 @@ back-compat promotion of a legacy external+driving-plugin rig to ``managed``.
 No hardware/SDK — a fake camera system + a stub driving plugin.
 """
 
-import os
 import threading
-import time
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import pytest
+from helpers import wait_until
 
 from octacam.cameras import CameraSystem
-from octacam.controller import RecordingController, RecordingSettings, StartResult
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController, StartResult
 from octacam.plugins.base import Plugin, PluginManager
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
@@ -27,14 +25,12 @@ class DrivingPlugin(Plugin):
     trigger during preview and records the arm/disarm calls it receives."""
 
     name = "faketrigger"
+    generates_trigger = True
 
     def __init__(self):
         self.preview_starts = 0
         self.preview_stops = 0
         self.last_params = None
-
-    def drives_preview_trigger(self) -> bool:
-        return True
 
     def on_preview_start(self, params) -> None:
         self.preview_starts += 1
@@ -150,12 +146,12 @@ def test_free_running_preview_caps_the_backend_and_flows_frames(make_controller)
         assert getattr(camera.backend, "_freerun_fps", None) == 50.0
     # retrieve_freerun actually delivers frames — timestamps accumulate even with
     # no display consumer popping the single-slot handoff.
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and not any(
-        c.frames_recorded > 1 for c in system
-    ):
-        time.sleep(0.05)
-    assert any(c.frames_recorded > 1 for c in system)
+    wait_until(
+        lambda: any(len(c.preview_timestamps) > 1 for c in system),
+        timeout=3.0,
+        interval=0.05,
+    )
+    assert any(len(c.preview_timestamps) > 1 for c in system)
 
 
 def test_software_preview_does_not_freerun(make_controller):
@@ -173,7 +169,7 @@ def test_managed_preview_arms_driving_plugin(make_controller):
     assert controller._effective_preview_mode() == "managed"
     assert plugin.preview_starts == 1
     # The controller hands the plugin its recording arm slice to reuse.
-    assert plugin.last_params == {"faketrigger": {"fps": 50, "duration_ms": 20000}}
+    assert plugin.last_params == {"fps": 50, "duration_ms": 20000}
 
 
 def test_non_managed_preview_disarms_driving_plugin(make_controller):
@@ -349,8 +345,10 @@ def test_camera_ops_are_refused_while_the_preview_arm_is_being_canceled(
         assert second.status == StartResult.BUSY
         assert "starting" in second.message
         assert controller.run_diagnostic().status == StartResult.BUSY
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="starting"):
             controller.update_settings(fps=60.0)
+        with pytest.raises(ValueError):  # a bad change is rejected as such
+            controller.update_settings(fps=0)
         with pytest.raises(RuntimeError):
             controller.start_preview()
         assert controller.get_settings().fps == 50.0

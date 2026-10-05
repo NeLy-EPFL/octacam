@@ -65,7 +65,9 @@ octacam doctor --backend flir
 ## Dropped frames and missed trigger pulses
 
 Run `octacam check <recording or directory>` — it lists every camera's missed
-pulses, unequal frame counts and start offsets. In `recording_summary.json`:
+pulses, unequal frame counts and start offsets. In the recording's
+`octacam_recording/recording_summary.json` (flat beside the videos in a recording
+made before that subfolder existed):
 
 - `writer_dropped` counts frames the **encoder/writer queue** could not accept.
   If you see these, the machine is CPU-bound — check whether an `octacam process`
@@ -91,6 +93,18 @@ whether the fault follows the cable or the camera.
 mounted/present or isn't writable (local recording still works either way). Mount
 the share or fix permissions, then re-run — transfers **resume**, redoing at most
 the one in-progress file. See [Processing → Transfer](../guide/processing.md#transfer).
+
+## Videos play as flat gray frames
+
+Videos recorded with `-pix_fmt gray` (the default before 0.3.4) are monochrome
+4:0:0 H.264. NVIDIA's hardware decoder shows these as a uniform gray frame,
+and VLC uses that decoder by default on an NVIDIA machine. Software decoders
+(ffmpeg, OpenCV, analysis tools) read them correctly. octacam now writes
+full-range 4:2:0, even for configs and recording snapshots that still say
+`gray`, so `octacam process` turns an older recording into an MP4 that plays
+everywhere. To view an old `.mkv` directly, turn off hardware decoding in VLC
+(*Tools → Preferences → Input / Codecs → Hardware-accelerated decoding →
+Disable*).
 
 ## Colour looks wrong after transcoding
 

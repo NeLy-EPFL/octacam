@@ -1,22 +1,24 @@
-"""SpinnakerBackend node/param mapping, with the ctypes binding faked.
+"""FlirBackend over the ctypes binding's shape, with the binding faked.
 
-No Spinnaker SDK or hardware: the module-level ``_Spinnaker`` binding (which is
-the only thing that touches ``libSpinnaker_C.so`` via ctypes) is replaced by a
-fake that operates on in-memory node maps, so the SFNC → NodeInfo mapping, the
+No Spinnaker SDK or hardware: the module-level binding (the only thing that
+touches ``libSpinnaker_C.so``) is replaced by a :class:`FlirBinding` whose
+primitives operate on in-memory node maps, so the shared node-map walker, the
 param round-trip, the software-trigger hand-off, the frame retrieve, the clean
-close, and the enumerate handle-release are all exercised in pure Python: the
+close, and the session's handle release are all exercised in pure Python: the
 real ctypes ABI is exercised only by the on-rig hardware verification.
 """
 
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+import octacam.cameras.flir as flir
 import octacam.cameras.spinnaker_c as sc
-from octacam.cameras._genicam_config import parse_config
-from octacam.cameras.base import BackendError, FeatureInfo, NodeInfo
-from octacam.cameras.spinnaker_c import SpinnakerBackend
+from octacam.cameras.base import BackendError
+from octacam.cameras.flir import MIN_STREAM_BUFFERS, FlirBackend, FlirBinding
+from octacam.cameras.genicam import parse_config
 
 
 # --------------------------------------------------------------------- fakes
@@ -48,12 +50,19 @@ class FakeEnum:
 
 
 class FakeBool:
-    """A boolean node (the native-TSV config persists these via _set/_get_bool)."""
+    """A boolean node (the native-TSV config persists these)."""
 
     def __init__(self, value, writable=True):
         self.value = bool(value)
         self.readable = True
         self.writable = writable
+
+
+class FakeString:
+    def __init__(self, value):
+        self.value = value
+        self.readable = True
+        self.writable = False
 
 
 class FakeCommand:
@@ -106,66 +115,120 @@ class FakeCam:
         self.next_image: FakeImage | None = None
 
 
-class FakeSpin:
-    """Stand-in for the ctypes ``_Spinnaker`` binding.
+class FakeSpin(FlirBinding):
+    """Stand-in for the ctypes binding: its primitives over Python objects. A
+    node handle is ``(name, node)``; Root is a category of every node, and the
+    C API's gaps are mirrored (no int unit, no float increment)."""
 
-    Every method takes the same opaque handles the real one does (here plain
-    Python objects) and returns the same Python values, raising ``BackendError``
-    where the real binding would on a non-success ``spinError``.
-    """
+    tier = "spinnaker"
 
     def __init__(self):
+        super().__init__()
         self.cameras: list[FakeCam] = []
+        self.system_released = False
 
-    # system / camera list
-    def get_system(self):
+    # GenApi
+    def node(self, nodemap, name):
+        if name == "Root":
+            return ("Root", nodemap)
+        obj = getattr(nodemap, name, None)
+        return None if obj is None else (name, obj)
+
+    def children(self, category):
+        return list(vars(category[1]).items())
+
+    def kind(self, node):
+        obj = node[1]
+        if isinstance(obj, FakeNodeMap):
+            return "category"
+        for cls, kind in ((FakeCommand, "command"), (FakeBool, "bool"),
+                          (FakeEnum, "enum"), (FakeString, "string")):
+            if isinstance(obj, cls):
+                return kind
+        if isinstance(obj, FakeNode):
+            return "int" if isinstance(obj.value, int) else "float"
+        return None
+
+    def name(self, node):
+        return node[0]
+
+    def display_name(self, node):
+        return node[0]
+
+    def tooltip(self, node):
+        return None
+
+    def visibility(self, node):
+        return "beginner"
+
+    def readable(self, node):
+        return getattr(node[1], "readable", False)
+
+    def writable(self, node):
+        return getattr(node[1], "writable", False)
+
+    def value(self, node, kind):
+        cast = {"int": int, "float": float, "bool": bool}.get(kind, lambda v: v)
+        return cast(node[1].value)
+
+    def bounds(self, node, kind):
+        obj = node[1]
+        if kind == "int":
+            return (obj.min, obj.max, obj.inc, None)
+        return (obj.min, obj.max, None, obj.unit)
+
+    def entries(self, node):
+        return [(entry, True) for entry in node[1].entries]
+
+    def write(self, node, kind, value):
+        node[1].value = value
+
+    def execute(self, node):
+        node[1].executed += 1
+
+    # System / camera list
+    def _get_system(self):
         return "SYSTEM"
 
-    def system_release_instance(self, hsystem):
-        self.system_released = True
-
-    def create_camera_list(self):
+    def _camera_list(self, system):
         return "CAMLIST"
 
-    def system_get_cameras(self, hsystem, hcamlist):
+    def _cameras(self, cam_list):
+        return list(self.cameras)
+
+    def _clear_camera_list(self, cam_list):
         pass
 
-    def camera_list_size(self, hcamlist):
-        return len(self.cameras)
+    def _release_system(self, system):
+        self.system_released = True
 
-    def camera_list_get(self, hcamlist, index):
-        return self.cameras[index]
-
-    def camera_list_clear(self, hcamlist):
-        pass
-
-    def camera_list_destroy(self, hcamlist):
-        pass
-
-    def read_serial(self, cam):
-        return cam.serial
-
-    # camera lifecycle
-    def camera_init(self, cam):
-        cam.initialized = True
-
-    def camera_deinit(self, cam):
-        cam.initialized = False
-
-    def camera_release(self, cam):
+    def _release(self, cam):
         cam.released = True
 
-    def camera_is_initialized(self, cam):
+    # camera lifecycle
+    def init(self, cam):
+        cam.initialized = True
+
+    def deinit(self, cam):
+        cam.initialized = False
+
+    def is_initialized(self, cam):
         return cam.initialized
 
-    def camera_is_streaming(self, cam):
+    def is_streaming(self, cam):
         return cam.streaming
 
-    def camera_get_nodemap(self, cam):
+    def nodemap(self, cam):
         return cam.nodemap
 
-    def camera_get_tl_stream_nodemap(self, cam):
+    def stream_nodemap(self, cam):
         return cam.stream_nodemap
+
+    def tl_device_nodemap(self, cam):
+        return SimpleNamespace(DeviceSerialNumber=FakeString(cam.serial))
+
+    def device_id(self, cam):
+        return ""
 
     def begin_acquisition(self, cam):
         cam.streaming = True
@@ -173,131 +236,8 @@ class FakeSpin:
     def end_acquisition(self, cam):
         cam.streaming = False
 
-    # node I/O
-    def read_number(self, nodemap, name, is_int):
-        node = getattr(nodemap, name, None)
-        if node is None or not node.readable:
-            raise BackendError(f"node {name} is not readable")
-        if is_int:
-            return NodeInfo(
-                value=int(node.value),
-                min=node.min,
-                max=node.max,
-                inc=node.inc,
-                unit=None,
-                writable=node.writable,
-            )
-        return NodeInfo(
-            value=float(node.value),
-            min=node.min,
-            max=node.max,
-            inc=None,
-            unit=node.unit,
-            writable=node.writable,
-        )
-
-    def write_number(self, nodemap, name, value, is_int):
-        node = getattr(nodemap, name, None)
-        if node is None or not node.writable:
-            raise BackendError(f"node {name} is not writable")
-        node.value = int(value) if is_int else float(value)
-
-    def set_enum(self, nodemap, name, value):
-        node = getattr(nodemap, name, None)
-        if node is None or not node.writable:
-            raise BackendError(f"enumeration {name} is not writable")
-        node.value = value
-
-    def get_enum(self, nodemap, name):
-        node = getattr(nodemap, name, None)
-        return node.value if node is not None else None
-
-    def set_bool(self, nodemap, name, value):
-        node = getattr(nodemap, name, None)
-        if node is None or not node.writable:
-            raise BackendError(f"boolean {name} is not writable")
-        node.value = bool(value)
-
-    def get_bool(self, nodemap, name):
-        node = getattr(nodemap, name, None)
-        return bool(node.value) if node is not None and node.readable else None
-
-    def read_string(self, nodemap, name):
-        # e.g. DeviceModelName in save_params(); absent on the fake node map -> None.
-        node = getattr(nodemap, name, None)
-        return getattr(node, "value", None) if node is not None else None
-
-    def execute_command(self, nodemap, name):
-        node = getattr(nodemap, name, None)
-        if node is None:
-            raise BackendError(f"command {name} not found")
-        node.executed += 1
-
-    # full node-map walk (Camera tab). The real facade traverses the GenApi
-    # category tree over ctypes; here we synthesize a FeatureInfo per fake node so
-    # the backend delegation + widget-kind mapping are exercised in pure Python.
-    def _feature_from(self, name, node):
-        if isinstance(node, FakeCommand):
-            return FeatureInfo(name, name, "command", category="Other")
-        if isinstance(node, FakeBool):
-            return FeatureInfo(
-                name, name, "bool", category="Other",
-                value=node.value, readable=node.readable, writable=node.writable,
-            )
-        if isinstance(node, FakeEnum):
-            entries = [{"value": e, "display": e, "available": True} for e in node.entries]
-            return FeatureInfo(
-                name, name, "enum", category="Other", value=node.value,
-                entries=entries, readable=node.readable, writable=node.writable,
-            )
-        if isinstance(node, FakeNode):
-            kind = "int" if isinstance(node.value, int) else "float"
-            # The real facade gives int nodes an increment but no unit, and float
-            # nodes a unit but no increment (the C API has no spinFloatGetInc /
-            # spinIntegerGetUnit) — mirror that so the fake is not more permissive.
-            return FeatureInfo(
-                name, name, kind, category="Other", value=node.value,
-                min=node.min, max=node.max,
-                inc=(node.inc if kind == "int" else None),
-                unit=(None if kind == "int" else node.unit),
-                readable=node.readable, writable=node.writable,
-            )
-        return None
-
-    def list_features(self, nodemap):
-        out = []
-        for name, node in vars(nodemap).items():
-            feature = self._feature_from(name, node)
-            if feature is not None:
-                out.append(feature)
-        return out
-
-    def read_feature(self, nodemap, name):
-        node = getattr(nodemap, name, None)
-        if node is None:
-            raise BackendError(f"node {name} is not an editable feature")
-        feature = self._feature_from(name, node)
-        if feature is None:
-            raise BackendError(f"node {name} is not an editable feature")
-        return feature
-
-    def write_feature(self, nodemap, name, value):
-        node = getattr(nodemap, name, None)
-        if node is None:
-            raise BackendError(f"no such node: {name}")
-        if not getattr(node, "writable", False):
-            raise BackendError(f"node {name} is not writable")
-        if isinstance(node, FakeBool):
-            node.value = str(value).strip().lower() in ("1", "true", "yes", "on") if isinstance(value, str) else bool(value)
-        elif isinstance(node, FakeEnum):
-            node.value = str(value)
-        elif isinstance(node, FakeNode):
-            node.value = int(round(float(value))) if isinstance(node.value, int) else float(value)
-        else:
-            raise BackendError(f"node {name} is not writable")
-
     # imaging
-    def get_next_image(self, cam, timeout_ms):
+    def next_image(self, cam, timeout_ms):
         return cam.next_image
 
     def image_incomplete(self, image):
@@ -306,10 +246,9 @@ class FakeSpin:
     def image_timestamp(self, image):
         return image.timestamp
 
-    def image_bits_per_pixel(self, image):
-        return image.bits
-
     def image_array(self, image):
+        if image.bits != 8:
+            raise BackendError(f"{image.bits}-bpp (non-Mono8) frame")
         return np.array(image.array, copy=True)
 
     def image_release(self, image):
@@ -318,17 +257,18 @@ class FakeSpin:
 
 @pytest.fixture(autouse=True)
 def fake_facade(monkeypatch):
-    """Swap the real ctypes binding for the fake and reset session globals."""
-    monkeypatch.setattr(sc, "_facade", FakeSpin())
-    monkeypatch.setattr(sc, "_system", None)
-    monkeypatch.setattr(sc, "_cam_list", None)
-    monkeypatch.setattr(sc, "_outstanding", {})
-    yield sc._facade
+    """Swap the real ctypes binding for the fake."""
+    monkeypatch.setattr(sc, "_binding", FakeSpin())
+    yield sc._binding
+
+
+def _backend(cam):
+    return FlirBackend(sc._spin(), cam)
 
 
 def _open_backend(nodemap=None, serial="17475185"):
     cam = FakeCam(serial, nodemap or FakeNodeMap())
-    backend = SpinnakerBackend(cam)
+    backend = _backend(cam)
     backend.open()
     return backend, cam
 
@@ -363,20 +303,20 @@ def test_open_maximizes_link_throughput():
 
 def test_open_without_throughput_node_is_fine():
     # A model lacking DeviceLinkThroughputLimit must still open cleanly (the raise
-    # is best-effort — read_number raises, the backend swallows it).
+    # is best-effort).
     nm = FakeNodeMap()
     del nm.DeviceLinkThroughputLimit
     backend, _cam = _open_backend(nm)
     assert backend.is_open()
 
 
-def test_read_node_maps_bounds_and_unit_by_kind():
+def test_read_feature_maps_bounds_and_unit_by_kind():
     backend, _cam = _open_backend()
-    width = backend.read_node("width")
+    width = backend.read_feature("Width")
     # Integer nodes: bounds + increment, no unit (the C API has no int GetUnit).
     assert width.value == 1920 and width.min == 16 and width.max == 1920
     assert width.inc == 16 and width.unit is None and width.writable is True
-    exposure = backend.read_node("exposure")
+    exposure = backend.read_feature("ExposureTime")
     # Float nodes: bounds + unit, no increment (the C API has no float GetInc).
     assert exposure.value == 5000.0 and exposure.unit == "us" and exposure.inc is None
 
@@ -385,22 +325,22 @@ def test_writability_reflects_access_mode():
     nm = FakeNodeMap()
     nm.Gain = FakeNode(1.5, writable=False)
     backend, _cam = _open_backend(nm)
-    assert backend.read_node("gain").writable is False
+    assert backend.read_feature("Gain").writable is False
 
 
-def test_read_node_raises_when_camera_not_open():
+def test_read_feature_raises_when_camera_not_open():
     cam = FakeCam("17475185")
-    backend = SpinnakerBackend(cam)  # not opened: no nodemap
+    backend = _backend(cam)  # not opened: no nodemap
     with pytest.raises(BackendError):
-        backend.read_node("width")
+        backend.read_feature("Width")
 
 
-def test_write_node_routes_to_int_or_float():
+def test_write_feature_routes_to_int_or_float():
     nm = FakeNodeMap()
     backend, _cam = _open_backend(nm)
-    backend.write_node("width", 800)
+    backend.write_feature("Width", 800)
     assert nm.Width.value == 800 and isinstance(nm.Width.value, int)
-    backend.write_node("exposure", 1234.5)
+    backend.write_feature("ExposureTime", 1234.5)
     assert nm.ExposureTime.value == 1234.5 and isinstance(nm.ExposureTime.value, float)
 
 
@@ -487,7 +427,7 @@ def test_list_features_walks_the_full_node_map():
 
 def test_list_features_empty_when_not_open():
     cam = FakeCam("17475185")
-    backend = SpinnakerBackend(cam)  # not opened: no nodemap
+    backend = _backend(cam)  # not opened: no nodemap
     assert backend.list_features() == []
 
 
@@ -505,7 +445,7 @@ def test_read_feature_unknown_node_raises():
 
 
 def test_read_feature_raises_when_not_open():
-    backend = SpinnakerBackend(FakeCam("17475185"))
+    backend = _backend(FakeCam("17475185"))
     with pytest.raises(BackendError):
         backend.read_feature("Width")
 
@@ -532,7 +472,7 @@ def test_write_feature_not_writable_raises():
 
 
 def test_write_feature_raises_when_not_open():
-    backend = SpinnakerBackend(FakeCam("17475185"))
+    backend = _backend(FakeCam("17475185"))
     with pytest.raises(BackendError):
         backend.write_feature("Width", 640)
 
@@ -545,22 +485,9 @@ def test_execute_command_fires_the_node():
 
 
 def test_execute_command_raises_when_not_open():
-    backend = SpinnakerBackend(FakeCam("17475185"))
+    backend = _backend(FakeCam("17475185"))
     with pytest.raises(BackendError):
         backend.execute_command("TriggerSoftware")
-
-
-def test_snap_int_rounds_to_the_increment_grid():
-    # The real write_feature snaps an off-grid integer to the node's inc grid
-    # (offset from min) before the SDK write, which would otherwise reject it.
-    # This is the one non-trivial bit of arithmetic in the ctypes walk, so it is
-    # covered directly (the ctypes .so itself is verified on hardware).
-    assert sc._snap_int(643, node_min=0, node_inc=16) == 640  # nearest multiple
-    assert sc._snap_int(650, node_min=0, node_inc=16) == 656  # rounds up
-    assert sc._snap_int(101, node_min=5, node_inc=16) == 101  # grid offset by min
-    assert sc._snap_int(100, node_min=5, node_inc=16) == 101  # -> 5 + 6*16
-    assert sc._snap_int(123.9, node_min=None, node_inc=None) == 124  # no inc: round
-    assert sc._snap_int(200, node_min=0, node_inc=None) == 200
 
 
 def test_trigger_once_is_a_pure_bump_not_a_device_call():
@@ -576,7 +503,7 @@ def test_trigger_once_is_a_pure_bump_not_a_device_call():
     assert backend.is_grabbing()
     backend.trigger_once()
     assert nm.TriggerSoftware.executed == 0  # NOT fired yet — retrieve fires it
-    assert backend._pending == 1
+    assert backend.trigger.pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
 
@@ -592,7 +519,7 @@ def test_retrieve_fires_trigger_and_returns_frame():
     array, timestamp = frame
     assert timestamp == 123 and array.shape == (2, 3)
     assert nm.TriggerSoftware.executed == 1  # retrieve fired the device trigger
-    assert backend._pending == 0  # consumed
+    assert backend.trigger.pending == 0  # consumed
     assert image.released  # every image is released
 
 
@@ -624,35 +551,27 @@ def test_retrieve_none_on_grab_timeout():
     assert nm.TriggerSoftware.executed == 1  # trigger fired; frame just didn't arrive
 
 
+def test_unpulsed_fetches_answer_no_trigger():
+    # Free run and an external trigger fetch outside the hand-off: answering it
+    # would make every frame UNMATCHED_TRIGGER, discarded as extra.
+    nm = FakeNodeMap()
+    backend, cam = _grabbing_backend(nm)
+    cam.next_image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), timestamp=7)
+    assert backend.retrieve_freerun(100, lambda: True)[1] == 7
+    assert backend.retrieve_external(100, lambda: True)[1] == 7
+    assert backend.last_trigger_index is None and nm.TriggerSoftware.executed == 0
+
+
 def test_retrieve_skips_incomplete_image_but_releases_it():
+    # A transport failure is an incomplete image: it answers its trigger at
+    # once, so the next one fires rather than waiting out the answer deadline.
     backend, cam = _grabbing_backend()
     image = FakeImage(array=np.zeros((2, 3), dtype=np.uint8), incomplete=True)
     cam.next_image = image
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None
     assert image.released  # incomplete frames are still released
-
-
-class _Records(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.records: list[logging.LogRecord] = []
-
-    def emit(self, record):
-        self.records.append(record)
-
-
-@pytest.fixture
-def octacam_log():
-    """Every record the octacam logger emits, debug included."""
-    handler = _Records()
-    logger = logging.getLogger("octacam")
-    level = logger.level
-    logger.setLevel(logging.DEBUG)
-    logger.addHandler(handler)
-    yield handler.records
-    logger.removeHandler(handler)
-    logger.setLevel(level)
+    assert backend.trigger.fired_index is None and backend.last_trigger_index == 0
 
 
 def _incomplete_logs(records):
@@ -669,38 +588,41 @@ def _incomplete_grab(record):
     return backend, lambda: backend.retrieve_freerun(100, lambda: True)
 
 
-def test_incomplete_images_are_counted_but_logged_once_per_grab(monkeypatch, octacam_log):
+def test_incomplete_images_are_counted_but_logged_once_per_grab(monkeypatch, caplog):
     # A saturated bus delivers incomplete images continuously: every one is
     # counted, but a record grab logs only its first until the report interval.
-    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
+    caplog.set_level(logging.DEBUG, logger="octacam")
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
     backend, fetch = _incomplete_grab(record=True)
     assert all(fetch() is None for _ in range(250))
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 250
-    logs = _incomplete_logs(octacam_log)
+    logs = _incomplete_logs(caplog.records)
     assert len(logs) == 1 and logs[0][0] == logging.WARNING
     backend.stop_grab()
     backend.start_grab_record()  # a new grab logs its own first one again
     assert fetch() is None
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 251
-    assert len(_incomplete_logs(octacam_log)) == 2
+    assert len(_incomplete_logs(caplog.records)) == 2
 
 
-def test_incomplete_images_in_a_preview_log_at_debug(monkeypatch, octacam_log):
-    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
+def test_incomplete_images_in_a_preview_log_at_debug(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="octacam")
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
     backend, fetch = _incomplete_grab(record=False)
     for _ in range(5):
         fetch()
-    logs = _incomplete_logs(octacam_log)
+    logs = _incomplete_logs(caplog.records)
     assert logs and all(level == logging.DEBUG for level, _ in logs)
     assert backend.stream_statistics()["IncompleteImagesDiscarded"] == 5
 
 
-def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, octacam_log):
-    monkeypatch.setattr(sc, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
+def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger="octacam")
+    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
     _backend, fetch = _incomplete_grab(record=True)
     for _ in range(3):
         fetch()
-    messages = [m for _, m in _incomplete_logs(octacam_log)]
+    messages = [m for _, m in _incomplete_logs(caplog.records)]
     assert "delivered an incomplete image" in messages[0]
     assert "2 incomplete images discarded in this grab (1 since" in messages[1]
     assert "3 incomplete images discarded in this grab (1 since" in messages[2]
@@ -733,17 +655,20 @@ def test_retrieve_accepts_non_mono8_frame_when_array_not_wanted():
 
 
 def test_close_deinits_releases_and_is_idempotent():
-    backend, cam = _open_backend()
+    backend, cam = _grabbing_backend()
     backend.close()
-    assert not backend.is_open()
+    assert not backend.is_open() and not backend.is_grabbing()
     assert cam.initialized is False and cam.released is True
     backend.close()  # second close is a no-op
+    backend.trigger.begin_grab()  # a stop race: the hand-off still reads grabbing
+    backend.trigger_once()
+    assert backend.retrieve(10, lambda: True) is None
 
 
 def test_enumerate_selects_requested_and_releases_the_rest(fake_facade):
     cams = [FakeCam("A"), FakeCam("B"), FakeCam("C")]
     fake_facade.cameras = cams
-    out = sc.enumerate_spinnaker(["B"])
+    out = sc.SPEC.enumerate(["B"])
     assert [serial for serial, _h in out] == ["B"]
     assert out[0][1] is cams[1]
     # Handles not handed to a backend are released 1:1; the selected one is not.
@@ -757,11 +682,11 @@ def test_teardown_releases_leaked_handle(fake_facade):
     # libusb transport aborts the process (usbi_mutex_destroy assertion, 134).
     cams = [FakeCam("A")]
     fake_facade.cameras = cams
-    out = sc.enumerate_spinnaker(["A"])
+    out = sc.SPEC.enumerate(["A"])
     assert out[0][1] is cams[0] and not cams[0].released  # handed out, still open
     sc.teardown()
     assert cams[0].released  # teardown released the leaked handle
-    assert not sc._outstanding  # and forgot it
+    assert not fake_facade._outstanding  # and forgot it
 
 
 def test_teardown_does_not_double_release_closed_handle(fake_facade):
@@ -769,8 +694,8 @@ def test_teardown_does_not_double_release_closed_handle(fake_facade):
     # release it a second time (a double spinCameraRelease is itself an error).
     cams = [FakeCam("A")]
     fake_facade.cameras = cams
-    out = sc.enumerate_spinnaker(["A"])
-    backend = SpinnakerBackend(out[0][1])
+    out = sc.SPEC.enumerate(["A"])
+    backend = _backend(out[0][1])
     backend.close()
     assert cams[0].released
     cams[0].released = False  # sentinel: detect any further release in teardown
@@ -785,25 +710,62 @@ def test_reenumerate_releases_prior_session(fake_facade):
     # process exit aborts via a libusb assertion (exit 134).
     first = [FakeCam("A")]
     fake_facade.cameras = first
-    out1 = sc.enumerate_spinnaker(["A"])
+    out1 = sc.SPEC.enumerate(["A"])
     assert out1[0][1] is first[0] and not first[0].released  # handed out, tracked
     second = [FakeCam("A")]
     fake_facade.cameras = second
-    sc.enumerate_spinnaker(["A"])
+    sc.SPEC.enumerate(["A"])
     assert first[0].released  # prior session's handle released by the re-enumerate
     assert fake_facade.system_released  # and its System
     assert not second[0].released  # the fresh handle is now the outstanding one
 
 
 def test_enumerate_sorts_when_unrequested():
-    fake = sc._facade
+    fake = sc._binding
     fake.cameras = [FakeCam("17475187"), FakeCam("17475185")]
-    out = sc.enumerate_spinnaker()
+    out = sc.SPEC.enumerate()
     assert [serial for serial, _h in out] == ["17475185", "17475187"]
 
 
 def test_enumerate_empty_returns_nothing():
-    sc._facade.cameras = []
-    assert sc.enumerate_spinnaker() == []
+    sc._binding.cameras = []
+    assert sc.SPEC.enumerate() == []
     # An empty enumeration tears the session down so a later run starts clean.
-    assert sc._system is None and sc._cam_list is None
+    assert sc._binding._system is None and sc._binding._cam_list is None
+
+
+def _record_pool(cam):
+    cam.stream_nodemap.StreamBufferCountMode = FakeEnum("Auto")
+    cam.stream_nodemap.StreamBufferCountManual = FakeNode(10, mn=1, mx=1000, inc=1)
+    return cam.stream_nodemap.StreamBufferCountManual
+
+
+def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(fake_facade, monkeypatch, caplog):
+    """Two full-sensor GS3s need more usbfs memory at 128 buffers than the
+    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts."""
+    backend, cam = _open_backend()
+    count = _record_pool(cam)
+
+    def begin(c):
+        if count.value > 32:
+            raise BackendError("Could not start acquisition. [-1001]")
+        c.streaming = True
+
+    monkeypatch.setattr(fake_facade, "begin_acquisition", begin)
+    assert backend.start_grab_record() is True
+    assert count.value == 32 and cam.streaming
+    retries = [r for r in caplog.records if "usbfs_memory_mb" in r.getMessage()]
+    assert len(retries) == 2  # 128 -> 64 -> 32
+
+
+def test_a_record_start_refused_at_every_pool_size_fails(fake_facade, monkeypatch):
+    backend, cam = _open_backend()
+    count = _record_pool(cam)
+
+    def refuse(c):
+        raise BackendError("Could not start acquisition. [-1001]")
+
+    monkeypatch.setattr(fake_facade, "begin_acquisition", refuse)
+    with pytest.raises(BackendError, match="Could not start acquisition"):
+        backend.start_grab_record()
+    assert count.value == MIN_STREAM_BUFFERS and not backend.is_grabbing()

@@ -1,29 +1,30 @@
-"""`octacam process`: writer dispatch + CLI folder/file/summary resolution."""
+"""`octacam process`: the transcoder + CLI folder/file/summary resolution."""
 
 import json
-import logging
-import os
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
 
 import numpy as np
 import pytest
 from typer.testing import CliRunner
 
 from octacam.cli import app
-from octacam.transform import DisplayTransform
-from octacam.writer import (
+from octacam.files import PARTIAL_INFIX, is_partial, partial_path
+from octacam.recording_format import RECORDING_INFO_DIRNAME
+from octacam.transcode import (
     TranscodeProgress,
     _parse_progress,
     _reporting_args,
-    is_partial_transcode,
-    transcode_encoded,
+    atomic_output,
     transcode_file,
-    transcode_raw,
 )
+from octacam.transform import DisplayTransform
 
 runner = CliRunner()
 cv2 = pytest.importorskip("cv2")
+
+
+def _temp(output):
+    """A transcode temp of *output*, as atomic_output names it."""
+    return partial_path(output, extension_last=True)
 
 
 def _frame(width, height):
@@ -40,7 +41,7 @@ def _make_mkv(path, frame, fps=10.0):
     raw = path.with_suffix(".raw")
     height, width = frame.shape
     _write_raw(raw, frame)
-    transcode_raw(
+    transcode_file(
         raw,
         output=path,
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -76,13 +77,17 @@ def _camera_entry(file, frame, *, fps=10.0, transform=None, transform_applied=Fa
     return entry
 
 
-def _summary(folder, cameras, fps_target=10.0):
-    (folder / "recording_summary.json").write_text(
+def _summary(folder, cameras, fps_target=10.0, *, nested=False):
+    """Write *folder*'s summary: flat beside the videos (a recording made before
+    the ``octacam_recording`` subfolder), or in that subfolder (*nested*)."""
+    info = folder / RECORDING_INFO_DIRNAME if nested else folder
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "recording_summary.json").write_text(
         json.dumps({"schema_version": 2, "fps_target": fps_target, "cameras": cameras})
     )
 
 
-# ------------------------------------------------------------------ writer
+# -------------------------------------------------------------- transcoder
 
 
 def test_transcode_file_raw_to_mp4(tmp_path):
@@ -93,13 +98,13 @@ def test_transcode_file_raw_to_mp4(tmp_path):
     assert _dims(out) == (16, 12)
 
 
-def test_transcode_encoded_produces_valid_video(tmp_path):
+def test_transcode_file_reencodes_an_encoded_video(tmp_path):
     src = _make_mkv(tmp_path / "cam.mkv", _frame(16, 12))
-    out = transcode_encoded(src, tmp_path / "cam.mp4")  # mkv -> re-encoded mp4
+    out = transcode_file(src, tmp_path / "cam.mp4")  # mkv -> re-encoded mp4
     assert _dims(out) == (16, 12)
 
 
-def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
+def test_transcode_file_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     # An already-encoded source must be re-encoded with the chosen slow preset,
     # not stream-copied: capture uses a fast preset, so this offline pass is
     # where the compression is earned. Regression guard for the dropped
@@ -110,8 +115,8 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
         captured["args"] = args
         open(args[-1], "wb").close()  # a real run leaves the output file in place
 
-    monkeypatch.setattr("octacam.writer._run_ffmpeg", fake_run)
-    transcode_encoded(
+    monkeypatch.setattr("octacam.transcode.run_ffmpeg", fake_run)
+    transcode_file(
         tmp_path / "cam.mkv",
         tmp_path / "cam.mp4",
         ffmpeg_params="-c:v libx264 -preset veryslow -crf 20 -pix_fmt gray",
@@ -124,30 +129,79 @@ def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     assert args[args.index("-pix_fmt") + 1] == "gray"
 
 
-def test_transcode_file_applies_vf(tmp_path):
-    raw = tmp_path / "cam.raw"
-    _write_raw(raw, _frame(16, 12))
-    from octacam.transform import display_vf_filter
-
-    out = transcode_file(
-        raw,
-        tmp_path / "cam.mp4",
-        vf=display_vf_filter(DisplayTransform(90)),
-        width=16,
-        height=12,
-        fps=10.0,
+def test_transcode_file_gives_the_4_2_0_rule_its_frame_size(tmp_path, monkeypatch):
+    # An encoded input's gray output turns yuv420p only with a known (even)
+    # size: without one an odd side cannot be ruled out.
+    captured = {}
+    monkeypatch.setattr(
+        "octacam.transcode.run_ffmpeg", lambda args, *a, **k: captured.update(args=args)
     )
-    assert _dims(out) == (12, 16)  # 90deg swap
+    src, out = tmp_path / "in.mkv", tmp_path / "out.mp4"
+    transcode_file(src, out, "-c:v libx264 -pix_fmt gray")
+    assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "gray"
+    transcode_file(src, out, "-c:v libx264 -pix_fmt gray", width=64, height=48)
+    assert captured["args"][captured["args"].index("-pix_fmt") + 1] == "yuv420p"
 
 
-def test_transcode_raw_without_geometry_raises(tmp_path):
+def test_transcode_file_sizes_an_encoded_inputs_bar_from_frames(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "octacam.transcode.run_ffmpeg", lambda args, src, **k: captured.update(k)
+    )
+    transcode_file(tmp_path / "cam.mkv", tmp_path / "cam.mp4", frames=7)
+    assert captured["total_frames"] == 7
+    transcode_file(tmp_path / "cam.mkv", tmp_path / "cam.mp4")
+    assert captured["total_frames"] is None  # no count: an indeterminate bar
+
+
+def _no_ffmpeg(*args, **kwargs):
+    raise RuntimeError("no ffmpeg")
+
+
+@pytest.mark.parametrize("suffix", [".mkv", ".raw"])
+@pytest.mark.parametrize(
+    "params, missing_ffmpeg, error",
+    [("-c:v 'bad", False, ValueError), ("-c:v libx264", True, RuntimeError)],
+    ids=["bad-quoting", "no-ffmpeg"],
+)
+def test_transcode_file_with_no_argv_leaves_the_folder_alone(
+    tmp_path, monkeypatch, suffix, params, missing_ffmpeg, error
+):
+    # The argv fails before a temp exists, so no orphan sweep runs either.
+    if missing_ffmpeg:
+        monkeypatch.setattr("octacam.transcode.find_ffmpeg", _no_ffmpeg)
+    src = tmp_path / f"cam{suffix}"
+    _write_raw(src, _frame(16, 12))
+    orphan = tmp_path / f".cam{PARTIAL_INFIX}.1.deadbeef.mp4"
+    orphan.write_bytes(b"")
+    before = sorted(tmp_path.iterdir())
+    with pytest.raises(error):
+        transcode_file(src, tmp_path / "cam.mp4", params, width=16, height=12, fps=10.0)
+    assert sorted(tmp_path.iterdir()) == before
+
+
+def test_transcode_file_raw_without_geometry_raises(tmp_path):
     # A .raw carries no geometry of its own; without width/height/fps (from the
     # recording summary) it cannot be laid out, so the encode refuses rather than
     # guessing.
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
     with pytest.raises(FileNotFoundError):
-        transcode_raw(raw, output=tmp_path / "cam.mp4")
+        transcode_file(raw, tmp_path / "cam.mp4")
+    # A partial geometry is still insufficient.
+    with pytest.raises(FileNotFoundError):
+        transcode_file(raw, tmp_path / "cam.mp4", width=16, height=12)
+
+
+def test_transcode_file_raw_refuses_an_unknown_pixel_format(tmp_path):
+    # Read as Mono8, a wider format would decode as garbage frames.
+    raw = tmp_path / "cam.raw"
+    _write_raw(raw, _frame(16, 12))
+    with pytest.raises(ValueError, match="Mono12"):
+        transcode_file(
+            raw, tmp_path / "cam.mp4", width=16, height=12, fps=10.0, pixel_format="Mono12"
+        )
+    assert not (tmp_path / "cam.mp4").exists()
 
 
 # ------------------------------------------------------- progress reporting
@@ -215,11 +269,11 @@ def test_parse_progress_emits_one_sample_per_block():
     assert last.out_time_s == 2.0 and last.done and last.total_frames == 50
 
 
-def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
+def test_transcode_file_raw_reports_progress_with_exact_total(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))  # exactly one 16x12 Mono8 frame
     samples: list[TranscodeProgress] = []
-    transcode_raw(
+    transcode_file(
         raw,
         output=tmp_path / "cam.mkv",
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -233,7 +287,7 @@ def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
     assert last.done and last.total_frames == 1 and last.frame == 1
 
 
-def test_transcode_raw_output_mode_still_produces_file(tmp_path):
+def test_transcode_file_raw_output_mode_still_produces_file(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
     out = transcode_file(
@@ -242,7 +296,7 @@ def test_transcode_raw_output_mode_still_produces_file(tmp_path):
     assert out.exists() and _dims(out) == (16, 12)
 
 
-def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
+def test_transcode_file_raw_propagates_and_recovers_from_callback_error(tmp_path):
     # A raising progress callback must propagate (and the ffmpeg child is killed
     # and reaped on the way out — the regression guard for the lost cleanup).
     raw = tmp_path / "cam.raw"
@@ -255,7 +309,7 @@ def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
         raise Boom
 
     with pytest.raises(Boom):
-        transcode_raw(
+        transcode_file(
             raw,
             output=tmp_path / "cam.mkv",
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -282,7 +336,7 @@ def test_interrupt_leaves_no_partial_output(tmp_path):
     _write_raw(raw, _frame(64, 48))
     out = tmp_path / "cam.mkv"
     with pytest.raises(_Stop):
-        transcode_raw(
+        transcode_file(
             raw,
             output=out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -304,7 +358,7 @@ def test_interrupt_does_not_clobber_existing_output(tmp_path):
     out = tmp_path / "cam.mkv"
     out.write_bytes(b"PREEXISTING-GOOD-OUTPUT")
     with pytest.raises(_Stop):
-        transcode_raw(
+        transcode_file(
             raw,
             output=out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -317,13 +371,12 @@ def test_interrupt_does_not_clobber_existing_output(tmp_path):
 
 
 def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
-    # transcode_encoded (re-encode of an already-encoded source) shares
-    # _atomic_output, so an interrupt mid-re-encode must also leave no output
-    # and no temp behind.
+    # The re-encode of an already-encoded source shares atomic_output, so an
+    # interrupt mid-re-encode must also leave no output and no temp behind.
     src = _make_mkv(tmp_path / "cam.mkv", _frame(64, 48))
     out = tmp_path / "out.mp4"
     with pytest.raises(_Stop):
-        transcode_encoded(
+        transcode_file(
             src,
             out,
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -331,14 +384,14 @@ def test_interrupt_leaves_no_partial_output_encoded(tmp_path):
         )
     assert not out.exists()
     assert src.exists()  # the source is never touched on the way out
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_successful_transcode_leaves_no_temp_file(tmp_path):
     # The happy path must not strand the temp sibling either.
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
-    transcode_raw(
+    transcode_file(
         raw,
         output=tmp_path / "cam.mkv",
         ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -347,15 +400,15 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
         fps=10.0,
     )
     assert (tmp_path / "cam.mkv").exists()
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
     # A file with a known total followed by one without must NOT inherit the
     # prior total (rich's reset/update keep total on None) — regression guard.
-    from octacam.cli import _TranscodeProgressBar
+    from octacam.cli.process import FileProgressBar
 
-    bar = _TranscodeProgressBar(2)
+    bar = FileProgressBar(2)
     determinate = bar.file(1, tmp_path / "a.raw")
     determinate(TranscodeProgress(50, 10.0, 5.0, 1.0, total_frames=100, done=False))
     assert bar._progress.tasks[-1].total == 100
@@ -369,9 +422,9 @@ def test_progress_bar_indeterminate_after_determinate(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
     # The frame total is only a hint; a recording with dropped frames encodes
     # fewer than the hint, so the final block must still read 100%.
-    from octacam.cli import _TranscodeProgressBar
+    from octacam.cli.process import FileProgressBar
 
-    bar = _TranscodeProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
     on_progress(TranscodeProgress(90, 10.0, 9.0, 1.0, total_frames=100, done=True))
     task = bar._progress.tasks[-1]
@@ -382,9 +435,9 @@ def test_progress_bar_snaps_to_full_when_total_overshoots(tmp_path):
 def test_progress_bar_snaps_to_full_when_total_undershoots(tmp_path):
     # The hint can also undershoot (more frames encoded than expected); the bar
     # must still land on a full 100% rather than appearing to overflow.
-    from octacam.cli import _TranscodeProgressBar
+    from octacam.cli.process import FileProgressBar
 
-    bar = _TranscodeProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.raw")
     on_progress(TranscodeProgress(110, 10.0, 11.0, 1.0, total_frames=100, done=True))
     task = bar._progress.tasks[-1]
@@ -395,9 +448,9 @@ def test_progress_bar_indeterminate_snaps_to_full_when_done(tmp_path):
     # A file with no known total draws an indeterminate bar; on completion it
     # must still close on a clean 100% (final frame count becomes the total)
     # instead of vanishing mid-pulse — the "moved on before 100%" symptom.
-    from octacam.cli import _TranscodeProgressBar
+    from octacam.cli.process import FileProgressBar
 
-    bar = _TranscodeProgressBar(1)
+    bar = FileProgressBar(1)
     on_progress = bar.file(1, tmp_path / "a.mkv")
     on_progress(TranscodeProgress(40, 10.0, 4.0, 1.0, total_frames=None, done=False))
     assert bar._progress.tasks[-1].total is None  # indeterminate while running
@@ -416,15 +469,6 @@ def _run(*args):
 # ----------------------------------------------- cache-driven selectors
 
 
-@pytest.fixture(autouse=True)
-def cache_env(tmp_path, monkeypatch):
-    """Isolate the recording cache (session_cache) under a throwaway dir.
-
-    Autouse so even plain-path processing (which publishes a transcode-activity
-    marker) never writes to the real ~/.cache/octacam during tests."""
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
-
-
 def _recording_folder(tmp_path, name, session="s1"):
     """Create a one-camera recording folder and note it in the cache."""
     from octacam import session_cache
@@ -441,7 +485,7 @@ def _recording_folder(tmp_path, name, session="s1"):
     return folder
 
 
-def test_transcode_last_uses_cache(tmp_path, cache_env):
+def test_transcode_last_uses_cache(tmp_path, cache_dir):
     f1 = _recording_folder(tmp_path, "rec1")
     f2 = _recording_folder(tmp_path, "rec2")
     result = _run("--last", "--no-grid", "--no-transfer")
@@ -450,7 +494,7 @@ def test_transcode_last_uses_cache(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_env):
+def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_dir):
     # `--last recording` is the explicit spelling of a bare `--last`.
     f1 = _recording_folder(tmp_path, "rec1")
     f2 = _recording_folder(tmp_path, "rec2")
@@ -460,7 +504,7 @@ def test_transcode_last_recording_is_alias_for_bare_last(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_last_session_uses_cache(tmp_path, cache_env):
+def test_transcode_last_session_uses_cache(tmp_path, cache_dir):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s2")
@@ -471,14 +515,14 @@ def test_transcode_last_session_uses_cache(tmp_path, cache_env):
     assert not (f_old / "cam0.mp4").exists()  # an earlier session is excluded
 
 
-def test_transcode_last_rejects_bad_value(tmp_path, cache_env):
+def test_transcode_last_rejects_bad_value(tmp_path, cache_dir):
     _recording_folder(tmp_path, "rec1")
     result = _run("--last", "bogus", "--no-grid", "--no-transfer")
     assert result.exit_code != 0
     assert "recording" in result.output and "session" in result.output
 
 
-def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
+def test_transcode_session_ignores_deleted_folder(tmp_path, cache_dir):
     import shutil
 
     f1 = _recording_folder(tmp_path, "rec1", session="s1")
@@ -489,7 +533,7 @@ def test_transcode_session_ignores_deleted_folder(tmp_path, cache_env):
     assert (f2 / "cam0.mp4").exists()
 
 
-def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
+def test_transcode_session_id_targets_exact_session(tmp_path, cache_dir):
     # --session-id names one exact session, unaffected by a later recording that
     # would steal the "latest session" out from under bare --last session.
     f1 = _recording_folder(tmp_path, "rec1", session="guiA")
@@ -508,7 +552,7 @@ def test_transcode_session_id_targets_exact_session(tmp_path, cache_env):
     assert not (f1 / "cam0.mp4").exists()
 
 
-def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
+def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_dir):
     f_old = _recording_folder(tmp_path, "old", session="s1")
     f1 = _recording_folder(tmp_path, "rec1", session="s2")
     f2 = _recording_folder(tmp_path, "rec2", session="s3")
@@ -520,13 +564,13 @@ def test_transcode_all_uses_cache_across_sessions(tmp_path, cache_env):
     assert (f2 / "cam0.mp4").exists()
 
 
-def test_transcode_all_empty_cache_errors(tmp_path, cache_env):
+def test_transcode_all_empty_cache_errors(tmp_path, cache_dir):
     result = _run("--all")
     assert result.exit_code != 0
     assert "No recordings found" in result.output
 
 
-def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
+def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_dir):
     _recording_folder(tmp_path, "rec1")
     result = _run("--last", "--all")
     assert result.exit_code != 0
@@ -537,14 +581,14 @@ def test_transcode_selectors_are_mutually_exclusive(tmp_path, cache_env):
     assert "at most one" in result.output
 
 
-def test_transcode_selector_rejects_explicit_paths(tmp_path, cache_env):
+def test_transcode_selector_rejects_explicit_paths(tmp_path, cache_dir):
     f1 = _recording_folder(tmp_path, "rec1")
     result = _run(str(f1), "--last")
     assert result.exit_code != 0
     assert "cannot be combined" in result.output
 
 
-def test_transcode_selector_empty_cache_errors(tmp_path, cache_env):
+def test_transcode_selector_empty_cache_errors(tmp_path, cache_dir):
     result = _run("--last")
     assert result.exit_code != 0
     assert "No recordings found" in result.output
@@ -594,33 +638,18 @@ def test_folder_display_form_recording_keeps_baked_orientation(tmp_path):
     assert _dims(tmp_path / "cam0.mp4") == (12, 16)  # unchanged, not re-rotated
 
 
-class _ListHandler(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.messages = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
-def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path):
-    from octacam.cli import _transcode_jobs
+def test_folder_without_summary_resolves_plain_jobs_and_warns(tmp_path, caplog):
+    from octacam.process import transcode_jobs
 
     _write_raw(tmp_path / "a.raw", _frame(16, 12))
     _make_mkv(tmp_path / "b.mkv", _frame(16, 12))
-    # The CLI callback clears the octacam logger's handlers, so exercise the
+    # The CLI callback stops the octacam logger's propagation, so exercise the
     # resolver directly to capture its warning and inspect the jobs.
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["a.raw", "b.mkv"]
     # Without a summary the job carries no geometry (defaults apply).
     assert all(j.width is None and j.height is None for j in jobs)
-    assert any("recording_summary.json" in m for m in handler.messages)
+    assert any("recording_summary.json" in m for m in caplog.messages)
 
 
 def test_folder_without_summary_transcodes_encoded_to_mp4(tmp_path):
@@ -632,8 +661,8 @@ def test_folder_without_summary_transcodes_encoded_to_mp4(tmp_path):
     assert (tmp_path / "b.mp4").exists()
 
 
-def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
-    from octacam.cli import _transcode_jobs
+def test_summary_skips_zero_frame_cameras_with_warning(tmp_path, caplog):
+    from octacam.process import transcode_jobs
 
     # A real capture and a 0-frame (header-only) capture in the same folder.
     _make_mkv(tmp_path / "good.mkv", _frame(16, 12))
@@ -645,16 +674,10 @@ def test_summary_skips_zero_frame_cameras_with_warning(tmp_path):
             {"file": "empty.mkv", "frames": 0},
         ],
     )
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     # The frameless file is skipped; the real one is still queued.
     assert [j.input_path.name for j in jobs] == ["good.mkv"]
-    assert any("0 frames" in m for m in handler.messages)
+    assert any("0 frames" in m for m in caplog.messages)
 
 
 def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
@@ -668,22 +691,16 @@ def test_frameless_folder_transcodes_cleanly_without_error(tmp_path):
     assert not (tmp_path / "cam0.mp4").exists()
 
 
-def test_single_file_skips_zero_frame_capture_with_warning(tmp_path):
-    from octacam.cli import _transcode_jobs
+def test_single_file_skips_zero_frame_capture_with_warning(tmp_path, caplog):
+    from octacam.process import transcode_jobs
 
     # Naming a 0-frame capture's file directly must skip it (mirror the folder
     # scan) instead of feeding a header-only file to ffmpeg.
     (tmp_path / "cam0.mkv").write_bytes(b"\x00" * 64)  # header-only stub
     _summary(tmp_path, [{"file": "cam0.mkv", "frames": 0}])
-    handler = _ListHandler()
-    logger = logging.getLogger("octacam")
-    logger.addHandler(handler)
-    try:
-        jobs = _transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
-    finally:
-        logger.removeHandler(handler)
+    jobs = transcode_jobs([tmp_path / "cam0.mkv"], recursive=False)
     assert jobs == []
-    assert any("0 frames" in m for m in handler.messages)
+    assert any("0 frames" in m for m in caplog.messages)
 
 
 def test_single_file_uses_summary_in_its_folder(tmp_path):
@@ -793,10 +810,10 @@ def test_process_cli_octacam_progress_style_is_default(tmp_path):
 
 
 def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
-    # Ctrl-C mid-batch through the REAL transcode_file/_atomic_output path: stop
+    # Ctrl-C mid-batch through the REAL transcode_file/atomic_output path: stop
     # cleanly with the SIGINT exit code, keep the finished file's renamed output,
     # and leave the interrupted file with neither a final nor a temp artifact.
-    import octacam.writer as writer
+    import octacam.transcode as transcode
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "a.raw", frame)
@@ -813,21 +830,21 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
         if len(calls) == 2:
             raise KeyboardInterrupt  # ...then Ctrl-C lands during the 2nd file
 
-    monkeypatch.setattr(writer, "_run_ffmpeg", fake_run_ffmpeg)
+    monkeypatch.setattr(transcode, "run_ffmpeg", fake_run_ffmpeg)
     result = _run(str(tmp_path), "--no-grid", "--no-transfer")
     assert result.exit_code == 130, result.output  # 128 + SIGINT
     assert len(calls) == 2  # stopped at the interrupted file, no further jobs
     assert (tmp_path / "a.mp4").exists()  # finished output renamed into place
     assert not (tmp_path / "b.mp4").exists()  # interrupted output absent
     # the interrupted encode's temp is discarded, not orphaned
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
     # The --progress-style ffmpeg path runs ffmpeg via subprocess.run (not Popen);
     # a Ctrl-C there must still discard the partial temp — the cleanup lives in
-    # _atomic_output, wrapping both progress modes.
-    import octacam.writer as writer
+    # atomic_output, wrapping both progress modes.
+    import octacam.transcode as transcode
 
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
@@ -836,9 +853,9 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
         open(args[-1], "wb").close()  # ffmpeg wrote a partial file...
         raise KeyboardInterrupt  # ...then the terminal's SIGINT arrives
 
-    monkeypatch.setattr(writer.subprocess, "run", fake_run)
+    monkeypatch.setattr(transcode.subprocess, "run", fake_run)
     with pytest.raises(KeyboardInterrupt):
-        transcode_raw(
+        transcode_file(
             raw,
             output=tmp_path / "cam.mkv",
             ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
@@ -848,25 +865,24 @@ def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
             raw_output=True,
         )
     assert not (tmp_path / "cam.mkv").exists()
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_transcode_skips_orphaned_partial_files(tmp_path):
     # A partial temp file a hard kill orphaned must not be picked up as a job.
-    from octacam.cli import _transcode_jobs
-    from octacam.writer import _partial_path
+    from octacam.process import transcode_jobs
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "cam.raw", frame)
     _summary(tmp_path, [_camera_entry("cam.raw", frame)])
-    orphan = _partial_path(tmp_path / "cam.mkv")
+    orphan = _temp(tmp_path / "cam.mkv")
     orphan.write_bytes(b"\x00" * 32)  # leftover ".octacam-part" sibling
-    assert is_partial_transcode(orphan)
+    assert is_partial(orphan)
     # ...whether discovered by a folder scan...
-    jobs = _transcode_jobs([tmp_path], recursive=False)
+    jobs = transcode_jobs([tmp_path], recursive=False)
     assert sorted(j.input_path.name for j in jobs) == ["cam.raw"]  # orphan skipped
     # ...or named explicitly on the command line.
-    explicit = _transcode_jobs([orphan], recursive=False)
+    explicit = transcode_jobs([orphan], recursive=False)
     assert explicit == []
 
 
@@ -880,34 +896,29 @@ def test_process_cli_rejects_unknown_progress_style(tmp_path):
 
 # --- concurrent transcodes of one output -------------------------------------
 # The transcode temp name used to be deterministic (".<stem>.octacam-part<ext>")
-# and _atomic_output unlinked it on entry, so two `octacam process` runs over one
+# and atomic_output unlinked it on entry, so two `octacam process` runs over one
 # folder — trivially, `--last` in two terminals — each destroyed the other's
 # in-flight temp and then renamed a file it had not written onto the output.
-# octacam.transfer._temp_path had already solved exactly this with pid+uuid.
 
 
 def test_partial_path_is_unique_but_still_muxer_inferable(tmp_path):
-    from octacam.writer import PARTIAL_INFIX, _partial_path
-
     out = tmp_path / "cam.mp4"
-    a, b = _partial_path(out), _partial_path(out)
+    a, b = _temp(out), _temp(out)
     assert a != b, "two runs must not share one temp name"
     for p in (a, b):
         assert p.parent == out.parent  # same filesystem -> os.replace is atomic
         assert p.name.startswith(".")  # hidden
         assert PARTIAL_INFIX in p.name  # still recognised by the folder scan
-        assert is_partial_transcode(p)
+        assert is_partial(p)
         assert p.suffix == ".mp4", "ffmpeg infers the muxer from the extension"
 
 
 def test_concurrent_atomic_outputs_do_not_clobber_each_other(tmp_path):
-    from octacam.writer import _atomic_output
-
     out = tmp_path / "cam.mp4"
-    with _atomic_output(out) as first:
+    with atomic_output(out) as first:
         first.write_bytes(b"AAAA")
         # A second run starting while the first is still encoding.
-        with _atomic_output(out) as second:
+        with atomic_output(out) as second:
             assert second != first
             assert first.exists(), "the second run deleted the first's live temp"
             assert first.read_bytes() == b"AAAA"
@@ -916,25 +927,23 @@ def test_concurrent_atomic_outputs_do_not_clobber_each_other(tmp_path):
         assert first.exists(), "promoting the second run's file removed the first's"
     # Both completed; the later finisher wins, and neither is left behind.
     assert out.read_bytes() == b"AAAA"
-    assert not any(is_partial_transcode(p) for p in tmp_path.iterdir())
+    assert not any(is_partial(p) for p in tmp_path.iterdir())
 
 
 def test_orphaned_partials_are_still_reclaimed(tmp_path):
     # Uniqueness must not turn every hard kill into permanently leaked disk:
     # a temp nobody holds open is an orphan and is reclaimed on the next run,
     # including one left by the older deterministic-name octacam.
-    from octacam.writer import PARTIAL_INFIX, _atomic_output, _partial_path
-
     out = tmp_path / "cam.mp4"
-    orphan = _partial_path(out)
+    orphan = _temp(out)
     orphan.write_bytes(b"x" * 64)
     legacy = out.with_name(f".{out.stem}{PARTIAL_INFIX}{out.suffix}")
     legacy.write_bytes(b"y" * 64)
     other = tmp_path / "second.mp4"  # a different output's temp is not ours
-    other_orphan = _partial_path(other)
+    other_orphan = _temp(other)
     other_orphan.write_bytes(b"z" * 64)
 
-    with _atomic_output(out) as tmp:
+    with atomic_output(out) as tmp:
         assert not orphan.exists(), "orphan not reclaimed"
         assert not legacy.exists(), "legacy-format orphan not reclaimed"
         assert other_orphan.exists(), "swept a different output's temp"
@@ -956,7 +965,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
     def run():
         try:
             barrier.wait()
-            transcode_raw(
+            transcode_file(
                 tmp_path / "cam.raw",
                 output=out,
                 width=frame.shape[1],
@@ -974,7 +983,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
 
     assert not errors, errors
     assert out.exists() and out.stat().st_size > 0
-    leftovers = [p.name for p in tmp_path.iterdir() if is_partial_transcode(p)]
+    leftovers = [p.name for p in tmp_path.iterdir() if is_partial(p)]
     assert not leftovers, leftovers
 
 
@@ -982,23 +991,112 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     # A camera name only has to be a single path segment, so "cam[1]" is legal.
     # Unescaped, its sweep pattern is a character class matching "cam1" — which
     # would delete a *different* camera's in-flight temp.
-    from octacam.writer import _atomic_output, _partial_path
-
     bracket = tmp_path / "cam[1].mp4"
     plain = tmp_path / "cam1.mp4"
-    victim = _partial_path(plain)
+    victim = _temp(plain)
     victim.write_bytes(b"another camera's work")
 
-    with _atomic_output(bracket) as tmp:
+    with atomic_output(bracket) as tmp:
         assert victim.exists(), "sweep matched the wrong camera's temp"
         tmp.write_bytes(b"ok")
     assert bracket.read_bytes() == b"ok"
     assert victim.read_bytes() == b"another camera's work"
 
     # ...and its own orphans are still reclaimed.
-    own = _partial_path(bracket)
+    own = _temp(bracket)
     own.write_bytes(b"orphan")
-    with _atomic_output(bracket) as tmp:
+    with atomic_output(bracket) as tmp:
         assert not own.exists()
         tmp.write_bytes(b"ok2")
     assert bracket.read_bytes() == b"ok2"
+
+
+# ------------------------------------------- recording layout (either kind)
+#
+# A recording keeps its summary in an ``octacam_recording`` subfolder; one made
+# before that keeps it flat beside the videos. Discovery must read both, and a
+# walk must never treat the subfolder as a folder of videos of its own.
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_folder_summary_drives_jobs_in_either_layout(tmp_path, nested):
+    from octacam.process import transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame, fps=25.0)], nested=nested)
+    jobs = transcode_jobs([tmp_path], recursive=False)
+    # The summary's file names are relative to the recording folder either way.
+    assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
+    assert (jobs[0].width, jobs[0].height, jobs[0].fps) == (16, 12, 25.0)
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+def test_single_file_finds_summary_in_either_layout(tmp_path, nested):
+    from octacam.process import transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=nested)
+    jobs = transcode_jobs([tmp_path / "cam0.raw"], recursive=False)
+    assert len(jobs) == 1
+    assert (jobs[0].width, jobs[0].height) == (16, 12)
+
+
+def test_nested_summary_wins_over_an_older_flat_take(tmp_path):
+    # Recorded into again after the layout change: the older take's flat summary
+    # (and its video) stay behind, but the newer take's nested one is the word.
+    from octacam.process import transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "old.raw", frame)
+    _write_raw(tmp_path / "new.raw", frame)
+    _summary(tmp_path, [_camera_entry("old.raw", frame)])
+    _summary(tmp_path, [_camera_entry("new.raw", frame)], nested=True)
+    jobs = transcode_jobs([tmp_path], recursive=False)
+    assert [j.input_path.name for j in jobs] == ["new.raw"]
+
+
+def test_recursive_walk_never_treats_the_info_dir_as_videos(tmp_path, caplog):
+    # A mixed tree: a flat (older) recording and a nested one. The nested one's
+    # octacam_recording subfolder holds no videos; even a stray .mkv in it must
+    # not be transcoded, nor warned about as a folder of loose files.
+    from octacam.process import transcode_jobs
+
+    frame = _frame(16, 12)
+    flat = tmp_path / "day" / "flat"
+    nested = tmp_path / "day" / "nested"
+    for folder in (flat, nested):
+        folder.mkdir(parents=True)
+        _write_raw(folder / "cam.raw", frame)
+    _summary(flat, [_camera_entry("cam.raw", frame)])
+    _summary(nested, [_camera_entry("cam.raw", frame)], nested=True)
+    _make_mkv(nested / RECORDING_INFO_DIRNAME / "stray.mkv", frame)
+    caplog.clear()
+    jobs = transcode_jobs([tmp_path], recursive=True)
+    assert sorted(j.input_path for j in jobs) == [flat / "cam.raw", nested / "cam.raw"]
+    assert not any(RECORDING_INFO_DIRNAME in m for m in caplog.messages)
+
+
+def test_naming_the_info_dir_means_the_recording_around_it(tmp_path):
+    from octacam.process import transcode_jobs
+
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=True)
+    jobs = transcode_jobs([tmp_path / RECORDING_INFO_DIRNAME], recursive=False)
+    assert [j.input_path for j in jobs] == [tmp_path / "cam0.raw"]
+
+
+def test_process_nested_recording_end_to_end_keeps_its_metadata(tmp_path):
+    # A real (not mocked) transcode of a nested-layout .raw recording: the .mp4
+    # lands beside the source, and --delete-source removes only the video.
+    frame = _frame(16, 12)
+    _write_raw(tmp_path / "cam0.raw", frame)
+    _summary(tmp_path, [_camera_entry("cam0.raw", frame)], nested=True)
+    result = _run(str(tmp_path), "-d", "--no-grid", "--no-transfer")
+    assert result.exit_code == 0, result.output
+    assert _dims(tmp_path / "cam0.mp4") == (16, 12)
+    assert not (tmp_path / "cam0.raw").exists()
+    assert (tmp_path / RECORDING_INFO_DIRNAME / "recording_summary.json").exists()
+    assert not (tmp_path / RECORDING_INFO_DIRNAME / "cam0.mp4").exists()

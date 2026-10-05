@@ -9,26 +9,28 @@ sequence number — so both the sequence and the timestamp paths are exercised.
 """
 
 import json
-import os
 import threading
 import time
 from typing import Any
 
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
-
 import numpy as np
 import pytest
+from helpers import camera_stats, wait_until
 
 import octacam.cameras._trigger_handoff as handoff
-import octacam.controller as controller_module
+import octacam.take as take_module
 from octacam.cameras import CameraSystem
 from octacam.check import check_recording
-from octacam.controller import RecordingController, RecordingSettings
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController
 from octacam.plugins.base import Plugin, PluginManager
 from octacam.pulses import PulseClock
-from octacam.writer import FORMATS
+from octacam.writer import FORMATS, WriteResult
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
+# Where a recording writes everything but its videos (transform.
+# RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
+INFO_DIR = "octacam_recording"
 W, H = 64, 48
 FPS = 50.0
 PERIOD_NS = int(1e9 / FPS)
@@ -67,8 +69,8 @@ def _record(system, tmp_path, *, plugins=None, **overrides):
     )
     assert result.ok, result.message
     controller.join(timeout=30)
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
-    with np.load(save_dir / "timestamps.npz") as data:
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
+    with np.load(save_dir / INFO_DIR / "timestamps.npz") as data:
         arrays = {k: data[k] for k in data.files}
     return save_dir, summary, arrays, controller
 
@@ -87,6 +89,7 @@ class Board(Plugin):
     trigger at the period, primes with sacrificial pulses, like the triggerbox."""
 
     name = "board"
+    generates_trigger = True
 
     def __init__(self, system, count, period_ns=PERIOD_NS):
         self.system = system
@@ -327,7 +330,7 @@ def test_an_image_later_than_its_deadline_cannot_answer_a_later_trigger(
         expected = video[row - 1] if dropped[row] else row % 256
         assert video[row] == expected, (row, video[max(0, row - 3) : row + 3])
     backend = _backend(fake_system, "FAKE-1")
-    assert backend.stale_images >= 1
+    assert backend.trigger.stale_images >= 1
 
 
 def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp_path):
@@ -343,7 +346,7 @@ def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp
         backend.ignore_first_silently = True
         backend.fetch_blocks = True
     slow = _backend(fake_system, "FAKE-1")
-    claim = slow._claim_trigger
+    claim = slow.trigger.claim
     claims = []
 
     def stalled(timeout_ms):
@@ -354,7 +357,7 @@ def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp
                 time.sleep(0.06)
         return fire
 
-    slow._claim_trigger = stalled
+    slow.trigger.claim = stalled
     save_dir, summary, arrays, _ = _record(fake_system, tmp_path, trigger_source="software")
     bad = _cam(summary, "FAKE-1")
     assert bad["frames"] == 50 and bad["missed_pulses"] <= 4, bad
@@ -393,7 +396,7 @@ def test_a_camera_still_silent_after_priming_is_warned_about(
     # Out of budget after one round: FAKE-1 is still ignoring triggers, so it
     # starts on the train's second pulse. Priming says so, and the start check
     # catches the offset against FAKE-0.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
     _ignoring_cameras(fake_system, [0, 5])
     board = Board(fake_system, count=50)
     _save_dir, summary, _arrays, controller = _record(
@@ -550,9 +553,9 @@ def test_a_low_fps_start_sequence_is_waited_out(
     # which outlasted the monitor's fixed waits: on_first_frame (and a teardown)
     # ran before the arm. Scaled down here: 5 fps, and waits that a round of
     # priming outlasts unless they allow for it.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)  # one round
-    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.4)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)  # one round
+    monkeypatch.setattr(take_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.4)
     fps = 5.0
     period_ns = int(1e9 / fps)
     for serial in FAKE_SERIALS:
@@ -590,8 +593,8 @@ def test_a_low_fps_start_sequence_is_waited_out(
 def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monkeypatch):
     # Stopped while a slow train's priming burst is still going out: the
     # teardown (and the board's disarm) must wait for it, not time out first.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
-    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "START_HOOKS_TIMEOUT_S", 0.2)
     period_ns = int(1e9 / 5.0)
     board = HookLog(fake_system, count=5, period_ns=period_ns)
     settings = RecordingSettings(
@@ -608,9 +611,7 @@ def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monke
         target=controller.start_recording, kwargs={"plugin_params": {"board": {}}}
     )
     starter.start()
-    deadline = time.monotonic() + 5
-    while controller.state != "waiting" and time.monotonic() < deadline:
-        time.sleep(0.01)
+    wait_until(lambda: controller.state == "waiting", interval=0.01)
     time.sleep(0.05)  # into the 0.8 s priming burst
     controller.stop_recording(abort=True)
     starter.join(timeout=10)
@@ -622,8 +623,8 @@ def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monke
 def test_a_camera_that_records_nothing_breaks_sync(fake_system, tmp_path, monkeypatch):
     # FAKE-1's record grab starts but it never answers a trigger: there is no
     # video of it to align, whatever the other camera did.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.3)
     _backend(fake_system, "FAKE-1").ignore_first_triggers = 10**9
     _save_dir, summary, _arrays, _ = _record(
         fake_system, tmp_path, trigger_source="software"
@@ -642,7 +643,7 @@ def test_the_start_check_compares_only_like_cameras(fake_system, tmp_path, unlik
     # pulse late (or unverifiable); between unlike cameras it says nothing.
     slow = next(c for c in fake_system if c.serial_number == "FAKE-1")
     if unlike == "exposure":
-        slow.set_live_param("exposure", 12000)
+        slow.set_feature("ExposureTime", 12000)
     elif unlike == "geometry":
         slow.set_geometry(width=2 * W, height=2 * H)
     _ignoring_cameras(fake_system, [0, 0])  # hardware-clocked, trigger line
@@ -719,11 +720,11 @@ def test_external_trigger_misses_are_reported_not_filled(fake_system, tmp_path):
     time.sleep(0.3)
     controller.stop_recording()
     controller.join(timeout=30)
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert _cam(summary, "FAKE-0")["frames"] == 19  # not filled
     assert _cam(summary, "FAKE-0")["missed_pulse_indices"] == [4]
     assert not summary["sync"]["ok"]
-    with np.load(save_dir / "timestamps.npz") as data:
+    with np.load(save_dir / INFO_DIR / "timestamps.npz") as data:
         pulses = data["FAKE-0/pulse_index"].tolist()
     assert pulses == [p for p in range(20) if p != 4]
 
@@ -734,13 +735,13 @@ def test_a_frame_the_writer_refuses_is_filled(fake_system, tmp_path):
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write = writer.write
         calls = {"n": 0}
 
         def refusing(frame, fill_before=0):
             calls["n"] += 1
-            return False if calls["n"] == 20 else write(frame, fill_before)
+            return WriteResult.REFUSED if calls["n"] == 20 else write(frame, fill_before)
 
         writer.write = refusing
         return ok
@@ -843,7 +844,7 @@ def test_an_image_that_never_arrives_is_given_up_on(
     missed = bad["missed_pulse_indices"]
     # 10 and the pulses within the 0.1 s deadline after it (5 periods), no more.
     assert missed[0] == 10 and missed[-1] <= 16, missed
-    assert bad_backend.unanswered_triggers == 1
+    assert bad_backend.trigger.unanswered_triggers == 1
     np.testing.assert_array_equal(arrays["FAKE-1/pulse_index"], np.arange(count))
     good, video = _frames(save_dir, "FAKE-0"), _frames(save_dir, "FAKE-1")
     for k in range(count):
@@ -857,16 +858,9 @@ def _direct_camera(serial):
 
     backend: Any = FakeBackend(serial)
     backend.open()
-    backend.write_node("width", W)
-    backend.write_node("height", H)
+    backend.write_feature("Width", W)
+    backend.write_feature("Height", H)
     return backend, Camera(backend)
-
-
-def _wait_for(predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        assert time.monotonic() < deadline, "timed out"
-        time.sleep(0.001)
 
 
 def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
@@ -876,28 +870,32 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
     backend, camera = _direct_camera("FAKE-P")
     path = tmp_path / "cam.raw"
     clock = PulseClock(PERIOD_NS, count=10, source="software")
-    assert camera.start_record(
-        str(path), FPS, FORMATS["raw"], pulse_clock=clock, hold=True
-    )
+    assert camera.start_record(str(path), FPS, FORMATS["raw"], clock, hold=True)
+    take = camera.take
     try:
         backend.late_triggers = {3: 100}  # ~100 fetches late: well after the arm
         for _ in range(4):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
-        _wait_for(lambda: backend._pending == 0 and bool(backend._outstanding))
-        assert camera.primed_frames == 3
+        assert wait_until(
+            lambda: backend.trigger.pending == 0
+            and backend.trigger.fired_index is not None,
+            interval=0.001,
+        )
+        assert take.primed_frames == 3
         backend.late_triggers = {}
-        camera.arm_counting()
-        _wait_for(lambda: camera.primed_frames == 4)
+        take.arm_counting()
+        assert wait_until(lambda: take.primed_frames == 4, interval=0.001)
         for _ in range(10):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
-        _wait_for(lambda: camera.pulses_complete)
+        assert wait_until(lambda: take.tracker.complete, interval=0.001)
     finally:
         camera.stop(fill_to=10)
         camera.join()
-    assert camera.primed_frames == 4 and camera.missed_pulses == []
-    assert camera.frame_pulse_index == list(range(10))
+    stats = take.stats()
+    assert stats.primed_frames == 4 and stats.missed_pulses == []
+    assert stats.pulse_index == list(range(10))
     video = np.fromfile(path, dtype=np.uint8).reshape(-1, H, W)
     np.testing.assert_array_equal(video[:, 0, 0], np.arange(10))
 
@@ -918,35 +916,30 @@ def test_a_buffered_priming_frame_is_a_straggler_at_low_fps(tmp_path):
     backend.retrieve_external = retrieve_external
     path = tmp_path / "cam.raw"
     clock = PulseClock(period, count=5, source="managed")
-    assert camera.start_record(
-        str(path),
-        10.0,
-        FORMATS["raw"],
-        software_trigger=False,
-        pulse_clock=clock,
-        hold=True,
-    )
+    assert camera.start_record(str(path), 10.0, FORMATS["raw"], clock, hold=True)
+    take = camera.take
     try:
         for _ in range(3):
             camera.trigger_once()
             time.sleep(0.01)
-        _wait_for(lambda: camera.primed_frames == 3)
+        assert wait_until(lambda: take.primed_frames == 3, interval=0.001)
         # The fourth priming pulse's frame: exposed a period after the third,
         # still in the SDK's buffer when counting starts.
         stamp = backend._clock_t0 + 3 * period
-        camera.arm_counting()
+        take.arm_counting()
         buffered.append((np.full((H, W), 3, dtype=np.uint8), stamp))
-        _wait_for(lambda: camera.primed_frames == 4)
+        assert wait_until(lambda: take.primed_frames == 4, interval=0.001)
         for _ in range(5):
             camera.trigger_once()
             time.sleep(0.01)
-        _wait_for(lambda: camera.pulses_complete)
+        assert wait_until(lambda: take.tracker.complete, interval=0.001)
     finally:
         camera.stop(fill_to=5)
         camera.join()
-    assert camera.primed_frames == 4 and camera.missed_pulses == []
-    assert camera.frame_pulse_index == list(range(5))
-    assert camera.extra_frames == 0
+    stats = take.stats()
+    assert stats.primed_frames == 4 and stats.missed_pulses == []
+    assert stats.pulse_index == list(range(5))
+    assert stats.extra_frames == 0
 
 
 # --- stray zero timestamps and fill timestamps -------------------------------- #
@@ -1042,13 +1035,7 @@ def test_fills_of_a_host_clocked_camera_are_host_time(fake_system, tmp_path):
 
 
 def test_mean_fps_of_a_series_that_runs_backward_is_zero():
-    from octacam.cameras.base import Camera
-    from octacam.cameras.fake import FakeBackend
-
-    backend: Any = FakeBackend("FAKE-T")
-    camera = Camera(backend)
-    camera._timestamps[:] = [3_600_000_000_000, 0]
-    assert camera.mean_fps == 0.0
+    assert camera_stats(timestamp_ns=[3_600_000_000_000, 0]).mean_fps == 0.0
 
 
 # --- writer overload: a sustained shortfall is skipped, not filled ------------- #
@@ -1068,7 +1055,7 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write_frame = writer._write_frame
 
         def slow(frame):
@@ -1088,8 +1075,8 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
     )
     count = summary["pulse_train"]["count"]
     cam = _cam(summary, "FAKE-0")
-    skipped = camera.writer_skipped_pulses
-    assert camera.writer_skipped == len(skipped) > 0
+    skipped = camera.take.stats().writer_skipped
+    assert len(skipped) > 0
     # The summary carries them, and the recording is no longer frame k = pulse k.
     assert cam["writer_skipped"] == len(skipped)
     assert cam["writer_skipped_pulse_indices"] == skipped[:1000]
@@ -1109,7 +1096,7 @@ def test_a_writer_that_cannot_keep_up_skips_instead_of_snowballing(
     # The other camera is untouched.
     assert _cam(summary, "FAKE-1")["frames"] == count
     other = next(c for c in fake_system if c.serial_number == "FAKE-1")
-    assert other.writer_skipped == 0
+    assert other.take.stats().writer_skipped == []
 
 
 def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
@@ -1123,7 +1110,7 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
 
     def start_record(*args, **kwargs):
         ok = original(*args, **kwargs)
-        writer = camera._video_writer
+        writer = camera.take.writer
         write_frame = writer._write_frame
         writes = {"n": 0}
 
@@ -1146,7 +1133,7 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
     )
     count = summary["pulse_train"]["count"]
     cam = _cam(summary, "FAKE-0")
-    assert camera.writer_skipped == 0
+    assert camera.take.stats().writer_skipped == []
     assert cam["writer_dropped"] > queue_size
     assert cam["frames"] == count and len(_frames(save_dir, "FAKE-0")) == count
     np.testing.assert_array_equal(arrays["FAKE-0/pulse_index"], np.arange(count))

@@ -13,6 +13,12 @@ import pytest
 
 from octacam import firmware as fw
 
+
+@pytest.fixture
+def no_flash():
+    """Overrides conftest's stub: this module tests the real discovery and flash."""
+
+
 # ---------------------------------------------------------------------------
 # sketch_fingerprint
 # ---------------------------------------------------------------------------
@@ -108,6 +114,7 @@ def spec():
         fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX",
         protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
 
 
@@ -154,7 +161,7 @@ def test_check_to_dict_roundtrip(spec):
     assert d["state"] == "outdated"
     assert d["needs_flash"] is True
     assert d["needed_build"] == "abc12345"
-    assert set(d) >= {"state", "detail", "board_build", "needs_flash", "safe_to_auto_flash"}
+    assert set(d) >= {"state", "detail", "needs_flash", "safe_to_auto_flash"}
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +261,7 @@ def test_preflight_no_cli(spec):
 def test_preflight_no_sketch(monkeypatch):
     spec = fw.FirmwareSpec(
         name="x", sketch_dir=Path("/nope/x"), fqbn="arduino:esp32:nano_nora",
-        banner_prefix="X", protocol_version=1,
+        banner_prefix="X", protocol_version=1, build_define="X_FW_BUILD",
     )
     ok, msg = fw.preflight(spec, "arduino-cli")
     assert not ok and "sketch" in msg.lower()
@@ -265,6 +272,7 @@ def test_preflight_core_missing(monkeypatch):
     spec = fw.FirmwareSpec(
         name="triggerbox", sketch_dir=spec_dir, fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX", protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
     monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: False)
     ok, msg = fw.preflight(spec, "arduino-cli")
@@ -276,6 +284,7 @@ def test_preflight_ok(monkeypatch):
     spec = fw.FirmwareSpec(
         name="triggerbox", sketch_dir=spec_dir, fqbn="arduino:esp32:nano_nora",
         banner_prefix="TRIGGERBOX", protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
     )
     monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
     ok, msg = fw.preflight(spec, "arduino-cli")
@@ -404,56 +413,14 @@ def test_flash_removes_temp_build_dir_on_failure(real_spec, monkeypatch):
     assert not Path(seen["sketch"]).parent.exists()  # cleaned up despite the raise
 
 
-# ---------------------------------------------------------------------------
-# FirmwareProvisioner — reopen-failure handling + lock reentrancy
-# ---------------------------------------------------------------------------
+def test_a_spec_without_a_source_checkout_is_never_built_or_flashed(real_spec):
+    # A wheel install ships no sketch: the board keeps working, by banner only
+    # (SerialPlugin's side is in test_plugins).
+    from dataclasses import replace
 
-
-def _provisioner(spec, *, reopen, close=lambda: None, is_busy=None):
-    return fw.FirmwareProvisioner(
-        spec,
-        resolve_device=lambda: ("/dev/ttyACM0", "ok"),
-        reopen=reopen,
-        close_link=close,
-        wait_for_device=lambda device, timeout=3.0: True,
-        is_busy=is_busy,
-    )
-
-
-def test_provisioner_clears_stale_check_when_reopen_fails(real_spec, monkeypatch):
-    """A successful upload whose reopen fails must NOT keep reporting the board as
-    out of date (the flash landed; we just can't confirm)."""
-    monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
-    monkeypatch.setattr(fw, "_run_streaming", lambda cmd, timeout, on_line: (0, "uploaded"))
-    prov = _provisioner(real_spec, reopen=lambda: "cannot reopen /dev/ttyACM0")
-    prov.classify("TRIGGERBOX 2")  # start out of date
-    assert prov.check.needs_flash
-    result = prov.flash()
-    assert result.ok
-    assert prov.check is None  # stale "outdated" dropped
-    assert "could not be reopened" in result.message
-
-
-def test_provisioner_refuses_when_busy(real_spec):
-    prov = _provisioner(real_spec, reopen=lambda: None, is_busy=lambda: (True, "busy now"))
-    result = prov.flash()
-    assert not result.ok and result.message == "busy now"
-
-
-def test_provisioner_port_lock_is_reentrant(real_spec, monkeypatch):
-    """flash() holds port_lock across reopen(); reopen (the plugin's _open) takes
-    the same lock — it must not self-deadlock."""
-    monkeypatch.setattr(fw, "core_installed", lambda cli, fqbn: True)
-    monkeypatch.setattr(fw, "_run_streaming", lambda cmd, timeout, on_line: (0, "ok"))
-    prov = None
-
-    def reopen():
-        # Same-thread re-acquire while flash() holds it (RLock).
-        with prov.port_lock:
-            prov.classify(f"TRIGGERBOX 2 {prov.needed_build}")
-        return None
-
-    prov = _provisioner(real_spec, reopen=reopen)
-    result = prov.flash()
-    assert result.ok
-    assert prov.check.state is fw.FirmwareState.CURRENT
+    spec = replace(real_spec, sketch_dir=None)
+    assert spec.main_ino is None
+    assert fw.source_build(spec) is None
+    assert fw.source_build(real_spec) == fw.sketch_fingerprint(real_spec.sketch_dir)
+    ok, msg = fw.preflight(spec, "arduino-cli")
+    assert not ok and "sketch source was not found;" in msg

@@ -6,22 +6,14 @@ live capture, transcode, or detached job is never touched.
 
 import fcntl
 
-import pytest
 from typer.testing import CliRunner
 
 from octacam import process_jobs as pj
 from octacam import session_cache
-from octacam.cli import _human_size, app
+from octacam.cli import app
+from octacam.cli.admin import _human_size
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    """Point the cache (and so the jobs dir) at a throwaway directory."""
-    target = tmp_path / "cache"
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(target))
-    return target
 
 
 def _job_status(job_id, **kw):

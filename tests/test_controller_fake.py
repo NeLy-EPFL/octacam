@@ -5,17 +5,19 @@ without PYLON_CAMEMU, driven by the same software-trigger timer as the real rig.
 """
 
 import json
-import os
-
-os.environ.setdefault("OCTACAM_FAKE_CAMERAS", "FAKE-0,FAKE-1")
 
 import pytest
+from helpers import wait_until
 
 from octacam.cameras import CameraSystem
-from octacam.controller import RecordingController, RecordingSettings, StartResult
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController, StartResult
 from octacam.transform import DisplayTransform
 
 FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
+# Where a recording writes everything but its videos (transform.
+# RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
+INFO_DIR = "octacam_recording"
 
 
 @pytest.fixture
@@ -46,17 +48,24 @@ def test_fake_full_recording_cycle(fake_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-    assert not (save_dir / "timestamps.npz").exists()  # timestamps are opt-in
+    # Timestamps are opt-in.
+    assert not (save_dir / INFO_DIR / "timestamps.npz").exists()
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert len(summary["cameras"]) == 2
     # frames flowed via the software trigger (be lenient on the exact count)
     assert all(c["frames"] >= 20 for c in summary["cameras"])
 
     assert controller.get_settings().save_dir.endswith("002-trial")
     # No config dir (a bare controller): no config snapshot, no camera files.
-    assert not (save_dir / "octacam_config.toml").exists()
-    assert not list(save_dir.glob("*.fake"))
+    assert not (save_dir / INFO_DIR / "octacam_config.toml").exists()
+    assert not list(save_dir.rglob("*.fake"))
+    # The folder shows the videos; the summary is in the subfolder.
+    assert {p.name for p in save_dir.iterdir()} == {
+        "FAKE-0.mkv",
+        "FAKE-1.mkv",
+        "octacam_recording",
+    }
     snapshot = controller.snapshot()
     assert all(c["frames"] > 0 for c in snapshot["cameras"])
 
@@ -73,7 +82,7 @@ def test_all_cameras_capture_the_same_frame_count(fake_system, tmp_path):
     assert controller.start_recording().ok
     controller.join(timeout=20)
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     counts = [c["frames"] for c in summary["cameras"]]
     assert len(counts) == 2
     # Every camera captured the same number, and none exceeded the intended cap.
@@ -93,8 +102,7 @@ def test_writer_queue_size_reaches_each_writer(fake_system, tmp_path):
     # Writers are open the moment start_recording() returns ok (created under the
     # controller lock), before the countdown ends — inspect them now.
     for camera in fake_system:
-        assert camera._video_writer is not None
-        assert camera._video_writer._max_queue_size == 7
+        assert camera.take.writer.max_queue_size == 7
     controller.join(timeout=20)
 
 
@@ -131,7 +139,9 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
     controller.join(timeout=20)
 
     # The live Process values land in the recording folder's config snapshot...
-    snap = tomllib.loads((save_dir / "octacam_config.toml").read_text())
+    snap = tomllib.loads(
+        (save_dir / INFO_DIR / "octacam_config.toml").read_text()
+    )
     assert snap["transcode"]["ffmpeg_params"] == "-c:v ffv1 -level 3"
     assert snap["transfer"] == {"directory": "~/other-store", "checksum": False}
     # ...while the untouched sections survive the patched re-emit and the
@@ -143,10 +153,8 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
 
 
 def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path):
-    from octacam.cli import _settings_from_record
-    from octacam.config import load_config_dir
-    from octacam.config_writer import read_pfs_files, write_config
-    from octacam.controller import record_config_values
+    from octacam.config import load_config_dir, resolve_config_dir
+    from octacam.config_writer import write_config
     from octacam.plugins import PluginManager
     from octacam.plugins.base import Plugin
 
@@ -172,7 +180,7 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
         name = "lamp"
 
         def snapshot_options(self, params):
-            return {"level": params["lamp"]["level"]}
+            return {"level": params["level"]}
 
     save_dir = tmp_path / "rec" / "001"
     settings = RecordingSettings(
@@ -194,23 +202,65 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
     assert controller.start_recording(plugin_params={"lamp": {"level": 7}}).ok
     controller.join(timeout=20)
 
-    # The recording folder loads back as the setup that was recorded, not the
-    # rig file's values, and keeps the path templates for a fresh folder...
-    config = load_config_dir(save_dir)
-    reloaded = _settings_from_record(config.record, config.transcode, config.transfer)
-    assert record_config_values(reloaded) == record_config_values(settings)
+    # The recording folder loads back (through its octacam_recording
+    # subfolder) as the setup that was recorded, not the rig file's values, and
+    # keeps the path templates for a fresh folder...
+    config = load_config_dir(resolve_config_dir(save_dir))
+    reloaded = RecordingSettings.from_config(config)
+    assert reloaded.record_config_values() == settings.record_config_values()
     assert config.record.directory == "~/data/%y%m%d"
     assert config.record.relative_directory == "Fly1/001"
     assert [(p.name, p.options) for p in config.plugins] == [
         ("lamp", {"device": "/dev/null", "level": 7})
     ]
     # ...with each camera's live parameters beside it, plus the rig's other files.
-    params = read_pfs_files(save_dir, "fake")
+    params = {p.stem: p.read_text() for p in (save_dir / INFO_DIR).glob("*.fake")}
     assert set(params) == {"FAKE-0", "FAKE-1", "AUX"}
     assert "ExposureTime\t1234\n" in params["FAKE-0"]
     assert "ExposureTime\t1234\n" not in params["FAKE-1"]
     # The rig's own config is untouched.
     assert load_config_dir(config_dir).record.fps == 80.0
+
+
+def test_fake_recording_snapshot_carries_the_live_view_transforms(fake_system, tmp_path):
+    from octacam.config import load_config_dir, resolve_config_dir
+    from octacam.config_writer import write_config
+    from octacam.transform import from_camera_config
+
+    # The View tab rotates one camera and un-flips the other live, unsaved; the
+    # recording bakes both in, so a relaunch from it must apply them too.
+    config_dir = tmp_path / "cfg"
+    write_config(
+        config_dir,
+        {
+            "record": {"fps": 50.0, "duration": 1.0},
+            "cameras": [
+                {"serial_number": "FAKE-0", "name": "cam0"},
+                {"serial_number": "FAKE-1", "name": "cam1", "scale_x": -1.0},
+            ],
+        },
+    )
+    fake_system.apply_display_config(load_config_dir(config_dir).cameras)
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    controller.set_camera_transform(0, 1.0, 1.0, 90)
+    controller.set_camera_transform(1, 1.0, 1.0, 0)
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
+    recorded = {c["serial"]: c["transform"] for c in summary["cameras"]}
+    reloaded = {
+        c.serial_number: from_camera_config(c).to_dict()
+        for c in load_config_dir(resolve_config_dir(save_dir)).cameras
+    }
+    assert reloaded == recorded
+    assert recorded["FAKE-0"]["rotation_deg"] == 90 and not recorded["FAKE-1"]["flip_h"]
+    # The rig's own config is untouched.
+    assert load_config_dir(config_dir).cameras[1].scale_x == -1.0
 
 
 def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, tmp_path):
@@ -227,12 +277,15 @@ def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, t
     assert controller.start_recording().ok
     controller.join(timeout=20)
 
-    assert (save_dir / "octacam_config.toml").read_text() == text
+    info_dir = save_dir / INFO_DIR
+    assert (info_dir / "octacam_config.toml").read_text() == text
     # The camera files are the live camera state, so they are always written.
-    assert {p.name for p in save_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
+    assert {p.name for p in info_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
 
 
 def test_recording_into_the_config_dir_leaves_the_rig_files_alone(fake_system, tmp_path):
+    from octacam.config import load_config_dir
+
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     (config_dir / "octacam_config.toml").write_text("[record]\nfps = 10.0\n")
@@ -248,6 +301,131 @@ def test_recording_into_the_config_dir_leaves_the_rig_files_alone(fake_system, t
     assert (config_dir / "octacam_config.toml").read_text() == "[record]\nfps = 10.0\n"
     assert (config_dir / "FAKE-0.fake").read_text() == "rig\n"
     assert not (config_dir / "FAKE-1.fake").exists()
+    # The recording's own snapshot went to its subfolder, clear of the rig's.
+    info_dir = config_dir / INFO_DIR
+    assert load_config_dir(info_dir).record.fps == 50.0  # the live value
+    assert {p.name for p in info_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
+
+
+def test_recording_layout_keeps_only_videos_at_the_top(fake_system, tmp_path):
+    import numpy as np
+
+    from octacam.config import load_config_dir, resolve_config_dir
+    from octacam.recording_format import recording_info_dir, recording_summary_path
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text("[record]\nfps = 50.0\n")
+    (config_dir / "AUX.fake").write_text("helper\n")
+
+    save_dir = tmp_path / "rec" / "001"
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(save_dir), save_frame_timestamps=True
+    )
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording().ok
+    controller.join(timeout=20)
+
+    # Exactly the videos at the top level; everything else in the subfolder.
+    info_dir = save_dir / INFO_DIR
+    assert {p.name for p in save_dir.iterdir()} == {
+        "FAKE-0.mkv",
+        "FAKE-1.mkv",
+        "octacam_recording",
+    }
+    assert {p.name for p in info_dir.iterdir()} == {
+        "recording_summary.json",
+        "timestamps.npz",
+        "octacam_config.toml",
+        "FAKE-0.fake",
+        "FAKE-1.fake",
+        "AUX.fake",
+    }
+    assert recording_info_dir(save_dir) == info_dir
+    # The summary's per-camera files are named in the recording folder.
+    summary = json.loads(recording_summary_path(save_dir).read_text())
+    assert {c["file"] for c in summary["cameras"]} == {"FAKE-0.mkv", "FAKE-1.mkv"}
+    assert all((save_dir / c["file"]).is_file() for c in summary["cameras"])
+    with np.load(info_dir / "timestamps.npz") as data:
+        assert "FAKE-0/timestamp_ns" in data.files
+    # The subfolder is a config dir the recording folder relaunches from.
+    assert resolve_config_dir(save_dir) == info_dir
+    assert load_config_dir(resolve_config_dir(save_dir)).record.fps == 50.0
+
+
+def test_recording_over_an_older_flat_take_leaves_its_files_alone(
+    fake_system, tmp_path
+):
+    from octacam.config import load_config_dir
+    from octacam.recording_format import recording_info_dir, recording_summary_path
+
+    # A folder holding a take recorded before the subfolder existed.
+    save_dir = tmp_path / "rec" / "001"
+    save_dir.mkdir(parents=True)
+    old = {
+        "recording_summary.json": '{"old": true}\n',
+        "timestamps.npz": "old npz",
+        "octacam_config.toml": "[record]\nfps = 1.0\n",
+        "FAKE-0.fake": "old params\n",
+    }
+    for name, text in old.items():
+        (save_dir / name).write_text(text)
+    assert recording_info_dir(save_dir) == save_dir
+
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text("[record]\nfps = 50.0\n")
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(save_dir), save_frame_timestamps=True
+    )
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording(confirm_overwrite=True).ok
+    controller.join(timeout=20)
+
+    # The new take is in the subfolder, which readers now prefer...
+    info_dir = save_dir / INFO_DIR
+    assert recording_info_dir(save_dir) == info_dir
+    summary = json.loads(recording_summary_path(save_dir).read_text())
+    assert len(summary["cameras"]) == 2
+    assert (info_dir / "timestamps.npz").is_file()
+    assert load_config_dir(info_dir).record.fps == 50.0
+    assert {p.name for p in info_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
+    # ...and the older take's flat files are untouched.
+    for name, text in old.items():
+        assert (save_dir / name).read_text() == text
+
+
+def test_recording_relaunched_from_a_recording_into_it_leaves_its_config(
+    fake_system, tmp_path
+):
+    from octacam.config import resolve_config_dir
+
+    # `octacam gui <recording>` runs from the recording's subfolder; recording
+    # into that same folder again must not rewrite the config it runs from.
+    save_dir = tmp_path / "rec" / "001"
+    info_dir = save_dir / INFO_DIR
+    info_dir.mkdir(parents=True)
+    (info_dir / "octacam_config.toml").write_text("[record]\nfps = 10.0\n")
+    (info_dir / "FAKE-0.fake").write_text("rig\n")
+    config_dir = resolve_config_dir(save_dir)
+    assert config_dir == info_dir
+
+    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
+    controller = RecordingController(
+        fake_system, settings, auto_preview=False, config_dir=config_dir
+    )
+    assert controller.start_recording(confirm_overwrite=True).ok
+    controller.join(timeout=20)
+
+    assert (info_dir / "octacam_config.toml").read_text() == "[record]\nfps = 10.0\n"
+    assert (info_dir / "FAKE-0.fake").read_text() == "rig\n"
+    assert not (info_dir / "FAKE-1.fake").exists()
+    # The take's summary is still written.
+    assert (info_dir / "recording_summary.json").is_file()
 
 
 def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):
@@ -263,7 +441,7 @@ def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):
 
     # One compressed file for the whole recording (no per-camera CSVs).
     assert not any(save_dir.glob("*.csv"))
-    with np.load(save_dir / "timestamps.npz") as data:
+    with np.load(save_dir / INFO_DIR / "timestamps.npz") as data:
         for serial in FAKE_SERIALS:
             timestamps = data[f"{serial}/timestamp_ns"]
             dropped = data[f"{serial}/dropped"]
@@ -276,7 +454,7 @@ def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):
     # The fake backend supplies a (nonzero) timestamp for every frame, so nothing
     # falls back to host time — the summary records that provenance. The 0 -> host
     # fallback path (pycameleon) is covered by test_timestamp_source_derivation.
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     for cam in summary["cameras"]:
         assert cam["timestamp_source"] == "hardware"
         assert cam["host_fallback_count"] == 0
@@ -298,7 +476,7 @@ def test_fake_recording_bakes_display_transform(fake_system, tmp_path):
     assert controller.start_recording().ok
     controller.join(timeout=20)
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     for cam in summary["cameras"]:
         assert cam["transform_applied"] is True
         assert cam["transform"]["rotation_deg"] == 90
@@ -313,14 +491,11 @@ def test_fake_recording_bakes_display_transform(fake_system, tmp_path):
         assert frame.shape[:2] == (320, 240)  # (height, width) after rotation
 
 
-def test_fake_recording_notes_folder_in_session_cache(
-    fake_system, tmp_path, monkeypatch
-):
+def test_fake_recording_notes_folder_in_session_cache(fake_system, tmp_path):
     # With a session id, each finished recording's folder is noted in the cache
     # so `octacam process --last session` can rediscover the batch.
     from octacam import session_cache
 
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     save_dir = tmp_path / "rec" / "001-bhv"
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
     controller = RecordingController(
@@ -331,20 +506,17 @@ def test_fake_recording_notes_folder_in_session_cache(
     assert session_cache.session_folders("sess-test") == [save_dir.resolve()]
 
 
-def test_fake_recording_without_session_id_skips_cache(
-    fake_system, tmp_path, monkeypatch
-):
-    # No session id (the default for a directly-built controller) -> the cache
-    # is untouched, so unit tests never write to the user cache dir.
+def test_fake_recording_without_session_id_gets_its_own_session(fake_system, tmp_path):
+    # A controller given no session id makes its own: its recordings are still
+    # noted, as one session.
     from octacam import session_cache
 
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     save_dir = tmp_path / "rec" / "001"
     settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(save_dir))
     controller = RecordingController(fake_system, settings, auto_preview=False)
     assert controller.start_recording().ok
     controller.join(timeout=20)
-    assert session_cache.last_folder() is None
+    assert session_cache.session_folders() == [save_dir.resolve()]
 
 
 def test_fake_external_trigger_waits_indefinitely(fake_system, tmp_path, monkeypatch):
@@ -358,12 +530,12 @@ def test_fake_external_trigger_waits_indefinitely(fake_system, tmp_path, monkeyp
     """
     import time
 
-    import octacam.controller as controller_module
+    import octacam.take as take_module
 
     # Shrink the thresholds so the *old* auto-start behaviour would trigger
     # almost immediately; if the fix works the controller still won't start.
-    monkeypatch.setattr(controller_module, "STARTED_WARN_AFTER_S", 0.1)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+    monkeypatch.setattr(take_module, "STARTED_WARN_AFTER_S", 0.1)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.3)
 
     save_dir = tmp_path / "ext" / "001"
     settings = RecordingSettings(
@@ -420,7 +592,7 @@ def test_fake_zero_frame_recording_is_flagged(fake_system, tmp_path):
     controller.join(timeout=20)
 
     # The summary still records the empty capture (not an abort, 0 frames)...
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert summary["aborted"] is False
     assert all(c["frames"] == 0 for c in summary["cameras"])
     # ...but the controller now emits a loud zero-frame error, naming the
@@ -532,17 +704,49 @@ def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
     controller.join(timeout=20)
 
 
-def test_fake_abort_recording(fake_system, tmp_path):
-    import time
+def test_teardown_gate_blocks_a_racing_benchmark(fake_system, tmp_path):
+    """A benchmark disarms the trigger plugin too, so it must not start while a
+    finished recording's teardown tail is still disarming and re-arming it."""
+    import threading as _t
 
+    from octacam.plugins.base import Plugin, PluginManager
+
+    in_stop = _t.Event()
+    release = _t.Event()
+
+    class Gate(Plugin):
+        name = "gate"
+
+        def on_recording_stop(self, aborted):
+            in_stop.set()
+            release.wait(10)  # hold the teardown tail open
+
+    settings = RecordingSettings(
+        fps=50.0, duration_s=0.3, save_dir=str(tmp_path / "rec" / "001")
+    )
+    controller = RecordingController(
+        fake_system, settings, PluginManager([Gate()]), auto_preview=False
+    )
+    try:
+        assert controller.start_recording().ok
+        assert in_stop.wait(20)
+        assert not controller.recording_active
+        result = controller.run_diagnostic(duration_s=0.3, find_max=False, sink="null")
+        assert result.status == StartResult.BUSY
+        assert result.message == "Previous recording is still finishing"
+    finally:
+        release.set()
+        controller.join(timeout=20)
+    assert controller.state == "idle"
+
+
+def test_fake_abort_recording(fake_system, tmp_path):
     save_dir = tmp_path / "abort" / "001"
     settings = RecordingSettings(fps=50.0, duration_s=60.0, save_dir=str(save_dir))
     controller = RecordingController(fake_system, settings, auto_preview=False)
     assert controller.start_recording().ok
 
-    deadline = time.monotonic() + 10
-    while controller.state != "recording" and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: controller.state == "recording", timeout=10, interval=0.05)
     assert controller.state == "recording"
 
     controller.stop_recording(abort=True)

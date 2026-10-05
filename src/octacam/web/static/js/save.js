@@ -2,17 +2,16 @@
 // to the active config dir or a new sibling config dir. The browser owns the
 // display state (runtime rotate/flip + tile layout), so it sends it up.
 
-import { api, ModalFocus } from "./util.js";
+import { api, Modal } from "./util.js";
 
-export class SaveDialog {
+export class SaveDialog extends Modal {
   constructor({ grid, notify, getRecording }) {
+    super(document.getElementById("save-dialog"));
     this.grid = grid;
     this.notify = notify;
     this.getRecording = getRecording; // () => bool
     this.busy = false;
 
-    this.dialog = document.getElementById("save-dialog");
-    this.focus = new ModalFocus(this.dialog.querySelector(".modal-card"));
     this.nameRow = document.getElementById("save-name-row");
     this.nameInput = document.getElementById("save-name");
     this.sensor = document.getElementById("save-sensor");
@@ -26,20 +25,12 @@ export class SaveDialog {
       .getElementById("save-cancel")
       .addEventListener("click", () => this.close());
     this.confirmBtn.addEventListener("click", () => this._save());
-    this.dialog.addEventListener("click", (e) => {
-      if (e.target === this.dialog) this.close();
-    });
     for (const el of document.querySelectorAll('input[name="save-target"]')) {
       el.addEventListener("change", () => this._syncTarget());
     }
     this.sensor.addEventListener("change", () => this._syncButtons());
     this.display.addEventListener("change", () => this._syncButtons());
     this.nameInput.addEventListener("input", () => this._syncButtons());
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !this.dialog.classList.contains("hidden")) {
-        this.close();
-      }
-    });
   }
 
   setConnected(connected) {
@@ -54,14 +45,7 @@ export class SaveDialog {
     }
     this.error.textContent = "";
     this._syncTarget();
-    this.dialog.classList.remove("hidden");
-    this.focus.activate();
-  }
-
-  close() {
-    if (this.dialog.classList.contains("hidden")) return;
-    this.dialog.classList.add("hidden");
-    this.focus.deactivate();
+    super.open();
   }
 
   _target() {

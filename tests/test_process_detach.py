@@ -6,17 +6,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from octacam import cli
 from octacam import process_jobs as pj
-from octacam.cli import app
+from octacam.cli import app, gui
 
 runner = CliRunner()
-
-
-@pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
-    return tmp_path / "cache"
 
 
 # ------------------------------------------------------------- process --detach
@@ -44,21 +37,37 @@ def test_process_detach_spawns_with_absolute_paths(cache_dir, tmp_path, monkeypa
     assert "--no-transfer" in captured["argv_tail"]
 
 
-def test_rebuild_process_argv_is_absolute_and_drops_selectors(tmp_path):
+def test_process_options_argv_is_absolute_and_drops_raw_output(tmp_path, monkeypatch):
+    from octacam.process import ProcessOptions
+
     folder = tmp_path / "r"
     folder.mkdir()
-    argv = cli._rebuild_process_argv(
-        [folder],
-        recursive=False,
-        no_transcode=False,
-        no_grid=True,
-        no_transfer=False,
+    monkeypatch.chdir(tmp_path)
+    options = ProcessOptions(grid=False, force=True, raw_output=True)
+    assert options.argv([Path("r")]) == ["--no-grid", "--force", str(folder.resolve())]
+    every = ProcessOptions(
+        transcode=False,
+        grid=False,
+        transfer=False,
         force=True,
-        config_dir=None,
-        delete_source=False,
-        dry_run=False,
+        recursive=True,
+        delete_source=True,
+        dry_run=True,
+        ignore_capture=True,
+        config_dir=Path("r"),
     )
-    assert argv == ["--no-grid", "--force", str(folder.resolve())]
+    assert every.argv([]) == [
+        "--no-transcode",
+        "--no-grid",
+        "--no-transfer",
+        "--force",
+        "--recursive",
+        "--delete-source",
+        "--dry-run",
+        "--ignore-capture",
+        "--config",
+        str(folder.resolve()),
+    ]
 
 
 # ------------------------------------------------------------- octacam jobs
@@ -96,10 +105,34 @@ def test_jobs_pause_resume_delegate(cache_dir, monkeypatch):
     assert seen == [("pause", "live"), ("resume", "live")]
 
 
-# ------------------------------------------------------------- _pause_gate
+@pytest.mark.parametrize(
+    ("verb", "message"),
+    [
+        ("pause", "Could not pause job live."),
+        ("resume", "Could not resume job live."),
+        ("cancel", "Could not cancel job live (it may have already finished)."),
+    ],
+)
+def test_jobs_control_failures(cache_dir, monkeypatch, verb, message):
+    none_live = runner.invoke(app, ["jobs", verb])
+    assert none_live.exit_code == 1
+    assert f"No live processing jobs to {verb}." in none_live.output
+    unknown = runner.invoke(app, ["jobs", verb, "nope"])
+    assert unknown.exit_code == 1
+    assert "No such live job." in unknown.output
+
+    pj.write_status(pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1))
+    monkeypatch.setattr(pj, "is_live", lambda jd: True)
+    monkeypatch.setattr(pj, verb, lambda job: False)
+    refused = runner.invoke(app, ["jobs", verb, "live"])
+    assert refused.exit_code == 1
+    assert message in refused.output
 
 
-class _FakeReporter:
+# ------------------------------------------------------------- pause_gate
+
+
+class _FakeReporter(pj.NullReporter):
     def __init__(self):
         self.calls = []
 
@@ -112,9 +145,9 @@ def test_pause_gate_blocks_then_resumes(monkeypatch):
 
     seq = iter([True, True, False])  # capture active twice, then clears
     monkeypatch.setattr(session_cache, "capture_active", lambda: next(seq, False))
-    monkeypatch.setattr(cli.time, "sleep", lambda s: None)  # don't actually wait
+    monkeypatch.setattr(pj.time, "sleep", lambda s: None)  # don't actually wait
     reporter = _FakeReporter()
-    cli._pause_gate(reporter, None, unit="file")
+    pj.pause_gate(reporter, unit="file")
     assert (True, "capture-active") in reporter.calls
     assert reporter.calls[-1] == (False, None)  # cleared on resume
 
@@ -124,14 +157,28 @@ def test_pause_gate_reports_both_reasons(cache_dir, monkeypatch):
 
     jd = pj.job_dir("j")
     jd.mkdir(parents=True)
-    pj.pause(pj.JobStatus(job_id="j"))  # manual flag set
+    status = pj.JobStatus(job_id="j")
+    pj.pause(status)  # manual flag set
     seq = iter([True, False])
     monkeypatch.setattr(session_cache, "capture_active", lambda: next(seq, False))
-    monkeypatch.setattr(pj, "is_manually_paused", lambda d: False)
-    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    reporter = _FakeReporter()
-    cli._pause_gate(reporter, jd, unit="file")
-    assert reporter.calls[0] == (True, "capture-active")
+    reasons = []
+
+    def sleep(_seconds):
+        reasons.append(pj.read_status(jd).paused_reason)
+        pj.resume(status)
+
+    monkeypatch.setattr(pj.time, "sleep", sleep)
+    pj.pause_gate(pj.JobReporter(jd, status), unit="file")
+    assert reasons == ["capture-active+manual"]
+    assert pj.read_status(jd).paused is False
+
+
+def test_pause_gate_ignore_capture_never_waits_on_a_capture(monkeypatch):
+    from octacam import session_cache
+
+    monkeypatch.setattr(session_cache, "capture_active", lambda: True)
+    monkeypatch.setattr(pj.time, "sleep", lambda s: pytest.fail("must not wait"))
+    pj.pause_gate(pj.NullReporter(), unit="file", ignore_capture=True)
 
 
 def test_pause_gate_does_not_swallow_interrupt(monkeypatch):
@@ -142,9 +189,9 @@ def test_pause_gate_does_not_swallow_interrupt(monkeypatch):
     def raise_ki(_):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.time, "sleep", raise_ki)
+    monkeypatch.setattr(pj.time, "sleep", raise_ki)
     with pytest.raises(KeyboardInterrupt):
-        cli._pause_gate(None, None, unit="file")
+        pj.pause_gate(pj.NullReporter(), unit="file")
 
 
 # ------------------------------------------------------------- _finish_gui_session
@@ -162,7 +209,7 @@ def test_finish_gui_session_spawns_when_process_after(cache_dir, tmp_path, monke
         "spawn_detached",
         lambda **kw: captured.update(kw) or pj.JobStatus(job_id="jid"),
     )
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=True)
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=True)
     assert captured["argv_tail"] == ["--session-id", "sess1", "--config", "/cfg"]
     assert captured["folders"] == [folder]
 
@@ -170,8 +217,8 @@ def test_finish_gui_session_spawns_when_process_after(cache_dir, tmp_path, monke
 def test_finish_gui_session_prints_hints_when_not(cache_dir, monkeypatch):
     called = {"spawn": False, "hints": False}
     monkeypatch.setattr(pj, "spawn_detached", lambda **kw: called.update(spawn=True))
-    monkeypatch.setattr(cli, "_print_transcode_hints", lambda sid: called.update(hints=True))
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=False)
+    monkeypatch.setattr(gui, "_print_transcode_hints", lambda sid: called.update(hints=True))
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=False)
     assert called == {"spawn": False, "hints": True}
 
 
@@ -183,4 +230,4 @@ def test_finish_gui_session_noop_without_recordings(cache_dir, monkeypatch):
         pj, "spawn_detached", lambda **kw: pytest.fail("must not spawn with no recordings")
     )
     # Must not raise.
-    cli._finish_gui_session("sess1", Path("/cfg"), process_after=True)
+    gui._finish_gui_session("sess1", Path("/cfg"), process_after=True)

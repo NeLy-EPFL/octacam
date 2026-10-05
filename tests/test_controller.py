@@ -1,48 +1,35 @@
 """RecordingController tests: pure-unit + emulator integration."""
 
 import json
-import os
-import time
-
-os.environ.setdefault("PYLON_CAMEMU", "2")
 
 import pytest
+from helpers import camera_stats, wait_until
 
-from octacam.controller import (
-    RecordingController,
-    RecordingSettings,
-    StartResult,
-    capture_frame_count,
-    increment_trailing_number,
-    normalize_save_dir,
-    sanitize_camera_name,
-)
+from octacam.cameras import CameraSystem
+from octacam.config import RecordingSettings
+from octacam.controller import RecordingController, StartResult
+from octacam.pulses import PulseClock
+from octacam.take import DeliveryProfile, capture_frame_count, check_sync
+from octacam.transform import DisplayTransform
 
 EMULATED_SERIALS = ["0815-0000", "0815-0001"]
+# Where a recording writes everything but its videos (recording_format.
+# RECORDING_INFO_DIRNAME), spelled out so a rename of the on-disk layout is caught.
+INFO_DIR = "octacam_recording"
 
 
 # ------------------------------------------------------------------- units
 
 
 def test_build_recording_summary():
-    from types import SimpleNamespace
+    from octacam.recording_format import build_recording_summary
 
-    from octacam.controller import build_recording_summary
-    from octacam.transform import DisplayTransform
-
-    cam = SimpleNamespace(
-        name="cam0",
-        serial_number="S0",
-        recorded_frame_size=(240, 320),
-        pixel_format="Mono8",
-        mean_fps=99.97,
-        frames_recorded=500,
-        dropped_count=2,
-        dropped_indices=[137, 411],
-        start_timestamp_ns=123,
-        host_fallback_count=0,
-        writer_failed=False,
-        display_transform=DisplayTransform(rotation_deg=90),
+    cam = camera_stats(
+        serial="S0",
+        frame_size=(240, 320),
+        frames=500,
+        dropped=[k in (137, 411) for k in range(500)],
+        transform=DisplayTransform(rotation_deg=90),
     )
     settings = RecordingSettings(
         fps=100.0, duration_s=5.0, save_method="ffmpeg", record_form="display"
@@ -62,8 +49,8 @@ def test_build_recording_summary():
     (entry,) = summary["cameras"]
     assert entry["file"] == "cam0.mkv"
     assert entry["pixel_format"] == "Mono8"
-    assert entry["dropped_indices"] == [137, 411]
-    # A camera that predates pulse accounting reads as having none.
+    assert entry["frames"] == 500 and entry["start_timestamp_ns"] == 1_000_000
+    assert entry["dropped"] == 2 and entry["dropped_indices"] == [137, 411]
     assert entry["missed_pulses"] == 0 and entry["missed_pulse_indices"] == []
     assert entry["writer_dropped"] == 0 and entry["stream"] == {}
     assert entry["writer_skipped"] == 0 and entry["writer_skipped_pulse_indices"] == []
@@ -83,48 +70,29 @@ def test_build_recording_summary():
 
 
 PERIOD_125_FPS = 8_000_000
-BASLER = ("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 2000)
-GS3 = ("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
+BASLER = DeliveryProfile("BaslerBackend", "acA1920-150um", 1920, 1200, "Mono8", 2000)
+GS3 = DeliveryProfile("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000)
 
 
-def _sync_camera(name, latency_ns, *, late_pulses=0, frames=16, **extra):
-    """A finished camera as _check_sync reads it: ``frames`` frames of a train at
+def _sync_camera(name, latency_ns, *, started_late=0, frames=16, **extra):
+    """A finished camera as check_sync reads it: ``frames`` frames of a train at
     125 fps, each reaching the host ``latency_ns`` after its pulse, the whole
-    video ``late_pulses`` pulses behind the train."""
-    from types import SimpleNamespace
-
+    video ``started_late`` pulses behind the train."""
     t0 = 1_700_000_000_000_000_000
-    fields = {
-        "name": name,
-        "serial_number": name,
-        "frames_recorded": frames,
-        "missed_pulses": [],
-        "writer_dropped": 0,
-        "extra_frames": 0,
-        "clock_mismatch": False,
-        "unclocked_frames": 0,
-        "timestamp_glitches": [],
-        "frame_arrival_ns": [
-            t0 + (p + late_pulses) * PERIOD_125_FPS + latency_ns for p in range(frames)
+    return camera_stats(
+        name,
+        frames=frames,
+        arrival_ns=[
+            t0 + (p + started_late) * PERIOD_125_FPS + latency_ns for p in range(frames)
         ],
-        "frame_pulse_index": list(range(frames)),
         **extra,
-    }
-    return SimpleNamespace(**fields)
-
-
-def _sync_controller(cameras, profiles):
-    from typing import Any, cast
-
-    from octacam.pulses import PulseClock
-
-    controller = RecordingController(
-        cast(Any, cameras), RecordingSettings(fps=125.0), auto_preview=False
     )
-    controller._pulse_clock = PulseClock(PERIOD_125_FPS, 16, "managed")
-    controller._delivery_profiles = profiles
-    controller._recording_cameras = [c.name for c in cameras]
-    return controller
+
+
+def _check(cameras, profiles):
+    """check_sync of a completed 16-pulse managed train every camera recorded."""
+    clock = PulseClock(PERIOD_125_FPS, 16, "managed")
+    return check_sync(cameras, [c.name for c in cameras], clock, profiles, completed=True)
 
 
 def test_check_sync_does_not_compare_unlike_cameras():
@@ -137,9 +105,7 @@ def test_check_sync_does_not_compare_unlike_cameras():
         _sync_camera("f0", 12_700_000),
         _sync_camera("f1", 12_600_000),
     ]
-    sync = _sync_controller(
-        cams, {"b0": BASLER, "b1": BASLER, "f0": GS3, "f1": GS3}
-    )._check_sync(completed=True)
+    sync = _check(cams, {"b0": BASLER, "b1": BASLER, "f0": GS3, "f1": GS3})
     assert sync["ok"], sync
     assert sync["start_offsets"] == {"b0": 0, "b1": 0, "f0": 0, "f1": 0}
     assert sync["warnings"] == []
@@ -147,15 +113,41 @@ def test_check_sync_does_not_compare_unlike_cameras():
     assert "[b0, b1]" in note and "[f0, f1]" in note, note
 
 
+def test_check_sync_note_names_what_differs():
+    # The capillary rig: two GS3s alike but for their ROI. The note must read as
+    # information and say why these two were not compared.
+    top = GS3._replace(width=1024, height=2048)
+    bottom = GS3._replace(width=2048, height=1024)
+    cams = [_sync_camera("top", 12_700_000), _sync_camera("bottom", 7_500_000)]
+    sync = _check(cams, {"top": top, "bottom": bottom})
+    assert sync["ok"] and sync["warnings"] == [], sync
+    (note,) = sync["notes"]
+    assert "not an error" in note, note
+    assert "frame size (top 1024×2048, bottom 2048×1024)" in note, note
+    for same in ("model", "pixel format", "exposure", "backend"):
+        assert f"{same} (" not in note, note
+
+
+def test_check_sync_note_names_each_differing_field_per_group():
+    cams = [
+        _sync_camera("b0", 6_700_000),
+        _sync_camera("b1", 6_800_000),
+        _sync_camera("f0", 12_700_000),
+    ]
+    sync = _check(cams, {"b0": BASLER, "b1": BASLER, "f0": GS3})
+    (note,) = sync["notes"]
+    assert f"model ([b0, b1] {BASLER.model}, f0 {GS3.model})" in note, note
+    assert "frame size ([b0, b1] 1920×1200, f0 2048×2048)" in note, note
+    assert "exposure (" not in note, note  # both 2000 µs
+
+
 def test_check_sync_still_catches_a_like_camera_a_pulse_late():
     cams = [
         _sync_camera("b0", 6_700_000),
         _sync_camera("f0", 12_700_000),
-        _sync_camera("f1", 12_600_000, late_pulses=1),
+        _sync_camera("f1", 12_600_000, started_late=1),
     ]
-    sync = _sync_controller(cams, {"b0": BASLER, "f0": GS3, "f1": GS3})._check_sync(
-        completed=True
-    )
+    sync = _check(cams, {"b0": BASLER, "f0": GS3, "f1": GS3})
     assert not sync["ok"]
     assert sync["start_offsets"] == {"f0": 0, "f1": 1}
     assert any("f1 started 1 pulse(s) late" in w for w in sync["warnings"]), sync
@@ -165,8 +157,8 @@ def test_check_sync_still_catches_a_like_camera_a_pulse_late():
 
 
 def test_check_sync_compares_a_camera_without_a_profile_with_none():
-    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, late_pulses=1)]
-    sync = _sync_controller(cams, {"f0": GS3, "f1": None})._check_sync(completed=True)
+    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, started_late=1)]
+    sync = _check(cams, {"f0": GS3, "f1": None})
     assert sync["ok"] and sync["start_offsets"] == {}, sync
     assert len(sync["notes"]) == 1
 
@@ -174,38 +166,16 @@ def test_check_sync_compares_a_camera_without_a_profile_with_none():
 def test_check_sync_flags_frames_the_writer_skipped():
     cams = [
         _sync_camera("f0", 12_700_000),
-        _sync_camera("f1", 12_600_000, writer_skipped=2, writer_skipped_pulses=[7, 8]),
+        _sync_camera("f1", 12_600_000, writer_skipped=[7, 8]),
     ]
-    controller = _sync_controller(cams, {"f0": GS3, "f1": GS3})
-    sync = controller._check_sync(completed=True)
+    sync = _check(cams, {"f0": GS3, "f1": GS3})
     assert not sync["ok"]
     (warning,) = sync["warnings"]
     assert "f1" in warning and "2 frame(s)" in warning and "pulse_index" in warning
-    from types import SimpleNamespace
-
-    from octacam.controller import build_recording_summary
-    from octacam.transform import DisplayTransform
+    from octacam.recording_format import build_recording_summary
 
     summary = build_recording_summary(
-        RecordingSettings(fps=125.0),
-        [
-            SimpleNamespace(
-                **vars(cam),
-                recorded_frame_size=(2048, 2048),
-                pixel_format="Mono8",
-                mean_fps=125.0,
-                dropped_count=0,
-                dropped_indices=[],
-                start_timestamp_ns=1,
-                host_fallback_count=0,
-                writer_failed=False,
-                display_transform=DisplayTransform(),
-            )
-            for cam in cams
-        ],
-        0,
-        aborted=False,
-        sync=sync,
+        RecordingSettings(fps=125.0), cams, 0, aborted=False, sync=sync
     )
     entry = summary["cameras"][1]
     assert entry["writer_skipped"] == 2 and entry["writer_skipped_pulse_indices"] == [7, 8]
@@ -214,13 +184,30 @@ def test_check_sync_flags_frames_the_writer_skipped():
 
 def test_check_sync_flags_a_recording_camera_with_no_frame():
     cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 0, frames=0)]
-    sync = _sync_controller(cams, {"f0": GS3, "f1": GS3})._check_sync(completed=True)
+    sync = _check(cams, {"f0": GS3, "f1": GS3})
     assert not sync["ok"]
     assert any("f1 recorded no frame" in w for w in sync["warnings"]), sync
 
 
+def test_check_sync_flags_a_camera_that_did_not_start():
+    cams = [_sync_camera("f0", 12_700_000), camera_stats("f1")]
+    clock = PulseClock(PERIOD_125_FPS, 16, "managed")
+    sync = check_sync(cams, ["f0"], clock, {"f0": GS3, "f1": GS3}, completed=True)
+    assert not sync["ok"]
+    assert any("f1 did not start recording" in w for w in sync["warnings"]), sync
+
+
+def test_check_sync_trusts_the_software_trigger_sequence():
+    # Frame 0 answers trigger 0 in every camera: one that merely delivers a
+    # period later did not start late.
+    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 12_600_000, started_late=1)]
+    clock = PulseClock(PERIOD_125_FPS, 16, "software")
+    sync = check_sync(cams, ["f0", "f1"], clock, {"f0": GS3, "f1": GS3}, completed=True)
+    assert sync["ok"] and sync["start_offsets"] == {"f0": 0, "f1": 0}, sync
+
+
 def test_timestamp_source_derivation():
-    from octacam.controller import _timestamp_source
+    from octacam.recording_format import _timestamp_source
 
     assert _timestamp_source(0, 0) is None  # no frames
     assert _timestamp_source(500, 0) == "hardware"  # never fell back
@@ -229,37 +216,41 @@ def test_timestamp_source_derivation():
 
 
 def test_build_timestamps_arrays():
-    from types import SimpleNamespace
-
     import numpy as np
 
-    from octacam.controller import build_timestamps_arrays
+    from octacam.recording_format import build_timestamps_arrays
+
+    def camera(name, timestamps, dropped):
+        n = len(timestamps)
+        return camera_stats(
+            name,
+            timestamp_ns=timestamps,
+            dropped=dropped,
+            missed=dropped[:n],
+            pulse_index=list(range(n)),
+            arrival_ns=[t + 5 for t in timestamps],
+        )
 
     cams = [
-        SimpleNamespace(
-            name="cam0",
-            frame_timestamps=[10, 20, 30],
-            frame_dropped=[False, True, False],
-        ),
+        camera("cam0", [10, 20, 30], [False, True, False]),
         # Different length (ragged) — long format handles it naturally.
-        SimpleNamespace(
-            name="cam1",
-            frame_timestamps=[100, 200],
-            frame_dropped=[False, False],
-        ),
+        camera("cam1", [100, 200], [False, False]),
         # Zero-frame camera contributes empty arrays.
-        SimpleNamespace(name="cam2", frame_timestamps=[], frame_dropped=[]),
+        camera("cam2", [], []),
         # Defensive: a length skew truncates to the shared minimum, never raises.
-        SimpleNamespace(
-            name="cam3", frame_timestamps=[1, 2, 3], frame_dropped=[True]
-        ),
+        camera("cam3", [1, 2, 3], [True]),
     ]
     arrays = build_timestamps_arrays(cams)
 
     assert arrays["cam0/timestamp_ns"].dtype == np.int64
     assert arrays["cam0/dropped"].dtype == np.bool_
+    assert arrays["cam0/missed"].dtype == np.bool_
+    assert arrays["cam0/pulse_index"].dtype == np.int64
+    assert arrays["cam0/arrival_ns"].dtype == np.int64
     assert list(arrays["cam0/timestamp_ns"]) == [10, 20, 30]
     assert list(arrays["cam0/dropped"]) == [False, True, False]
+    assert list(arrays["cam0/pulse_index"]) == [0, 1, 2]
+    assert list(arrays["cam0/arrival_ns"]) == [15, 25, 35]
     assert list(arrays["cam1/timestamp_ns"]) == [100, 200]
     assert len(arrays["cam2/timestamp_ns"]) == 0
     assert len(arrays["cam2/dropped"]) == 0
@@ -271,37 +262,6 @@ def dataclasses_replace(obj, **kw):
     import dataclasses
 
     return dataclasses.replace(obj, **kw)
-
-
-def test_record_config_values_covers_every_record_setting():
-    # Each recording's config snapshot is written from record_config_values, so a
-    # new [record] key must either be reproduced there or be deliberately left
-    # out — otherwise a recording made with it would relaunch with the rig
-    # file's value instead of its own.
-    from octacam.config import RecordConfig
-    from octacam.controller import record_config_values
-
-    reproduced = set(record_config_values(RecordingSettings()))
-    # duration_s stands in for the duration/unit pair (config_writer picks a unit).
-    reproduced = (reproduced - {"duration_s"}) | {"duration", "duration_unit"}
-    # The save path templates are kept as written, so a relaunch resolves a fresh
-    # dated folder; the path a recording used is in its summary.
-    excluded = {"directory", "relative_directory"}
-    assert set(RecordConfig.model_fields) == reproduced | excluded
-
-
-def test_increment_trailing_number():
-    assert increment_trailing_number("/data/001-bhv") == "/data/002-bhv"
-    assert increment_trailing_number("/d/240101_/Fly1/009") == "/d/240101_/Fly1/010"
-    assert increment_trailing_number("/data/run007/trial003") == "/data/run007/trial004"
-    assert increment_trailing_number("/data/999") == "/data/1000"
-    assert increment_trailing_number("/data/no-number") == "/data/no-number"
-
-
-def test_normalize_save_dir():
-    home = os.path.expanduser("~")
-    assert normalize_save_dir(" ~/data ") == f"{home}/data"
-    assert normalize_save_dir("/a/b").startswith("/a/b")
 
 
 def test_capture_frame_count():
@@ -334,18 +294,11 @@ def test_capture_frame_count():
     ) == 1
 
 
-def test_update_settings_validation():
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings()
-    controller._state = "preview"
-    controller._lock = __import__("threading").RLock()
-
-    class _SystemStub:
-        def set_software_trigger_frequency(self, hz):
-            self.hz = hz
-
-    controller.camera_system = _SystemStub()
+def test_update_settings_validation(monkeypatch):
+    system = CameraSystem.pending()
+    rates: list[float] = []
+    monkeypatch.setattr(system, "set_software_trigger_frequency", rates.append)
+    controller = RecordingController(system, RecordingSettings(), auto_preview=False)
     with pytest.raises(ValueError):
         controller.update_settings(codec="vp9")
     with pytest.raises(ValueError):
@@ -370,38 +323,62 @@ def test_update_settings_validation():
         controller.update_settings(max_nvenc_sessions=-1)
     with pytest.raises(ValueError):
         controller.update_settings(max_nvenc_sessions=True)
-    # nvenc_params must be shlex-parseable (bad quoting rejected up front).
+    # Encoder args must be shlex-parseable (bad quoting rejected up front): the
+    # writer splits them at open, so every camera's writer would fail to start.
     with pytest.raises(ValueError):
         controller.update_settings(nvenc_params='-c:v h264_nvenc "oops')
+    with pytest.raises(ValueError):
+        controller.update_settings(ffmpeg_params='-c:v libx264 "oops')
     assert (
         controller.update_settings(nvenc_params="-c:v hevc_nvenc -cq 20").nvenc_params
         == "-c:v hevc_nvenc -cq 20"
     )
     controller.update_settings(fps=42.0)
-    assert controller.camera_system.hz == 42.0
+    assert rates == [42.0]
+    with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
+        controller.update_settings(self=1)
 
-    controller._state = "recording"
-    with pytest.raises(RuntimeError):
-        controller.update_settings(fps=10.0)
+
+def test_settings_and_names_are_locked_while_recording(tmp_path):
+    system = CameraSystem(["FAKE-0"], backend="fake")
+    system.load_config(tmp_path)
+    system.camera_at(0).set_geometry(width=64, height=48)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=60.0, save_method="raw", save_dir=str(tmp_path / "rec")
+    )
+    controller = RecordingController(system, settings, auto_preview=False)
+    try:
+        assert controller.start_recording().ok
+        assert controller.recording_active
+        with pytest.raises(RuntimeError):
+            controller.update_settings(fps=10.0)
+        # A bad change is rejected as such in any state.
+        with pytest.raises(ValueError):
+            controller.update_settings(fps=0)
+        with pytest.raises(ValueError, match=r"^Unknown settings: \['self'\]$"):
+            controller.update_settings(self=1)
+        with pytest.raises(RuntimeError):
+            controller.set_camera_name(0, "other")
+    finally:
+        controller.close()
+    assert controller.get_settings().fps == 50.0
+    assert system.camera_at(0).name == "FAKE-0"
 
 
 def test_update_settings_lone_save_dir_clears_split_halves():
     # Setting save_dir alone (no record_directory/relative_directory in the same
-    # patch) must clear the stale split halves — otherwise _relative_directory
+    # patch) must clear the stale split halves — otherwise relative_save_dir
     # keeps preferring the old relative_directory and the post-recording increment
     # recomposes save_dir from it, discarding the explicitly set path.
-    import threading
-
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings(
-        record_directory="/base",
-        relative_directory="240101/001",
-        save_dir="/base/240101/001",
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(
+            record_directory="/base",
+            relative_directory="240101/001",
+            save_dir="/base/240101/001",
+        ),
+        auto_preview=False,
     )
-    controller._state = "idle"
-    controller._lock = threading.RLock()
-    controller._auto_preview = False
 
     merged = controller.update_settings(save_dir="/other/place")
     assert merged.save_dir.endswith("/other/place")
@@ -418,27 +395,23 @@ def test_update_settings_lone_save_dir_clears_split_halves():
     assert merged.save_dir.endswith("/b/run/002")
 
 
-def test_sanitize_camera_name():
-    assert sanitize_camera_name("  cam left  ") == "cam left"
-    assert sanitize_camera_name("cam_01") == "cam_01"
-    for bad in ("", "   ", ".", "..", "a/b", "a\\b"):
-        with pytest.raises(ValueError):
-            sanitize_camera_name(bad)
-
-
 def test_browse_directory(tmp_path):
     (tmp_path / "b").mkdir()
     (tmp_path / "a").mkdir()
     (tmp_path / ".hidden").mkdir()
+    # A recording's metadata subfolder is never a place to record into.
+    (tmp_path / "octacam_recording").mkdir()
     (tmp_path / "f.txt").write_text("x")
 
-    controller = RecordingController.__new__(RecordingController)
-    controller._starting = False  # __init__ bypassed: no start is in flight
-    controller._settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
+    controller = RecordingController(
+        CameraSystem.pending(),
+        RecordingSettings(save_dir=str(tmp_path / "rec" / "001")),
+        auto_preview=False,
+    )
 
     listing = controller.browse_directory(str(tmp_path))
     assert listing["path"] == str(tmp_path)
-    assert listing["entries"] == ["a", "b"]  # sorted, dirs only, no dotfiles
+    assert listing["entries"] == ["a", "b"]  # sorted, dirs only, no dotfiles/info dir
     assert listing["parent"] == str(tmp_path.parent)
     assert listing["writable"] is True
 
@@ -450,36 +423,14 @@ def test_browse_directory(tmp_path):
     )
 
 
-def test_video_format_carries_ffmpeg_params():
-    settings = RecordingSettings(
-        save_method="ffmpeg",
-        ffmpeg_params="-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p",
-    )
-    video_format = settings.video_format()
-    assert video_format.save_method == "ffmpeg"
-    assert (
-        video_format.ffmpeg_params
-        == "-c:v libx264 -preset superfast -crf 20 -pix_fmt yuv420p"
-    )
-    assert RecordingSettings(save_method="raw").video_format().extension == "raw"
-
-
-def test_recording_settings_default_ffmpeg_params():
-    # The capture default tracks writer.DEFAULT_FFMPEG_PARAMS (CRF 18 ultrafast,
-    # near visually lossless); config's record.ffmpeg_params overrides it.
-    from octacam.writer import DEFAULT_FFMPEG_PARAMS
-
-    assert RecordingSettings().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
-
-
 # ------------------------------------------------- emulator integration
 
 
 @pytest.fixture
 def camera_system(tmp_path):
-    from octacam.camera import CameraSystem
+    from octacam.cameras import CameraSystem
 
-    system = CameraSystem(EMULATED_SERIALS)
+    system = CameraSystem(EMULATED_SERIALS, backend="basler")
     assert len(system) == 2, "PYLON_CAMEMU=2 expected"
     system.load_config(tmp_path)  # no .pfs files: emulator defaults
     yield system
@@ -497,7 +448,7 @@ def collect_states(controller):
 
 
 def test_deferred_startup_ready_attach_and_fail(camera_system):
-    from octacam.camera import CameraSystem
+    from octacam.cameras import CameraSystem
 
     # The GUI starts the controller against a hardware-free placeholder so the
     # web server can serve before the cameras open.
@@ -555,9 +506,10 @@ def test_full_recording_cycle(camera_system, tmp_path):
     assert len(videos) == 2
     for video in videos:
         assert video.stat().st_size > 0
-    assert not (save_dir / "timestamps.npz").exists()  # timestamps are opt-in
+    # Timestamps are opt-in.
+    assert not (save_dir / INFO_DIR / "timestamps.npz").exists()
 
-    summary = json.loads((save_dir / "recording_summary.json").read_text())
+    summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
     for cam in summary["cameras"]:
@@ -580,9 +532,7 @@ def test_abort_recording(camera_system, tmp_path):
     controller = RecordingController(camera_system, settings, auto_preview=False)
     assert controller.start_recording().ok
 
-    deadline = time.monotonic() + 10
-    while controller.state != "recording" and time.monotonic() < deadline:
-        time.sleep(0.05)
+    wait_until(lambda: controller.state == "recording", timeout=10, interval=0.05)
     assert controller.state == "recording"
 
     controller.stop_recording(abort=True)
@@ -616,14 +566,14 @@ def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
     controller = RecordingController(
         camera_system, settings, PluginManager([Spy()]), auto_preview=False
     )
-    params = {"spy": {"value": 1}}
+    params = {"spy": {"value": 1}, "other": {"value": 2}}
     assert controller.start_recording(plugin_params=params).ok
     controller.join(timeout=20)
 
     first_frames = [c for c in calls if c[0] == "first_frame"]
     assert len(first_frames) == 1, "on_first_frame must fire exactly once"
-    assert first_frames[0][1] == params  # plugin slice threaded through
-    assert ("start", params) in calls
+    assert first_frames[0][1] == {"value": 1}  # the plugin's own slice
+    assert ("start", {"value": 1}) in calls
     assert ("stop", False) in calls  # completed, not aborted
 
 
@@ -717,8 +667,3 @@ def test_set_camera_name(camera_system):
         controller.set_camera_name(0, "a/b")
     with pytest.raises(IndexError):
         controller.set_camera_name(9, "x")
-
-    # names are locked while a recording is active
-    controller._state = "recording"
-    with pytest.raises(RuntimeError):
-        controller.set_camera_name(0, "other")

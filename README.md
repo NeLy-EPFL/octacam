@@ -57,7 +57,8 @@ octacam process --all          # transcode + grid + copy everything you recorded
 
 Everything after recording — transcoding, composite grid videos, and copying to
 a shared destination — is the single command **`octacam process`**, driven by a
-config snapshot each recording saves alongside its videos.
+config snapshot each recording saves in its `octacam_recording/` subfolder, beside
+its videos.
 
 ## Commands
 

@@ -19,7 +19,7 @@ options override only the day-to-day values:
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config's `duration`/`duration_unit`). |
 | `--output`, `-o` | Save directory, overriding the templated location. |
-| `--yes`, `-y` | If a serial plugin's board firmware is out of date, reflash it before recording (also lets a headless run flash instead of only warning). |
+| `--yes`, `-y` | Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about; use `octacam flash`). |
 | `--plugin <name>` | Enable a [plugin](plugins.md) (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
 
@@ -29,13 +29,30 @@ octacam record configs/my_rig --fps 100 --duration 10
 
 ## Recording outputs
 
-Each recording writes, into its own save directory:
+Each recording gets its own save directory. It shows just the videos; everything
+else the recording writes goes into an `octacam_recording/` subfolder:
 
-- one video file per camera,
-- one `recording_summary.json`,
-- the recording's config: a snapshot of `octacam_config.toml` plus each camera's
-  sensor parameter file (`<serial>.pfs` / `<serial>.txt`),
-- one `timestamps.npz` (only when `record.save_timestamps` is on).
+```text
+001-bhv/                        # the recording folder
+├── cam0.mkv                    # one video per camera (.raw for a raw dump;
+├── cam1.mkv                    #   .mp4 once `octacam process` transcodes it)
+├── grid.mp4                    # composite grid, if `octacam process` builds one
+└── octacam_recording/
+    ├── recording_summary.json  # frame accounting, sync verdict, settings
+    ├── timestamps.npz          # per-frame timestamps (record.save_timestamps)
+    ├── octacam_config.toml     # the config snapshot
+    ├── 40001978.pfs            # each camera's sensor parameters
+    └── 17475187.txt
+```
+
+The summary's per-camera `file` entries name the videos relative to the
+recording folder, not to `octacam_recording/`.
+
+!!! note "Older recordings"
+    Recordings made before the `octacam_recording/` subfolder existed keep these
+    files flat, beside the videos. They keep working with every command —
+    `octacam check`, `process` (transcode, grid, transfer) and relaunching with
+    `octacam gui` — which read either layout.
 
 ### The recording summary
 
@@ -104,8 +121,8 @@ event log while recording, and each tile's *dropped* counter includes them.
 ### Per-frame timestamps
 
 With `record.save_timestamps = true`, each recording also writes a single
-compressed `timestamps.npz` holding every camera's per-frame series, one entry
-per **video** frame, keyed by camera name:
+compressed `octacam_recording/timestamps.npz` holding every camera's per-frame
+series, one entry per **video** frame, keyed by camera name:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
@@ -117,7 +134,7 @@ per **video** frame, keyed by camera name:
 
 ```python
 import numpy as np
-d = np.load("timestamps.npz")
+d = np.load("001-bhv/octacam_recording/timestamps.npz")
 ts = d["cam0/timestamp_ns"]          # nanoseconds
 real = ~d["cam0/dropped"]            # frames that are images of their own pulse
 gaps_ms = np.diff(ts[real]) / 1e6    # inter-frame gaps between real frames
@@ -133,7 +150,9 @@ not wall-clock and not aligned across cameras.
 
 `octacam check` screens recording folders (or whole directory trees) for missed
 pulses, unequal frame counts, a start offset between cameras, late exposures and
-camera-clock jumps, and exits 1 if any recording has a problem:
+camera-clock jumps, and exits 1 if any recording has a problem. A directory is
+searched for recordings of either layout; an `octacam_recording/` subfolder is
+never mistaken for a recording of its own:
 
 ```bash
 octacam check ~/octacam/data/hexaview/260917          # every recording under it
@@ -160,16 +179,21 @@ recording has too few of them it is reported as undetermined.
 
 ### The embedded config snapshot
 
-Each recording also saves its config into its own folder: a copy of the rig's
-`octacam_config.toml` updated with everything changed live in the GUI, plus each
-camera's sensor parameter file. That makes the folder a complete
-[config directory](configuration.md) for the setup the recording actually used:
+Each recording also saves its config into its `octacam_recording/` subfolder: a
+copy of the rig's `octacam_config.toml` updated with everything changed live in
+the GUI, plus each camera's sensor parameter file. That makes the subfolder a
+complete [config directory](configuration.md) for the setup the recording
+actually used:
 
 - **`[record]`** holds the settings the recording ran with (fps, duration,
   trigger source, save method and encoder args, …), even when they were changed
   in the **Record** tab and never saved to the rig config.
 - **`[[plugins]]`** holds each plugin's live settings, e.g. the triggerbox camera
   lines and light channels as set in its tab.
+- **`[[cameras]]`** holds each camera's rotation and flips as set in the
+  **View** tab, which a display-form recording bakes into its video. (Only
+  cameras the rig config already lists are updated. Tile layout is saved only by
+  **Save**.)
 - **`<serial>.pfs` / `<serial>.txt`** are read from each camera just before it
   starts recording, so they include **Camera**-tab edits (exposure, gain, ROI, …)
   that were never saved. The rig's other parameter files are copied too.
@@ -185,13 +209,19 @@ directory and launch from it. The copy on your storage works too, since
 ```bash
 mkdir -p configs/wt-rerun
 rsync -a --include='octacam_config.toml' --include='*.pfs' --include='*.txt' \
-  --exclude='*' /mnt/store/matthias/260620-wt/Fly1/001-bhv/ configs/wt-rerun/
+  --exclude='*' /mnt/store/matthias/260620-wt/Fly1/001-bhv/octacam_recording/ \
+  configs/wt-rerun/
 octacam gui configs/wt-rerun
 ```
 
+(For an older recording with its files flat beside the videos, drop the
+`octacam_recording/` from the source path.)
+
 New recordings go to the templated save directory, with today's date and a fresh
-trial number. You can also run `octacam gui <recording folder>` directly, but a
-GUI *Save…* would then write into that folder.
+trial number. You can also run `octacam gui <recording folder>` directly: octacam
+finds the config in its `octacam_recording/` subfolder (or, for an older
+recording, in the folder itself), but a GUI *Save…* would then write into that
+recording.
 
 The snapshot is also what lets `octacam process` transcode, build grids, and
 transfer with no `--config` flag: it reads the encoder args
@@ -204,6 +234,9 @@ destination (`[transfer]`) straight from the embedded copy. See
     new take writes, but the previous take's transcoded `.mp4`/`grid.mp4` stay
     behind. `octacam process` notices they are older than the recording they sit
     with and redoes them, rather than transferring a video from the earlier take.
+    Likewise, recording into a folder that holds an older flat-layout take leaves
+    that take's flat summary and config where they are (octacam never deletes
+    them); every command then reads the new take's `octacam_recording/`.
 
 ## Transformed vs raw frames
 
@@ -214,8 +247,9 @@ saw on screen.
 - Set `record.save_transformed = false` to save the raw, untransformed sensor
   image instead. This is also toggleable live in the GUI's **Record** tab.
 - A raw recording (`record.save_method = "raw"`) writes only a `.raw` byte dump
-  per camera. Its width/height/pixel-format/fps live in `recording_summary.json`,
-  so `octacam process` can transcode it later without a per-camera sidecar.
+  per camera. Its width/height/pixel-format/fps live in the recording's
+  `recording_summary.json`, so `octacam process` can transcode it later without
+  a per-camera sidecar.
 
 ## Where recordings go
 

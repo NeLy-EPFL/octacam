@@ -20,10 +20,8 @@
   --resizer-width: 6px;
 }
 
-/* Light theme — only the colours that differ from the dark defaults above are
-   redefined; everything else (e.g. --lime, which overlays the black video
-   letterbox) inherits. Selected by setting data-theme="light" on <html>; an
-   inline script in index.html applies the saved choice before first paint. */
+/* Light theme (data-theme="light" on <html>) redefines only the colors that
+   differ; the rest (e.g. --lime over the black video letterbox) inherits. */
 :root[data-theme="light"] {
   color-scheme: light;
   --bg: #f4f5f7;
@@ -81,9 +79,8 @@ body {
 
 /* -------------------------------------------- update-available banner */
 
-/* Read-only "a newer octacam is available" notice (js/update.js). Accent, not
-   red — informational and dismissible. Fixed to the top edge like the
-   connection banner; sits behind it (z 99 vs 100) on the rare overlap. */
+/* "A newer octacam is available" (js/update.js): accent, not red. Sits behind
+   the connection banner (z 99 vs 100) if both show. */
 #update-banner {
   position: fixed;
   top: 0;
@@ -136,9 +133,7 @@ body {
   isolation: isolate;
 }
 
-/* Shown in the grid area while the server opens the cameras on its background
-   init thread (the page is served before the hardware is ready); replaced by
-   buildCameras() when the camera list arrives, or shows the init error. */
+/* Spinner or init error in the grid area until the cameras are open. */
 .grid-placeholder {
   position: absolute;
   inset: 0;
@@ -300,9 +295,8 @@ body {
   background: var(--lime);
 }
 
-/* Prominent, hard-to-miss badge over a tile whose writer failed mid-recording
-   (a subtle red name tint alone is easy to overlook on a busy multi-cam grid).
-   Persists until the flag clears on the next recording. */
+/* Badge over a tile whose writer failed (a red name tint alone is easy to
+   miss on a busy grid). */
 .tile-fail {
   position: absolute;
   top: 6px;
@@ -424,6 +418,20 @@ body {
 .tabs-menu button[data-tab]:hover { color: var(--text); background: var(--border); }
 .tabs-menu button[data-tab].active { color: var(--text); }
 
+/* Incomplete-rig warning (app.js showMissingCameras), above every tab for the
+   whole session. Amber like the firmware banner: attention, not an error. */
+#rig-alert {
+  flex: none;
+  margin: 10px 10px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--panel));
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+#rig-alert ul { margin: 4px 0 0; padding-left: 18px; }
+
 .tab {
   display: none;
   padding: 12px 10px;
@@ -464,7 +472,7 @@ body {
 .serial-port-row { flex: none; display: flex; align-items: center; gap: 4px; }
 
 /* Firmware "out of date — Flash firmware" banner, shared by serial-plugin tabs
-   (js/firmware-flash.js). Amber = attention, distinct from the red link-error
+   (js/serial.js). Amber = attention, distinct from the red link-error
    .plugin-status above. */
 .fw-flash {
   display: flex;
@@ -640,9 +648,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 
 /* status + hints */
 
-/* Persistent, prominent save-failure banner (item mirrors the per-tile badge).
-   A solid red fill rather than a tint so it can't be missed during a trial;
-   no animation, so it is fine under prefers-reduced-motion. */
+/* Save-failure banner: a solid red fill so it can't be missed in a trial. */
 .writer-alert {
   margin-top: 8px;
   padding: 7px 10px;
@@ -778,9 +784,7 @@ input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); }
 #footer-actions button:hover:not(:disabled) { border-color: var(--text-dim); }
 #footer-actions button:disabled { opacity: 0.5; cursor: default; }
 
-/* Compact icon-only buttons (☀️/🌙 theme, ⌨️ shortcuts help, 💾 save config,
-   🔌/🔗/🔄 disconnect-reconnect, 🛑 shutdown) — no visible label, title= carries
-   the tooltip. */
+/* Icon-only footer buttons; title= carries the label. */
 #theme-toggle,
 #shortcuts-help-btn,
 #save-config-btn,
@@ -959,9 +963,7 @@ kbd {
   color: var(--text-dim);
 }
 
-/* Record tab — the Advanced-options switch and the grouped panels it reveals.
-   Replaces the old collapsible <details> "Advanced"/"Process" sections with a
-   single binary toggle (wired in record.js). */
+/* Record tab: the Advanced-options switch and the groups it reveals. */
 .adv-toggle {
   display: flex;
   align-items: center;
@@ -1394,10 +1396,8 @@ kbd {
 
 /* ------------------------------------------------ narrow / mobile layout */
 
-/* The default layout is a fixed horizontal split (grid + a resizable sidebar),
-   which is unusable on a phone-width window. Below this breakpoint, stack the
-   grid above the sidebar and let the page scroll, hide the drag-resizer (the
-   sidebar spans the full width), and span the banner edge-to-edge. */
+/* Phone width: stack the grid above a full-width sidebar and let the page
+   scroll. */
 @media (max-width: 640px) {
   body {
     flex-direction: column;
@@ -1413,16 +1413,15 @@ kbd {
   #sidebar-resizer { display: none; }
 
   #sidebar {
-    /* Full width overrides the JS-driven --sidebar-width (and its 240px floor),
-       so a narrow viewport is not held to the desktop minimum. */
+    /* Overrides the JS-driven --sidebar-width and its 240px floor. */
     width: 100%;
     flex: none;
     border-left: none;
     border-top: 1px solid var(--border);
   }
 
-  /* Sidebar sits below the grid now, so the banners span the whole top edge
-     (--sidebar-width is not reset here, so both must drop their right inset). */
+  /* The banners span the whole top edge (--sidebar-width still holds its
+     desktop value). */
   #banner,
   #update-banner { right: 0; }
 }

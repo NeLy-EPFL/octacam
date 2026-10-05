@@ -1,4 +1,4 @@
-"""DisplayTransform: orientation correctness and numpy <-> ffmpeg equivalence."""
+"""DisplayTransform: orientation correctness."""
 
 import numpy as np
 import pytest
@@ -7,7 +7,6 @@ from octacam.config import CameraConfig
 from octacam.transform import (
     DisplayTransform,
     apply_display_transform,
-    display_vf_filter,
     from_camera_config,
 )
 
@@ -19,7 +18,6 @@ def test_identity_is_noop_and_passthrough():
     assert t.is_identity
     out = apply_display_transform(ARR, t)
     assert np.array_equal(out, ARR)
-    assert display_vf_filter(t) == ""
     assert t.output_size(640, 480) == (640, 480)
 
 
@@ -66,47 +64,6 @@ def test_from_scale_rotation_matches_gui_vocabulary():
     )
 
 
-def test_vf_filter_strings():
-    assert display_vf_filter(DisplayTransform(90)) == "transpose=1"
-    assert display_vf_filter(DisplayTransform(270)) == "transpose=2"
-    assert display_vf_filter(DisplayTransform(180)) == "transpose=1,transpose=1"
-    assert display_vf_filter(DisplayTransform(90, flip_h=True)) == "transpose=1,hflip"
-    assert display_vf_filter(DisplayTransform(0, flip_v=True)) == "vflip"
-
-
 def test_dict_roundtrip():
     t = DisplayTransform(180, flip_h=True)
     assert DisplayTransform.from_dict(t.to_dict()) == t
-
-
-def test_numpy_and_ffmpeg_agree_on_every_combo(tmp_path):
-    """The recorded (numpy) and transcoded (ffmpeg -vf) pixels must match."""
-    cv2 = pytest.importorskip("cv2")
-    from octacam.writer import transcode_raw
-
-    width, height = 8, 6
-    frame = np.arange(height * width, dtype=np.uint8).reshape(height, width) * 3
-    combos = [
-        DisplayTransform(r, fh, fv)
-        for r in (0, 90, 180, 270)
-        for fh in (False, True)
-        for fv in (False, True)
-    ]
-    for i, t in enumerate(combos):
-        raw = tmp_path / f"c{i}.raw"
-        raw.write_bytes(frame.tobytes())
-        out = tmp_path / f"c{i}.mkv"
-        transcode_raw(
-            raw,
-            ffmpeg_params="-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray",
-            output=out,
-            vf=display_vf_filter(t),
-            width=width,
-            height=height,
-            fps=10.0,
-        )
-        cap = cv2.VideoCapture(str(out))
-        ok, decoded = cap.read()
-        cap.release()
-        assert ok, t
-        assert np.array_equal(decoded[:, :, 0], apply_display_transform(frame, t)), t

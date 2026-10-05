@@ -1,11 +1,17 @@
 """pycameleon backend node/param mapping, with a mocked camera (no hardware)."""
 
 import asyncio
+import threading
 import types
 
 import numpy as np
 
-from octacam.cameras._genicam_config import parse_config
+from octacam.cameras._trigger_handoff import (
+    DRAIN_POLL_MS,
+    PRIMING_ANSWER_TIMEOUT_S,
+    SoftwareTrigger,
+)
+from octacam.cameras.genicam import parse_config
 from octacam.cameras.pycameleon import (
     PycameleonBackend,
     enumerate_pycameleon,
@@ -108,23 +114,23 @@ def test_serial_and_open_forces_mono8():
     assert backend._context_xml == "<GenApi/>"
 
 
-def test_read_node_types_and_width_max():
+def test_read_feature_types_and_width_max():
     backend, _cam = _open_backend()
-    width = backend.read_node("width")
+    width = backend.read_feature("Width")
     assert width.value == 1920 and isinstance(width.value, int)
     assert width.max == 1920  # filled from SFNC WidthMax
     assert width.min is None and width.inc is None and width.unit is None
     assert width.writable is True  # open ⇒ geometry writable
-    exposure = backend.read_node("exposure")
+    exposure = backend.read_feature("ExposureTime")
     assert exposure.value == 5000.0 and isinstance(exposure.value, float)
     assert exposure.max is None  # no bounds exposed for non-geometry nodes
 
 
-def test_write_node_routes_to_int_or_float():
+def test_write_feature_routes_to_int_or_float():
     backend, cam = _open_backend()
-    backend.write_node("width", 800)
+    backend.write_feature("Width", 800)
     assert cam._int["Width"] == 800 and isinstance(cam._int["Width"], int)
-    backend.write_node("exposure", 1234.5)
+    backend.write_feature("ExposureTime", 1234.5)
     assert cam._float["ExposureTime"] == 1234.5
 
 
@@ -134,8 +140,8 @@ def test_params_round_trip_and_trigger_normalization():
     backend.load_params(
         "# GenApi persistence file\nExposureTime\t2222.0\nWidth\t640\n"
     )
-    assert backend.read_node("exposure").value == 2222.0
-    assert backend.read_node("width").value == 640
+    assert backend.read_feature("ExposureTime").value == 2222.0
+    assert backend.read_feature("Width").value == 640
     # Preview forces TriggerSource=Software on the live device; a config saved now
     # must be normalized back to the captured original, else it bakes an
     # unrecordable Software trigger (see normalize_trigger_source).
@@ -161,7 +167,7 @@ def test_triggering_sets_software_and_defers_execute():
     # (the execute happens in retrieve, so it can't race a concurrent receive()).
     backend.trigger_once()
     assert cam.executed == []
-    assert backend._pending == 1
+    assert backend.trigger.pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
     assert not cam.streaming
@@ -187,6 +193,57 @@ def test_retrieve_executes_trigger_then_receives():
     backend.stop_grab()
 
 
+def test_a_refused_software_trigger_is_not_awaited():
+    class RefusingCam(FakePyCam):
+        refusals = 1
+
+        def execute(self, node):
+            if self.refusals:
+                self.refusals -= 1
+                raise RuntimeError("TriggerSoftware refused")
+            super().execute(node)
+
+    cam = RefusingCam()
+    backend = PycameleonBackend(cam)
+    backend.open()
+    backend.start_grab_preview()
+    backend.trigger_once()
+    assert backend.retrieve(100, lambda: True) is None
+    assert backend.trigger.fired_index is None
+    backend.trigger_once()  # fires at once: nothing awaits trigger 0's image
+    assert backend.retrieve(100, lambda: True) is not None
+    assert cam.executed == ["TriggerSoftware"] and backend.last_trigger_index == 1
+    backend.stop_grab()
+
+
+def test_a_frame_is_copied_off_the_device_lock():
+    # Only the fire and the receive hold the lock, so a Camera-tab read or a stop
+    # never waits behind a frame copy.
+    backend, _cam = _open_backend()
+    backend.start_grab_preview()
+    held: list[bool] = []
+
+    def wants_array():
+        free = threading.Event()
+
+        def probe():  # another thread: the device lock is reentrant
+            if backend._lock.acquire(blocking=False):
+                backend._lock.release()
+                free.set()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join()
+        held.append(not free.is_set())
+        return True
+
+    backend.trigger_once()
+    assert backend.retrieve(100, wants_array) is not None
+    assert backend.retrieve_freerun(100, wants_array) is not None
+    assert held == [False, False]
+    backend.stop_grab()
+
+
 def test_retrieve_honors_timeout_when_receive_stalls():
     # A stalled/disconnected trigger source must NOT park the grab thread forever:
     # _receive_bounded honors timeout_ms and returns None so the grab loop can
@@ -199,7 +256,7 @@ def test_retrieve_honors_timeout_when_receive_stalls():
     assert got is None
     assert cam.executed == ["TriggerSoftware"]  # trigger still fired
     # _lock was released, so a concurrent node read / stop does not deadlock.
-    assert backend.read_node("width").value == 1920
+    assert backend.read_feature("Width").value == 1920
     backend.stop_grab()
     assert not backend.is_grabbing()
 
@@ -222,6 +279,47 @@ def test_retrieve_freerun_returns_frame():
     assert got is not None
     array, timestamp = got
     assert array.shape == (4, 4) and timestamp == 0
+    backend.stop_grab()
+
+
+def test_unpulsed_fetches_answer_no_trigger():
+    # Free run and an external trigger fetch outside the hand-off: answering it
+    # would make every frame UNMATCHED_TRIGGER, discarded as extra. A payload
+    # cameleon rejects answers nothing either.
+    backend, cam = _open_backend()
+    backend.start_grab_preview()
+    assert backend.retrieve_freerun(100, lambda: True) is not None
+    assert backend.retrieve_external(100, lambda: True) is not None
+
+    async def reject(_rx):
+        raise RuntimeError("Failed to receive image: invalid trailer")
+
+    cam.receive_async = reject
+    assert backend.retrieve_external(100, lambda: True) is None
+    assert backend.last_trigger_index is None and cam.executed == []
+    backend.stop_grab()
+
+
+def test_a_drain_fetch_only_polls():
+    # After a trigger is given up on, an idle loop fetches its late image with a
+    # short poll: a receive for the loop's whole timeout would make the next
+    # trigger stale.
+    backend, _cam = _open_backend()
+    now = [0]
+    backend.trigger = SoftwareTrigger(backend.serial_number, lambda: now[0])
+    timeouts: list[int] = []
+
+    def receive(timeout_ms):
+        timeouts.append(timeout_ms)
+        return None  # no image
+
+    backend._receive_bounded = receive
+    backend.start_grab_preview()
+    backend.trigger_once()
+    assert backend.retrieve(500, lambda: True) is None  # fired; no image
+    now[0] += int(2 * PRIMING_ANSWER_TIMEOUT_S * 1e9)  # given up on
+    assert backend.retrieve(500, lambda: True) is None  # nothing pending: a drain
+    assert timeouts == [500, DRAIN_POLL_MS]
     backend.stop_grab()
 
 

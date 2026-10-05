@@ -1,19 +1,10 @@
-"""Check PyPI for a newer octacam release and advise the correct upgrade command.
+"""Check PyPI for a newer octacam release and advise the upgrade command for
+how octacam was installed (pip / uv tool / pipx / conda).
 
-Read-only and fail-silent by design: **octacam never updates itself.** It only
-*tells* the user that a newer stable release exists and prints the upgrade command
-appropriate to how octacam was installed (pip / uv tool / pipx / conda), leaving
-the actual upgrade to the user and their environment's package manager.
-
-This is deliberate, and matches what established Python CLIs do (pip, pipx, HTTPie
-all notify rather than self-update): a *library* must never mutate its own install,
-and octacam is sometimes a project dependency (`uv add octacam`) or lives inside a
-conda env, where an out-of-band self-update would desync a lockfile or corrupt
-conda's bookkeeping.
-
-The check is version-based and only becomes meaningful once octacam is published to
-PyPI; until then the Simple API returns 404 and every surface stays silent. Nothing
-here raises — an offline or air-gapped rig must be unaffected.
+Read-only: octacam never updates itself (it may be a project dependency or live
+in a conda env, whose lockfile or bookkeeping a self-update would corrupt).
+Nothing here raises, so an offline rig is unaffected; until octacam is on PyPI
+the Simple API 404s and every surface stays silent.
 """
 
 from __future__ import annotations
@@ -30,21 +21,18 @@ from pathlib import Path
 
 from packaging.version import InvalidVersion, Version
 
-# PEP 691 JSON Simple API. PyPI recommends this over the legacy /pypi/<name>/json;
-# it returns the full version list, and a 404 (package not yet published) is the
-# natural "stay silent" signal.
+# The PEP 691 JSON Simple API: every version, and a 404 while unpublished.
 PYPI_SIMPLE_URL = "https://pypi.org/simple/octacam/"
 _SIMPLE_ACCEPT = "application/vnd.pypi.simple.v1+json"
 _DEFAULT_TIMEOUT = 4.0
 
-# Environment variables that suppress the check entirely (no network call): the
-# octacam-specific opt-out plus the cross-tool DO_NOT_TRACK convention.
+# Either one set skips the check, network call included.
 _OPT_OUT_ENV = ("OCTACAM_NO_UPDATE_CHECK", "DO_NOT_TRACK")
 
 
 @dataclass
 class UpdateNotice:
-    """The result of an update check — always safe to render, never a failure."""
+    """The result of an update check; always safe to render."""
 
     current: str
     latest: str | None  # newest stable release on PyPI, or None (no signal)
@@ -64,10 +52,6 @@ class UpdateNotice:
         }
 
 
-def _opted_out() -> bool:
-    return any(os.environ.get(name) for name in _OPT_OUT_ENV)
-
-
 def current_version() -> str:
     try:
         return version("octacam")
@@ -76,57 +60,40 @@ def current_version() -> str:
 
 
 def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
-    """Newest non-prerelease octacam version on PyPI, or None.
-
-    None means "no signal": the package is not on PyPI yet (404), the network is
-    unreachable, or the response was unparseable. Never raises.
-    """
+    """The newest stable octacam version on PyPI, or None for no signal
+    (unpublished, offline, unparseable). Never raises."""
     req = urllib.request.Request(
         PYPI_SIMPLE_URL,
         headers={"Accept": _SIMPLE_ACCEPT, "User-Agent": "octacam-update-check"},
     )
     try:
-        # Fixed https PyPI URL (not user input); short timeout; errors caught below.
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+    # HTTPException: a connection dropped mid-body (IncompleteRead).
     except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
-        # HTTPException covers a mid-body connection drop (IncompleteRead), which
-        # is neither an OSError nor a URLError. "Never raises" must hold here.
         return None
     versions = payload.get("versions") if isinstance(payload, dict) else None
     if not isinstance(versions, list):
         return None
-    # Known limitation: the Simple API's versions[] list carries no yank status
-    # (that lives per-file in files[]), so a fully-yanked latest release would be
-    # reported as newest and we'd advise an upgrade the package manager then
-    # refuses. Accepted for now — read-only advice, and octacam yanks are rare.
-    best: Version | None = None
+    # versions[] carries no yank status, so a yanked release can be advised.
+    stable: list[Version] = []
     for raw in versions:
         try:
             v = Version(raw)
         except (InvalidVersion, TypeError):
             continue
-        if v.is_prerelease or v.is_devrelease:
-            continue
-        if best is None or v > best:
-            best = v
-    return str(best) if best is not None else None
-
-
-def _read_dist_text(name: str) -> str | None:
-    try:
-        return distribution("octacam").read_text(name)
-    except PackageNotFoundError:
-        return None
+        if not v.is_prerelease:  # dev releases count as prereleases
+            stable.append(v)
+    return str(max(stable)) if stable else None
 
 
 def _read_direct_url() -> dict | None:
-    """PEP 610 direct_url.json for the installed dist, or None.
-
-    Returns None for anything that isn't a JSON object (a malformed file could
-    parse to a list/scalar), so callers can assume a dict without a shape check.
-    """
-    text = _read_dist_text("direct_url.json")
+    """The installed dist's PEP 610 direct_url.json if it is a JSON object, else
+    None."""
+    try:
+        text = distribution("octacam").read_text("direct_url.json")
+    except PackageNotFoundError:
+        return None
     if not text:
         return None
     try:
@@ -146,16 +113,11 @@ def _in_conda() -> bool:
 
 
 def detect_install_method() -> str:
-    """Best-effort classification of how octacam was installed, for ADVICE only.
-
-    Never used to mutate anything, so a wrong guess only yields slightly-off advice
-    text — never a broken install. Order matters: the most specific
-    "do-not-suggest-a-plain-upgrade" signals (dev/vcs/conda) come first.
-    """
+    """How octacam was installed, best-effort and for advice only. The installs
+    that must not get a plain upgrade (dev, vcs, conda) are checked first."""
     direct = _read_direct_url()
     if direct:
         dir_info = direct.get("dir_info")
-        # dir_info may be absent, null, or (in a malformed file) a non-object.
         if isinstance(dir_info, dict) and dir_info.get("editable"):
             return "editable"
         if "vcs_info" in direct:
@@ -165,37 +127,30 @@ def detect_install_method() -> str:
     prefix = Path(sys.prefix)
     if (prefix / "uv-receipt.toml").exists():
         return "uv-tool"
-    # pipx installs each tool under <pipx home>/venvs/<name>/; the path is the
-    # reliable tell (PIPX_* env vars are only set inside `pipx run`, not for an
-    # installed tool's own entry point).
+    # <pipx home>/venvs/<name>/ (PIPX_* is set only inside `pipx run`).
     if "pipx" in prefix.parts and "venvs" in prefix.parts:
         return "pipx"
     return "pip"
 
 
 def advice_for(method: str) -> str:
-    """The upgrade command to suggest for an install method, or "".
-
-    Empty when octacam should not print a command: a dev/VCS checkout (the user
-    owns the source tree). conda/pip/uv-tool/pipx each get their manager's command.
-    """
+    """The upgrade command to suggest for an install method; "" for a dev or VCS
+    checkout, whose source tree the user owns."""
     return {
         "pip": "pip install --upgrade octacam",
         "uv-tool": "uv tool upgrade octacam",
         "pipx": "pipx upgrade octacam",
         "conda": "conda update octacam",
-        "editable": "git pull && uv sync",
     }.get(method, "")
 
 
 def check(timeout: float = _DEFAULT_TIMEOUT) -> UpdateNotice:
-    """Check PyPI and return advice. Never raises; safe on air-gapped rigs."""
+    """Check PyPI and return advice. Never raises."""
     current = current_version()
     method = detect_install_method()
-    if _opted_out():
+    if any(os.environ.get(name) for name in _OPT_OUT_ENV):
         return UpdateNotice(current, None, False, method, "", "update check disabled")
-    # A dev/editable/VCS build isn't a PyPI release, so a version compare is
-    # meaningless (a dev build is usually AHEAD of the latest stable). Don't nag.
+    # A dev or VCS build is no PyPI release (and usually ahead of the latest).
     if method in ("editable", "vcs"):
         return UpdateNotice(current, None, False, method, "", "development install")
     latest = latest_stable(timeout=timeout)

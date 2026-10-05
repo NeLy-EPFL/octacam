@@ -1,37 +1,19 @@
-// Sidebar resizer: drag the gutter between the camera grid and the control
-// panel to widen/narrow the sidebar. The width drives the --sidebar-width CSS
-// variable (read by both #sidebar and the connection banner) and is persisted
-// so it survives a reload.
+// Sidebar resizer: dragging the gutter sets --sidebar-width (read by #sidebar
+// and the connection banner), remembered across reloads.
+
+import { store } from "./util.js";
 
 const MIN = 240;
 const KEY = "octacam.sidebarWidth";
-
-const readSaved = () => {
-  try {
-    return Number(localStorage.getItem(KEY));
-  } catch {
-    return NaN;
-  }
-};
-
-const writeSaved = (w) => {
-  try {
-    localStorage.setItem(KEY, String(w));
-  } catch {
-    // storage unavailable (private mode / sandbox) — width just won't persist
-  }
-};
 
 export function initSidebarResize() {
   const root = document.documentElement;
   const handle = document.getElementById("sidebar-resizer");
   if (!handle) return;
 
-  // Cap the panel so the grid can never be squeezed away entirely.
+  // The grid can never be squeezed away entirely.
   const maxWidth = () => Math.min(680, Math.round(window.innerWidth * 0.6));
-  // Relax the 240px floor on a narrow viewport (where MIN would otherwise exceed
-  // the whole window) so the width math stays sane; the CSS breakpoint stacks
-  // the panel below the grid at phone widths regardless.
+  // A window narrower than MIN relaxes the floor.
   const minWidth = () => Math.min(MIN, Math.max(140, window.innerWidth - 80));
   const clampW = (w) =>
     Math.max(minWidth(), Math.min(maxWidth(), Math.round(w)));
@@ -40,7 +22,7 @@ export function initSidebarResize() {
     parseInt(getComputedStyle(root).getPropertyValue("--sidebar-width"), 10);
 
   // Restore a previously chosen width, re-clamped to the current viewport.
-  const saved = readSaved();
+  const saved = Number(store.get(KEY));
   if (Number.isFinite(saved) && saved > 0) apply(clampW(saved));
 
   let active = false;
@@ -63,7 +45,7 @@ export function initSidebarResize() {
     handle.classList.remove("dragging");
     document.body.style.cursor = "";
     const w = current();
-    if (Number.isFinite(w)) writeSaved(w);
+    if (Number.isFinite(w)) store.set(KEY, w);
   };
   handle.addEventListener("pointerup", end);
   handle.addEventListener("pointercancel", end);
