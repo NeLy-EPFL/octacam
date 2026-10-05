@@ -463,6 +463,15 @@ def test_websocket_preview_and_telemetry(client):
      sw, sh) = FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
     assert (version, kind) == (2, 1)
     assert camera_index in (0, 1)
+    assert flags == 0  # not recording
+    # One ready client gets every frame encoded for it: each camera's preview
+    # frame numbers count up by one.
+    numbers: dict[int, list[int]] = {}
+    for frame in frames:
+        fields = FRAME_HEADER.unpack(frame[: FRAME_HEADER.size])
+        numbers.setdefault(fields[2], []).append(fields[4])
+    for seq in numbers.values():
+        assert seq == list(range(seq[0], seq[0] + len(seq))), numbers
     # A default client is un-cropped: the crop rect is the whole sensor.
     assert (cx, cy) == (0, 0) and (cw, ch) == (sw, sh)
     jpeg = np.frombuffer(frames[0][FRAME_HEADER.size :], np.uint8)
@@ -1750,6 +1759,38 @@ def test_cap_variants_bounds_encode_count():
     # The priciest full-res crop was demoted onto the baseline (client folded in).
     assert ((0, 0, 2048, 2048), 1) not in groups
     assert "c" in groups[baseline_key]
+
+
+def test_variants_groups_only_ready_wanting_clients_capped_per_camera():
+    """The preview loop's grouping: a client with a frame still pending, or one
+    that does not want the camera, costs no encode; however many distinct views
+    the ready ones ask for, one camera encodes at most the cap."""
+    from starlette.websockets import WebSocketState
+
+    from octacam.web.hub import Client
+    from octacam.web.preview import MAX_PREVIEW_VARIANTS_PER_CAMERA, ViewSpec, _variants
+
+    def new_client(**view):
+        ws = Mock()
+        ws.client_state = WebSocketState.CONNECTED
+        c = Client(ws)
+        if view:
+            c.views[0] = ViewSpec(**view)
+        return c
+
+    stalled = new_client()
+    stalled.queue_frame(0, b"unsent")
+    hidden = new_client(want=False)
+    assert _variants([stalled, hidden], 0, 2048, 2048, False) == {}
+
+    many = [
+        new_client(need=2048, full=True, crop=(0, 0, 100 * (i + 1), 100 * (i + 1)))
+        for i in range(MAX_PREVIEW_VARIANTS_PER_CAMERA + 3)
+    ]
+    groups = _variants([stalled, hidden, *many], 0, 2048, 2048, False)
+    assert len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA
+    grouped = [c for group in groups.values() for c in group]
+    assert sorted(map(id, grouped)) == sorted(map(id, many))  # nobody dropped
 
 
 def test_view_message_selects_resolution_and_pauses(client):
