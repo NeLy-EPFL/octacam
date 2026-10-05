@@ -91,7 +91,6 @@ USB3_BUS_MBPS = 384.0  # only for the transfer-bound advice
 SYSTEM_CPU_WARN_PERCENT = 60.0
 LOAD_PER_CORE_WARN = 0.7
 
-# Phase labels, matched exactly by _ProgressPlan to weight the progress bar.
 PHASE_ACQUIRE = "Measuring acquisition ceiling"
 PHASE_ACQUIRE_SOLO = "Measuring per-camera solo ceiling"
 PHASE_FREERUN = "Measuring free-run ceiling"
@@ -99,82 +98,33 @@ PHASE_ENCODE = "Measuring encode ceiling"
 PHASE_TRIAL = "Running end-to-end trial"
 PHASE_FREERUN_TRIAL = "Running free-run trial"
 PHASE_MAX = "Searching for the stable max fps"
+PHASE_DONE = "Done"
 
 
 @dataclass
 class Progress:
-    """One progress update. A front end animates the bar from ``fraction`` (the
-    run's completion at this phase's start) toward ``target`` (at its end) over
-    ``eta_s``, smooth although updates arrive only at phase boundaries."""
+    """One progress update in budgeted seconds: this step starts *elapsed_s*
+    into a run budgeted at *total_s* and should take *step_s*. A front end eases
+    its bar toward ``elapsed_s + step_s`` in real time and never moves it back;
+    the run ends on a :data:`PHASE_DONE` update at ``total_s``."""
 
     phase: str
     detail: str
-    fraction: float
-    target: float
-    eta_s: float
+    elapsed_s: float
+    step_s: float
+    total_s: float
 
     def to_dict(self) -> dict:
         return {
             "phase": self.phase,
             "detail": self.detail,
-            "fraction": round(self.fraction, 4),
-            "target": round(self.target, 4),
-            "eta_s": round(self.eta_s, 3),
+            "elapsed_s": round(self.elapsed_s, 3),
+            "step_s": round(self.step_s, 3),
+            "total_s": round(self.total_s, 3),
         }
 
 
 ProgressCallback = Callable[["Progress"], None]
-
-
-class _ProgressPlan:
-    """Turns phase labels into :class:`Progress`, each phase that will run
-    weighted by its expected wall-clock. A phase that reports many times (the
-    max search's probes) passes ``advance=True`` and eases forward through its
-    span, never snapping back, however many probes run."""
-
-    _SUB_ADVANCE = 0.5  # an advancing re-emit closes half the remaining gap
-
-    def __init__(self, phases: list[tuple[str, float]]):
-        self._phases = phases
-        self._total = sum(w for _, w in phases) or 1.0
-        self._idx = -1
-        self._before = 0.0
-        self._within = 0.0  # progress within the current phase span, in [0, 1)
-
-    def step(
-        self,
-        label: str,
-        detail: str,
-        *,
-        advance: bool = False,
-        eta: float | None = None,
-    ) -> Progress:
-        if self._idx < 0 or self._phases[self._idx][0] != label:
-            if self._idx >= 0:
-                self._before += self._phases[self._idx][1]
-            self._idx += 1
-            # Tolerate a label that skips ahead (a conditional phase not run).
-            while self._idx < len(self._phases) and self._phases[self._idx][0] != label:
-                self._before += self._phases[self._idx][1]
-                self._idx += 1
-            self._within = 0.0
-        if self._idx >= len(self._phases):
-            return Progress(label, detail, 1.0, 1.0, 0.0)
-        weight = self._phases[self._idx][1]
-        start = self._before / self._total
-        span = weight / self._total
-        eta_s = eta if eta is not None else weight
-        if advance:
-            before = self._within
-            self._within = before + (1.0 - before) * self._SUB_ADVANCE
-            return Progress(
-                label, detail, start + span * before, start + span * self._within, eta_s
-            )
-        return Progress(label, detail, start + span * self._within, start + span, eta_s)
-
-    def done(self) -> Progress:
-        # A short eta eases the last sliver to 100% instead of snapping.
-        return Progress("Done", "", 1.0, 1.0, 0.3)
 
 
 # --- Result types (to_dict: the CLI's --json and the GUI payload) ---
@@ -743,7 +693,11 @@ class _CamAccum:
         } | {name: len(samples) for name, samples in self._samples().items()}
 
     def result(
-        self, start: dict[str, int], end: dict[str, int], target_fps: float, window: float
+        self,
+        start: dict[str, int],
+        end: dict[str, int],
+        target_fps: float,
+        window: float,
     ) -> CameraTrial:
         """The trial between the *start* and *end* marks, *window* seconds apart."""
         grabbed = end["grabbed"] - start["grabbed"]
@@ -1164,7 +1118,7 @@ def diagnose(
     *sink* ``"config"`` writes the settings' real format, ``"null"`` discards
     frames (acquisition and host only). *find_max* searches for the stable
     software-trigger max; *measure_freerun* adds the free-run ceiling.
-    *progress_cb* gets a :class:`Progress` per phase. The caller owns the
+    *progress_cb* gets a :class:`Progress` per step. The caller owns the
     cameras, open with their parameters loaded: this never opens or closes them
     and leaves every backend stopped.
     """
@@ -1210,31 +1164,35 @@ def diagnose(
     # pointless without an encoder, and skipped if free-run turns out unsupported.
     run_freerun_trial = run_freerun and run_encode
 
-    # The max search is weighted for its worst case: every probe plus the
-    # confirmation.
+    # Every phase that will run has a fixed slot in the budget, so one that is
+    # skipped or ends early moves the bar forward, never back. The max search's
+    # slot is its worst case: every probe plus the confirmation.
     window = WARMUP_S + duration_s
     probe_dur = max(1.5, duration_s / 2.0)
-    phases: list[tuple[str, float]] = [(PHASE_ACQUIRE, window)]
+    budget = {PHASE_ACQUIRE: window}
     if run_solo:
-        phases.append((PHASE_ACQUIRE_SOLO, len(cameras) * (solo_warmup + solo_dur)))
+        budget[PHASE_ACQUIRE_SOLO] = len(cameras) * (solo_warmup + solo_dur)
     if run_freerun:
-        phases.append((PHASE_FREERUN, window))
+        budget[PHASE_FREERUN] = window
     if run_encode:
-        phases.append((PHASE_ENCODE, window))
-    phases.append((PHASE_TRIAL, window))
+        budget[PHASE_ENCODE] = window
+    budget[PHASE_TRIAL] = window
     if run_freerun_trial:
-        phases.append((PHASE_FREERUN_TRIAL, window))
+        budget[PHASE_FREERUN_TRIAL] = window
     if run_search:
-        phases.append(
-            (PHASE_MAX, (1 + FIND_MAX_ITERATIONS) * (WARMUP_S + probe_dur) + window)
-        )
-    plan = _ProgressPlan(phases)
+        budget[PHASE_MAX] = (1 + FIND_MAX_ITERATIONS) * (WARMUP_S + probe_dur) + window
+    starts: dict[str, float] = {}
+    total_s = 0.0
+    for phase, seconds in budget.items():
+        starts[phase] = total_s
+        total_s += seconds
 
     def emit(
-        phase: str, detail: str = "", *, advance: bool = False, eta: float | None = None
+        phase: str, detail: str, offset_s: float = 0.0, step_s: float | None = None
     ) -> None:
-        p = plan.step(phase, detail, advance=advance, eta=eta)
-        log.debug("benchmark: %s %s (%.0f%%)", phase, detail, p.fraction * 100)
+        step = budget[phase] if step_s is None else step_s
+        p = Progress(phase, detail, starts[phase] + offset_s, step, total_s)
+        log.debug("benchmark: %s %s (at %.0fs)", phase, detail, p.elapsed_s)
         if progress_cb is not None:
             progress_cb(p)
 
@@ -1386,9 +1344,7 @@ def diagnose(
             predicted,
             probe_dur,
             duration_s,
-            lambda detail, _offset, step: emit(
-                PHASE_MAX, detail, advance=True, eta=step
-            ),
+            lambda detail, offset, step: emit(PHASE_MAX, detail, offset, step),
             cancel,
         )
         report.max_confirmed = bool(confirmed)
@@ -1402,6 +1358,6 @@ def diagnose(
     if _cancelled(cancel):
         report.notes.append("Benchmark was cancelled before it finished.")
     elif progress_cb is not None:
-        progress_cb(plan.done())
+        progress_cb(Progress(PHASE_DONE, "", total_s, 0.0, total_s))
 
     return report

@@ -10,6 +10,7 @@ acquisition-bound.
 import json
 import math
 import time
+from itertools import pairwise
 
 import pytest
 from helpers import wait_until
@@ -275,56 +276,55 @@ def test_outcome_max_queue_depth_is_worst_camera():
 # ----------------------------------------------------------------- progress
 
 
-def test_progress_plan_advances_and_animates():
-    plan = dg._ProgressPlan([("a", 1.0), ("b", 3.0)])
-    p1 = plan.step("a", "x")
-    assert p1.fraction == 0.0 and p1.target == pytest.approx(0.25) and p1.eta_s == 1.0
-    # Re-emitting the same phase keeps the fractions but updates the detail.
-    p1b = plan.step("a", "y")
-    assert p1b.detail == "y" and p1b.fraction == 0.0
-    p2 = plan.step("b", "")
-    assert p2.fraction == pytest.approx(0.25) and p2.target == pytest.approx(1.0)
-    done = plan.done()
-    assert done.fraction == 1.0 and done.target == 1.0
-
-
-def test_progress_plan_advance_creeps_forward_without_reset():
-    # A multi-probe phase (the max-fps search) must ease forward across emits, not
-    # re-emit its start fraction — that reset is what jerked the bar backwards.
-    plan = dg._ProgressPlan([("trial", 1.0), ("max", 3.0)])  # total 4
-    plan.step("trial", "")
-    emits = [plan.step("max", f"probe {i}", advance=True, eta=0.5) for i in range(4)]
-    fracs = [e.fraction for e in emits]
-    targets = [e.target for e in emits]
-    assert fracs == sorted(fracs)  # never regresses
-    assert targets == sorted(targets)
-    assert fracs[0] == pytest.approx(0.25)  # the max phase starts at 1/4
-    # Each probe picks up exactly where the previous one was heading.
-    for i in range(1, len(emits)):
-        assert fracs[i] == pytest.approx(targets[i - 1])
-    assert all(e.eta_s == 0.5 for e in emits)
-    assert all(0.25 <= f < 1.0 for f in fracs)
-    assert targets[-1] < 1.0  # leaves headroom for the Done sentinel to finish
-
-
-def test_progress_plan_skips_absent_phase():
-    # A label that jumps ahead (a conditional phase that did not run) still lands.
-    plan = dg._ProgressPlan([("a", 1.0), ("b", 1.0), ("c", 2.0)])
-    plan.step("a", "")
-    p = plan.step("c", "")  # 'b' skipped
-    assert p.fraction == pytest.approx(0.5)  # (1 + 1) / 4
-
-
 def test_progress_to_dict_is_strict_json():
-    d = dg.Progress("phase", "detail", 0.25, 0.5, 2.0).to_dict()
+    d = dg.Progress("phase", "detail", 1.25, 2.0, 10.0).to_dict()
     assert d == {
         "phase": "phase",
         "detail": "detail",
-        "fraction": 0.25,
-        "target": 0.5,
-        "eta_s": 2.0,
+        "elapsed_s": 1.25,
+        "step_s": 2.0,
+        "total_s": 10.0,
     }
     json.dumps(d, allow_nan=False)
+
+
+def test_stable_max_search_steps_fill_its_budget():
+    # Stable below 80 fps: the bisection runs every probe, and each step starts
+    # where the previous one's budget ends, the confirmation ending the budget.
+    steps = []
+    fps, confirmed = dg._search_stable_max(
+        lambda fps, seconds: _outcome(fps if fps <= 80 else fps / 2, fps),
+        lo=50.0,
+        cap=100.0,
+        probe_s=1.0,
+        confirm_s=2.0,
+        progress=lambda detail, offset, step: steps.append((detail, offset, step)),
+        cancel=None,
+    )
+    assert confirmed and fps == pytest.approx(80.0)
+    assert len(steps) == 2 + dg.FIND_MAX_ITERATIONS
+    assert steps[-1][0] == "confirming 80 fps"
+    for (_, offset, step), (_, next_offset, _) in pairwise(steps):
+        assert offset + step <= next_offset + 1e-9
+    budget = (1 + dg.FIND_MAX_ITERATIONS) * (dg.WARMUP_S + 1.0) + dg.WARMUP_S + 2.0
+    assert steps[-1][1] + steps[-1][2] == pytest.approx(budget)
+
+
+def test_stable_max_search_cancelled_before_confirming():
+    import threading
+
+    cancel = threading.Event()
+    cancel.set()
+    fps, confirmed = dg._search_stable_max(
+        lambda fps, seconds: _outcome(fps, fps),
+        lo=50.0,
+        cap=100.0,
+        probe_s=1.0,
+        confirm_s=2.0,
+        progress=lambda *a: None,
+        cancel=cancel,
+    )
+    assert (fps, confirmed) == (50.0, None)
 
 
 def test_null_writer_counts_frames():
@@ -659,9 +659,11 @@ def test_diagnose_emits_monotonic_progress(fake_system):
         progress_cb=updates.append,
     )
     assert updates
-    fracs = [u.fraction for u in updates]
-    assert fracs == sorted(fracs)  # never regresses
-    assert updates[-1].fraction == 1.0  # the Done sentinel
+    total = updates[0].total_s
+    assert all(u.total_s == total for u in updates)
+    for step, following in pairwise(updates):  # never moves back
+        assert step.elapsed_s + step.step_s <= following.elapsed_s + 1e-9
+    assert updates[-1].phase == dg.PHASE_DONE and updates[-1].elapsed_s == total
     labels = {u.phase for u in updates}
     assert dg.PHASE_ACQUIRE in labels
     assert dg.PHASE_FREERUN in labels
@@ -736,8 +738,9 @@ def test_run_diagnostic_emits_progress_notifications(fake_system):
     wait_until(lambda: not controller.diagnosing, timeout=30, interval=0.05)
 
     assert progress  # the Benchmark tab's determinate bar is fed these
-    assert all({"phase", "fraction", "target", "eta_s"} <= set(p) for p in progress)
-    assert progress[-1]["fraction"] == 1.0  # ends on the Done sentinel
+    keys = {"phase", "detail", "elapsed_s", "step_s", "total_s"}
+    assert all(set(p) == keys for p in progress)
+    assert progress[-1]["elapsed_s"] == progress[-1]["total_s"]  # ends on Done
 
 
 def test_run_diagnostic_rejected_while_recording(fake_system, tmp_path):

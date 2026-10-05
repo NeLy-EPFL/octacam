@@ -86,28 +86,27 @@ export class BenchmarkTab {
     this.progress.hidden = true;
   }
 
-  // A "diagnostics_progress" message: animate the bar from its current width
-  // toward the phase's target over the phase's expected duration. The goal
-  // only grows, so repeated updates within a phase never move it backward.
+  // A "diagnostics_progress" message: a step starting elapsed_s into a run
+  // budgeted at total_s, expected to take step_s. The bar eases toward the
+  // step's end over step_s; the goal only grows, so it never moves back.
   applyProgress(msg) {
     if (this.results.dataset.forThisRun) return; // a report is already shown
     this.progress.hidden = false;
-    const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0));
-    const goal = Math.max(
-      this._progressGoal || 0,
-      clamp(msg.target != null ? msg.target : msg.fraction)
-    );
-    this._progressGoal = goal;
+    const elapsed = Number(msg.elapsed_s) || 0;
+    const step = Math.max(0, Number(msg.step_s) || 0);
+    const total = Number(msg.total_s) || 0;
+    const end = total > 0 ? Math.min(1, (elapsed + step) / total) : 1;
+    this._progressGoal = Math.max(this._progressGoal || 0, end);
     if (msg.phase === "Done") {
       this.progressLabel.textContent = "Finishing…";
     } else {
       const label = msg.detail ? `${msg.phase} — ${msg.detail}` : msg.phase;
-      this.progressLabel.textContent = `${label} · ${Math.round(goal * 100)}%`;
+      const left = Math.ceil(Math.max(0, total - elapsed));
+      this.progressLabel.textContent = `${label} · about ${left} s left`;
     }
-    const eta = Math.max(0, Number(msg.eta_s) || 0);
     const fill = this.progressFill;
-    fill.style.transition = `width ${eta > 0 ? eta : 0.3}s linear`;
-    fill.style.width = `${goal * 100}%`;
+    fill.style.transition = `width ${step > 0 ? step : 0.3}s linear`;
+    fill.style.width = `${this._progressGoal * 100}%`;
   }
 
   updateControls() {

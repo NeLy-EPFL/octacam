@@ -2596,33 +2596,27 @@ def _bottleneck_label(bottleneck: str) -> str:
 
 
 class _BenchmarkProgressBar:
-    """Benchmark progress bar. diagnose reports only at phase boundaries, so a
-    ticker eases the bar toward each phase's ``target`` over its ``eta_s``."""
+    """Benchmark progress bar over diagnose's seconds budget: a ticker advances
+    it in real time toward the current step's end and never moves it back."""
 
     def __init__(self) -> None:
-        from rich.progress import (
-            BarColumn,
-            Progress,
-            TaskProgressColumn,
-            TextColumn,
-            TimeElapsedColumn,
-        )
+        from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
 
         self._progress = Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TaskProgressColumn(),
-            TimeElapsedColumn(),
+            TextColumn("[progress.remaining]{task.fields[left]}"),
             console=_stderr_console(),
             transient=True,
         )
-        self._task = self._progress.add_task("Benchmarking…", total=1000)
+        self._task = self._progress.add_task("Benchmarking…", total=None, left="")
         self._lock = threading.Lock()
-        self._shown = 0.0  # displayed fraction; never regresses
-        self._anchor = 0.0  # where the bar was when the goal was set
-        self._goal = 0.0
-        self._eta = 0.0
-        self._phase_start = time.monotonic()
+        self._shown = 0.0  # budget seconds the bar shows
+        self._base = 0.0  # where the bar was when the step began
+        self._end = 0.0  # the step's end
+        self._total = 0.0
+        self._t0 = time.monotonic()
         self._stop = threading.Event()
         self._ticker = threading.Thread(target=self._run, daemon=True)
 
@@ -2634,33 +2628,27 @@ class _BenchmarkProgressBar:
     def __exit__(self, *exc) -> None:
         self._stop.set()
         self._ticker.join(timeout=1.0)
-        self._progress.update(self._task, completed=1000)
+        self._progress.update(self._task, total=1, completed=1)
         self._progress.stop()
 
     def update(self, p) -> None:
-        """Start easing toward ``p.target`` from where the bar is (a
-        :class:`octacam.diagnostics.Progress`); the bar never moves back."""
+        """Start a step (an :class:`octacam.diagnostics.Progress`)."""
         with self._lock:
-            self._goal = max(self._goal, p.target)
-            self._anchor = self._shown
-            self._eta = p.eta_s
-            self._phase_start = time.monotonic()
-            desc = p.phase if not p.detail else f"{p.phase} {p.detail}"
-            self._progress.update(
-                self._task, description=desc, completed=self._shown * 1000
-            )
+            self._total = p.total_s
+            self._base = max(self._shown, p.elapsed_s)
+            self._end = max(self._base, p.elapsed_s + p.step_s)
+            self._t0 = time.monotonic()
+        desc = f"{p.phase} {p.detail}" if p.detail else p.phase
+        self._progress.update(self._task, description=desc, total=p.total_s)
 
     def _run(self) -> None:
         while not self._stop.wait(0.05):
             with self._lock:
-                if self._eta > 0 and self._goal > self._anchor:
-                    ratio = min(1.0, (time.monotonic() - self._phase_start) / self._eta)
-                    frac = self._anchor + (self._goal - self._anchor) * ratio
-                else:
-                    frac = self._goal
-                frac = min(1.0, max(self._shown, frac))
-                self._shown = frac
-            self._progress.update(self._task, completed=frac * 1000)
+                elapsed = time.monotonic() - self._t0
+                self._shown = min(self._end, self._base + elapsed)
+                shown, total = self._shown, self._total
+            left = f"~{total - shown:.0f}s left" if total else ""
+            self._progress.update(self._task, completed=shown, left=left)
 
 
 def _fps(value) -> str:
