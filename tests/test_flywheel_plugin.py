@@ -163,9 +163,7 @@ def _released(link):
 
 
 def _configured(**command):
-    from octacam.plugins.flywheel import _build
-
-    return _build({"device": "/dev/null", "command": command} if command else {})
+    return FlywheelPlugin.from_options({"device": "/dev/null", "command": command} if command else {})
 
 
 _RIG_COMMAND = {
@@ -193,9 +191,7 @@ def test_configured_command_tolerates_a_partial_or_bad_table():
     assert _configured(n_steps=999_999)._command is None
     assert _configured(n_steps="spin")._command is None
 
-    from octacam.plugins.flywheel import _build
-
-    assert _build({"command": ["not", "a", "table"]})._command is None
+    assert FlywheelPlugin.from_options({"command": ["not", "a", "table"]})._command is None
 
 
 def test_snapshot_options_carry_the_armed_loop_command():
@@ -467,7 +463,7 @@ def test_serial_command_endpoint_422_on_bad_payload():
 # Firmware provisioning: identity (sentinel), classification, flash, endpoints
 # ---------------------------------------------------------------------------
 
-from octacam.plugins.flywheel import _IDENTIFY_MARKER, _build  # noqa: E402
+from octacam.plugins.flywheel import _IDENTIFY_MARKER  # noqa: E402
 
 
 def _plugin_with_fake(is_open=True):
@@ -541,7 +537,7 @@ def test_firmware_and_flash_endpoints():
 
 
 def test_build_reads_fqbn_and_auto_flash():
-    p = _build({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
+    p = FlywheelPlugin.from_options({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
     assert p._auto_flash is True
     assert p._fw.spec.fqbn == "arduino:avr:nano"
 

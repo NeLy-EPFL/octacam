@@ -85,6 +85,12 @@ class Plugin:
 
     name: str = "plugin"
 
+    @classmethod
+    def from_options(cls, options: dict) -> Plugin:
+        """The plugin its ``[plugins.options]`` table configures; raises when it
+        cannot be built."""
+        return cls()
+
     def setup(self) -> None:
         pass
 
@@ -143,8 +149,8 @@ class Plugin:
 class PluginManager:
     """The active plugins; a hook that raises is logged and skipped, never fatal."""
 
-    def __init__(self, plugins: list[OctacamPlugin] | None = None):
-        self.plugins: list[OctacamPlugin] = list(plugins or [])
+    def __init__(self, plugins: list[Plugin] | None = None):
+        self.plugins: list[Plugin] = list(plugins or [])
 
     def _name(self, plugin) -> str:
         return getattr(plugin, "name", repr(plugin))

@@ -15,7 +15,6 @@ from octacam.plugins.twophoton import (
     DEFAULT_FPS,
     ArmParams,
     TwoPhotonPlugin,
-    _build,
 )
 
 # Wire-format constants (mirror the firmware and plugin source)
@@ -446,18 +445,18 @@ def test_link_broken_broadcasts_not_ready():
 
 
 # ---------------------------------------------------------------------------
-# Factory: _build
+# Factory: from_options
 # ---------------------------------------------------------------------------
 
 def test_build_uses_default_device_when_omitted():
     # No device key → falls back to DEFAULT_DEVICE ("/dev/arduinoCams")
     from octacam.plugins.twophoton import DEFAULT_DEVICE
-    plugin = _build({})
+    plugin = TwoPhotonPlugin.from_options({})
     assert plugin.device == DEFAULT_DEVICE
 
 
 def test_build_uses_provided_options():
-    plugin = _build(
+    plugin = TwoPhotonPlugin.from_options(
         {"device": "/dev/arduinoCams", "baud": 9600, "default_fps": 50, "default_duration_ms": 3000}
     )
     assert plugin.device == "/dev/arduinoCams"
@@ -628,47 +627,6 @@ def test_link_broken_invokes_on_broken_callback(monkeypatch):
     fake.raise_on_read = serial.SerialException("device disconnected")
     assert wait_until(lambda: broken == [True])
     link.close()
-
-
-# ---------------------------------------------------------------------------
-# Plugin registry: builtins always win over external entry points
-# ---------------------------------------------------------------------------
-
-def test_builtin_not_overridden_by_entry_point(monkeypatch):
-    """An external entry-point named 'twophoton' must not replace the builtin."""
-    import octacam.plugins as registry_mod
-    from octacam.plugins import _REGISTRY
-
-    sentinel_factory = lambda opts: object()  # noqa: E731
-
-    class FakeEP:
-        name = "twophoton"
-        value = "fake_package:factory"
-        def load(self):
-            return sentinel_factory
-
-    def fake_entry_points(group):
-        return [FakeEP()]
-
-    # Clear twophoton from registry so the entry-point would normally win.
-    saved = _REGISTRY.pop("twophoton", None)
-    try:
-        monkeypatch.setattr(
-            "octacam.plugins.entry_points", fake_entry_points, raising=False
-        )
-        # Patch importlib.metadata.entry_points inside the module
-        import importlib.metadata as meta_mod
-        monkeypatch.setattr(meta_mod, "entry_points", fake_entry_points)
-
-        registry_mod._discover_entry_points()
-
-        # The builtin name must not have been replaced by the external factory.
-        assert _REGISTRY.get("twophoton") is not sentinel_factory, (
-            "External entry-point overwrote the builtin 'twophoton' factory"
-        )
-    finally:
-        if saved is not None:
-            _REGISTRY["twophoton"] = saved
 
 
 # ---------------------------------------------------------------------------

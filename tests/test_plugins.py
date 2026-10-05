@@ -1,8 +1,29 @@
 """Plugin registry + manager behavior."""
 
+import pytest
+
+import octacam.plugins as plugins_mod
 from octacam.config import OctacamConfig, PluginConfig
-from octacam.plugins import PluginManager, available_plugins, build_plugins, register
-from octacam.plugins.base import Plugin
+from octacam.plugins import available_plugins, build_plugins
+from octacam.plugins.base import Plugin, PluginManager
+
+
+class SpyPlugin(Plugin):
+    """A registrable plugin double that keeps the options it was built with."""
+
+    name = "spy"
+
+    def __init__(self, options=None):
+        self.options = options
+
+    @classmethod
+    def from_options(cls, options):
+        return cls(options)
+
+
+@pytest.fixture
+def spy_registered(monkeypatch):
+    monkeypatch.setitem(plugins_mod._PLUGINS, "spy", f"{__name__}:SpyPlugin")
 
 
 def test_build_plugins_default_is_empty():
@@ -35,30 +56,28 @@ def test_legacy_alias_and_new_name_do_not_double_load():
     assert [p.name for p in manager.plugins] == ["flywheel"]
 
 
-def test_register_and_build_with_options():
-    @register("spy_demo")
-    def _factory(options):
-        plugin = Plugin()
-        plugin.name = "spy_demo"
-        plugin.options = options
-        return plugin
-
-    config = OctacamConfig(plugins=[PluginConfig(name="spy_demo", options={"a": 1})])
+def test_build_passes_the_options_to_from_options(spy_registered):
+    config = OctacamConfig(plugins=[PluginConfig(name="spy", options={"a": 1})])
     manager = build_plugins(config)
     assert len(manager.plugins) == 1
     assert manager.plugins[0].options == {"a": 1}
 
 
-def test_cli_plugin_flag_adds_to_config():
-    @register("spy_added")
-    def _factory(options):
-        plugin = Plugin()
-        plugin.name = "spy_added"
-        return plugin
+def test_cli_plugin_flag_adds_to_config(spy_registered):
+    # config has none; --plugin spy adds it
+    manager = build_plugins(OctacamConfig(), enabled=["spy"])
+    assert [p.name for p in manager.plugins] == ["spy"]
+    assert manager.plugins[0].options == {}
 
-    # config has none; --plugin spy_added adds it
-    manager = build_plugins(OctacamConfig(), enabled=["spy_added"])
-    assert [p.name for p in manager.plugins] == ["spy_added"]
+
+def test_plugin_that_fails_to_build_is_skipped(monkeypatch, spy_registered, caplog):
+    def boom(cls, options):
+        raise ValueError("bad options")
+
+    monkeypatch.setattr(SpyPlugin, "from_options", classmethod(boom))
+    config = OctacamConfig(plugins=[PluginConfig(name="spy")])
+    assert build_plugins(config).plugins == []
+    assert "Plugin 'spy' failed to load (bad options)" in caplog.text
 
 
 def test_available_plugins_describes_bundled_flywheel():
@@ -160,35 +179,19 @@ def test_status_is_ready_failure_reports_not_ready():
     assert PluginManager([Broken()]).status() == {"broken": {"ready": False}}
 
 
-def test_plugin_summary_falls_back_to_factory_module_doc():
-    # A third-party entry-point plugin has no octacam.plugins.<name> module, so
-    # sys.modules.get(...) is None. The summary must fall back to the factory
-    # module's docstring, not the truthy NoneType class docstring.
-    from octacam.plugins import _plugin_summary
-
-    @register("spy_summary")
-    def _factory(options):
-        p = Plugin()
-        p.name = "spy_summary"
-        return p
-
-    summary = _plugin_summary("spy_summary")
-    # This module's docstring first line.
-    assert summary == "Plugin registry + manager behavior."
-    assert "NoneType" not in summary
+def test_available_plugins_summarizes_each_from_its_module_docstring(spy_registered):
+    infos = {info.name: info for info in available_plugins()}
+    assert infos["spy"].summary == "Plugin registry + manager behavior."
+    assert infos["spy"].available is True
 
 
 def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
     # A known builtin whose module fails to import must NOT be reported as an
     # "Unknown plugin" (which is indistinguishable from a typo); it gets a
     # builtin-specific warning instead.
-    import octacam.plugins as plugins_mod
-
-    # Simulate the module never importing: neutralize the import and drop any
-    # already-registered factory so build_plugins sees factory is None.
-    monkeypatch.setattr(plugins_mod, "_import_builtin", lambda name: None)
-    monkeypatch.delitem(plugins_mod._REGISTRY, "flywheel", raising=False)
-
+    monkeypatch.setitem(
+        plugins_mod._PLUGINS, "flywheel", "octacam.plugins.no_such_module:Flywheel"
+    )
     config = OctacamConfig(plugins=[PluginConfig(name="flywheel")])
     manager = build_plugins(config)
     assert manager.plugins == []
@@ -196,6 +199,8 @@ def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
         "Builtin plugin 'flywheel' failed to import" in m for m in caplog.messages
     )
     assert not any("Unknown plugin" in m for m in caplog.messages)
+    info = {i.name: i for i in available_plugins()}["flywheel"]
+    assert (info.available, info.detail) == (False, "module failed to import")
 
 
 class _FakeLink:

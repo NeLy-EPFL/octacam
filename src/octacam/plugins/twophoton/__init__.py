@@ -34,7 +34,6 @@ import serial
 
 from octacam import firmware as fw
 from octacam import serial_ports
-from octacam.plugins import register
 from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
 
@@ -162,40 +161,6 @@ _STATE_LABELS: dict[str, str] = {
 }
 
 
-@register("twophoton")
-def _build(options: dict) -> TwoPhotonPlugin:
-    device = str(options.get("device") or DEFAULT_DEVICE)
-    try:
-        baud = int(options.get("baud", DEFAULT_BAUD))
-    except (TypeError, ValueError):
-        log.warning(
-            "twophoton plugin: invalid baud %r; using %d",
-            options.get("baud"),
-            DEFAULT_BAUD,
-        )
-        baud = DEFAULT_BAUD
-    try:
-        default_fps = int(options.get("default_fps", DEFAULT_FPS))
-    except (TypeError, ValueError):
-        default_fps = DEFAULT_FPS
-    try:
-        default_duration_ms = int(
-            options.get("default_duration_ms", DEFAULT_DURATION_MS)
-        )
-    except (TypeError, ValueError):
-        default_duration_ms = DEFAULT_DURATION_MS
-    auto_flash = options.get("auto_flash", False)
-    if isinstance(auto_flash, str):
-        auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
-    return TwoPhotonPlugin(
-        device=str(device),
-        baud=baud,
-        default_fps=default_fps,
-        default_duration_ms=default_duration_ms,
-        auto_flash=bool(auto_flash),
-    )
-
-
 class TwoPhotonPlugin(Plugin):
     """Arms the 2-photon trigger with the recording's fps and duration."""
 
@@ -234,6 +199,39 @@ class TwoPhotonPlugin(Plugin):
         self._armed_event = threading.Event()
         self._ack_timeout_s = ACK_TIMEOUT_S
         self._broadcast: Callable[[str, dict], None] | None = None
+
+    @classmethod
+    def from_options(cls, options: dict) -> TwoPhotonPlugin:
+        device = str(options.get("device") or DEFAULT_DEVICE)
+        try:
+            baud = int(options.get("baud", DEFAULT_BAUD))
+        except (TypeError, ValueError):
+            log.warning(
+                "twophoton plugin: invalid baud %r; using %d",
+                options.get("baud"),
+                DEFAULT_BAUD,
+            )
+            baud = DEFAULT_BAUD
+        try:
+            default_fps = int(options.get("default_fps", DEFAULT_FPS))
+        except (TypeError, ValueError):
+            default_fps = DEFAULT_FPS
+        try:
+            default_duration_ms = int(
+                options.get("default_duration_ms", DEFAULT_DURATION_MS)
+            )
+        except (TypeError, ValueError):
+            default_duration_ms = DEFAULT_DURATION_MS
+        auto_flash = options.get("auto_flash", False)
+        if isinstance(auto_flash, str):
+            auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
+        return cls(
+            device=device,
+            baud=baud,
+            default_fps=default_fps,
+            default_duration_ms=default_duration_ms,
+            auto_flash=bool(auto_flash),
+        )
 
     def _fw_is_busy(self) -> tuple[bool, str]:
         """Refuse to flash while the trigger is armed or a capture is running."""

@@ -1,8 +1,7 @@
-"""The opt-in plugins: a name -> factory registry and the loader.
+"""The opt-in plugins: a name -> class table and the loader.
 
 A rig selects plugins in ``[[plugins]]`` (options in ``[plugins.options]``) or
-with ``--plugin``; the default launch loads none. Another package can add one
-through the ``octacam.plugins`` entry-point group, but a bundled name wins.
+with ``--plugin``; the default launch loads none.
 """
 
 from __future__ import annotations
@@ -10,28 +9,18 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
-from collections.abc import Callable
 from dataclasses import dataclass
 
-from octacam.plugins.base import OctacamPlugin, Plugin, PluginManager
+from octacam.plugins.base import Plugin, PluginManager
 
 log = logging.getLogger("octacam")
 
-__all__ = [
-    "OctacamPlugin",
-    "Plugin",
-    "PluginManager",
-    "PluginInfo",
-    "register",
-    "build_plugins",
-    "available_plugins",
-]
-
-# Filled by @register as each plugin module is imported.
-_REGISTRY: dict[str, Callable[[dict], OctacamPlugin]] = {}
-
-# octacam.plugins.<name>, imported on demand.
-_BUILTINS = ("flywheel", "twophoton", "triggerbox")
+# name -> "module:Class", imported on first use.
+_PLUGINS = {
+    "flywheel": "octacam.plugins.flywheel:FlywheelPlugin",
+    "twophoton": "octacam.plugins.twophoton:TwoPhotonPlugin",
+    "triggerbox": "octacam.plugins.triggerbox:TriggerboxPlugin",
+}
 
 # Old plugin names, still loaded (with a warning) so no rig loses its plugin.
 _ALIASES = {"arduino": "flywheel"}
@@ -42,47 +31,11 @@ def canonical_name(name: str) -> str:
     return _ALIASES.get(name, name)
 
 
-def _discover_entry_points() -> None:
-    """Import the plugins other packages register, e.g.::
-
-        [project.entry-points."octacam.plugins"]
-        mydevice = "octacam_mydevice.plugin:_build"
-
-    One that fails is logged at debug level: it must not stop octacam."""
-    try:
-        from importlib.metadata import entry_points
-
-        for ep in entry_points(group="octacam.plugins"):
-            if ep.name in _BUILTINS or ep.name in _REGISTRY:
-                continue
-            try:
-                ep.load()
-                log.debug("Loaded entry-point plugin %r from %s", ep.name, ep.value)
-            except Exception as e:
-                log.debug("Entry-point plugin %r failed to load: %s", ep.name, e)
-    except Exception as e:
-        log.debug("Entry-point plugin discovery failed: %s", e)
-
-
-def register(name: str):
-    """Decorator registering a plugin factory under *name*."""
-
-    def decorator(factory: Callable[[dict], OctacamPlugin]):
-        _REGISTRY[name] = factory
-        return factory
-
-    return decorator
-
-
-def _import_builtin(name: str) -> None:
-    """Import a bundled plugin so its @register runs. A failure is a real fault,
-    not a missing optional plugin, so its cause is logged at warning level."""
-    if name in _REGISTRY or name not in _BUILTINS:
-        return
-    try:
-        importlib.import_module(f"octacam.plugins.{name}")
-    except Exception as e:
-        log.warning("Builtin plugin module %r could not be imported: %s", name, e)
+def plugin_class(name: str) -> type[Plugin]:
+    """The plugin class named *name*, imported on first use. Raises KeyError for
+    an unknown name, and whatever its module raises when it fails to import."""
+    module, _, cls = _PLUGINS[name].partition(":")
+    return getattr(importlib.import_module(module), cls)
 
 
 def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
@@ -103,15 +56,13 @@ def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
 
 
 def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
-    """The configured and enabled plugins; one that is unknown or fails to
-    build is logged and skipped."""
-    _discover_entry_points()
-    selection = _resolve_selection(config.plugins, enabled)
-    plugins: list[OctacamPlugin] = []
+    """The configured and enabled plugins; one that is unknown, or fails to
+    import or to build, is logged and skipped."""
+    plugins: list[Plugin] = []
     seen: set[str] = set()
-    for name, options in selection:
-        canonical = _ALIASES.get(name)
-        if canonical is not None:
+    for name, options in _resolve_selection(config.plugins, enabled):
+        canonical = canonical_name(name)
+        if canonical != name:
             log.warning(
                 "Plugin %r was renamed to %r; please update your config / "
                 "--plugin flag (loading %r for now).",
@@ -123,19 +74,17 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
         if name in seen:
             continue  # after aliasing, so arduino + flywheel load once
         seen.add(name)
-        _import_builtin(name)
-        factory = _REGISTRY.get(name)
-        if factory is None:
-            if name in _BUILTINS:
-                log.warning(
-                    "Builtin plugin %r failed to import (cause logged above); skipping",
-                    name,
-                )
-            else:
-                log.warning("Unknown plugin %r; skipping", name)
+        if name not in _PLUGINS:
+            log.warning("Unknown plugin %r; skipping", name)
+            continue
+        # A bundled module that fails to import is a real fault, not a typo.
+        try:
+            cls = plugin_class(name)
+        except Exception as e:
+            log.warning("Builtin plugin %r failed to import (%s); skipping", name, e)
             continue
         try:
-            plugins.append(factory(options))
+            plugins.append(cls.from_options(options))
         except Exception as e:
             log.warning("Plugin %r failed to load (%s); skipping", name, e)
     if plugins:
@@ -153,42 +102,22 @@ class PluginInfo:
     detail: str = ""
 
 
-def _plugin_summary(name: str) -> str:
-    """First line of a plugin's module docstring, else of its factory's module
-    (a third-party plugin has no ``octacam.plugins.<name>``)."""
-    # Not getattr(module, "__doc__"): for a missing module that is NoneType's
-    # docstring, which would mask the fallback.
-    mod = sys.modules.get(f"octacam.plugins.{name}")
-    doc = (mod.__doc__ or "").strip() if mod is not None else ""
-    if not doc:
-        factory = _REGISTRY.get(name)
-        factory_module = (
-            sys.modules.get(getattr(factory, "__module__", "")) if factory else None
-        )
-        doc = (factory_module.__doc__ or "").strip() if factory_module is not None else ""
-    return doc.splitlines()[0] if doc else ""
-
-
 def available_plugins() -> list[PluginInfo]:
-    """Every plugin build_plugins could load, bundled ones first, each built
-    with no options to see whether it can be."""
-    _discover_entry_points()
+    """Every plugin build_plugins could load, each built with no options to see
+    whether it can be; the summary is its module docstring's first line."""
     infos: list[PluginInfo] = []
-    names = list(_BUILTINS) + [n for n in _REGISTRY if n not in _BUILTINS]
-    for name in names:
-        if name in _BUILTINS:
-            _import_builtin(name)
-        summary = _plugin_summary(name)
-        factory = _REGISTRY.get(name)
-        if factory is None:
+    for name in _PLUGINS:
+        try:
+            cls = plugin_class(name)
+        except Exception:
             infos.append(
-                PluginInfo(
-                    name, summary, available=False, detail="module failed to import"
-                )
+                PluginInfo(name, "", available=False, detail="module failed to import")
             )
             continue
+        doc = (sys.modules[cls.__module__].__doc__ or "").strip()
+        summary = doc.splitlines()[0] if doc else ""
         try:
-            factory({})
+            cls.from_options({})
             infos.append(PluginInfo(name, summary, available=True))
         except Exception as e:
             infos.append(PluginInfo(name, summary, available=False, detail=str(e)))

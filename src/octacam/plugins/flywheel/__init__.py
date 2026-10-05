@@ -29,7 +29,6 @@ import serial
 
 from octacam import firmware as fw
 from octacam import serial_ports
-from octacam.plugins import register
 from octacam.plugins.base import Plugin
 
 log = logging.getLogger("octacam")
@@ -295,31 +294,6 @@ class JogClock:
                     self._write(release)
 
 
-@register("flywheel")
-def _build(options: dict) -> FlywheelPlugin:
-    device = str(options.get("device", DEFAULT_DEVICE))
-    try:
-        baud = int(options.get("baud", DEFAULT_BAUD))
-    except (TypeError, ValueError):
-        log.warning(
-            "Flywheel plugin: invalid baud %r; using %d",
-            options.get("baud"),
-            DEFAULT_BAUD,
-        )
-        baud = DEFAULT_BAUD
-    fqbn = str(options.get("fqbn", _DEFAULT_FQBN)) or _DEFAULT_FQBN
-    auto_flash = options.get("auto_flash", False)
-    if isinstance(auto_flash, str):
-        auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
-    return FlywheelPlugin(
-        device=device,
-        baud=baud,
-        fqbn=fqbn,
-        auto_flash=bool(auto_flash),
-        command=_command_from_options(options),
-    )
-
-
 class FlywheelPlugin(Plugin):
     name = "flywheel"
 
@@ -356,6 +330,30 @@ class FlywheelPlugin(Plugin):
         self._jog_lock = threading.Lock()
         self._jog_owner: int | None = None
         self._closing = False  # set in teardown to refuse jogs racing shutdown
+
+    @classmethod
+    def from_options(cls, options: dict) -> FlywheelPlugin:
+        device = str(options.get("device", DEFAULT_DEVICE))
+        try:
+            baud = int(options.get("baud", DEFAULT_BAUD))
+        except (TypeError, ValueError):
+            log.warning(
+                "Flywheel plugin: invalid baud %r; using %d",
+                options.get("baud"),
+                DEFAULT_BAUD,
+            )
+            baud = DEFAULT_BAUD
+        fqbn = str(options.get("fqbn", _DEFAULT_FQBN)) or _DEFAULT_FQBN
+        auto_flash = options.get("auto_flash", False)
+        if isinstance(auto_flash, str):
+            auto_flash = auto_flash.strip().lower() in ("1", "true", "yes", "on")
+        return cls(
+            device=device,
+            baud=baud,
+            fqbn=fqbn,
+            auto_flash=bool(auto_flash),
+            command=_command_from_options(options),
+        )
 
     def _write(self, command: Command) -> None:
         self._link.write_command(command)

@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
-from octacam.plugins import _BUILTINS, build_plugins
+from octacam.plugins import build_plugins, plugin_class
 from octacam.plugins.triggerbox import (
     _PROTOCOL_VERSION,
     PIN_LABELS,
@@ -24,7 +24,6 @@ from octacam.plugins.triggerbox import (
     LightChannel,
     TriggerboxLink,
     TriggerboxPlugin,
-    _build,
     period_us,
     pin_id,
     plan_train,
@@ -206,7 +205,7 @@ def _fake_link(plugin: TriggerboxPlugin, is_open: bool = True, **kwargs) -> Fake
 
 
 def _plugin_with_fake(is_open: bool = True, **options) -> tuple[TriggerboxPlugin, FakeLink]:
-    plugin = _build({"device": DEVICE, **options})
+    plugin = TriggerboxPlugin.from_options({"device": DEVICE, **options})
     return plugin, _fake_link(plugin, is_open)
 
 
@@ -478,12 +477,12 @@ def test_ws_spec_edit_no_rearm_when_unchanged():
 
 
 # ===========================================================================
-# Factory: _build (config parsing)
+# Factory: from_options (config parsing)
 # ===========================================================================
 
 
 def test_build_defaults_reproduce_classic_rig():
-    plugin = _build({})
+    plugin = TriggerboxPlugin.from_options({})
     assert [c.pin for c in plugin._cameras] == ["D13"]
     assert [(lt.channel, lt.pin, lt.mode) for lt in plugin._lights] == [
         (1, "D5", "strobe"),
@@ -492,7 +491,7 @@ def test_build_defaults_reproduce_classic_rig():
 
 
 def test_build_parses_cameras_and_lights_arrays():
-    plugin = _build(
+    plugin = TriggerboxPlugin.from_options(
         {
             "cameras": [
                 {"pin": "D13", "pulse_us": 500},
@@ -513,7 +512,7 @@ def test_build_parses_cameras_and_lights_arrays():
 
 def test_build_accepts_legacy_duty_percent_key():
     # The old config wrote duty_percent / cam_pulse_us (no default_ prefix).
-    plugin = _build({"duty_percent": 42, "cam_pulse_us": 321})
+    plugin = TriggerboxPlugin.from_options({"duty_percent": 42, "cam_pulse_us": 321})
     assert plugin._default_duty_percent == 42
     assert plugin._default_cam_pulse_us == 321
     # classic-rig strobe channels inherit the configured manual duty
@@ -521,12 +520,12 @@ def test_build_accepts_legacy_duty_percent_key():
 
 
 def test_build_default_auto_makes_classic_channels_auto():
-    plugin = _build({"default_duty_auto": True})
+    plugin = TriggerboxPlugin.from_options({"default_duty_auto": True})
     assert all(lt.duty_mode == "auto" for lt in plugin._lights)
 
 
 def test_build_unknown_camera_pin_falls_back(caplog):
-    plugin = _build({"cameras": [{"pin": "D99"}]})
+    plugin = TriggerboxPlugin.from_options({"cameras": [{"pin": "D99"}]})
     assert plugin._cameras[0].pin == "D13"
 
 
@@ -598,7 +597,7 @@ def test_on_recording_stop_sends_cancel():
 
 
 def test_default_start_params_shape():
-    plugin = _build({})
+    plugin = TriggerboxPlugin.from_options({})
     params = plugin.default_start_params(fps=80.0, duration_s=5.0)
     assert params["fps"] == 80 and params["duration_ms"] == 5000
     assert [c["pin"] for c in params["cameras"]] == ["D13"]
@@ -634,7 +633,7 @@ _SNAPSHOT_RIG = {
 
 
 def test_snapshot_options_none_when_the_config_already_matches():
-    plugin = _build(_SNAPSHOT_RIG)
+    plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     # Not armed with the recording: nothing to record.
     assert plugin.snapshot_options(None) is None
     assert plugin.snapshot_options({"twophoton": {}}) is None
@@ -646,7 +645,7 @@ def test_snapshot_options_none_when_the_config_already_matches():
 
 
 def test_snapshot_options_carry_the_armed_lights_and_cameras():
-    plugin = _build(_SNAPSHOT_RIG)
+    plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     spec = _tab_spec(
         plugin,
         ch1={"duty_percent": 60.0},
@@ -665,13 +664,13 @@ def test_snapshot_options_carry_the_armed_lights_and_cameras():
         (3, "continuous"),
     ]
     # Reloading those options arms the board exactly as this recording did.
-    relaunched = _build({**_SNAPSHOT_RIG, **options})
+    relaunched = TriggerboxPlugin.from_options({**_SNAPSHOT_RIG, **options})
     assert relaunched._cameras == plugin._cameras_from_spec(spec)
     assert relaunched._lights == plugin._lights_from_spec(spec)
 
 
 def test_snapshot_options_none_after_edits_are_reverted():
-    plugin = _build(_SNAPSHOT_RIG)
+    plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     edited = _tab_spec(plugin, ch1={"duty_percent": 60.0})
     original = _tab_spec(plugin)
     plugin.on_ws_message({"type": "triggerbox_spec", "spec": edited}, 1)
@@ -680,13 +679,13 @@ def test_snapshot_options_none_after_edits_are_reverted():
 
 
 def test_snapshot_options_all_lights_off_reloads_as_off():
-    plugin = _build(_SNAPSHOT_RIG)
+    plugin = TriggerboxPlugin.from_options(_SNAPSHOT_RIG)
     spec = _tab_spec(plugin, ch1={"mode": "off"}, ch2={"mode": "off"})
     options = plugin.snapshot_options({"triggerbox": spec})
     assert options is not None and options["lights"] == []
     # An explicit empty list means "all off", unlike an absent key (which
     # defaults to the classic two strobes).
-    assert _build({"lights": options["lights"]})._lights == []
+    assert TriggerboxPlugin.from_options({"lights": options["lights"]})._lights == []
 
 
 # ===========================================================================
@@ -1103,7 +1102,7 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
 
 
 def test_triggerbox_is_registered_builtin():
-    assert "triggerbox" in _BUILTINS
+    assert plugin_class("triggerbox") is TriggerboxPlugin
 
 
 def test_default_start_params_via_manager():
@@ -1265,8 +1264,8 @@ def test_flash_endpoint():
 
 
 def test_build_reads_auto_flash_option():
-    assert _build({"device": DEVICE}).firmware_provisioning()["auto_flash"] is False
-    plugin = _build({"device": DEVICE, "auto_flash": True})
+    assert TriggerboxPlugin.from_options({"device": DEVICE}).firmware_provisioning()["auto_flash"] is False
+    plugin = TriggerboxPlugin.from_options({"device": DEVICE, "auto_flash": True})
     assert plugin._auto_flash is True
     assert plugin.firmware_provisioning()["auto_flash"] is True
 
@@ -1546,7 +1545,7 @@ def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
 
 def _realtime_plugin(**options):
     """A plugin whose fake board answers from a timer, as the reader thread would."""
-    plugin = _build({"device": DEVICE, **options})
+    plugin = TriggerboxPlugin.from_options({"device": DEVICE, **options})
     link = _fake_link(plugin, delay_s=0.005)
     plugin._ack_timeout_s = 0.5
     return plugin, link

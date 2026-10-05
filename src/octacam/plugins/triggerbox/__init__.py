@@ -54,7 +54,6 @@ if TYPE_CHECKING:
 
 from octacam import firmware as fw
 from octacam import serial_ports
-from octacam.plugins import register
 from octacam.plugins._serial_link import SerialReaderLink
 from octacam.plugins.base import Plugin
 
@@ -605,84 +604,6 @@ class TriggerboxLink(SerialReaderLink):
 # ---- Plugin -----------------------------------------------------------------
 
 
-@register("triggerbox")
-def _build(options: dict) -> TriggerboxPlugin:
-    def _opt_int(key: str, default: int) -> int:
-        try:
-            return int(options.get(key, default))
-        except (TypeError, ValueError):
-            log.warning("triggerbox plugin: invalid %s %r; using %d", key, options.get(key), default)
-            return default
-
-    def _opt_float(*keys: str, default: float) -> float:
-        # The first key present: configs spell some options two ways.
-        for key in keys:
-            if key in options:
-                try:
-                    return float(options[key])
-                except (TypeError, ValueError):
-                    log.warning("triggerbox plugin: invalid %s %r; using %g", key, options[key], default)
-                    return default
-        return default
-
-    def _opt_bool(*keys: str, default: bool) -> bool:
-        for key in keys:
-            if key not in options:
-                continue
-            val = options[key]
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.strip().lower() in ("1", "true", "yes", "on")
-            try:
-                return bool(int(val))
-            except (TypeError, ValueError):
-                log.warning("triggerbox plugin: invalid %s %r; using %s", key, val, default)
-                return default
-        return default
-
-    default_duty_percent = _opt_float("duty_percent", "default_duty_percent", default=DEFAULT_DUTY_PERCENT)
-    default_duty_auto = _opt_bool("duty_auto", "default_duty_auto", default=DEFAULT_DUTY_AUTO)
-    default_cam_pulse_us = _opt_int("cam_pulse_us", DEFAULT_CAM_PULSE_US) \
-        if "cam_pulse_us" in options else _opt_int("default_cam_pulse_us", DEFAULT_CAM_PULSE_US)
-
-    # Camera lines: explicit array, else the classic single D13 line.
-    raw_cams = options.get("cameras")
-    if raw_cams is not None and not isinstance(raw_cams, list):
-        log.warning("triggerbox plugin: 'cameras' must be an array of tables; ignoring %r", raw_cams)
-    cameras = _cameras_from(raw_cams, default_cam_pulse_us) if isinstance(raw_cams, list) else []
-    if not cameras:
-        cameras = [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
-
-    # Light channels: explicit array, else the classic ch1+ch2 strobe.
-    raw_lights = options.get("lights")
-    if isinstance(raw_lights, list):
-        lights = _lights_from(raw_lights, default_duty_percent, default_duty_auto)
-    elif raw_lights is None:
-        dm = "auto" if default_duty_auto else "manual"
-        lights = [
-            LightChannel(channel=1, pin="D5", mode="strobe", duty_mode=dm, duty_percent=default_duty_percent),
-            LightChannel(channel=2, pin="D6", mode="strobe", duty_mode=dm, duty_percent=default_duty_percent),
-        ]
-    else:
-        log.warning("triggerbox plugin: 'lights' must be an array of tables; ignoring %r", raw_lights)
-        lights = []
-
-    return TriggerboxPlugin(
-        device=str(options.get("device") or DEFAULT_DEVICE),
-        baud=_opt_int("baud", DEFAULT_BAUD),
-        auto_flash=_opt_bool("auto_flash", default=False),
-        default_fps=_opt_int("default_fps", DEFAULT_FPS),
-        default_duration_ms=_opt_int("default_duration_ms", DEFAULT_DURATION_MS),
-        default_duty_percent=default_duty_percent,
-        default_duty_auto=default_duty_auto,
-        strobe_guard_us=_opt_int("strobe_guard_us", DEFAULT_STROBE_GUARD_US),
-        default_cam_pulse_us=default_cam_pulse_us,
-        cameras=cameras,
-        lights=lights,
-    )
-
-
 class TriggerboxPlugin(Plugin):
     """Arms the board with the fps, duration and every camera line and light
     channel; the board then runs them on its own clock."""
@@ -746,6 +667,83 @@ class TriggerboxPlugin(Plugin):
         self._last_error: str | None = None
         self._ack_timeout_s = ACK_TIMEOUT_S
         self._broadcast: Callable[[str, dict], None] | None = None
+
+    @classmethod
+    def from_options(cls, options: dict) -> TriggerboxPlugin:
+        def _opt_int(key: str, default: int) -> int:
+            try:
+                return int(options.get(key, default))
+            except (TypeError, ValueError):
+                log.warning("triggerbox plugin: invalid %s %r; using %d", key, options.get(key), default)
+                return default
+
+        def _opt_float(*keys: str, default: float) -> float:
+            # The first key present: configs spell some options two ways.
+            for key in keys:
+                if key in options:
+                    try:
+                        return float(options[key])
+                    except (TypeError, ValueError):
+                        log.warning("triggerbox plugin: invalid %s %r; using %g", key, options[key], default)
+                        return default
+            return default
+
+        def _opt_bool(*keys: str, default: bool) -> bool:
+            for key in keys:
+                if key not in options:
+                    continue
+                val = options[key]
+                if isinstance(val, bool):
+                    return val
+                if isinstance(val, str):
+                    return val.strip().lower() in ("1", "true", "yes", "on")
+                try:
+                    return bool(int(val))
+                except (TypeError, ValueError):
+                    log.warning("triggerbox plugin: invalid %s %r; using %s", key, val, default)
+                    return default
+            return default
+
+        default_duty_percent = _opt_float("duty_percent", "default_duty_percent", default=DEFAULT_DUTY_PERCENT)
+        default_duty_auto = _opt_bool("duty_auto", "default_duty_auto", default=DEFAULT_DUTY_AUTO)
+        default_cam_pulse_us = _opt_int("cam_pulse_us", DEFAULT_CAM_PULSE_US) \
+            if "cam_pulse_us" in options else _opt_int("default_cam_pulse_us", DEFAULT_CAM_PULSE_US)
+
+        # Camera lines: explicit array, else the classic single D13 line.
+        raw_cams = options.get("cameras")
+        if raw_cams is not None and not isinstance(raw_cams, list):
+            log.warning("triggerbox plugin: 'cameras' must be an array of tables; ignoring %r", raw_cams)
+        cameras = _cameras_from(raw_cams, default_cam_pulse_us) if isinstance(raw_cams, list) else []
+        if not cameras:
+            cameras = [CameraLine(pin="D13", pulse_us=default_cam_pulse_us)]
+
+        # Light channels: explicit array, else the classic ch1+ch2 strobe.
+        raw_lights = options.get("lights")
+        if isinstance(raw_lights, list):
+            lights = _lights_from(raw_lights, default_duty_percent, default_duty_auto)
+        elif raw_lights is None:
+            dm = "auto" if default_duty_auto else "manual"
+            lights = [
+                LightChannel(channel=1, pin="D5", mode="strobe", duty_mode=dm, duty_percent=default_duty_percent),
+                LightChannel(channel=2, pin="D6", mode="strobe", duty_mode=dm, duty_percent=default_duty_percent),
+            ]
+        else:
+            log.warning("triggerbox plugin: 'lights' must be an array of tables; ignoring %r", raw_lights)
+            lights = []
+
+        return cls(
+            device=str(options.get("device") or DEFAULT_DEVICE),
+            baud=_opt_int("baud", DEFAULT_BAUD),
+            auto_flash=_opt_bool("auto_flash", default=False),
+            default_fps=_opt_int("default_fps", DEFAULT_FPS),
+            default_duration_ms=_opt_int("default_duration_ms", DEFAULT_DURATION_MS),
+            default_duty_percent=default_duty_percent,
+            default_duty_auto=default_duty_auto,
+            strobe_guard_us=_opt_int("strobe_guard_us", DEFAULT_STROBE_GUARD_US),
+            default_cam_pulse_us=default_cam_pulse_us,
+            cameras=cameras,
+            lights=lights,
+        )
 
     def set_broadcast(self, callback: Callable[[str, dict], None]) -> None:
         self._broadcast = callback
