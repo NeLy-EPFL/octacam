@@ -1258,6 +1258,19 @@ def test_camera_feature_reset_prefers_config(client, tmp_path):
     assert abs(restored - saved) < 2.0
 
 
+def test_camera_feature_reset_reads_only_the_cameras_own_file(client, tmp_path):
+    # An unreadable auxiliary parameter file beside the rig's (it used to make
+    # every reset a 500) is not the camera's, so the reset never reads it.
+    saved = _exposure(client) + 500.0
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
+    client.post("/api/config/save", json={"target": "active", "save_display": False})
+    (tmp_path / "fictrac_camera_config.pfs").write_bytes(b"ExposureTime\t\xff\xfe\n")
+    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved + 1000.0})
+    r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime", "scope": "all"})
+    assert r.status_code == 200, r.text
+    assert abs(_exposure_in(r.json()["updated"][0]["features"]) - saved) < 2.0
+
+
 def _exposure(client) -> float:
     """Camera 0's ExposureTime as the Camera tab reads it (which caches it as
     the first-seen value)."""
