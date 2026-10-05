@@ -3,6 +3,7 @@
 import pytest
 
 import octacam.plugins as plugins_mod
+from octacam import firmware as fw
 from octacam.config import OctacamConfig, PluginConfig
 from octacam.plugins import available_plugins, build_plugins, plugin_class
 from octacam.plugins.base import Plugin, PluginManager
@@ -110,7 +111,9 @@ def test_a_bundled_plugin_declares_its_facts(name, trigger, device, banner):
     assert cls.default_device == device
     assert cls.firmware is not None and cls.firmware.banner_prefix == banner
     # The spec the CLI and doctor read is the one the plugin provisions with.
-    assert cls.from_options({})._fw.spec == cls.firmware
+    prov = cls.from_options({}).firmware_provisioning()
+    assert prov["needed_build"] == fw.source_build(cls.firmware)
+    assert prov["sketch_found"] is (cls.firmware.sketch_dir is not None)
 
 
 @pytest.mark.parametrize(
