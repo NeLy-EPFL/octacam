@@ -229,8 +229,8 @@ def test_frames_written_reflects_actual_writes_on_failure():
 
 
 def test_capture_pipes_rawvideo_into_the_configured_encoder(tmp_path, monkeypatch):
-    # The input geometry is derived, the params are spliced verbatim, and frames
-    # go unbuffered down the stdin pipe.
+    # The input geometry is derived, the params reach ffmpeg through output_args
+    # (gray becomes full-range 4:2:0), and frames go unbuffered down the stdin pipe.
     import octacam.writer as writer_mod
 
     launched = []
@@ -258,6 +258,9 @@ def test_capture_pipes_rawvideo_into_the_configured_encoder(tmp_path, monkeypatc
     assert args[args.index("-i") + 1] == "pipe:0"
     assert args[args.index("-crf") + 1] == "18"
     assert args[args.index("-preset") + 1] == "ultrafast"
+    assert args[args.index("-pix_fmt") + 1] == "yuv420p"  # never 4:0:0 H.264
+    assert args[args.index("-color_range") + 1] == "pc"
+    assert "scale=out_range=full" in args[args.index("-vf") + 1]
     assert args[-1] == str(out)
     assert kwargs["stdin"] is subprocess.PIPE and kwargs["bufsize"] == 0
 
