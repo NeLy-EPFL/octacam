@@ -352,6 +352,29 @@ def _software_grab(backend, monkeypatch, image, refusals=0):
     return command
 
 
+def test_a_software_retrieve_fires_one_trigger_and_its_image_answers_it(
+    backend, monkeypatch
+):
+    image = FakeImage(array=np.zeros((4, 4), dtype=np.uint8))
+    command = _software_grab(backend, monkeypatch, image)
+    backend.trigger_once()
+    array, timestamp = backend.retrieve(100, lambda: True)
+    assert command.executed == 1 and array.dtype == np.uint8 and timestamp == 7
+    assert backend.trigger.pending == 0 and backend.trigger.fired_index is None
+    assert backend.last_trigger_index == 0 and image.released == 1
+
+
+def test_a_refused_software_trigger_is_not_awaited(backend, monkeypatch):
+    image = FakeImage(array=np.zeros((4, 4), dtype=np.uint8))
+    command = _software_grab(backend, monkeypatch, image, refusals=1)
+    backend.trigger_once()
+    assert backend.retrieve(100, lambda: True) is None
+    assert backend.trigger.fired_index is None and image.released == 0
+    backend.trigger_once()  # fires at once: nothing awaits trigger 0's image
+    assert backend.retrieve(100, lambda: True) is not None
+    assert command.executed == 1 and backend.last_trigger_index == 1
+
+
 def test_close_mid_grab_ends_it_and_retrieve_stays_quiet(backend, monkeypatch):
     _software_grab(backend, monkeypatch, FakeImage())
     backend.close()
