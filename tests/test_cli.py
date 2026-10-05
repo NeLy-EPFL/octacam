@@ -1,5 +1,6 @@
 """CLI smoke tests for the typer app (no real recording is started)."""
 
+import io
 import json
 import logging
 import os
@@ -1065,6 +1066,32 @@ def test_build_config_doc_includes_plugins():
     assert doc["plugins"] == [
         {"name": "triggerbox", "options": {"device": "/dev/ttyACM0"}}
     ]
+
+
+@pytest.mark.parametrize(
+    ("name", "device"),
+    [("triggerbox", "/dev/ttyACM0"), ("twophoton", "/dev/arduinoCams"), ("flywheel", "/dev/ttyACM0")],
+)
+def test_config_wizard_offers_the_plugins_default_device_without_a_port(
+    monkeypatch, name, device
+):
+    from rich.console import Console
+    from rich.prompt import Confirm, Prompt
+
+    import octacam.cli as cli_mod
+
+    defaults = {}
+
+    def ask(prompt, *, default=None, **_kw):
+        defaults[prompt.strip()] = default
+        return name if prompt.strip() == "Plugin" else default
+
+    monkeypatch.setattr(Confirm, "ask", lambda *a, **k: True)
+    monkeypatch.setattr(Prompt, "ask", ask)
+    monkeypatch.setattr(cli_mod, "_detect_serial_ports", lambda console: [])
+    entries = cli_mod._prompt_serial_plugin(Console(file=io.StringIO()))
+    assert defaults["Device"] == device
+    assert entries == [{"name": name, "options": {"device": device}}]
 
 
 # --- process: idempotent re-runs (skip existing outputs) --------------------
