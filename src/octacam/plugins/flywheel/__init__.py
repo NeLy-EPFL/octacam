@@ -22,7 +22,7 @@ import logging
 import struct
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import serial
@@ -63,21 +63,14 @@ _IDENTIFY_MARKER = 0xFFFF
 _EXPECTED_BANNER = "FLYWHEEL"
 _DEFAULT_FQBN = "arduino:avr:uno"  # the `fqbn` option overrides it
 _PROTOCOL_VERSION = 1
-
-
-def _firmware_spec(fqbn: str) -> fw.FirmwareSpec | None:
-    """The firmware spec, or None without the sketch source (a wheel install)."""
-    sketch = fw.resolve_sketch_dir("stepper_motor")
-    if sketch is None:
-        return None
-    return fw.FirmwareSpec(
-        name="flywheel",
-        sketch_dir=sketch,
-        fqbn=fqbn,
-        banner_prefix=_EXPECTED_BANNER,
-        protocol_version=_PROTOCOL_VERSION,
-        build_define="FLYWHEEL_FW_BUILD",
-    )
+_FIRMWARE = fw.FirmwareSpec(
+    name="flywheel",
+    sketch_dir=fw.resolve_sketch_dir("stepper_motor"),
+    fqbn=_DEFAULT_FQBN,
+    banner_prefix=_EXPECTED_BANNER,
+    protocol_version=_PROTOCOL_VERSION,
+    build_define="FLYWHEEL_FW_BUILD",
+)
 
 
 @dataclass
@@ -297,6 +290,8 @@ class JogClock:
 class FlywheelPlugin(Plugin):
     name = "flywheel"
     web_dir = Path(__file__).parent / "web"
+    firmware = _FIRMWARE
+    default_device = DEFAULT_DEVICE
 
     def __init__(
         self,
@@ -307,7 +302,7 @@ class FlywheelPlugin(Plugin):
         command: Command | None = None,
     ):
         # What the config names (a path or "auto"), and the port it resolved to.
-        self._configured_device = device
+        self.configured_device = device
         self.device = device
         self.baud = baud
         self._auto_flash = bool(auto_flash)
@@ -318,8 +313,8 @@ class FlywheelPlugin(Plugin):
         self._last_error: str | None = None
         self._link = SerialLink()
         self._fw = fw.FirmwareProvisioner(
-            _firmware_spec(fqbn),
-            resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
+            replace(_FIRMWARE, fqbn=fqbn),
+            resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=self._open,
             close_link=lambda: self._link.close(),
             wait_for_device=serial_ports.wait_for_device,
@@ -379,7 +374,7 @@ class FlywheelPlugin(Plugin):
             self._firmware = None
             self._firmware_ok = True
             self._last_error = None
-            device, reason = serial_ports.resolve_device(self._configured_device)
+            device, reason = serial_ports.resolve_device(self.configured_device)
             if device is None:
                 log.warning("Flywheel plugin: %s", reason)
                 return reason
@@ -505,7 +500,7 @@ class FlywheelPlugin(Plugin):
             """Reopen the port, switching to ``{"device": ...}`` when given."""
             device = payload.get("device") if isinstance(payload, dict) else None
             if isinstance(device, str) and device.strip():
-                self._configured_device = device.strip()
+                self.configured_device = device.strip()
             error = self._open()
             check = self._fw.check
             return {

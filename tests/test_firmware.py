@@ -466,3 +466,25 @@ def test_provisioner_port_lock_is_reentrant(real_spec, monkeypatch):
     result = prov.flash()
     assert result.ok
     assert prov.check.state is fw.FirmwareState.CURRENT
+
+
+def test_a_spec_without_a_source_checkout_is_never_classified_or_flashed(real_spec):
+    # A wheel install ships no sketch: the board keeps working, by banner only.
+    from dataclasses import replace
+
+    spec = replace(real_spec, sketch_dir=None)
+    assert spec.main_ino is None
+    assert fw.source_build(spec) is None
+    assert fw.source_build(real_spec) == fw.sketch_fingerprint(real_spec.sketch_dir)
+    ok, msg = fw.preflight(spec, "arduino-cli")
+    assert not ok and "sketch source was not found;" in msg
+    prov = _provisioner(spec, reopen=lambda: None)
+    assert prov.classify("TRIGGERBOX 2 oldbuild") is None
+    info = prov.provisioning(
+        plugin_name="triggerbox", device="/dev/ttyACM0", firmware=None, firmware_ok=True
+    )
+    assert (info["sketch_found"], info["can_flash"], info["needs_flash"]) == (
+        False, False, False
+    )
+    result = prov.flash()
+    assert not result.ok and "sketch source was not found" in result.message

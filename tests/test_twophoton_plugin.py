@@ -372,7 +372,7 @@ def test_reconnect_endpoint_accepts_device_override():
     data = r.json()
     assert data["ready"] is True
     assert data["device"] == "/dev/ttyUSB3"
-    assert plugin._configured_device == "/dev/ttyUSB3"
+    assert plugin.configured_device == "/dev/ttyUSB3"
 
 
 def test_from_payload_clamps_duration_to_uint32():

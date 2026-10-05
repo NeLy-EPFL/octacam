@@ -25,7 +25,8 @@ from octacam.cli import (
     _resolve_enabled,
     app,
 )
-from octacam.plugins.base import PluginManager
+from octacam.firmware import FirmwareSpec
+from octacam.plugins.base import Plugin, PluginManager
 
 runner = CliRunner()
 
@@ -2153,11 +2154,19 @@ def test_doctor_probe_classifies_a_configured_board(
 # --- record's firmware preflight ----------------------------------------------
 
 
-class _StaleBoardPlugin:
+class _StaleBoardPlugin(Plugin):
     """A serial plugin whose board runs an old build of its own sketch (or, with
     ``state="unidentified"``, sent no banner)."""
 
     name = "triggerbox"
+    firmware = FirmwareSpec(
+        name="triggerbox",
+        sketch_dir=None,
+        fqbn="arduino:esp32:nano_nora",
+        banner_prefix="TRIGGERBOX",
+        protocol_version=2,
+        build_define="TRIGGERBOX_FW_BUILD",
+    )
 
     def __init__(self, auto_flash, state="outdated"):
         self.auto_flash = auto_flash

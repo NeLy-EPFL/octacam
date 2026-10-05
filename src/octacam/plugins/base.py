@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from fastapi import APIRouter
 
     from octacam.controller import RecordingController
+    from octacam.firmware import FirmwareSpec, FlashResult
 
 log = logging.getLogger("octacam")
 
@@ -40,6 +41,13 @@ class Plugin:
     # JS/CSS served under /plugins/<name>/ (<name>.js, optional <name>.css);
     # None = no UI.
     web_dir: ClassVar[Path | None] = None
+    # A serial-hardware plugin's board firmware, and the port it opens when the
+    # config names none; None for any other plugin.
+    firmware: ClassVar[FirmwareSpec | None] = None
+    default_device: ClassVar[str | None] = None
+    # The port the config names (a path or "auto"); `octacam flash --device`
+    # replaces it before setup.
+    configured_device: str | None = None
     # Set by PluginManager.attach.
     controller: RecordingController | None = None
 
@@ -123,6 +131,18 @@ class Plugin:
 
     def on_ws_disconnect(self, client_id: int) -> None:
         pass
+
+    # ---- board firmware (firmware is not None) ----
+
+    def firmware_provisioning(self) -> dict:
+        """The board's firmware state and whether octacam can flash it
+        (FirmwareProvisioner.provisioning)."""
+        raise NotImplementedError
+
+    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> FlashResult:
+        """Upload the current firmware, streaming arduino-cli's output to
+        ``on_line``; never raises."""
+        raise NotImplementedError
 
 
 class PluginManager:

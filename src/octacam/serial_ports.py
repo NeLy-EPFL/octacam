@@ -21,13 +21,8 @@ log = logging.getLogger("octacam")
 DEFAULT_BAUD = 115200
 # The identify query byte the trigger firmwares (triggerbox, twophoton) answer
 # with their banner line; shared by probe_identity and the plugins' links.
+# flywheel answers an 8-byte sentinel command instead (see plugins.flywheel).
 IDENTIFY_MAGIC = b"?"
-
-# The serial plugins and their firmware banners. Only triggerbox and twophoton
-# answer the `?` probe; flywheel answers an 8-byte sentinel command instead (see
-# plugins.flywheel), so here it serves the wrong-board check only.
-SERIAL_PLUGINS = frozenset({"triggerbox", "twophoton", "flywheel"})
-EXPECTED_BANNER = {"triggerbox": "TRIGGERBOX", "twophoton": "2PHOTON", "flywheel": "FLYWHEEL"}
 
 # Board names are best-effort (a board's PID varies by revision and bootloader
 # mode), so the raw VID:PID is always shown beside them.

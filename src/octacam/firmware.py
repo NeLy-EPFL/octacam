@@ -39,10 +39,12 @@ _DEFAULT_FLASH_TIMEOUT_S = 300.0
 @dataclass(frozen=True)
 class FirmwareSpec:
     """What a plugin's board should run, and how to flash it. ``sketch_dir``
-    holds ``<sketch_dir.name>.ino``, as arduino-cli requires."""
+    holds ``<sketch_dir.name>.ino``, as arduino-cli requires; None without a
+    source checkout (a wheel install), where a board is never classified by its
+    build or flashed."""
 
     name: str
-    sketch_dir: Path
+    sketch_dir: Path | None
     fqbn: str
     banner_prefix: str
     protocol_version: int
@@ -50,7 +52,9 @@ class FirmwareSpec:
     build_header: str = "fw_build_info.h"
 
     @property
-    def main_ino(self) -> Path:
+    def main_ino(self) -> Path | None:
+        if self.sketch_dir is None:
+            return None
         return self.sketch_dir / f"{self.sketch_dir.name}.ino"
 
 
@@ -124,6 +128,18 @@ def sketch_fingerprint(sketch_dir: Path, exclude: str = "fw_build_info.h", lengt
         h.update(p.read_bytes().replace(b"\r\n", b"\n"))
         h.update(b"\0")
     return h.hexdigest()[:length]
+
+
+def source_build(spec: FirmwareSpec) -> str | None:
+    """The fingerprint of *spec*'s sketch on disk: the build a current board
+    reports. None without a source checkout or when the sketch cannot be read."""
+    if spec.sketch_dir is None:
+        return None
+    try:
+        return sketch_fingerprint(spec.sketch_dir)
+    except Exception:
+        log.debug("firmware: could not fingerprint %s sketch", spec.name, exc_info=True)
+        return None
 
 
 def parse_banner(banner: str | None) -> tuple[str | None, int | None, str | None]:
@@ -255,11 +271,13 @@ def preflight(spec: FirmwareSpec, cli: str | None) -> tuple[bool, str]:
             "arduino-cli/latest/installation/) or set the OCTACAM_ARDUINO_CLI "
             "environment variable to its path."
         )
-    if spec.sketch_dir is None or not spec.main_ino.is_file():
+    ino = spec.main_ino
+    if ino is None or not ino.is_file():
+        expected = f" (expected {ino})" if ino else ""
         return False, (
-            f"the {spec.name} sketch source was not found "
-            f"(expected {spec.main_ino}); auto-flash needs a source checkout. Set "
-            "OCTACAM_ARDUINO_DIR, or flash manually with arduino-cli."
+            f"the {spec.name} sketch source was not found{expected}; auto-flash "
+            "needs a source checkout. Set OCTACAM_ARDUINO_DIR, or flash manually "
+            "with arduino-cli."
         )
     core = core_installed(cli, spec.fqbn)
     core_id = ":".join(spec.fqbn.split(":")[:2])
@@ -354,7 +372,7 @@ def flash(
     ok, msg = preflight(spec, cli)
     if not ok:
         return FlashResult(False, msg)
-    assert cli is not None  # preflight guarantees it
+    assert cli is not None and spec.sketch_dir is not None  # preflight guarantees both
 
     try:
         tmp = tempfile.mkdtemp(prefix="octacam-fw-")
@@ -420,7 +438,7 @@ class FirmwareProvisioner:
 
     def __init__(
         self,
-        spec: FirmwareSpec | None,
+        spec: FirmwareSpec,
         *,
         resolve_device: Callable[[], tuple[str | None, str]],
         reopen: Callable[[], str | None],
@@ -429,13 +447,7 @@ class FirmwareProvisioner:
         is_busy: Callable[[], tuple[bool, str]] | None = None,
     ):
         self.spec = spec
-        self.needed_build: str | None = None
-        if spec is not None:
-            try:
-                self.needed_build = sketch_fingerprint(spec.sketch_dir)
-            except Exception:
-                log.debug("firmware: could not fingerprint %s sketch",
-                          spec.name, exc_info=True)
+        self.needed_build = source_build(spec)
         self.check: FirmwareCheck | None = None
         self.port_lock = threading.RLock()
         self._resolve_device = resolve_device
@@ -446,7 +458,7 @@ class FirmwareProvisioner:
 
     def classify(self, banner: str | None) -> FirmwareCheck | None:
         """Classify *banner* against the source; None when no source is available."""
-        if self.spec is None or self.needed_build is None:
+        if self.needed_build is None:
             self.check = None
         else:
             self.check = classify(self.spec, banner, self.needed_build)
@@ -454,11 +466,7 @@ class FirmwareProvisioner:
 
     @property
     def can_flash(self) -> bool:
-        return (
-            self.spec is not None
-            and self.needed_build is not None
-            and arduino_cli_path() is not None
-        )
+        return self.needed_build is not None and arduino_cli_path() is not None
 
     def provisioning(
         self, *, plugin_name: str, device: str, firmware: str | None,
@@ -471,7 +479,7 @@ class FirmwareProvisioner:
             "firmware": firmware,
             "firmware_ok": firmware_ok,
             "needed_build": self.needed_build,
-            "sketch_found": self.spec is not None,
+            "sketch_found": self.spec.sketch_dir is not None,
             "cli_available": arduino_cli_path() is not None,
             "can_flash": self.can_flash,
         }
@@ -495,7 +503,7 @@ class FirmwareProvisioner:
             busy, why = self._is_busy()
             if busy:
                 return FlashResult(False, why)
-        if self.spec is None or self.needed_build is None:
+        if self.needed_build is None:
             return FlashResult(
                 False,
                 "the sketch source was not found; auto-flash is unavailable (flash "

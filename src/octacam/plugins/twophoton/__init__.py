@@ -55,23 +55,15 @@ _STATUS_BYTES = frozenset(b"ATD")
 
 # Starts with '2', never a status byte, so the reader tells the two apart.
 _EXPECTED_BANNER = "2PHOTON"
-_FQBN = "arduino:avr:mega"  # Arduino Mega 2560
 _PROTOCOL_VERSION = 1
-
-
-def _firmware_spec() -> fw.FirmwareSpec | None:
-    """The firmware spec, or None without the sketch source (a wheel install)."""
-    sketch = fw.resolve_sketch_dir("2photon_trigger")
-    if sketch is None:
-        return None
-    return fw.FirmwareSpec(
-        name="twophoton",
-        sketch_dir=sketch,
-        fqbn=_FQBN,
-        banner_prefix=_EXPECTED_BANNER,
-        protocol_version=_PROTOCOL_VERSION,
-        build_define="TWOPHOTON_FW_BUILD",
-    )
+_FIRMWARE = fw.FirmwareSpec(
+    name="twophoton",
+    sketch_dir=fw.resolve_sketch_dir("2photon_trigger"),
+    fqbn="arduino:avr:mega",  # Arduino Mega 2560
+    banner_prefix=_EXPECTED_BANNER,
+    protocol_version=_PROTOCOL_VERSION,
+    build_define="TWOPHOTON_FW_BUILD",
+)
 
 
 @dataclass
@@ -166,6 +158,8 @@ class TwoPhotonPlugin(Plugin):
 
     name = "twophoton"
     web_dir = Path(__file__).parent / "web"
+    firmware = _FIRMWARE
+    default_device = DEFAULT_DEVICE
 
     def __init__(
         self,
@@ -176,7 +170,7 @@ class TwoPhotonPlugin(Plugin):
         auto_flash: bool = False,
     ):
         # What the config names (a path or "auto"), and the port it resolved to.
-        self._configured_device = device
+        self.configured_device = device
         self.device = device
         self.baud = baud
         self._default_fps = default_fps
@@ -189,8 +183,8 @@ class TwoPhotonPlugin(Plugin):
             self._on_arduino_status, on_broken=self._on_link_broken
         )
         self._fw = fw.FirmwareProvisioner(
-            _firmware_spec(),
-            resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
+            _FIRMWARE,
+            resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=self._open,
             close_link=lambda: self._link.close(),
             wait_for_device=serial_ports.wait_for_device,
@@ -283,7 +277,7 @@ class TwoPhotonPlugin(Plugin):
             self._firmware = None
             self._firmware_ok = True
             self._last_error = None
-            device, reason = serial_ports.resolve_device(self._configured_device)
+            device, reason = serial_ports.resolve_device(self.configured_device)
             if device is None:
                 log.warning("2-photon trigger: %s", reason)
                 return reason
@@ -439,7 +433,7 @@ class TwoPhotonPlugin(Plugin):
             """Reopen the port, switching to ``{"device": ...}`` when given."""
             device = payload.get("device") if isinstance(payload, dict) else None
             if isinstance(device, str) and device.strip():
-                self._configured_device = device.strip()
+                self.configured_device = device.strip()
             error = self._open()
             check = self._fw.check
             return {

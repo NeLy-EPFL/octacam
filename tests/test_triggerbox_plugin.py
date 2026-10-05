@@ -6,7 +6,7 @@ import re
 import struct
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -938,7 +938,7 @@ def test_reconnect_endpoint_device_override(monkeypatch):
     plugin, _link = _plugin_with_fake()
     monkeypatch.setattr(plugin, "_open", lambda: None)
     _test_client(plugin).post("/api/triggerbox/reconnect", json={"device": "/dev/ttyUSB9"})
-    assert plugin._configured_device == "/dev/ttyUSB9"
+    assert plugin.configured_device == "/dev/ttyUSB9"
 
 
 # ===========================================================================
@@ -1175,10 +1175,17 @@ def test_identify_unidentified_proceeds_but_flags_flash():
     assert prov["needs_flash"] and not prov["safe_to_auto_flash"]
 
 
-def test_no_source_falls_back_to_banner_compatibility():
+@pytest.fixture
+def no_source_checkout(monkeypatch):
+    """A wheel install: the plugin's firmware has no sketch to fingerprint or flash."""
+    import octacam.plugins.triggerbox as tb
+
+    monkeypatch.setattr(tb, "_FIRMWARE", replace(tb._FIRMWARE, sketch_dir=None))
+
+
+def test_no_source_falls_back_to_banner_compatibility(no_source_checkout):
     plugin, link = _plugin_with_fake()
-    plugin._fw.spec = None
-    plugin._fw.needed_build = None
+    assert plugin.firmware_provisioning()["sketch_found"] is False
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
     assert plugin._firmware_ok  # name+version compatible; no flash offer
     assert plugin._fw.check is None
@@ -1227,10 +1234,8 @@ def test_flash_firmware_refused_while_recording():
     assert "recording" in result.message
 
 
-def test_flash_firmware_without_source():
+def test_flash_firmware_without_source(no_source_checkout):
     plugin, link = _plugin_with_fake()
-    plugin._fw.spec = None
-    plugin._fw.needed_build = None
     result = plugin.flash_firmware()
     assert not result.ok
     assert "source" in result.message.lower()

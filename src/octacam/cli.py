@@ -1362,28 +1362,30 @@ def _doctor_plugins(report: _Report, cfg) -> None:
             report.add("ok", f"config enables {name!r} (available)")
 
 
-def _plugin_default_device(name: str) -> str | None:
-    """The ``DEFAULT_DEVICE`` a serial plugin falls back to (None if unknown)."""
-    import importlib
+def _serial_plugin(name: str):
+    """The class of the serial-hardware plugin *name* (one with board firmware),
+    or None for any other name and for a module that fails to import."""
+    from octacam.plugins import plugin_class
 
     try:
-        mod = importlib.import_module(f"octacam.plugins.{name}")
-        return getattr(mod, "DEFAULT_DEVICE", None)
+        cls = plugin_class(name)
     except Exception:
         return None
+    return cls if cls.firmware is not None else None
 
 
 def _configured_device(pc) -> tuple[str | None, bool]:
-    """``(device, is_auto)`` a plugin config resolves to, as its factory would:
-    the ``device`` option, else the plugin's ``DEFAULT_DEVICE``."""
+    """``(device, is_auto)`` a serial plugin's config resolves to, as the plugin
+    would: the ``device`` option, else the plugin's default port."""
     from octacam.plugins import canonical_name
 
-    name = canonical_name(pc.name)
     raw = pc.options.get("device")
     if isinstance(raw, str) and raw.strip().lower() == "auto":
         return None, True
-    device = str(raw) if raw else _plugin_default_device(name)
-    return device, False
+    if raw:
+        return str(raw), False
+    cls = _serial_plugin(canonical_name(pc.name))
+    return (cls.default_device if cls is not None else None), False
 
 
 def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
@@ -1429,7 +1431,7 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
     any_serial_plugin = False
     for pc in cfg.plugins:
         name = canonical_name(pc.name)
-        if name not in sp.SERIAL_PLUGINS:
+        if _serial_plugin(name) is None:
             continue
         any_serial_plugin = True
         device, is_auto = _configured_device(pc)
@@ -1469,47 +1471,21 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
                 )
 
 
-def _firmware_spec_for(name: str):
-    """``(spec, needed_build)`` for a serial plugin whose board carries a firmware
-    fingerprint, or ``(None, None)`` for an unknown/source-less plugin."""
-    from octacam import firmware as fw
-
-    if name == "triggerbox":
-        from octacam.plugins.triggerbox import _firmware_spec
-
-        spec = _firmware_spec()
-    elif name == "twophoton":
-        from octacam.plugins.twophoton import _firmware_spec
-
-        spec = _firmware_spec()
-    elif name == "flywheel":
-        from octacam.plugins.flywheel import _DEFAULT_FQBN, _firmware_spec
-
-        spec = _firmware_spec(_DEFAULT_FQBN)  # fqbn is irrelevant to classification
-    else:
-        return None, None
-    if spec is None:
-        return None, None
-    try:
-        return spec, fw.sketch_fingerprint(spec.sketch_dir)
-    except Exception:
-        return spec, None
-
-
 def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
     """Read each microcontroller port's firmware identity (opt-in, invasive)."""
     from octacam import firmware as fw
     from octacam import serial_ports as sp
     from octacam.plugins import canonical_name
 
-    expected: dict[str, tuple[str, str]] = {}
+    expected: dict[str, tuple[str, fw.FirmwareSpec]] = {}
     if cfg is not None:
         for pc in cfg.plugins:
             name = canonical_name(pc.name)
-            banner = sp.EXPECTED_BANNER.get(name)
+            cls = _serial_plugin(name)
+            spec = cls.firmware if cls is not None else None
             device, is_auto = _configured_device(pc)
-            if banner and device and not is_auto:
-                expected[os.path.realpath(device)] = (name, banner)
+            if spec is not None and device and not is_auto:
+                expected[os.path.realpath(device)] = (name, spec)
     for p in mcus:
         ident = sp.probe_identity(p.device)
         if ident.busy:
@@ -1530,9 +1506,9 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
         exp = expected.get(os.path.realpath(p.device))
         if not exp:
             continue
-        name = exp[0]
-        spec, needed = _firmware_spec_for(name)
-        if spec is not None and needed is not None:
+        name, spec = exp
+        needed = fw.source_build(spec)
+        if needed is not None:
             check = fw.classify(spec, ident.banner, needed)
             if check.state is fw.FirmwareState.CURRENT:
                 report.add("ok", f"{p.device}: {name} firmware up to date (build {needed})")
@@ -1543,11 +1519,11 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
                     f"{p.device}: {name} firmware needs flashing — {check.detail}; "
                     "run `octacam flash`",
                 )
-        elif ident.banner and not ident.banner.upper().startswith(exp[1]):
+        elif ident.banner and not ident.banner.upper().startswith(spec.banner_prefix):
             report.add(
                 "warn",
-                f"{p.device}: expected {name} firmware (banner {exp[1]!r}) but "
-                f"got {ident.banner!r} — wrong board?",
+                f"{p.device}: expected {name} firmware (banner {spec.banner_prefix!r}) "
+                f"but got {ident.banner!r} — wrong board?",
             )
 
 
@@ -1976,7 +1952,8 @@ def _prompt_serial_plugin(console) -> list[dict]:
         console=console,
     )
     ports = _detect_serial_ports(console)
-    default_device = ports[0].device if ports else (_plugin_default_device(name) or "auto")
+    cls = _serial_plugin(name)
+    default_device = ports[0].device if ports else (cls and cls.default_device) or "auto"
     console.print(
         "  Enter a device path, or [bold]auto[/bold] to pick the single board "
         "connected at launch."
@@ -2463,14 +2440,10 @@ def _load_config_or_empty(config_dir: Path | None) -> "OctacamConfig":
 
 
 def _flashable_plugins(plugins, only: str | None):
-    """The plugins that support firmware provisioning, optionally filtered to one."""
+    """The plugins with board firmware, optionally filtered to one."""
     from octacam.plugins import canonical_name
 
-    out = [
-        p
-        for p in plugins.plugins
-        if hasattr(p, "flash_firmware") and hasattr(p, "firmware_provisioning")
-    ]
+    out = [p for p in plugins.plugins if p.firmware is not None]
     if only:
         # build_plugins loaded an alias (arduino) under its current name.
         out = [p for p in out if p.name == canonical_name(only)]
@@ -2542,7 +2515,7 @@ def _preflight_firmware(plugins, *, assume_yes: bool) -> None:
     interactive = sys.stdin.isatty()
     console = None
     for p in plugins.plugins:
-        if not (hasattr(p, "firmware_provisioning") and hasattr(p, "flash_firmware")):
+        if p.firmware is None:
             continue
         try:
             prov = p.firmware_provisioning()
@@ -2668,8 +2641,8 @@ def flash(
 
         exit_code = 0
         for p in flashable:
-            if device and hasattr(p, "_configured_device"):
-                p._configured_device = device
+            if device:
+                p.configured_device = device
             try:
                 p.setup()  # open the link + read the identity banner
             except Exception as e:

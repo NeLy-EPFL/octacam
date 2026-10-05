@@ -116,22 +116,14 @@ _REJECT_REASONS = {
 }
 
 _EXPECTED_BANNER = "TRIGGERBOX"
-_FQBN = "arduino:esp32:nano_nora"
-
-
-def _firmware_spec() -> fw.FirmwareSpec | None:
-    """The firmware spec, or None without the sketch source (a wheel install)."""
-    sketch = fw.resolve_sketch_dir("triggerbox")
-    if sketch is None:
-        return None
-    return fw.FirmwareSpec(
-        name="triggerbox",
-        sketch_dir=sketch,
-        fqbn=_FQBN,
-        banner_prefix=_EXPECTED_BANNER,
-        protocol_version=_PROTOCOL_VERSION,
-        build_define="TRIGGERBOX_FW_BUILD",
-    )
+_FIRMWARE = fw.FirmwareSpec(
+    name="triggerbox",
+    sketch_dir=fw.resolve_sketch_dir("triggerbox"),
+    fqbn="arduino:esp32:nano_nora",
+    banner_prefix=_EXPECTED_BANNER,
+    protocol_version=_PROTOCOL_VERSION,
+    build_define="TRIGGERBOX_FW_BUILD",
+)
 
 
 def _u16(v) -> int:
@@ -607,6 +599,8 @@ class TriggerboxPlugin(Plugin):
     name = "triggerbox"
     generates_trigger = True
     web_dir = Path(__file__).parent / "web"
+    firmware = _FIRMWARE
+    default_device = DEFAULT_DEVICE
 
     def __init__(
         self,
@@ -622,7 +616,7 @@ class TriggerboxPlugin(Plugin):
         cameras: list[CameraLine] | None = None,
         lights: list[LightChannel] | None = None,
     ):
-        self._configured_device = device
+        self.configured_device = device
         self.device = device
         self.baud = baud
         self._firmware: str | None = None
@@ -647,8 +641,8 @@ class TriggerboxPlugin(Plugin):
             on_reject=self._on_arduino_reject,
         )
         self._fw = fw.FirmwareProvisioner(
-            _firmware_spec(),
-            resolve_device=lambda: serial_ports.resolve_device(self._configured_device),
+            _FIRMWARE,
+            resolve_device=lambda: serial_ports.resolve_device(self.configured_device),
             reopen=lambda: self._open(allow_recovery=False),
             close_link=lambda: self._link.close(),
             wait_for_device=serial_ports.wait_for_device,
@@ -894,7 +888,7 @@ class TriggerboxPlugin(Plugin):
             self._firmware = None
             self._firmware_ok = True
             self._last_error = None
-            device, reason = serial_ports.resolve_device(self._configured_device)
+            device, reason = serial_ports.resolve_device(self.configured_device)
             if device is None:
                 log.warning("triggerbox: %s", reason)
                 return reason
@@ -1309,7 +1303,7 @@ class TriggerboxPlugin(Plugin):
         def reconnect(payload: dict = Body(default={})):
             device = payload.get("device") if isinstance(payload, dict) else None
             if isinstance(device, str) and device.strip():
-                self._configured_device = device.strip()
+                self.configured_device = device.strip()
             error = self._open()
             check = self._fw.check
             return {
