@@ -428,7 +428,7 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
 
 def is_safe_segment(name: str) -> bool:
     """Whether ``name`` is one path segment, usable as a filename stem or folder
-    name: non-blank, no separator, no ``.``/``..``."""
+    name: non-empty, no separator, no ``.``/``..``."""
     return (
         name not in ("", ".", "..")
         and "/" not in name
