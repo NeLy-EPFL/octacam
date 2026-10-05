@@ -1256,9 +1256,11 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     _make_recording(folder, with_outputs=True)
 
     calls = {"transcode": 0, "grid": 0}
+    transcode_kwargs = {}
 
     def fake_transcode(input_path, output, **kwargs):
         calls["transcode"] += 1
+        transcode_kwargs.update(kwargs)
         Path(output).write_bytes(b"reencoded")
         return output
 
@@ -1273,6 +1275,7 @@ def test_process_force_rebuilds_existing_outputs(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     # --force re-runs both steps even though the outputs already existed.
     assert calls == {"transcode": 1, "grid": 1}
+    assert transcode_kwargs["frames"] == 10  # the summary's count sizes the bar
 
 
 def test_process_builds_no_grid_without_visualization_config(tmp_path, monkeypatch):
