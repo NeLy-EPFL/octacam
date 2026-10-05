@@ -10,6 +10,7 @@ from octacam.config import (
     GuiConfig,
     OctacamConfig,
     RecordConfig,
+    RecordForm,
     RecordingSettings,
     SaveMethod,
     TransferConfig,
@@ -615,8 +616,13 @@ def test_settings_updated_names_each_bad_field():
 
 
 def test_save_methods_are_the_writer_formats():
-
     assert set(get_args(SaveMethod)) == set(FORMATS)
+
+
+def test_record_forms_are_the_benchmark_choices():
+    from octacam import cli
+
+    assert {form.value for form in cli.RecordForm} == set(get_args(RecordForm))
 
 
 def test_video_format_carries_ffmpeg_params():

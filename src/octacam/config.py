@@ -88,6 +88,9 @@ PreviewTriggerSource = Literal["auto", "software", "free_running"]
 # "ffmpeg" = CPU (libx264); "nvenc" = NVIDIA GPU, cameras beyond
 # max_nvenc_sessions on CPU; "raw" = Mono8 dump, transcoded later.
 SaveMethod = Literal["ffmpeg", "nvenc", "raw"]
+# "display" bakes the display transform into the video; "sensor" does not
+# (the config's save_transformed).
+RecordForm = Literal["display", "sensor"]
 _ScalarFfmpegArgs = Annotated[FfmpegArgs, BeforeValidator(_scalar_str)]
 
 
@@ -308,8 +311,7 @@ class RecordingSettings:
     # None = the GPU's detected session cap; cameras beyond it encode on CPU.
     max_nvenc_sessions: Annotated[StrictInt, Field(ge=0)] | None = None
     writer_queue_size: Annotated[StrictInt, Field(ge=1)] = 64
-    # "display" bakes the display transform into the video; "sensor" does not.
-    record_form: Literal["display", "sensor"] = "display"
+    record_form: RecordForm = "display"
     save_frame_timestamps: bool = False
     # `octacam process` params: unused during capture, patched into each
     # recording's config snapshot. An empty transfer_directory skips the transfer.
