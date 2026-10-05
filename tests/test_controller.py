@@ -324,8 +324,11 @@ def test_record_config_values_covers_every_record_setting():
     assert set(RecordConfig.model_fields) == reproduced | excluded
 
 
-def test_from_config_takes_the_config_as_it_loads():
+def test_from_config_takes_the_config_as_it_loads(monkeypatch):
     from octacam.config import OctacamConfig, RecordConfig, TransferConfig
+
+    moment = time.localtime(0)
+    monkeypatch.setattr(time, "localtime", lambda *_a: moment)
 
     config = OctacamConfig(
         record=RecordConfig(
@@ -340,7 +343,7 @@ def test_from_config_takes_the_config_as_it_loads():
         transfer=TransferConfig(directory="/store", checksum=False),
     )
     settings = RecordingSettings.from_config(config)
-    year = time.strftime("%Y")
+    year = time.strftime("%Y", moment)
     assert (settings.fps, settings.duration_s) == (50.0, 2.0)
     assert settings.record_directory == f"/data/{year}"
     assert settings.relative_directory == "Fly1/001"
@@ -354,6 +357,21 @@ def test_from_config_takes_the_config_as_it_loads():
     # No [transfer]: no transfer, and checksums on for a later one.
     bare = RecordingSettings.from_config(OctacamConfig())
     assert (bare.transfer_directory, bare.transfer_checksum) == ("", True)
+
+
+def test_from_config_expands_the_save_dirs_at_one_moment(monkeypatch):
+    from octacam.config import OctacamConfig, RecordConfig
+
+    # Each read of the clock a year later: a second read would split the dirs.
+    moments = iter(time.strptime(f"{year}-12-31", "%Y-%m-%d") for year in (2025, 2026))
+    monkeypatch.setattr(time, "localtime", lambda *_a: next(moments))
+    record = RecordConfig(directory="/d/%Y", relative_directory="%Y/001")
+    settings = RecordingSettings.from_config(OctacamConfig(record=record))
+    assert (settings.record_directory, settings.relative_directory) == (
+        "/d/2025",
+        "2025/001",
+    )
+    assert settings.save_dir == "/d/2025/2025/001"
 
 
 def test_next_take_bumps_the_relative_part_else_save_dir():
@@ -501,12 +519,18 @@ def test_settings_updated_names_each_bad_field():
     with pytest.raises(ValueError, match="^fps: ") as error:
         settings.updated(fps=0, duration_s=5.0)
     assert "duration_s" not in str(error.value)
+    with pytest.raises(ValueError, match="^duration_s: "):
+        settings.updated(duration_s=0)
     with pytest.raises(ValueError, match="^save_method: "):
         settings.updated(save_method="vp9")
     with pytest.raises(ValueError, match="^transcode_ffmpeg_params: bad quoting"):
         settings.updated(transcode_ffmpeg_params='a "b')
-    with pytest.raises(ValueError, match="^save_dir: "):
-        settings.updated(save_dir=None)
+    # Every field is type-checked, as JSON would be: no None in a str or bool.
+    for field in ("save_dir", "transfer_directory", "save_frame_timestamps"):
+        with pytest.raises(ValueError, match=f"^{field}: "):
+            settings.updated(**{field: None})
+    # Coerced like the HTTP boundary's JSON: a numeric string is a number.
+    assert settings.updated(fps="100").fps == 100.0
     # The changed fields only: a config value the GUI would refuse (fps 0, as
     # the tolerant config loads it) must not block editing another field.
     assert RecordingSettings(fps=0.0).updated(duration_s=5.0).duration_s == 5.0

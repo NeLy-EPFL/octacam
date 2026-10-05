@@ -421,6 +421,31 @@ def test_record_tears_down_when_the_capture_marker_fails(tmp_path, monkeypatch):
     assert events == [("close", False), ("teardown_all", False)]
 
 
+def test_record_applies_its_fps_duration_and_output_overrides(tmp_path, monkeypatch):
+    import octacam.controller
+
+    _patch_one_camera_record(monkeypatch, tmp_path, [])
+    seen = []
+
+    class Capture(octacam.controller.RecordingController):
+        def __init__(self, _system, settings, *_a, **_k):
+            seen.append(settings)
+
+    monkeypatch.setattr("octacam.controller.RecordingController", Capture)
+    output = tmp_path / "elsewhere"
+    result = runner.invoke(
+        app,
+        ["record", str(tmp_path), "--fps", "50", "--duration", "2"]
+        + ["--output", str(output)],
+    )
+    assert result.exit_code == 0, result.output
+    (settings,) = seen
+    assert (settings.fps, settings.duration_s) == (50.0, 2.0)
+    # An explicit --output clears the config's split save path.
+    assert settings.save_dir == str(output)
+    assert (settings.record_directory, settings.relative_directory) == ("", "")
+
+
 def test_browser_skip_reason(monkeypatch):
     for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(var, raising=False)
@@ -2367,14 +2392,20 @@ def test_benchmark_closes_the_cameras_when_it_exits_before_measuring(
 
 
 @pytest.mark.parametrize(
-    ("extra", "sink", "record_form", "with_bar"),
+    ("extra", "sink", "record_form", "fps", "with_bar"),
     [
-        ([], "config", "display", True),
-        (["--sink", "null", "--record-form", "sensor", "--json"], "null", "sensor", False),
+        ([], "config", "display", 100.0, True),
+        (
+            ["--sink", "null", "--record-form", "sensor", "--fps", "50", "--json"],
+            "null",
+            "sensor",
+            50.0,
+            False,
+        ),
     ],
 )
 def test_benchmark_passes_its_options_to_diagnose(
-    tmp_path, monkeypatch, extra, sink, record_form, with_bar
+    tmp_path, monkeypatch, extra, sink, record_form, fps, with_bar
 ):
     (tmp_path / "octacam_config.toml").write_text(
         'backend = "fake"\n[[cameras]]\nserial_number = "FAKE-0"\n'
@@ -2382,7 +2413,7 @@ def test_benchmark_passes_its_options_to_diagnose(
     seen = {}
 
     def diagnose(system, settings, **kwargs):
-        seen.update(kwargs, record_form=settings.record_form)
+        seen.update(kwargs, record_form=settings.record_form, fps=settings.fps)
         raise SystemExit("stop")
 
     monkeypatch.setattr("octacam.diagnostics.diagnose", diagnose)
@@ -2392,6 +2423,7 @@ def test_benchmark_passes_its_options_to_diagnose(
     assert result.exit_code != 0
     assert type(seen["sink"]) is str and seen["sink"] == sink
     assert type(seen["record_form"]) is str and seen["record_form"] == record_form
+    assert seen["fps"] == fps
     assert callable(seen.get("progress_cb")) is with_bar
 
 
