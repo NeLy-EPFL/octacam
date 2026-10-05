@@ -18,7 +18,7 @@ import pytest
 from helpers import camera_stats, wait_until
 
 import octacam.cameras._trigger_handoff as handoff
-import octacam.controller as controller_module
+import octacam.take as take_module
 from octacam.cameras import CameraSystem
 from octacam.check import check_recording
 from octacam.config import RecordingSettings
@@ -396,7 +396,7 @@ def test_a_camera_still_silent_after_priming_is_warned_about(
     # Out of budget after one round: FAKE-1 is still ignoring triggers, so it
     # starts on the train's second pulse. Priming says so, and the start check
     # catches the offset against FAKE-0.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
     _ignoring_cameras(fake_system, [0, 5])
     board = Board(fake_system, count=50)
     _save_dir, summary, _arrays, controller = _record(
@@ -553,9 +553,9 @@ def test_a_low_fps_start_sequence_is_waited_out(
     # which outlasted the monitor's fixed waits: on_first_frame (and a teardown)
     # ran before the arm. Scaled down here: 5 fps, and waits that a round of
     # priming outlasts unless they allow for it.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)  # one round
-    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.4)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)  # one round
+    monkeypatch.setattr(take_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.4)
     fps = 5.0
     period_ns = int(1e9 / fps)
     for serial in FAKE_SERIALS:
@@ -593,8 +593,8 @@ def test_a_low_fps_start_sequence_is_waited_out(
 def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monkeypatch):
     # Stopped while a slow train's priming burst is still going out: the
     # teardown (and the board's disarm) must wait for it, not time out first.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
-    monkeypatch.setattr(controller_module, "START_HOOKS_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "START_HOOKS_TIMEOUT_S", 0.2)
     period_ns = int(1e9 / 5.0)
     board = HookLog(fake_system, count=5, period_ns=period_ns)
     settings = RecordingSettings(
@@ -623,8 +623,8 @@ def test_a_stop_during_low_fps_priming_waits_for_it(fake_system, tmp_path, monke
 def test_a_camera_that_records_nothing_breaks_sync(fake_system, tmp_path, monkeypatch):
     # FAKE-1's record grab starts but it never answers a trigger: there is no
     # video of it to align, whatever the other camera did.
-    monkeypatch.setattr(controller_module, "PRIME_BUDGET_S", 0.0)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+    monkeypatch.setattr(take_module, "PRIME_BUDGET_S", 0.0)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.3)
     _backend(fake_system, "FAKE-1").ignore_first_triggers = 10**9
     _save_dir, summary, _arrays, _ = _record(
         fake_system, tmp_path, trigger_source="software"

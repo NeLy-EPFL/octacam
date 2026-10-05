@@ -530,12 +530,12 @@ def test_fake_external_trigger_waits_indefinitely(fake_system, tmp_path, monkeyp
     """
     import time
 
-    import octacam.controller as controller_module
+    import octacam.take as take_module
 
     # Shrink the thresholds so the *old* auto-start behaviour would trigger
     # almost immediately; if the fix works the controller still won't start.
-    monkeypatch.setattr(controller_module, "STARTED_WARN_AFTER_S", 0.1)
-    monkeypatch.setattr(controller_module, "STARTED_FAIL_AFTER_S", 0.3)
+    monkeypatch.setattr(take_module, "STARTED_WARN_AFTER_S", 0.1)
+    monkeypatch.setattr(take_module, "STARTED_FAIL_AFTER_S", 0.3)
 
     save_dir = tmp_path / "ext" / "001"
     settings = RecordingSettings(
