@@ -1,9 +1,6 @@
-"""Live preview over the GUI WebSocket.
-
-Each client says per camera what it shows (a view spec); every tick the loop
-groups the ready clients by the variant (crop, decimation) they need and encodes
-each camera's newest frame once per variant, on its own executor task.
-"""
+"""Live preview over the GUI WebSocket: each client's per-camera view spec, and
+the loop that encodes a camera's newest frame once per variant (crop,
+decimation) its ready clients need."""
 
 import asyncio
 import dataclasses
