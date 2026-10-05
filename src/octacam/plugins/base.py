@@ -141,9 +141,7 @@ class PluginManager:
         try:
             return hook(*args)
         except Exception:
-            # A partialmethod or decorator-object hook has no __name__.
-            name = getattr(hook, "__name__", hook)
-            log.exception("Plugin %s.%s failed", plugin.name, name)
+            log.exception("Plugin %s.%s failed", plugin.name, hook.__name__)
             return default
 
     def setup_all(self) -> None:

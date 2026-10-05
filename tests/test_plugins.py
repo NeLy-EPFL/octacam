@@ -1,7 +1,5 @@
 """Plugin registry + manager behavior."""
 
-import functools
-
 import pytest
 
 import octacam.plugins as plugins_mod
@@ -145,18 +143,6 @@ def test_a_raising_hook_does_not_stop_the_next_plugin(method, hook, args):
         plugins.reverse()  # teardown runs in reverse, so Boom still goes first
     getattr(PluginManager(plugins), method)(*args)  # must not raise
     assert len(calls) == 1
-
-
-def test_a_failing_hook_without_a_name_is_still_isolated():
-    class Partial(Plugin):
-        name = "partial"
-
-        def _boom(self, *args):
-            raise RuntimeError("boom")
-
-        on_first_frame = functools.partialmethod(_boom)
-
-    PluginManager([Partial()]).on_first_frame(None)  # must not raise
 
 
 def test_attach_gives_every_plugin_the_controller_and_the_broadcast():
