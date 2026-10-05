@@ -1395,9 +1395,6 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
 
     report.section("Serial devices")
     ports = sp.list_serial_ports()
-    if sp.comports is None:
-        report.add("warn", "pyserial not available; cannot enumerate serial ports")
-        return
     if not ports:
         report.add("info", "no serial ports detected")
 
