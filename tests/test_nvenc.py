@@ -75,25 +75,6 @@ def test_encoder_of_and_nvenc_encoder(params, encoder, nvenc):
 # --- find_ffmpeg(require_encoder) probe + cache -----------------------------
 
 
-def test_find_ffmpeg_default_needs_no_probe(monkeypatch):
-    # The historical no-arg path must never run a capability probe.
-    monkeypatch.setattr(
-        ff, "ffmpeg_encoder_works", lambda *a, **k: pytest.fail("probed")
-    )
-    assert ff.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
-
-
-def test_find_ffmpeg_override_skips_the_search(monkeypatch):
-    # imageio validates its binary by running it: an override must not pay that.
-    import imageio_ffmpeg
-
-    monkeypatch.setenv("OCTACAM_FFMPEG", "/pinned/ffmpeg")
-    monkeypatch.setattr(
-        imageio_ffmpeg, "get_ffmpeg_exe", lambda: pytest.fail("searched")
-    )
-    assert ff.find_ffmpeg() == "/pinned/ffmpeg"
-
-
 def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
     candidates = [(exe, "system PATH") for exe in ("/no/nvenc", "/has/nvenc", "/also")]
     monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: candidates)

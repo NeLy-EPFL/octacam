@@ -1,4 +1,4 @@
-"""ffmpeg toolchain: argument policy, off-tty launches and binary discovery."""
+"""ffmpeg toolchain: binary discovery, argument policy and off-tty launches."""
 
 import functools
 import io
@@ -292,3 +292,54 @@ def test_ffmpeg_source_names_each_origin(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_FFMPEG", str(on_path))
     assert ff.find_ffmpeg() == str(on_path)
     assert ff.ffmpeg_source(str(on_path)) == "OCTACAM_FFMPEG override"
+
+
+def test_find_ffmpeg_default_needs_no_probe(monkeypatch):
+    # Without require_encoder, find_ffmpeg never runs a capability probe.
+    monkeypatch.setattr(
+        ff, "ffmpeg_encoder_works", lambda *a, **k: pytest.fail("probed")
+    )
+    assert ff.find_ffmpeg()  # bundled/PATH ffmpeg, no probe
+
+
+def test_find_ffmpeg_override_skips_the_search(monkeypatch):
+    # imageio validates its binary by running it: an override must not pay that.
+    import imageio_ffmpeg
+
+    monkeypatch.setenv("OCTACAM_FFMPEG", "/pinned/ffmpeg")
+    monkeypatch.setattr(
+        imageio_ffmpeg, "get_ffmpeg_exe", lambda: pytest.fail("searched")
+    )
+    assert ff.find_ffmpeg() == "/pinned/ffmpeg"
+
+
+def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
+    # A rig pinning OCTACAM_FFMPEG must probe with that build's own ffprobe, not
+    # whatever older ffprobe happens to come first on $PATH.
+    import stat
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("ffmpeg", "ffprobe"):
+        exe = bindir / name
+        exe.write_text("#!/bin/sh\nexit 0\n")
+        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.delenv("OCTACAM_FFPROBE", raising=False)
+    monkeypatch.setenv("OCTACAM_FFMPEG", str(bindir / "ffmpeg"))
+    assert ff.find_ffprobe() == str(bindir / "ffprobe")
+
+    # No sibling next to the chosen ffmpeg -> fall back to $PATH...
+    (bindir / "ffprobe").unlink()
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    path_probe = other / "ffprobe"
+    path_probe.write_text("#!/bin/sh\nexit 0\n")
+    path_probe.chmod(path_probe.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(other))
+    assert ff.find_ffprobe() == str(path_probe)
+
+    # ...and with neither, a clean RuntimeError the caller can degrade on —
+    # never a bare FileNotFoundError from deep inside the probe.
+    path_probe.unlink()
+    with pytest.raises(RuntimeError, match="No ffprobe"):
+        ff.find_ffprobe()

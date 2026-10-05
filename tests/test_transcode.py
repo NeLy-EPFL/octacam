@@ -100,7 +100,7 @@ def test_transcode_file_reencodes_an_encoded_video(tmp_path):
     assert _dims(out) == (16, 12)
 
 
-def test_transcode_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
+def test_transcode_file_encoded_always_reencodes_never_copies(tmp_path, monkeypatch):
     # An already-encoded source must be re-encoded with the chosen slow preset,
     # not stream-copied: capture uses a fast preset, so this offline pass is
     # where the compression is earned. Regression guard for the dropped
@@ -160,12 +160,12 @@ def test_transcode_file_with_no_argv_leaves_the_folder_alone(tmp_path, suffix):
     before = sorted(tmp_path.iterdir())
     with pytest.raises(ValueError):
         transcode_file(
-            src, tmp_path / "cam.mp4", "-c:v 'unterminated", width=16, height=12, fps=10.0
+            src, tmp_path / "cam.mp4", "-c:v 'bad", width=16, height=12, fps=10.0
         )
     assert sorted(tmp_path.iterdir()) == before
 
 
-def test_transcode_raw_without_geometry_raises(tmp_path):
+def test_transcode_file_raw_without_geometry_raises(tmp_path):
     # A .raw carries no geometry of its own; without width/height/fps (from the
     # recording summary) it cannot be laid out, so the encode refuses rather than
     # guessing.
@@ -178,7 +178,7 @@ def test_transcode_raw_without_geometry_raises(tmp_path):
         transcode_file(raw, tmp_path / "cam.mp4", width=16, height=12)
 
 
-def test_transcode_raw_refuses_an_unknown_pixel_format(tmp_path):
+def test_transcode_file_raw_refuses_an_unknown_pixel_format(tmp_path):
     # Read as Mono8, a wider format would decode as garbage frames.
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
@@ -254,7 +254,7 @@ def test_parse_progress_emits_one_sample_per_block():
     assert last.out_time_s == 2.0 and last.done and last.total_frames == 50
 
 
-def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
+def test_transcode_file_raw_reports_progress_with_exact_total(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))  # exactly one 16x12 Mono8 frame
     samples: list[TranscodeProgress] = []
@@ -272,7 +272,7 @@ def test_transcode_raw_reports_progress_with_exact_total(tmp_path):
     assert last.done and last.total_frames == 1 and last.frame == 1
 
 
-def test_transcode_raw_output_mode_still_produces_file(tmp_path):
+def test_transcode_file_raw_output_mode_still_produces_file(tmp_path):
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
     out = transcode_file(
@@ -281,7 +281,7 @@ def test_transcode_raw_output_mode_still_produces_file(tmp_path):
     assert out.exists() and _dims(out) == (16, 12)
 
 
-def test_transcode_raw_propagates_and_recovers_from_callback_error(tmp_path):
+def test_transcode_file_raw_propagates_and_recovers_from_callback_error(tmp_path):
     # A raising progress callback must propagate (and the ffmpeg child is killed
     # and reaped on the way out — the regression guard for the lost cleanup).
     raw = tmp_path / "cam.raw"

@@ -374,40 +374,6 @@ def test_probe_runs_off_the_tty_and_is_bounded(tmp_path, monkeypatch):
     assert os.path.isabs(seen["argv0"]), seen["argv0"]
 
 
-def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
-    # A rig pinning OCTACAM_FFMPEG must probe with that build's own ffprobe, not
-    # whatever older ffprobe happens to come first on $PATH.
-    import stat
-
-    from octacam.ffmpeg import find_ffprobe
-
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for name in ("ffmpeg", "ffprobe"):
-        exe = bindir / name
-        exe.write_text("#!/bin/sh\nexit 0\n")
-        exe.chmod(exe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.delenv("OCTACAM_FFPROBE", raising=False)
-    monkeypatch.setenv("OCTACAM_FFMPEG", str(bindir / "ffmpeg"))
-    assert find_ffprobe() == str(bindir / "ffprobe")
-
-    # No sibling next to the chosen ffmpeg -> fall back to $PATH...
-    (bindir / "ffprobe").unlink()
-    other = tmp_path / "elsewhere"
-    other.mkdir()
-    path_probe = other / "ffprobe"
-    path_probe.write_text("#!/bin/sh\nexit 0\n")
-    path_probe.chmod(path_probe.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", str(other))
-    assert find_ffprobe() == str(path_probe)
-
-    # ...and with neither, a clean RuntimeError the caller can degrade on —
-    # never a bare FileNotFoundError from deep inside the probe.
-    path_probe.unlink()
-    with pytest.raises(RuntimeError, match="No ffprobe"):
-        find_ffprobe()
-
-
 # --- two configured grids must not mark each other stale --------------------- #
 
 
