@@ -14,7 +14,6 @@ orchestrates it as :class:`~octacam.cameras.flir.FlirBackend` does PySpin.
 import atexit
 import ctypes
 import logging
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +23,7 @@ from octacam.cameras._genicam_config import (
     MIN_STREAM_BUFFERS,
     RECORD_STREAM_BUFFERS,
     GenICamTriggerConfig,
+    IncompleteLog,
     dump_config,
     fewer_stream_buffers,
     normalize_trigger_source,
@@ -80,7 +80,6 @@ STREAM_STATISTICS = (
     "StreamIncompleteFrameCount",
     "StreamDeliveredFrameCount",
 )
-INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 # spinNodeType (SpinnakerGenApiDefsC.h) -> widget kind; unmapped types are skipped.
 _KIND_BY_NODE_TYPE = {
@@ -813,12 +812,7 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
         self._stream_nodemap: Any = None
         super().__init__(_spin().read_serial(cam))
         self._original_trigger_source: str | None = None
-        # Incomplete images, as in FlirBackend.
-        self._incomplete_images = 0
-        self._grab_is_record = False
-        self._grab_incomplete = 0
-        self._grab_incomplete_logged = 0
-        self._incomplete_logged_at = 0.0
+        self._incomplete = IncompleteLog(self._serial)
 
     # ------------------------------------------------------------- lifecycle
 
@@ -988,7 +982,7 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
 
     def stream_statistics(self) -> dict[str, int]:
         """As :meth:`FlirBackend.stream_statistics`."""
-        out = {"IncompleteImagesDiscarded": self._incomplete_images}
+        out = {"IncompleteImagesDiscarded": self._incomplete.total}
         if self._stream_nodemap is None:
             return out
         spin = _spin()
@@ -1048,46 +1042,13 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
         self.trigger.begin_grab()
 
     def start_grab_preview(self) -> None:
-        self._begin_incomplete_log(record=False)
+        self._incomplete.begin_grab(record=False)
         self._begin_acquisition("NewestOnly")
 
     def start_grab_record(self) -> bool:
-        self._begin_incomplete_log(record=True)
+        self._incomplete.begin_grab(record=True)
         self._begin_acquisition("OldestFirst", RECORD_STREAM_BUFFERS)
         return True
-
-    def _begin_incomplete_log(self, *, record: bool) -> None:
-        """Start a grab's incomplete-image log afresh (see _count_incomplete)."""
-        self._grab_is_record = record
-        self._grab_incomplete = 0
-        self._grab_incomplete_logged = 0
-
-    def _count_incomplete(self) -> None:
-        """As :meth:`FlirBackend._count_incomplete`."""
-        self._incomplete_images += 1
-        self._grab_incomplete += 1
-        now = time.monotonic()
-        first = self._grab_incomplete == 1
-        if not first and now - self._incomplete_logged_at < INCOMPLETE_REPORT_INTERVAL_S:
-            return
-        level = logging.WARNING if self._grab_is_record else logging.DEBUG
-        if first:
-            log.log(
-                level,
-                "Camera %s delivered an incomplete image; discarded (more in this "
-                "grab are totaled at most every %g s)",
-                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
-            )
-        else:
-            log.log(
-                level,
-                "Camera %s: %d incomplete images discarded in this grab (%d since "
-                "the last report)",
-                self._serial, self._grab_incomplete,
-                self._grab_incomplete - self._grab_incomplete_logged,
-            )
-        self._grab_incomplete_logged = self._grab_incomplete
-        self._incomplete_logged_at = now
 
     def stop_grab(self) -> None:
         self.trigger.end_grab()
@@ -1126,7 +1087,7 @@ class SpinnakerBackend(GenICamTriggerConfig, CameraBackend):
             self.trigger.answered(stamp)
         try:
             if spin.image_incomplete(image):
-                self._count_incomplete()
+                self._incomplete.count()
                 return None
             timestamp = spin.image_timestamp(image)
             array = None

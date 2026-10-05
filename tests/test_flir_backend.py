@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import octacam.cameras._genicam_config as genicam_config
 import octacam.cameras.flir as flir
 from octacam.cameras._genicam_config import (
     MIN_STREAM_BUFFERS,
@@ -340,7 +341,7 @@ def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeyp
     # A saturated bus delivers incomplete images continuously: every one is
     # counted, but a record grab logs only its first until the report interval.
     caplog.set_level(logging.DEBUG, logger="octacam")
-    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
+    monkeypatch.setattr(genicam_config, "INCOMPLETE_REPORT_INTERVAL_S", 1e9)
     fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
     assert all(fetch() is None for _ in range(250))
     assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 250}
@@ -355,7 +356,7 @@ def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeyp
 
 def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG, logger="octacam")
-    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
+    monkeypatch.setattr(genicam_config, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)
     fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True))
     for _ in range(5):
         fetch()
@@ -366,7 +367,7 @@ def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, caplo
 
 def test_incomplete_image_reports_carry_the_grabs_running_total(backend, monkeypatch, caplog):
     caplog.set_level(logging.DEBUG, logger="octacam")
-    monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
+    monkeypatch.setattr(genicam_config, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
     fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
     for _ in range(3):
         fetch()

@@ -10,6 +10,7 @@ into a dead rig.
 """
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from octacam.cameras.base import BackendError, coerce_bool
@@ -38,6 +39,55 @@ def fewer_stream_buffers(buffers: int, serial: str, error: object) -> int:
         buffers // 2,
     )
     return buffers // 2
+
+
+# A saturated USB bus delivers incomplete images continuously: a FLIR grab logs
+# its first, then its running total at most this often (a preview's at debug).
+INCOMPLETE_REPORT_INTERVAL_S = 10.0
+
+
+class IncompleteLog:
+    """A FLIR camera's discarded incomplete images: each is counted (``total``,
+    for the stream statistics) and a grab's are logged rate-limited, as
+    warnings only in a record grab."""
+
+    def __init__(self, serial: str):
+        self._serial = serial
+        self.total = 0
+        self._record = False
+        self._grab = 0  # this grab's
+        self._logged = 0  # this grab's at the last report
+        self._logged_at = 0.0
+
+    def begin_grab(self, *, record: bool) -> None:
+        self._record = record
+        self._grab = 0
+        self._logged = 0
+
+    def count(self) -> None:
+        self.total += 1
+        self._grab += 1
+        now = time.monotonic()
+        first = self._grab == 1
+        if not first and now - self._logged_at < INCOMPLETE_REPORT_INTERVAL_S:
+            return
+        level = logging.WARNING if self._record else logging.DEBUG
+        if first:
+            log.log(
+                level,
+                "Camera %s delivered an incomplete image; discarded (more in this "
+                "grab are totaled at most every %g s)",
+                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+            )
+        else:
+            log.log(
+                level,
+                "Camera %s: %d incomplete images discarded in this grab (%d since "
+                "the last report)",
+                self._serial, self._grab, self._grab - self._logged,
+            )
+        self._logged = self._grab
+        self._logged_at = now
 
 
 # Nodes octacam owns, never applied from a file: the link throughput (maxed at
