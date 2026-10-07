@@ -136,6 +136,98 @@ def thorimage_timepoints(experiment_xml: Path) -> int | None:
         return None
 
 
+def thorimage_expected_frameout_edges(experiment_xml: Path) -> int | None:
+    """How many ``FrameOut`` edges ThorSync should record for this ThorImage
+    acquisition — what a verified segment's edge count is compared against.
+
+    ``FrameOut`` pulses once per *scanned frame*, not per timepoint. For a
+    plain streaming capture those are the same (``timepoints``), but a FastZ
+    (simultaneous multi-plane) capture scans every Z plane plus the piezo's
+    flyback frame(s) per timepoint — confirmed on real data (2026-10-07,
+    ``AllPPL1xCI80``): ``timepoints=500, ZStage steps=5, flybackFrames=1``
+    recorded exactly 3000 edges (500 x 6), and 300 x 6 = 1800 likewise.
+    Comparing against bare ``timepoints`` made every FastZ capture fail
+    verification. None if missing/unparseable."""
+    timepoints = thorimage_timepoints(experiment_xml)
+    if timepoints is None:
+        return None
+    try:
+        root = ET.parse(experiment_xml).getroot()
+    except (ET.ParseError, OSError):
+        return timepoints
+    streaming_el = root.find("Streaming")
+    zstage_el = root.find("ZStage")
+    fastz = (
+        streaming_el is not None
+        and streaming_el.get("enable") == "1"
+        and streaming_el.get("zFastEnable") == "1"
+        and zstage_el is not None
+    )
+    if not fastz or streaming_el is None or zstage_el is None:
+        return timepoints
+    try:
+        steps = int(zstage_el.get("steps", "1"))
+        flyback = int(streaming_el.get("flybackFrames", "0"))
+    except ValueError:
+        return timepoints
+    return timepoints * (steps + flyback)
+
+
+def twophoton_identity(folder: Path) -> tuple[str, str]:
+    """``(name, fingerprint)`` identifying one ThorImage/ThorSync acquisition
+    across copies — what NAS-side dedup compares, never the bare name.
+
+    ThorImage reuses folder names per experiment (``Fly1_Zstack`` exists in
+    many experiments) and ThorSync's ``SyncData<N>`` numbering repeats across
+    experiment subfolders (real data, 2026-10-07: ``Test/SyncData135`` and
+    ``AllPPL1xCI80/SyncData135`` the same day) — a name-only check silently
+    skipped a new day's Z-stacks forever because an older experiment had
+    same-named folders. The fingerprint survives a copy: ``Experiment.xml``'s
+    ``<Date uTime>`` (the acquisition's own start, unique per capture) for an
+    image folder, the ``Episode*.h5`` byte size for a sync folder, ``""`` when
+    neither is readable (falls back to name-only, the old behavior)."""
+    start = _thorimage_start_time(folder / EXPERIMENT_XML_FILENAME)
+    if start is not None:
+        return (folder.name, f"uTime={int(start)}")
+    episodes = sorted(folder.glob("Episode*.h5"))
+    if episodes:
+        try:
+            return (folder.name, f"h5size={episodes[0].stat().st_size}")
+        except OSError:
+            pass
+    return (folder.name, "")
+
+
+def thorimage_zstack_signature(experiment_xml: Path) -> tuple[int, int] | None:
+    """``(slices, frameout_edges_per_slice)`` ThorSync records for a
+    step-and-shoot Z-stack, or None if this isn't one.
+
+    A Z-stack's ThorSync episode has one ``CaptureOn`` segment *per slice*,
+    each carrying one ``FrameOut`` edge per averaged frame — confirmed on real
+    data (2026-10-07, ``AllPPL1xCI80``): ``ZStage steps="201"`` with
+    ``LSM averageMode="1" averageNum="4"`` recorded 201 segments x 4 edges;
+    with ``averageMode="0"`` 201 x 1. Comparing a single segment against
+    ``timepoints`` (1) — the streaming rule — left every averaged Z-stack's
+    SyncData unattributable."""
+    try:
+        root = ET.parse(experiment_xml).getroot()
+    except (ET.ParseError, OSError):
+        return None
+    z, stream, lsm = root.find("ZStage"), root.find("Streaming"), root.find("LSM")
+    timepoints = thorimage_timepoints(experiment_xml) or 1
+    if z is None or z.get("enable") != "1" or timepoints > 1:
+        return None
+    if stream is not None and stream.get("enable") == "1":
+        return None
+    try:
+        steps = int(z.get("steps", "0"))
+        averaged = lsm is not None and lsm.get("averageMode") == "1"
+        per_slice = int(lsm.get("averageNum", "1")) if averaged and lsm is not None else 1
+    except ValueError:
+        return None
+    return (steps, per_slice) if steps > 1 else None
+
+
 def _folder_last_mtime(folder: Path) -> float:
     """Max ``st_mtime`` across every file under *folder*, recursively.
 
@@ -416,8 +508,16 @@ def match_takes_to_twophoton_batch(
             for c in candidates:
                 if c.kind != "image" or c.path in claimed_folders:
                     continue
+                # An edge count alone is not identifying (many captures share
+                # a frame count) — without this window a weeks-old folder
+                # elsewhere on the share with the same count was claimed
+                # (real bug, 2026-10-07: September's AllPAM Fly4_Streaming_*
+                # verified against October takes).
+                image_gap = _start_gap_seconds(take.start_time, c)
+                if image_gap > verify_window_s:
+                    continue
                 if c.path not in timepoints_cache:
-                    timepoints_cache[c.path] = thorimage_timepoints(
+                    timepoints_cache[c.path] = thorimage_expected_frameout_edges(
                         c.path / EXPERIMENT_XML_FILENAME
                     )
                 timepoints = timepoints_cache[c.path]
@@ -425,9 +525,7 @@ def match_takes_to_twophoton_batch(
                     continue
                 diff = frameout_edge_diff(segment, timepoints)
                 if diff <= _VERIFY_TOLERANCE:
-                    image_ranked.append(
-                        (diff, _start_gap_seconds(take.start_time, c), c)
-                    )
+                    image_ranked.append((diff, image_gap, c))
             if image_ranked:
                 image_ranked.sort(key=lambda r: (r[0], r[1]))
                 best_diff, best_gap, best_folder = image_ranked[0]
@@ -677,13 +775,16 @@ def correlate_sync_folder_to_image(
     sync_folder: TwoPhotonFolder,
     image_candidates: list[TwoPhotonFolder],
     tolerance: int = _VERIFY_TOLERANCE,
+    window_s: float = 3600.0,
 ) -> TwoPhotonFolder | None:
     """Find which discovered ThorImage folder *sync_folder* actually paired
     with, purely from the recorded DAQ signal — no octacam take involved.
 
     A ``SyncData*`` folder's ``FrameOut`` edge count (per ``CaptureOn``
     segment) is checked against every candidate's own ``Experiment.xml
-    <Timelapse timepoints="...">`` (:func:`thorimage_timepoints`); an
+    <Timelapse timepoints="...">`` (scaled for FastZ, see
+    :func:`thorimage_expected_frameout_edges`), within *window_s* of the
+    sync folder's own start; an
     exact/near match is decisive, the same signal already used to confirm a
     behavior-take pairing transitively (see ``match_takes_to_twophoton_batch``)
     — this is that same check with no take in the loop, for a ``SyncData``
@@ -694,16 +795,31 @@ def correlate_sync_folder_to_image(
     segments = read_capture_segments(sync_folder.path)
     if not segments:
         return None
-    ranked: list[tuple[int, TwoPhotonFolder]] = []
+    ranked: list[tuple[int, float, TwoPhotonFolder]] = []
     for candidate in image_candidates:
-        timepoints = thorimage_timepoints(candidate.path / EXPERIMENT_XML_FILENAME)
+        gap = abs(candidate.start_time - sync_folder.start_time)
+        if gap > window_s:
+            continue
+        timepoints = thorimage_expected_frameout_edges(
+            candidate.path / EXPERIMENT_XML_FILENAME
+        )
         if timepoints is None:
+            continue
+        zstack = thorimage_zstack_signature(candidate.path / EXPERIMENT_XML_FILENAME)
+        if zstack is not None:
+            # Whole-episode signature: one segment per slice, each with the
+            # averaged-frame edge count (see thorimage_zstack_signature).
+            slices, per_slice = zstack
+            if all(seg.frameout_edges == per_slice for seg in segments):
+                diff = abs(len(segments) - slices)
+                if diff <= tolerance:
+                    ranked.append((diff, gap, candidate))
             continue
         for segment in segments:
             diff = frameout_edge_diff(segment, timepoints)
             if diff <= tolerance:
-                ranked.append((diff, candidate))
+                ranked.append((diff, gap, candidate))
     if not ranked:
         return None
-    ranked.sort(key=lambda r: r[0])
-    return ranked[0][1]
+    ranked.sort(key=lambda r: (r[0], r[1]))
+    return ranked[0][2]

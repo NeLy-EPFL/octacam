@@ -435,6 +435,119 @@ def test_batch_same_sync_folder_verifies_two_different_segments(tmp_path):
     assert match_a.folder is sync and match_b.folder is sync
 
 
+def _make_fastz_image_folder(
+    root: Path, experiment: str, name: str, *, u_time: float, timepoints: int, zsteps: int
+) -> TwoPhotonFolder:
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment>'
+        f'<Date date="x" uTime="{u_time}" />'
+        f'<ZStage steps="{zsteps}" enable="1" />'
+        f'<Streaming enable="1" zFastEnable="1" flybackFrames="1" />'
+        f'<Timelapse timepoints="{timepoints}" /></ThorImageExperiment>'
+    )
+    return TwoPhotonFolder(folder, "image", start_time=u_time, last_mtime=u_time)
+
+
+def test_batch_verifies_fastz_image_by_frames_not_timepoints(tmp_path):
+    # Real data (2026-10-07): FrameOut pulses once per scanned frame, so a
+    # FastZ capture of 500 timepoints x (5 planes + 1 flyback) records 3000
+    # edges — comparing against bare timepoints failed every FastZ capture.
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData001",
+        mtime=1000.0,
+        capture_ranges=[(100, 19900)],
+        cameras_per_segment=[500],
+        frameout_per_segment=[3000],
+        total=20000,
+    )
+    fastz = _make_fastz_image_folder(
+        tmp_path, "exp", "Fly1_Streaming_FastZ", u_time=1001.0, timepoints=500, zsteps=5
+    )
+    take = TakeInfo(tmp_path / "rec", start_time=1000.0, duration_s=10.0, camera_frame_counts=[500])
+    results = match_takes_to_twophoton_batch(
+        [take], [sync, fastz], match_window_s=5.0, verify_window_s=3600.0, verify_with_signals=True
+    )
+    image = [m for m in results[take.folder] if m.folder.kind == "image"]
+    assert [m.folder for m in image] == [fastz]
+    assert image[0].confidence == "verified"
+    assert correlate_sync_folder_to_image(sync, [fastz]) is fastz
+
+
+def test_batch_verified_image_tier_ignores_far_away_same_count_folder(tmp_path):
+    # Real bug (2026-10-07): with no time bound on the image tier, a weeks-old
+    # ThorImage folder elsewhere on the share that happened to share the
+    # FrameOut count was "verified" against a fresh take.
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData001",
+        mtime=10_000_000.0,
+        capture_ranges=[(100, 19900)],
+        cameras_per_segment=[500],
+        frameout_per_segment=[3000],
+        total=20000,
+    )
+    weeks_old = _make_image_folder_with_timepoints(
+        tmp_path, "old_exp", "Fly4_Streaming_004", u_time=1000.0, timepoints=3000
+    )
+    take = TakeInfo(
+        tmp_path / "rec", start_time=10_000_000.0, duration_s=10.0, camera_frame_counts=[500]
+    )
+    results = match_takes_to_twophoton_batch(
+        [take], [sync, weeks_old], match_window_s=5.0, verify_window_s=3600.0, verify_with_signals=True
+    )
+    assert [m.folder.kind for m in results[take.folder]] == ["sync"]
+    assert correlate_sync_folder_to_image(sync, [weeks_old]) is None
+
+
+def _make_zstack_image_folder(
+    root: Path, experiment: str, name: str, *, u_time: float, steps: int, average: int
+) -> TwoPhotonFolder:
+    folder = root / experiment / name
+    folder.mkdir(parents=True)
+    (folder / "Experiment.xml").write_text(
+        f'<?xml version="1.0"?><ThorImageExperiment>'
+        f'<Date date="x" uTime="{u_time}" />'
+        f'<LSM averageMode="{int(average > 1)}" averageNum="{average}" />'
+        f'<ZStage steps="{steps}" enable="1" />'
+        f'<Streaming enable="0" zFastEnable="1" flybackFrames="1" />'
+        f'<Timelapse timepoints="1" /></ThorImageExperiment>'
+    )
+    return TwoPhotonFolder(folder, "image", start_time=u_time, last_mtime=u_time)
+
+
+def test_correlate_zstack_sync_by_per_slice_segments(tmp_path):
+    # Real data (2026-10-07): a Z-stack's ThorSync episode has one CaptureOn
+    # segment per slice, each with averageNum FrameOut edges (201 x 4). The
+    # streaming rule (one segment's edges == timepoints == 1) never matched,
+    # so every averaged Z-stack's SyncData fell into the generic bucket. Two
+    # same-shaped stacks minutes apart (Fly1_Zstack / Fly1_Zstack_001) must be
+    # told apart by start time.
+    sync = _make_verifiable_sync_folder(
+        tmp_path,
+        "exp",
+        "SyncData135",
+        mtime=1001.0,
+        capture_ranges=[(100 + 300 * i, 300 + 300 * i) for i in range(5)],
+        cameras_per_segment=[0] * 5,
+        frameout_per_segment=[4] * 5,
+    )
+    right = _make_zstack_image_folder(
+        tmp_path, "exp", "Fly1_Zstack", u_time=1000.0, steps=5, average=4
+    )
+    later = _make_zstack_image_folder(
+        tmp_path, "exp", "Fly1_Zstack_001", u_time=1250.0, steps=5, average=4
+    )
+    unaveraged = _make_zstack_image_folder(
+        tmp_path, "exp", "Fly1_Zstack_x4", u_time=1001.0, steps=5, average=1
+    )
+    assert correlate_sync_folder_to_image(sync, [later, unaveraged, right]) is right
+
+
 def test_batch_verify_with_signals_false_uses_timestamp_tier_only(tmp_path):
     sync = _make_verifiable_sync_folder(
         tmp_path,

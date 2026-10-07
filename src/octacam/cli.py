@@ -4386,6 +4386,7 @@ def _finalize_twophoton_matches(
     checksum: bool,
     dry_run: bool,
     assemble_tiff_stacks: bool = True,
+    render_options=None,
 ) -> tuple[list[Path], list[Path], int]:
     """Transfer every settled match to ``dest/2P/<name>`` (plus, for an
     ``image`` kind, its own ``Experiment.xml`` alongside the take), then write
@@ -4438,6 +4439,13 @@ def _finalize_twophoton_matches(
         match_path = folder / TWOPHOTON_MATCH_FILENAME
         match_path.write_text(json.dumps(record, indent=2) + "\n")
         transfer_folder(folder, dest, files_only=[match_path], verify=verify, checksum=checksum)
+        # Quick-look behavior + 2P render, straight from what just landed on
+        # the NAS (see octacam.synced_render) — only once every matched
+        # folder transferred cleanly, and never fatal to the transfer.
+        if render_options is not None and not n_failed:
+            from octacam.synced_render import render_synced_video
+
+            render_synced_video(dest, render_options)
     return matched_paths, ok_paths, n_failed
 
 
@@ -4495,15 +4503,17 @@ def _sweep_unclaimed_twophoton(
     entirely, so without the NAS-side check too, an already-legitimately-
     matched 2P folder would look "unclaimed" again and get duplicate-copied
     to a second destination. Separately, a folder already sitting *anywhere*
-    on the NAS by name (:func:`_already_present_2p_names`) — claimed by a
+    on the NAS by identity (:func:`_already_present_2p_identities`) — claimed by a
     take or not — is also excluded, closing the same class of duplicate for
     genuinely unclaimed data an older sweep already copied once.
     """
+    from octacam.synced_render import options_from_config
     from octacam.transfer import transfer_tree
     from octacam.twophoton_transfer import (
         discover_twophoton_folders,
         is_settled,
         match_takes_to_twophoton_batch,
+        twophoton_identity,
     )
 
     sweep_root = dest_root / "2p_only"
@@ -4512,7 +4522,7 @@ def _sweep_unclaimed_twophoton(
         | _already_matched_twophoton_paths_on_nas(dest_root, source_root)
         | also_exclude
     )
-    already_present_names = _already_present_2p_names(dest_root)
+    already_present = _already_present_2p_identities(dest_root)
 
     candidates = discover_twophoton_folders(source_root)
     todo = [
@@ -4520,7 +4530,7 @@ def _sweep_unclaimed_twophoton(
         for c in candidates
         if is_settled(c, twophoton_cfg.settle_s)
         and c.path.resolve() not in already_matched
-        and c.path.name not in already_present_names
+        and twophoton_identity(c.path) not in already_present
     ]
     fly_basenames = (
         _gather_fly_image_basenames(dest_root)
@@ -4566,6 +4576,7 @@ def _sweep_unclaimed_twophoton(
                     assemble_tiff_stacks=record.get(
                         "assemble_tiff_stacks", twophoton_cfg.assemble_tiff_stacks
                     ),
+                    render_options=options_from_config(twophoton_cfg),
                 )
                 n_failed += n_failed_here
                 n_copied += len(ok_paths)
@@ -4714,8 +4725,11 @@ def _already_matched_twophoton_paths_on_nas(dest_root: Path, source_root: Path) 
     return matched
 
 
-def _already_present_2p_names(dest_root: Path) -> set[str]:
-    """Every 2P folder *name* already present anywhere under *dest_root* —
+def _already_present_2p_identities(dest_root: Path) -> set[tuple[str, str]]:
+    """Every 2P folder already present anywhere under *dest_root*, as
+    :func:`~octacam.twophoton_transfer.twophoton_identity` keys (name +
+    acquisition fingerprint — a bare name collides across experiments, see
+    that function) —
     the generic ``2p_only/<experiment>/<date>/`` bucket, any fly's
     ``2P_only/``, or any fly's already-reconciled ``RecordingN_2P/2P/`` —
     regardless of which take (if any) claims it.
@@ -4730,7 +4744,9 @@ def _already_present_2p_names(dest_root: Path) -> set[str]:
     newer sweep re-copies that same live-share folder into the new
     fly-attributed location too, creating an exact duplicate (confirmed on
     real data: byte-identical pixel content, ~10.8 GB across 10 folders)."""
-    names: set[str] = set()
+    from octacam.twophoton_transfer import twophoton_identity
+
+    folders: list[Path] = []
     generic_root = dest_root / "2p_only"
     if generic_root.is_dir():
         for experiment_dir in generic_root.iterdir():
@@ -4738,14 +4754,14 @@ def _already_present_2p_names(dest_root: Path) -> set[str]:
                 continue
             for date_dir in experiment_dir.iterdir():
                 if date_dir.is_dir():
-                    names.update(p.name for p in date_dir.iterdir() if p.is_dir())
+                    folders.extend(p for p in date_dir.iterdir() if p.is_dir())
     for two_p_only in dest_root.glob("*/*/2P_only"):
         if two_p_only.is_dir():
-            names.update(p.name for p in two_p_only.iterdir() if p.is_dir())
+            folders.extend(p for p in two_p_only.iterdir() if p.is_dir())
     for two_p in dest_root.glob("*/*/Recording*_2P*/2P"):
         if two_p.is_dir():
-            names.update(p.name for p in two_p.iterdir() if p.is_dir())
-    return names
+            folders.extend(p for p in two_p.iterdir() if p.is_dir())
+    return {twophoton_identity(p) for p in folders}
 
 
 def _write_2p_only_source_marker(dest: Path, experiment: str) -> None:
@@ -5641,18 +5657,37 @@ def _run_twophoton_sweep(
         sys.exit(f"{n_failed} file(s) failed to transfer")
 
 
-def _find_twophoton_dest_folder(dest_root: Path, name: str) -> Path | None:
+def _find_twophoton_dest_folder(dest_root: Path, source: Path) -> Path | None:
     """Where a 2P folder named *name* already landed under *dest_root*, if
     anywhere — checked across every shape a 2P folder can end up in: a take's
     own ``<day>/<fly>/<take>/2P/``, a fly-attributed ``<day>/<fly>/2P_only/``,
     an already-reconciled ``<day>/<fly>/RecordingN_2P/2P/``, or the generic
     ``2p_only/<experiment>/<date>/`` bucket. The latter three mirror the same
-    locations :func:`_already_present_2p_names` already checks (by name only,
+    locations :func:`_already_present_2p_identities` already checks (by identity,
     for dedup); the take-own ``2P/`` shape is one level deeper (a take
     between fly and ``2P/``), which that function has no need to check since
     matched-take copies are deduped via :func:`_already_matched_twophoton_paths`
     instead. This returns the actual path, for :func:`_run_twophoton_verify`
-    to read back and verify. Returns ``None`` if *name* isn't found anywhere."""
+    to read back and verify. Only a copy with the same acquisition identity
+    as *source* counts (:func:`~octacam.twophoton_transfer.twophoton_identity`
+    — names repeat across experiments). Returns ``None`` if no copy of
+    *source* is found anywhere."""
+    from octacam.twophoton_transfer import twophoton_identity
+
+    name = source.name
+    want = twophoton_identity(source)
+    for pattern in (
+        f"*/*/*/2P/{name}",
+        f"*/*/2P_only/{name}",
+        f"*/*/Recording*_2P*/2P/{name}",
+        f"2p_only/*/*/{name}",
+    ):
+        for candidate in dest_root.glob(pattern):
+            if candidate.is_dir() and twophoton_identity(candidate) == want:
+                return candidate
+    # No identity match: fall back to a same-named copy so a truncated or
+    # corrupted copy (its h5 size no longer matches) is still hashed and
+    # flagged MISMATCH — at worst a namesake is flagged too, never "safe".
     for pattern in (
         f"*/*/*/2P/{name}",
         f"*/*/2P_only/{name}",
@@ -5726,7 +5761,7 @@ def _run_twophoton_verify(cli_config_dir: Path | None, user: str | None = None) 
             log.info("2P verify: %s still writing — skipped", folder.path)
             n_unsettled += 1
             continue
-        dest = _find_twophoton_dest_folder(dest_root, folder.path.name)
+        dest = _find_twophoton_dest_folder(dest_root, folder.path)
         if dest is None:
             log.info("2P verify: %s not yet transferred — leave it", folder.path)
             n_pending += 1
@@ -5998,6 +6033,7 @@ def _grid_and_transfer(
     cameras."""
     from octacam.config import resolve_dir_template
     from octacam.grid import build_grid_video
+    from octacam.synced_render import options_from_config
     from octacam.transfer import transfer_folder
     from octacam.transform import RECORDING_SUMMARY_FILENAME
     from octacam.twophoton_transfer import (
@@ -6006,6 +6042,8 @@ def _grid_and_transfer(
         is_settled,
         match_takes_to_twophoton_batch,
     )
+    from octacam.zstack_mip import find_zstacks, render_zstack_mips
+    from octacam.zstack_mip import options_from_config as zstack_options_from_config
 
     folder_cfgs = {
         f: _config_for_recording(f, cli_config_dir, user) for f in folder_outputs
@@ -6325,6 +6363,7 @@ def _grid_and_transfer(
                     checksum=checksum,
                     dry_run=dry_run,
                     assemble_tiff_stacks=twophoton_cfg.assemble_tiff_stacks,
+                    render_options=options_from_config(twophoton_cfg),
                 )
                 matched_this_run.update(p.resolve() for p in matched_paths)
                 transfer_failed += n_failed
@@ -6447,6 +6486,23 @@ def _grid_and_transfer(
                 reconcile_targets.setdefault(reconcile_dest_root, set()).add(dest.parent)
             for reconcile_dest_root, fly_dirs in reconcile_targets.items():
                 _auto_reconcile_fly_dirs(reconcile_dest_root, fly_dirs, dry_run)
+
+        # --- Phase 6: Z-stack MIP renders -------------------------------------
+        # After reconcile, so the PNGs land in the final RecordingN_2P_<detail>/
+        # Renderings/ wrapper. Scoped to the fly folders this run touched —
+        # where its anatomical Z-stacks were just attributed by the sweep.
+        if not dry_run:
+            mip_targets: dict[Path, object] = {}
+            for folder, dest in folder_dest.items():
+                cfg = folder_cfgs[folder]
+                assert cfg.transfer is not None
+                mip_options = zstack_options_from_config(cfg.transfer.twophoton)
+                if mip_options is not None:
+                    mip_targets.setdefault(dest.parent, mip_options)
+            for fly_dir, mip_options in mip_targets.items():
+                if fly_dir.is_dir():
+                    for zstack in find_zstacks(fly_dir):
+                        render_zstack_mips(zstack, mip_options)  # type: ignore[arg-type]
 
     return transfer_failed
 
@@ -6580,6 +6636,110 @@ class _ProcessCommand(typer.core.TyperCommand):
 
     def parse_args(self, ctx, args):  # type: ignore[override]
         return super().parse_args(ctx, _inject_default_last(args))
+
+
+@app.command("render")
+def render(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="Transferred take/recording folders, or any parent (day, "
+            "experiment, fly) — searched recursively.",
+        ),
+    ],
+    synced: Annotated[
+        bool,
+        typer.Option("--synced/--no-synced", help="Render behavior + 2P synced videos."),
+    ] = True,
+    mip: Annotated[
+        bool, typer.Option("--mip/--no-mip", help="Render Z-stack MIP images.")
+    ] = True,
+    force: Annotated[
+        bool, typer.Option("--force", help="Re-render even if the output exists.")
+    ] = False,
+    green: Annotated[
+        str, typer.Option("--green", help="ThorImage channel shown in green.")
+    ] = "ChanA",
+    red: Annotated[str, typer.Option("--red", help="ThorImage channel shown in red.")] = "ChanB",
+    fastz_projection: Annotated[
+        str,
+        typer.Option(
+            "--fastz-projection", help="How a FastZ timepoint's planes are combined: mean or max."
+        ),
+    ] = "mean",
+    fps: Annotated[float, typer.Option("--fps", help="Synced video frame rate (real time).")] = 25.0,
+    height: Annotated[int, typer.Option("--height", help="Synced video height in pixels.")] = 720,
+    smooth: Annotated[
+        int, typer.Option("--smooth", help="2P box-blur radius in pixels (0 = off).")
+    ] = 1,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="List what would be rendered, render nothing.")
+    ] = False,
+) -> None:
+    """Render quick-look visualizations for transferred 2P recordings.
+
+    Synced videos: <take>/Renderings/synced_2p.mp4 — the behavior grid next to
+    a green/red 2P merge, frame-aligned on ThorSync's own DAQ clock (FastZ
+    planes averaged per timepoint by default). Z-stack MIPs:
+    Renderings/zstack_mip_{green,red,dual}.png for every anatomical Z-stack.
+    `octacam process` already does both automatically; use this to backfill
+    older data or re-render with different settings (--force).
+    """
+    from octacam.synced_render import (
+        SyncedRenderOptions,
+        find_synced_inputs,
+        render_synced_video,
+    )
+    from octacam.transform import TWOPHOTON_MATCH_FILENAME
+    from octacam.zstack_mip import MipOptions, find_zstacks, render_zstack_mips
+
+    if fastz_projection not in ("mean", "max"):
+        sys.exit("--fastz-projection must be 'mean' or 'max'")
+    takes = sorted(
+        {
+            m.parent
+            for p in paths
+            for m in ([p / TWOPHOTON_MATCH_FILENAME] if (p / TWOPHOTON_MATCH_FILENAME).is_file()
+                      else p.rglob(TWOPHOTON_MATCH_FILENAME))
+        }
+    ) if synced else []
+    zstacks = sorted({z for p in paths for z in find_zstacks(p)}) if mip else []
+    if not takes and not zstacks:
+        log.warning("render: nothing to render under %s", ", ".join(map(str, paths)))
+        return
+    synced_options = SyncedRenderOptions(
+        green_channel=green,
+        red_channel=red,
+        fastz_projection=fastz_projection,
+        fps=fps,
+        height=height,
+        smooth_px=smooth,
+    )
+    mip_options = MipOptions(green_channel=green, red_channel=red)
+    done = skipped = 0
+    for take in takes:
+        if dry_run:
+            inputs = find_synced_inputs(take)
+            log.info("[dry-run] render synced: %s -> %s", take,
+                     inputs if isinstance(inputs, str) else "would render")
+            continue
+        if render_synced_video(take, synced_options, force=force) is not None:
+            done += 1
+        else:
+            skipped += 1
+    for zstack in zstacks:
+        if dry_run:
+            log.info("[dry-run] render MIP: %s", zstack)
+            continue
+        if render_zstack_mips(zstack, mip_options, force=force) is not None:
+            done += 1
+        else:
+            skipped += 1
+    if not dry_run:
+        log.info("render: %d rendered/present, %d skipped or failed", done, skipped)
 
 
 @app.command(cls=_ProcessCommand)

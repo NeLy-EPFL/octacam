@@ -11,6 +11,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **Synced behavior + 2-photon video** — `octacam process` now renders
+  `Renderings/synced_2p.mp4` for every take with a matched ThorImage +
+  ThorSync folder: the behavior grid next to a green/red 2P merge, aligned
+  frame-by-frame on ThorSync's DAQ clock. FastZ planes are averaged per
+  timepoint (or max-projected). Configure with `[transfer.twophoton]`
+  `render_synced_video`, `synced_green_channel`, `synced_red_channel`,
+  `synced_fastz_projection`; backfill or re-render with the new
+  `octacam render PATHS [--force]`.
+- **Z-stack MIP images** — `octacam process` writes
+  `zstack_mip_green.png` / `zstack_mip_red.png` / `zstack_mip_dual.png` into
+  `Renderings/` for every anatomical Z-stack of the flies it processed
+  (`[transfer.twophoton] render_zstack_mip`, default on); `octacam render`
+  backfills any folder.
 - **Detachable processing** — `octacam process --detach` runs the
   transcode → grid → transfer pipeline as a background job that survives an SSH
   disconnect (no `tmux` needed), printing a job id. Manage jobs with the new
@@ -45,6 +58,20 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   crash-safe (a crashed gui/record auto-clears the pause).
 
 ### Fixed
+
+- **2P matching: FastZ captures now verify, and never cross experiments** —
+  ThorSync's FrameOut counts every scanned frame (timepoints × (planes +
+  flyback)), not timepoints, so FastZ captures never verified; and the
+  verified ThorImage tier had no time limit, so another day's folder with the
+  same frame count could be paired with a take. Both fixed.
+- **Z-stack ThorSync folders are filed under their fly** — a Z-stack's
+  SyncData (one capture segment per slice, frame-averaged) was never
+  recognized as belonging to its Z-stack and landed in the generic
+  `2p_only/` bucket.
+- **2P sweep no longer skips folders whose name already exists elsewhere on
+  the NAS** — ThorImage reuses names like `Fly1_Zstack` across experiments;
+  dedup now compares the acquisition itself (Experiment.xml start time /
+  ThorSync episode size), not the bare name.
 
 - **`octacam` now starts on Python 3.10–3.13 again** — the CLI annotated two
   helpers with `JobReporter`, a name imported only under `if TYPE_CHECKING:`, and

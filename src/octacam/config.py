@@ -293,6 +293,17 @@ class TwoPhotonTransferConfig(BaseModel):
     flies, which needs a human to actually look at the result and stays
     exclusive to the explicit standalone mode. Only gates the automatic
     per-run step; the standalone mode always runs when invoked explicitly.
+
+    ``render_synced_video`` renders ``Renderings/synced_2p.mp4`` (behavior
+    grid + green/red 2P merge, frame-aligned on ThorSync's DAQ clock — see
+    ``octacam.synced_render``) for every take that just got both a ThorImage
+    and a SyncData match. ``synced_green_channel``/``synced_red_channel`` map
+    ThorImage channels to colors (ThorImage records none itself);
+    ``synced_fastz_projection`` (``mean``/``max``) collapses a FastZ
+    timepoint's planes into one image. ``render_zstack_mip`` writes
+    ``zstack_mip_{green,red,dual}.png`` for every anatomical Z-stack in the
+    fly folders a run touched (``octacam.zstack_mip``; same channel colors).
+    ``octacam render`` re-renders or backfills both by hand.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -306,6 +317,11 @@ class TwoPhotonTransferConfig(BaseModel):
     write_manifest: bool = True
     attribute_unclaimed_to_fly: bool = True
     reconcile_recordings: bool = True
+    render_synced_video: bool = True
+    synced_green_channel: str = "ChanA"
+    synced_red_channel: str = "ChanB"
+    synced_fastz_projection: str = "mean"
+    render_zstack_mip: bool = True
 
     @field_validator("source", mode="before")
     @classmethod

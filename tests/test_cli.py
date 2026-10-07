@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import time
@@ -2512,10 +2513,12 @@ def test_sweep_attributes_unclaimed_sync_folder_via_frameout_correlation(
     take_start = 1_000_000.0
     _make_image_folder_2p(source_root, "exp", "Fly1_001", u_time=take_start + 2, n_frames=2)
     # Unclaimed SyncData: FrameOut edge count matches Fly1_001's 2 timepoints
-    # exactly, but its own timing is far outside any take's match window.
+    # exactly, but its own timing is far outside any take's match window
+    # (still within correlate_sync_folder_to_image's own 1h window — a real
+    # SyncData starts seconds from its ThorImage folder).
     _make_verifiable_sync_folder_2p(
         source_root, "exp", "SyncData999",
-        mtime=take_start - 5000, camera_frames=0, frameout_edges=2,
+        mtime=take_start - 500, camera_frames=0, frameout_edges=2,
     )
 
     folder = tmp_path / "rec"
@@ -2933,7 +2936,7 @@ def test_sweep_skips_folder_already_present_in_generic_bucket_by_name(tmp_path, 
     # Simulate the pre-existing copy an older run already made.
     already_there = dest_root / "2p_only" / "expA" / date_str / folder.name
     already_there.mkdir(parents=True)
-    (already_there / "Episode001.h5").write_bytes(b"x")
+    shutil.copy(folder / "Episode001.h5", already_there / "Episode001.h5")
 
     n_copied, n_failed = _sweep_unclaimed_twophoton(
         source_root, dest_root, twophoton_cfg, checksum=True, dry_run=False
@@ -2942,6 +2945,42 @@ def test_sweep_skips_folder_already_present_in_generic_bucket_by_name(tmp_path, 
     # No second copy anywhere else under the generic bucket.
     all_copies = list(dest_root.glob("2p_only/*/*/SyncData102"))
     assert all_copies == [already_there]
+
+
+def test_sweep_does_not_skip_a_new_folder_sharing_an_old_folders_name(tmp_path, monkeypatch):
+    # Real bug (2026-10-07): ThorImage reuses names per experiment, so a new
+    # day's Fly1_Zstack was silently never transferred because a September
+    # experiment already had a Fly1_Zstack on the NAS. Dedup must compare the
+    # acquisition itself (Experiment.xml uTime), not the bare name.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    from octacam.cli import _sweep_unclaimed_twophoton
+
+    source_root = tmp_path / "windows_share" / "MD"
+    dest_root = tmp_path / "dest"
+    twophoton_cfg = SimpleNamespace(
+        settle_s=60.0, attribute_unclaimed_to_fly=False, assemble_tiff_stacks=False
+    )
+
+    new = source_root / "expNew" / "Fly1_Zstack"
+    new.mkdir(parents=True)
+    (new / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="2000000" />'
+        "</ThorImageExperiment>"
+    )
+    old_mtime = time.time() - 10_000
+    os.utime(new / "Experiment.xml", (old_mtime, old_mtime))
+    old_copy = dest_root / "260903_Old" / "Fly1" / "Recording11_2P_Zstack" / "2P" / "Fly1_Zstack"
+    old_copy.mkdir(parents=True)
+    (old_copy / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="1000000" />'
+        "</ThorImageExperiment>"
+    )
+
+    n_copied, n_failed = _sweep_unclaimed_twophoton(
+        source_root, dest_root, twophoton_cfg, checksum=True, dry_run=False
+    )
+    assert n_failed == 0 and n_copied >= 1
+    assert list(dest_root.glob("2p_only/expNew/*/Fly1_Zstack/Experiment.xml"))
 
 
 # --- process: --twophoton-manifest / automatic reconciliation-manifest rebuild -

@@ -120,7 +120,9 @@ follows the newest release, and `develop` pushes refresh the rolling `dev` versi
 
 ```
 src/octacam/
-  cli.py            typer CLI: gui, doctor, config, record, flash, benchmark, process
+  cli.py            typer CLI: gui, doctor, config, record, flash, benchmark, process, render
+  synced_render.py  behavior grid + green/red 2P quick-look video, DAQ-clock aligned
+  zstack_mip.py     green/red/dual max-intensity PNGs for anatomical Z-stacks
   controller.py     RecordingController — the framework-free record state machine
   config.py         octacam_config.toml parsing (pydantic, tolerant/warn-and-default)
   config_writer.py  writes config snapshots (inline-table TOML for triggerbox)
@@ -676,11 +678,73 @@ against a real 2P rig; the durable findings:
   aged out of `session_cache`'s `RETENTION_DAYS`) can no longer be found this
   way — the pending marker lives only in the take's own local folder, not on
   the NAS.
-- **Still deferred**: a synced behavior+2P *preview video* (different fps,
-  same wall-clock window) is out of scope even now that `twophoton_signals.py`
-  reads `Episode001.h5`'s edges for matching *verification* — that's a
-  different consumer of the same data (per-frame alignment for a rendered
-  video, not a yes/no pairing check) and still needs its own design pass.
+- **Synced behavior+2P quick-look video (`synced_render.py`, 2026-10-07)**:
+  `Renderings/synced_2p.mp4` = the behavior `grid.mp4` (fallback: first
+  `Behavior/*.mp4`) next to a green/red 2P merge, rendered straight from the
+  *transferred NAS take folder* (so it serves both the automatic hook —
+  `_finalize_twophoton_matches`, after a take's 2P folders transfer cleanly,
+  gated by `[transfer.twophoton].render_synced_video`, default on — and the
+  standalone `octacam render PATHS` backfill/re-render command, which also
+  does Z-stack MIPs).
+  Alignment is on ThorSync's DAQ clock, never wall time: behavior frame k =
+  the k-th `DI/Cameras` edge, 2P frame j = the j-th `DI/FrameOut` edge, both
+  inside the `CaptureOn` segment whose camera-edge count matches the take
+  (`twophoton_signals.read_segment_edge_times`). FastZ (`ChanX_ZNN.tif` per
+  plane) is projected per timepoint (`mean` default — Matthias's own ask, to
+  average the planes into a steadier image; `max` optional) and timestamped
+  at its volume's first edge. Contrast is a *fixed* per-channel stretch from
+  frames sampled across the run (no flicker), anchored at the **median**
+  (`low_percentile=50`) → 99.9th, plus a 3×3 box blur — chosen against real
+  data: single-plane streaming green is sparse photon-count speckle, and a
+  1st-percentile floor (or blur alone) turned the whole field into green
+  noise. ThorImage records no channel colors; default ChanA=green,
+  ChanB=red (usual Thorlabs PMT layout — not verified per rig), configurable
+  (`synced_green_channel`/`synced_red_channel`). ~2.5 min per 3-min take.
+- **Z-stack MIPs (`zstack_mip.py`, 2026-10-07)**: `zstack_mip_{green,red,
+  dual}.png` (the names of the lab's earlier hand-made renders) per
+  anatomical Z-stack, in `RecordingN_2P_<detail>/Renderings/` (else the 2P
+  folder's own `Renderings/`). `is_zstack` = `ZStage enable="1"`, steps > 1,
+  one timepoint, streaming off — streaming/FastZ captures also carry an
+  enabled `ZStage` (real `Fly1_Streaming`: `steps="201"`), so `ZStage`
+  alone is not enough. Each slice is 3×3 box-blurred before the max (a raw
+  MIP keeps every column's brightest noise pixel); per-channel 0.5–99.8
+  percentile stretch of the MIP itself. Checked against a real September
+  Z-stack: matches Matthias's own render (which also confirms ChanA=green,
+  ChanB=red there). Automatic as `process` Phase 6, *after* reconcile so it
+  writes into the final wrapper, scoped to the fly dirs the run touched
+  (`render_zstack_mip`, default on); generic-bucket Z-stacks need `octacam
+  render`. ~9 s per 201-slice stack.
+- **FrameOut counts scanned frames, not timepoints (fixed 2026-10-07)**: a
+  FastZ capture records `timepoints x (ZStage steps + flybackFrames)` edges
+  (real data: 500 x (5+1) = 3000), so comparing against bare `timepoints`
+  failed every FastZ verification
+  (`thorimage_expected_frameout_edges`). Worse, the verified *image* tier
+  had **no time bound**, so a FastZ take's slot was filled by any folder on
+  the share with the right count — real October takes got "verified" against
+  September's `AllPAM/Fly4_Streaming_*`. The image tier now also requires
+  the candidate within `verify_window_s` of the take (ranked by edge diff,
+  then start gap); `correlate_sync_folder_to_image` likewise bounds by 1h
+  from the sync folder's own start. **Z-stack SyncData has its own shape**
+  (`thorimage_zstack_signature`): one `CaptureOn` segment *per slice*, each
+  with `averageNum` FrameOut edges when `LSM averageMode="1"` (else 1) — real
+  data: 201 segments x 4. The per-segment streaming rule (edges ==
+  timepoints == 1) only ever matched an un-averaged stack, so averaged
+  Z-stacks' SyncData fell into the generic bucket; correlation now checks the
+  whole-episode signature, ties (same-shaped stacks minutes apart) broken by
+  start gap. Also: in a `--dry-run`, fly attribution has no anchors for
+  that run's own takes (they come from `twophoton_match.json` already on the
+  NAS, which a dry run never writes), so the preview shows today's unclaimed
+  folders going to the generic bucket even when a real run files them under
+  the fly — a known preview limitation, not a real misfile.
+- **NAS dedup is by acquisition identity, not bare name (fixed
+  2026-10-07)**: ThorImage reuses names per experiment (`Fly1_Zstack` in
+  many) and `SyncData<N>` repeats across experiment subfolders, so the
+  sweep's name-only `already present` check silently skipped a new day's
+  Z-stacks forever. `twophoton_identity` = `(name, Experiment.xml uTime)` for
+  image folders, `(name, Episode h5 byte size)` for sync folders — both
+  survive a copy. `_find_twophoton_dest_folder` (`--twophoton-verify`) prefers
+  an identity match and only falls back to a namesake so a corrupted copy is
+  still hashed and flagged MISMATCH.
 - **TIFF stack assembly (`twophoton_tiff.py`)**: ThorImage's streaming-mode
   capture writes one `.tif` file **per frame per channel** — a 1500-timepoint,
   2-channel recording is 3000 loose files. Neither `<Streaming enable>` nor
@@ -1098,7 +1162,7 @@ scales with the box (draw at real pixel size); force a theme by setting
 
 ## CLI notes
 
-Seven commands: `gui`, `doctor`, `config` (scaffold a rig interactively),
+Eight commands: `render` (behavior+2P synced video, Z-stack MIPs), `gui`, `doctor`, `config` (scaffold a rig interactively),
 `record`, `flash`, `benchmark`, `process`. `doctor` never opens a camera (safe
 during a live session). A rig **instance-lock** prevents two octacams owning one
 rig.

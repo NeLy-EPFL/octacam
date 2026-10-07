@@ -244,3 +244,42 @@ def verify_frameout_match(
     """Whether *segment*'s FrameOut edge count matches ThorImage's own
     ``Experiment.xml <Timelapse timepoints="...">`` within *tolerance*."""
     return frameout_edge_diff(segment, timepoints) <= tolerance
+
+
+def read_segment_edge_times(
+    sync_folder: Path, segment: CaptureSegment
+) -> tuple[list[float], list[float]] | None:
+    """``(cameras, frameout)`` rising-edge times in seconds, relative to
+    *segment*'s own ``CaptureOn`` rise, for every edge inside that segment —
+    the per-frame alignment both halves of a synced behavior+2P render share
+    (one DAQ clock, so no wall-clock drift between the two). Falls back to
+    ThorSync's usual 100 kHz when the settings file doesn't say. None when
+    the episode can't be read; never raises."""
+    if not h5py_available():
+        return None
+    episodes = sorted(sync_folder.glob(EPISODE_GLOB))
+    if not episodes:
+        return None
+    import h5py
+
+    try:
+        with h5py.File(episodes[0], "r") as f:
+            di = f.get("DI")
+            if not isinstance(di, h5py.Group):
+                return None
+            cameras = di.get(_CAMERAS_CHANNEL)
+            frameout = di.get(_FRAMEOUT_CHANNEL)
+            if not isinstance(cameras, h5py.Dataset) or not isinstance(frameout, h5py.Dataset):
+                return None
+            cameras_col = cameras[:, 0]
+            frameout_col = frameout[:, 0]
+    except OSError:
+        log.warning("synced render: could not read %s", episodes[0], exc_info=True)
+        return None
+    rate = segment.sample_rate or 100_000.0
+    start, end = segment.start_sample, segment.end_sample
+
+    def _times(col) -> list[float]:
+        return [(e - start) / rate for e in _rising_edge_indices(col) if start <= e < end]
+
+    return _times(cameras_col), _times(frameout_col)
