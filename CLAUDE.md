@@ -698,7 +698,7 @@ against a real 2P rig; the durable findings:
   data: single-plane streaming green is sparse photon-count speckle, and a
   1st-percentile floor (or blur alone) turned the whole field into green
   noise. ThorImage records no channel colors; default ChanA=green,
-  ChanB=red (usual Thorlabs PMT layout — not verified per rig), configurable
+  ChanB=red (confirmed by Matthias for this rig, 2026-10-08), configurable
   (`synced_green_channel`/`synced_red_channel`). ~2.5 min per 3-min take.
 - **Z-stack MIPs (`zstack_mip.py`, 2026-10-07)**: `zstack_mip_{green,red,
   dual}.png` (the names of the lab's earlier hand-made renders) per
@@ -1044,6 +1044,15 @@ against a real 2P rig; the durable findings:
   retroactively repair what the one buggy run already left on disk.
   `test_reconcile_recordings_rerun_moves_whole_wrapper_not_just_leaf` guards
   the fix.
+  **Renumber shift collisions (fixed 2026-10-08)**: a late-arriving early
+  session (a September Z-stack the old name-only dedup had skipped) shifts a
+  fly's whole sequence up, and the old in-order rename tried `Recording5 ->
+  7` while `Recording7` still existed — 3 real sessions were left unmoved,
+  with duplicate numbers. Renames are now two-phase (every top-level mover is
+  parked under `.reconcile-tmp-*` first, then placed), and a target held by a
+  session that is *not* moving is refused up front — the old
+  `mkdir(exist_ok)` + rename could otherwise have merged a 2P leaf into
+  someone else's wrapper.
 
   Also promotes the fuzzier case: data still sitting in the fully generic
   `2p_only/<experiment>/<date>/` bucket (nothing could attribute it to an

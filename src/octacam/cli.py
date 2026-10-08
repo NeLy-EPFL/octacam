@@ -5279,6 +5279,7 @@ def _reconcile_sessions(
             continue
         entries.sort(key=lambda e: e[0])
         fly_moves: list[tuple[Path, Path]] = []
+        planned: list[tuple[Path, Path]] = []
         for i, (_start, kind, current_path) in enumerate(entries, 1):
             detail = (
                 _thorimage_detail(current_path.name)
@@ -5307,15 +5308,49 @@ def _reconcile_sessions(
             if source == target:
                 n_unchanged += 1
                 continue
-            if dry_run:
-                log.info("[dry-run] reconcile: %s -> %s", source, target)
+            planned.append((source, target))
+        # A renumber usually shifts names onto ones another of this fly's
+        # sessions still holds (Recording5 -> 7 while 7 -> 9 hasn't moved
+        # yet), so a straight in-order rename collides. Only a top-level name
+        # held by a session that is NOT itself moving is a real conflict.
+        moving_away = {src for src, _ in planned if src.parent == fly_dir}
+        moves: list[tuple[Path, Path]] = []
+        for source, target in planned:
+            top = fly_dir / target.relative_to(fly_dir).parts[0]
+            if top.exists() and top not in moving_away:
+                n_conflict += 1
+                log.error("reconcile: cannot move %s -> %s: %s already exists", source, target, top)
                 continue
+            moves.append((source, target))
+        if dry_run:
+            for source, target in moves:
+                log.info("[dry-run] reconcile: %s -> %s", source, target)
+            continue
+        # Two phases: park every top-level mover under a unique temporary name
+        # first, then place each at its final name — so no target is still
+        # occupied.
+        parked: list[tuple[Path, Path, Path]] = []
+        for k, (source, target) in enumerate(moves):
+            if source not in moving_away:  # a 2P_only/ leaf can't block anyone
+                parked.append((source, source, target))
+                continue
+            tmp = fly_dir / f".reconcile-tmp-{k}-{source.name}"
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                source.rename(target)
+                source.rename(tmp)
             except OSError as e:
                 n_conflict += 1
                 log.error("reconcile: failed to move %s -> %s: %s", source, target, e)
+                continue
+            parked.append((source, tmp, target))
+        for source, tmp, target in parked:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp.rename(target)
+            except OSError as e:
+                n_conflict += 1
+                log.error(
+                    "reconcile: failed to move %s -> %s (left at %s): %s", source, target, tmp, e
+                )
                 continue
             n_moved += 1
             log.info("reconcile: %s -> %s", source, target)

@@ -25,8 +25,8 @@ flybackFrames`` edges (confirmed on real data: 500 timepoints x (5 + 1) =
 sampled across the whole recording (fixed, so the video doesn't flicker
 frame to frame), then mapped green/red. ThorImage records no per-channel
 color, so the mapping is configurable; the default (ChanA green, ChanB red)
-follows the usual Thorlabs PMT layout. Non-square pixels are corrected to
-the physical µm aspect from ``Experiment.xml``.
+matches the 2P rig (confirmed by the operator). Non-square pixels are
+corrected to the physical µm aspect from ``Experiment.xml``.
 
 Best-effort like the rest of the 2P pipeline: :func:`render_synced_video`
 logs and returns ``None`` on any missing input instead of raising, so a

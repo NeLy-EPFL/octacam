@@ -59,6 +59,10 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Fixed
 
+- **`RecordingN` renumbering no longer collides when a fly's sequence shifts
+  up** (e.g. an earlier Z-stack arriving late): renames are two-phase, and a
+  name held by a session that isn't moving is refused instead of merged into.
+
 - **2P matching: FastZ captures now verify, and never cross experiments** —
   ThorSync's FrameOut counts every scanned frame (timepoints × (planes +
   flyback)), not timepoints, so FastZ captures never verified; and the

@@ -3619,6 +3619,36 @@ def test_reconcile_recordings_rerun_moves_whole_wrapper_not_just_leaf(tmp_path, 
     assert not wrapper.exists()
 
 
+def test_reconcile_recordings_shifting_every_number_up_does_not_collide(tmp_path, monkeypatch):
+    # Real NAS run (2026-10-08): an earlier Z-stack transferred late shifts a
+    # fly's whole sequence up by one. An in-order rename tried Recording1 ->
+    # Recording2 while Recording2 still existed and left sessions unmoved.
+    monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
+    dest_root = tmp_path / "dest"
+    fly_dir = dest_root / "day1" / "Fly1"
+    _write_take(dest_root, "day1/Fly1/Recording1_Beh", start_time_ns=3_000_000_000_000, duration_s=10.0)
+    _write_take(dest_root, "day1/Fly1/Recording2_Beh", start_time_ns=4_000_000_000_000, duration_s=10.0)
+    (fly_dir / "Recording2_Beh" / "marker").write_text("second")
+    zstack = fly_dir / "2P_only" / "Fly1_Zstack"
+    zstack.mkdir(parents=True)
+    (zstack / "Experiment.xml").write_text(
+        '<?xml version="1.0"?><ThorImageExperiment><Date date="x" uTime="1000" /></ThorImageExperiment>'
+    )
+    config_dir = tmp_path / "rig"
+    config_dir.mkdir()
+    (config_dir / "octacam_config.toml").write_text(
+        f'[transfer]\ndirectory = "{dest_root.as_posix()}"\n'
+    )
+    result = runner.invoke(
+        app, ["process", "--reconcile-recordings", "--config", str(config_dir), "--all"]
+    )
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in fly_dir.iterdir() if p.is_dir()) == [
+        "Recording1_2P_Zstack", "Recording2_Beh", "Recording3_Beh",
+    ]
+    assert (fly_dir / "Recording3_Beh" / "marker").read_text() == "second"
+
+
 def test_reconcile_recordings_rerun_with_no_changes_is_noop(tmp_path, monkeypatch):
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(tmp_path / "cache"))
     dest_root = tmp_path / "dest"
