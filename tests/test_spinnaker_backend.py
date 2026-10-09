@@ -1,7 +1,7 @@
 """FlirBackend over the ctypes binding's shape, with the binding faked.
 
 No Spinnaker SDK or hardware: the module-level binding (the only thing that
-touches ``libSpinnaker_C.so``) is replaced by a :class:`FlirBinding` whose
+touches `libSpinnaker_C.so`) is replaced by a `FlirBinding` whose
 primitives operate on in-memory node maps, so the shared node-map walker, the
 param round-trip, the software-trigger hand-off, the frame retrieve, the clean
 close, and the session's handle release are all exercised in pure Python: the
@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import octacam.cameras.flir as flir
 import octacam.cameras.spinnaker_c as sc
+from octacam.cameras import flir
 from octacam.cameras.base import BackendError
 from octacam.cameras.flir import MIN_STREAM_BUFFERS, FlirBackend, FlirBinding
 from octacam.cameras.genicam import parse_config
@@ -117,8 +117,9 @@ class FakeCam:
 
 class FakeSpin(FlirBinding):
     """Stand-in for the ctypes binding: its primitives over Python objects. A
-    node handle is ``(name, node)``; Root is a category of every node, and the
-    C API's gaps are mirrored (no int unit, no float increment)."""
+    node handle is `(name, node)`; Root is a category of every node, and the
+    C API's gaps are mirrored (no int unit, no float increment).
+    """
 
     tier = "spinnaker"
 
@@ -141,8 +142,12 @@ class FakeSpin(FlirBinding):
         obj = node[1]
         if isinstance(obj, FakeNodeMap):
             return "category"
-        for cls, kind in ((FakeCommand, "command"), (FakeBool, "bool"),
-                          (FakeEnum, "enum"), (FakeString, "string")):
+        for cls, kind in (
+            (FakeCommand, "command"),
+            (FakeBool, "bool"),
+            (FakeEnum, "enum"),
+            (FakeString, "string"),
+        ):
             if isinstance(obj, cls):
                 return kind
         if isinstance(obj, FakeNode):
@@ -414,7 +419,9 @@ def test_list_features_walks_the_full_node_map():
     assert width.type == "int" and width.value == 1920
     assert width.min == 16 and width.max == 1920 and width.inc == 16
     exposure = features["ExposureTime"]
-    assert exposure.type == "float" and exposure.value == 5000.0 and exposure.unit == "us"
+    assert (
+        exposure.type == "float" and exposure.value == 5000.0 and exposure.unit == "us"
+    )
     assert features["Gain"].type == "float"
     gamma = features["GammaEnabled"]
     assert gamma.type == "bool" and gamma.value is False
@@ -492,17 +499,17 @@ def test_execute_command_raises_when_not_open():
 
 def test_trigger_once_is_a_pure_bump_not_a_device_call():
     # The device TriggerSoftware execute happens in retrieve() on the grab thread,
-    # NOT in trigger_once() on the shared timer thread — so one camera's slow
+    # NOT in trigger_once() on the shared timer thread -- so one camera's slow
     # trigger can never block another's. trigger_once only bumps the counter.
     nm = FakeNodeMap()
     backend, _cam = _grabbing_backend(nm)
     assert nm.TriggerSource.value == "Software" and nm.TriggerMode.value == "On"
-    # TriggerOverlap=ReadOut lets triggers pipeline during readout — without it the
+    # TriggerOverlap=ReadOut lets triggers pipeline during readout -- without it the
     # FLIR ignores every other software trigger (~halved fps; measured 5->64 fps).
     assert nm.TriggerOverlap.value == "ReadOut"
     assert backend.is_grabbing()
     backend.trigger_once()
-    assert nm.TriggerSoftware.executed == 0  # NOT fired yet — retrieve fires it
+    assert nm.TriggerSoftware.executed == 0  # NOT fired yet -- retrieve fires it
     assert backend.trigger.pending == 1
     backend.stop_grab()
     assert not backend.is_grabbing()
@@ -575,7 +582,9 @@ def test_retrieve_skips_incomplete_image_but_releases_it():
 
 
 def _incomplete_logs(records):
-    return [(r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()]
+    return [
+        (r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()
+    ]
 
 
 def _incomplete_grab(record):
@@ -630,7 +639,7 @@ def test_incomplete_image_reports_carry_the_grabs_running_total(monkeypatch, cap
 
 def test_retrieve_skips_non_mono8_frame_but_releases_it():
     # We force Mono8 at open, but if that best-effort set failed the camera could
-    # still deliver e.g. Mono16 — a 2-D frame with a wider stride that image_array
+    # still deliver e.g. Mono16 -- a 2-D frame with a wider stride that image_array
     # would misread one byte per pixel. The bits-per-pixel guard drops it (PySpin's
     # ndim!=2 check would let it through, since a Mono16 frame is still 2-D).
     backend, cam = _grabbing_backend()
@@ -638,7 +647,7 @@ def test_retrieve_skips_non_mono8_frame_but_releases_it():
     cam.next_image = image
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None  # non-Mono8: dropped
-    assert image.released  # but still released — never leak a buffer
+    assert image.released  # but still released -- never leak a buffer
 
 
 def test_retrieve_accepts_non_mono8_frame_when_array_not_wanted():
@@ -677,7 +686,7 @@ def test_enumerate_selects_requested_and_releases_the_rest(fake_facade):
 
 def test_teardown_releases_leaked_handle(fake_facade):
     # A handle enumerate hands out but that is never close()d (an enumerate-only
-    # probe, or a killed/hung record) must be released by teardown() — otherwise
+    # probe, or a killed/hung record) must be released by teardown() -- otherwise
     # the System is released with a dangling device reference and Spinnaker's
     # libusb transport aborts the process (usbi_mutex_destroy assertion, 134).
     cams = [FakeCam("A")]
@@ -706,7 +715,7 @@ def test_teardown_does_not_double_release_closed_handle(fake_facade):
 def test_reenumerate_releases_prior_session(fake_facade):
     # octacam doctor enumerates spinnaker twice (the backend sweep AND the cascade
     # assignment). The second enumeration must release the first session's System
-    # and handles instead of orphaning them — a stale System released only at
+    # and handles instead of orphaning them -- a stale System released only at
     # process exit aborts via a libusb assertion (exit 134).
     first = [FakeCam("A")]
     fake_facade.cameras = first
@@ -740,9 +749,12 @@ def _record_pool(cam):
     return cam.stream_nodemap.StreamBufferCountManual
 
 
-def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(fake_facade, monkeypatch, caplog):
+def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(
+    fake_facade, monkeypatch, caplog
+):
     """Two full-sensor GS3s need more usbfs memory at 128 buffers than the
-    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts."""
+    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts.
+    """
     backend, cam = _open_backend()
     count = _record_pool(cam)
 

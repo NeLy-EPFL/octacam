@@ -1,9 +1,9 @@
 """Trigger-pulse accounting (octacam.pulses) on synthetic trigger trains.
 
 The series reproduce what the hexaview rig's two GS3 cameras actually recorded
-at 125 fps (see the missed-frames investigation): an 8 ms clock with a few µs of
+at 125 fps (see the missed-frames investigation): an 8 ms clock with a few us of
 jitter and ppm drift, a camera that misses a pulse (a 16 ms interval), one that
-fires on the pulse's falling edge (+503 µs, then a 7.697 ms readout-limited
+fires on the pulse's falling edge (+503 us, then a 7.697 ms readout-limited
 catch-up), and the Grasshopper3's 128 s timestamp-extension glitch.
 """
 
@@ -23,13 +23,24 @@ P = 8_000_000  # 125 fps
 READOUT = 7_697_000  # GS3 readout at 2048x1408: the fastest a frame can follow another
 
 
-def train(n, *, period=P, ppm=0.0, jitter_ns=3_000, t0=1_800_000_000_000_000, seed=0,
-          missed=(), late=None, board_late=None):
+def train(
+    n,
+    *,
+    period=P,
+    ppm=0.0,
+    jitter_ns=3_000,
+    t0=1_800_000_000_000_000,
+    seed=0,
+    missed=(),
+    late=None,
+    board_late=None,
+):
     """Camera timestamps for pulses 0..n-1 of a regular trigger train.
 
-    ``missed``: pulses the camera never exposed. ``late``: {pulse: ns} a camera-
-    side late exposure (followed by readout-limited catch-up). ``board_late``:
-    {pulse: ns} a late *trigger* (every camera sees it)."""
+    `missed`: pulses the camera never exposed. `late`: {pulse: ns} a camera-
+    side late exposure (followed by readout-limited catch-up). `board_late`:
+    {pulse: ns} a late *trigger* (every camera sees it).
+    """
     rng = random.Random(seed)
     scale = 1 + ppm * 1e-6
     late = dict(late or {})
@@ -64,12 +75,13 @@ BURST_GAP = 50_000  # buffered frames reach the host back to back
 
 
 def delivered(ts, *, stall_from=None, stall_ns=0, buffers=None):
-    """Host arrival times of the frames exposed at ``ts``, and the frames kept.
+    """Host arrival times of the frames exposed at `ts`, and the frames kept.
 
-    The grab thread stalls for ``stall_ns`` just before frame ``stall_from``:
+    The grab thread stalls for `stall_ns` just before frame `stall_from`:
     the frames exposed meanwhile wait in the stream buffers and reach the host
-    back to back when it resumes. With ``buffers``, only that many fit; the
-    frames exposed once they are full never arrive (lost at transport)."""
+    back to back when it resumes. With `buffers`, only that many fit; the
+    frames exposed once they are full never arrive (lost at transport).
+    """
     kept, host = [], []
     stall_end = next_free = None  # next_free: when the host takes the next frame
     waiting = 0
@@ -114,12 +126,12 @@ def test_consecutive_and_repeated_misses():
 
 
 def test_a_falling_edge_trigger_is_late_not_missed():
-    # The top camera's signature: +503 µs, then the readout-limited catch-up.
+    # The top camera's signature: +503 us, then the readout-limited catch-up.
     ts, pulses = train(2000, late={700: 503_000})
     tracker, got = run(ts)
     assert got == pulses
     assert tracker.missed == []
-    assert tracker.late == [700]  # the catch-up frame (+~200 µs) is not flagged
+    assert tracker.late == [700]  # the catch-up frame (+~200 us) is not flagged
 
 
 def test_a_late_board_pulse_by_nearly_half_a_period_stays_on_its_pulse():
@@ -257,7 +269,7 @@ def test_a_duplicate_timestamp_is_extra():
 
 def test_assign_index_reports_leading_and_interior_misses():
     tracker = PulseTracker(PulseClock(P, 10, "software"))
-    assert tracker.assign_index(2).missed == range(0, 2)
+    assert tracker.assign_index(2).missed == range(2)
     assert tracker.assign_index(3).missed == range(0)
     assert tracker.assign_index(6).missed == range(4, 6)
     assert tracker.assign_index(6).extra
@@ -276,8 +288,12 @@ def test_estimate_offset_lines_cameras_up_on_shared_trigger_jitter():
     a, _ = train(3000, board_late=board, seed=1)
     # Camera b has one extra frame before pulse 0 (it caught a stray pulse), so
     # its frame index is one ahead of a's for every pulse.
-    b, _ = train(3001, board_late={p + 1: v for p, v in board.items()}, seed=2,
-                 late={2000: 503_000})
+    b, _ = train(
+        3001,
+        board_late={p + 1: v for p, v in board.items()},
+        seed=2,
+        late={2000: 503_000},
+    )
     lag, n = estimate_offset(analyze_timestamps(a, 125), analyze_timestamps(b, 125))
     assert lag == 1 and n >= 3
 
@@ -292,7 +308,7 @@ def test_estimate_offset_is_undecided_without_shared_events():
 def test_a_rearmed_trigger_source_is_followed_through_its_phase_jump():
     # The pre-fix GUI start: two preview pulses, then the recording arm restarts
     # the board clock at an arbitrary phase x after the last preview pulse; the
-    # cameras catch up at their readout limit (a run of 7.697 ms intervals — the
+    # cameras catch up at their readout limit (a run of 7.697 ms intervals -- the
     # "dark ramp"). Every frame is still one pulse after the previous one.
     for x in (1_000_000, 3_900_000, 5_000_000, 7_500_000):
         ts, _ = train(400, board_late={p: x - P for p in range(2, 400)}, seed=x)

@@ -1,4 +1,4 @@
-"""The triggerbox wire protocol v2 (must match ``arduino/triggerbox``) and the
+"""The triggerbox wire protocol v2 (must match `arduino/triggerbox`) and the
 serial link that speaks it.
 
 Host -> board (little-endian):
@@ -37,23 +37,41 @@ CANCEL_ACK_TIMEOUT_S = 0.3
 
 _ARM_MAGIC = 0xA5
 _CANCEL_MAGIC = 0xCA
-_HDR = struct.Struct("<BBH")      # magic u8, version u8, payload_len u16
-_FIXED = struct.Struct("<HIBB")   # fps u16, duration_ms u32, n_cam u8, n_light u8
-_CAM = struct.Struct("<BHH")      # pin_id u8, pulse_us u16, delay_us u16
+_HDR = struct.Struct("<BBH")  # magic u8, version u8, payload_len u16
+_FIXED = struct.Struct("<HIBB")  # fps u16, duration_ms u32, n_cam u8, n_light u8
+_CAM = struct.Struct("<BHH")  # pin_id u8, pulse_us u16, delay_us u16
 _LIGHT = struct.Struct("<BBIIII")  # pin_id u8, mode u8, p0 u32, p1 u32, p2 u32, p3 u32
 
 # The wire's pin ids (by index): the single source of truth, mirrored by kPinTable
 # in triggerbox.ino (a test keeps them equal). D2/D3/D4 drive the status LED and
 # the firmware rejects them as outputs.
 PIN_LABELS = (
-    "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11",
-    "D12", "D13", "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7",
+    "D2",
+    "D3",
+    "D4",
+    "D5",
+    "D6",
+    "D7",
+    "D8",
+    "D9",
+    "D10",
+    "D11",
+    "D12",
+    "D13",
+    "A0",
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
 )
 RESERVED_PINS = frozenset({"D2", "D3", "D4"})
-# CCS light channel (1/2/3) → default board pin.
+# CCS light channel (1/2/3) -> default board pin.
 LIGHT_PIN_BY_CHANNEL = {1: "D5", 2: "D6", 3: "D7"}
 
-# Light modes (name ↔ wire value). "pulse" is accepted as an alias of pulse_train.
+# Light modes (name <-> wire value). "pulse" is accepted as an alias of pulse_train.
 LIGHT_MODE_IDS = {"off": 0, "strobe": 1, "continuous": 2, "pulse_train": 3, "pulse": 3}
 LIGHT_MODE_NAMES = {0: "off", 1: "strobe", 2: "continuous", 3: "pulse_train"}
 
@@ -89,7 +107,7 @@ class CameraLine:
     """One camera-trigger output line."""
 
     pin: str = "D13"
-    pulse_us: int = 0  # 0 → firmware default (500 µs)
+    pulse_us: int = 0  # 0 -> firmware default (500 us)
     delay_us: int = 0
 
     def record(self) -> tuple[int, int, int]:
@@ -98,7 +116,7 @@ class CameraLine:
 
 @dataclass
 class LightChannel:
-    """One CCS light channel; ``channel`` only picks the default pin."""
+    """One CCS light channel; `channel` only picks the default pin."""
 
     channel: int = 1
     pin: str = "D5"
@@ -117,28 +135,29 @@ class LightChannel:
         return self.mode == "strobe" and self.duty_mode == "auto"
 
     def resolve(self, period_us: float, auto_led_on_us: float | None) -> tuple:
-        """The wire record ``(pin_id, mode, p0, p1, p2, p3)``. An auto strobe
-        takes ``auto_led_on_us``, or its manual duty when that is None."""
+        """The wire record `(pin_id, mode, p0, p1, p2, p3)`. An auto strobe
+        takes `auto_led_on_us`, or its manual duty when that is None.
+        """
         pid = pin_id(self.pin)
         mode = LIGHT_MODE_IDS.get(self.mode, 0)
         if mode == 1:  # strobe
             if self.duty_mode == "auto" and auto_led_on_us is not None:
-                on_us = int(math.ceil(auto_led_on_us))
+                on_us = math.ceil(auto_led_on_us)
             else:
                 duty = max(0.0, min(100.0, self.duty_percent))
-                on_us = int(round(duty / 100.0 * period_us))
+                on_us = round(duty / 100.0 * period_us)
             return (pid, 1, _u32(self.delay_us), _u32(on_us), 0, 0)
         if mode == 2:  # continuous
             return (pid, 2, 0, 0, 0, 0)
         if mode == 3:  # pulse_train
-            interval = int(round(1_000_000.0 / self.freq_hz)) if self.freq_hz > 0 else 0
+            interval = round(1_000_000.0 / self.freq_hz) if self.freq_hz > 0 else 0
             return (
                 pid,
                 3,
                 _u32(self.pulse_us),
                 _u32(interval),
-                _u32(int(round(self.start_delay_ms * 1000))),
-                _u32(int(round(self.train_ms * 1000))),
+                _u32(round(self.start_delay_ms * 1000)),
+                _u32(round(self.train_ms * 1000)),
             )
         return (pid, 0, 0, 0, 0, 0)  # off
 
@@ -150,10 +169,12 @@ class ArmSpec:
     fps: int
     duration_ms: int
     cameras: list[tuple]  # (pin_id, pulse_us, delay_us)
-    lights: list[tuple]   # (pin_id, mode, p0, p1, p2, p3)
+    lights: list[tuple]  # (pin_id, mode, p0, p1, p2, p3)
 
     def to_bytes(self) -> bytes:
-        payload = _FIXED.pack(self.fps, self.duration_ms, len(self.cameras), len(self.lights))
+        payload = _FIXED.pack(
+            self.fps, self.duration_ms, len(self.cameras), len(self.lights)
+        )
         for rec in self.cameras:
             payload += _CAM.pack(*rec)
         for rec in self.lights:
@@ -163,13 +184,18 @@ class ArmSpec:
         checksum = 0
         for byte in body:
             checksum ^= byte
-        return _HDR.pack(_ARM_MAGIC, PROTOCOL_VERSION, len(payload)) + payload + bytes([checksum])
+        return (
+            _HDR.pack(_ARM_MAGIC, PROTOCOL_VERSION, len(payload))
+            + payload
+            + bytes([checksum])
+        )
 
 
 class TriggerboxLink(SerialLink):
     """The serial link to the triggerbox. It owns the board's answers: arms and
     cancels are serialized, ack wait included, so concurrent ones (a preview
-    re-arm and a recording arm) cannot take each other's answer."""
+    re-arm and a recording arm) cannot take each other's answer.
+    """
 
     name = "triggerbox"
     banner_prefix = BANNER
@@ -185,8 +211,9 @@ class TriggerboxLink(SerialLink):
         self.reject: str | None = None  # the last arm's reject code
 
     def arm(self, spec: ArmSpec) -> str:
-        """Send an arm: ``"ok"`` ('R'), ``"reject"`` ('E<c>', code in
-        :attr:`reject`), ``"timeout"`` or ``"write_failed"`` (a wedged or closed link)."""
+        """Send an arm: `"ok"` ('R'), `"reject"` ('E<c>', code in
+        `reject`), `"timeout"` or `"write_failed"` (a wedged or closed link).
+        """
         with self._arm_lock:
             self._answered.clear()
             self._done.clear()
@@ -199,7 +226,8 @@ class TriggerboxLink(SerialLink):
 
     def cancel(self) -> bool:
         """Cancel the run and wait (bounded) for the board's 'C'; True if it
-        answered or the link is closed."""
+        answered or the link is closed.
+        """
         with self._arm_lock:
             self._idle.clear()
             self.send_cancel()

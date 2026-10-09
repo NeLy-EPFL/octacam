@@ -32,12 +32,12 @@ def _frame(width, height):
 
 
 def _write_raw(path, frame):
-    """Write only the raw Mono8 bytes (no sidecar — geometry lives elsewhere)."""
+    """Write only the raw Mono8 bytes (no sidecar -- geometry lives elsewhere)."""
     path.write_bytes(frame.tobytes())
 
 
 def _make_mkv(path, frame, fps=10.0):
-    """Encode a one-frame .mkv next to ``path`` (an encoded-input fixture)."""
+    """Encode a one-frame .mkv next to `path` (an encoded-input fixture)."""
     raw = path.with_suffix(".raw")
     height, width = frame.shape
     _write_raw(raw, frame)
@@ -79,7 +79,8 @@ def _camera_entry(file, frame, *, fps=10.0, transform=None, transform_applied=Fa
 
 def _summary(folder, cameras, fps_target=10.0, *, nested=False):
     """Write *folder*'s summary: flat beside the videos (a recording made before
-    the ``octacam_recording`` subfolder), or in that subfolder (*nested*)."""
+    the `octacam_recording` subfolder), or in that subfolder (*nested*).
+    """
     info = folder / RECORDING_INFO_DIRNAME if nested else folder
     info.mkdir(parents=True, exist_ok=True)
     (info / "recording_summary.json").write_text(
@@ -199,7 +200,12 @@ def test_transcode_file_raw_refuses_an_unknown_pixel_format(tmp_path):
     _write_raw(raw, _frame(16, 12))
     with pytest.raises(ValueError, match="Mono12"):
         transcode_file(
-            raw, tmp_path / "cam.mp4", width=16, height=12, fps=10.0, pixel_format="Mono12"
+            raw,
+            tmp_path / "cam.mp4",
+            width=16,
+            height=12,
+            fps=10.0,
+            pixel_format="Mono12",
         )
     assert not (tmp_path / "cam.mp4").exists()
 
@@ -298,7 +304,7 @@ def test_transcode_file_raw_output_mode_still_produces_file(tmp_path):
 
 def test_transcode_file_raw_propagates_and_recovers_from_callback_error(tmp_path):
     # A raising progress callback must propagate (and the ffmpeg child is killed
-    # and reaped on the way out — the regression guard for the lost cleanup).
+    # and reaped on the way out -- the regression guard for the lost cleanup).
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
 
@@ -405,7 +411,7 @@ def test_successful_transcode_leaves_no_temp_file(tmp_path):
 
 def test_progress_bar_indeterminate_after_determinate(tmp_path):
     # A file with a known total followed by one without must NOT inherit the
-    # prior total (rich's reset/update keep total on None) — regression guard.
+    # prior total (rich's reset/update keep total on None) -- regression guard.
     from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(2)
@@ -447,7 +453,7 @@ def test_progress_bar_snaps_to_full_when_total_undershoots(tmp_path):
 def test_progress_bar_indeterminate_snaps_to_full_when_done(tmp_path):
     # A file with no known total draws an indeterminate bar; on completion it
     # must still close on a clean 100% (final frame count becomes the total)
-    # instead of vanishing mid-pulse — the "moved on before 100%" symptom.
+    # instead of vanishing mid-pulse -- the "moved on before 100%" symptom.
     from octacam.cli.process import FileProgressBar
 
     bar = FileProgressBar(1)
@@ -618,7 +624,7 @@ def test_folder_with_summary_as_saved_keeps_orientation(tmp_path):
 
 def test_folder_display_form_recording_keeps_baked_orientation(tmp_path):
     # Display-form recording: the raw is already rotated (12x16) and flagged
-    # transform_applied. Reproducing as-saved must not re-rotate it — the pixels
+    # transform_applied. Reproducing as-saved must not re-rotate it -- the pixels
     # already carry the display orientation.
     frame = _frame(12, 16)
     _write_raw(tmp_path / "cam0.raw", frame)
@@ -813,7 +819,7 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
     # Ctrl-C mid-batch through the REAL transcode_file/atomic_output path: stop
     # cleanly with the SIGINT exit code, keep the finished file's renamed output,
     # and leave the interrupted file with neither a final nor a temp artifact.
-    import octacam.transcode as transcode
+    from octacam import transcode
 
     frame = _frame(16, 12)
     _write_raw(tmp_path / "a.raw", frame)
@@ -842,9 +848,9 @@ def test_process_cli_keyboardinterrupt_stops_gracefully(tmp_path, monkeypatch):
 
 def test_raw_output_interrupt_cleans_temp(tmp_path, monkeypatch):
     # The --progress-style ffmpeg path runs ffmpeg via subprocess.run (not Popen);
-    # a Ctrl-C there must still discard the partial temp — the cleanup lives in
+    # a Ctrl-C there must still discard the partial temp -- the cleanup lives in
     # atomic_output, wrapping both progress modes.
-    import octacam.transcode as transcode
+    from octacam import transcode
 
     raw = tmp_path / "cam.raw"
     _write_raw(raw, _frame(16, 12))
@@ -897,7 +903,7 @@ def test_process_cli_rejects_unknown_progress_style(tmp_path):
 # --- concurrent transcodes of one output -------------------------------------
 # The transcode temp name used to be deterministic (".<stem>.octacam-part<ext>")
 # and atomic_output unlinked it on entry, so two `octacam process` runs over one
-# folder — trivially, `--last` in two terminals — each destroyed the other's
+# folder -- trivially, `--last` in two terminals -- each destroyed the other's
 # in-flight temp and then renamed a file it had not written onto the output.
 
 
@@ -972,7 +978,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
                 height=frame.shape[0],
                 fps=10.0,
             )
-        except BaseException as e:  # noqa: BLE001 - surfaced via `errors`
+        except BaseException as e:
             errors.append(e)
 
     threads = [threading.Thread(target=run) for _ in range(2)]
@@ -989,7 +995,7 @@ def test_two_threads_transcoding_one_output_both_succeed(tmp_path):
 
 def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
     # A camera name only has to be a single path segment, so "cam[1]" is legal.
-    # Unescaped, its sweep pattern is a character class matching "cam1" — which
+    # Unescaped, its sweep pattern is a character class matching "cam1" -- which
     # would delete a *different* camera's in-flight temp.
     bracket = tmp_path / "cam[1].mp4"
     plain = tmp_path / "cam1.mp4"
@@ -1013,7 +1019,7 @@ def test_partial_sweep_escapes_glob_metacharacters_in_camera_names(tmp_path):
 
 # ------------------------------------------- recording layout (either kind)
 #
-# A recording keeps its summary in an ``octacam_recording`` subfolder; one made
+# A recording keeps its summary in an `octacam_recording` subfolder; one made
 # before that keeps it flat beside the videos. Discovery must read both, and a
 # walk must never treat the subfolder as a folder of videos of its own.
 

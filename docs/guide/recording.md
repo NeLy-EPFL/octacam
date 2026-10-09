@@ -18,10 +18,12 @@ options override only the day-to-day values:
 | --- | --- |
 | `--fps`, `-f` | Frame rate (default: from config). |
 | `--duration`, `-d` | Duration in seconds (default: from config's `duration`/`duration_unit`). |
-| `--output`, `-o` | Save directory, overriding the templated location. |
+| `--out`, `-o` | Save directory, overriding the templated location. |
 | `--yes`, `-y` | Before recording, reflash without asking a serial plugin's board that runs an old build of its firmware (a blank or foreign board is only warned about; use `octacam flash`). |
 | `--plugin <name>` | Enable a [plugin](plugins.md) (repeatable). |
 | `--no-plugins` | Disable all plugins for this run. |
+| `--set KEY=VALUE` | Override any config key for this take by its dotted path (`--set record.save_method=raw`); repeatable. `--fps`, `--duration` and `--out` win over it. |
+| `-v`, `--verbose` | Debug messages, and a traceback on errors. |
 
 ```bash
 octacam record configs/my_rig --fps 100 --duration 10
@@ -134,10 +136,11 @@ series, one entry per **video** frame, keyed by camera name:
 
 ```python
 import numpy as np
+
 d = np.load("001-bhv/octacam_recording/timestamps.npz")
-ts = d["cam0/timestamp_ns"]          # nanoseconds
-real = ~d["cam0/dropped"]            # frames that are images of their own pulse
-gaps_ms = np.diff(ts[real]) / 1e6    # inter-frame gaps between real frames
+ts = d["cam0/timestamp_ns"]  # nanoseconds
+real = ~d["cam0/dropped"]  # frames that are images of their own pulse
+gaps_ms = np.diff(ts[real]) / 1e6  # inter-frame gaps between real frames
 ```
 
 Where each camera's timestamps came from — hardware (the camera/SDK clock) or

@@ -1,4 +1,4 @@
-"""Unit tests for octacam.updates — the read-only PyPI update check.
+"""Unit tests for octacam.updates -- the read-only PyPI update check.
 
 No network: the HTTP call and the install-origin probes are monkeypatched, so
 these exercise the parsing, version comparison, install-method classification,
@@ -80,7 +80,7 @@ def test_latest_stable_none_on_bad_json(monkeypatch):
 
 def test_latest_stable_none_on_incomplete_read(monkeypatch):
     # A 200 whose body is severed mid-transfer raises http.client.IncompleteRead
-    # (an HTTPException — NOT OSError/URLError/ValueError). The "never raises"
+    # (an HTTPException -- NOT OSError/URLError/ValueError). The "never raises"
     # contract must still hold: latest_stable() returns None, not a traceback.
     import http.client
 

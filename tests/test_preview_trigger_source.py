@@ -1,10 +1,10 @@
 """Preview trigger-source resolution and arming on the fake backend.
 
-Covers the two-axis design: the recording ``trigger_source`` (software | managed
-| external) and the ``preview_trigger_source`` override (auto | software |
-free_running), plus the plugin capability that makes ``managed`` real and the
-back-compat promotion of a legacy external+driving-plugin rig to ``managed``.
-No hardware/SDK — a fake camera system + a stub driving plugin.
+Covers the two-axis design: the recording `trigger_source` (software | managed
+| external) and the `preview_trigger_source` override (auto | software |
+free_running), plus the plugin capability that makes `managed` real and the
+back-compat promotion of a legacy external+driving-plugin rig to `managed`.
+No hardware/SDK -- a fake camera system + a stub driving plugin.
 """
 
 import threading
@@ -22,7 +22,8 @@ FAKE_SERIALS = ["FAKE-0", "FAKE-1"]
 
 class DrivingPlugin(Plugin):
     """A stub trigger-generating plugin (like the triggerbox): it can drive the
-    trigger during preview and records the arm/disarm calls it receives."""
+    trigger during preview and records the arm/disarm calls it receives.
+    """
 
     name = "faketrigger"
     generates_trigger = True
@@ -54,9 +55,10 @@ def make_controller(tmp_path):
         plugin=None,
         auto_preview=False,
     ):
-        """``plugin`` injects a specific driving-plugin instance (implies
-        ``driving``); ``auto_preview`` mirrors the GUI (preview resumes after a
-        recording) rather than the headless default."""
+        """`plugin` injects a specific driving-plugin instance (implies
+        `driving`); `auto_preview` mirrors the GUI (preview resumes after a
+        recording) rather than the headless default.
+        """
         system = CameraSystem(FAKE_SERIALS, backend="fake")
         system.load_config(tmp_path)
         for camera in system:
@@ -123,7 +125,8 @@ def test_managed_trigger_available_reflects_driving_plugin(make_controller):
 
 def test_external_plus_driving_plugin_promotes_to_managed(make_controller):
     """A legacy external rig with a driving plugin (the shipped triggerbox config)
-    is promoted to managed, so recording is unchanged but auto preview drives it."""
+    is promoted to managed, so recording is unchanged but auto preview drives it.
+    """
     controller, _system = make_controller(trigger_source="external", driving=True)
     assert controller.get_settings().trigger_source == "managed"
     assert controller._effective_preview_mode() == "managed"
@@ -144,7 +147,7 @@ def test_free_running_preview_caps_the_backend_and_flows_frames(make_controller)
     # begin_freerun(fps) reached every backend with the target rate.
     for camera in system:
         assert getattr(camera.backend, "_freerun_fps", None) == 50.0
-    # retrieve_freerun actually delivers frames — timestamps accumulate even with
+    # retrieve_freerun actually delivers frames -- timestamps accumulate even with
     # no display consumer popping the single-slot handoff.
     wait_until(
         lambda: any(len(c.preview_timestamps) > 1 for c in system),
@@ -216,9 +219,10 @@ def test_update_settings_accepts_managed_and_rejects_bad_preview(make_controller
 
 class HookLog(DrivingPlugin):
     """DrivingPlugin that also journals every arm/disarm/recording hook, in
-    order, into a shared list — so a test can check *when* the board was
-    canceled relative to the cameras' record grab. ``release_preview_stop``
-    can be cleared to hold ``on_preview_stop`` open (it is set by default)."""
+    order, into a shared list -- so a test can check *when* the board was
+    canceled relative to the cameras' record grab. `release_preview_stop`
+    can be cleared to hold `on_preview_stop` open (it is set by default).
+    """
 
     def __init__(self, order):
         super().__init__()
@@ -267,9 +271,10 @@ def test_recording_start_disarms_the_managed_preview_before_the_record_grab(
     record grab while those pulses kept coming and only then re-arm the board for
     the recording, restarting its frame clock at an arbitrary phase; a camera in
     overlapped readout (TriggerOverlap=ReadOut) then delayed its exposure out from
-    under the strobe for the next several frames — a dark ramp opening every GUI
+    under the strobe for the next several frames -- a dark ramp opening every GUI
     recording. The preview arm must be canceled before any camera begins the
-    record grab, and the recording arm sent only after."""
+    record grab, and the recording arm sent only after.
+    """
     order: list[str] = []
     controller, system = make_controller(
         trigger_source="managed", plugin=HookLog(order), auto_preview=True
@@ -298,7 +303,8 @@ def test_recording_start_disarms_the_managed_preview_before_the_record_grab(
 def test_recording_start_leaves_a_non_managed_preview_alone(make_controller):
     """A software preview never armed the board (the driving plugin was disarmed
     when preview started), so the recording start sends no further cancel: the
-    recording arm brings the board up from idle, as it always did."""
+    recording arm brings the board up from idle, as it always did.
+    """
     order: list[str] = []
     controller, system = make_controller(
         trigger_source="managed",
@@ -322,8 +328,9 @@ def test_camera_ops_are_refused_while_the_preview_arm_is_being_canceled(
     """While start_recording is canceling the preview arm off the lock, the
     cameras are already stopped and claimed: a second start, a benchmark, a
     settings change and a preview restart must all be refused instead of handing
-    the cameras a fresh trigger clock under the recording's feet — and the gate
-    must lift once the recording is running."""
+    the cameras a fresh trigger clock under the recording's feet -- and the gate
+    must lift once the recording is running.
+    """
     order: list[str] = []
     plugin = HookLog(order)
     plugin.release_preview_stop.clear()  # hold on_preview_stop open
@@ -367,8 +374,9 @@ def test_camera_ops_are_refused_while_the_preview_arm_is_being_canceled(
 
 def test_failed_start_rearms_the_managed_preview(make_controller, monkeypatch):
     """If no camera can begin the record grab after the preview arm was
-    canceled, the preview — cameras and board — is re-armed and the start gate
-    released, so the operator is back on a live, strobe-lit preview."""
+    canceled, the preview -- cameras and board -- is re-armed and the start gate
+    released, so the operator is back on a live, strobe-lit preview.
+    """
     order: list[str] = []
     controller, system = make_controller(
         trigger_source="managed", plugin=HookLog(order), auto_preview=True

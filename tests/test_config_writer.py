@@ -1,12 +1,12 @@
 """TOML config writer: round-trip fidelity, strftime safety, atomic writes."""
 
 import glob
+import tomllib
 from pathlib import Path
 
 import pytest
 
 from octacam import config_writer as cw
-from octacam._compat import tomllib
 from octacam.config import parse_config, parse_record_section
 
 PRESETS = sorted(glob.glob("configs/*/octacam_config.toml"))
@@ -94,12 +94,13 @@ def test_dumps_serializes_date_and_datetime():
     doc = {
         "record": {
             "directory": datetime.date(2026, 7, 9),
-            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),
+            # A TOML local date-time.
+            "stamp": datetime.datetime(2026, 7, 9, 13, 30, 5),  # noqa: DTZ001
         }
     }
     reparsed = tomllib.loads(cw._dumps(doc))["record"]
     assert reparsed["directory"] == datetime.date(2026, 7, 9)
-    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)
+    assert reparsed["stamp"] == datetime.datetime(2026, 7, 9, 13, 30, 5)  # noqa: DTZ001
 
 
 def test_plugin_options_roundtrip():
@@ -160,7 +161,10 @@ def test_new_config_dir_rejects_unsafe_names(tmp_path, name):
 
 
 def test_new_config_dir_name_is_stripped(tmp_path):
-    assert cw.resolve_new_config_dir(tmp_path / "active", " my_rig ") == tmp_path / "my_rig"
+    assert (
+        cw.resolve_new_config_dir(tmp_path / "active", " my_rig ")
+        == tmp_path / "my_rig"
+    )
 
 
 def test_resolve_new_config_dir_collision(tmp_path):
@@ -374,7 +378,10 @@ def test_with_record_settings_duration_units(unit, fps, duration_s, expected):
     assert (record["duration"], record["duration_unit"]) == expected
     # Whatever the unit, the snapshot loads back as the recorded length.
     reloaded = parse_record_section(edited)
-    assert duration_to_seconds(reloaded.duration, reloaded.duration_unit, fps) == duration_s
+    assert (
+        duration_to_seconds(reloaded.duration, reloaded.duration_unit, fps)
+        == duration_s
+    )
 
 
 def test_with_record_settings_rescales_frames_when_only_fps_changed():
@@ -460,7 +467,7 @@ def test_with_camera_transforms_noop_when_nothing_changed():
 
 
 def test_with_camera_transforms_patches_rotation_and_flips():
-    # The capillary rig's PR-test takes: top rotated 90° in the View tab, which
+    # The capillary rig's PR-test takes: top rotated 90 deg in the View tab, which
     # the recording baked in but the snapshot did not carry.
     raw = _rig_cameras()
     live = {

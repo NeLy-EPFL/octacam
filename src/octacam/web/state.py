@@ -24,7 +24,7 @@ class StrictModel(BaseModel):
 
 
 def require_config_dir(config_dir: str | Path | None) -> Path:
-    """``config_dir`` as a Path; 400 when the session has none."""
+    """`config_dir` as a Path; 400 when the session has none."""
     if not config_dir:
         raise HTTPException(400, "No config directory is set for this session")
     return Path(config_dir)
@@ -32,12 +32,13 @@ def require_config_dir(config_dir: str | Path | None) -> Path:
 
 @dataclasses.dataclass(eq=False)
 class AppState:
-    """One GUI session; cli.gui reads it as ``app.state.app_state``.
+    """One GUI session; cli.gui reads it as `app.state.app_state`.
 
-    ``config`` is live (a save of the active config replaces it); ``raw_config``
+    `config` is live (a save of the active config replaces it); `raw_config`
     is the parsed TOML a save patches, so [gui], [[plugins]] and the save-dir
-    template survive it. ``plugin_web`` maps each plugin with a web UI to its
-    assets dir."""
+    template survive it. `plugin_web` maps each plugin with a web UI to its
+    assets dir.
+    """
 
     controller: RecordingController
     hub: Hub
@@ -52,9 +53,10 @@ class AppState:
     process_after: bool = False
 
     def adopt_config(self, raw: dict) -> None:
-        """Make the active config just saved from ``raw`` live: the next save
+        """Make the active config just saved from `raw` live: the next save
         patches it, and the cameras get its display transforms (which recordings
-        bake in) and its ROI centering."""
+        bake in) and its ROI centering.
+        """
         self.raw_config = raw
         try:
             self.config = parse_config(find_config_file(self.config_dir))
@@ -65,15 +67,16 @@ class AppState:
         self.controller.camera_system.apply_display_config(self.config.cameras)
 
     def refresh_update_notice(self) -> None:
-        """Set ``update_notice`` from a PyPI check. Fail-soft; never raises."""
+        """Set `update_notice` from a PyPI check. Fail-soft; never raises."""
         try:
             self.update_notice = updates.check()
         except Exception:
             log.debug("update check failed", exc_info=True)
 
     def system_descriptor(self) -> dict:
-        """The /api/system payload and WS ``system`` message; ``ready`` is False
-        (no cameras) until the init thread attaches them and pushes a fresh one."""
+        """The /api/system payload and WS `system` message; `ready` is False
+        (no cameras) until the init thread attaches them and pushes a fresh one.
+        """
         controller = self.controller
         config_by_serial = {c.serial_number: c for c in self.config.cameras}
         cameras = []

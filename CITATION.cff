@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use octacam, please cite it as below."
+type: software
+title: "octacam: synchronized video from many scientific cameras"
+authors:
+  - family-names: Lam
+    given-names: Thomas Ka Chung
+    email: thomas.lam@epfl.ch
+    affiliation: "EPFL, Neuroengineering Laboratory"
+  - family-names: Durrieu
+    given-names: Matthias
+repository-code: "https://github.com/NeLy-EPFL/octacam"
+url: "https://nely-epfl.github.io/octacam/"
+license: MIT
+keywords:
+  - video acquisition
+  - multi-camera
+  - GenICam
+  - Basler
+  - FLIR
+  - neuroscience

@@ -2,7 +2,7 @@
 
 The grid is the one path that defaults to a YUV pixel format (for browser /
 QuickTime playback), so it must force full colour range or it loses the
-0-255 → 16-235 squeeze on every cell. See ffmpeg.color_range_args.
+0-255 -> 16-235 squeeze on every cell. See ffmpeg.color_range_args.
 """
 
 import logging
@@ -25,7 +25,7 @@ _GRAY_FFMPEG_PARAMS = "-c:v libx264 -preset ultrafast -crf 0 -pix_fmt gray"
 
 
 def _gray_mp4(folder, name, frame=None):
-    """Write a tiny gray (full-range) mp4 cell named ``<name>.mp4``."""
+    """Write a tiny gray (full-range) mp4 cell named `<name>.mp4`."""
     if frame is None:
         frame = np.tile(np.arange(W, dtype=np.uint8) * (255 // (W - 1)), (H, 1))
     raw = folder / f"{name}.raw"
@@ -44,11 +44,11 @@ def _gray_mp4(folder, name, frame=None):
 
 
 def _gray_mp4_sized(folder, name, w, h, value):
-    """Write a solid-gray (full-range) mp4 of arbitrary ``w``×``h`` size.
+    """Write a solid-gray (full-range) mp4 of arbitrary `w`x`h` size.
 
     Used to build a rig with non-uniform frame sizes so the grid's
-    letterboxing can be exercised (unlike :func:`_gray_mp4`, which is fixed at
-    the module ``W``×``H``).
+    letterboxing can be exercised (unlike `_gray_mp4`, which is fixed at
+    the module `W`x`H`).
     """
     frame = np.full((h, w), value, dtype=np.uint8)
     raw = folder / f"{name}.raw"
@@ -79,14 +79,14 @@ def test_grid_yuv420p_forces_full_range(tmp_path, caplog):
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
     cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "yuv420p")
-    # Output stream is tagged full range, and the in-graph gray→yuv conversion
+    # Output stream is tagged full range, and the in-graph gray->yuv conversion
     # is pinned to full range so the luma is never squeezed into 16-235.
     assert "-color_range pc" in cmd
     assert "out_range=full" in cmd
 
 
 def test_grid_gray_adds_no_range_flags(tmp_path, caplog):
-    # gray (4:0:0) is already full range — no -color_range / out_range churn.
+    # gray (4:0:0) is already full range -- no -color_range / out_range churn.
     _gray_mp4(tmp_path, "a")
     _gray_mp4(tmp_path, "b")
     cmd = _dry_run_cmd(caplog, tmp_path, [["a", "b"]], "gray")
@@ -380,11 +380,11 @@ def test_probe_runs_off_the_tty_and_is_bounded(tmp_path, monkeypatch):
 def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
     """A grid is never one of its own inputs, and never another grid's.
 
-    Under ``--no-transcode`` ``folder_outputs`` is "every *.mp4 in the folder",
+    Under `--no-transcode` `folder_outputs` is "every *.mp4 in the folder",
     which includes the configured grids. Comparing a grid against that set made
-    two ``[[visualization]]`` entries mark each other stale — building the first
+    two `[[visualization]]` entries mark each other stale -- building the first
     refreshes its mtime, so the second is now "older than the videos it
-    composites" — re-encoding both on every run and defeating the idempotent
+    composites" -- re-encoding both on every run and defeating the idempotent
     skip-if-exists contract, on precisely the flag documented for regenerating
     just the grids. Next run the roles swap, so it never settles.
     """
@@ -439,7 +439,8 @@ def test_two_visualizations_do_not_rebuild_each_other(tmp_path, monkeypatch):
 
 def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
     """The staleness check itself must survive the fix: a genuinely stale grid
-    (older than a camera video it composites) is still redone."""
+    (older than a camera video it composites) is still redone.
+    """
     import os
     import types
 
@@ -456,9 +457,7 @@ def test_a_grid_older_than_its_source_is_still_rebuilt(tmp_path, monkeypatch):
 
     cfg = types.SimpleNamespace(
         visualization=[
-            types.SimpleNamespace(
-                name="grid.mp4", layout=[["cam0"]], ffmpeg_params=""
-            )
+            types.SimpleNamespace(name="grid.mp4", layout=[["cam0"]], ffmpeg_params="")
         ],
         transcode=types.SimpleNamespace(ffmpeg_params=""),
         transfer=None,

@@ -13,7 +13,7 @@ successor to SeptaCam.
 > Active development is on the `develop` branch (git-flow: `main` tracks the
 > latest stable release, `develop` is the next). The camera layer is a multi-tier
 > GenICam cascade (basler / flir / spinnaker / pycameleon; see below) running on
-> Python 3.10–3.14; `requires-python >= 3.10`.
+> Python 3.14; `requires-python = ">=3.14,<3.15"`.
 
 ## Dev workflow
 
@@ -21,11 +21,11 @@ The project uses **uv** (no pip in the venv).
 
 ```bash
 uv sync                                   # install (dev + core deps)
-uv run pytest -q -o addopts=""            # ~1,650 tests, ~6 min (-o skips slow coverage)
-uv run ruff check src/                    # lint (clean)
-uv run pyright src/                       # types (documented baseline; net-new must be 0)
+uv run pytest                             # ~1,660 tests, ~8 min; warnings are errors
+uv run ruff check && uv run ruff format --check   # lint + format (clean)
+uv run pyrefly check                      # types (zero errors)
 uv run --group docs mkdocs build --strict # docs build + link/nav validation
-uv run --group frontend pytest tests/test_frontend.py -o addopts=""  # browser GUI tests, on their own
+uv run --group frontend pytest tests/test_frontend.py  # browser GUI tests, on their own
 
 PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, no hardware
 ```
@@ -35,10 +35,15 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
 - **`fake` backend** is the CI vehicle — a rich SFNC-keyed synthetic camera that
   exercises every node/widget kind without hardware. Prefer adding fake-backed
   regression tests over hardware-only assertions.
-- **Lint/type baselines:** ruff is clean; pyright reports 4 errors (the fake
-  backend's node-table literal and two float() calls on its `object` feature
-  values; recording_format's `savez_compressed(**arrays)`); every backend's SDK
-  handle is typed `Any`. **New work must add zero.**
+- **Lint/type baselines:** ruff, `ruff format` and pyrefly are clean, with no
+  baseline; an ignore carries its reason (`savez_compressed(**arrays)` is the one
+  pyrefly ignore). Every backend's SDK handle is typed `Any`; feature values typed
+  `object` go through `coerce_float`/`coerce_bool`. **New work must keep all three
+  clean**, and `.py` files ASCII (a glyph users see as a `\N{...}` escape).
+- **CLI conventions are shared with deeperfly and spintrack** (CONTRIBUTING.md):
+  every command is wrapped in `cli._common.command` and takes `-v/--verbose`;
+  `--set KEY=VALUE` (`config.apply_overrides`) on the commands that read a rig
+  config; `docs/cli.md` is generated (`uv run python tests/test_cli_docs.py`).
 - **`tests/conftest.py`** sets the env (`PYLON_CAMEMU`, `OCTACAM_FAKE_CAMERAS`,
   `OCTACAM_NO_UPDATE_CHECK`), gives each test its own `OCTACAM_CACHE_DIR`,
   restores the `octacam` logger after each test (so use `caplog` —
@@ -61,15 +66,11 @@ PYLON_CAMEMU=8 octacam gui configs/emulate_basler   # run with 8 fake cameras, n
   running event loop in the process, so any later test calling `asyncio.run`
   dies (`tests/test_web.py` sender cases, `tests/test_pycameleon_backend.py`
   retrieve cases); naming the file in a list with others still collects it.
-- **The dev rig runs Python 3.14, but `requires-python` is `>= 3.10`.** 3.14
-  evaluates annotations lazily (PEP 649), so a bug a 3.10–3.13 user hits at
-  *import* is invisible here: a name imported only under `if TYPE_CHECKING:` must
-  be **quoted** in an annotation Python evaluates (function signatures;
-  module/class-level variable annotations — function-*local* ones, like
-  `self._task: TaskID | None` in a method, are never evaluated). An unquoted one
-  took out the whole CLI below 3.14.
-  `tests/test_typing_hygiene.py` walks the AST for this on any version; an import
-  test cannot.
+- **Python 3.14 only** (`requires-python = ">=3.14,<3.15"`, like deeperfly and
+  spintrack). Annotations are evaluated lazily (PEP 649), so a name imported only
+  under `if TYPE_CHECKING:` no longer breaks import, but anything that introspects
+  an annotation at runtime (Typer commands, pydantic models, FastAPI routes) still
+  evaluates it: keep those names real imports.
 - **Pylon's GenTL producers segfault at exit**: pylon's GenTL transport layer
   loads the *system* pylon's producers from `GENICAM_GENTL64_PATH`
   (`/etc/profile.d/basler-gentl-path.sh`), whose `libuxapi` unload segfaulted

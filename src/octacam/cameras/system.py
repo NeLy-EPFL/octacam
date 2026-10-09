@@ -1,6 +1,6 @@
 """Multi-camera orchestration, independent of any camera SDK.
 
-``CameraSystem`` enumerates and opens the cameras, drives them in parallel (each
+`CameraSystem` enumerates and opens the cameras, drives them in parallel (each
 SDK releases the GIL on its blocking calls, so N cameras take about one camera's
 time) and owns the shared software-trigger timer.
 """
@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from octacam.cameras.base import WRITER_QUEUE_SIZE, BackendError, Camera
 from octacam.cameras.registry import (
@@ -83,14 +83,16 @@ class CameraSystem:
 
     def _warn_if_incomplete(self) -> None:
         """Warn once, loudly, when fewer cameras opened than were asked for: the
-        individual failures scroll past at startup."""
+        individual failures scroll past at startup.
+        """
         if not self.requested_serial_numbers or not self.missing:
             return
         detail = ", ".join(
             f"{serial} ({reason})" for serial, reason in sorted(self.missing.items())
         )
         log.warning(
-            "INCOMPLETE RIG: %d of %d configured cameras opened — missing %s. "
+            "INCOMPLETE RIG: %d of %d configured cameras opened \N{EM DASH} missing "
+            "%s. "
             "Recordings will be short these cameras.",
             len(self.cameras),
             len(self.requested_serial_numbers),
@@ -105,16 +107,17 @@ class CameraSystem:
     @classmethod
     def for_config(
         cls,
-        config: "OctacamConfig",
+        config: OctacamConfig,
         config_dir: str | Path,
         backend: str | None = None,
-    ) -> "CameraSystem":
+    ) -> CameraSystem:
         """Open the rig *config* describes (through *backend*, else the config's):
         each camera named, its parameter file loaded and its display settings
         applied. Raises BackendError when no camera opens.
 
         Any failure closes the cameras before raising: a camera left open to
-        interpreter teardown can crash it (see BaslerBackend.close)."""
+        interpreter teardown can crash it (see BaslerBackend.close).
+        """
         system = cls(
             [c.serial_number for c in config.cameras], backend=backend or config.backend
         )
@@ -132,15 +135,16 @@ class CameraSystem:
         return system
 
     @classmethod
-    def pending(cls, backend: str = "auto") -> "CameraSystem":
+    def pending(cls, backend: str = "auto") -> CameraSystem:
         """A hardware-free placeholder with no cameras, which the GUI serves until
-        its init thread swaps in the real system (``attach_system``)."""
+        its init thread swaps in the real system (`attach_system`).
+        """
         return cls(backend=backend, _defer_open=True)
 
     def _enumerate(
         self, backend: str, requested_serial_numbers: list[str] | None
-    ) -> list[tuple[str, object, "Callable"]]:
-        """Resolve the selector to ``[(serial, handle, backend_factory), ...]``.
+    ) -> list[tuple[str, object, Callable]]:
+        """Resolve the selector to `[(serial, handle, backend_factory), ...]`.
 
         Each tier, in cascade order, is offered only the requested serials:
         enumeration is a device access (Basler's CreateDevice downloads the
@@ -218,8 +222,9 @@ class CameraSystem:
         return self.cameras[index]
 
     def apply_to_all(self, fn) -> list:
-        """``fn(camera)`` on every camera concurrently: the results in camera
-        order, or the first exception raised."""
+        """`fn(camera)` on every camera concurrently: the results in camera
+        order, or the first exception raised.
+        """
         results = []
         for _camera, result, exc in self._run_parallel(fn):
             if exc is not None:
@@ -236,15 +241,16 @@ class CameraSystem:
         return out
 
     def _run_parallel(self, fn):
-        """``fn(camera)`` on every camera concurrently, as ``[(camera, result,
-        exception)]`` in camera order (exception None on success)."""
+        """`fn(camera)` on every camera concurrently, as `[(camera, result,
+        exception)]` in camera order (exception None on success).
+        """
         if not self.cameras:
             return []
         with ThreadPoolExecutor(
             max_workers=len(self.cameras), thread_name_prefix="cam"
         ) as executor:
             futures = [executor.submit(fn, camera) for camera in self.cameras]
-        results = []
+        results: list[tuple[Camera, Any, Exception | None]] = []
         for camera, future in zip(self.cameras, futures, strict=True):
             try:
                 results.append((camera, future.result(), None))
@@ -268,9 +274,10 @@ class CameraSystem:
             if exc is not None:
                 raise exc
 
-    def apply_display_config(self, cameras: "list[CameraConfig]") -> None:
+    def apply_display_config(self, cameras: list[CameraConfig]) -> None:
         """Set each camera's display transform and ROI centering from config (an
-        absent camera gets neither); an enabled axis re-centers now."""
+        absent camera gets neither); an enabled axis re-centers now.
+        """
         by_serial = {c.serial_number: c for c in cameras}
         for camera in self.cameras:
             cfg = by_serial.get(camera.serial_number)
@@ -286,11 +293,13 @@ class CameraSystem:
                 except (BackendError, ValueError) as e:
                     log.debug(
                         "Could not apply center_%s on %s: %s",
-                        axis, camera.serial_number, e,
+                        axis,
+                        camera.serial_number,
+                        e,
                     )
 
     def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
-        """Start preview on every camera (modes: :meth:`Camera.start_preview`)."""
+        """Start preview on every camera (modes: `Camera.start_preview`)."""
         self.stop()
         for _camera, _result, exc in self._run_parallel(
             lambda camera: camera.start_preview(mode, fps)
@@ -309,12 +318,12 @@ class CameraSystem:
         writer_queue_size: int = WRITER_QUEUE_SIZE,
         hold: bool = False,
     ) -> list[str]:
-        """Start a take on every camera (each camera's ``take``, even one that
+        """Start a take on every camera (each camera's `take`, even one that
         fails to start); return the names that started.
 
-        Arguments as :meth:`Camera.start_record`. ``video_format`` is one format,
-        or one per camera in ``self.cameras`` order (a GPU recording's overflow
-        goes to the CPU, see :func:`octacam.writer.resolve_capture_formats`).
+        Arguments as `Camera.start_record`. `video_format` is one format,
+        or one per camera in `self.cameras` order (a GPU recording's overflow
+        goes to the CPU, see `octacam.writer.resolve_capture_formats`).
         """
         self.stop()
 
@@ -374,10 +383,13 @@ class CameraSystem:
         for camera in self.cameras:
             camera.set_trigger_source(use_software_trigger)
 
-    def prime_software_trigger(self, pulses: int, fps: float, timeout_s: float = 1.0) -> None:
-        """Fire ``pulses`` sacrificial software triggers at every camera (a GS3
+    def prime_software_trigger(
+        self, pulses: int, fps: float, timeout_s: float = 1.0
+    ) -> None:
+        """Fire `pulses` sacrificial software triggers at every camera (a GS3
         ignores its first triggers after acquisition start); their frames are
-        discarded under the priming hold."""
+        discarded under the priming hold.
+        """
         interval = 1.0 / fps if fps > 0 else 0.01
         for _ in range(pulses):
             self._trigger_all()
@@ -392,8 +404,9 @@ class CameraSystem:
             time.sleep(interval)
 
     def stop(self, fill_to: int | None = None) -> None:
-        """Stop and join every grab loop. ``fill_to`` (a completed train's pulse
-        count) pads each recording camera's video to that many frames."""
+        """Stop and join every grab loop. `fill_to` (a completed train's pulse
+        count) pads each recording camera's video to that many frames.
+        """
         for camera in self.cameras:
             camera.stop(fill_to)
         for camera in self.cameras:

@@ -1,5 +1,6 @@
 """The software-trigger hand-off's pairing (cameras/_trigger_handoff.py), through
-its public API, on a hand-driven clock so every deadline is exact."""
+its public API, on a hand-driven clock so every deadline is exact.
+"""
 
 import logging
 
@@ -52,7 +53,7 @@ def _fire(trigger) -> None:
 
 
 def _answer_after(trigger, clock, delay_ns: int) -> None:
-    """Fire one trigger and answer it with an image exposed ``delay_ns`` after."""
+    """Fire one trigger and answer it with an image exposed `delay_ns` after."""
     _fire(trigger)
     trigger.answered(clock.ns + CAMERA_AHEAD_NS + delay_ns)
 
@@ -85,9 +86,7 @@ def test_gives_up_on_a_trigger_past_its_answer_deadline(trigger, clock):
     assert trigger.last_index == UNMATCHED_TRIGGER
 
 
-def test_a_silent_camera_costs_only_the_short_deadline_until_it_answers(
-    trigger, clock
-):
+def test_a_silent_camera_costs_only_the_short_deadline_until_it_answers(trigger, clock):
     # A Grasshopper3 silently ignores its first triggers after acquisition start:
     # before the grab's first answer (and before a recording counts) each costs
     # only PRIMING_ANSWER_TIMEOUT_S and is not reported as unanswered. After the
@@ -167,7 +166,7 @@ def test_a_priming_give_up_clears_the_reference_at_counting_start(trigger, clock
 
 def test_drops_a_trigger_left_pending_for_half_a_period(trigger, clock):
     # While a recording counts at a low rate, a trigger left pending behind an
-    # unanswered one must be dropped once it is half a period old — not fired a
+    # unanswered one must be dropped once it is half a period old -- not fired a
     # whole period late under its own pulse number.
     trigger.configure_period(0.2)  # deadline max(1.0, 2P) = 1 s; stale after 0.1 s
     trigger.restart_sequence()

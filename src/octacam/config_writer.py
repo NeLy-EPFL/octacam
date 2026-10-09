@@ -2,18 +2,18 @@
 
 The stdlib has no TOML writer, so the config's small fixed schema is
 serialized here. Every edit patches the raw parsed TOML, so the sections it
-does not touch, and templated paths such as ``record.directory``, survive as
+does not touch, and templated paths such as `record.directory`, survive as
 they were; every file is written atomically.
 """
 
 import copy
 import dataclasses
 import datetime
+import tomllib
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from octacam._compat import tomllib
 from octacam.config import (
     duration_to_seconds,
     find_config_file,
@@ -82,7 +82,7 @@ def _toml_value(value: object) -> str:
         return "[" + ", ".join(_toml_value(v) for v in value) + "]"
     if isinstance(value, dict):
         # An inline table: arrays of tables inside a subtable (triggerbox's
-        # ``cameras``/``lights`` under ``[plugins.options]``).
+        # `cameras`/`lights` under `[plugins.options]`).
         inner = ", ".join(f"{k} = {_toml_value(v)}" for k, v in value.items())
         return "{" + inner + "}"
     raise TypeError(f"Unsupported TOML value type: {type(value).__name__}")
@@ -91,8 +91,9 @@ def _toml_value(value: object) -> str:
 def _emit_table(
     lines: list[str], header: str, table: dict, *, array: bool = False
 ) -> None:
-    """Emit a ``[header]`` (or ``[[header]]``) table: its keys first, then each
-    nested dict as a ``[header.key]`` subtable."""
+    """Emit a `[header]` (or `[[header]]`) table: its keys first, then each
+    nested dict as a `[header.key]` subtable.
+    """
     lines.append(f"[[{header}]]" if array else f"[{header}]")
     subtables = [(k, v) for k, v in table.items() if isinstance(v, dict)]
     for key, value in table.items():
@@ -114,7 +115,7 @@ def _dumps(data: dict) -> str:
         _emit_table(lines, header, table, array=array)
         blocks.append("\n".join(lines))
 
-    # Top-level keys (``backend``) must precede every table header.
+    # Top-level keys (`backend`) must precede every table header.
     scalars = {
         key: value
         for key, value in data.items()
@@ -149,11 +150,11 @@ def _dumps(data: dict) -> str:
 
 
 def merge_camera_display(raw_base: dict, patches: list[dict]) -> dict:
-    """Return a copy of ``raw_base`` with per-camera display fields patched.
+    """Return a copy of `raw_base` with per-camera display fields patched.
 
-    ``patches`` entries carry a ``serial`` (or ``serial_number``) plus any of
-    ``DISPLAY_FIELDS`` and an optional ``name``. A camera not already present
-    in ``raw_base`` is appended.
+    `patches` entries carry a `serial` (or `serial_number`) plus any of
+    `DISPLAY_FIELDS` and an optional `name`. A camera not already present
+    in `raw_base` is appended.
     """
     doc = copy.deepcopy(raw_base) if raw_base else {}
     cameras = doc.get("cameras")
@@ -190,10 +191,10 @@ def with_process_params(
     transfer_directory: str,
     transfer_checksum: bool,
 ) -> dict:
-    """Return a copy of ``raw`` with the live Process-section values as
-    ``[transcode].ffmpeg_params`` and ``[transfer]``.
+    """Return a copy of `raw` with the live Process-section values as
+    `[transcode].ffmpeg_params` and `[transfer]`.
 
-    Equal to ``raw`` when they match what the config loads as, and a missing
+    Equal to `raw` when they match what the config loads as, and a missing
     section is added only for a value that differs from its default.
     """
     doc = copy.deepcopy(raw) if raw else {}
@@ -226,16 +227,16 @@ def with_process_params(
 
 
 def with_record_settings(raw: dict, live: Mapping[str, Any]) -> dict:
-    """Return a copy of ``raw`` whose ``[record]`` reproduces a recording's settings.
+    """Return a copy of `raw` whose `[record]` reproduces a recording's settings.
 
-    ``live`` maps ``[record]`` keys to the values the recording ran with, with
-    ``duration_s`` (seconds) in place of ``duration``/``duration_unit``. A key is
+    `live` maps `[record]` keys to the values the recording ran with, with
+    `duration_s` (seconds) in place of `duration`/`duration_unit`. A key is
     written only when its value differs from what the config already loads as,
     so a recording made with the config's own settings keeps a byte-verbatim
     snapshot. A changed duration keeps the config's unit when the value there is
     exact and readable (5 minutes -> 60 minutes), else it is written in seconds
-    (100 s, not 1.6666666666666667 minutes). A ``None``
-    (``max_nvenc_sessions`` left at auto) removes the key; TOML has no null.
+    (100 s, not 1.6666666666666667 minutes). A `None`
+    (`max_nvenc_sessions` left at auto) removes the key; TOML has no null.
     """
     doc = copy.deepcopy(raw) if raw else {}
     current = parse_record_section(doc)
@@ -263,13 +264,15 @@ def with_record_settings(raw: dict, live: Mapping[str, Any]) -> dict:
     return doc
 
 
-def with_camera_transforms(raw: dict, transforms: Mapping[str, Mapping[str, Any]]) -> dict:
-    """Return a copy of ``raw`` whose ``[[cameras]]`` carry the live transforms
-    (serial -> :meth:`DisplayTransform.to_dict`).
+def with_camera_transforms(
+    raw: dict, transforms: Mapping[str, Mapping[str, Any]]
+) -> dict:
+    """Return a copy of `raw` whose `[[cameras]]` carry the live transforms
+    (serial -> `DisplayTransform.to_dict`).
 
     A camera is patched only when its transform differs from what the config
     loads as, and only when the config lists it: adding one would change which
-    cameras the rig opens. A flip is the sign of ``scale_x``/``scale_y``.
+    cameras the rig opens. A flip is the sign of `scale_x`/`scale_y`.
     """
     doc = copy.deepcopy(raw) if raw else {}
     cameras = doc.get("cameras")
@@ -296,9 +299,10 @@ def with_camera_transforms(raw: dict, transforms: Mapping[str, Mapping[str, Any]
 
 
 def _duration_in(duration_s: float, unit: str, fps: float) -> tuple[float, str]:
-    """``(duration, unit)`` that loads back as exactly ``duration_s``: in ``unit``
+    """`(duration, unit)` that loads back as exactly `duration_s`: in `unit`
     when the value there has at most 3 decimals and converts back exactly, else
-    in seconds, which always does."""
+    in seconds, which always does.
+    """
     if unit == "frames":
         value = duration_s * fps
     else:
@@ -309,14 +313,14 @@ def _duration_in(duration_s: float, unit: str, fps: float) -> tuple[float, str]:
 
 
 def with_plugin_options(raw: dict, options_by_name: Mapping[str, dict]) -> dict:
-    """Return a copy of ``raw`` whose ``[[plugins]]`` reproduce a session's plugins.
+    """Return a copy of `raw` whose `[[plugins]]` reproduce a session's plugins.
 
-    ``options_by_name`` has an entry for every plugin the session loaded: its
+    `options_by_name` has an entry for every plugin the session loaded: its
     current name -> the options its live state differs in (often empty). Those
     options are merged into the plugin's entry, matched through legacy aliases;
-    a loaded plugin the config does not list (enabled with ``--plugin``) is
+    a loaded plugin the config does not list (enabled with `--plugin`) is
     appended so a relaunch loads it too. With nothing to merge or append the copy
-    compares equal to ``raw``.
+    compares equal to `raw`.
     """
     doc = copy.deepcopy(raw) if raw else {}
     found = doc.get("plugins")
@@ -351,7 +355,7 @@ def with_plugin_options(raw: dict, options_by_name: Mapping[str, dict]) -> dict:
 
 
 def write_config(config_dir: str | Path, doc: dict) -> Path:
-    """Serialize ``doc`` to ``config_dir/octacam_config.toml`` atomically."""
+    """Serialize `doc` to `config_dir/octacam_config.toml` atomically."""
     path = find_config_file(config_dir)
     atomic_write_text(path, _dumps(doc))
     return path
@@ -362,8 +366,9 @@ def write_pfs_files(
     pfs_by_serial: dict[str, str],
     extension: str | Mapping[str, str] = "pfs",
 ) -> None:
-    """Write each ``<serial> -> param text`` to ``<serial>.<extension>``;
-    ``extension`` is one suffix or a mixed rig's ``serial -> suffix`` map."""
+    """Write each `<serial> -> param text` to `<serial>.<extension>`;
+    `extension` is one suffix or a mixed rig's `serial -> suffix` map.
+    """
     target_dir = Path(target_dir)
     for serial, text in pfs_by_serial.items():
         ext = extension if isinstance(extension, str) else extension.get(serial, "pfs")
@@ -377,8 +382,9 @@ def copy_auxiliary_pfs(
     extension: str | Iterable[str] = "pfs",
 ) -> None:
     """Copy the parameter files no live camera wrote (auxiliary configs,
-    cameras not opened), so ``target_dir`` is a complete config directory;
-    ``extension`` is one suffix or a mixed rig's suffixes."""
+    cameras not opened), so `target_dir` is a complete config directory;
+    `extension` is one suffix or a mixed rig's suffixes.
+    """
     src_dir, target_dir = Path(src_dir), Path(target_dir)
     if src_dir.resolve() == target_dir.resolve():
         return
@@ -395,8 +401,9 @@ def resolve_new_config_dir(
     active_dir: str | Path, name: str, *, overwrite: bool = False
 ) -> Path:
     """Resolve a new config dir beside the active one, where presets live; for a
-    session relaunched from a recording (its ``octacam_recording`` subfolder),
-    beside the recording folder."""
+    session relaunched from a recording (its `octacam_recording` subfolder),
+    beside the recording folder.
+    """
     anchor = recording_folder(active_dir)
     target = anchor.parent / safe_segment(name, "config name")
     if target.exists() and not overwrite:
@@ -405,7 +412,7 @@ def resolve_new_config_dir(
 
 
 def load_raw_config(config_dir: str | Path) -> dict:
-    """Best-effort raw ``tomllib`` dict of the existing config (``{}`` if absent/bad)."""
+    """Best-effort raw `tomllib` dict of the existing config (`{}` if absent/bad)."""
     path = find_config_file(config_dir)
     if not path.exists():
         return {}
@@ -420,8 +427,9 @@ def load_raw_config(config_dir: str | Path) -> dict:
 
 @dataclasses.dataclass(frozen=True)
 class SavedConfig:
-    """What :func:`save_rig_config` wrote; ``raw`` is the rewritten active config's
-    document, for the caller to adopt (a new config dir is never adopted)."""
+    """What `save_rig_config` wrote; `raw` is the rewritten active config's
+    document, for the caller to adopt (a new config dir is never adopted).
+    """
 
     directory: Path
     cameras_written: list[str]
@@ -429,7 +437,7 @@ class SavedConfig:
 
 
 def save_rig_config(
-    controller: "RecordingController",
+    controller: RecordingController,
     active_dir: Path,
     raw: dict,
     cameras: list[dict],
@@ -439,13 +447,14 @@ def save_rig_config(
     sensor: bool = True,
     display: bool = True,
 ) -> SavedConfig:
-    """Write the cameras' parameter files (``sensor``) and ``raw`` patched with
-    their display settings (``display``) to ``active_dir``, or to a new config
-    dir ``new_name`` with the auxiliary parameter files, so it is complete.
-    Raises RuntimeError while camera control is locked (with ``sensor``; the
+    """Write the cameras' parameter files (`sensor`) and `raw` patched with
+    their display settings (`display`) to `active_dir`, or to a new config
+    dir `new_name` with the auxiliary parameter files, so it is complete.
+    Raises RuntimeError while camera control is locked (with `sensor`; the
     caller refuses a save while recording), ValueError for a bad name,
-    FileExistsError for an existing new dir without ``overwrite``, and OSError
-    when a write fails."""
+    FileExistsError for an existing new dir without `overwrite`, and OSError
+    when a write fails.
+    """
     system = controller.camera_system
     params = controller.export_camera_params() if sensor else {}
     doc = merge_camera_display(raw, cameras) if display else None

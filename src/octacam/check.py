@@ -1,16 +1,16 @@
 """Screen recordings for missed trigger pulses and desynchronized cameras
-(``octacam check``; read-only).
+(`octacam check`; read-only).
 
 * **Missed pulses.** A schema-4 recording carries the recorder's accounting:
-  per frame in ``timestamps.npz``, else the summary's counts (never its index
-  lists, which are capped), and its ``sync`` verdict is honored. An older one
+  per frame in `timestamps.npz`, else the summary's counts (never its index
+  lists, which are capped), and its `sync` verdict is honored. An older one
   is re-derived from its hardware timestamps with the recorder's tracker
-  (:func:`octacam.pulses.analyze_timestamps`); host-clock timestamps are not,
+  (`octacam.pulses.analyze_timestamps`); host-clock timestamps are not,
   as their delivery jitter would read as misses.
 * **Unequal frame counts**, a problem only for a take that ran to its end.
 * **A start offset** (frame 0 not the same pulse everywhere): a schema-4
   recording's own, never re-derived; an older one's from the trigger timing
-  events every camera shares (:func:`octacam.pulses.estimate_offset`). An
+  events every camera shares (`octacam.pulses.estimate_offset`). An
   offset n means the camera's frame k shows the earliest camera's frame k+n.
 * Late exposures, writer-queue fills and corrected clock jumps are noted.
 
@@ -118,8 +118,9 @@ def _natural_key(path: Path) -> list:
 
 def check_recordings(paths, fps: float | None = None) -> list[RecordingCheck]:
     """Check the recording each of *paths* names (it may also name a summary
-    file or an ``octacam_recording`` subfolder), or every recording under a path
-    that is not one, in natural order."""
+    file or an `octacam_recording` subfolder), or every recording under a path
+    that is not one, in natural order.
+    """
     found: dict[Path, Path] = {}
     for path in paths:
         for folder in find_recordings([path], False) or find_recordings([path], True):
@@ -133,11 +134,15 @@ def _after_frame(missed: list[int]) -> list[int]:
 
 
 def _shown(pulses: list[int], total: int | None = None, limit: int = 8) -> str:
-    """The first ``limit`` of ``pulses``, and how many of ``total`` are not shown."""
+    """The first `limit` of `pulses`, and how many of `total` are not shown."""
     total = len(pulses) if total is None else total
     shown = pulses[:limit]
     text = ", ".join(str(p) for p in shown)
-    return text + (f" … (+{total - len(shown)})" if total > len(shown) else "")
+    return text + (
+        f" \N{HORIZONTAL ELLIPSIS} (+{total - len(shown)})"
+        if total > len(shown)
+        else ""
+    )
 
 
 def _error(exc: BaseException) -> str:
@@ -146,7 +151,8 @@ def _error(exc: BaseException) -> str:
 
 def _count(meta: dict, count_key: str, list_key: str) -> int:
     """A schema-4 per-camera count; its capped index list stands in only when
-    the count is absent."""
+    the count is absent.
+    """
     value = meta.get(count_key)
     if value is None:
         return len(meta.get(list_key) or [])
@@ -155,8 +161,9 @@ def _count(meta: dict, count_key: str, list_key: str) -> int:
 
 def _read_arrays(path: Path) -> dict[str, np.ndarray]:
     # Every array is decompressed here, so a truncated or corrupt member fails
-    # now rather than halfway through the checks.
-    with np.load(path) as data:
+    # now rather than halfway through the checks. The file is opened here, not by
+    # np.load, which leaks its handle when the archive is truncated.
+    with open(path, "rb") as fh, np.load(fh) as data:
         return {k: np.asarray(data[k]) for k in data.files}
 
 
@@ -168,7 +175,8 @@ def _unreadable(folder: Path, fps: float | None, what: str) -> RecordingCheck:
 
 def check_recording(folder: str | Path, fps: float | None = None) -> RecordingCheck:
     """Check one recording folder (or its summary file or subfolder). A damaged
-    recording is reported as an "unreadable: ..." problem, never raised."""
+    recording is reported as an "unreadable: ..." problem, never raised.
+    """
     folder = recording_folder(folder)
     try:
         summary = read_summary(folder)
@@ -275,7 +283,8 @@ def _from_summary(cam: CameraCheck, meta: dict, filled: bool) -> None:
 
 def _from_accounting(cam: CameraCheck, missed_flags, pulse_index) -> None:
     """The recorder's per-frame accounting from timestamps.npz: every missed
-    pulse, where the summary's list stops at its cap."""
+    pulse, where the summary's list stops at its cap.
+    """
     cam.source = "recorded"
     pulse_index = np.asarray(pulse_index, dtype=np.int64)
     if cam.filled:
@@ -293,7 +302,8 @@ def _from_accounting(cam: CameraCheck, missed_flags, pulse_index) -> None:
 
 def _host_clocked(source, ts) -> str | None:
     """Why a pre-schema-4 camera's timestamps are host delivery times rather
-    than a camera clock, or None when they are the camera's own."""
+    than a camera clock, or None when they are the camera's own.
+    """
     if source == "host":
         return 'its timestamps are host delivery times (timestamp_source "host")'
     if source == "mixed":
@@ -307,7 +317,8 @@ def _host_clocked(source, ts) -> str | None:
 
 def _ended_early(summary: dict, cams: list[CameraCheck]) -> str | None:
     """Why the take may have ended its cameras on different pulses (it did not
-    run to its end), or None."""
+    run to its end), or None.
+    """
     if summary.get("aborted"):
         return "the recording was aborted"
     completed = summary.get("completed")
@@ -406,7 +417,8 @@ def _start_offsets(
     series: dict[str, np.ndarray],
 ) -> None:
     """Start alignment: the recorder's own verdict when it has one, else line the
-    cameras up on shared trigger-timing events."""
+    cameras up on shared trigger-timing events.
+    """
     checked = [c for c in result.cameras if c.source != "none"]
     recorded = [
         c
@@ -435,7 +447,7 @@ def _start_offsets(
         return reports[name]
 
     ref = cands[0]
-    # A camera that started after ``ref`` has a negative lag.
+    # A camera that started after `ref` has a negative lag.
     after_ref: dict[str, int] = {ref.name: 0}
     events: dict[str, int] = {}
     for cam in cands[1:]:

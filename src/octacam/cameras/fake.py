@@ -1,9 +1,9 @@
 """In-memory fake camera backend, the CI vehicle.
 
 An SFNC-keyed node table spanning every widget kind, and synthetic Mono8 frames
-that come only once ``trigger_once`` has fired, so the rig's PreciseTimer drives
-it. Its test knobs model a real camera's failure modes. ``enumerate_fake`` reads
-serials from ``OCTACAM_FAKE_CAMERAS`` (default ``FAKE-0,FAKE-1``).
+that come only once `trigger_once` has fired, so the rig's PreciseTimer drives
+it. Its test knobs model a real camera's failure modes. `enumerate_fake` reads
+serials from `OCTACAM_FAKE_CAMERAS` (default `FAKE-0,FAKE-1`).
 """
 
 import logging
@@ -15,7 +15,13 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras.base import BackendError, FeatureInfo, Frame, coerce_bool
+from octacam.cameras.base import (
+    BackendError,
+    FeatureInfo,
+    Frame,
+    coerce_bool,
+    coerce_float,
+)
 from octacam.cameras.genicam import GenICamBackend
 from octacam.cameras.registry import BackendSpec, select_serials
 
@@ -35,76 +41,272 @@ def _default_nodes() -> dict[str, dict]:
     """A fresh SFNC-keyed node table spanning every widget kind."""
 
     def n(name, display, kind, category, value, **kw):
-        e = {"name": name, "display_name": display, "type": kind,
-             "category": category, "value": value, "writable": kw.pop("writable", True),
-             "visibility": kw.pop("visibility", "beginner")}
+        e = {
+            "name": name,
+            "display_name": display,
+            "type": kind,
+            "category": category,
+            "value": value,
+            "writable": kw.pop("writable", True),
+            "visibility": kw.pop("visibility", "beginner"),
+        }
         e.update(kw)
         return name, e
 
-    nodes = dict([
-        # --- ImageFormatControl ---
-        n("Width", "Width", "int", "ImageFormatControl", _SENSOR_W,
-          min=16, max=_SENSOR_W, inc=16, unit="px"),
-        n("Height", "Height", "int", "ImageFormatControl", _SENSOR_H,
-          min=16, max=_SENSOR_H, inc=16, unit="px"),
-        n("OffsetX", "Offset X", "int", "ImageFormatControl", 0,
-          min=0, max=_SENSOR_W - 16, inc=4, unit="px"),
-        n("OffsetY", "Offset Y", "int", "ImageFormatControl", 0,
-          min=0, max=_SENSOR_H - 16, inc=2, unit="px"),
-        n("WidthMax", "Width Max", "int", "ImageFormatControl", _SENSOR_W,
-          min=16, max=_SENSOR_W, inc=1, unit="px", writable=False, visibility="expert"),
-        n("HeightMax", "Height Max", "int", "ImageFormatControl", _SENSOR_H,
-          min=16, max=_SENSOR_H, inc=1, unit="px", writable=False, visibility="expert"),
-        n("PixelFormat", "Pixel Format", "enum", "ImageFormatControl", "Mono8",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Mono8", "Mono16")]),
-        n("ReverseX", "Reverse X", "bool", "ImageFormatControl", False,
-          visibility="expert"),
-        n("TestPattern", "Test Pattern", "enum", "ImageFormatControl", "Off",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Off", "GreyRamp", "ColorBars")]),
-        # --- AcquisitionControl ---
-        n("ExposureTime", "Exposure Time", "float", "AcquisitionControl", 5000.0,
-          min=20.0, max=1_000_000.0, inc=1.0, unit="us"),
-        n("ExposureAuto", "Exposure Auto", "enum", "AcquisitionControl", "Off",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Off", "Once", "Continuous")]),
-        n("AcquisitionFrameRate", "Acquisition Frame Rate", "float",
-          "AcquisitionControl", 100.0, min=1.0, max=1000.0, inc=0.1, unit="Hz",
-          visibility="expert"),
-        n("TriggerMode", "Trigger Mode", "enum", "AcquisitionControl", "Off",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Off", "On")]),
-        n("TriggerSource", "Trigger Source", "enum", "AcquisitionControl", "Line1",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Software", "Line0", "Line1")]),
-        # --- AnalogControl ---
-        n("Gain", "Gain", "float", "AnalogControl", 0.0,
-          min=0.0, max=24.0, inc=0.1, unit="dB"),
-        n("GainAuto", "Gain Auto", "enum", "AnalogControl", "Off",
-          entries=[{"value": v, "display": v, "available": True}
-                   for v in ("Off", "Once", "Continuous")]),
-        n("BlackLevel", "Black Level", "float", "AnalogControl", 0.0,
-          min=0.0, max=63.0, inc=0.1, unit="%", visibility="expert"),
-        n("Gamma", "Gamma", "float", "AnalogControl", 1.0,
-          min=0.25, max=4.0, inc=0.01, visibility="expert"),
-        n("GammaEnable", "Gamma Enable", "bool", "AnalogControl", True,
-          visibility="expert"),
-        # --- DeviceControl ---
-        n("DeviceModelName", "Device Model Name", "string", "DeviceControl",
-          "FakeCamera", writable=False),
-        n("DeviceUserID", "Device User ID", "string", "DeviceControl", "",
-          visibility="expert"),
-        n("DeviceLinkThroughputLimit", "Device Link Throughput Limit", "int",
-          "DeviceControl", 380_000_000, min=1_000_000, max=380_000_000, inc=1,
-          unit="Bps", visibility="expert"),
-    ])
+    nodes = dict(
+        [
+            # --- ImageFormatControl ---
+            n(
+                "Width",
+                "Width",
+                "int",
+                "ImageFormatControl",
+                _SENSOR_W,
+                min=16,
+                max=_SENSOR_W,
+                inc=16,
+                unit="px",
+            ),
+            n(
+                "Height",
+                "Height",
+                "int",
+                "ImageFormatControl",
+                _SENSOR_H,
+                min=16,
+                max=_SENSOR_H,
+                inc=16,
+                unit="px",
+            ),
+            n(
+                "OffsetX",
+                "Offset X",
+                "int",
+                "ImageFormatControl",
+                0,
+                min=0,
+                max=_SENSOR_W - 16,
+                inc=4,
+                unit="px",
+            ),
+            n(
+                "OffsetY",
+                "Offset Y",
+                "int",
+                "ImageFormatControl",
+                0,
+                min=0,
+                max=_SENSOR_H - 16,
+                inc=2,
+                unit="px",
+            ),
+            n(
+                "WidthMax",
+                "Width Max",
+                "int",
+                "ImageFormatControl",
+                _SENSOR_W,
+                min=16,
+                max=_SENSOR_W,
+                inc=1,
+                unit="px",
+                writable=False,
+                visibility="expert",
+            ),
+            n(
+                "HeightMax",
+                "Height Max",
+                "int",
+                "ImageFormatControl",
+                _SENSOR_H,
+                min=16,
+                max=_SENSOR_H,
+                inc=1,
+                unit="px",
+                writable=False,
+                visibility="expert",
+            ),
+            n(
+                "PixelFormat",
+                "Pixel Format",
+                "enum",
+                "ImageFormatControl",
+                "Mono8",
+                entries=[
+                    {"value": v, "display": v, "available": True}
+                    for v in ("Mono8", "Mono16")
+                ],
+            ),
+            n(
+                "ReverseX",
+                "Reverse X",
+                "bool",
+                "ImageFormatControl",
+                False,
+                visibility="expert",
+            ),
+            n(
+                "TestPattern",
+                "Test Pattern",
+                "enum",
+                "ImageFormatControl",
+                "Off",
+                entries=[
+                    {"value": v, "display": v, "available": True}
+                    for v in ("Off", "GreyRamp", "ColorBars")
+                ],
+            ),
+            # --- AcquisitionControl ---
+            n(
+                "ExposureTime",
+                "Exposure Time",
+                "float",
+                "AcquisitionControl",
+                5000.0,
+                min=20.0,
+                max=1_000_000.0,
+                inc=1.0,
+                unit="us",
+            ),
+            n(
+                "ExposureAuto",
+                "Exposure Auto",
+                "enum",
+                "AcquisitionControl",
+                "Off",
+                entries=[
+                    {"value": v, "display": v, "available": True}
+                    for v in ("Off", "Once", "Continuous")
+                ],
+            ),
+            n(
+                "AcquisitionFrameRate",
+                "Acquisition Frame Rate",
+                "float",
+                "AcquisitionControl",
+                100.0,
+                min=1.0,
+                max=1000.0,
+                inc=0.1,
+                unit="Hz",
+                visibility="expert",
+            ),
+            n(
+                "TriggerMode",
+                "Trigger Mode",
+                "enum",
+                "AcquisitionControl",
+                "Off",
+                entries=[
+                    {"value": v, "display": v, "available": True} for v in ("Off", "On")
+                ],
+            ),
+            n(
+                "TriggerSource",
+                "Trigger Source",
+                "enum",
+                "AcquisitionControl",
+                "Line1",
+                entries=[
+                    {"value": v, "display": v, "available": True}
+                    for v in ("Software", "Line0", "Line1")
+                ],
+            ),
+            # --- AnalogControl ---
+            n(
+                "Gain",
+                "Gain",
+                "float",
+                "AnalogControl",
+                0.0,
+                min=0.0,
+                max=24.0,
+                inc=0.1,
+                unit="dB",
+            ),
+            n(
+                "GainAuto",
+                "Gain Auto",
+                "enum",
+                "AnalogControl",
+                "Off",
+                entries=[
+                    {"value": v, "display": v, "available": True}
+                    for v in ("Off", "Once", "Continuous")
+                ],
+            ),
+            n(
+                "BlackLevel",
+                "Black Level",
+                "float",
+                "AnalogControl",
+                0.0,
+                min=0.0,
+                max=63.0,
+                inc=0.1,
+                unit="%",
+                visibility="expert",
+            ),
+            n(
+                "Gamma",
+                "Gamma",
+                "float",
+                "AnalogControl",
+                1.0,
+                min=0.25,
+                max=4.0,
+                inc=0.01,
+                visibility="expert",
+            ),
+            n(
+                "GammaEnable",
+                "Gamma Enable",
+                "bool",
+                "AnalogControl",
+                True,
+                visibility="expert",
+            ),
+            # --- DeviceControl ---
+            n(
+                "DeviceModelName",
+                "Device Model Name",
+                "string",
+                "DeviceControl",
+                "FakeCamera",
+                writable=False,
+            ),
+            n(
+                "DeviceUserID",
+                "Device User ID",
+                "string",
+                "DeviceControl",
+                "",
+                visibility="expert",
+            ),
+            n(
+                "DeviceLinkThroughputLimit",
+                "Device Link Throughput Limit",
+                "int",
+                "DeviceControl",
+                380_000_000,
+                min=1_000_000,
+                max=380_000_000,
+                inc=1,
+                unit="Bps",
+                visibility="expert",
+            ),
+        ]
+    )
     return nodes
 
 
 # The Python type of each node kind's value.
 _CAST: dict[str, Callable[[Any], Any]] = {
-    "int": int, "float": float, "bool": bool, "enum": str, "string": str,
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "enum": str,
+    "string": str,
 }
 
 
@@ -196,7 +398,8 @@ class FakeBackend(GenICamBackend):
         """A ROI node's ceiling, or None. The coupling runs both ways, as on a
         camera (an origin's max is sensor - size, a size's sensor - origin), so
         the suite catches ROI writes in the wrong order (see
-        ``genicam._clear_roi_offsets``)."""
+        `genicam._clear_roi_offsets`).
+        """
         if sfnc in ("OffsetX", "OffsetY"):
             return self._offset_max(sfnc)
         if sfnc == "Width":
@@ -212,8 +415,9 @@ class FakeBackend(GenICamBackend):
     # The typed seam, straight into the node table; a node the fake lacks raises
     # or reads None, so the TSV applier skips it as a camera's would.
     def _typed(self, name: str, kind: str) -> dict | None:
-        """``name``'s table entry if it holds a ``kind`` value (int and float
-        interchange), else None."""
+        """`name`'s table entry if it holds a `kind` value (int and float
+        interchange), else None.
+        """
         node = self._nodes.get(name)
         numeric = ("int", "float")
         if node is None or not (
@@ -294,9 +498,9 @@ class FakeBackend(GenICamBackend):
         if not node.get("writable", True):
             raise BackendError(f"node {name} is not writable")
         if kind == "int":
-            node["value"] = int(round(float(value)))
+            node["value"] = round(coerce_float(value))
         elif kind == "float":
-            node["value"] = float(value)
+            node["value"] = coerce_float(value)
         elif kind == "bool":
             node["value"] = coerce_bool(value)
         elif kind == "enum":
@@ -346,7 +550,11 @@ class FakeBackend(GenICamBackend):
             if not self.trigger.grabbing:
                 return None
         self._frame_index += 1
-        array = _render(self.width(), self.height(), self._frame_index) if wants_array() else None
+        array = (
+            _render(self.width(), self.height(), self._frame_index)
+            if wants_array()
+            else None
+        )
         return (array, time.time_ns())
 
     # ------------------------------------------------------------- grabbing
@@ -371,7 +579,9 @@ class FakeBackend(GenICamBackend):
         # A camera clock runs on through the post-priming settle (1 s here), so
         # the train's frames are not taken for priming stragglers.
         if self.hardware_period_ns:
-            self._clock_t0 += self.trigger.next_index * self.hardware_period_ns + 1_000_000_000
+            self._clock_t0 += (
+                self.trigger.next_index * self.hardware_period_ns + 1_000_000_000
+            )
         super().restart_trigger_sequence()
 
     @property
@@ -385,12 +595,15 @@ class FakeBackend(GenICamBackend):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         if self.hardware_period_ns:
-            return self._retrieve_clocked(timeout_ms, wants_array, self.hardware_period_ns)
+            return self._retrieve_clocked(
+                timeout_ms, wants_array, self.hardware_period_ns
+            )
         return super().retrieve(timeout_ms, wants_array)
 
     def _fire_trigger(self) -> bool:
         """The device's response to the trigger just fired (the newest
-        outstanding one); False only when the grab restarted under it."""
+        outstanding one); False only when the grab restarted under it.
+        """
         seq = self.trigger.fired_index
         if seq is None:
             return False
@@ -405,7 +618,9 @@ class FakeBackend(GenICamBackend):
             return True
         if seq in self.lost_triggers:
             return True  # nothing will arrive; the hand-off gives up on it
-        latency = self.latency_by_fire.get(self._triggers_since_grab, self.image_latency_s)
+        latency = self.latency_by_fire.get(
+            self._triggers_since_grab, self.image_latency_s
+        )
         self._device_images.append(
             _Image(
                 seq=seq,
@@ -431,13 +646,16 @@ class FakeBackend(GenICamBackend):
             return None
         if answers_trigger:
             self.trigger.answered(image.stamp)
-        array = _render(self.width(), self.height(), image.seq) if wants_array() else None
+        array = (
+            _render(self.width(), self.height(), image.seq) if wants_array() else None
+        )
         return (array, image.stamp)
 
     def _next_image(self, timeout_ms: int) -> _Image | None:
         """One fetch from the device's image queue: the image it hands over, or
         None. A wait ends early on a trigger offer or the grab's end (see
-        SoftwareTrigger.wait)."""
+        SoftwareTrigger.wait).
+        """
         head = self._device_images[0] if self._device_images else None
         if head is None or not head.ready(time.monotonic()):
             if head is not None and head.misses > 0:
@@ -479,13 +697,15 @@ class FakeBackend(GenICamBackend):
     ) -> Frame | None:
         """External-trigger record fetch: the trigger counter models the external
         source, so a recording with no pulses yields nothing (retrieve_freerun
-        would fabricate a frame per call)."""
+        would fabricate a frame per call).
+        """
         return self.retrieve(timeout_ms, wants_array)
 
 
 def _render(width: int, height: int, index: int) -> np.ndarray:
-    """A cheap, owned mono frame of value ``index`` mod 256 (the trigger's
-    sequence number where the frame answers one, else the frame count)."""
+    """A cheap, owned mono frame of value `index` mod 256 (the trigger's
+    sequence number where the frame answers one, else the frame count).
+    """
     return np.full((height, width), index % 256, dtype=np.uint8)
 
 
@@ -495,7 +715,7 @@ def _available_serials() -> list[str]:
 
 
 def enumerate_fake(requested_serials: list[str] | None = None):
-    """``[(serial, serial)]`` in :func:`select_serials` order."""
+    """`[(serial, serial)]` in `select_serials` order."""
     available = _available_serials()
     if not available:
         return []

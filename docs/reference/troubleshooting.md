@@ -40,8 +40,9 @@ unplugged. Stop the other instance, or check the connection, then retry.
 
 ## "Port 8765 is already in use"
 
-Another program (or an octacam serving a different config) holds the port. Pick a
-free one:
+Another program (or an octacam serving a different config) holds the port you
+asked for with `--port`. Leave `--port` out to take the next free port after 8765,
+or pick one:
 
 ```bash
 octacam gui <config_dir> --port 8766

@@ -1,7 +1,7 @@
 """The opt-in plugins: a name -> class table and the loader.
 
-A rig selects plugins in ``[[plugins]]`` (options in ``[plugins.options]``) or
-with ``--plugin``; the default launch loads none.
+A rig selects plugins in `[[plugins]]` (options in `[plugins.options]`) or
+with `--plugin`; the default launch loads none.
 """
 
 from __future__ import annotations
@@ -27,21 +27,23 @@ _ALIASES = {"arduino": "flywheel"}
 
 
 def canonical_name(name: str) -> str:
-    """The current name for a configured plugin name (``arduino`` -> ``flywheel``)."""
+    """The current name for a configured plugin name (`arduino` -> `flywheel`)."""
     return _ALIASES.get(name, name)
 
 
 def plugin_class(name: str) -> type[Plugin]:
     """The plugin class named *name*, imported on first use. Raises KeyError for
-    an unknown name, and whatever its module raises when it fails to import."""
+    an unknown name, and whatever its module raises when it fails to import.
+    """
     module, _, cls = _PLUGINS[name].partition(":")
     return getattr(importlib.import_module(module), cls)
 
 
 def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
-    """``[(name, options)]`` from the config and the CLI's ``enabled``: None
-    keeps the config, ``[]`` is ``--no-plugins``, and names from ``--plugin``
-    are added to the config's."""
+    """`[(name, options)]` from the config and the CLI's `enabled`: None
+    keeps the config, `[]` is `--no-plugins`, and names from `--plugin`
+    are added to the config's.
+    """
     selection = [(p.name, dict(p.options)) for p in config_plugins]
     if enabled is None:
         return selection
@@ -57,7 +59,8 @@ def _resolve_selection(config_plugins, enabled) -> list[tuple[str, dict]]:
 
 def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
     """The configured and enabled plugins; one that is unknown, or fails to
-    import or to build, is logged and skipped."""
+    import or to build, is logged and skipped.
+    """
     plugins: list[Plugin] = []
     seen: set[str] = set()
     for name, options in _resolve_selection(config.plugins, enabled):
@@ -94,7 +97,7 @@ def build_plugins(config, enabled: list[str] | None = None) -> PluginManager:
 
 @dataclass(frozen=True)
 class PluginInfo:
-    """A plugin and whether it builds right now; ``detail`` says why not."""
+    """A plugin and whether it builds right now; `detail` says why not."""
 
     name: str
     summary: str
@@ -104,7 +107,8 @@ class PluginInfo:
 
 def available_plugins() -> list[PluginInfo]:
     """Every plugin build_plugins could load, each built with no options to see
-    whether it can be; the summary is its module docstring's first line."""
+    whether it can be; the summary is its module docstring's first line.
+    """
     infos: list[PluginInfo] = []
     for name in _PLUGINS:
         try:

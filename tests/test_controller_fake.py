@@ -100,14 +100,15 @@ def test_writer_queue_size_reaches_each_writer(fake_system, tmp_path):
     controller = RecordingController(fake_system, settings, auto_preview=False)
     assert controller.start_recording().ok
     # Writers are open the moment start_recording() returns ok (created under the
-    # controller lock), before the countdown ends — inspect them now.
+    # controller lock), before the countdown ends -- inspect them now.
     for camera in fake_system:
         assert camera.take.writer.max_queue_size == 7
     controller.join(timeout=20)
 
 
 def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path):
-    from octacam._compat import tomllib
+    import tomllib
+
     from octacam.config_writer import write_config
 
     # A rig config the GUI has *not* edited on disk, but whose transcode/transfer
@@ -139,9 +140,7 @@ def test_fake_recording_bakes_process_params_into_snapshot(fake_system, tmp_path
     controller.join(timeout=20)
 
     # The live Process values land in the recording folder's config snapshot...
-    snap = tomllib.loads(
-        (save_dir / INFO_DIR / "octacam_config.toml").read_text()
-    )
+    snap = tomllib.loads((save_dir / INFO_DIR / "octacam_config.toml").read_text())
     assert snap["transcode"]["ffmpeg_params"] == "-c:v ffv1 -level 3"
     assert snap["transfer"] == {"directory": "~/other-store", "checksum": False}
     # ...while the untouched sections survive the patched re-emit and the
@@ -171,7 +170,9 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
                 "directory": "~/data/%y%m%d",
                 "relative_directory": "Fly1/001",
             },
-            "plugins": [{"name": "lamp", "options": {"device": "/dev/null", "level": 1}}],
+            "plugins": [
+                {"name": "lamp", "options": {"device": "/dev/null", "level": 1}}
+            ],
         },
     )
     (config_dir / "AUX.fake").write_text("helper\n")  # e.g. a tracking camera's file
@@ -222,7 +223,9 @@ def test_fake_recording_snapshot_reproduces_the_live_setup(fake_system, tmp_path
     assert load_config_dir(config_dir).record.fps == 80.0
 
 
-def test_fake_recording_snapshot_carries_the_live_view_transforms(fake_system, tmp_path):
+def test_fake_recording_snapshot_carries_the_live_view_transforms(
+    fake_system, tmp_path
+):
     from octacam.config import load_config_dir, resolve_config_dir
     from octacam.config_writer import write_config
     from octacam.transform import from_camera_config
@@ -263,7 +266,9 @@ def test_fake_recording_snapshot_carries_the_live_view_transforms(fake_system, t
     assert load_config_dir(config_dir).cameras[1].scale_x == -1.0
 
 
-def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, tmp_path):
+def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(
+    fake_system, tmp_path
+):
     config_dir = tmp_path / "cfg"
     config_dir.mkdir()
     text = "# rig notes survive\n[record]\nfps = 50.0\nduration = 1.0\n"
@@ -283,7 +288,9 @@ def test_fake_recording_snapshot_is_verbatim_when_nothing_changed(fake_system, t
     assert {p.name for p in info_dir.glob("*.fake")} == {"FAKE-0.fake", "FAKE-1.fake"}
 
 
-def test_recording_into_the_config_dir_leaves_the_rig_files_alone(fake_system, tmp_path):
+def test_recording_into_the_config_dir_leaves_the_rig_files_alone(
+    fake_system, tmp_path
+):
     from octacam.config import load_config_dir
 
     config_dir = tmp_path / "cfg"
@@ -452,7 +459,7 @@ def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):
             assert np.all(np.diff(timestamps) >= 0)
 
     # The fake backend supplies a (nonzero) timestamp for every frame, so nothing
-    # falls back to host time — the summary records that provenance. The 0 -> host
+    # falls back to host time -- the summary records that provenance. The 0 -> host
     # fallback path (pycameleon) is covered by test_timestamp_source_derivation.
     summary = json.loads((save_dir / INFO_DIR / "recording_summary.json").read_text())
     for cam in summary["cameras"]:
@@ -463,7 +470,7 @@ def test_fake_recording_writes_timestamps_when_enabled(fake_system, tmp_path):
 def test_fake_recording_bakes_display_transform(fake_system, tmp_path):
     import cv2
 
-    # A 90° rotation must swap the recorded video's width/height and be flagged
+    # A 90 deg rotation must swap the recorded video's width/height and be flagged
     # in the summary so transcode never re-applies it.
     for camera in fake_system:
         camera.display_transform = DisplayTransform(rotation_deg=90)
@@ -480,7 +487,7 @@ def test_fake_recording_bakes_display_transform(fake_system, tmp_path):
     for cam in summary["cameras"]:
         assert cam["transform_applied"] is True
         assert cam["transform"]["rotation_deg"] == 90
-        # sensor was 320x240; a 90° rotation records 240x320.
+        # sensor was 320x240; a 90 deg rotation records 240x320.
         assert (cam["width"], cam["height"]) == (240, 320)
 
     for video in sorted(save_dir.glob("*.mkv")):
@@ -605,7 +612,8 @@ def test_fake_zero_frame_recording_is_flagged(fake_system, tmp_path):
 def test_teardown_preview_rearm_failure_goes_idle(fake_system, tmp_path, monkeypatch):
     """A camera dropping out mid-recording can make the teardown preview re-arm
     raise; the controller must still fire on_recording_stop and reach a terminal,
-    non-active state (idle) rather than wedging in "finishing" forever."""
+    non-active state (idle) rather than wedging in "finishing" forever.
+    """
     from octacam.plugins.base import Plugin, PluginManager
 
     stopped: list[bool] = []
@@ -642,7 +650,8 @@ def test_start_recording_errors_when_start_record_raises(
 ):
     """A non-BackendError escaping camera_system.start_record must not orphan
     partially-started cameras: start_recording tears them down, re-arms preview,
-    and returns ERROR instead of letting the exception escape."""
+    and returns ERROR instead of letting the exception escape.
+    """
     settings = RecordingSettings(
         fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec" / "001")
     )
@@ -666,8 +675,9 @@ def test_start_recording_errors_when_start_record_raises(
 def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
     """While a finished recording's off-lock teardown tail is still running
     (on_recording_stop + preview re-arm), the state has already left the active
-    set — a new start must still be refused (BUSY) so it cannot race the previous
-    recording's disarm over the shared trigger plugin."""
+    set -- a new start must still be refused (BUSY) so it cannot race the previous
+    recording's disarm over the shared trigger plugin.
+    """
     import threading as _t
 
     from octacam.plugins.base import Plugin, PluginManager
@@ -706,7 +716,8 @@ def test_teardown_gate_blocks_a_racing_start(fake_system, tmp_path):
 
 def test_teardown_gate_blocks_a_racing_benchmark(fake_system, tmp_path):
     """A benchmark disarms the trigger plugin too, so it must not start while a
-    finished recording's teardown tail is still disarming and re-arming it."""
+    finished recording's teardown tail is still disarming and re-arming it.
+    """
     import threading as _t
 
     from octacam.plugins.base import Plugin, PluginManager

@@ -24,7 +24,8 @@ from octacam.plugins.flywheel import (
 
 class FakeLink(FlywheelLink):
     """The real link over no port: it records the commands written and answers
-    identify with ``banner``."""
+    identify with `banner`.
+    """
 
     def __init__(self, is_open=True):
         super().__init__(lambda: None)
@@ -167,7 +168,9 @@ def _released(link):
 
 
 def _configured(**command):
-    return FlywheelPlugin.from_options({"device": "/dev/null", "command": command} if command else {})
+    return FlywheelPlugin.from_options(
+        {"device": "/dev/null", "command": command} if command else {}
+    )
 
 
 _RIG_COMMAND = {
@@ -195,7 +198,9 @@ def test_configured_command_tolerates_a_partial_or_bad_table():
     assert _configured(n_steps=999_999)._command is None
     assert _configured(n_steps="spin")._command is None
 
-    assert FlywheelPlugin.from_options({"command": ["not", "a", "table"]})._command is None
+    assert (
+        FlywheelPlugin.from_options({"command": ["not", "a", "table"]})._command is None
+    )
 
 
 def test_snapshot_options_carry_the_armed_loop_command():
@@ -266,7 +271,7 @@ def test_jog_stopped_by_owner_ws_disconnect():
     assert _released(link)
     n = len(link.snapshot())
     time.sleep(0.02)
-    assert len(link.snapshot()) == n  # clock really stopped — no further pulses
+    assert len(link.snapshot()) == n  # clock really stopped -- no further pulses
 
 
 def test_jog_restart_switches_direction():
@@ -393,8 +398,9 @@ def test_jog_start_refused_while_closing():
 
 
 class StallingLink(FakeLink):
-    """FakeLink whose first write blocks until released — simulates a serial
-    write wedged past the teardown join timeout."""
+    """FakeLink whose first write blocks until released -- simulates a serial
+    write wedged past the teardown join timeout.
+    """
 
     def __init__(self):
         super().__init__()
@@ -467,7 +473,7 @@ def test_serial_command_endpoint_422_on_bad_payload():
 # Firmware provisioning: identity (sentinel), classification, flash, endpoints
 # ---------------------------------------------------------------------------
 
-from octacam.plugins.flywheel import _IDENTIFY_MARKER  # noqa: E402
+from octacam.plugins.flywheel import _IDENTIFY_MARKER
 
 
 def _plugin_with_fake(is_open=True):
@@ -520,7 +526,7 @@ def test_flash_firmware_success():
 
 
 def test_flash_refused_while_jogging():
-    plugin, link = _plugin_with_fake()
+    plugin, _link = _plugin_with_fake()
     plugin._jog_owner = 123  # a jog is active
     result = plugin.flash_firmware()
     assert not result.ok
@@ -541,7 +547,9 @@ def test_firmware_and_flash_endpoints():
 
 
 def test_build_reads_fqbn_and_auto_flash():
-    p = FlywheelPlugin.from_options({"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True})
+    p = FlywheelPlugin.from_options(
+        {"device": "/dev/ttyACM0", "fqbn": "arduino:avr:nano", "auto_flash": True}
+    )
     assert p.auto_flash is True
     assert p.firmware_spec.fqbn == "arduino:avr:nano"
 
@@ -555,7 +563,7 @@ def test_default_start_params_returns_the_configured_command():
     `options.command` only ever seeded the GUI tab: FlywheelPlugin implemented no
     `default_start_params`, so cli built no slice for it, `on_first_frame` found
     nothing in params and the motor silently never turned. That also broke
-    relaunching a recording from its own config snapshot with `octacam record` —
+    relaunching a recording from its own config snapshot with `octacam record` --
     the whole point of the snapshot carrying the motion.
     """
     from dataclasses import asdict
@@ -575,7 +583,8 @@ def test_default_start_params_returns_the_configured_command():
 def test_default_start_params_is_none_without_a_configured_command():
     """No `options.command` means no motion: the tab's defaults are a GUI
     affordance, and spinning an unconfigured motor from the CLI would be a
-    surprise, not a default."""
+    surprise, not a default.
+    """
     from octacam.plugins.flywheel import FlywheelPlugin
 
     assert FlywheelPlugin(device=None).default_start_params(100.0, 10.0) is None
@@ -583,7 +592,8 @@ def test_default_start_params_is_none_without_a_configured_command():
 
 def test_configured_command_arms_on_first_frame_headlessly():
     """End to end: the slice default_start_params contributes is the shape
-    on_first_frame consumes, so the board actually gets written."""
+    on_first_frame consumes, so the board actually gets written.
+    """
     from octacam.plugins.flywheel import Command, FlywheelPlugin
 
     command = Command(n_steps=1024, step_interval_us=900)
@@ -599,7 +609,8 @@ def test_configured_command_arms_on_first_frame_headlessly():
 
 class _BoardSerial:
     """A pyserial double for the stepper board: it answers the identify sentinel
-    with ``banner`` (None: an older, silent firmware) and records the rest."""
+    with `banner` (None: an older, silent firmware) and records the rest.
+    """
 
     in_waiting = 0
 
@@ -627,7 +638,9 @@ class _BoardSerial:
 
 
 @pytest.mark.parametrize("banner", ["FLYWHEEL 1 abc12345", None])
-def test_link_identify_answers_the_sentinel_and_still_takes_commands(monkeypatch, banner):
+def test_link_identify_answers_the_sentinel_and_still_takes_commands(
+    monkeypatch, banner
+):
     import serial
 
     board = _BoardSerial(banner)
@@ -635,7 +648,9 @@ def test_link_identify_answers_the_sentinel_and_still_takes_commands(monkeypatch
     link = FlywheelLink(lambda: None)
     link.open("/dev/fake", 115200)
     try:
-        assert link.identify(timeout=0.3) == banner  # blocks for the reply or the timeout
+        assert (
+            link.identify(timeout=0.3) == banner
+        )  # blocks for the reply or the timeout
         link.write_command(Command(n_steps=1))
         assert board.commands == [Command(n_steps=1).to_bytes()]
     finally:

@@ -75,9 +75,10 @@ GS3 = DeliveryProfile("FlirBackend", "GS3-U3-41C6NIR", 2048, 2048, "Mono8", 2000
 
 
 def _sync_camera(name, latency_ns, *, started_late=0, frames=16, **extra):
-    """A finished camera as check_sync reads it: ``frames`` frames of a train at
-    125 fps, each reaching the host ``latency_ns`` after its pulse, the whole
-    video ``started_late`` pulses behind the train."""
+    """A finished camera as check_sync reads it: `frames` frames of a train at
+    125 fps, each reaching the host `latency_ns` after its pulse, the whole
+    video `started_late` pulses behind the train.
+    """
     t0 = 1_700_000_000_000_000_000
     return camera_stats(
         name,
@@ -92,11 +93,13 @@ def _sync_camera(name, latency_ns, *, started_late=0, frames=16, **extra):
 def _check(cameras, profiles):
     """check_sync of a completed 16-pulse managed train every camera recorded."""
     clock = PulseClock(PERIOD_125_FPS, 16, "managed")
-    return check_sync(cameras, [c.name for c in cameras], clock, profiles, completed=True)
+    return check_sync(
+        cameras, [c.name for c in cameras], clock, profiles, completed=True
+    )
 
 
 def test_check_sync_does_not_compare_unlike_cameras():
-    # The rig at 125 fps: a 2048² GS3 frame reaches the host 6 ms (0.75 of a
+    # The rig at 125 fps: a 2048^2 GS3 frame reaches the host 6 ms (0.75 of a
     # period) after an acA1920 frame of the same pulse. Compared as if alike,
     # every GS3 read as "started 1 pulse late".
     cams = [
@@ -123,7 +126,10 @@ def test_check_sync_note_names_what_differs():
     assert sync["ok"] and sync["warnings"] == [], sync
     (note,) = sync["notes"]
     assert "not an error" in note, note
-    assert "frame size (top 1024×2048, bottom 2048×1024)" in note, note
+    assert (
+        "frame size (top 1024\N{MULTIPLICATION SIGN}2048, bottom "
+        "2048\N{MULTIPLICATION SIGN}1024)" in note
+    ), note
     for same in ("model", "pixel format", "exposure", "backend"):
         assert f"{same} (" not in note, note
 
@@ -137,8 +143,11 @@ def test_check_sync_note_names_each_differing_field_per_group():
     sync = _check(cams, {"b0": BASLER, "b1": BASLER, "f0": GS3})
     (note,) = sync["notes"]
     assert f"model ([b0, b1] {BASLER.model}, f0 {GS3.model})" in note, note
-    assert "frame size ([b0, b1] 1920×1200, f0 2048×2048)" in note, note
-    assert "exposure (" not in note, note  # both 2000 µs
+    assert (
+        "frame size ([b0, b1] 1920\N{MULTIPLICATION SIGN}1200, f0 "
+        "2048\N{MULTIPLICATION SIGN}2048)" in note
+    ), note
+    assert "exposure (" not in note, note  # both 2000 us
 
 
 def test_check_sync_still_catches_a_like_camera_a_pulse_late():
@@ -178,7 +187,10 @@ def test_check_sync_flags_frames_the_writer_skipped():
         RecordingSettings(fps=125.0), cams, 0, aborted=False, sync=sync
     )
     entry = summary["cameras"][1]
-    assert entry["writer_skipped"] == 2 and entry["writer_skipped_pulse_indices"] == [7, 8]
+    assert entry["writer_skipped"] == 2 and entry["writer_skipped_pulse_indices"] == [
+        7,
+        8,
+    ]
     assert summary["sync"]["ok"] is False
 
 
@@ -200,7 +212,10 @@ def test_check_sync_flags_a_camera_that_did_not_start():
 def test_check_sync_trusts_the_software_trigger_sequence():
     # Frame 0 answers trigger 0 in every camera: one that merely delivers a
     # period later did not start late.
-    cams = [_sync_camera("f0", 12_700_000), _sync_camera("f1", 12_600_000, started_late=1)]
+    cams = [
+        _sync_camera("f0", 12_700_000),
+        _sync_camera("f1", 12_600_000, started_late=1),
+    ]
     clock = PulseClock(PERIOD_125_FPS, 16, "software")
     sync = check_sync(cams, ["f0", "f1"], clock, {"f0": GS3, "f1": GS3}, completed=True)
     assert sync["ok"] and sync["start_offsets"] == {"f0": 0, "f1": 0}, sync
@@ -233,7 +248,7 @@ def test_build_timestamps_arrays():
 
     cams = [
         camera("cam0", [10, 20, 30], [False, True, False]),
-        # Different length (ragged) — long format handles it naturally.
+        # Different length (ragged) -- long format handles it naturally.
         camera("cam1", [100, 200], [False, False]),
         # Zero-frame camera contributes empty arrays.
         camera("cam2", [], []),
@@ -266,15 +281,24 @@ def dataclasses_replace(obj, **kw):
 
 def test_capture_frame_count():
     # octacam-clocked triggers cap at the intended pulse count round(fps*dur)...
-    assert capture_frame_count(
-        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="software")
-    ) == 800
-    assert capture_frame_count(
-        RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="managed")
-    ) == 800
-    assert capture_frame_count(
-        RecordingSettings(fps=30.0, duration_s=2.5, trigger_source="software")
-    ) == 75
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="software")
+        )
+        == 800
+    )
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=80.0, duration_s=10.0, trigger_source="managed")
+        )
+        == 800
+    )
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=30.0, duration_s=2.5, trigger_source="software")
+        )
+        == 75
+    )
     # ...an external trigger's pulse count is unknown, so it stays uncapped.
     assert (
         capture_frame_count(
@@ -289,9 +313,12 @@ def test_capture_frame_count():
         )
         is None
     )
-    assert capture_frame_count(
-        RecordingSettings(fps=1.0, duration_s=0.1, trigger_source="software")
-    ) == 1
+    assert (
+        capture_frame_count(
+            RecordingSettings(fps=1.0, duration_s=0.1, trigger_source="software")
+        )
+        == 1
+    )
 
 
 def test_update_settings_validation(monkeypatch):
@@ -317,7 +344,9 @@ def test_update_settings_validation(monkeypatch):
     assert controller.update_settings(writer_queue_size=100).writer_queue_size == 100
     # max_nvenc_sessions: None = auto-detect (accepted); a non-negative int caps it;
     # bool/negative are rejected.
-    assert controller.update_settings(max_nvenc_sessions=None).max_nvenc_sessions is None
+    assert (
+        controller.update_settings(max_nvenc_sessions=None).max_nvenc_sessions is None
+    )
     assert controller.update_settings(max_nvenc_sessions=4).max_nvenc_sessions == 4
     with pytest.raises(ValueError):
         controller.update_settings(max_nvenc_sessions=-1)
@@ -367,7 +396,7 @@ def test_settings_and_names_are_locked_while_recording(tmp_path):
 
 def test_update_settings_lone_save_dir_clears_split_halves():
     # Setting save_dir alone (no record_directory/relative_directory in the same
-    # patch) must clear the stale split halves — otherwise relative_save_dir
+    # patch) must clear the stale split halves -- otherwise relative_save_dir
     # keeps preferring the old relative_directory and the post-recording increment
     # recomposes save_dir from it, discarding the explicitly set path.
     controller = RecordingController(
@@ -459,7 +488,9 @@ def test_deferred_startup_ready_attach_and_fail(camera_system):
     )
     assert controller.ready is False
     snap = controller.snapshot()
-    assert snap["ready"] is False and snap["cameras"] == [] and snap["init_error"] is None
+    assert (
+        snap["ready"] is False and snap["cameras"] == [] and snap["init_error"] is None
+    )
 
     # Attaching the real system (as the init thread does) flips ready and the
     # snapshot now reports the live cameras.
@@ -579,9 +610,10 @@ def test_plugin_hooks_fire_during_recording(camera_system, tmp_path):
 
 def test_stop_waits_for_start_hooks_before_dispatching(camera_system, tmp_path):
     """Aborting in the window right after a recording starts must not let
-    on_recording_stop overtake a still-running on_recording_start — otherwise a
+    on_recording_stop overtake a still-running on_recording_start -- otherwise a
     hardware cancel could be sent before its arm (leaving the rig armed after the
-    cameras stopped). The monitor waits for the off-lock start hooks to finish."""
+    cameras stopped). The monitor waits for the off-lock start hooks to finish.
+    """
     import threading as _t
 
     from octacam.plugins.base import Plugin, PluginManager

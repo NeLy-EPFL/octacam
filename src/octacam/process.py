@@ -1,9 +1,9 @@
-"""The post-recording pipeline behind ``octacam process``: transcode each
+"""The post-recording pipeline behind `octacam process`: transcode each
 recording's videos, build its grids, transfer it.
 
 Every step reads the recording's own config snapshot and skips work already
 done, so a re-run resumes where the last one stopped. An output older than its
-source is not done work (:func:`is_stale`).
+source is not done work (`is_stale`).
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ log = logging.getLogger("octacam")
 
 @dataclass(frozen=True)
 class ProcessOptions:
-    """One run's choices, as ``octacam process`` takes them."""
+    """One run's choices, as `octacam process` takes them."""
 
     transcode: bool = True
     grid: bool = True
@@ -62,9 +62,10 @@ class ProcessOptions:
     raw_output: bool = False  # stream ffmpeg's own output, not a progress bar
 
     def argv(self, folders: list[Path]) -> list[str]:
-        """The ``process`` arguments that rerun these options on *folders*, for
+        """The `process` arguments that rerun these options on *folders*, for
         a detached job: every path absolute (the child runs from $HOME), and
-        ffmpeg's raw output left out so the job's log stays line-oriented."""
+        ffmpeg's raw output left out so the job's log stays line-oriented.
+        """
         flags = {
             "--no-transcode": not self.transcode,
             "--no-grid": not self.grid,
@@ -83,8 +84,9 @@ class ProcessOptions:
 
 @dataclass
 class TranscodeJob:
-    """One source file to transcode. A ``.raw`` stream carries no geometry, so
-    the summary supplies it; encoded inputs leave these None."""
+    """One source file to transcode. A `.raw` stream carries no geometry, so
+    the summary supplies it; encoded inputs leave these None.
+    """
 
     input_path: Path
     frames: int | None = None
@@ -113,13 +115,16 @@ def run(
     reporter: NullReporter,
     bar: Callable[[int], FileProgressBar] | None = None,
 ) -> None:
-    """Process *folders*: recordings, their parents with ``recursive``, or
+    """Process *folders*: recordings, their parents with `recursive`, or
     video files. *bar* makes a phase's progress bar over n files (None: none).
 
     Exits (SystemExit) naming the files that failed to transcode or transfer.
     A Ctrl-C during the transcodes ends the batch once the encode in progress
-    is discarded, and re-raises KeyboardInterrupt without grids or transfers."""
-    config = functools.cache(lambda folder: config_for_recording(folder, options.config_dir))
+    is discarded, and re-raises KeyboardInterrupt without grids or transfers.
+    """
+    config = functools.cache(
+        lambda folder: config_for_recording(folder, options.config_dir)
+    )
     done = Transcoded()
     if options.transcode:
         jobs = transcode_jobs(folders, options.recursive)
@@ -130,7 +135,7 @@ def run(
                 transcode_videos(jobs, options, config, reporter, bar, done)
             except KeyboardInterrupt:
                 log.warning(
-                    "Interrupted — stopped after %d file(s); the in-progress "
+                    "Interrupted \N{EM DASH} stopped after %d file(s); the in-progress "
                     "transcode was discarded.",
                     done.completed,
                 )
@@ -172,8 +177,9 @@ def transcode_videos(
     bar: Callable[[int], FileProgressBar] | None,
     done: Transcoded,
 ) -> None:
-    """Transcode each job to an ``.mp4`` beside it (on stdout, one per line),
-    recording the outputs in *done*. A file that fails is counted, not fatal."""
+    """Transcode each job to an `.mp4` beside it (on stdout, one per line),
+    recording the outputs in *done*. A file that fails is counted, not fatal.
+    """
     skipped = planned = 0
     progress = bar(len(jobs)) if bar else None
     reporter.begin_phase("transcode", len(jobs))
@@ -195,7 +201,7 @@ def transcode_videos(
             stale = output.exists() and is_stale(output, source)
             if stale:
                 log.warning(
-                    "%s is older than %s — it is left over from an earlier "
+                    "%s is older than %s \N{EM DASH} it is left over from an earlier "
                     "recording in this folder; re-transcoding",
                     output.name,
                     source.name,
@@ -206,7 +212,11 @@ def transcode_videos(
             elif output.exists() and not options.force and not stale:
                 skipped += 1  # transcoded atomically, so a present .mp4 is complete
             elif options.dry_run:
-                log.info("[dry-run] transcode: %s → %s", source, output.name)
+                log.info(
+                    "[dry-run] transcode: %s \N{RIGHTWARDS ARROW} %s",
+                    source,
+                    output.name,
+                )
                 if options.delete_source:
                     log.info("[dry-run] would delete source: %s", source)
                 planned += 1
@@ -242,14 +252,18 @@ def transcode_videos(
             done.outputs.setdefault(source.parent, []).append(output)
             reporter.item_done()
     if options.dry_run:
-        log.info("[dry-run] Transcode: %d to transcode, %d already done", planned, skipped)
+        log.info(
+            "[dry-run] Transcode: %d to transcode, %d already done", planned, skipped
+        )
     else:
         log.info(
             "Transcode: %d done, %d skipped, %d failed%s",
             done.completed,
             skipped,
             done.failures,
-            " (use --force to re-transcode existing)" if skipped and not options.force else "",
+            " (use --force to re-transcode existing)"
+            if skipped and not options.force
+            else "",
         )
 
 
@@ -261,16 +275,17 @@ def build_grids(
     reporter: NullReporter,
     bar: Callable[[int], FileProgressBar] | None = None,
 ) -> dict[Path, list[Path]]:
-    """Build each folder's ``[[visualization]]`` grids from its *outputs*;
+    """Build each folder's `[[visualization]]` grids from its *outputs*;
     return the grid files (built, present or planned) to transfer.
 
     On a dry run *outputs* may name videos the transcode step only planned, and
     *rewritten* those it will rewrite: a grid of either is listed as work to do
-    instead of being probed."""
+    instead of being probed.
+    """
     targets = [folder for folder in outputs if configs[folder].visualization]
     if not targets:
         log.info(
-            "Grid: no [[visualization]] entry in the config — skipping grid "
+            "Grid: no [[visualization]] entry in the config \N{EM DASH} skipping grid "
             "generation (add one to the rig config to build a composite)"
         )
         return {}
@@ -302,7 +317,8 @@ def build_grids(
                 stale = out_path.exists() and any(is_stale(out_path, p) for p in inputs)
                 if stale:
                     log.warning(
-                        "%s is older than the videos it composites — rebuilding",
+                        "%s is older than the videos it composites \N{EM DASH} "
+                        "rebuilding",
                         out_path.name,
                     )
                 if out_path.exists() and not options.force and not stale:
@@ -314,7 +330,9 @@ def build_grids(
                 waiting = [p.name for p in planned if p.stem in cells]
                 if waiting:
                     log.info(
-                        "[dry-run] grid: %s (waits for: %s)", out_path, ", ".join(waiting)
+                        "[dry-run] grid: %s (waits for: %s)",
+                        out_path,
+                        ", ".join(waiting),
                     )
                     todo += 1
                     built.append(out_path)
@@ -326,7 +344,9 @@ def build_grids(
                     ffmpeg_params=visualization.ffmpeg_params
                     or cfg.transcode.ffmpeg_params,
                     dry_run=options.dry_run,
-                    on_progress=progress.file(i, folder, "grid: ") if progress else None,
+                    on_progress=progress.file(i, folder, "grid: ")
+                    if progress
+                    else None,
                 )
                 if out is not None:
                     todo += 1
@@ -336,7 +356,10 @@ def build_grids(
     if options.dry_run:
         log.info("[dry-run] Grid: %d to build, %d already exist", todo, skipped)
     elif skipped:
-        log.info("Grid: %d already exist — skipping (use --force to rebuild)", skipped)
+        log.info(
+            "Grid: %d already exist \N{EM DASH} skipping (use --force to rebuild)",
+            skipped,
+        )
     return grids
 
 
@@ -348,9 +371,10 @@ def transfer_outputs(
     reporter: NullReporter,
     bar: Callable[[int], FileProgressBar] | None = None,
 ) -> int:
-    """Copy each folder's outputs, grids and metadata to its ``[transfer]``
-    destination, under its summary's ``relative_directory``; return how many
-    files failed."""
+    """Copy each folder's outputs, grids and metadata to its `[transfer]`
+    destination, under its summary's `relative_directory`; return how many
+    files failed.
+    """
     copied = skipped = failed = 0
     progress = bar(0) if bar else None
     reporter.begin_phase("transfer", len(outputs))
@@ -365,13 +389,15 @@ def transfer_outputs(
             transfer = configs[folder].transfer
             if transfer is None or not transfer.directory:
                 log.warning(
-                    "No [transfer].directory resolvable for %s; skipping transfer", folder
+                    "No [transfer].directory resolvable for %s; skipping transfer",
+                    folder,
                 )
             else:
                 relative = (_read_summary(folder) or {}).get("relative_directory")
                 result = transfer_folder(
                     folder,
-                    Path(resolve_dir_template(transfer.directory)) / (relative or folder.name),
+                    Path(resolve_dir_template(transfer.directory))
+                    / (relative or folder.name),
                     files_only=files + grids.get(folder, []),
                     dry_run=options.dry_run,
                     verify=transfer.checksum,
@@ -382,7 +408,9 @@ def transfer_outputs(
                 failed += len(result.failed)
             reporter.item_done()
     if options.dry_run:
-        log.info("[dry-run] Transfer: %d to copy, %d already up to date", copied, skipped)
+        log.info(
+            "[dry-run] Transfer: %d to copy, %d already up to date", copied, skipped
+        )
     else:
         log.info("Transfer: %d copied, %d skipped, %d failed", copied, skipped, failed)
         if failed:
@@ -393,9 +421,10 @@ def transfer_outputs(
 def is_stale(output: Path, source: Path) -> bool:
     """Whether a derived file predates its source.
 
-    A folder recorded into twice keeps the previous take's ``.mp4``/``grid.mp4``,
+    A folder recorded into twice keeps the previous take's `.mp4`/`grid.mp4`,
     which would otherwise pass as finished and be transferred as this take's.
-    Equal mtimes count as current, a stat error as not stale."""
+    Equal mtimes count as current, a stat error as not stale.
+    """
     try:
         return output.stat().st_mtime_ns < source.stat().st_mtime_ns
     except OSError:
@@ -404,7 +433,8 @@ def is_stale(output: Path, source: Path) -> bool:
 
 def config_for_recording(folder: Path, fallback: Path | None) -> OctacamConfig:
     """The config governing one recording: its own snapshot (either layout),
-    else the *fallback* config dir (``--config``), else built-in defaults."""
+    else the *fallback* config dir (`--config`), else built-in defaults.
+    """
     info_dir = recording_info_dir(folder)
     if find_config_file(info_dir).exists():
         return load_config_dir(info_dir)
@@ -421,12 +451,13 @@ def config_for_recording(folder: Path, fallback: Path | None) -> OctacamConfig:
 
 
 def transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
-    """Resolve folders/files to a deduped list of :class:`TranscodeJob`.
+    """Resolve folders/files to a deduped list of `TranscodeJob`.
 
     A recording's summary (in either layout) supplies each camera's geometry;
     loose .mkv/.raw without one are transcoded with defaults and a warning. An
-    ``octacam_recording`` folder named directly means its recording, and a
-    recursive walk never enters one."""
+    `octacam_recording` folder named directly means its recording, and a
+    recursive walk never enters one.
+    """
     jobs: dict[Path, TranscodeJob] = {}
 
     def add(job: TranscodeJob) -> None:
@@ -482,7 +513,11 @@ def transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
                 if data is not None:
                     fps_target = data.get("fps_target")
                     entry = next(
-                        (e for e in data.get("cameras", []) if e.get("file") == path.name),
+                        (
+                            e
+                            for e in data.get("cameras", [])
+                            if e.get("file") == path.name
+                        ),
                         None,
                     )
             if entry is not None and entry.get("frames") == 0:
@@ -502,11 +537,12 @@ def transcode_jobs(paths: list[Path], recursive: bool) -> list[TranscodeJob]:
 
 def find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
     """The recordings (either layout) at *roots*, or under them when
-    *recursive*, deduped (see :func:`~octacam.recording_format.find_recordings`).
+    *recursive*, deduped (see `find_recordings`).
 
     A root that is not a recording is warned about and skipped, so a stray
     folder never aborts the batch; if nothing is left and recordings lie
-    beneath, it exits suggesting ``-r``."""
+    beneath, it exits suggesting `-r`.
+    """
     result = find_recordings(roots, recursive)
     saw_nested = False
     for root in roots:
@@ -520,7 +556,7 @@ def find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
             saw_nested = True
             log.warning(
                 "%s is not a recording directory; %d recording(s) found beneath "
-                "it — pass -r/--recursive to include them. Skipping.",
+                "it \N{EM DASH} pass -r/--recursive to include them. Skipping.",
                 folder,
                 len(nested),
             )
@@ -533,7 +569,8 @@ def find_recording_dirs(roots: list[Path], recursive: bool) -> list[Path]:
 
     if not recursive and not result and saw_nested:
         sys.exit(
-            "No recording directory given directly — re-run with -r/--recursive "
+            "No recording directory given directly \N{EM DASH} re-run with "
+            "-r/--recursive "
             "to copy the recordings found beneath the path(s) above."
         )
     return result
@@ -553,7 +590,9 @@ def _job_from_entry(video: Path, entry: dict, fps_target: float | None) -> Trans
 
 def _warn_zero_frames(video: Path) -> None:
     # A header-only file: ffmpeg would fail with a cryptic EBML error.
-    log.warning("Skipping %s: recording captured 0 frames (empty header-only file)", video)
+    log.warning(
+        "Skipping %s: recording captured 0 frames (empty header-only file)", video
+    )
 
 
 def _read_summary(folder: Path) -> dict | None:
@@ -567,7 +606,8 @@ def _read_summary(folder: Path) -> dict | None:
 
 def _delete_source(source: Path) -> None:
     """Delete a source video that has transcoded: only that file goes (never the
-    recording's metadata), and a failure is only logged."""
+    recording's metadata), and a failure is only logged.
+    """
     try:
         source.unlink(missing_ok=True)
     except OSError as e:

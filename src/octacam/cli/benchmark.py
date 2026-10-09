@@ -1,19 +1,22 @@
 """`octacam benchmark`: an instrumented dry run (no video kept) for the
 achievable and maximum fps and the limiting stage. It opens the cameras, like
-`record`."""
+`record`.
+"""
 
 import contextlib
 import json
 import logging
 import threading
 import time
+from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Self
 
 import typer
 
-from octacam._compat import StrEnum
 from octacam.cli._common import (
+    Verbose,
+    command,
     open_rig,
     resolve_config_arg,
     stderr_console,
@@ -35,7 +38,8 @@ class RecordForm(StrEnum):
 
 class _BenchmarkProgressBar:
     """Benchmark progress bar over diagnose's seconds budget: a ticker advances
-    it in real time toward the current step's end and never moves it back."""
+    it in real time toward the current step's end and never moves it back.
+    """
 
     def __init__(self) -> None:
         from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn
@@ -48,7 +52,9 @@ class _BenchmarkProgressBar:
             console=stderr_console(),
             transient=True,
         )
-        self._task = self._progress.add_task("Benchmarking…", total=None, left="")
+        self._task = self._progress.add_task(
+            "Benchmarking\N{HORIZONTAL ELLIPSIS}", total=None, left=""
+        )
         self._lock = threading.Lock()
         self._shown = 0.0  # budget seconds the bar shows
         self._base = 0.0  # where the bar was when the step began
@@ -58,7 +64,7 @@ class _BenchmarkProgressBar:
         self._stop = threading.Event()
         self._ticker = threading.Thread(target=self._run, daemon=True)
 
-    def __enter__(self) -> "_BenchmarkProgressBar":
+    def __enter__(self) -> Self:
         self._progress.start()
         self._ticker.start()
         return self
@@ -70,7 +76,7 @@ class _BenchmarkProgressBar:
         self._progress.stop()
 
     def update(self, p) -> None:
-        """Start a step (an :class:`octacam.diagnostics.Progress`)."""
+        """Start a step (an `octacam.diagnostics.Progress`)."""
         with self._lock:
             self._total = p.total_s
             self._base = max(self._shown, p.elapsed_s)
@@ -90,17 +96,18 @@ class _BenchmarkProgressBar:
 
 
 def _fps(value) -> str:
-    """Format an fps/ceiling for the report ("–" for None/inf)."""
+    """Format an fps/ceiling for the report ("-" for None/inf)."""
     import math
 
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
-        return "–"
+        return "\N{EN DASH}"
     return f"{value:.0f}"
 
 
 def _render_benchmark(report) -> None:
     """Render a DiagnosticReport on stdout: key results, then the limiting stage,
-    then per-camera detail."""
+    then per-camera detail.
+    """
     from rich.console import Console
     from rich.table import Table
     from rich.text import Text
@@ -113,12 +120,14 @@ def _render_benchmark(report) -> None:
     console.print()
     console.print(
         Text(
-            f"octacam benchmark — {r.n_cameras} camera(s) via {r.backend}", style="bold"
+            f"octacam benchmark \N{EM DASH} {r.n_cameras} camera(s) via {r.backend}",
+            style="bold",
         )
     )
     encoder = r.save_method + (f" ({r.ffmpeg_params})" if r.ffmpeg_params else "")
     console.print(
-        f"target {r.target_fps:g} fps · {r.trigger_source} trigger · sink={encoder}"
+        f"target {r.target_fps:g} fps \N{MIDDLE DOT} {r.trigger_source} trigger "
+        f"\N{MIDDLE DOT} sink={encoder}"
     )
 
     console.print()
@@ -142,12 +151,15 @@ def _render_benchmark(report) -> None:
         )
     if r.achievable:
         console.print(
-            Text(f"  ✓ {r.target_fps:g} fps is ACHIEVABLE", style="bold green")
+            Text(
+                f"  \N{CHECK MARK} {r.target_fps:g} fps is ACHIEVABLE",
+                style="bold green",
+            )
         )
     else:
         console.print(
             Text(
-                f"  ✗ {r.target_fps:g} fps is NOT achievable — "
+                f"  \N{BALLOT X} {r.target_fps:g} fps is NOT achievable \N{EM DASH} "
                 f"limited by {r.bottleneck_label}",
                 style="bold red",
             )
@@ -161,7 +173,11 @@ def _render_benchmark(report) -> None:
         )
 
         def mark(name):
-            return Text("  ← limits", style="red") if r.bottleneck == name else Text("")
+            return (
+                Text("  \N{LEFTWARDS ARROW} limits", style="red")
+                if r.bottleneck == name
+                else Text("")
+            )
 
         console.print(
             Text(f"  acquisition  {_fps(c.grab_min):>4} fps/cam  "),
@@ -171,14 +187,19 @@ def _render_benchmark(report) -> None:
         if r.throughput_mbps_total:
             per_cam = r.throughput_mbps_total / r.n_cameras if r.n_cameras else 0.0
             solo = (
-                f" · alone {_fps(c.grab_solo_min)} fps/cam" if c.grab_solo_fps else ""
+                f" \N{MIDDLE DOT} alone {_fps(c.grab_solo_min)} fps/cam"
+                if c.grab_solo_fps
+                else ""
             )
             console.print(
                 Text(
-                    f"  transfer     {per_cam:>4.0f} MB/s/cam · "
+                    f"  transfer     {per_cam:>4.0f} MB/s/cam \N{MIDDLE DOT} "
                     f"{r.throughput_mbps_total:.0f} MB/s total"
                 ),
-                Text(f"(derived from frame size × fps{solo})", style="dim"),
+                Text(
+                    f"(derived from frame size \N{MULTIPLICATION SIGN} fps{solo})",
+                    style="dim",
+                ),
                 mark(diag.TRANSFER),
             )
         if c.encode_fps:
@@ -186,7 +207,7 @@ def _render_benchmark(report) -> None:
         else:
             console.print(
                 Text(
-                    "  encode        n/a  (null sink — encoder not measured)",
+                    "  encode        n/a  (null sink \N{EM DASH} encoder not measured)",
                     style="dim",
                 )
             )
@@ -210,15 +231,17 @@ def _render_benchmark(report) -> None:
         s = t.serial
         table.add_row(
             t.name,
-            f"{t.width}×{t.height}",
-            _fps(c.grab_fps.get(s)) if c else "–",
-            _fps(c.freerun_fps.get(s)) if c and c.freerun_fps else "–",
-            _fps(c.encode_fps.get(s)) if c and c.encode_fps else "–",
+            f"{t.width}\N{MULTIPLICATION SIGN}{t.height}",
+            _fps(c.grab_fps.get(s)) if c else "\N{EN DASH}",
+            _fps(c.freerun_fps.get(s)) if c and c.freerun_fps else "\N{EN DASH}",
+            _fps(c.encode_fps.get(s)) if c and c.encode_fps else "\N{EN DASH}",
             f"{t.achieved_fps:.1f}",
             f"{100 * t.drop_rate:.2f}",
             f"{t.max_queue_depth} of {r.writer_queue_size}",
-            f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "–",
-            f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}" if enc and enc.samples else "–",
+            f"{acq.p50_ms:.1f}/{acq.p99_ms:.1f}" if acq else "\N{EN DASH}",
+            f"{enc.p50_ms:.2f}/{enc.p99_ms:.2f}"
+            if enc and enc.samples
+            else "\N{EN DASH}",
         )
     console.print(table)
     console.print(
@@ -259,26 +282,33 @@ def _render_benchmark(report) -> None:
     if r.jitter_p99_ms is not None:
         extras.append(f"scheduler jitter p99 {r.jitter_p99_ms:.2f} ms")
     if extras:
-        console.print("  " + " · ".join(extras))
+        console.print("  " + " \N{MIDDLE DOT} ".join(extras))
 
     if r.recommendations:
         console.print()
         for rec in r.recommendations:
-            console.print(Text(f"  → {rec}", style="yellow"))
+            console.print(Text(f"  \N{RIGHTWARDS ARROW} {rec}", style="yellow"))
     for note in r.notes:
-        console.print(Text(f"  • {note}", style="dim"))
+        console.print(Text(f"  \N{BULLET} {note}", style="dim"))
     console.print()
 
 
+@command
 def benchmark(
     config_dir: Annotated[
         Path,
-        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="The rig's config directory (`octacam_config.toml` and its camera "
+            "files), or a recording folder, whose config snapshot it uses.",
+        ),
     ] = Path("."),
     fps: Annotated[
         float | None,
         typer.Option(
-            "--fps", "-f", help=r"Target fps to test \[default: from config]."
+            "--fps", "-f", help="Target fps to test (default: from the config)."
         ),
     ] = None,
     duration: Annotated[
@@ -306,7 +336,8 @@ def benchmark(
         typer.Option(
             "--sink",
             help="What to write through: 'config' (the rig's real save_method, so "
-            "the encode cost is measured) or 'null' (discard frames — isolate "
+            "the encode cost is measured) or 'null' (discard frames \N{EM DASH} "
+            "isolate "
             "acquisition, skip the encoder).",
         ),
     ] = BenchmarkSink.config,
@@ -318,19 +349,22 @@ def benchmark(
         RecordForm | None,
         typer.Option(
             "--record-form",
-            help=r"'display' (bake the transform) or 'sensor' \[default: from config].",
+            help="'display' (bake the transform) or 'sensor' "
+            "(default: from the config).",
         ),
     ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Emit the report as JSON instead of the table."),
     ] = False,
+    verbose: Verbose = False,
 ) -> None:
-    """Benchmark a rig: is the target fps achievable, what is the max, and what limits it.
+    """Benchmark a rig: is the target fps achievable, what is the max, and what limits
+    it.
 
-    Runs a short, instrumented dry-run against the cameras in CONFIG_DIR — an
+    Runs a short, instrumented dry-run against the cameras in `config_dir` -- an
     acquisition-ceiling sweep, an encoder-ceiling sweep, and an end-to-end trial
-    at the target fps — then reports the achievable rate, the maximum, and the
+    at the target fps -- then reports the achievable rate, the maximum, and the
     per-stage throughput so you can see the bottleneck. No video is kept. It opens
     the cameras (like `record`), so it cannot run at the same time as a live GUI or
     recording on the same rig.
@@ -352,7 +386,8 @@ def benchmark(
     system = open_rig(config, config_dir, backend)
     try:
         log.info(
-            "Benchmarking %d camera(s) at %g fps (%s trigger, sink=%s)…",
+            "Benchmarking %d camera(s) at %g fps (%s trigger, "
+            "sink=%s)\N{HORIZONTAL ELLIPSIS}",
             len(system),
             settings.fps,
             settings.trigger_source,

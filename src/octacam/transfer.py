@@ -1,12 +1,12 @@
 """Copy processed recordings to a destination directory, often a network share.
 
-The caller resolves the destination (``octacam process``: ``transfer.directory``
-joined with the summary's ``relative_directory``). Each file is copied to a
+The caller resolves the destination (`octacam process`: `transfer.directory`
+joined with the summary's `relative_directory`). Each file is copied to a
 unique sibling temp, checked (by digest, or by size) and only then renamed onto
 its name, so an interrupted copy never leaves a complete-looking partial, and a
 rerun skips what is already there (videos by size, metadata by content). The
 recording's metadata always goes along, in the layout it has here (the
-``octacam_recording`` subfolder, or flat), so the copy can relaunch the same
+`octacam_recording` subfolder, or flat), so the copy can relaunch the same
 setup.
 """
 
@@ -99,7 +99,8 @@ def _stream_copy(
     hash_src: bool,
 ) -> str | None:
     """Stream *src* into *tmp* and fsync it (durable before the rename);
-    returns the source digest when *hash_src*."""
+    returns the source digest when *hash_src*.
+    """
     h = hashlib.blake2b() if hash_src else None
     bytes_done = 0
     start = time.monotonic()
@@ -138,7 +139,7 @@ def _stream_copy(
 
 
 def _sweep_stale_temps(final: Path) -> None:
-    """Remove *final*'s orphaned temps (see :data:`_STALE_TEMP_AGE_S`)."""
+    """Remove *final*'s orphaned temps (see `_STALE_TEMP_AGE_S`)."""
     cutoff = time.time() - _STALE_TEMP_AGE_S
     for stale in final.parent.glob(partial_glob(final)):
         try:
@@ -159,7 +160,8 @@ def _copy_one(
 ) -> bool:
     """Copy *src* onto *final* through a temp that is verified (or size-checked)
     before the rename; False on a mismatch. Any exception, Ctrl-C included,
-    removes the temp and leaves *final* untouched."""
+    removes the temp and leaves *final* untouched.
+    """
     size = src.stat().st_size
     _sweep_stale_temps(final)
     tmp = partial_path(final)
@@ -215,7 +217,8 @@ def _copy_one(
 def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
     """Whether *final* already matches *src*: by size (an interrupted copy is
     short; mtime is unreliable on network shares), and with *by_content* by
-    digest too (the metadata: an edited config is often the same size)."""
+    digest too (the metadata: an edited config is often the same size).
+    """
     if not final.exists():
         return False
     if final.stat().st_size != src.stat().st_size:
@@ -227,8 +230,9 @@ def _should_skip(src: Path, final: Path, *, by_content: bool) -> bool:
 
 def _metadata_files(folder: Path) -> list[Path]:
     """The summary, timestamps, config snapshot and camera parameter files, from
-    :func:`~octacam.recording_format.recording_info_dir` only: a folder recorded into
-    again carries the new take's metadata, not an older flat take's leftovers."""
+    `recording_info_dir` only: a folder recorded into
+    again carries the new take's metadata, not an older flat take's leftovers.
+    """
     info = recording_info_dir(folder)
     names = [RECORDING_SUMMARY_FILENAME, TIMESTAMPS_FILENAME, CONFIG_SNAPSHOT_FILENAME]
     files = [info / name for name in names]
@@ -238,11 +242,10 @@ def _metadata_files(folder: Path) -> list[Path]:
     return [f for f in files if f.is_file() and not f.name.startswith(".")]
 
 
-def _target(
-    folder: Path, dest: Path, src: Path, *, metadata: bool
-) -> tuple[Path, str]:
+def _target(folder: Path, dest: Path, src: Path, *, metadata: bool) -> tuple[Path, str]:
     """Where *src* lands under *dest*, and the name the result reports it by:
-    metadata keeps its path relative to *folder*, videos land in *dest*."""
+    metadata keeps its path relative to *folder*, videos land in *dest*.
+    """
     rel = Path(src.name)
     if metadata:
         try:
@@ -266,7 +269,7 @@ def transfer_folder(
     *dry_run* touches nothing and reports a file already matching at *dest* as
     skipped, any other (even an output not produced yet) as copied. *verify*
     compares each copy's digest with the source's before the rename, else only
-    its size. *on_progress* gets a :class:`TransferProgress` per chunk.
+    its size. *on_progress* gets a `TransferProgress` per chunk.
     """
     candidates = list(files_only)
     metadata = _metadata_files(folder)
@@ -288,7 +291,7 @@ def transfer_folder(
             if f.exists() and _should_skip(f, target, by_content=f in by_content):
                 result.skipped.append(label)
             else:
-                log.info("[dry-run] transfer: %s → %s", f, target)
+                log.info("[dry-run] transfer: %s \N{RIGHTWARDS ARROW} %s", f, target)
                 result.copied.append(label)
         return result
 
@@ -308,10 +311,12 @@ def transfer_folder(
             # The metadata subfolder, when the recording has one.
             target.parent.mkdir(parents=True, exist_ok=True)
             if _copy_one(f, target, idx, n, verify=verify, on_progress=on_progress):
-                log.info("Transfer: %s → %s", label, dest)
+                log.info("Transfer: %s \N{RIGHTWARDS ARROW} %s", label, dest)
                 result.copied.append(label)
             else:
-                log.error("Transfer: %s failed verification — not copied", label)
+                log.error(
+                    "Transfer: %s failed verification \N{EM DASH} not copied", label
+                )
                 result.failed.append(label)
         except OSError as e:
             log.error("Failed to transfer %s: %s", f, e)

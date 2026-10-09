@@ -1,10 +1,10 @@
-"""The Spinnaker SDK's C API over ``ctypes``: the ``spinnaker`` tier's
-:class:`~octacam.cameras.flir.FlirBinding`.
+"""The Spinnaker SDK's C API over `ctypes`: the `spinnaker` tier's
+`FlirBinding`.
 
-The FLIR tier when PySpin is missing: it needs only ``libSpinnaker_C.so``. A
-``CDLL`` releases the GIL around every foreign call, so a blocking
-``spinCameraGetNextImageEx`` never stalls the other cameras' threads. It drives
-the C API, not the Spinnaker GenTL producer, whose ``DevClose`` deadlocks
+The FLIR tier when PySpin is missing: it needs only `libSpinnaker_C.so`. A
+`CDLL` releases the GIL around every foreign call, so a blocking
+`spinCameraGetNextImageEx` never stalls the other cameras' threads. It drives
+the C API, not the Spinnaker GenTL producer, whose `DevClose` deadlocks
 holding the GIL.
 """
 
@@ -75,7 +75,8 @@ def _err_name(err: int) -> str:
 
 def _ascii(value: object) -> bytes:
     """GenICam names and strings are ASCII: a BackendError, not a
-    UnicodeEncodeError."""
+    UnicodeEncodeError.
+    """
     try:
         return str(value).encode("ascii")
     except UnicodeEncodeError as e:
@@ -86,7 +87,7 @@ def _configure(lib) -> None:
     """Set argtypes and restype (spinError) for every C function called.
 
     Mandatory on 64-bit: without argtypes, ctypes passes a handle as a 32-bit
-    ``c_int`` and truncates it.
+    `c_int` and truncates it.
     """
     P = ctypes.POINTER
     v = ctypes.c_void_p
@@ -173,11 +174,11 @@ def _configure(lib) -> None:
         fn.argtypes = argtypes
 
 
-
 class _Spinnaker(FlirBinding):
-    """The C API binding. Handles are ``void*`` values (int, or None for NULL).
+    """The C API binding. Handles are `void*` values (int, or None for NULL).
     Node handles belong to the node map and are freed with the camera handle
-    (SpinnakerGenApiC.h), so nothing here releases them."""
+    (SpinnakerGenApiC.h), so nothing here releases them.
+    """
 
     tier = "spinnaker"
 
@@ -186,7 +187,9 @@ class _Spinnaker(FlirBinding):
         self._lib = lib
         _configure(lib)
         # kind -> (getter, setter, ctype, Python type) of a plain value node.
-        self._value_calls = {
+        # (getter, setter, ctypes type, Python type) per kind: the SDK's ctypes
+        # calls are untyped, as every backend's SDK handles are.
+        self._value_calls: dict[str, tuple[Any, Any, Any, Any]] = {
             "int": (lib.spinIntegerGetValue, lib.spinIntegerSetValue, _I64, int),
             "float": (lib.spinFloatGetValue, lib.spinFloatSetValue, _F64, float),
             "bool": (lib.spinBooleanGetValue, lib.spinBooleanSetValue, _U8, int),
@@ -194,19 +197,19 @@ class _Spinnaker(FlirBinding):
 
     # ------------------------------------------------------------- helpers
     def _call(self, fn: Any, *args: Any) -> None:
-        """``fn(*args)``; BackendError unless it returns SUCCESS."""
+        """`fn(*args)`; BackendError unless it returns SUCCESS."""
         err = fn(*args)
         if err != SPINNAKER_ERR_SUCCESS:
             raise BackendError(f"{fn.__name__} failed ({_err_name(err)})")
 
     def _out(self, fn: Any, *args: Any, ctype: Any = ctypes.c_void_p) -> Any:
-        """The value ``fn(*args, &out)`` writes; BackendError on a failure."""
+        """The value `fn(*args, &out)` writes; BackendError on a failure."""
         out = ctype()
         self._call(fn, *args, ctypes.byref(out))
         return out.value
 
     def _try(self, fn: Any, *args: Any, ctype: Any = ctypes.c_void_p) -> Any:
-        """As :meth:`_out`, None on a failure."""
+        """As `_out`, None on a failure."""
         out = ctype()
         if fn(*args, ctypes.byref(out)) != SPINNAKER_ERR_SUCCESS:
             return None
@@ -226,7 +229,9 @@ class _Spinnaker(FlirBinding):
     def node(self, nodemap: Any, name: str) -> Any:
         if not nodemap:
             return None
-        return self._try(self._lib.spinNodeMapGetNode, nodemap, name.encode("ascii", "replace"))
+        return self._try(
+            self._lib.spinNodeMapGetNode, nodemap, name.encode("ascii", "replace")
+        )
 
     def children(self, category: Any) -> list[Any]:
         lib = self._lib
@@ -239,7 +244,9 @@ class _Spinnaker(FlirBinding):
         return out
 
     def kind(self, node: Any) -> str | None:
-        return _KIND_BY_NODE_TYPE.get(self._try(self._lib.spinNodeGetType, node, ctype=_C_INT))
+        return _KIND_BY_NODE_TYPE.get(
+            self._try(self._lib.spinNodeGetType, node, ctype=_C_INT)
+        )
 
     def name(self, node: Any) -> str | None:
         return self._string(self._lib.spinNodeGetName, node)
@@ -309,8 +316,12 @@ class _Spinnaker(FlirBinding):
         if kind == "enum":
             entry = self._out(lib.spinEnumerationGetEntryByName, node, _ascii(value))
             if not entry:
-                raise BackendError(f"enumeration {self.name(node)} has no entry {value!r}")
-            int_value = self._out(lib.spinEnumerationEntryGetIntValue, entry, ctype=_I64)
+                raise BackendError(
+                    f"enumeration {self.name(node)} has no entry {value!r}"
+                )
+            int_value = self._out(
+                lib.spinEnumerationEntryGetIntValue, entry, ctype=_I64
+            )
             self._call(lib.spinEnumerationSetIntValue, node, _I64(int_value))
         elif kind == "string":
             self._call(lib.spinStringSetValue, node, _ascii(value))
@@ -338,7 +349,9 @@ class _Spinnaker(FlirBinding):
     def _cameras(self, cam_list: Any) -> list[Any]:
         lib = self._lib
         count = self._out(lib.spinCameraListGetSize, cam_list, ctype=_SIZE)
-        return [self._out(lib.spinCameraListGet, cam_list, _SIZE(i)) for i in range(count)]
+        return [
+            self._out(lib.spinCameraListGet, cam_list, _SIZE(i)) for i in range(count)
+        ]
 
     def _clear_camera_list(self, cam_list: Any) -> None:
         self._lib.spinCameraListClear(cam_list)
@@ -402,7 +415,10 @@ class _Spinnaker(FlirBinding):
         return incomplete is None or bool(incomplete)
 
     def image_timestamp(self, image: Any) -> int:
-        return int(self._try(self._lib.spinImageGetTimeStamp, image, ctype=ctypes.c_uint64) or 0)
+        return int(
+            self._try(self._lib.spinImageGetTimeStamp, image, ctype=ctypes.c_uint64)
+            or 0
+        )
 
     def image_array(self, image: Any) -> np.ndarray:
         lib = self._lib
@@ -416,9 +432,11 @@ class _Spinnaker(FlirBinding):
             raise BackendError("image has no data")
         # Honor the row stride: a padded buffer has stride > width.
         stride = self._try(lib.spinImageGetStride, image, ctype=_SIZE) or 0
-        row = stride if stride >= width else width
+        row = max(stride, width)
         # A view of the SDK buffer, copied before image_release recycles it.
-        flat = np.ctypeslib.as_array((ctypes.c_ubyte * (row * height)).from_address(data))
+        flat = np.ctypeslib.as_array(
+            (ctypes.c_ubyte * (row * height)).from_address(data)
+        )
         return flat.reshape(height, row)[:, :width].copy()
 
     def image_release(self, image: Any) -> None:
@@ -430,7 +448,8 @@ _binding: FlirBinding | None = None  # loaded by _spin(); tests swap in a fake
 
 def _spin() -> FlirBinding:
     """The binding, loading the library on first use; BackendUnavailable
-    without the SDK."""
+    without the SDK.
+    """
     global _binding
     if _binding is None:
         try:
@@ -450,7 +469,7 @@ def ensure_available() -> None:
 
 
 def teardown() -> None:
-    """Release the C API session (:meth:`FlirBinding.teardown`), if loaded."""
+    """Release the C API session (`FlirBinding.teardown`), if loaded."""
     if _binding is not None:
         _binding.teardown()
 

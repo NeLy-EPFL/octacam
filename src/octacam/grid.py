@@ -1,8 +1,8 @@
 """Composite grid videos from a recording folder's mp4 files.
 
-``octacam process`` builds one grid per ``[[visualization]]`` entry of the
+`octacam process` builds one grid per `[[visualization]]` entry of the
 recording's config, and none without one (grids are opt-in per rig). A layout
-is a 2D list of camera names, ``""`` for a black cell:
+is a 2D list of camera names, `""` for a black cell:
 
     [[visualization]]
     name = "grid.mp4"
@@ -48,8 +48,9 @@ PROBE_TIMEOUT_S = 30.0
 
 
 def auto_layout(camera_names: list[str]) -> list[list[str]]:
-    """A near-square row-major layout for *camera_names* (``octacam config``'s
-    proposal), the last row padded with ``""``: xstack needs equal rows."""
+    """A near-square row-major layout for *camera_names* (`octacam config`'s
+    proposal), the last row padded with `""`: xstack needs equal rows.
+    """
     names = [n for n in camera_names if n]
     if not names:
         return []
@@ -60,7 +61,7 @@ def auto_layout(camera_names: list[str]) -> list[list[str]]:
 
 
 def _fps_value(fps_str: str) -> float:
-    """ffprobe's ``num/den`` rate as a float; its ``0/0`` (no defined rate) is 0.0."""
+    """Ffprobe's `num/den` rate as a float; its `0/0` (no defined rate) is 0.0."""
     num, _, den = fps_str.partition("/")
     if not den:
         return float(num)
@@ -71,8 +72,8 @@ def _fps_value(fps_str: str) -> float:
 def _probe_video(path: Path, ffprobe: str) -> tuple[int, int, str, float]:
     """(width, height, fps fraction, duration s) of *path*'s video stream.
 
-    Off the tty like every ffmpeg launch (see :mod:`octacam.ffmpeg`); ffprobe
-    has no ``-nostdin``, so only ``stdin=DEVNULL``.
+    Off the tty like every ffmpeg launch (see `octacam.ffmpeg`); ffprobe
+    has no `-nostdin`, so only `stdin=DEVNULL`.
     """
     result = subprocess.run(
         [
@@ -118,7 +119,8 @@ def _probe_cells(
 ) -> tuple[list[Path | None], tuple[int, int, str, float] | None]:
     """Each cell's mp4 in row-major (xstack input) order and the first probed
     file's (width, height, fps, duration). A missing or unprobeable file is a
-    black cell (None), so one bad camera never costs the whole grid."""
+    black cell (None), so one bad camera never costs the whole grid.
+    """
     cells: list[Path | None] = []
     ref: tuple[int, int, str, float] | None = None
     for name in (name for row in layout for name in row):
@@ -129,7 +131,9 @@ def _probe_cells(
         try:
             probe = _probe_video(path, ffprobe)
         except _PROBE_ERRORS as e:
-            log.warning("Could not probe %s: %s — treating as a black cell", path, e)
+            log.warning(
+                "Could not probe %s: %s \N{EM DASH} treating as a black cell", path, e
+            )
             cells.append(None)
             continue
         cells.append(path)
@@ -138,13 +142,13 @@ def _probe_cells(
 
 
 def _filtergraph(rows: int, cols: int, width: int, height: int, pix_fmt: str) -> str:
-    """Letterbox every input into a width×height cell, then xstack the cells.
+    """Letterbox every input into a widthxheight cell, then xstack the cells.
 
     Each cell is converted to *pix_fmt* first: xstack's implicit conversion of
     full-range camera videos and limited-range lavfi cells mis-tags the range
-    (washed out in VLC, stalling in QuickTime). ``out_range=full`` keeps 0-255
+    (washed out in VLC, stalling in QuickTime). `out_range=full` keeps 0-255
     luma for limited-range YUV (see ffmpeg.color_range_args), so the pad's bars
-    are true black. ``force_divisible_by=2`` keeps a letterboxed camera's fitted
+    are true black. `force_divisible_by=2` keeps a letterboxed camera's fitted
     size even, as yuv420p needs.
     """
     scale_range = ":out_range=full" if is_limited_range_yuv(pix_fmt) else ""
@@ -212,17 +216,17 @@ def build_grid_video(
     on_progress: ProgressCallback | None = None,
 ) -> Path | None:
     """Write *layout*'s camera videos as one grid to *output* (default
-    ``folder/grid.mp4``).
+    `folder/grid.mp4`).
 
     *ffmpeg_params* picks the encoder (empty: the transcode default); its
-    ``-pix_fmt``/``-vf`` are ignored, as the grid owns its filters and writes
+    `-pix_fmt`/`-vf` are ignored, as the grid owns its filters and writes
     *pix_fmt* (yuv420p, for QuickTime/Keynote). Every cell takes the first
     probed camera's size; other sizes are letterboxed, a missing camera is
     black. Returns *output* (also on *dry_run*, which only logs the command),
     or None when nothing was built.
     """
     if not layout or not layout[0]:
-        log.warning("Grid layout is empty — skipping grid")
+        log.warning("Grid layout is empty \N{EM DASH} skipping grid")
         return None
     if output is None:
         output = folder / GRID_FILENAME
@@ -236,7 +240,8 @@ def build_grid_video(
     cells, ref = _probe_cells(folder, layout, ffprobe)
     if ref is None:
         log.warning(
-            "No probeable mp4 files matching the grid layout found in %s — skipping grid",
+            "No probeable mp4 files matching the grid layout found in %s \N{EM DASH} "
+            "skipping grid",
             folder,
         )
         return None
@@ -251,7 +256,7 @@ def build_grid_video(
         log.info("[dry-run] grid: %s", " ".join([*cmd, str(output)]))
         return output
 
-    log.info("Generating grid video → %s", output)
+    log.info("Generating grid video \N{RIGHTWARDS ARROW} %s", output)
     try:
         # A partial grid.mp4 must never pass for a finished one.
         with atomic_output(output) as tmp:

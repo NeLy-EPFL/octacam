@@ -1,15 +1,21 @@
 """What the commands share: the stderr console, the plugin and config-dir
-options, opening the rig, and the camera enumeration doctor and the wizard read."""
+options, opening the rig, and the camera enumeration doctor and the wizard read.
+"""
 
 import functools
 import logging
 import os
 import socket
 import sys
+import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import typer
+from typer.exceptions import TyperException
+
+from octacam.config import ConfigError
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -22,12 +28,78 @@ log = logging.getLogger("octacam")
 
 
 @functools.cache
-def stderr_console() -> "Console":
+def stderr_console() -> Console:
     """The one stderr Console, shared by the logger and every progress bar so log
-    lines render above a live bar instead of corrupting it."""
+    lines render above a live bar instead of corrupting it.
+    """
     from rich.console import Console
 
     return Console(stderr=True)
+
+
+#: `-v/--verbose`, which every command takes.
+Verbose = Annotated[
+    bool,
+    typer.Option("--verbose", "-v", help="Debug messages, and a traceback on errors."),
+]
+
+#: `--set KEY=VALUE`, repeatable, for the commands that read a rig config.
+Sets = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--set",
+        metavar="KEY=VALUE",
+        help=(
+            "Override one config key for this launch by its dotted path, "
+            "`table.key=value`; repeatable. The value is read as TOML (a list may "
+            "drop its brackets), and `none` restores the default."
+        ),
+        show_default=False,
+    ),
+]
+
+
+def command[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
+    """Wrap a command: `--verbose` logging, and errors as one line.
+
+    A usage error stays Typer's (exit 2) and a config error is left to `main`
+    (exit 2). Any other error prints `error: ...` and exits 1, with its traceback
+    under `--verbose`; Ctrl-C exits 130.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        verbose = bool(kwargs.get("verbose"))
+        if verbose:
+            logging.getLogger("octacam").setLevel(logging.DEBUG)
+        try:
+            return fn(*args, **kwargs)
+        except TyperException, typer.Exit, typer.Abort, ConfigError:
+            raise
+        except KeyboardInterrupt:
+            if verbose:
+                traceback.print_exc()
+            typer.echo("interrupted", err=True)
+            raise typer.Exit(130) from None
+        except Exception as exc:
+            if verbose:
+                raise
+            typer.echo(f"error: {exc}", err=True)
+            raise typer.Exit(1) from None
+
+    return wrapper
+
+
+def with_sets(config: OctacamConfig, sets: list[str] | None) -> OctacamConfig:
+    """`config` with the `--set` overrides applied; a bad one is a usage error."""
+    if not sets:
+        return config
+    from octacam.config import apply_overrides
+
+    try:
+        return apply_overrides(config, sets)
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc), param_hint="'--set'") from None
 
 
 EnabledPlugins = Annotated[
@@ -50,17 +122,19 @@ NoPlugins = Annotated[
 
 
 def resolve_enabled(enabled_plugins, no_plugins):
-    """build_plugins' ``enabled``: None to use the config, [] for --no-plugins,
-    else the --plugin names to add to the config's selection."""
+    """build_plugins' `enabled`: None to use the config, [] for --no-plugins,
+    else the --plugin names to add to the config's selection.
+    """
     if no_plugins:
         return []
     return list(enabled_plugins) if enabled_plugins else None
 
 
 def resolve_config_arg(config_dir: Path) -> Path:
-    """The config dir CONFIG_DIR names: a recording folder resolves to its config
+    """The config dir `config_dir` names: a recording folder resolves to its config
     snapshot, so `octacam gui <recording>` relaunches what it ran with. Every
-    command that opens a rig calls this once; a redirect is logged."""
+    command that opens a rig calls this once; a redirect is logged.
+    """
     from octacam.config import resolve_config_dir
 
     resolved = resolve_config_dir(config_dir)
@@ -84,11 +158,12 @@ def browser_skip_reason(no_browser: bool) -> str | None:
     """Why auto-opening the browser should be skipped, or None to open it.
 
     Over SSH the browser would open on the rig, not the user's machine; the
-    no-display check catches SSH setups that strip the SSH_* variables."""
+    no-display check catches SSH setups that strip the SSH_* variables.
+    """
     if no_browser:
         return "--no-browser was passed"
     if in_ssh_session():
-        return "running over SSH — open the GUI on your local machine instead"
+        return "running over SSH \N{EM DASH} open the GUI on your local machine instead"
     if sys.platform.startswith("linux") and not (
         os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     ):
@@ -96,13 +171,40 @@ def browser_skip_reason(no_browser: bool) -> str | None:
     return None
 
 
+#: How many ports after the default a page tries before giving up.
+PORT_TRIES = 20
+
+
+def pick_port(host: str, port: int | None, default: int) -> int:
+    """The port to serve on: `port` if it is free, else exit; with no `port`,
+    `default` or the next free one after it.
+    """
+    if port is not None:
+        if not port_available(host, port):
+            sys.exit(
+                f"Port {port} is already in use on {host}. Choose a free one with "
+                "--port, or leave it out to take the next free port."
+            )
+        return port
+    for candidate in range(default, default + PORT_TRIES):
+        if port_available(host, candidate):
+            if candidate != default:
+                log.info("Port %d is in use; serving on %d.", default, candidate)
+            return candidate
+    sys.exit(
+        f"Ports {default}-{default + PORT_TRIES - 1} are all in use on {host}. "
+        "Choose a free one with --port."
+    )
+
+
 def port_available(host: str, port: int) -> bool:
-    """Return False if a server is already bound to ``host:port``.
+    """Return False if a server is already bound to `host:port`.
 
     gui checks it before touching hardware: its init thread opens the cameras
     and arms the plugins before uvicorn binds. SO_REUSEADDR mirrors uvicorn, so
     a socket lingering in TIME_WAIT (which uvicorn could rebind) is not reported
-    as in use; a listening server is."""
+    as in use; a listening server is.
+    """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -115,7 +217,8 @@ def port_available(host: str, port: int) -> bool:
 
 def warn_if_transcoding() -> None:
     """Warn (best-effort) when an `octacam process` is transcoding on this
-    machine: it competes with live capture for the CPU."""
+    machine: it competes with live capture for the CPU.
+    """
     from octacam import session_cache
 
     try:
@@ -126,8 +229,10 @@ def warn_if_transcoding() -> None:
     if count:
         log.warning(
             "%d octacam process run%s transcoding on this machine. They pause at "
-            "their next file/folder boundary while these cameras are in use — "
-            "detached and foreground alike — and resume when they are free. A file "
+            "their next file/folder boundary while these cameras are in use "
+            "\N{EM DASH} "
+            "detached and foreground alike \N{EM DASH} and resume when they are free. "
+            "A file "
             "already being transcoded finishes first, so capture may be slowed "
             "briefly. Use `octacam process --ignore-capture` to opt out.",
             count,
@@ -137,23 +242,26 @@ def warn_if_transcoding() -> None:
 
 def camera_open_error(e: Exception) -> str:
     """The operator's message for a rig whose cameras did not open (*e* is a
-    BackendError or BackendUnavailable)."""
+    BackendError or BackendUnavailable).
+    """
     from octacam.cameras import BackendUnavailable
 
     if isinstance(e, BackendUnavailable):
         return str(e)
     return (
         f"Could not open the cameras: {e}. They may already be in use by another "
-        "octacam instance on this rig, or disconnected — only one process can open "
+        "octacam instance on this rig, or disconnected \N{EM DASH} only one process "
+        "can open "
         "them at a time."
     )
 
 
 def open_rig(
-    config: "OctacamConfig", config_dir: Path, backend: str | None = None
-) -> "CameraSystem":
-    """:meth:`CameraSystem.for_config`, exiting with the reason when the cameras
-    do not open."""
+    config: OctacamConfig, config_dir: Path, backend: str | None = None
+) -> CameraSystem:
+    """`CameraSystem.for_config`, exiting with the reason when the cameras
+    do not open.
+    """
     from octacam.cameras import BackendError, BackendUnavailable, CameraSystem
 
     try:
@@ -163,16 +271,17 @@ def open_rig(
 
 
 def enumerate_backend(name: str) -> list[tuple[str, str | None]]:
-    """``[(serial, model|None), ...]`` for a backend without opening any camera.
+    """`[(serial, model|None), ...]` for a backend without opening any camera.
 
-    ``"auto"`` (or an empty selector) sweeps the available backend cascade and
+    `"auto"` (or an empty selector) sweeps the available backend cascade and
     returns each camera once, claimed by the highest-priority tier that sees it
     (so a Basler served by the vendor tier is not also listed under the pycameleon
-    floor) — mirroring how :class:`CameraSystem` opens them. Basler goes through
+    floor) -- mirroring how `CameraSystem` opens them. Basler goes through
     the pylon TL factory directly so model names come along; every other backend
-    labels its cameras through its spec's ``read_model`` (None without one).
+    labels its cameras through its spec's `read_model` (None without one).
     Enumeration never opens/grabs a device, so this is safe alongside a live
-    session."""
+    session.
+    """
     from octacam.cameras import select_backend
     from octacam.cameras.registry import is_auto
 
@@ -198,8 +307,9 @@ def enumerate_backend(name: str) -> list[tuple[str, str | None]]:
 
 
 def cascade_assignment() -> list[tuple[str, str, str | None]]:
-    """``[(serial, backend, model|None), ...]``: the tier :class:`CameraSystem`
-    would open each camera through under ``auto``. A failing tier is skipped."""
+    """`[(serial, backend, model|None), ...]`: the tier `CameraSystem`
+    would open each camera through under `auto`. A failing tier is skipped.
+    """
     from octacam.cameras.registry import available_backends
 
     claimed: dict[str, tuple[str, str | None]] = {}
@@ -217,9 +327,10 @@ def cascade_assignment() -> list[tuple[str, str, str | None]]:
     return [(serial, claimed[serial][0], claimed[serial][1]) for serial in order]
 
 
-def serial_plugin(name: str) -> "type[SerialPlugin] | None":
+def serial_plugin(name: str) -> type[SerialPlugin] | None:
     """The class of the serial-hardware plugin *name* (one with board firmware),
-    or None for any other name and for a module that fails to import."""
+    or None for any other name and for a module that fails to import.
+    """
     from octacam.plugins import plugin_class
     from octacam.plugins.serial import SerialPlugin
 

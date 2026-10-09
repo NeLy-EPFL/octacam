@@ -1,10 +1,10 @@
-"""The recording folder layout: metadata in the ``octacam_recording`` subfolder.
+"""The recording folder layout: metadata in the `octacam_recording` subfolder.
 
 A recording folder shows only its videos; the summary, the timestamps, the
 config snapshot and the camera parameter files sit in its
-``octacam_recording`` subfolder. Recordings made before that keep them flat
+`octacam_recording` subfolder. Recordings made before that keep them flat
 beside the videos, and every reader must accept both. These pin the shared
-helpers in :mod:`octacam.recording_format` and :func:`octacam.config.resolve_config_dir`
+helpers in `octacam.recording_format` and `octacam.config.resolve_config_dir`
 that every reader goes through.
 """
 
@@ -146,7 +146,9 @@ def test_find_recordings_at_a_recording_and_off_the_tree(tmp_path):
         assert find_recordings([tmp_path / "missing"], recursive) == []
     # Deduplicated across spellings, in the order given.
     other = _flat(tmp_path / "other")
-    assert find_recordings([other, rec, info, tmp_path / "rec" / ".." / "rec"], False) == [
+    assert find_recordings(
+        [other, rec, info, tmp_path / "rec" / ".." / "rec"], False
+    ) == [
         other,
         rec,
     ]

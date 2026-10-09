@@ -1,5 +1,6 @@
 """`octacam config`: the first-run wizard. It only enumerates cameras (opening
-them just for --snapshot-params) and leaves placement and grid to `gui`."""
+them just for --snapshot-params) and leaves placement and grid to `gui`.
+"""
 
 import logging
 import sys
@@ -8,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, get_args
 
 import typer
 
-from octacam.cli._common import enumerate_backend, serial_plugin
+from octacam.cli._common import Verbose, command, enumerate_backend, serial_plugin
 
 if TYPE_CHECKING:
     from octacam.config import RecordConfig
@@ -17,8 +18,9 @@ log = logging.getLogger("octacam")
 
 
 def _resolve_backend(console, cli_backend: str | None) -> str:
-    """The wizard's backend, without prompting: ``auto`` (every installed
-    backend, so mixed vendors just work) unless ``--backend`` pins one."""
+    """The wizard's backend, without prompting: `auto` (every installed
+    backend, so mixed vendors just work) unless `--backend` pins one.
+    """
     from octacam.cameras.registry import BACKENDS, available_backends, is_auto
 
     if cli_backend is not None:
@@ -39,15 +41,17 @@ def _resolve_backend(console, cli_backend: str | None) -> str:
         )
     else:
         console.print(
-            "[yellow]No camera SDK detected here[/yellow] — you can still write a "
+            "[yellow]No camera SDK detected here[/yellow] \N{EM DASH} you can still "
+            "write a "
             "config now and detect cameras later on the rig."
         )
     return "auto"
 
 
 def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
-    """Print and return ``[(serial, model|None)]`` for *backend* (``auto``
-    sweeps the cascade); [] if none or enumeration fails."""
+    """Print and return `[(serial, model|None)]` for *backend* (`auto`
+    sweeps the cascade); [] if none or enumeration fails.
+    """
     from octacam.cameras.registry import is_auto
 
     label = "" if is_auto(backend) else f"{backend} "
@@ -59,15 +63,16 @@ def _detect_cameras(console, backend: str) -> list[tuple[str, str | None]]:
     if cams:
         console.print(f"Detected [bold]{len(cams)}[/bold] {label}camera(s):")
         for serial, model in cams:
-            console.print(f"  • {model + '  ' if model else ''}{serial}")
+            console.print(f"  \N{BULLET} {model + '  ' if model else ''}{serial}")
     else:
         console.print(f"[yellow]No {label}cameras detected.[/yellow]")
     return cams
 
 
 def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dict]:
-    """``cameras`` entries (serial plus an optional unique, safe ``name``) for
-    the detected or typed serials; [] means every camera detected at record time."""
+    """`cameras` entries (serial plus an optional unique, safe `name`) for
+    the detected or typed serials; [] means every camera detected at record time.
+    """
     from rich.prompt import Confirm, Prompt
 
     from octacam.config import is_safe_segment
@@ -85,7 +90,8 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
             serials.append(serial)
     if not serials:
         console.print(
-            "No cameras listed — the config will use every camera detected at "
+            "No cameras listed \N{EM DASH} the config will use every camera detected "
+            "at "
             "record time."
         )
         return []
@@ -106,12 +112,12 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
                 break
             if not is_safe_segment(name):
                 console.print(
-                    r"    [red]Invalid name[/red] — no '/', '\', '.' or '..'."
+                    "    [red]Invalid name[/red] \N{EM DASH} no '/', '\\', '.' or '..'."
                 )
                 continue
             if name in used:
                 console.print(
-                    f"    [red]{name!r} is already used[/red] — pick another."
+                    f"    [red]{name!r} is already used[/red] \N{EM DASH} pick another."
                 )
                 continue
             used.add(name)
@@ -121,10 +127,11 @@ def _prompt_cameras(console, detected: list[tuple[str, str | None]]) -> list[dic
 
 
 def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
-    """Offer one auto-arranged ``grid.mp4`` of the named cameras (two or more).
+    """Offer one auto-arranged `grid.mp4` of the named cameras (two or more).
 
     Declining is the default: `octacam process` builds a grid only for a rig
-    with a ``[[visualization]]`` entry, so this answer is the whole opt-in."""
+    with a `[[visualization]]` entry, so this answer is the whole opt-in.
+    """
     from rich.prompt import Confirm
 
     from octacam.grid import auto_layout
@@ -142,7 +149,7 @@ def _prompt_visualization(console, cameras: list[dict]) -> list[dict]:
     return [{"name": "grid.mp4", "layout": auto_layout(names)}]
 
 
-def _prompt_record(console) -> "RecordConfig":
+def _prompt_record(console) -> RecordConfig:
     """Prompt for the [record] section, defaulting every field to the schema default."""
     from rich.prompt import FloatPrompt, Prompt
 
@@ -225,7 +232,8 @@ def _prompt_transfer(console) -> dict | None:
 
 def _detect_serial_ports(console):
     """Print and return the microcontroller-class serial ports (no legacy
-    ``/dev/ttyS*``)."""
+    `/dev/ttyS*`).
+    """
     from octacam import serial_ports as sp
 
     mcus = [p for p in sp.list_serial_ports() if p.likely_microcontroller]
@@ -233,14 +241,14 @@ def _detect_serial_ports(console):
         console.print(f"Detected [bold]{len(mcus)}[/bold] serial device(s):")
         for p in mcus:
             sn = f"  sn={p.serial_number}" if p.serial_number else ""
-            console.print(f"  • {p.board_name}  {p.device}  [{p.vid_pid}]{sn}")
+            console.print(f"  \N{BULLET} {p.board_name}  {p.device}  [{p.vid_pid}]{sn}")
     else:
         console.print("[yellow]No Arduino-class serial ports detected.[/yellow]")
     return mcus
 
 
 def _prompt_serial_plugin(console) -> list[dict]:
-    """Optionally enable one serial plugin; its ``plugins`` entries ([] if not)."""
+    """Optionally enable one serial plugin; its `plugins` entries ([] if not)."""
     from rich.prompt import Confirm, Prompt
 
     from octacam import serial_ports as sp
@@ -260,7 +268,9 @@ def _prompt_serial_plugin(console) -> list[dict]:
     )
     ports = _detect_serial_ports(console)
     cls = serial_plugin(name)
-    default_device = ports[0].device if ports else (cls and cls.default_device) or "auto"
+    default_device = (
+        ports[0].device if ports else (cls and cls.default_device) or "auto"
+    )
     console.print(
         "  Enter a device path, or [bold]auto[/bold] to pick the single board "
         "connected at launch."
@@ -288,14 +298,15 @@ def _prompt_serial_plugin(console) -> list[dict]:
 
 def _build_config_doc(
     backend: str,
-    record_cfg: "RecordConfig",
+    record_cfg: RecordConfig,
     cameras: list[dict],
     visualization: list[dict],
     transfer: dict | None,
     plugins: list[dict] | None = None,
 ) -> dict:
-    """The raw-TOML dict for the config writer. ``backend`` is written only when
-    pinned (``auto`` stays implicit); empty sections are omitted."""
+    """The raw-TOML dict for the config writer. `backend` is written only when
+    pinned (`auto` stays implicit); empty sections are omitted.
+    """
     from octacam.cameras.registry import is_auto
     from octacam.config import TranscodeConfig
 
@@ -321,7 +332,8 @@ def _snapshot_camera_params(
     """Save each camera's sensor params into *target*; return the filenames.
 
     Never fatal: a camera that will not open (say, a live session holds it) is
-    skipped with a warning, and the GUI's Save… completes the config later."""
+    skipped with a warning, and the GUI's Save... completes the config later.
+    """
     if not serials:
         return []
     from octacam import config_writer
@@ -332,14 +344,16 @@ def _snapshot_camera_params(
         system = CameraSystem(requested_serial_numbers=serials, backend=backend)
     except BackendError as e:
         console.print(
-            f"[yellow]Skipping sensor parameters[/yellow] — could not open the "
+            f"[yellow]Skipping sensor parameters[/yellow] \N{EM DASH} could not open "
+            "the "
             f"camera(s): {e}\n  A camera is likely in use by another session; run "
-            "`octacam gui` and use Save… to capture them later."
+            "`octacam gui` and use Save\N{HORIZONTAL ELLIPSIS} to capture them later."
         )
         return []
-    except Exception as e:  # missing SDK, unknown serial, … — never fatal here
+    except Exception as e:  # missing SDK, unknown serial, ... -- never fatal here
         console.print(
-            f"[yellow]Skipping sensor parameters[/yellow] — could not open the "
+            f"[yellow]Skipping sensor parameters[/yellow] \N{EM DASH} could not open "
+            "the "
             f"camera(s): {e}"
         )
         return []
@@ -355,6 +369,7 @@ def _snapshot_camera_params(
         system.close()
 
 
+@command
 def config(
     config_dir: Annotated[
         Path | None,
@@ -388,13 +403,14 @@ def config(
             "parameters (.pfs/.txt). Skipped when a camera is busy. On by default.",
         ),
     ] = True,
+    verbose: Verbose = False,
 ) -> None:
     """Interactively scaffold a new rig config directory.
 
     Auto-detects the connected cameras (across every installed backend, so a
     Basler+FLIR rig just works), then prompts for the record and transfer
-    settings and writes an octacam_config.toml. The visual per-camera bits —
-    window placement, rotation, and the grid — are left to `octacam gui`, which
+    settings and writes an octacam_config.toml. The visual per-camera bits --
+    window placement, rotation, and the grid -- are left to `octacam gui`, which
     tunes them against a live preview; run it next on the new directory.
 
     By default it also opens each detected camera once to snapshot its current
@@ -407,7 +423,7 @@ def config(
     from octacam import config_writer
 
     console = Console()
-    console.print("[bold]octacam config[/bold] — set up a new rig config\n")
+    console.print("[bold]octacam config[/bold] \N{EM DASH} set up a new rig config\n")
 
     chosen_backend = _resolve_backend(console, backend)
     detected = _detect_cameras(console, chosen_backend)
@@ -434,7 +450,9 @@ def config(
         cfg_file.exists()
         and not force
         and not Confirm.ask(
-            f"{cfg_file} already exists — overwrite?", default=False, console=console
+            f"{cfg_file} already exists \N{EM DASH} overwrite?",
+            default=False,
+            console=console,
         )
     ):
         console.print("Aborted.")
@@ -449,15 +467,16 @@ def config(
     except OSError as e:
         sys.exit(f"Failed to write config: {e}")
 
-    console.print(f"\n[green]✓[/green] Wrote [bold]{written}[/bold]")
+    console.print(f"\n[green]\N{CHECK MARK}[/green] Wrote [bold]{written}[/bold]")
     if snapshot_params:
         serials = [c["serial_number"] for c in cameras] or [s for s, _ in detected]
         saved = _snapshot_camera_params(console, chosen_backend, serials, target)
         if saved:
             console.print(
-                f"[green]✓[/green] Saved sensor parameters: {', '.join(saved)}"
+                f"[green]\N{CHECK MARK}[/green] Saved sensor parameters: "
+                f"{', '.join(saved)}"
             )
     console.print("\nNext steps:")
-    console.print(f"  • Validate it:          octacam doctor {target}")
-    console.print(f"  • Place cameras & grid: octacam gui {target}")
-    console.print(f"  • Record headlessly:    octacam record {target}")
+    console.print(f"  \N{BULLET} Validate it:          octacam doctor {target}")
+    console.print(f"  \N{BULLET} Place cameras & grid: octacam gui {target}")
+    console.print(f"  \N{BULLET} Record headlessly:    octacam record {target}")

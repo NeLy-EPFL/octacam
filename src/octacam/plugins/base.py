@@ -1,6 +1,7 @@
 """The plugin contract and the manager that calls it. Hooks must be thread-safe:
 on_first_frame (at the countdown's t0: never block) and on_recording_stop run on
-the monitor thread, the start and preview hooks off the controller lock."""
+the monitor thread, the start and preview hooks off the controller lock.
+"""
 
 from __future__ import annotations
 
@@ -19,8 +20,9 @@ log = logging.getLogger("octacam")
 
 
 class Plugin:
-    """The hooks the core calls, all no-ops by default. A hook's ``params`` is
-    this plugin's slice of the start request, or None."""
+    """The hooks the core calls, all no-ops by default. A hook's `params` is
+    this plugin's slice of the start request, or None.
+    """
 
     name: str = "plugin"
     # Drives the managed trigger. A recording counts frames against its
@@ -31,11 +33,11 @@ class Plugin:
     controller: RecordingController | None = None  # set by PluginManager.attach
 
     def broadcast(self, topic: str, payload: dict, /) -> None:
-        """Push ``payload`` to every GUI client as ``topic``; a no-op until attached."""
+        """Push `payload` to every GUI client as `topic`; a no-op until attached."""
 
     @classmethod
     def from_options(cls, options: dict) -> Plugin:
-        """The plugin a ``[plugins.options]`` table configures; raises if it can't."""
+        """The plugin a `[plugins.options]` table configures; raises if it can't."""
         return cls()
 
     def setup(self) -> None:
@@ -60,13 +62,15 @@ class Plugin:
         pass
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
-        """The slice headless ``octacam record`` starts with, as the GUI sends its
-        tab's: a plugin that arms a board at record start needs one."""
+        """The slice headless `octacam record` starts with, as the GUI sends its
+        tab's: a plugin that arms a board at record start needs one.
+        """
         return None
 
     def snapshot_options(self, params: dict | None) -> dict | None:
-        """The ``[[plugins]]`` options reproducing this plugin's live state in the
-        config snapshot, None when the configured ones do. No I/O: under the lock."""
+        """The `[[plugins]]` options reproducing this plugin's live state in the
+        config snapshot, None when the configured ones do. No I/O: under the lock.
+        """
         return None
 
     def on_preview_start(self, params: dict | None) -> None:
@@ -76,20 +80,22 @@ class Plugin:
         pass
 
     def trigger_train(self, params: dict | None) -> dict | None:
-        """The exact ``{"period_ns", "count"}`` on_recording_start emits for
-        these params. Pure: called under the controller lock."""
+        """The exact `{"period_ns", "count"}` on_recording_start emits for
+        these params. Pure: called under the controller lock.
+        """
         return None
 
     def prime_trigger(self, params: dict | None, pulses: int) -> bool:
-        """Emit ``pulses`` sacrificial camera pulses, lights dark, and return once
-        they are out; True if it did. Off the lock, before on_recording_start."""
+        """Emit `pulses` sacrificial camera pulses, lights dark, and return once
+        they are out; True if it did. Off the lock, before on_recording_start.
+        """
         return False
 
     def api_router(self) -> APIRouter | None:
         return None
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """True if the message was this plugin's; ``client_id`` names the socket."""
+        """True if the message was this plugin's; `client_id` names the socket."""
         return False
 
     def on_ws_disconnect(self, client_id: int) -> None:
@@ -98,7 +104,8 @@ class Plugin:
 
 class PluginManager:
     """The active plugins, called in load order (teardown in reverse); a hook
-    that raises is logged and skipped, never fatal."""
+    that raises is logged and skipped, never fatal.
+    """
 
     def __init__(self, plugins: list[Plugin] | None = None):
         self.plugins: list[Plugin] = list(plugins or [])
@@ -158,9 +165,12 @@ class PluginManager:
 
     def on_ws_message(self, message: dict, client_id: int) -> None:
         """Offer a message to each plugin until one claims it; a raising hook
-        claims it, so a bad message reaches no further plugin."""
+        claims it, so a bad message reaches no further plugin.
+        """
         for plugin in self.plugins:
-            if self._call(plugin, plugin.on_ws_message, message, client_id, default=True):
+            if self._call(
+                plugin, plugin.on_ws_message, message, client_id, default=True
+            ):
                 return
 
     def on_ws_disconnect(self, client_id: int) -> None:
@@ -185,7 +195,8 @@ class PluginManager:
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
         """Each plugin's non-None headless start slice, keyed by name as the GUI
-        sends them."""
+        sends them.
+        """
         params: dict = {}
         for plugin in self.plugins:
             slice_ = self._call(plugin, plugin.default_start_params, fps, duration_s)
@@ -194,8 +205,9 @@ class PluginManager:
         return params
 
     def snapshot_options(self, params: dict | None) -> dict[str, dict]:
-        """Every plugin's snapshot options by name, ``{}`` when its config
-        reproduces it."""
+        """Every plugin's snapshot options by name, `{}` when its config
+        reproduces it.
+        """
         result: dict[str, dict] = {}
         for plugin in self.plugins:
             slice_ = self._slice(plugin, params)
@@ -205,8 +217,10 @@ class PluginManager:
         return result
 
     def status(self) -> dict:
-        """Each plugin's status() with its is_ready() as ``ready``, which wins
-        over a "ready" key; a failing status() drops only the details."""
+        """The status of each plugin, with its `is_ready()` as `ready`.
+
+        `ready` wins over a "ready" key; a failing `status()` drops only the details.
+        """
         result: dict = {}
         for plugin in self.plugins:
             ready = self._call(plugin, plugin.is_ready)

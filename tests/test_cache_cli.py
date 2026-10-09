@@ -29,7 +29,7 @@ def _finished_job(job_id="fin1"):
 
 
 def _job_with_state(job_id, state, *, age_s=0.0):
-    """A job dir in ``state`` with no lock held, optionally aged ``age_s`` seconds."""
+    """A job dir in `state` with no lock held, optionally aged `age_s` seconds."""
     jd = pj.job_dir(job_id)
     jd.mkdir(parents=True)
     pj.write_status(jd, _job_status(job_id, state=state))
@@ -61,7 +61,7 @@ class _LiveJob:
 
 
 def _stale_marker(directory):
-    """Drop an orphaned (unlocked), clearly-old marker into ``directory``."""
+    """Drop an orphaned (unlocked), clearly-old marker into `directory`."""
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / "999999-dead.lock"
     marker.write_text("999999 crashed\n")
@@ -169,7 +169,7 @@ def test_clear_finished_removes_crashed_running_job(cache_dir):
 
 def test_clear_finished_removes_starting_job_past_grace(cache_dir):
     # A `starting` job that never took the lock and is now old (child failed to
-    # boot) is a dead husk — removable.
+    # boot) is a dead husk -- removable.
     jd = _job_with_state("stuck1", "starting", age_s=120.0)
     removed, kept = pj.clear_finished()
     assert (removed, kept) == (1, 0)

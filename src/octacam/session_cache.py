@@ -1,11 +1,11 @@
-"""The recording cache behind ``octacam process --last/--all``, and the
+"""The recording cache behind `octacam process --last/--all`, and the
 cross-process activity markers.
 
-Each finished recording is one line of ``recordings.jsonl`` in the cache dir:
-``{"folder", "time", "session", "kind"}``, where ``session`` groups one
-``gui``/``record`` process. Every write rewrites the file atomically under an
+Each finished recording is one line of `recordings.jsonl` in the cache dir:
+`{"folder", "time", "session", "kind"}`, where `session` groups one
+`gui`/`record` process. Every write rewrites the file atomically under an
 flock (two rigs may record at once) and drops entries past
-:data:`RETENTION_DAYS`. Queries skip folders deleted since.
+`RETENTION_DAYS`. Queries skip folders deleted since.
 """
 
 from __future__ import annotations
@@ -34,8 +34,9 @@ _STALE_MARKER_AGE_S = 60.0
 
 
 def cache_dir() -> Path:
-    """``OCTACAM_CACHE_DIR``, else ``$XDG_CACHE_HOME/octacam``, else
-    ``~/.cache/octacam``."""
+    """`OCTACAM_CACHE_DIR`, else `$XDG_CACHE_HOME/octacam`, else
+    `~/.cache/octacam`.
+    """
     override = os.environ.get("OCTACAM_CACHE_DIR")
     if override:
         return Path(override).expanduser()
@@ -50,7 +51,8 @@ def _cache_file() -> Path:
 
 def new_session_id() -> str:
     """A unique id grouping all recordings made by one octacam process."""
-    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    # Local time, as the rig's folder names use.
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")  # noqa: DTZ005
     return f"{stamp}-{os.getpid()}"
 
 
@@ -62,12 +64,14 @@ def _now() -> datetime.datetime:
 @contextmanager
 def _locked() -> Iterator[None]:
     """Hold the cache's flock for a read-modify-write; without a lock file (an
-    unwritable cache dir) proceed unlocked: the cache is a convenience."""
+    unwritable cache dir) proceed unlocked: the cache is a convenience.
+    """
     directory = cache_dir()
     handle = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        handle = open(directory / LOCK_FILENAME, "a+")
+        # The handle outlives this block: it holds the lock.
+        handle = open(directory / LOCK_FILENAME, "a+")  # noqa: SIM115
     except OSError as e:
         log.debug("Recording cache lock unavailable (%s); proceeding unlocked", e)
         yield
@@ -95,7 +99,8 @@ def _parse_time(value: object) -> datetime.datetime | None:
 
 def _read_entries() -> list[dict]:
     """All valid entries in recorded order; a malformed line (a crashed writer's
-    partial line) is skipped."""
+    partial line) is skipped.
+    """
     try:
         text = _cache_file().read_text()
     except OSError:
@@ -115,13 +120,14 @@ def _read_entries() -> list[dict]:
 
 
 def _write_entries(entries: list[dict]) -> None:
-    """Atomically replace the cache file with ``entries`` (safe unlocked too)."""
+    """Atomically replace the cache file with `entries` (safe unlocked too)."""
     atomic_write_text(_cache_file(), "".join(json.dumps(e) + "\n" for e in entries))
 
 
 def record_recording(folder: str | Path, session_id: str, kind: str = "gui") -> None:
-    """Note that ``folder`` was just recorded, pruning entries past retention.
-    Never raises: a cache failure must not disturb recording teardown."""
+    """Note that `folder` was just recorded, pruning entries past retention.
+    Never raises: a cache failure must not disturb recording teardown.
+    """
     entry = {
         "folder": str(Path(folder).resolve()),
         "time": _now().isoformat(),
@@ -177,8 +183,9 @@ def last_folder() -> Path | None:
 
 
 def session_folders(session_id: str | None = None) -> list[Path]:
-    """Existing folders of one session (the latest when ``None``), in recorded
-    order."""
+    """Existing folders of one session (the latest when `None`), in recorded
+    order.
+    """
     entries = _read_entries()
     if session_id is None:
         session_id = _latest_session_id(entries)
@@ -200,7 +207,8 @@ def all_folders() -> list[Path]:
 
 def dir_size(path: Path) -> int:
     """Total size in bytes of a file or directory tree, not following directory
-    symlinks; 0 on error."""
+    symlinks; 0 on error.
+    """
     try:
         if path.is_file():
             return path.stat().st_size
@@ -256,9 +264,9 @@ def clear_recordings() -> bool:
 #
 # flock-held files signal liveness across processes without PID bookkeeping: the
 # OS drops an flock on exit or crash, so a marker whose lock can be taken is dead.
-# ``transcode-active``: a running ``octacam process``; a ``gui``/``record``
-# launch warns about the CPU contention. ``capture-active``: a ``gui``/``record``
-# owning the cameras; ``octacam process`` pauses between work units meanwhile.
+# `transcode-active`: a running `octacam process`; a `gui`/`record`
+# launch warns about the CPU contention. `capture-active`: a `gui`/`record`
+# owning the cameras; `octacam process` pauses between work units meanwhile.
 # ---------------------------------------------------------------------------
 
 
@@ -272,21 +280,25 @@ def _capture_dir() -> Path:
 
 @contextmanager
 def _mark_active(directory: Path, detail: str) -> Iterator[None]:
-    """Publish an flock-held marker under ``directory`` for the block's lifetime
-    (best-effort: without one if it cannot be created)."""
+    """Publish an flock-held marker under `directory` for the block's lifetime
+    (best-effort: without one if it cannot be created).
+    """
     handle = None
     path = None
     try:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{os.getpid()}-{uuid.uuid4().hex}.lock"
-        handle = open(path, "a+")
+        # The handle outlives this block: it holds the lock.
+        handle = open(path, "a+")  # noqa: SIM115
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.seek(0)
         handle.truncate()
         handle.write(f"{os.getpid()} {detail}\n")
         handle.flush()
     except OSError as e:
-        log.debug("Could not publish an activity marker in %s (%s); continuing", directory, e)
+        log.debug(
+            "Could not publish an activity marker in %s (%s); continuing", directory, e
+        )
         if handle is not None:
             handle.close()
             handle = None
@@ -320,10 +332,10 @@ def mark_capture_active(detail: str = "") -> Iterator[None]:
 
 
 def _scan(directory: Path) -> tuple[int, int]:
-    """Count the live markers in ``directory`` and sweep the orphaned ones;
+    """Count the live markers in `directory` and sweep the orphaned ones;
     return (live, swept).
 
-    An orphan is swept only past :data:`_STALE_MARKER_AGE_S`, so a marker created
+    An orphan is swept only past `_STALE_MARKER_AGE_S`, so a marker created
     but not yet locked is never taken for one.
     """
     try:

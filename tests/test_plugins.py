@@ -234,7 +234,9 @@ def test_a_ws_message_goes_to_the_first_plugin_that_claims_it():
                 raise ValueError("bad message")
             return self.claims
 
-    PluginManager([Claims("a", False), Claims("b", True), Claims("c", True)]).on_ws_message({}, 1)
+    PluginManager(
+        [Claims("a", False), Claims("b", True), Claims("c", True)]
+    ).on_ws_message({}, 1)
     assert seen == ["a", "b"]
     seen.clear()
     # A raising hook is logged and counts as handled: the message goes no further.
@@ -315,7 +317,7 @@ def test_status_is_ready_wins_over_status_ready_key():
 
 def test_status_detail_failure_preserves_ready():
     # A status() that raises after is_ready() already succeeded must not flip the
-    # plugin to not-ready — only the details are dropped.
+    # plugin to not-ready -- only the details are dropped.
     class Half(Plugin):
         name = "half"
 
@@ -363,7 +365,7 @@ def test_builtin_import_failure_reports_distinct_warning(monkeypatch, caplog):
 
 
 class _FakeLink(FlywheelLink):
-    """The flywheel link over no port; ``fail`` makes open() raise it."""
+    """The flywheel link over no port; `fail` makes open() raise it."""
 
     def __init__(self):
         super().__init__(lambda: None)
@@ -516,9 +518,12 @@ def test_a_plugin_without_a_source_checkout_never_classifies_or_flashes(monkeypa
     plugin, _link = _flywheel("FLYWHEEL 1 oldbuild")
     assert plugin.firmware_check is None and plugin.firmware_ok
     info = plugin.firmware_provisioning()
-    assert (info["state"], info["needed_build"], info["can_flash"], info["needs_flash"]) == (
-        None, None, False, False
-    )
+    assert (
+        info["state"],
+        info["needed_build"],
+        info["can_flash"],
+        info["needs_flash"],
+    ) == (None, None, False, False)
     assert info["detail"].startswith("the sketch source was not found")
     result = plugin.flash_firmware()
     assert not result.ok and "sketch source was not found" in result.message
@@ -537,7 +542,8 @@ def test_an_unclassified_board_says_why(monkeypatch, tmp_path, sketch, probed, d
 
     if sketch == "missing":
         monkeypatch.setattr(
-            FlywheelPlugin, "firmware",
+            FlywheelPlugin,
+            "firmware",
             replace(FlywheelPlugin.firmware, sketch_dir=tmp_path / "gone"),
         )
     plugin = FlywheelPlugin(device="/dev/test")

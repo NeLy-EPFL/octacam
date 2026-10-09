@@ -1,18 +1,19 @@
-"""`octacam process` (the post-recording pipeline, :mod:`octacam.process`) and
-`octacam check`."""
+"""`octacam process` (the post-recording pipeline, `octacam.process`) and
+`octacam check`.
+"""
 
 import json
 import logging
 import shlex
 import sys
+from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Self
 
 import typer
 from typer.core import TyperCommand
 
-from octacam._compat import StrEnum
-from octacam.cli._common import resolve_config_arg, stderr_console
+from octacam.cli._common import Verbose, command, resolve_config_arg, stderr_console
 
 if TYPE_CHECKING:
     from rich.progress import TaskID
@@ -34,11 +35,12 @@ def _resolve_transcode_paths(
     session_id: str | None,
     all_: bool,
 ) -> list[Path]:
-    """Explicit PATHS, or the cached folders one selector names (deleted ones
-    skipped): ``--last [recording]`` the newest, ``--last session`` its whole
-    session, ``--session-id`` an exact one (what the GUI prints), ``--all``
-    every one. The selectors exclude each other and PATHS; exits on a bad
-    value or combination, or when nothing is found."""
+    """Explicit paths, or the cached folders one selector names (deleted ones
+    skipped): `--last [recording]` the newest, `--last session` its whole
+    session, `--session-id` an exact one (what the GUI prints), `--all`
+    every one. The selectors exclude each other and paths; exits on a bad
+    value or combination, or when nothing is found.
+    """
     from octacam import session_cache
 
     if last is not None and last not in ("recording", "session"):
@@ -59,13 +61,10 @@ def _resolve_transcode_paths(
     if len(chosen) > 1:
         sys.exit(f"Choose at most one of {', '.join(chosen)}.")
     if chosen and paths:
-        sys.exit(f"{chosen[0]} cannot be combined with explicit PATHS.")
+        sys.exit(f"{chosen[0]} cannot be combined with explicit paths.")
     if not chosen:
         if not paths:
-            sys.exit(
-                "Provide one or more PATHS, or one of "
-                "--last/--session-id/--all."
-            )
+            sys.exit("Provide one or more paths, or one of --last/--session-id/--all.")
         return paths
 
     if last == "session":
@@ -85,7 +84,7 @@ def _resolve_transcode_paths(
         sys.exit(
             f"No recordings found for {selector} in the cache "
             f"({session_cache.cache_dir()}). Record something first, or pass "
-            "explicit PATHS."
+            "explicit paths."
         )
     log.info(
         "%s: transcoding %d folder(s) from the recording cache", selector, len(folders)
@@ -97,8 +96,9 @@ class FileProgressBar:
     """`process`'s progress bar on the stderr console, one rich task per file.
 
     Each file gets a fresh task: rich keeps a task's total when updated with
-    ``total=None``, so a reused task would give a file of unknown length the
-    previous file's total."""
+    `total=None`, so a reused task would give a file of unknown length the
+    previous file's total.
+    """
 
     def __init__(self, total_files: int = 0) -> None:
         from rich.progress import (
@@ -123,20 +123,20 @@ class FileProgressBar:
         )
         self._task: TaskID | None = None
 
-    def __enter__(self) -> "FileProgressBar":
+    def __enter__(self) -> Self:
         self._progress.start()
         return self
 
     def __exit__(self, *exc) -> None:
         self._progress.stop()
 
-    def _start(self, description: str, total: float | None) -> "TaskID":
+    def _start(self, description: str, total: float | None) -> TaskID:
         if self._task is not None:
             self._progress.remove_task(self._task)
         self._task = self._progress.add_task(description, total=total, stats="")
         return self._task
 
-    def file(self, index: int, path: Path, label: str = "") -> "ProgressCallback":
+    def file(self, index: int, path: Path, label: str = "") -> ProgressCallback:
         """Start the bar for one ffmpeg encode and return its progress callback."""
         from octacam.transcode import TranscodeProgress
 
@@ -167,7 +167,7 @@ class FileProgressBar:
 
         return on_progress
 
-    def transfer_callback(self) -> "TransferCallback":
+    def transfer_callback(self) -> TransferCallback:
         """A transfer_folder callback: a fresh task for each file's copy and verify."""
         from octacam.transfer import TransferProgress
 
@@ -190,9 +190,10 @@ class FileProgressBar:
 
 
 def _inject_default_last(args: list[str]) -> list[str]:
-    """Give a bare ``--last`` (last token, or followed by an option) its default
-    ``recording``. typer's vendored click drops ``flag_value``, so the raw args
-    are normalized instead; tokens after ``--`` are left alone."""
+    """Give a bare `--last` (last token, or followed by an option) its default
+    `recording`. typer's vendored click drops `flag_value`, so the raw args
+    are normalized instead; tokens after `--` are left alone.
+    """
     out: list[str] = []
     seen_ddash = False
     for i, tok in enumerate(args):
@@ -209,25 +210,26 @@ def _inject_default_last(args: list[str]) -> list[str]:
 
 
 class ProcessCommand(TyperCommand):
-    """`process`, whose bare ``--last`` means ``--last recording``."""
+    """`process`, whose bare `--last` means `--last recording`."""
 
     def parse_args(self, ctx, args):  # type: ignore[override]
         return super().parse_args(ctx, _inject_default_last(args))
 
 
+@command
 def check(
     paths: Annotated[
         list[Path] | None,
         typer.Argument(
             exists=True,
             help="Recording folders, or directories to search for them "
-            r"\[default: the current directory].",
+            "(default: the current directory).",
         ),
     ] = None,
     fps: Annotated[
         float | None,
         typer.Option(
-            "--fps", help=r"Trigger rate to check against \[default: each summary's]."
+            "--fps", help="Trigger rate to check against (default: each summary's)."
         ),
     ] = None,
     as_json: Annotated[
@@ -237,13 +239,14 @@ def check(
         bool,
         typer.Option("--quiet", "-q", help="Only list recordings with problems."),
     ] = False,
+    verbose: Verbose = False,
 ) -> None:
     """Check recordings for missed trigger pulses and desynchronized cameras.
 
     Reads each recording's summary and timestamps.npz (never modifies anything)
-    and reports, per camera, the trigger pulses it delivered no frame for — an
+    and reports, per camera, the trigger pulses it delivered no frame for -- an
     unfilled one shifts its later frames by one against a camera that did not
-    miss it — plus unequal frame counts, a start offset between cameras, the
+    miss it -- plus unequal frame counts, a start offset between cameras, the
     recorder's own sync verdict, late exposures and camera-clock jumps.
     Recordings made before octacam counted pulses are re-derived from the
     hardware timestamps. A recording that cannot be read is a problem too.
@@ -265,7 +268,11 @@ def check(
         for result in results:
             if quiet and result.ok:
                 continue
-            verdict = Text("ok", style="green") if result.ok else Text("PROBLEM", style="bold red")
+            verdict = (
+                Text("ok", style="green")
+                if result.ok
+                else Text("PROBLEM", style="bold red")
+            )
             console.print(Text(f"{result.folder}  ", style="bold") + verdict)
             for cam in result.cameras:
                 if cam.source == "none":
@@ -293,6 +300,7 @@ def check(
         raise typer.Exit(1)
 
 
+@command
 def process(
     paths: Annotated[
         list[Path] | None,
@@ -345,7 +353,7 @@ def process(
     no_transfer: Annotated[
         bool,
         typer.Option(
-            "--no-transfer", help=r"Skip transferring to the \[transfer] destination."
+            "--no-transfer", help="Skip transferring to the [transfer] destination."
         ),
     ] = False,
     ignore_capture: Annotated[
@@ -419,25 +427,26 @@ def process(
         Path | None,
         typer.Option("--_job-dir", hidden=True),  # the detached child's job dir
     ] = None,
+    verbose: Verbose = False,
 ) -> None:
     """Post-recording pipeline: transcode, build grids, and transfer recordings.
 
-    Every setting — encoder args, grid layouts, transfer destination — is read
+    Every setting -- encoder args, grid layouts, transfer destination -- is read
     from each recording's own octacam_config.toml (copied in at record time), so
     no --config is needed. Transcode and transfer run by default (disable with
-    --no-transcode / --no-transfer); the composite grid is opt-in — it is built
+    --no-transcode / --no-transfer); the composite grid is opt-in -- it is built
     only for a rig whose config carries a [[visualization]] entry, and --no-grid
     skips even those.
 
     Re-running is safe and resumes where it left off: each step skips outputs
-    that already exist — a finished transcode .mp4, a built grid, or a file
-    already at the transfer destination — so only missing work is redone. Pass
+    that already exist -- a finished transcode .mp4, a built grid, or a file
+    already at the transfer destination -- so only missing work is redone. Pass
     --force to rebuild existing transcodes and grids anyway (e.g. after changing
     the encoder params or grid layout). --dry-run lists that missing work without
     doing any of it, so `octacam process --all --dry-run` shows what is left to
     process.
 
-    Instead of PATHS, pass --last (the most recent recording; same as --last
+    Instead of `paths`, pass --last (the most recent recording; same as --last
     recording), --last session (the last GUI session), --session-id (an exact
     session), or --all (every cached folder). Deleted folders are silently
     skipped.
@@ -464,10 +473,13 @@ def process(
 
     # The detached child re-runs this command with --_job-dir, as the job's worker.
     if detach and job_dir is None:
-        status = process_jobs.spawn_detached(argv_tail=options.argv(folders), folders=folders)
+        status = process_jobs.spawn_detached(
+            argv_tail=options.argv(folders), folders=folders, verbose=verbose
+        )
         typer.echo(status.job_id)  # stdout: scriptable
         log.info(
-            "Detached processing job %s — watch it with: octacam jobs attach %s",
+            "Detached processing job %s \N{EM DASH} watch it with: octacam jobs "
+            "attach %s",
             status.job_id,
             status.job_id,
         )
@@ -484,6 +496,8 @@ def process(
     )
     try:
         with process_jobs.worker(job_dir) as reporter:
-            pipeline.run(folders, options, reporter, FileProgressBar if show_bar else None)
+            pipeline.run(
+                folders, options, reporter, FileProgressBar if show_bar else None
+            )
     except process_jobs.JobLockError as e:  # already written into status.json
         sys.exit(str(e))

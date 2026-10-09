@@ -59,7 +59,7 @@ class _Broadcasts:
 
 
 # ---------------------------------------------------------------------------
-# Frame decoder — the reference the tests check the packer against
+# Frame decoder -- the reference the tests check the packer against
 # ---------------------------------------------------------------------------
 
 
@@ -93,16 +93,17 @@ def _decode_frame(raw: bytes) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# FakeLink — stands in for TriggerboxLink without any serial port
+# FakeLink -- stands in for TriggerboxLink without any serial port
 # ---------------------------------------------------------------------------
 
 
 class FakeLink(TriggerboxLink):
     """The real link over no port: it records what is written and answers like
-    the board, 'R' to an arm (``E<reject_code>`` when that is set), 'D' once a
-    finite run is over, 'C' to a cancel, and ``banner`` to identify. Answers come
-    at once, or from a timer ``delay_s`` later ('D' after the run's real
-    duration); ``acks = False`` silences the board."""
+    the board, 'R' to an arm (`E<reject_code>` when that is set), 'D' once a
+    finite run is over, 'C' to a cancel, and `banner` to identify. Answers come
+    at once, or from a timer `delay_s` later ('D' after the run's real
+    duration); `acks = False` silences the board.
+    """
 
     def __init__(self, plugin, is_open: bool = True, delay_s: float | None = None):
         super().__init__(plugin._on_state, plugin._on_link_broken)
@@ -189,7 +190,9 @@ def _fake_link(plugin: TriggerboxPlugin, is_open: bool = True, **kwargs) -> Fake
     return link
 
 
-def _plugin_with_fake(is_open: bool = True, **options) -> tuple[TriggerboxPlugin, FakeLink]:
+def _plugin_with_fake(
+    is_open: bool = True, **options
+) -> tuple[TriggerboxPlugin, FakeLink]:
     plugin = TriggerboxPlugin.from_options({"device": DEVICE, **options})
     return plugin, _fake_link(plugin, is_open)
 
@@ -236,10 +239,17 @@ def test_empty_spec_has_only_the_fixed_prefix():
 
 def test_pin_labels_match_firmware_table():
     """The Python PIN_LABELS must stay byte-for-byte in sync with kPinTable."""
-    ino = (Path(__file__).resolve().parents[1] / "arduino" / "triggerbox" / "triggerbox.ino").read_text()
-    m = re.search(r"kPinTable\[kNumPins\]\s*=\s*\{([^}]*)\}", ino, re.S)
+    ino = (
+        Path(__file__).resolve().parents[1]
+        / "arduino"
+        / "triggerbox"
+        / "triggerbox.ino"
+    ).read_text()
+    m = re.search(r"kPinTable\[kNumPins\]\s*=\s*\{([^}]*)\}", ino, re.DOTALL)
     assert m, "kPinTable not found in triggerbox.ino"
-    tokens = tuple(t.strip() for t in m.group(1).replace("\n", " ").split(",") if t.strip())
+    tokens = tuple(
+        t.strip() for t in m.group(1).replace("\n", " ").split(",") if t.strip()
+    )
     assert tokens == PIN_LABELS
 
 
@@ -252,17 +262,19 @@ def test_pin_id_maps_known_pins():
 
 
 # ===========================================================================
-# LightChannel.resolve — per-mode field mapping
+# LightChannel.resolve -- per-mode field mapping
 # ===========================================================================
 
-PERIOD_80 = 1_000_000.0 / 80  # 12500 µs
+PERIOD_80 = 1_000_000.0 / 80  # 12500 us
 
 
 def test_resolve_strobe_manual_duty():
-    lc = LightChannel(channel=1, pin="D5", mode="strobe", duty_mode="manual", duty_percent=20)
+    lc = LightChannel(
+        channel=1, pin="D5", mode="strobe", duty_mode="manual", duty_percent=20
+    )
     pid, mode, p0, p1, p2, p3 = lc.resolve(PERIOD_80, auto_led_on_us=None)
     assert (pid, mode) == (pin_id("D5"), 1)
-    assert p1 == 2500  # 20% of 12500 µs
+    assert p1 == 2500  # 20% of 12500 us
     assert (p0, p2, p3) == (0, 0, 0)
 
 
@@ -287,14 +299,19 @@ def test_resolve_continuous_and_off():
 
 def test_resolve_pulse_train_converts_freq_and_ms():
     lc = LightChannel(
-        pin="D7", mode="pulse_train", freq_hz=10, pulse_us=5000, start_delay_ms=2, train_ms=500
+        pin="D7",
+        mode="pulse_train",
+        freq_hz=10,
+        pulse_us=5000,
+        start_delay_ms=2,
+        train_ms=500,
     )
     pid, mode, p0, p1, p2, p3 = lc.resolve(PERIOD_80, None)
     assert (pid, mode) == (pin_id("D7"), 3)
-    assert p0 == 5000        # pulse_us
-    assert p1 == 100000      # 10 Hz -> 100 ms interval
-    assert p2 == 2000        # 2 ms start delay
-    assert p3 == 500000      # 500 ms train
+    assert p0 == 5000  # pulse_us
+    assert p1 == 100000  # 10 Hz -> 100 ms interval
+    assert p2 == 2000  # 2 ms start delay
+    assert p3 == 500000  # 500 ms train
 
 
 # ===========================================================================
@@ -315,15 +332,16 @@ def test_auto_and_manual_channels_size_independently():
     )
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     lights = _last_arm(link)["lights"]
-    # channel 1 auto: max(2000+50, 1000+0) + 100 = 2150 µs
+    # channel 1 auto: max(2000+50, 1000+0) + 100 = 2150 us
     assert lights[0][3] == 2150
-    # channel 2 manual: 10% of 12500 = 1250 µs
+    # channel 2 manual: 10% of 12500 = 1250 us
     assert lights[1][3] == 1250
 
 
 def test_auto_duty_skips_camera_without_exposure_but_uses_others():
     plugin, link = _plugin_with_fake(
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}], strobe_guard_us=0
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}],
+        strobe_guard_us=0,
     )
     PluginManager([plugin]).attach(
         controller=FakeController([FakeCamera("a", None), FakeCamera("b", 1500, 0)])
@@ -333,11 +351,12 @@ def test_auto_duty_skips_camera_without_exposure_but_uses_others():
 
 
 def test_auto_duty_reads_a_real_camera_without_a_trigger_delay():
-    # The fake backend has ExposureTime (5000 µs) and no TriggerDelay node.
+    # The fake backend has ExposureTime (5000 us) and no TriggerDelay node.
     camera = Camera(FakeBackend("FAKE-0"))
     assert camera.trigger_window_us() == (0.0, 5000.0)
     plugin, link = _plugin_with_fake(
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}], strobe_guard_us=0
+        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto"}],
+        strobe_guard_us=0,
     )
     PluginManager([plugin]).attach(controller=FakeController([camera]))
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
@@ -346,7 +365,9 @@ def test_auto_duty_reads_a_real_camera_without_a_trigger_delay():
 
 def test_auto_duty_without_controller_falls_back_to_manual(caplog):
     plugin, link = _plugin_with_fake(
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "auto", "duty_percent": 30}]
+        lights=[
+            {"channel": 1, "mode": "strobe", "duty_mode": "auto", "duty_percent": 30}
+        ]
     )
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
     assert _last_arm(link)["lights"][0][3] == round(0.30 * PERIOD_80)
@@ -367,7 +388,12 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
     plugin, link = _plugin_with_fake(
         cameras=[{"pin": "D13", "pulse_us": 500}],
         lights=[
-            {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}
+            {
+                "channel": 1,
+                "mode": "strobe",
+                "duty_mode": "manual",
+                "duty_percent": 20.0,
+            }
         ],
     )
     slice_ = plugin.default_start_params(80.0, 10.0)
@@ -377,7 +403,10 @@ def test_preview_arm_matches_recording_except_indefinite_duration():
     prev = _last_arm(link)
     # Recording runs exactly its 800 pulses (ending once the last pulse and
     # strobe are out, see plan_train); preview runs until cancel (0)...
-    assert rec["duration_ms"] == plan_train(80, 800, rec["cams"], rec["lights"]).duration_ms
+    assert (
+        rec["duration_ms"]
+        == plan_train(80, 800, rec["cams"], rec["lights"]).duration_ms
+    )
     assert rec["duration_ms"] == 9991
     assert prev["duration_ms"] == 0
     # ...but is otherwise the same trigger + strobe as the recording (user chose
@@ -413,7 +442,12 @@ def _spec_msg(duty):
             "fps": 80,
             "cameras": [{"pin": "D13", "pulse_us": 500}],
             "lights": [
-                {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": duty}
+                {
+                    "channel": 1,
+                    "mode": "strobe",
+                    "duty_mode": "manual",
+                    "duty_percent": duty,
+                }
             ],
         },
     }
@@ -441,7 +475,14 @@ def test_ws_spec_edit_does_not_arm_when_not_previewing():
 
 def test_ws_spec_edit_rearms_a_running_managed_preview():
     plugin, link = _plugin_with_fake(
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
+        lights=[
+            {
+                "channel": 1,
+                "mode": "strobe",
+                "duty_mode": "manual",
+                "duty_percent": 20.0,
+            }
+        ]
     )
     plugin.on_preview_start(_preview_params(plugin))  # managed preview, config spec
     before = len([f for f in link.snapshot() if f and f[0] == ARM_MAGIC])
@@ -455,7 +496,14 @@ def test_ws_spec_edit_rearms_a_running_managed_preview():
 
 def test_ws_spec_edit_no_rearm_when_unchanged():
     plugin, link = _plugin_with_fake(
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 20.0}]
+        lights=[
+            {
+                "channel": 1,
+                "mode": "strobe",
+                "duty_mode": "manual",
+                "duty_percent": 20.0,
+            }
+        ]
     )
     plugin.on_preview_start(_preview_params(plugin))
     plugin.on_ws_message(_spec_msg(20.0), 1)  # first push adopts the spec (may re-arm)
@@ -535,7 +583,10 @@ def test_on_recording_start_arms_with_full_spec():
     dec = _last_arm(link)
     # 2000 ms at 100 fps = 200 pulses; the run ends once the last one is out.
     assert dec["fps"] == 100
-    assert dec["duration_ms"] == plan_train(100, 200, dec["cams"], dec["lights"]).duration_ms
+    assert (
+        dec["duration_ms"]
+        == plan_train(100, 200, dec["cams"], dec["lights"]).duration_ms
+    )
     assert dec["duration_ms"] == 1992
     assert dec["cams"] == [(pin_id("D13"), 500, 0)]
     assert dec["lights"] == [(pin_id("D5"), 2, 0, 0, 0, 0)]
@@ -597,15 +648,23 @@ def test_default_start_params_shape():
 def _tab_spec(plugin: TriggerboxPlugin, **light_changes) -> dict:
     """A start slice shaped like the tab's getStartParams(): full-key camera and
     light dicts seeded from status(), off channels left out, per-channel edits
-    applied from ``light_changes`` ({"ch1": {...}})."""
+    applied from `light_changes` ({"ch1": {...}}).
+    """
     status = plugin.status()
     by_channel = {lt["channel"]: dict(lt) for lt in status["lights"]}
     for key, change in light_changes.items():
         channel = int(key.removeprefix("ch"))
         base = by_channel.get(channel, asdict(LightChannel(channel=channel)))
         by_channel[channel] = {**base, **change}
-    lights = [by_channel[ch] for ch in sorted(by_channel) if by_channel[ch]["mode"] != "off"]
-    return {"fps": 80, "duration_ms": 5000, "cameras": status["cameras"], "lights": lights}
+    lights = [
+        by_channel[ch] for ch in sorted(by_channel) if by_channel[ch]["mode"] != "off"
+    ]
+    return {
+        "fps": 80,
+        "duration_ms": 5000,
+        "cameras": status["cameras"],
+        "lights": lights,
+    }
 
 
 _SNAPSHOT_RIG = {
@@ -685,7 +744,7 @@ _ARM = ArmSpec(80, 0, [(11, 500, 0)], [])
 
 
 def test_link_arm_classifies_outcomes(monkeypatch):
-    plugin, link = _plugin_with_fake(delay_s=0.01)  # answers arrive during the wait
+    _plugin, link = _plugin_with_fake(delay_s=0.01)  # answers arrive during the wait
     assert link.arm(_ARM) == "ok"
     link.reject_code = "d"
     assert link.arm(_ARM) == "reject" and link.reject == "d"
@@ -701,7 +760,9 @@ def test_arm_timeout_reports_error_and_attempts_usb_reset(monkeypatch, caplog):
     import octacam.serial_ports as sp
 
     calls: list[str] = []
-    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1])
+    monkeypatch.setattr(
+        sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1]
+    )
     bc = _Broadcasts()
     plugin, link = _plugin_with_fake()
     PluginManager([plugin]).attach(broadcast=bc)
@@ -757,7 +818,9 @@ def test_arm_reject_does_not_trigger_usb_reset(monkeypatch):
     import octacam.serial_ports as sp
 
     calls: list[str] = []
-    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1])
+    monkeypatch.setattr(
+        sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1]
+    )
     plugin, link = _plugin_with_fake()
     link.reject_code = "r"  # reserved pin
     plugin.on_recording_start({"fps": 80, "duration_ms": 1000})
@@ -773,10 +836,11 @@ def test_recover_usb_holds_port_lock(monkeypatch):
 
     reset_calls: list[str] = []
     monkeypatch.setattr(
-        sp, "reset_usb_device",
+        sp,
+        "reset_usb_device",
         lambda device: (reset_calls.append(device), (True, "reset"))[1],
     )
-    plugin, link = _plugin_with_fake()
+    plugin, _link = _plugin_with_fake()
     started = threading.Event()
     done = threading.Event()
 
@@ -800,7 +864,7 @@ def test_recover_usb_holds_port_lock(monkeypatch):
 def test_link_arms_are_serialized():
     # The clear+send+wait window is serialized, so two concurrent arms cannot
     # take each other's ack or reject.
-    plugin, link = _plugin_with_fake()
+    _plugin, link = _plugin_with_fake()
     gate = threading.Event()
     in_send = threading.Event()
 
@@ -889,8 +953,9 @@ def test_exposures_endpoint_follows_a_late_attached_camera_system():
 
     Serve-first startup hands the plugin a controller whose camera system is
     still the hardware-free placeholder (zero cameras), and swaps in the real one
-    seconds later. The same client must see the exposures appear — that is what
-    makes the tab's re-read on the init push (triggerbox.js applyStatus) work."""
+    seconds later. The same client must see the exposures appear -- that is what
+    makes the tab's re-read on the init push (triggerbox.js applyStatus) work.
+    """
     plugin, _link = _plugin_with_fake(strobe_guard_us=100)
     controller = FakeController([])
     PluginManager([plugin]).attach(controller=controller)
@@ -915,7 +980,7 @@ def test_reconnect_endpoint(monkeypatch):
 
 
 def test_reconnect_endpoint_surfaces_error(monkeypatch):
-    plugin, link = _plugin_with_fake(is_open=False)
+    plugin, _link = _plugin_with_fake(is_open=False)
     monkeypatch.setattr(plugin, "_open", lambda: "boom")
     body = _test_client(plugin).post("/api/triggerbox/reconnect", json={}).json()
     assert body["ready"] is False and body["error"] == "boom"
@@ -924,7 +989,9 @@ def test_reconnect_endpoint_surfaces_error(monkeypatch):
 def test_reconnect_endpoint_device_override(monkeypatch):
     plugin, _link = _plugin_with_fake()
     monkeypatch.setattr(plugin, "_open", lambda: None)
-    _test_client(plugin).post("/api/triggerbox/reconnect", json={"device": "/dev/ttyUSB9"})
+    _test_client(plugin).post(
+        "/api/triggerbox/reconnect", json={"device": "/dev/ttyUSB9"}
+    )
     assert plugin.configured_device == "/dev/ttyUSB9"
 
 
@@ -1074,8 +1141,10 @@ def test_open_attempts_usb_reset_when_board_is_silent(monkeypatch):
     import octacam.serial_ports as sp
 
     calls: list[str] = []
-    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1])
-    plugin, link = _plugin_with_fake()  # FakeLink.identify() returns None (silent)
+    monkeypatch.setattr(
+        sp, "reset_usb_device", lambda device: (calls.append(device), (False, "no"))[1]
+    )
+    plugin, _link = _plugin_with_fake()  # FakeLink.identify() returns None (silent)
     plugin._open()
     assert calls == [DEVICE]  # a wedge is suspected -> one bus reset attempted
 
@@ -1084,7 +1153,9 @@ def test_open_no_reset_for_healthy_board(monkeypatch):
     import octacam.serial_ports as sp
 
     calls: list[str] = []
-    monkeypatch.setattr(sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1])
+    monkeypatch.setattr(
+        sp, "reset_usb_device", lambda device: (calls.append(device), (True, "x"))[1]
+    )
     plugin, link = _plugin_with_fake()
     link.banner = "TRIGGERBOX 2"
     plugin._open()
@@ -1102,7 +1173,9 @@ def test_triggerbox_is_registered_builtin():
 
 
 def test_default_start_params_via_manager():
-    cfg = SimpleNamespace(plugins=[SimpleNamespace(name="triggerbox", options={"device": DEVICE})])
+    cfg = SimpleNamespace(
+        plugins=[SimpleNamespace(name="triggerbox", options={"device": DEVICE})]
+    )
     manager = build_plugins(cfg, enabled=None)
     params = manager.default_start_params(80.0, 5.0)
     assert "triggerbox" in params
@@ -1113,7 +1186,7 @@ def test_default_start_params_via_manager():
 # Firmware provisioning: identity classification, flash, endpoints
 # ===========================================================================
 
-import octacam.firmware as fw_mod  # noqa: E402
+import octacam.firmware as fw_mod
 
 
 def _verify_with_banner(plugin: TriggerboxPlugin, link: FakeLink, banner):
@@ -1133,7 +1206,9 @@ def test_identify_current_build_is_up_to_date():
 
 def test_identify_outdated_build_still_arms():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2")  # no build tag = pre-fingerprint flash
+    _verify_with_banner(
+        plugin, link, "TRIGGERBOX 2"
+    )  # no build tag = pre-fingerprint flash
     assert plugin.firmware_ok  # OUTDATED is still wire-compatible; arming stays enabled
     prov = plugin.firmware_provisioning()
     assert prov["state"] == "outdated"
@@ -1210,7 +1285,7 @@ def test_flash_firmware_success_updates_state():
 
 
 def test_flash_firmware_refused_while_running():
-    plugin, link = _plugin_with_fake()
+    plugin, _link = _plugin_with_fake()
     plugin.board_state = "running"
     result = plugin.flash_firmware()
     assert not result.ok
@@ -1228,7 +1303,7 @@ def test_flash_firmware_refused_while_recording():
 
 
 def test_flash_firmware_without_source(no_source_checkout):
-    plugin, link = _plugin_with_fake()
+    plugin, _link = _plugin_with_fake()
     result = plugin.flash_firmware()
     assert not result.ok
     assert "source" in result.message.lower()
@@ -1238,8 +1313,11 @@ def test_flash_firmware_failure_is_reported(monkeypatch):
     plugin, link = _plugin_with_fake()
     _verify_with_banner(plugin, link, "TRIGGERBOX 2")
     monkeypatch.setattr(
-        fw_mod, "flash",
-        lambda spec, port, build, **k: fw_mod.FlashResult(False, "arduino-cli exited 1", "boom"),
+        fw_mod,
+        "flash",
+        lambda spec, port, build, **k: fw_mod.FlashResult(
+            False, "arduino-cli exited 1", "boom"
+        ),
     )
     result = plugin.flash_firmware()
     assert not result.ok
@@ -1267,7 +1345,12 @@ def test_flash_endpoint():
 
 
 def test_build_reads_auto_flash_option():
-    assert TriggerboxPlugin.from_options({"device": DEVICE}).firmware_provisioning()["auto_flash"] is False
+    assert (
+        TriggerboxPlugin.from_options({"device": DEVICE}).firmware_provisioning()[
+            "auto_flash"
+        ]
+        is False
+    )
     plugin = TriggerboxPlugin.from_options({"device": DEVICE, "auto_flash": True})
     assert plugin.auto_flash is True
     assert plugin.firmware_provisioning()["auto_flash"] is True
@@ -1305,8 +1388,9 @@ def _fw_line(period, pulse_us, delay_us):
 
 
 def _fw_emitted(period, line, end_us):
-    """(pulses a line emits, µs its last one is high) for an idle at ``end_us``
-    from the train's first frame edge."""
+    """(pulses a line emits, us its last one is high) for an idle at `end_us`
+    from the train's first frame edge.
+    """
     delay, pulse = line
     if end_us < delay:
         return 0, 0
@@ -1315,17 +1399,21 @@ def _fw_emitted(period, line, end_us):
 
 
 def _fw_ends(duration_ms):
-    """The earliest and latest idle of a run of ``duration_ms``."""
+    """The earliest and latest idle of a run of `duration_ms`."""
     from octacam.plugins.triggerbox.train import RUN_END_EARLY_US, RUN_END_LATE_US
 
-    return duration_ms * 1000 - 1000 - RUN_END_EARLY_US, duration_ms * 1000 + RUN_END_LATE_US
+    return (
+        duration_ms * 1000 - 1000 - RUN_END_EARLY_US,
+        duration_ms * 1000 + RUN_END_LATE_US,
+    )
 
 
 def _fw_strobe_done(period, light, count, duration_ms):
     """Whether a strobe record's on-time of the train's last frame is over when
-    a run of ``duration_ms`` ends (a continuous light or pulse train has none).
-    A strobe may lose the few µs by which the run can end early, so this takes
-    the nominal earliest end, a whole millisecond before the duration."""
+    a run of `duration_ms` ends (a continuous light or pulse train has none).
+    A strobe may lose the few us by which the run can end early, so this takes
+    the nominal earliest end, a whole millisecond before the duration.
+    """
     _pin, mode, delay, on_us, _p2, _p3 = light
     if mode != 1 or not 0 < on_us < period:
         return True
@@ -1334,7 +1422,7 @@ def _fw_strobe_done(period, light, count, duration_ms):
 
 
 def _fw_exact(fps, cams, duration_ms, count):
-    """Every line emits exactly ``count`` complete pulses for every end."""
+    """Every line emits exactly `count` complete pulses for every end."""
     period = period_us(fps)
     first, last = _fw_ends(duration_ms)
     for _pin, pulse_us, delay_us in cams:
@@ -1380,17 +1468,22 @@ def test_plan_train_counts_what_the_board_emits_at_every_gui_fps():
             elif plan.certain:
                 # The last pulse may be cut short, never below half its width.
                 n_first, high = _fw_emitted(period, line, first)
-                assert n_first == _fw_emitted(period, line, last)[0] == plan.count, where
+                assert n_first == _fw_emitted(period, line, last)[0] == plan.count, (
+                    where
+                )
                 assert 2 * high >= line[1], where
             else:
                 # Not guaranteed: but the likeliest outcome over the end window.
                 outcomes = [
-                    _fw_emitted(period, line, end)[0] for end in range(first, last + 1, 5)
+                    _fw_emitted(period, line, end)[0]
+                    for end in range(first, last + 1, 5)
                 ]
                 assert max(set(outcomes), key=outcomes.count) == plan.count, where
 
 
-@pytest.mark.parametrize("fps", [90, 300, 333, *range(400, 505), *range(505, 1001, 7), 1000])
+@pytest.mark.parametrize(
+    "fps", [90, 300, 333, *range(400, 505), *range(505, 1001, 7), 1000]
+)
 def test_plan_train_misses_no_exact_count(fps):
     # Brute force over counts and durations with the board model: an exact plan
     # exists within the shift iff the planner finds one, at the smallest shift.
@@ -1417,7 +1510,7 @@ def test_plan_train_misses_no_exact_count(fps):
 def test_plan_train_ends_after_the_last_strobe_and_delayed_pulses():
     # Several camera lines (one delayed) and strobes: exact, and the end comes
     # after every line's last pulse and every strobe's last on-time, before the
-    # next frame edge — for every fps and duration where that fits.
+    # next frame edge -- for every fps and duration where that fits.
     cams = [(pin_id("D13"), 500, 0), (pin_id("D12"), 300, 2000)]
     for fps in (1, 10, 50, 80, 90, 100, 125, 150, 200):
         period = period_us(fps)
@@ -1433,9 +1526,14 @@ def test_plan_train_ends_after_the_last_strobe_and_delayed_pulses():
             assert plan.exact and plan.count == wanted, where
             assert plan.lights_cut == () and not plan.light_overrun, where
             assert _fw_exact(fps, cams, plan.duration_ms, plan.count), where
-            done = [_fw_strobe_done(period, lt, plan.count, plan.duration_ms) for lt in lights]
+            done = [
+                _fw_strobe_done(period, lt, plan.count, plan.duration_ms)
+                for lt in lights
+            ]
             assert all(done), where
-            assert _fw_ends(plan.duration_ms)[1] < plan.count * period, where  # no next edge
+            assert _fw_ends(plan.duration_ms)[1] < plan.count * period, (
+                where
+            )  # no next edge
 
 
 def test_plan_train_count_does_not_depend_on_the_lights():
@@ -1459,16 +1557,18 @@ def test_plan_train_ends_just_before_the_next_edge_when_a_strobe_cannot_finish()
     light = (pin_id("D5"), 1, 0, period * 95 // 100, 0, 0)
     plan = plan_train(80, 800, _D13, [light])
     assert plan.exact and plan.count == 800
-    first, last = _fw_ends(plan.duration_ms)
+    _first, last = _fw_ends(plan.duration_ms)
     assert last < 800 * period and last + 1000 >= 800 * period  # as late as it can
     ((index, cut_us),) = plan.lights_cut
     assert index == 0
-    assert cut_us == 799 * period + period * 95 // 100 - (plan.duration_ms * 1000 - 1000)
+    assert cut_us == 799 * period + period * 95 // 100 - (
+        plan.duration_ms * 1000 - 1000
+    )
 
 
 def test_trigger_train_counts_the_pulses_the_arm_emits():
     # Through the plugin: the count the recording is told is the count the arm's
-    # duration makes the board emit — also above 500 fps, where a run ended
+    # duration makes the board emit -- also above 500 fps, where a run ended
     # half a period after the last pulse emitted up to 9 fewer.
     for fps in (90, 300, 333, 401, 450, 480, 504, 505, 550, 610):
         plugin, link = _plugin_with_fake(cameras=[{"pin": "D13", "pulse_us": 500}])
@@ -1499,7 +1599,16 @@ def test_a_delayed_camera_line_gets_its_last_pulse():
     [
         (80, {"mode": "strobe", "duty_mode": "manual", "duty_percent": 60}, None),
         (125, {"mode": "strobe", "duty_mode": "auto"}, 5000),
-        (100, {"mode": "strobe", "duty_mode": "manual", "duty_percent": 40, "delay_us": 4000}, None),
+        (
+            100,
+            {
+                "mode": "strobe",
+                "duty_mode": "manual",
+                "duty_percent": 40,
+                "delay_us": 4000,
+            },
+            None,
+        ),
     ],
 )
 def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
@@ -1518,7 +1627,9 @@ def test_the_last_strobe_finishes_before_the_run_ends(fps, light, exposure_us):
     plugin.on_recording_start(params)
     arm = _last_arm(link)
     assert _fw_exact(fps, arm["cams"], arm["duration_ms"], count)
-    assert _fw_strobe_done(period_us(fps), arm["lights"][0], count, arm["duration_ms"]), arm
+    assert _fw_strobe_done(
+        period_us(fps), arm["lights"][0], count, arm["duration_ms"]
+    ), arm
 
 
 def test_arm_warns_when_the_train_cannot_end_cleanly(caplog):
@@ -1555,7 +1666,9 @@ def _realtime_plugin(**options):
 def test_prime_trigger_sends_camera_lines_only_and_waits_for_the_burst():
     plugin, link = _realtime_plugin(
         cameras=[{"pin": "D13", "pulse_us": 500}],
-        lights=[{"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25}],
+        lights=[
+            {"channel": 1, "mode": "strobe", "duty_mode": "manual", "duty_percent": 25}
+        ],
     )
     spec = plugin.default_start_params(125.0, 10.0)
     started = time.monotonic()

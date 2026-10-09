@@ -1,10 +1,10 @@
 """Software-trigger hand-off between the shared trigger timer and grab loops.
 
-The shared :class:`~octacam.trigger.PreciseTimer` calls ``trigger_once`` on every
+The shared `PreciseTimer` calls `trigger_once` on every
 camera from one thread, so a device trigger there would let a slow camera delay
 every other one (a 100 fps Basler fell to ~82 fps behind two FLIRs). Instead
-``trigger_once`` only offers a trigger to the camera's :class:`SoftwareTrigger`,
-and the camera's own :meth:`~octacam.cameras.base.CameraBackend.retrieve` claims
+`trigger_once` only offers a trigger to the camera's `SoftwareTrigger`,
+and the camera's own `retrieve` claims
 it, fires it and fetches its image::
 
     fire = trigger.claim(timeout_ms)
@@ -20,19 +20,19 @@ so one frame is recorded per trigger fired.
 
 Sequence
     Every trigger offered while grabbing is numbered from the grab start or
-    :meth:`SoftwareTrigger.restart_sequence`, dropped ones included.
-    :attr:`SoftwareTrigger.last_index` names the trigger the latest image
+    `SoftwareTrigger.restart_sequence`, dropped ones included.
+    `SoftwareTrigger.last_index` names the trigger the latest image
     answers, so a missed pulse is a gap in the sequence.
 
 Pairing
     A fired trigger stays outstanding until an image answers it. While one is
-    outstanding and within its answer deadline, ``claim`` fires nothing and only
+    outstanding and within its answer deadline, `claim` fires nothing and only
     fetches, so an image always answers the oldest outstanding trigger: firing on
     regardless would label every frame after a late image one pulse late. Past
     the deadline the trigger is given up on (a missed pulse).
 
 Overflow
-    At most :data:`PENDING_MAX` triggers wait; more are dropped, newest first,
+    At most `PENDING_MAX` triggers wait; more are dropped, newest first,
     with a rate-limited warning, so an fps above the camera's maximum shows as
     missed pulses rather than a stale backlog. A dropped trigger was never fired,
     so frames never outnumber the triggers fired.
@@ -117,11 +117,11 @@ def _median(values: deque[int]) -> int:
 class SoftwareTrigger:
     """One camera's software-trigger hand-off (see the module docstring).
 
-    The backend calls :meth:`begin_grab` / :meth:`end_grab` around streaming
-    (:attr:`grabbing` is its ``is_grabbing``: a locked Python bool, never a native
-    SDK query), :meth:`offer` in ``trigger_once``, and claims, fires and answers in
-    ``retrieve``. Every deadline and fire time is read from ``clock`` (monotonic
-    ns). The counters are per grab, except :attr:`dropped_triggers`.
+    The backend calls `begin_grab` / `end_grab` around streaming
+    (`grabbing` is its `is_grabbing`: a locked Python bool, never a native
+    SDK query), `offer` in `trigger_once`, and claims, fires and answers in
+    `retrieve`. Every deadline and fire time is read from `clock` (monotonic
+    ns). The counters are per grab, except `dropped_triggers`.
     """
 
     def __init__(self, serial: str, clock: Callable[[], int] = time.monotonic_ns):
@@ -163,8 +163,9 @@ class SoftwareTrigger:
     @property
     def last_index(self) -> int | None:
         """Sequence number of the trigger the latest image answers, or
-        :data:`PRIMING_TRIGGER`/:data:`UNMATCHED_TRIGGER`; None before an answer
-        in this grab (a hardware-triggered fetch never draws on the hand-off)."""
+        `PRIMING_TRIGGER`/`UNMATCHED_TRIGGER`; None before an answer
+        in this grab (a hardware-triggered fetch never draws on the hand-off).
+        """
         answer = self._answer
         if answer is None:
             return None
@@ -174,7 +175,8 @@ class SoftwareTrigger:
     @property
     def fired_index(self) -> int | None:
         """Sequence number of the newest outstanding trigger (the one a retrieve
-        just fired), or None."""
+        just fired), or None.
+        """
         with self._cond:
             return self._outstanding[-1].seq if self._outstanding else None
 
@@ -185,7 +187,8 @@ class SoftwareTrigger:
 
     def configure_period(self, period_s: float | None) -> None:
         """The period of a counting recording's triggers (None for preview and the
-        benchmark); see :data:`STALE_TRIGGER_S`."""
+        benchmark); see `STALE_TRIGGER_S`.
+        """
         with self._cond:
             self._period_s = period_s if period_s and period_s > 0 else None
 
@@ -193,7 +196,8 @@ class SoftwareTrigger:
         """Forget pending triggers and number the next one 0: counting starts.
 
         A priming trigger still awaiting its image stays outstanding at its short
-        deadline, and its image reads :data:`PRIMING_TRIGGER`."""
+        deadline, and its image reads `PRIMING_TRIGGER`.
+        """
         with self._cond:
             self._pending.clear()
             self._next_seq = 0
@@ -207,8 +211,9 @@ class SoftwareTrigger:
                 self._offsets.clear()
 
     def offer(self) -> None:
-        """One pending trigger, without device I/O; dropped at :data:`PENDING_MAX`
-        and when not grabbing."""
+        """One pending trigger, without device I/O; dropped at `PENDING_MAX`
+        and when not grabbing.
+        """
         with self._cond:
             if not self._grabbing:
                 return
@@ -221,7 +226,7 @@ class SoftwareTrigger:
             self.dropped_triggers += 1
             if self.dropped_triggers % 100 == 1:
                 log.warning(
-                    "Camera %s: dropping software triggers (%d so far) — the "
+                    "Camera %s: dropping software triggers (%d so far) \N{EM DASH} the "
                     "requested fps exceeds what the camera can deliver; it is "
                     "running at its maximum rate.",
                     self._serial,
@@ -248,8 +253,9 @@ class SoftwareTrigger:
             self._grabbing = True
 
     def end_grab(self) -> bool:
-        """Disarm and wake a retrieve parked in :meth:`claim`; call it before the
-        native stop. True if it ended a live grab."""
+        """Disarm and wake a retrieve parked in `claim`; call it before the
+        native stop. True if it ended a live grab.
+        """
         with self._cond:
             was_grabbing = self._grabbing
             self._grabbing = False
@@ -259,8 +265,8 @@ class SoftwareTrigger:
     def claim(self, timeout_ms: int) -> bool | None:
         """What this retrieve does: True fire then fetch, False only fetch (a
         trigger is outstanding, or a drain), None nothing (no trigger within
-        ``timeout_ms``, or not grabbing). A claimed trigger is outstanding at
-        once, so a failed device call must report :meth:`unfired`.
+        `timeout_ms`, or not grabbing). A claimed trigger is outstanding at
+        once, so a failed device call must report `unfired`.
         """
         with self._cond:
             self._drain_poll = False
@@ -289,12 +295,13 @@ class SoftwareTrigger:
             return True
 
     def fetch_timeout_ms(self, timeout_ms: int) -> int:
-        """This fetch's timeout: a :data:`DRAIN_POLL_MS` poll for a drain."""
+        """This fetch's timeout: a `DRAIN_POLL_MS` poll for a drain."""
         return min(timeout_ms, DRAIN_POLL_MS) if self._drain_poll else timeout_ms
 
     def unfired(self) -> None:
         """The device refused the trigger just claimed: no image will answer it,
-        so it is not outstanding (its pulse is a gap in the sequence)."""
+        so it is not outstanding (its pulse is a gap in the sequence).
+        """
         with self._cond:
             if self._outstanding:
                 self._outstanding.pop()
@@ -302,7 +309,8 @@ class SoftwareTrigger:
     def answered(self, timestamp_ns: int | None = None) -> None:
         """An image was fetched, usable or not: it answers the oldest outstanding
         trigger, unless its timestamp (ns, else None) shows it older than that
-        trigger (see :data:`STALE_IMAGE_TOLERANCE_NS`)."""
+        trigger (see `STALE_IMAGE_TOLERANCE_NS`).
+        """
         with self._cond:
             if not self._outstanding:
                 self._answer = (UNMATCHED_TRIGGER, self._epoch)
@@ -333,8 +341,9 @@ class SoftwareTrigger:
 
     def take(self, timeout_ms: int) -> int | None:
         """Consume one pending trigger (the fake's model of a hardware trigger
-        line): its sequence number, or None when none came within ``timeout_ms``
-        or the grab ended."""
+        line): its sequence number, or None when none came within `timeout_ms`
+        or the grab ended.
+        """
         with self._cond:
             if not self._pending and self._grabbing:
                 self._cond.wait(timeout_ms / 1000.0)
@@ -344,8 +353,9 @@ class SoftwareTrigger:
             return seq
 
     def wait(self, timeout_s: float) -> None:
-        """Block up to ``timeout_s``, until a trigger is offered or the grab ends;
-        at once when not grabbing (the fake's device waits here)."""
+        """Block up to `timeout_s`, until a trigger is offered or the grab ends;
+        at once when not grabbing (the fake's device waits here).
+        """
         with self._cond:
             if self._grabbing:
                 self._cond.wait(timeout_s)
@@ -353,7 +363,8 @@ class SoftwareTrigger:
     def _drop_stale_pending(self) -> None:
         """Drop pending triggers too old to fire while a recording counts (caller
         holds the condition); their pulses are missed. Priming never drops: it
-        waits out an ignored trigger's deadline by design."""
+        waits out an ignored trigger's deadline by design.
+        """
         if not self._period_s or not self._counting:
             return
         limit = _ns(max(STALE_TRIGGER_S, 0.5 * self._period_s))
@@ -372,7 +383,8 @@ class SoftwareTrigger:
 
     def _expire_unanswered(self) -> None:
         """Give up on the outstanding triggers past their answer deadline (the
-        caller holds the condition)."""
+        caller holds the condition).
+        """
         now = self._clock()
         while self._outstanding and now > self._outstanding[0].deadline_ns:
             fired = self._outstanding.popleft()
@@ -380,7 +392,11 @@ class SoftwareTrigger:
                 # The image rejected for it was probably its own.
                 self._offsets.clear()
                 self._rejected_for = None
-            window = max(DRAIN_WINDOW_S, 2 * self._period_s) if self._period_s else DRAIN_WINDOW_S
+            window = (
+                max(DRAIN_WINDOW_S, 2 * self._period_s)
+                if self._period_s
+                else DRAIN_WINDOW_S
+            )
             self._drain_until = max(self._drain_until, now + _ns(window))
             self._expired_in_grab = True
             if not fired.counted:

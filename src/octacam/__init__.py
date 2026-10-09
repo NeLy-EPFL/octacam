@@ -1,5 +1,6 @@
 """octacam: preview, record, and save synchronized video from many scientific
-cameras (Basler, FLIR, and any GenICam USB3-Vision camera)."""
+cameras (Basler, FLIR, and any GenICam USB3-Vision camera).
+"""
 
 from importlib.metadata import PackageNotFoundError, version
 

@@ -1,7 +1,7 @@
 """Backend registry selection, the auto cascade, and unavailable handling.
 
 Pure Python, no hardware: the vendor tiers may or may not be importable here, so
-these assert the cascade *structure* and the missing-SDK → BackendUnavailable
+these assert the cascade *structure* and the missing-SDK -> BackendUnavailable
 contract rather than any particular camera being present.
 """
 
@@ -85,7 +85,7 @@ def test_select_unknown_backend_raises():
 
 def test_resolve_backend_names_auto_is_available_cascade():
     # "auto" (and its aliases / an absent selector) resolves to the available
-    # cascade tiers in priority order — never fake.
+    # cascade tiers in priority order -- never fake.
     available = available_backends()
     assert resolve_backend_names("auto") == available
     assert resolve_backend_names("all") == available
@@ -145,16 +145,16 @@ def test_select_pycameleon_without_package_raises(monkeypatch):
 def test_flir_module_imports_without_pyspin():
     # The module must import even when PySpin is absent (it is reached only via
     # the registry, which converts the missing SDK to BackendUnavailable).
-    import octacam.cameras.flir as flir
+    from octacam.cameras import flir
 
     assert flir.FlirBackend.extension == "txt"
 
 
 def test_spinnaker_module_imports_without_sdk():
     # The ctypes binding module has no import-time dependency on the SDK (ctypes
-    # is stdlib; the .so is loaded lazily), so it always imports — the registry
+    # is stdlib; the .so is loaded lazily), so it always imports -- the registry
     # converts a missing libSpinnaker_C.so to BackendUnavailable at selection.
-    import octacam.cameras.spinnaker_c as spinnaker_c
+    from octacam.cameras import spinnaker_c
 
     assert spinnaker_c.SPEC.ensure_available is spinnaker_c.ensure_available
 
@@ -164,7 +164,7 @@ def test_select_spinnaker_without_sdk_raises(monkeypatch):
     # so it is absent in CI; selecting it must surface a clean BackendUnavailable,
     # never a raw OSError. Force the missing-SDK path so the test is deterministic
     # whether or not the SDK happens to be installed on the box running it.
-    import octacam.cameras.spinnaker_c as spinnaker_c
+    from octacam.cameras import spinnaker_c
 
     # A never-loaded facade + a soname that does not exist makes ctypes.CDLL fail
     # exactly as it would on a box without the SDK, regardless of this host.
@@ -193,16 +193,15 @@ def test_only_the_spinnaker_tiers_hold_session_state():
     # the other backends have nothing to release.
     for name in ("basler", "fake", "pycameleon"):
         assert select_backend(name).teardown is None
-    import octacam.cameras.flir as flir
-    import octacam.cameras.spinnaker_c as spinnaker_c
+    from octacam.cameras import flir, spinnaker_c
 
     assert flir.SPEC.teardown is flir.teardown
     assert spinnaker_c.SPEC.teardown is spinnaker_c.teardown
 
 
 # --------------------------------------------------------------------------
-# Basler backend unit tests (pypylon imports here — genicam.GenericException is
-# the real SDK exception type — but no camera is present, so pylon's
+# Basler backend unit tests (pypylon imports here -- genicam.GenericException is
+# the real SDK exception type -- but no camera is present, so pylon's
 # InstantCamera is replaced by a faked raw device).
 # --------------------------------------------------------------------------
 
@@ -214,7 +213,8 @@ class _Raw:
 
     def GetDeviceInfo(self):
         return types.SimpleNamespace(
-            GetSerialNumber=lambda: "test-basler", GetDeviceClass=lambda: self.device_class
+            GetSerialNumber=lambda: "test-basler",
+            GetDeviceClass=lambda: self.device_class,
         )
 
 
@@ -333,7 +333,8 @@ class _GrabResult:
 
 class _LateImageRaw(_Raw):
     """A raw whose RetrieveResult hands out queued results (an empty one: the
-    fetch timed out) and counts the software triggers fired."""
+    fetch timed out) and counts the software triggers fired.
+    """
 
     def __init__(self, results):
         self.results = list(results)
@@ -348,8 +349,8 @@ class _LateImageRaw(_Raw):
 
 def test_basler_retrieve_credits_a_late_image_to_its_own_trigger(make_basler_backend):
     # Trigger 0's image misses the fetch after it. The next retrieve must not
-    # fire trigger 1 — it would then fetch image 0 and credit it to trigger 1,
-    # putting every later frame a pulse late — but only fetch.
+    # fire trigger 1 -- it would then fetch image 0 and credit it to trigger 1,
+    # putting every later frame a pulse late -- but only fetch.
     raw = _LateImageRaw([_GrabResult(valid=False), _GrabResult(timestamp=111)])
     be = make_basler_backend(raw)
     be.trigger.begin_grab()
@@ -417,7 +418,9 @@ def test_basler_failed_grab_answers_its_trigger(make_basler_backend):
     assert be.stream_statistics()["IncompleteImagesDiscarded"] == 1
 
 
-@pytest.mark.parametrize(("device_class", "stamp"), [("BaslerUsb", 111), ("BaslerGigE", None)])
+@pytest.mark.parametrize(
+    ("device_class", "stamp"), [("BaslerUsb", 111), ("BaslerGigE", None)]
+)
 def test_basler_only_ns_timestamps_reach_the_clock_check(
     make_basler_backend, monkeypatch, device_class, stamp
 ):
@@ -478,9 +481,9 @@ class _FakeBaslerDevice:
 class _FakeTlFactory:
     """pylon transport-layer factory stand-in with no hardware.
 
-    ``CreateDevice`` raises the real SDK exception for any serial in ``bad`` — as
-    pylon does when a USB3 camera's SuperSpeed link trained down to USB 2.0 —
-    blocks for ``slow_seconds`` for any serial in ``slow`` (a camera that
+    `CreateDevice` raises the real SDK exception for any serial in `bad` -- as
+    pylon does when a USB3 camera's SuperSpeed link trained down to USB 2.0 --
+    blocks for `slow_seconds` for any serial in `slow` (a camera that
     enumerated but never answers its first register read, which held one test rig
     for 271 s), and returns a sentinel handle otherwise.
     """
@@ -579,7 +582,9 @@ def test_enumerate_basler_goes_through_the_guarded_factory(monkeypatch):
 
     monkeypatch.setenv("GENICAM_GENTL64_PATH", "/opt/pylon/lib/gentlproducer/gtl")
     factory = _patch_basler_factory(monkeypatch, ["40018631"], bad=set())
-    assert [serial for serial, _handle in enumerate_basler(["40018631"])] == ["40018631"]
+    assert [serial for serial, _handle in enumerate_basler(["40018631"])] == [
+        "40018631"
+    ]
     assert factory.gentl_path_at_load == [None]
 
 
@@ -625,7 +630,11 @@ def test_real_pylon_loads_no_gentl_producer_and_exits_cleanly():
         "print('cti' if '.cti' in maps else 'clean', flush=True)\n"
     )
     result = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+        [sys.executable, "-c", script],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=120,
     )
     assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
     assert result.stdout.strip().splitlines()[-1] == "clean"
@@ -635,8 +644,8 @@ def test_enumerate_basler_reports_uncreatable_camera_with_none_handle(
     monkeypatch, caplog
 ):
     # A camera whose SuperSpeed link fell back to USB 2.0 (CreateDevice raises)
-    # is reported with a None handle — the sentinel that lets CameraSystem claim
-    # the serial (so no lower cascade tier retries it) without opening it — while
+    # is reported with a None handle -- the sentinel that lets CameraSystem claim
+    # the serial (so no lower cascade tier retries it) without opening it -- while
     # the working cameras carry real handles. Enumeration never raises.
     from octacam.cameras.basler import enumerate_basler
 
@@ -663,8 +672,8 @@ def test_enumerate_basler_all_uncreatable_have_none_handles(monkeypatch):
 
 
 def test_cascade_claims_declined_camera_so_lower_tier_skips_it(monkeypatch):
-    # Regression: a higher tier reporting (serial, None) — "present but unusable"
-    # — must CLAIM the serial so a lower cascade tier does not pointlessly retry
+    # Regression: a higher tier reporting (serial, None) -- "present but unusable"
+    # -- must CLAIM the serial so a lower cascade tier does not pointlessly retry
     # the same broken device (for a USB3 camera on a USB 2.0 link that retry just
     # fails to open on every backend and, for pycameleon, wastes a stream-timeout
     # + destabilizes native teardown).
@@ -766,7 +775,7 @@ def test_enumerate_basler_deduplicates_a_repeated_serial(monkeypatch):
     # A serial listed twice in the rig config must create the device once. Two
     # CreateDevice calls would hand back two real handles of which only one can
     # be returned (results is keyed by serial), orphaning the other with no
-    # DestroyDevice — the pylon leak that segfaults at PylonTerminate().
+    # DestroyDevice -- the pylon leak that segfaults at PylonTerminate().
     from octacam.cameras.basler import enumerate_basler
 
     factory = _patch_basler_factory(monkeypatch, ["40018619", "40018631"], bad=())
@@ -815,7 +824,7 @@ def test_select_serials_requested_in_order_else_all_sorted():
 
 def test_cascade_does_not_enumerate_cameras_the_rig_never_asked_for(monkeypatch):
     # Regression: the cascade used to call every tier with None ("the whole bus"),
-    # so a 2-camera FLIR rig paid for CreateDevice on every attached Basler — and
+    # so a 2-camera FLIR rig paid for CreateDevice on every attached Basler -- and
     # inherited the stall when one of them was sick. Each tier must be offered the
     # rig's requested serials instead.
     from octacam.cameras import system as sysmod
@@ -918,7 +927,7 @@ class _FakeCamList:
 def test_flir_enumerate_releases_previous_system(monkeypatch):
     # Re-enumeration (octacam doctor enumerates twice) must release the prior
     # System first instead of orphaning it.
-    import octacam.cameras.flir as flir
+    from octacam.cameras import flir
 
     binding = flir.PySpinBinding()
     prev_system = _FakeSystem(_FakeCamList())
@@ -948,7 +957,7 @@ def test_flir_registers_atexit_teardown(monkeypatch):
     import atexit
     import importlib
 
-    import octacam.cameras.flir as flir
+    from octacam.cameras import flir
 
     registered = []
     monkeypatch.setattr(atexit, "register", lambda fn, *a, **k: registered.append(fn))
@@ -966,14 +975,14 @@ def test_flir_registers_atexit_teardown(monkeypatch):
 def test_roi_offsets_are_applied_after_sizes_whatever_the_file_order():
     """Origins must be programmed after sizes, however the file lists them.
 
-    A size node's max is ``sensor - origin``, so an origin written first clamps
-    the size that follows. ``_clear_roi_offsets`` zeroes the origins up front, but
-    that only helps when the file's own origin lines come *after* its size lines —
-    true for octacam's ``dump_config`` (CONFIG_NODES order) and not something a
+    A size node's max is `sensor - origin`, so an origin written first clamps
+    the size that follows. `_clear_roi_offsets` zeroes the origins up front, but
+    that only helps when the file's own origin lines come *after* its size lines --
+    true for octacam's `dump_config` (CONFIG_NODES order) and not something a
     vendor-exported or hand-edited file guarantees, though the module advertises
-    the native GenApi persistence TSV. Given ``OffsetY`` before ``Height``, the
+    the native GenApi persistence TSV. Given `OffsetY` before `Height`, the
     zeroed origin was immediately overwritten with 278 and the following
-    ``Height = 2048`` was refused against a max of 1770, leaving the camera on the
+    `Height = 2048` was refused against a max of 1770, leaving the camera on the
     previous session's ROI for the whole recording.
     """
     from octacam.cameras.genicam import _roi_offsets_last
@@ -994,7 +1003,7 @@ def test_roi_offsets_are_applied_after_sizes_whatever_the_file_order():
 
 
 def test_roi_reorder_is_a_no_op_for_dump_config_order():
-    """octacam's own files already list sizes first; they must be untouched."""
+    """Octacam's own files already list sizes first; they must be untouched."""
     from octacam.cameras.genicam import _roi_offsets_last
 
     pairs = [("Width", "2048"), ("Height", "2048"), ("OffsetX", "0"), ("OffsetY", "0")]
@@ -1024,6 +1033,6 @@ def test_rejected_geometry_write_is_reported_loudly(caplog):
 
     with caplog.at_level(logging.WARNING, logger="octacam"):
         apply_config(Backend(), "Width\t2048\nHeight\t2048\n")
-    assert any(
-        "Height" in m and "geometry" in m for m in caplog.messages
-    ), caplog.messages
+    assert any("Height" in m and "geometry" in m for m in caplog.messages), (
+        caplog.messages
+    )

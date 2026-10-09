@@ -152,7 +152,9 @@ def test_unsafe_camera_name_dropped(tmp_path):
     assert config.cameras[1].name == "ok"
 
 
-@pytest.mark.parametrize("name", ["", "   ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"])
+@pytest.mark.parametrize(
+    "name", ["", "   ", ".", "..", "a/b", "a\\b", "/abs", "x/../y"]
+)
 def test_safe_segment_rejects(name):
     with pytest.raises(ValueError, match="^Invalid camera name: "):
         safe_segment(name, "camera name")
@@ -362,7 +364,7 @@ def test_transfer_bad_field_keeps_default(tmp_path):
 
 def test_visualization_skips_entries_without_a_valid_layout(tmp_path, caplog):
     (tmp_path / "octacam_config.toml").write_text(
-        'visualization = [\n'
+        "visualization = [\n"
         '  "not a table",\n'
         '  { name = "missing.mp4" },\n'
         '  { name = "empty.mp4", layout = [] },\n'
@@ -370,7 +372,7 @@ def test_visualization_skips_entries_without_a_valid_layout(tmp_path, caplog):
         '  { name = "number.mp4", layout = [["a", 1]] },\n'
         '  { name = "flat.mp4", layout = ["a", "b"] },\n'
         '  { name = "ok.mp4", layout = [["a", ""], ["", "b"]] },\n'
-        ']\n'
+        "]\n"
     )
     with caplog.at_level(logging.WARNING, logger="octacam"):
         viz = load_config_dir(tmp_path).visualization
@@ -435,8 +437,8 @@ def test_parse_config_raises_on_malformed_toml(tmp_path):
     become an all-defaults config.
 
     Field-level problems stay tolerant (warn-and-default), but a decode error
-    yielded *nothing*: the rig then ran on stock defaults — every detected
-    camera, save dir "./", no plugins, no [transfer] destination — which reads to
+    yielded *nothing*: the rig then ran on stock defaults -- every detected
+    camera, save dir "./", no plugins, no [transfer] destination -- which reads to
     the operator as "octacam ignored my config". The documented flywheel
     `options.command` example was itself invalid TOML (an inline table cannot be
     extended with a dotted key), so copy-pasting the docs hit exactly this.
@@ -445,10 +447,10 @@ def test_parse_config_raises_on_malformed_toml(tmp_path):
 
     bad = tmp_path / "octacam_config.toml"
     bad.write_text(
-        '[[plugins]]\n'
+        "[[plugins]]\n"
         'name = "flywheel"\n'
         'options = { device = "/dev/ttyACM0" }\n'
-        'options.command = { n_steps = -2048 }\n'
+        "options.command = { n_steps = -2048 }\n"
     )
     with pytest.raises(ConfigError) as excinfo:
         parse_config(bad)
@@ -480,13 +482,14 @@ def test_documented_flywheel_options_example_parses():
     in the all-defaults path above rather than pointing at the bad line.
     """
     import re
-    from pathlib import Path
-
     import tomllib
+    from pathlib import Path
 
     doc = Path(__file__).resolve().parents[1] / "docs" / "guide" / "plugins.md"
     block = re.search(
-        r"```toml\n(\[\[plugins\]\]\nname = \"flywheel\".*?)```", doc.read_text(), re.S
+        r"```toml\n(\[\[plugins\]\]\nname = \"flywheel\".*?)```",
+        doc.read_text(),
+        re.DOTALL,
     )
     assert block is not None, "flywheel options example not found in plugins.md"
     parsed = tomllib.loads(block.group(1))
@@ -499,7 +502,7 @@ def test_documented_flywheel_options_example_parses():
 def test_record_config_values_covers_every_record_setting():
     # Each recording's config snapshot is written from record_config_values, so a
     # new [record] key must either be reproduced there or be deliberately left
-    # out — otherwise a recording made with it would relaunch with the rig
+    # out -- otherwise a recording made with it would relaunch with the rig
     # file's value instead of its own.
     reproduced = set(RecordingSettings().record_config_values())
     # duration_s stands in for the duration/unit pair (config_writer picks a unit).
@@ -586,7 +589,9 @@ def test_next_take_bumps_the_relative_part_else_save_dir():
     assert lone.save_dir == "/data/002-bhv"
     # The relative part is joined stripped, as a live edit joins it.
     padded = RecordingSettings(
-        record_directory="/base", relative_directory=" day/009", save_dir="/base/ day/009"
+        record_directory="/base",
+        relative_directory=" day/009",
+        save_dir="/base/ day/009",
     ).next_take()
     assert (padded.relative_directory, padded.save_dir) == (" day/010", "/base/day/010")
 
@@ -599,7 +604,9 @@ def test_updated_composes_save_dir_from_the_split():
     assert (padded.relative_directory, padded.save_dir) == (" day/002", "/base/day/002")
     # An absolute relative part discards the base.
     for relative in ("/elsewhere/001", " /elsewhere/001"):
-        assert settings.updated(relative_directory=relative).save_dir == "/elsewhere/001"
+        assert (
+            settings.updated(relative_directory=relative).save_dir == "/elsewhere/001"
+        )
     # The base is stored normalized: the GUI shows it and relative_save_dir
     # measures against it.
     based = settings.updated(record_directory=" ~/b ")
@@ -617,9 +624,12 @@ def test_with_save_dir_clears_the_split():
 
 def test_relative_save_dir():
     # The explicit relative part, else save_dir under the base, else its name.
-    assert RecordingSettings(
-        record_directory="/b", relative_directory="day/001", save_dir="/b/day/001"
-    ).relative_save_dir() == "day/001"
+    assert (
+        RecordingSettings(
+            record_directory="/b", relative_directory="day/001", save_dir="/b/day/001"
+        ).relative_save_dir()
+        == "day/001"
+    )
     under = RecordingSettings(record_directory="/b", save_dir="/b/x/002")
     assert under.relative_save_dir() == "x/002"
     outside = RecordingSettings(record_directory="/b", save_dir="/out/003")
@@ -680,3 +690,34 @@ def test_recording_settings_default_ffmpeg_params():
     # near visually lossless); config's record.ffmpeg_params overrides it.
 
     assert RecordingSettings().ffmpeg_params == DEFAULT_FFMPEG_PARAMS
+
+
+def test_apply_overrides_reads_values_as_toml_typed_by_their_key():
+    from octacam.config import ConfigError, OctacamConfig, apply_overrides
+
+    config = OctacamConfig()
+    config.record.fps = 30.0
+    updated = apply_overrides(
+        config,
+        [
+            "record.fps=80",
+            "record.directory=2026-01-01",  # text stays text, not a TOML date
+            "transfer.directory=/mnt/archive",  # an optional table the file left out
+            "backend=FLIR",
+        ],
+    )
+    assert updated.record.fps == 80.0
+    assert updated.record.directory == "2026-01-01"
+    assert updated.transfer is not None
+    assert updated.transfer.directory == "/mnt/archive"
+    assert updated.backend == "flir"
+    assert config.record.fps == 30.0  # a copy
+    assert apply_overrides(config, ["record.fps=none"]).record.fps == 100.0
+    for bad, says in [
+        ("record.fps=fast", "record.fps"),
+        ("record.fsp=1", "did you mean 'record.fps'"),
+        ("record=1", "is a table"),
+        ("backend=nikon", "backend"),
+    ]:
+        with pytest.raises(ConfigError, match=says):
+            apply_overrides(config, [bad])

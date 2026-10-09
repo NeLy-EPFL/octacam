@@ -1,8 +1,8 @@
 """One camera's recording: the record loop and its accounting.
 
-:class:`CameraTake` assigns every delivered frame to the trigger pulse that
-exposed it (:mod:`octacam.pulses`), fills what the camera missed so that video
-frame k is pulse k, and writes the video. :class:`CameraStats` is the record it
+`CameraTake` assigns every delivered frame to the trigger pulse that
+exposed it (`octacam.pulses`), fills what the camera missed so that video
+frame k is pulse k, and writes the video. `CameraStats` is the record it
 leaves for the summary, the sync check and the timestamps file.
 """
 
@@ -92,7 +92,8 @@ class CameraStats:
     @property
     def mean_fps(self) -> float:
         """The rate over the whole take; 0 when the span is not positive (a clock
-        that jumped back has no rate)."""
+        that jumped back has no rate).
+        """
         timestamps = self.timestamp_ns
         if len(timestamps) < 2:
             return 0.0
@@ -104,14 +105,14 @@ class CameraTake:
     """One camera's recording: its record grab thread, its writer and its pulse
     accounting.
 
-    Its thread is the only writer of its state. Live while it runs: ``started``,
-    ``primed_frames``, ``dropped_count``, :attr:`frames` and ``tracker``; the
-    rest through :meth:`stats`, final once the take is joined.
+    Its thread is the only writer of its state. Live while it runs: `started`,
+    `primed_frames`, `dropped_count`, `frames` and `tracker`; the
+    rest through `stats`, final once the take is joined.
     """
 
     def __init__(
         self,
-        camera: "Camera",
+        camera: Camera,
         clock: PulseClock,
         *,
         video_format: VideoFormat,
@@ -119,10 +120,11 @@ class CameraTake:
         record_form: str,
         hold: bool,
     ):
-        """A take of ``camera`` counted against ``clock``, written in
-        ``video_format`` behind a queue of ``queue_size``. ``record_form``
-        "display" bakes the display transform into the video; ``hold`` discards
-        frames until :meth:`arm_counting`, while the recording primes."""
+        """A take of `camera` counted against `clock`, written in
+        `video_format` behind a queue of `queue_size`. `record_form`
+        "display" bakes the display transform into the video; `hold` discards
+        frames until `arm_counting`, while the recording primes.
+        """
         self.name = camera.name
         self.serial = camera.serial_number
         self.clock = clock
@@ -178,7 +180,8 @@ class CameraTake:
 
     def start(self, save_path: str, fps: float) -> bool:
         """Open the writer and start the record grab; True iff the record loop
-        was launched."""
+        was launched.
+        """
         sensor = (self._backend.width(), self._backend.height())
         self.frame_size = self._transform.output_size(*sensor) if self._bake else sensor
         if not self.writer.open(save_path, fps, self.frame_size):
@@ -192,7 +195,9 @@ class CameraTake:
                 period_ns / 1e9 if self._software and period_ns else None
             )
             if not self._backend.start_grab_record():
-                log.error("Failed to start grabbing for recording on camera %s", self.serial)
+                log.error(
+                    "Failed to start grabbing for recording on camera %s", self.serial
+                )
                 self.writer.close()
                 return False
         except Exception:
@@ -206,14 +211,16 @@ class CameraTake:
         return True
 
     def arm_counting(self) -> None:
-        """End the priming ``hold``: the next trigger is the take's first, and a
-        software-trigger sequence restarts so it is trigger 0."""
+        """End the priming `hold`: the next trigger is the take's first, and a
+        software-trigger sequence restarts so it is trigger 0.
+        """
         self._backend.restart_trigger_sequence()
         self._armed.set()
 
     def stop(self, fill_to: int | None = None) -> None:
-        """Stop the record loop. ``fill_to`` (a completed train's count) pads a
-        camera that missed the last pulses, so it ends aligned."""
+        """Stop the record loop. `fill_to` (a completed train's count) pads a
+        camera that missed the last pulses, so it ends aligned.
+        """
         if fill_to is not None:
             self._fill_to = fill_to
         self._stop.set()
@@ -224,7 +231,8 @@ class CameraTake:
 
     def stats(self) -> CameraStats:
         """The take so far, as a copy: final once the take is joined. It copies
-        every series, so read it once per take, not per tick."""
+        every series, so read it once per take, not per tick.
+        """
         tracker = self.tracker
         start, stop = self._stream_at_start, self._stream_at_stop
         return CameraStats(
@@ -311,7 +319,8 @@ class CameraTake:
         self, array: np.ndarray, timestamp: int, index: int | None, host_ns: int
     ) -> None:
         """Place a counted frame on its pulse, fill the pulses it shows missed,
-        write it and add its row."""
+        write it and add its row.
+        """
         tracker = self.tracker
         arrival = time.time_ns()
         assignment, placed = self._place(index, timestamp, host_ns)
@@ -349,8 +358,9 @@ class CameraTake:
         self.started = True
 
     def _write(self, array: np.ndarray, pulse: int) -> WriteResult:
-        """Write the frame of ``pulse`` with the fills it owes, and account for
-        what the writer did with it."""
+        """Write the frame of `pulse` with the fills it owes, and account for
+        what the writer did with it.
+        """
         # The preview gets the raw array: the browser applies the transform.
         frame = apply_display_transform(array, self._transform) if self._bake else array
         result = self.writer.write(frame, fill_before=self._owed)
@@ -368,7 +378,7 @@ class CameraTake:
         else:
             if not self._writer_skipped:
                 log.error(
-                    "Camera %s: the video writer cannot keep up — %d frames "
+                    "Camera %s: the video writer cannot keep up \N{EM DASH} %d frames "
                     "refused before it caught up. From pulse %d on, a frame it "
                     "refuses is skipped instead of filled: this camera's video "
                     "will be short of the train (pulse_index in the timestamps "
@@ -425,17 +435,20 @@ class CameraTake:
     def _place(
         self, index: int | None, timestamp: int, host_ns: int
     ) -> tuple[Assignment, int | None]:
-        """Assign a delivered frame to its pulse; returns ``(assignment, stamp)``,
-        ``stamp`` being the timestamp its row carries (None: host arrival time).
+        """Assign a delivered frame to its pulse; returns `(assignment, stamp)`,
+        `stamp` being the timestamp its row carries (None: host arrival time).
 
-        ``index`` is the software-trigger sequence number of the trigger the frame
-        answers (exact), else the frame is placed from its camera ``timestamp``.
+        `index` is the software-trigger sequence number of the trigger the frame
+        answers (exact), else the frame is placed from its camera `timestamp`.
         """
         tracker = self.tracker
         if index is not None:
             return tracker.assign_index(index), (timestamp or None)
         if timestamp:
-            if tracker.last_pulse is not None and tracker.expected_ts(tracker.next_pulse) is None:
+            if (
+                tracker.last_pulse is not None
+                and tracker.expected_ts(tracker.next_pulse) is None
+            ):
                 # The first timed frame after untimed ones: anchor the camera
                 # clock at this frame's pulse, not the train's first (which would
                 # restart the count and shift every frame).
@@ -454,8 +467,9 @@ class CameraTake:
         return tracker.assign_index(tracker.next_pulse), None
 
     def _fill(self, pulses: range, anchor: tuple[int, int, bool]) -> None:
-        """Owe a fill for each of ``pulses``, each with its row (stamped by
-        :func:`_fill_stamp`)."""
+        """Owe a fill for each of `pulses`, each with its row (stamped by
+        `_fill_stamp`).
+        """
         for pulse in pulses:
             due, unstamped = _fill_stamp(self.tracker, pulse, anchor)
             self._append_row(
@@ -473,8 +487,9 @@ class CameraTake:
         arrival: int,
         unstamped: bool,
     ) -> None:
-        """One video frame's row. ``unstamped``: the camera did not supply its
-        timestamp (see CameraStats.host_fallback_count)."""
+        """One video frame's row. `unstamped`: the camera did not supply its
+        timestamp (see CameraStats.host_fallback_count).
+        """
         self._timestamp_ns.append(timestamp)
         self._pulse_index.append(pulse)
         self._missed.append(missed)
@@ -486,8 +501,9 @@ class CameraTake:
             self._host_fallback_count += 1
 
     def _reconcile_unwritten_frames(self) -> None:
-        """After a writer failure the file ends at ``frames_written``: mark the
-        later rows dropped."""
+        """After a writer failure the file ends at `frames_written`: mark the
+        later rows dropped.
+        """
         if not self.writer.failed:
             return
         for index in range(self.writer.frames_written, len(self._dropped)):
@@ -506,8 +522,8 @@ class CameraTake:
 def _fill_stamp(
     tracker: PulseTracker, pulse: int, anchor: tuple[int, int, bool]
 ) -> tuple[int, bool]:
-    """A fill's timestamp: when ``pulse`` was due, on the camera clock where the
-    tracker follows it, else whole periods from ``anchor`` (timestamp, pulse,
+    """A fill's timestamp: when `pulse` was due, on the camera clock where the
+    tracker follows it, else whole periods from `anchor` (timestamp, pulse,
     unstamped) of a delivered frame. Returns it with whether it inherits an
     unstamped anchor; never 0 or negative.
     """
@@ -516,7 +532,8 @@ def _fill_stamp(
         return max(due, 1), False
     stamp, at_pulse, unstamped = anchor
     # An integer offset: a host-time stamp (~1.8e18 ns) is past float precision.
-    offset = int(round((pulse - at_pulse) * tracker.period_ns))
+    # int(): round() keeps a numpy integer a numpy integer.
+    offset = int(round((pulse - at_pulse) * tracker.period_ns))  # noqa: RUF046
     return max(stamp + offset, 1), unstamped
 
 

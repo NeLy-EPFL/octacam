@@ -16,7 +16,8 @@ class CameraNamePatch(StrictModel):
 
 class CameraTransformPatch(StrictModel):
     """One camera's live display transform (negative scale = flip), sent on every
-    rotate/flip so a "display"-form recording bakes in what the operator sees."""
+    rotate/flip so a "display"-form recording bakes in what the operator sees.
+    """
 
     scale_x: float = 1.0
     scale_y: float = 1.0
@@ -24,8 +25,9 @@ class CameraTransformPatch(StrictModel):
 
 
 class CameraFeaturePatch(StrictModel):
-    """Set one node-map feature by GenApi name; the backend coerces ``value`` to
-    the node's type (an enum sends its symbol)."""
+    """Set one node-map feature by GenApi name; the backend coerces `value` to
+    the node's type (an enum sends its symbol).
+    """
 
     name: str
     value: Any
@@ -57,7 +59,8 @@ class CameraCenterPatch(StrictModel):
 def _http_errors():
     """Map a controller error to HTTP: no such camera 404, busy 409, bad value 422.
     A route with a narrower contract maps only its own errors, so an unexpected one
-    stays a logged 500."""
+    stays a logged 500.
+    """
     try:
         yield
     except IndexError as e:
@@ -78,7 +81,11 @@ def router(state: AppState) -> APIRouter:
             index = entry["index"]
             hub.publish(
                 "camera_features_dirty",
-                {"index": index, "center_x": entry["center_x"], "center_y": entry["center_y"]},
+                {
+                    "index": index,
+                    "center_x": entry["center_x"],
+                    "center_y": entry["center_y"],
+                },
                 key=index,
             )
 

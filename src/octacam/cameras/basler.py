@@ -1,7 +1,7 @@
 """Basler backend over pypylon, the only module that imports it.
 
-A pylon ``InstantCamera`` per camera, enumerated through :func:`tl_factory`;
-parameters persist as ``.pfs`` feature-stream files.
+A pylon `InstantCamera` per camera, enumerated through `tl_factory`;
+parameters persist as `.pfs` feature-stream files.
 """
 
 import logging
@@ -53,23 +53,30 @@ _VIS_NAME = {
 
 
 def _call(obj: Any, method: str) -> Any:
-    """``obj.<method>()``, or None where the SDK refuses or the node lacks it
-    (a float without GetInc)."""
+    """`obj.<method>()`, or None where the SDK refuses or the node lacks it
+    (a float without GetInc).
+    """
     try:
         return getattr(obj, method)()
-    except (AttributeError, genicam.GenericException):
+    except AttributeError, genicam.GenericException:
         return None
 
 
 class _PylonGenApi(GenApi):
     """pypylon's GenApi. Nodes come back downcast to their typed interface;
-    their INode (``GetNode()``) carries the metadata and the access mode."""
+    their INode (`GetNode()`) carries the metadata and the access mode.
+    """
 
     def node(self, nodemap: Any, name: str) -> Any:
         try:
-            return nodemap.GetNode(name)
+            node = nodemap.GetNode(name)
         except genicam.GenericException:
             return None
+        # pypylon 26.8 answers an unknown name with a placeholder, not an error.
+        is_valid = getattr(node, "IsValid", None)
+        if is_valid is not None and not is_valid():
+            return None
+        return node
 
     def children(self, category: Any) -> list[Any]:
         out = []
@@ -115,7 +122,12 @@ class _PylonGenApi(GenApi):
 
     def bounds(self, node: Any, kind: str) -> Bounds:
         unit = _call(node, "GetUnit") or None
-        return (_call(node, "GetMin"), _call(node, "GetMax"), _call(node, "GetInc"), unit)
+        return (
+            _call(node, "GetMin"),
+            _call(node, "GetMax"),
+            _call(node, "GetInc"),
+            unit,
+        )
 
     def entries(self, node: Any) -> list[tuple[str, bool]]:
         out = []
@@ -153,7 +165,7 @@ def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
     """Undo a live preview's FrameStart trigger overrides in a saved .pfs:
     TriggerMode back to Off (the shipped convention), TriggerSource to the one
     load_params captured. Other selectors are left alone. The TSV counterpart is
-    :func:`octacam.cameras.genicam.normalize_trigger_source`.
+    `octacam.cameras.genicam.normalize_trigger_source`.
     """
     out = []
     for line in content.splitlines():
@@ -178,8 +190,9 @@ def _normalize_pfs_triggers(content: str, original_source: str | None) -> str:
 
 
 def _drop_empty_pfs_values(content: str) -> str:
-    """Drop .pfs entries with an empty value ("ImageFilename\\t"): current
-    parsers reject the whole stream over them."""
+    r"""Drop .pfs entries with an empty value ("ImageFilename\\t"): current
+    parsers reject the whole stream over them.
+    """
     lines = []
     for line in content.splitlines():
         if not line.startswith("#") and "\t" in line:
@@ -191,9 +204,10 @@ def _drop_empty_pfs_values(content: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-class BaslerBackend(NodeMapBackend):
+class BaslerBackend(NodeMapBackend[_PylonGenApi]):
     """A single Basler camera, driven through pypylon; parameters persist as
-    ``.pfs`` (the trigger chain is the shared GenICam one)."""
+    `.pfs` (the trigger chain is the shared GenICam one).
+    """
 
     extension = "pfs"
 
@@ -242,8 +256,9 @@ class BaslerBackend(NodeMapBackend):
     # ------------------------------------------------- .pfs persistence
 
     def config_values(self, config_str: str) -> dict[str, str]:
-        """``.pfs`` lines as {name: last field}; selector-qualified lines collapse
-        to the base node, enough for the per-field reset."""
+        """`.pfs` lines as {name: last field}; selector-qualified lines collapse
+        to the base node, enough for the per-field reset.
+        """
         out: dict[str, str] = {}
         for line in config_str.splitlines():
             if line.startswith("#") or "\t" not in line:
@@ -285,7 +300,8 @@ class BaslerBackend(NodeMapBackend):
 
     def stream_statistics(self) -> dict[str, int]:
         """The failed grabs this backend discarded, plus pylon's stream-grabber
-        statistics where the transport layer exposes them."""
+        statistics where the transport layer exposes them.
+        """
         out = {"IncompleteImagesDiscarded": self._incomplete_grabs}
         raw = self.raw
         if raw is None:
@@ -391,7 +407,8 @@ class BaslerBackend(NodeMapBackend):
 def _describe_open_failure(serial: str, exc: Exception) -> str:
     """An actionable reason a Basler camera cannot be opened: pylon's "USB 2.0
     port" error reads like a wrong port when a USB3 link that failed to train
-    fell back to USB 2.0 (the cable or connector)."""
+    fell back to USB 2.0 (the cable or connector).
+    """
     text = str(exc)
     if "USB 2.0" in text or "USB 3.0 compatible port" in text:
         return (
@@ -400,7 +417,8 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
             "2.0 even in a USB 3 port, so the cause is the cable or connector, "
             "not the port choice. Reseat both ends of its cable (or swap in a "
             "known-good USB3 cable), or move it to another USB 3 port, then "
-            "reload. `lsusb -t` shows each camera's link speed — a healthy one "
+            "reload. `lsusb -t` shows each camera's link speed \N{EM DASH} a healthy "
+            "one "
             "reads 5000M, this one 480M. Skipping this camera for now."
         )
     if "first register" in text or "maximum device response time" in text:
@@ -408,7 +426,8 @@ def _describe_open_failure(serial: str, exc: Exception) -> str:
             f"Camera {serial} enumerated but never answered its first register "
             "read, so pylon could not download its XML description. The link "
             "trained (it may well report a healthy 5000M) but the camera is not "
-            "answering USB control transfers — almost always a marginal cable or "
+            "answering USB control transfers \N{EM DASH} almost always a marginal "
+            "cable or "
             "connector. Check `dmesg` for a matching `can't set config` line, "
             "then reseat both ends of its cable or move it to another USB 3 "
             "port. Skipping this camera for now."
@@ -429,9 +448,10 @@ _tl_factory_ready = False
 
 
 def tl_factory():
-    """pylon's transport-layer factory, loaded without GenTL producers. Every
+    """Pylon's transport-layer factory, loaded without GenTL producers. Every
     path into pylon goes through it; a process that used pylon first has already
-    loaded them."""
+    loaded them.
+    """
     global _tl_factory_ready
     with _tl_factory_lock:
         if _tl_factory_ready:
@@ -456,9 +476,10 @@ _CREATE_PROGRESS_INTERVAL_S = 3.0
 
 
 def _create_device_timeout() -> float:
-    """The CreateDevice deadline: ``OCTACAM_BASLER_CREATE_TIMEOUT`` if it is a
-    finite positive number (``float()`` accepts ``inf``, which would remove the
-    guard, and ``nan``, which would spin the deadline loop), else the default."""
+    """The CreateDevice deadline: `OCTACAM_BASLER_CREATE_TIMEOUT` if it is a
+    finite positive number (`float()` accepts `inf`, which would remove the
+    guard, and `nan`, which would spin the deadline loop), else the default.
+    """
     raw = os.environ.get("OCTACAM_BASLER_CREATE_TIMEOUT", "").strip()
     if not raw:
         return _CREATE_DEVICE_TIMEOUT_S
@@ -477,20 +498,21 @@ def _create_device_timeout() -> float:
     return value
 
 
-def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
+def _release_late_device(factory, serial: str) -> Callable[[Future], None]:
     """A done-callback destroying a handle that arrives after the deadline:
     nothing owns it, and left to the GC it would segfault at exit (see
-    :meth:`BaslerBackend.close`). This is the factory's DestroyDevice, not the
-    InstantCamera's."""
+    `BaslerBackend.close`). This is the factory's DestroyDevice, not the
+    InstantCamera's.
+    """
 
-    def _callback(future: "Future") -> None:
+    def _callback(future: Future) -> None:
         try:
             device = future.result()
         except Exception:
             return  # it failed on its own; there is no handle to release
         try:
             factory.DestroyDevice(device)
-        except Exception as e:  # best effort — we are already past the deadline
+        except Exception as e:  # best effort -- we are already past the deadline
             log.debug("Could not release late handle for camera %s: %s", serial, e)
         else:
             log.info(
@@ -503,12 +525,12 @@ def _release_late_device(factory, serial: str) -> Callable[["Future"], None]:
 
 
 def enumerate_basler(requested_serials: list[str] | None = None):
-    """``[(serial, device)]`` in :func:`select_serials` order (each serial once:
+    """`[(serial, device)]` in `select_serials` order (each serial once:
     a second handle would never be destroyed). A camera present but unusable (a
     USB 2.0 fallback, no answer to its first register read) gets a None handle
     and a loud message: the cascade claims it without opening it, so no lower
     tier retries it. The CreateDevice calls run concurrently under one deadline
-    (:func:`_create_device_timeout`).
+    (`_create_device_timeout`).
     """
     factory = tl_factory()
     devices = factory.EnumerateDevices()
@@ -581,7 +603,7 @@ def enumerate_basler(requested_serials: list[str] | None = None):
             "Camera %s did not respond within %gs and will be skipped. It "
             "enumerated, so its link trained (it may even report a healthy "
             "5000M), but pylon got no answer from it. Most often that is a "
-            "marginal USB cable or connector — check `dmesg` for a matching "
+            "marginal USB cable or connector \N{EM DASH} check `dmesg` for a matching "
             "`can't set config` line, then reseat both ends of its cable or move "
             "it to another USB 3 port. It can also mean another process already "
             "holds the camera. Set OCTACAM_BASLER_CREATE_TIMEOUT to allow longer "

@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from helpers import wait_until
 
-import octacam.plugins.twophoton as twophoton
+from octacam.plugins import twophoton
 from octacam.plugins.base import PluginManager
 from octacam.plugins.twophoton import (
     DEFAULT_DURATION_MS,
@@ -20,19 +20,21 @@ from octacam.plugins.twophoton import (
 )
 
 # Wire-format constants (mirror the firmware and plugin source)
-ARM_MAGIC    = 0xA5
+ARM_MAGIC = 0xA5
 CANCEL_MAGIC = 0xCA
-ARM_FORMAT   = "<BHI"  # magic(u8) + fps(u16) + duration_ms(u32) = 7 bytes
+ARM_FORMAT = "<BHI"  # magic(u8) + fps(u16) + duration_ms(u32) = 7 bytes
 
 
 # ---------------------------------------------------------------------------
-# FakeLink — stands in for TwoPhotonLink without any serial port
+# FakeLink -- stands in for TwoPhotonLink without any serial port
 # ---------------------------------------------------------------------------
+
 
 class FakeLink(TwoPhotonLink):
     """The real link over no port: it records what is written, answers an arm
-    with 'A' as the board does (unless ``acks`` is off), and identify with
-    ``banner``."""
+    with 'A' as the board does (unless `acks` is off), and identify with
+    `banner`.
+    """
 
     def __init__(self, plugin, is_open: bool = True):
         super().__init__(plugin._on_status, plugin._on_link_broken)
@@ -87,6 +89,7 @@ def _plugin_with_fake(is_open: bool = True) -> tuple[TwoPhotonPlugin, FakeLink]:
 # ArmParams: wire format
 # ---------------------------------------------------------------------------
 
+
 def test_arm_params_to_bytes_correct_format():
     params = ArmParams(fps=100, duration_ms=10_000)
     raw = params.to_bytes()
@@ -123,15 +126,15 @@ def test_arm_params_from_payload_falls_back_to_defaults():
 
 
 def test_arm_params_from_payload_clamps_fps():
-    p_low  = ArmParams.from_payload({"fps": 0}, 100, 1000)
+    p_low = ArmParams.from_payload({"fps": 0}, 100, 1000)
     p_high = ArmParams.from_payload({"fps": 99_999}, 100, 1000)
-    assert p_low.fps == 1       # clamped to min
-    assert p_high.fps == 10_000 # clamped to max
+    assert p_low.fps == 1  # clamped to min
+    assert p_high.fps == 10_000  # clamped to max
 
 
 def test_arm_params_from_payload_clamps_duration():
     p = ArmParams.from_payload({"duration_ms": -5}, 100, 1000)
-    assert p.duration_ms == 1   # clamped to min
+    assert p.duration_ms == 1  # clamped to min
 
 
 def test_arm_params_from_payload_handles_invalid_types():
@@ -143,6 +146,7 @@ def test_arm_params_from_payload_handles_invalid_types():
 # ---------------------------------------------------------------------------
 # Plugin: recording lifecycle hooks
 # ---------------------------------------------------------------------------
+
 
 def test_on_recording_start_sends_arm_packet():
     plugin, link = _plugin_with_fake()
@@ -156,14 +160,14 @@ def test_on_recording_start_sends_arm_packet():
 
 
 def test_on_recording_start_does_not_arm_when_no_params():
-    # params=None means "arm with recording" was unchecked — must not send anything.
+    # params=None means "arm with recording" was unchecked -- must not send anything.
     plugin, link = _plugin_with_fake()
     plugin.on_recording_start(None)
     assert link.snapshot() == []
 
 
 def test_on_recording_start_does_not_arm_when_plugin_key_absent():
-    # A different plugin's params present but no "twophoton" key → do not arm.
+    # A different plugin's params present but no "twophoton" key -> do not arm.
     plugin, link = _plugin_with_fake()
     PluginManager([plugin]).on_recording_start({"flywheel": {"n_steps": 100}})
     assert link.snapshot() == []
@@ -200,7 +204,7 @@ def test_on_recording_stop_clean_also_cancels_and_resets():
 
 def test_on_recording_start_silently_skips_when_port_closed():
     plugin, link = _plugin_with_fake(is_open=False)
-    plugin.on_recording_start(None)   # must not raise
+    plugin.on_recording_start(None)  # must not raise
     assert link.snapshot() == []
 
 
@@ -260,6 +264,7 @@ def test_good_arm_clears_prior_arm_error():
 # Plugin: Arduino status callback and broadcast
 # ---------------------------------------------------------------------------
 
+
 def test_arduino_status_updates_internal_state():
     plugin, _ = _plugin_with_fake()
     assert plugin.board_state == "idle"
@@ -294,12 +299,13 @@ def test_broadcast_called_on_status_change():
 
 def test_no_broadcast_when_callback_not_set():
     plugin, _ = _plugin_with_fake()
-    plugin._on_status("A")   # must not raise even without a broadcast hook
+    plugin._on_status("A")  # must not raise even without a broadcast hook
 
 
 # ---------------------------------------------------------------------------
 # Plugin: is_ready / status
 # ---------------------------------------------------------------------------
+
 
 def test_is_ready_reflects_link_state():
     plugin, link = _plugin_with_fake(is_open=True)
@@ -320,6 +326,7 @@ def test_status_includes_device_and_state():
 # Plugin: REST endpoints
 # ---------------------------------------------------------------------------
 
+
 def _test_client(plugin: TwoPhotonPlugin) -> TestClient:
     app = FastAPI()
     router = plugin.api_router()
@@ -330,20 +337,20 @@ def _test_client(plugin: TwoPhotonPlugin) -> TestClient:
 def test_reconnect_endpoint_reopens_link(monkeypatch):
     plugin, link = _plugin_with_fake(is_open=False)
     monkeypatch.setattr(plugin, "_open", lambda: None)  # suppress real serial open
-    link._open = True   # simulate successful open
+    link._open = True  # simulate successful open
     client = _test_client(plugin)
     r = client.post("/api/twophoton/reconnect")
     assert r.status_code == 200
     data = r.json()
     assert data["device"] == "/dev/arduinoCams"
-    # The endpoint exists to report the post-reopen state — assert it, not just
+    # The endpoint exists to report the post-reopen state -- assert it, not just
     # the static device field.
     assert data["ready"] is True
     assert data["error"] is None
 
 
 def test_reconnect_endpoint_surfaces_failure(monkeypatch):
-    plugin, link = _plugin_with_fake(is_open=False)
+    plugin, _link = _plugin_with_fake(is_open=False)
     # _open returns the error string and leaves the link closed (port absent).
     monkeypatch.setattr(plugin, "_open", lambda: "could not open /dev/arduinoCams")
     client = _test_client(plugin)
@@ -355,8 +362,8 @@ def test_reconnect_endpoint_surfaces_failure(monkeypatch):
 
 
 def test_reconnect_endpoint_accepts_device_override():
-    # A {"device": …} body switches the port before reopening (GUI dropdown).
-    plugin, link = _plugin_with_fake(is_open=False)
+    # A {"device": ...} body switches the port before reopening (GUI dropdown).
+    plugin, _link = _plugin_with_fake(is_open=False)
     r = _test_client(plugin).post(
         "/api/twophoton/reconnect", json={"device": "/dev/ttyUSB3"}
     )
@@ -450,16 +457,23 @@ def test_link_broken_broadcasts_not_ready():
 # Factory: from_options
 # ---------------------------------------------------------------------------
 
+
 def test_build_uses_default_device_when_omitted():
-    # No device key → falls back to DEFAULT_DEVICE ("/dev/arduinoCams")
+    # No device key -> falls back to DEFAULT_DEVICE ("/dev/arduinoCams")
     from octacam.plugins.twophoton import DEFAULT_DEVICE
+
     plugin = TwoPhotonPlugin.from_options({})
     assert plugin.device == DEFAULT_DEVICE
 
 
 def test_build_uses_provided_options():
     plugin = TwoPhotonPlugin.from_options(
-        {"device": "/dev/arduinoCams", "baud": 9600, "default_fps": 50, "default_duration_ms": 3000}
+        {
+            "device": "/dev/arduinoCams",
+            "baud": 9600,
+            "default_fps": 50,
+            "default_duration_ms": 3000,
+        }
     )
     assert plugin.device == "/dev/arduinoCams"
     assert plugin.baud == 9600
@@ -470,6 +484,7 @@ def test_build_uses_provided_options():
 # ---------------------------------------------------------------------------
 # TwoPhotonLink: is_open thread-safety
 # ---------------------------------------------------------------------------
+
 
 def test_is_open_safe_when_serial_is_none():
     # is_open must not raise when close() nulls _serial concurrently.
@@ -600,8 +615,9 @@ def test_link_close_swallows_shutdown_read_error(monkeypatch):
 
 
 def test_link_reopen_starts_fresh_reader(monkeypatch):
-    """open -> close -> open must start a live reader. The reused _reader_stop
-    Event must be cleared so the second reader is not born already-stopped."""
+    """Open -> close -> open must start a live reader. The reused _reader_stop
+    Event must be cleared so the second reader is not born already-stopped.
+    """
     import octacam.plugins.twophoton as m
 
     created: list[_FakeSerial] = []
@@ -626,7 +642,8 @@ def test_link_reopen_starts_fresh_reader(monkeypatch):
 
 def test_link_broken_invokes_on_broken_callback(monkeypatch):
     """A mid-run read failure fires the on_broken hook so the owner can surface
-    the lost link (a clean close must NOT fire it)."""
+    the lost link (a clean close must NOT fire it).
+    """
     import octacam.plugins.twophoton as m
 
     fake = _FakeSerial()
@@ -643,6 +660,7 @@ def test_link_broken_invokes_on_broken_callback(monkeypatch):
 # Firmware provisioning: identity classification, reader, flash, endpoints
 # ---------------------------------------------------------------------------
 
+
 def _verify_with_banner(plugin, link, banner):
     link.banner = banner
     plugin._identify()
@@ -650,8 +668,9 @@ def _verify_with_banner(plugin, link, banner):
 
 def test_reader_distinguishes_bare_status_from_banner():
     """The reader must emit bare 'A'/'T'/'D' statuses AND capture the newline-
-    terminated '2PHOTON …' banner — the two never collide because the banner
-    starts with '2'."""
+    terminated '2PHOTON ...' banner -- the two never collide because the banner
+    starts with '2'.
+    """
     statuses: list[str] = []
     link = TwoPhotonLink(statuses.append, _noop)
     for byte in b"A2PHOTON 1 deadbeef\nT":  # one byte per read, as a slow port
@@ -698,7 +717,7 @@ def test_flash_firmware_success():
 
 
 def test_flash_refused_while_armed():
-    plugin, link = _plugin_with_fake()
+    plugin, _link = _plugin_with_fake()
     plugin.board_state = "armed"
     result = plugin.flash_firmware()
     assert not result.ok
@@ -707,7 +726,9 @@ def test_flash_refused_while_armed():
 
 def test_on_recording_start_refuses_on_incompatible_firmware():
     plugin, link = _plugin_with_fake()
-    _verify_with_banner(plugin, link, "TRIGGERBOX 2 abcd")  # foreign -> firmware_ok False
+    _verify_with_banner(
+        plugin, link, "TRIGGERBOX 2 abcd"
+    )  # foreign -> firmware_ok False
     plugin.on_recording_start({"fps": 100, "duration_ms": 5000})
     assert link.snapshot() == []  # nothing armed
 

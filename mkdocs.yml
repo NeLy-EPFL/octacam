@@ -51,7 +51,11 @@ markdown_extensions:
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - pymdownx.superfences
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  # `--8<-- "README.md:citing"` pastes part of a file; paths are relative to the
+  # repository root, where mkdocs runs.
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.tabbed:
@@ -71,16 +75,20 @@ nav:
   - Home: index.md
   - Installation: installation.md
   - Quickstart: quickstart.md
-  - User Guide:
+  - Guide:
       - Web GUI: guide/gui.md
       - Recording: guide/recording.md
       - Processing recordings: guide/processing.md
-      - Configuration: guide/configuration.md
       - Camera backends: guide/backends.md
       - Plugins: guide/plugins.md
-  - Reference:
-      - CLI reference: reference/cli.md
       - Troubleshooting: reference/troubleshooting.md
+  - Configuration: guide/configuration.md
+  - CLI reference: cli.md
+  - Citing and credits: citing.md
+
+# Design notes kept beside the docs but not published in the nav.
+not_in_nav: |
+  plan-spinnaker-c-backend.md
 
 extra:
   # Versioned docs: the header shows a version dropdown driven by mike's

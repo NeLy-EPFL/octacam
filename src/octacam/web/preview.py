@@ -1,5 +1,6 @@
 """Live preview over the GUI WebSocket: per-client view specs, and the loop that
-encodes each camera's newest frame once per variant its ready clients need."""
+encodes each camera's newest frame once per variant its ready clients need.
+"""
 
 import asyncio
 import dataclasses
@@ -41,9 +42,10 @@ Variant = tuple[Rect, int]  # (region, decimation factor)
 @dataclasses.dataclass(frozen=True)
 class ViewSpec:
     """One client's need of one camera (the default: the baseline preview).
-    ``want`` False skips it (hidden behind a maximized tile); ``need`` is the
-    longest source edge it can show, in px; ``full`` marks a focused tile, which
-    may exceed ``PREVIEW_MAX_DIM``; ``crop`` asks for that region only."""
+    `want` False skips it (hidden behind a maximized tile); `need` is the
+    longest source edge it can show, in px; `full` marks a focused tile, which
+    may exceed `PREVIEW_MAX_DIM`; `crop` asks for that region only.
+    """
 
     want: bool = True
     need: int | None = None
@@ -55,8 +57,9 @@ DEFAULT_VIEW = ViewSpec()
 
 
 def parse_views(message: dict) -> dict[int, ViewSpec]:
-    """The view specs a ``{"type": "view"}`` message sets, by camera index. A
-    malformed entry is skipped, never raised: that would tear down the socket."""
+    """The view specs a `{"type": "view"}` message sets, by camera index. A
+    malformed entry is skipped, never raised: that would tear down the socket.
+    """
     cameras = message.get("cameras")
     if not isinstance(cameras, dict):
         return {}
@@ -64,7 +67,7 @@ def parse_views(message: dict) -> dict[int, ViewSpec]:
     for key, spec in cameras.items():
         try:
             index = int(key)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if not isinstance(spec, dict):
             continue
@@ -72,7 +75,7 @@ def parse_views(message: dict) -> dict[int, ViewSpec]:
         if need is not None:
             try:
                 need = int(need)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 need = None
             else:
                 if need <= 0:
@@ -93,7 +96,7 @@ def _parse_crop(crop) -> Rect | None:
     try:
         x, y = int(crop["x"]), int(crop["y"])
         w, h = int(crop["w"]), int(crop["h"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None
     if w <= 0 or h <= 0 or x < 0 or y < 0:
         return None
@@ -102,7 +105,8 @@ def _parse_crop(crop) -> Rect | None:
 
 def _clamp_crop(crop: Rect | None, width: int, height: int) -> Rect:
     """Clamp a crop to the sensor (the whole sensor for None). The header carries
-    the clamped rect: the client places what was sent, not what it asked for."""
+    the clamped rect: the client places what was sent, not what it asked for.
+    """
     if crop is None:
         return (0, 0, width, height)
     x, y, w, h = crop
@@ -117,8 +121,9 @@ def _preview_factor(
     sensor_long: int, region_long: int, spec: ViewSpec, recording: bool
 ) -> int:
     """Integer decimation of the encoded region (the sensor, or a crop of it):
-    without ``need`` the baseline; an unfocused tile only coarser; a focused one
-    down to 1:1, capped while recording."""
+    without `need` the baseline; an unfocused tile only coarser; a focused one
+    down to 1:1, capped while recording.
+    """
     sensor_long = max(sensor_long, 1)
     region_long = max(region_long, 1)
     baseline = max(1, math.ceil(sensor_long / PREVIEW_MAX_DIM))
@@ -143,7 +148,8 @@ def _cap_variants(
 ) -> None:
     """Keep the cheapest variants and demote the rest to the whole-sensor
     baseline. Two different crops are never merged (a client would see the
-    wrong region): demotion only widens a crop to the full frame."""
+    wrong region): demotion only widens a crop to the full frame.
+    """
     if len(groups) <= MAX_PREVIEW_VARIANTS_PER_CAMERA:
         return
 
@@ -164,8 +170,9 @@ def _cap_variants(
 def _variants(
     clients: list[Client], index: int, width: int, height: int, recording: bool
 ) -> dict[Variant, list[Client]]:
-    """The ready clients that want camera ``index``, grouped by the variant they
-    need (each is encoded once and shared), capped per camera."""
+    """The ready clients that want camera `index`, grouped by the variant they
+    need (each is encoded once and shared), capped per camera.
+    """
     sensor_long = max(width, height)
     groups: dict[Variant, list[Client]] = {}
     for client in clients:
@@ -175,7 +182,9 @@ def _variants(
         if not spec.want:
             continue
         region = _clamp_crop(spec.crop, width, height)
-        factor = _preview_factor(sensor_long, max(region[2], region[3]), spec, recording)
+        factor = _preview_factor(
+            sensor_long, max(region[2], region[3]), spec, recording
+        )
         groups.setdefault((region, factor), []).append(client)
     _cap_variants(groups, width, height, sensor_long)
     return groups
@@ -184,7 +193,8 @@ def _variants(
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class EncodeJob:
     """One camera's frame and everything its encode needs, taken on the event
-    loop, so the executor thread touches no shared state or camera."""
+    loop, so the executor thread touches no shared state or camera.
+    """
 
     camera: int
     frame: np.ndarray
@@ -216,18 +226,31 @@ def _encode_camera(job: EncodeJob) -> list[tuple[bytes, list[Client]]]:
         if not ok:
             continue
         header = FRAME_HEADER.pack(
-            FRAME_VERSION, 1, job.camera, int(job.recording), job.number,
-            job.timestamp_ns, job.fps, job.dropped, x, y, w, h, frame_w, frame_h,
+            FRAME_VERSION,
+            1,
+            job.camera,
+            int(job.recording),
+            job.number,
+            job.timestamp_ns,
+            job.fps,
+            job.dropped,
+            x,
+            y,
+            w,
+            h,
+            frame_w,
+            frame_h,
         )
         messages.append((header + jpeg.tobytes(), group))
     return messages
 
 
 async def preview_loop(
-    hub: Hub, controller: "RecordingController", interval_s: float
+    hub: Hub, controller: RecordingController, interval_s: float
 ) -> None:
-    """Every ``interval_s``, send each camera's newest frame to the clients ready
-    for it (a camera no ready client wants is neither popped nor encoded)."""
+    """Every `interval_s`, send each camera's newest frame to the clients ready
+    for it (a camera no ready client wants is neither popped nor encoded).
+    """
     loop = asyncio.get_running_loop()
     numbers: dict[int, int] = {}
     while True:
@@ -246,20 +269,22 @@ async def preview_loop(
                 continue
             numbers[index] = numbers.get(index, 0) + 1
             take = camera.take  # read once: a preview start clears it
-            jobs.append(EncodeJob(
-                camera=index,
-                frame=frame,
-                groups=groups,
-                number=numbers[index],
-                timestamp_ns=time.time_ns(),
-                fps=camera.frame_for_display.fps,
-                dropped=take.dropped_count if take else 0,
-                recording=recording,
-            ))
+            jobs.append(
+                EncodeJob(
+                    camera=index,
+                    frame=frame,
+                    groups=groups,
+                    number=numbers[index],
+                    timestamp_ns=time.time_ns(),
+                    fps=camera.frame_for_display.fps,
+                    dropped=take.dropped_count if take else 0,
+                    recording=recording,
+                )
+            )
         if not jobs:
             continue
         # One executor task per camera: cv2.imencode releases the GIL, so a tick
-        # costs the slowest camera, not the sum (8 focused 2048²: 85 vs 14 ms).
+        # costs the slowest camera, not the sum (8 focused 2048^2: 85 vs 14 ms).
         batches = await asyncio.gather(
             *[loop.run_in_executor(None, _encode_camera, job) for job in jobs]
         )

@@ -34,7 +34,7 @@ octacam doctor <config_dir> # …and validate a specific rig config
 `doctor` lists detected cameras and bundled plugins, and checks the encoder,
 storage, and runtime for problems — cross-checking the cameras a config declares
 against the ones actually attached. It never opens a camera, so it is safe to
-run while a session is live. See [`doctor` in the CLI reference](reference/cli.md#doctor).
+run while a session is live. See [`doctor` in the CLI reference](cli.md#octacam-doctor).
 
 ## 3. What is a config directory?
 

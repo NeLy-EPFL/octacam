@@ -21,13 +21,26 @@ def pytest_ignore_collect(collection_path: Path, config: pytest.Config) -> bool 
 
     pytest asks this only about paths it reached by walking a directory. The
     browser tests stay out of a plain run because playwright's sync API leaves an
-    event loop running, which breaks every later ``asyncio.run``."""
+    event loop running, which breaks every later `asyncio.run`.
+    """
     return collection_path.name == "test_frontend.py" or None
 
 
 @pytest.fixture(autouse=True)
+def plain_help(monkeypatch):
+    """Help and usage errors as on a terminal here, not as GitHub Actions renders them.
+
+    Typer forces a styled terminal when `GITHUB_ACTIONS` is set, which splits the
+    option names the CLI tests look for with color codes.
+    """
+    import typer.rich_utils
+
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", None)
+
+
+@pytest.fixture(autouse=True)
 def cache_dir(tmp_path, monkeypatch):
-    """The recording cache, per test: nothing touches ``~/.cache/octacam``."""
+    """The recording cache, per test: nothing touches `~/.cache/octacam`."""
     path = tmp_path / "cache"
     monkeypatch.setenv("OCTACAM_CACHE_DIR", str(path))
     return path
@@ -35,8 +48,9 @@ def cache_dir(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _restore_octacam_logger():
-    """Undo ``cli._setup_logging``, which swaps the process-wide octacam logger's
-    handlers and stops propagation, so ``caplog`` sees every later test's records."""
+    """Undo `cli._setup_logging`, which swaps the process-wide octacam logger's
+    handlers and stops propagation, so `caplog` sees every later test's records.
+    """
     logger = logging.getLogger("octacam")
     level, handlers, propagate = logger.level, logger.handlers[:], logger.propagate
     yield
@@ -48,7 +62,8 @@ def _restore_octacam_logger():
 @pytest.fixture(autouse=True)
 def no_flash(monkeypatch):
     """No test runs arduino-cli: discovery finds a fake one, and a flash succeeds
-    without running it. A module that tests the real code overrides this fixture."""
+    without running it. A module that tests the real code overrides this fixture.
+    """
     from octacam import firmware
 
     def flash(spec, port, needed_build, **kwargs):
@@ -67,7 +82,8 @@ def no_flash(monkeypatch):
 def no_usb_reset(monkeypatch):
     """No test resets a USB device or waits for one to come back. A test of the
     recovery path patches its own outcome; a module that tests the real code
-    overrides this fixture."""
+    overrides this fixture.
+    """
     from octacam import serial_ports
 
     monkeypatch.setattr(

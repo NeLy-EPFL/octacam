@@ -1,6 +1,6 @@
 """The controller's lock discipline, pinned through its public calls.
 
-``snapshot()`` and ``stop_recording()`` take the controller lock, so nothing that
+`snapshot()` and `stop_recording()` take the controller lock, so nothing that
 can stall may run under it: not the device reads a recording makes as it starts
 (the parameter export walks each camera's node map over USB with no timeout),
 and not a plugin hook (a serial write that may wait for an ack). And however
@@ -43,8 +43,9 @@ def _settings(tmp_path) -> RecordingSettings:
 
 
 def _call_promptly(call):
-    """``call()``'s result, on a helper thread so a call stuck behind the lock
-    fails the test instead of hanging it."""
+    """`call()`'s result, on a helper thread so a call stuck behind the lock
+    fails the test instead of hanging it.
+    """
     result = []
     worker = threading.Thread(target=lambda: result.append(call()), daemon=True)
     worker.start()
@@ -97,7 +98,8 @@ def test_a_camera_stalled_in_a_start_read_leaves_snapshot_and_stop_responsive(
 
 class _BlockingArm(Plugin):
     """A plugin whose recording arm blocks until released, like a serial write
-    waiting for its ack."""
+    waiting for its ack.
+    """
 
     name = "arm"
 
