@@ -69,7 +69,9 @@ def test_color_range_args_only_for_limited_range_yuv():
 
 
 def test_output_args_force_full_range_for_yuv_only():
-    yuv = output_args("-c:v libx264 -crf 0 -preset ultrafast -pix_fmt yuv420p", (64, 48))
+    yuv = output_args(
+        "-c:v libx264 -crf 0 -preset ultrafast -pix_fmt yuv420p", (64, 48)
+    )
     assert yuv[yuv.index("-color_range") + 1] == "pc"
     # The full-range conversion filter is injected into the merged -vf.
     assert "scale=out_range=full" in yuv[yuv.index("-vf") + 1]
@@ -89,8 +91,8 @@ def _out_pix_fmt(args: list[str]) -> str:
 @pytest.mark.parametrize("encoder", ["libx264", "libx265"])
 def test_gray_h264_is_written_as_full_range_yuv420p(encoder):
     # Monochrome 4:0:0 H.264 decodes as flat gray frames on NVIDIA hardware
-    # decoders (VLC's default there), so a gray output — every older config and
-    # recording snapshot — is written as full-range 4:2:0 instead.
+    # decoders (VLC's default there), so a gray output -- every older config and
+    # recording snapshot -- is written as full-range 4:2:0 instead.
     args = output_args(f"-c:v {encoder} -crf 18 -pix_fmt gray", (64, 48))
     assert _out_pix_fmt(args) == "yuv420p"
     assert args[args.index("-color_range") + 1] == "pc"
@@ -108,7 +110,7 @@ def test_the_4_2_0_rule_reads_each_encoder_option_spelling(spelling):
 @pytest.mark.parametrize("size", [(63, 48), (64, 47)])
 def test_odd_frames_stay_monochrome(size):
     # 4:2:0 cannot code an odd side (libx264: "width not divisible by 2"), so
-    # gray is kept — and a yuv420p default falls back to it — rather than failing.
+    # gray is kept -- and a yuv420p default falls back to it -- rather than failing.
     for pix_fmt in ("gray", "yuv420p"):
         args = output_args(f"-c:v libx264 -pix_fmt {pix_fmt}", size)
         assert _out_pix_fmt(args) == "gray"
@@ -338,7 +340,7 @@ def test_find_ffprobe_prefers_the_sibling_of_our_ffmpeg(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(other))
     assert ff.find_ffprobe() == str(path_probe)
 
-    # ...and with neither, a clean RuntimeError the caller can degrade on —
+    # ...and with neither, a clean RuntimeError the caller can degrade on --
     # never a bare FileNotFoundError from deep inside the probe.
     path_probe.unlink()
     with pytest.raises(RuntimeError, match="No ffprobe"):

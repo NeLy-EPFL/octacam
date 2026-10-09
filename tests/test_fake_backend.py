@@ -2,10 +2,9 @@
 
 These exercise what the Basler emulator (PYLON_CAMEMU) cannot: the
 backend-selection path, the persistence generalization (a non-".pfs" extension
-round-tripping through load_config), and deterministic node behaviour — all in
+round-tripping through load_config), and deterministic node behaviour -- all in
 pure Python with no hardware.
 """
-
 
 import logging
 import threading
@@ -81,9 +80,10 @@ def test_load_params_grows_roi_past_a_previous_sessions_offset(previewing_system
 
     A camera keeps its ROI until it is power-cycled, and a size node's max is
     (sensor - origin), so applying rig B's full-sensor Height while rig A's
-    OffsetY is still on the device is out of range — on the rig this took down the
+    OffsetY is still on the device is out of range -- on the rig this took down the
     whole GUI init ("Value = 2048 must be equal or smaller than Max = 1770").
-    The applier clears the origin before programming the size."""
+    The applier clears the origin before programming the size.
+    """
     cam = previewing_system.camera_at(0)
     full_w, full_h = cam.width, cam.height
 
@@ -115,10 +115,7 @@ def test_load_config_reads_backend_extension(tmp_path):
     # backend's extension, round-trips through load_config. The fake persists the
     # native GenApi persistence TSV, so the file uses SFNC feature names.
     (tmp_path / "FAKE-0.fake").write_text(
-        "# GenApi persistence file\n"
-        "ExposureTime\t9999.0\n"
-        "Width\t800\n"
-        "Height\t600\n"
+        "# GenApi persistence file\nExposureTime\t9999.0\nWidth\t800\nHeight\t600\n"
     )
     system = CameraSystem(FAKE_SERIALS, backend="fake")
     try:
@@ -142,9 +139,16 @@ def test_features_span_every_widget_kind(previewing_system):
     assert {"int", "float", "enum", "bool", "string", "command"} <= kinds
     # Bounds/entries/units are surfaced per kind.
     assert by["Gain"]["min"] == 0.0 and by["Gain"]["unit"] == "dB"
-    assert [e["value"] for e in by["ExposureAuto"]["entries"]] == ["Off", "Once", "Continuous"]
+    assert [e["value"] for e in by["ExposureAuto"]["entries"]] == [
+        "Off",
+        "Once",
+        "Continuous",
+    ]
     assert by["ReverseX"]["type"] == "bool"
-    assert by["DeviceModelName"]["type"] == "string" and by["DeviceModelName"]["writable"] is False
+    assert (
+        by["DeviceModelName"]["type"] == "string"
+        and by["DeviceModelName"]["writable"] is False
+    )
 
 
 def test_expert_and_guru_visibility(previewing_system):
@@ -222,7 +226,7 @@ def test_grab_locked_offset_write_cycles_the_preview(previewing_system, monkeypa
 
 def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypatch):
     # Regression (system.py:326): a *non*-BackendError raised by one camera's
-    # start_record must be logged-and-skipped, not re-raised — the other cameras
+    # start_record must be logged-and-skipped, not re-raised -- the other cameras
     # have already launched their grab thread + ffmpeg child, so propagating would
     # abandon them half-started (and violates start_record's documented contract).
     from octacam.pulses import PulseClock
@@ -248,7 +252,7 @@ def test_start_record_skips_a_camera_that_raises_unexpectedly(tmp_path, monkeypa
 
 def test_open_phase_skips_one_camera_that_fails_to_open(tmp_path, monkeypatch, caplog):
     # Regression: a single camera that fails to open must be dropped (logged),
-    # not abort the whole rig — mirroring the enumerate "not found" skip and the
+    # not abort the whole rig -- mirroring the enumerate "not found" skip and the
     # start_record skip. This is what lets the auto cascade survive a USB3 camera
     # that fell back to USB 2.0 and got claimed by the pycameleon floor (it opens
     # on no backend), instead of one bad camera crashing every camera.
@@ -345,7 +349,7 @@ def test_start_preview_falls_back_to_software_when_freerun_unavailable(
 def test_managed_preview_grab_is_paced_not_busylooped():
     # Regression (fake.py:376): a managed preview grabs via retrieve_freerun with no
     # fps cap (_freerun_fps is None), yet must still block ~ the grab timeout rather
-    # than return instantly — otherwise the preview thread busy-loops at 100% CPU.
+    # than return instantly -- otherwise the preview thread busy-loops at 100% CPU.
     from octacam.cameras.fake import FakeBackend
 
     be = FakeBackend("FAKE-managed")

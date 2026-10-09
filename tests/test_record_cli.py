@@ -29,7 +29,7 @@ def fake_cameras(monkeypatch):
 
 
 def _rig(tmp_path, serials=SERIALS):
-    """A rig config dir whose takes land in ``tmp_path/data/001``."""
+    """A rig config dir whose takes land in `tmp_path/data/001`."""
     rig = tmp_path / "rig"
     rig.mkdir()
     record = {
@@ -61,7 +61,8 @@ def _summary(save_dir) -> dict:
 
 def _text(result) -> str:
     """Everything the run printed, on one line: the log is wrapped to the
-    console's width and may be colored."""
+    console's width and may be colored.
+    """
     return " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
 
 
@@ -158,4 +159,6 @@ def test_record_fails_when_a_camera_records_nothing(tmp_path, monkeypatch):
     assert frames == {"FAKE-0": PULSES, "FAKE-1": 0}
     # A camera that never started is a take short a camera, not a synced one.
     assert summary["sync"]["ok"] is False
-    assert any("FAKE-1 did not start recording" in w for w in summary["sync"]["warnings"])
+    assert any(
+        "FAKE-1 did not start recording" in w for w in summary["sync"]["warnings"]
+    )

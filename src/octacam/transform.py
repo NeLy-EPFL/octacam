@@ -1,10 +1,10 @@
 """Display transforms (rotation + flips) baked into recorded video.
 
-The GUI shows each camera through the CSS transform ``scale(sx, sy)
-rotate(deg)`` (``web/static/js/grid.js``). CSS composes right-to-left, so a
+The GUI shows each camera through the CSS transform `scale(sx, sy)
+rotate(deg)` (`web/static/js/grid.js`). CSS composes right-to-left, so a
 video reproduces it by rotating first (clockwise for a positive angle), then
 flipping along the screen axes. Only what the View tab produces is supported:
-90° steps, and flips (a negative scale; its magnitude is ignored).
+90 deg steps, and flips (a negative scale; its magnitude is ignored).
 """
 
 from __future__ import annotations
@@ -23,8 +23,9 @@ log = logging.getLogger("octacam")
 
 @dataclass(frozen=True)
 class DisplayTransform:
-    """A bakeable display orientation: a clockwise 0/90/180/270° rotation, then
-    flips along the screen axes."""
+    """A bakeable display orientation: a clockwise 0/90/180/270 deg rotation, then
+    flips along the screen axes.
+    """
 
     rotation_deg: int = 0
     flip_h: bool = False
@@ -35,7 +36,7 @@ class DisplayTransform:
         return self.rotation_deg == 0 and not self.flip_h and not self.flip_v
 
     def output_size(self, width: int, height: int) -> tuple[int, int]:
-        """The (width, height) after this transform (90°/270° swap the axes)."""
+        """The (width, height) after this transform (90 deg/270 deg swap the axes)."""
         if self.rotation_deg in (90, 270):
             return (height, width)
         return (width, height)
@@ -72,8 +73,8 @@ def _normalize_rotation(rotation_deg: float) -> int:
     deg = round(float(rotation_deg)) % 360
     if deg % 90 != 0:
         log.warning(
-            "Display rotation %s° is not a multiple of 90; ignoring it "
-            "(only 90° steps can be baked into a video)",
+            "Display rotation %s\N{DEGREE SIGN} is not a multiple of 90; ignoring it "
+            "(only 90\N{DEGREE SIGN} steps can be baked into a video)",
             rotation_deg,
         )
         return 0
@@ -88,8 +89,9 @@ def from_camera_config(cfg: CameraConfig) -> DisplayTransform:
 
 
 def apply_display_transform(array: np.ndarray, t: DisplayTransform) -> np.ndarray:
-    """``array`` rotated then flipped per ``t``, C-contiguous (the writer casts
-    it to raw bytes)."""
+    """`array` rotated then flipped per `t`, C-contiguous (the writer casts
+    it to raw bytes).
+    """
     if t.is_identity:
         return array
     # CSS rotate(+deg) is clockwise; np.rot90's positive k is counter-clockwise.

@@ -1,11 +1,11 @@
 """FlirBackend over the PySpin binding, with PySpin faked.
 
-No Spinnaker SDK or hardware: the module-level ``PySpin`` (the only thing the
+No Spinnaker SDK or hardware: the module-level `PySpin` (the only thing the
 PySpin binding touches the SDK through) is replaced by a fake whose nodes model
-the one GenICam behaviour that matters here — a ROI *size* node's max is
-``sensor - origin``, so a stale origin makes a full-sensor Width/Height write out
-of range. That is the constraint the rig hit (``Value = 2048 must be equal or
-smaller than Max = 1770`` on Height), and it is reproduced here in pure Python.
+the one GenICam behaviour that matters here -- a ROI *size* node's max is
+`sensor - origin`, so a stale origin makes a full-sensor Width/Height write out
+of range. That is the constraint the rig hit (`Value = 2048 must be equal or
+smaller than Max = 1770` on Height), and it is reproduced here in pure Python.
 """
 
 import logging
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import octacam.cameras.flir as flir
+from octacam.cameras import flir
 from octacam.cameras.base import BackendError
 from octacam.cameras.flir import MIN_STREAM_BUFFERS, RECORD_STREAM_BUFFERS
 from octacam.cameras.genicam import parse_config
@@ -180,7 +180,8 @@ class Category(Node):
 
 class FakeNodeMap:
     """A small SFNC node map with the ROI nodes genuinely coupled, under a
-    category tree for the walk."""
+    category tree for the walk.
+    """
 
     def __init__(self):
         self.nodes = {
@@ -196,7 +197,9 @@ class FakeNodeMap:
         }
         for name, node in self.nodes.items():
             node.name = name
-        image = Category(*(self.nodes[n] for n in ("Width", "Height", "OffsetX", "OffsetY")))
+        image = Category(
+            *(self.nodes[n] for n in ("Width", "Height", "OffsetX", "OffsetY"))
+        )
         image.name = "ImageFormatControl"
         roots = [image, self.nodes["ExposureTime"], self.nodes["GammaEnabled"]]
         roots += [self.nodes["TriggerSource"], self.nodes["Secret"]]
@@ -232,11 +235,18 @@ FAKE_PYSPIN = SimpleNamespace(
     CStringPtr=_identity,
     CCommandPtr=_identity,
     CCategoryPtr=_identity,
-    **{f"intfI{t}": k for t, k in (
-        ("Integer", "int"), ("Float", "float"), ("Boolean", "bool"),
-        ("Enumeration", "enum"), ("String", "string"), ("Command", "command"),
-        ("Category", "category"),
-    )},
+    **{
+        f"intfI{t}": k
+        for t, k in (
+            ("Integer", "int"),
+            ("Float", "float"),
+            ("Boolean", "bool"),
+            ("Enumeration", "enum"),
+            ("String", "string"),
+            ("Command", "command"),
+            ("Category", "category"),
+        )
+    },
     Beginner=BEGINNER,
     Expert=EXPERT,
     Guru=GURU,
@@ -245,7 +255,7 @@ FAKE_PYSPIN = SimpleNamespace(
 
 
 def _fake_cam(stream_nodes, serial="17475185"):
-    """A PySpin CameraPtr stand-in; ``stream_nodes`` None has no TL stream map."""
+    """A PySpin CameraPtr stand-in; `stream_nodes` None has no TL stream map."""
     nodemap = FakeNodeMap()
     cam = SimpleNamespace(initialized=False, streaming=False)
     cam.Init = lambda: setattr(cam, "initialized", True)
@@ -303,7 +313,8 @@ def _roi_config(width, height, offset_x=0, offset_y=0):
 def test_set_number_out_of_range_raises_backend_error(backend):
     """A value the device refuses must surface as BackendError, not a raw
     SpinnakerException: the config applier guards itself with `except
-    BackendError`, so a leak here aborts the whole rig init on one bad node."""
+    BackendError`, so a leak here aborts the whole rig init on one bad node.
+    """
     backend.set_node("Height", "int", 1408)  # crop, making room for an origin
     backend.set_node("OffsetY", "int", 278)
     with pytest.raises(BackendError, match="must be equal or smaller than Max"):
@@ -335,7 +346,8 @@ def test_getters_on_an_absent_node_return_none(backend):
 def test_load_params_grows_roi_past_a_stale_offset(backend):
     """The rig crash: a cropped/offset ROI left by a *previous* session clamped
     the next config's full-sensor Height (2048 against a max of 2048-278=1770).
-    The applier must clear the origin before programming the size."""
+    The applier must clear the origin before programming the size.
+    """
     backend.load_params(_roi_config(SENSOR, 1408, offset_y=278))
     assert (backend.width(), backend.height()) == (SENSOR, 1408)
     assert backend.get_node("OffsetY", "int") == 278
@@ -348,7 +360,8 @@ def test_load_params_grows_roi_past_a_stale_offset(backend):
 
 def test_load_params_keeps_the_configs_own_offset(backend):
     """Clearing the origin is a pre-pass, not a policy: the file's own Offset*
-    lines still land (they follow the size lines in file order)."""
+    lines still land (they follow the size lines in file order).
+    """
     backend.load_params(_roi_config(1024, 1024, offset_x=512, offset_y=256))
     assert (backend.width(), backend.height()) == (1024, 1024)
     assert backend.get_node("OffsetX", "int") == 512
@@ -384,7 +397,12 @@ def test_the_walk_labels_features_by_their_categorys_display_name(backend):
     assert features["ExposureTime"].category == "Other"  # directly under Root
     width = features["Width"]
     assert (width.type, width.value, width.min, width.max, width.inc, width.unit) == (
-        "int", SENSOR, 0, SENSOR, 2, "px"
+        "int",
+        SENSOR,
+        0,
+        SENSOR,
+        2,
+        "px",
     )
     assert width.display_name == "Width (display)" and width.tooltip == "About Width"
     trigger = features["TriggerSource"]
@@ -429,7 +447,9 @@ def test_a_session_hands_out_the_requested_cameras_and_releases_the_system_last(
     monkeypatch.setattr(
         flir,
         "PySpin",
-        SimpleNamespace(**vars(FAKE_PYSPIN), System=SimpleNamespace(GetInstance=lambda: system)),
+        SimpleNamespace(
+            **vars(FAKE_PYSPIN), System=SimpleNamespace(GetInstance=lambda: system)
+        ),
     )
     binding = flir.PySpinBinding()
     assert [serial for serial, _cam in binding.enumerate(None)] == ["A", "B"]
@@ -465,7 +485,7 @@ class FakeImage:
 
 
 def _grab(backend, monkeypatch, image, *, record=False):
-    """Start a (native-free) grab and return a free-run fetch of ``image``."""
+    """Start a (native-free) grab and return a free-run fetch of `image`."""
     monkeypatch.setattr(
         backend, "_begin_acquisition", lambda *a, **k: backend.trigger.begin_grab()
     )
@@ -563,10 +583,14 @@ def test_close_mid_grab_ends_it_and_retrieve_stays_quiet(backend, monkeypatch):
 
 
 def _incomplete_logs(records):
-    return [(r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()]
+    return [
+        (r.levelno, r.getMessage()) for r in records if "incomplete" in r.getMessage()
+    ]
 
 
-def test_incomplete_images_are_counted_but_logged_once_per_grab(backend, monkeypatch, caplog):
+def test_incomplete_images_are_counted_but_logged_once_per_grab(
+    backend, monkeypatch, caplog
+):
     # A saturated bus delivers incomplete images continuously: every one is
     # counted, but a record grab logs only its first until the report interval.
     caplog.set_level(logging.DEBUG, logger="octacam")
@@ -594,7 +618,9 @@ def test_incomplete_images_in_a_preview_log_at_debug(backend, monkeypatch, caplo
     assert backend.stream_statistics() == {"IncompleteImagesDiscarded": 5}
 
 
-def test_incomplete_image_reports_carry_the_grabs_running_total(backend, monkeypatch, caplog):
+def test_incomplete_image_reports_carry_the_grabs_running_total(
+    backend, monkeypatch, caplog
+):
     caplog.set_level(logging.DEBUG, logger="octacam")
     monkeypatch.setattr(flir, "INCOMPLETE_REPORT_INTERVAL_S", 0.0)  # report each
     fetch = _grab(backend, monkeypatch, FakeImage(incomplete=True), record=True)
@@ -622,7 +648,8 @@ def test_record_starts_although_its_mode_and_buffer_handling_are_refused(make_ba
     """Only BeginAcquisition is fatal: the camera defaults to Continuous and the
     buffer handling only tunes the stream. The fake node map has no
     AcquisitionMode, and its stream refuses the buffer handling but still takes
-    the record buffer count."""
+    the record buffer count.
+    """
     stream = {
         "StreamBufferHandlingMode": RefusedEnumNode(
             "NewestOnly", ["NewestOnly", "OldestFirst"]
@@ -640,7 +667,9 @@ def test_record_starts_although_its_mode_and_buffer_handling_are_refused(make_ba
 def _record_stream(make_backend):
     """A backend whose stream takes a record pool, and its buffer-count node."""
     stream = {
-        "StreamBufferHandlingMode": EnumNode("NewestOnly", ["NewestOnly", "OldestFirst"]),
+        "StreamBufferHandlingMode": EnumNode(
+            "NewestOnly", ["NewestOnly", "OldestFirst"]
+        ),
         "StreamBufferCountMode": EnumNode("Auto", ["Auto", "Manual"]),
         "StreamBufferCountManual": IntNode(10, lambda: 1000),
     }
@@ -649,7 +678,8 @@ def _record_stream(make_backend):
 
 def test_a_record_pool_the_usb_memory_cannot_hold_is_halved(make_backend, caplog):
     """Two full-sensor GS3s need more usbfs memory at 128 buffers than the
-    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts."""
+    kernel's 1000 MB: BeginAcquisition refuses, and a smaller pool starts.
+    """
     backend, count = _record_stream(make_backend)
 
     def begin():

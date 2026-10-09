@@ -1,7 +1,7 @@
 """NVENC (GPU) encode path: detection, session-cap fallback, and real-GPU encodes.
 
 The unit tests mock the capability probe so they run anywhere (CI has no GPU);
-the ``@requires_nvenc`` integration tests skip unless a working ``h264_nvenc``
+the `@requires_nvenc` integration tests skip unless a working `h264_nvenc`
 ffmpeg is present on this machine.
 """
 
@@ -47,7 +47,8 @@ def probe_caches(monkeypatch):
 
     The process's real results are swapped back afterwards rather than
     cleared: a re-probe while another process holds the GPU's NVENC sessions
-    would cache "unavailable" for every later test."""
+    would cache "unavailable" for every later test.
+    """
     for name in ("ffmpeg_encoder_works", "_ffmpeg_for_encoder", "_nvenc_session_cap"):
         monkeypatch.setattr(ff, name, functools.cache(getattr(ff, name).__wrapped__))
 
@@ -79,7 +80,9 @@ def test_encoder_of_and_nvenc_encoder(params, encoder, nvenc):
 def test_find_ffmpeg_require_encoder_picks_first_working(monkeypatch, probe_caches):
     candidates = [(exe, "system PATH") for exe in ("/no/nvenc", "/has/nvenc", "/also")]
     monkeypatch.setattr(ff, "_ffmpeg_candidates", lambda: candidates)
-    monkeypatch.setattr(ff, "ffmpeg_encoder_works", lambda exe, enc: exe == "/has/nvenc")
+    monkeypatch.setattr(
+        ff, "ffmpeg_encoder_works", lambda exe, enc: exe == "/has/nvenc"
+    )
     assert ff.find_ffmpeg(require_encoder="h264_nvenc") == "/has/nvenc"
     # Cached: a second call must not recompute the candidate list.
     monkeypatch.setattr(
@@ -253,13 +256,18 @@ def test_config_accepts_nvenc_and_sessions():
 
 
 def test_config_floors_negative_sessions():
-    assert RecordConfig.model_validate({"max_nvenc_sessions": -5}).max_nvenc_sessions == 0
+    assert (
+        RecordConfig.model_validate({"max_nvenc_sessions": -5}).max_nvenc_sessions == 0
+    )
 
 
 def test_config_max_nvenc_sessions_defaults_to_auto():
     # Omitted => None => auto-detect the GPU cap.
     assert RecordConfig().max_nvenc_sessions is None
-    assert RecordConfig.model_validate({"max_nvenc_sessions": None}).max_nvenc_sessions is None
+    assert (
+        RecordConfig.model_validate({"max_nvenc_sessions": None}).max_nvenc_sessions
+        is None
+    )
 
 
 def test_config_nvenc_params_default_and_custom():
@@ -279,7 +287,9 @@ def test_config_nvenc_params_rejects_bad_quoting():
 def test_summary_resolves_auto_sessions_to_detected(monkeypatch):
     from octacam.recording_format import build_recording_summary
 
-    monkeypatch.setattr("octacam.recording_format.nvenc_max_sessions", lambda encoder="h264_nvenc": 7)
+    monkeypatch.setattr(
+        "octacam.recording_format.nvenc_max_sessions", lambda encoder="h264_nvenc": 7
+    )
     s = RecordingSettings(save_method="nvenc", max_nvenc_sessions=None)
     summary = build_recording_summary(s, [], 0, aborted=False)
     assert summary["max_nvenc_sessions"] == 7  # None (auto) -> detected
@@ -296,7 +306,9 @@ def test_summary_auto_uses_the_configured_encoder(monkeypatch):
         lambda encoder="h264_nvenc": (seen.append(encoder), 4)[1],
     )
     s = RecordingSettings(
-        save_method="nvenc", nvenc_params="-c:v hevc_nvenc -cq 20", max_nvenc_sessions=None
+        save_method="nvenc",
+        nvenc_params="-c:v hevc_nvenc -cq 20",
+        max_nvenc_sessions=None,
     )
     summary = build_recording_summary(s, [], 0, aborted=False)
     assert seen == ["hevc_nvenc"]
@@ -333,7 +345,9 @@ def test_start_record_rejects_wrong_length_format_list():
     clock = PulseClock(33_333_333, 30, "software")
     try:
         with pytest.raises(ValueError, match="formats for"):
-            system.start_record("/tmp/x", 30.0, [FORMATS["ffmpeg"]], clock)  # 1 fmt, 2 cams
+            system.start_record(
+                "/tmp/x", 30.0, [FORMATS["ffmpeg"]], clock
+            )  # 1 fmt, 2 cams
     finally:
         system.close()
 
@@ -380,8 +394,8 @@ def _fake_nvenc_system(tmp_path):
 def test_fake_recording_nvenc_falls_back_to_cpu_when_unavailable(
     tmp_path, monkeypatch, probe_caches
 ):
-    # No GPU (all of CI): save_method="nvenc" must still record — every camera on
-    # libx264 — and warn. Exercises the controller's nvenc path (resolve fallback
+    # No GPU (all of CI): save_method="nvenc" must still record -- every camera on
+    # libx264 -- and warn. Exercises the controller's nvenc path (resolve fallback
     # + summary None-branch) with no real GPU, by mocking NVENC as unavailable
     # while keeping a real ffmpeg for the CPU encode.
     real_find = ff.find_ffmpeg

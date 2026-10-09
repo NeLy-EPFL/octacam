@@ -203,4 +203,13 @@ cameras and resolves the save/transfer paths:
 octacam doctor <config_dir>
 ```
 
-See [`doctor`](../reference/cli.md#doctor).
+See [`doctor`](../cli.md#octacam-doctor).
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `PYLON_CAMEMU` | Number of emulated Basler cameras (run without hardware). |
+| `OCTACAM_CACHE_DIR` | Override the octacam cache location (recording list, job logs, markers; default `~/.cache/octacam`). Inspect/clear it with `octacam cache`. |
+| `OCTACAM_FFMPEG` | Path to an ffmpeg binary to use instead of the bundled one. |
+| `OCTACAM_BASLER_CREATE_TIMEOUT` | Seconds to wait for a Basler camera to answer during enumeration (default `15`). A camera that misses the deadline is skipped with an explanation and the rest of the rig still comes up; raise this only for a rig with a genuinely slow camera. |

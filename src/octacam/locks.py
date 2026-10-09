@@ -1,4 +1,4 @@
-"""The rig instance lock: one octacam owns a rig, on any ``--port``.
+"""The rig instance lock: one octacam owns a rig, on any `--port`.
 
 An flock on a per-rig file in the temp dir, keyed on the resolved config dir so
 every spelling of one rig shares it. The OS drops it when its holder exits, even
@@ -23,8 +23,9 @@ log = logging.getLogger("octacam")
 
 
 class RigInUse(Exception):
-    """Another octacam holds the rig's lock; ``holder`` is its pid ("unknown"
-    when unreadable)."""
+    """Another octacam holds the rig's lock; `holder` is its pid ("unknown"
+    when unreadable).
+    """
 
     def __init__(self, holder: str) -> None:
         super().__init__(f"another octacam (pid {holder}) owns this rig")
@@ -41,10 +42,12 @@ def instance_lock(config_dir: Path) -> Iterator[None]:
     """Own the rig at *config_dir* for the block, or raise RigInUse.
 
     A lock file that cannot be opened is no lock: the exclusive camera open is
-    then the only guard."""
+    then the only guard.
+    """
     path = _lock_path(config_dir)
     try:
-        handle = open(path, "a+")
+        # The handle outlives this block: it holds the lock.
+        handle = open(path, "a+")  # noqa: SIM115
     except OSError as e:
         log.debug("Instance lock %s unavailable (%s); relying on camera lock", path, e)
         yield
@@ -65,7 +68,8 @@ def instance_lock(config_dir: Path) -> Iterator[None]:
 def holder(config_dir: Path) -> str | None:
     """The pid holding the rig's lock ("unknown" when unreadable), or None when
     it is free. The probe never takes or blocks the holder's lock; a lock the
-    filesystem cannot probe counts as held."""
+    filesystem cannot probe counts as held.
+    """
     path = _lock_path(config_dir)
     try:
         if flock_held(path) is False:

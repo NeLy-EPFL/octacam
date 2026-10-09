@@ -17,7 +17,11 @@ from octacam.writer import (
     WriteResult,
 )
 
-WRITTEN, REFUSED, SKIPPED = WriteResult.WRITTEN, WriteResult.REFUSED, WriteResult.SKIPPED
+WRITTEN, REFUSED, SKIPPED = (
+    WriteResult.WRITTEN,
+    WriteResult.REFUSED,
+    WriteResult.SKIPPED,
+)
 
 WIDTH, HEIGHT = 64, 48
 
@@ -195,7 +199,7 @@ def test_drop_on_full_then_drain_on_close(tmp_path):
 
 
 def test_format_registry_creates_writers():
-    for _name, video_format in FORMATS.items():
+    for video_format in FORMATS.values():
         assert video_format.create_writer(2) is not None
         assert video_format.extension
         assert video_format.label
@@ -350,7 +354,8 @@ class _GatedSink(AsyncFrameWriter):
 
 def _gated(max_queue_size):
     """A gated writer holding its first frame at the gate, so its queue has room
-    for exactly ``max_queue_size`` more."""
+    for exactly `max_queue_size` more.
+    """
     writer = _GatedSink(max_queue_size=max_queue_size)
     assert writer.open("ignored", 30.0, (WIDTH, HEIGHT))
     assert writer.write(synthetic_frames(1)[0]) is WRITTEN
@@ -366,7 +371,7 @@ def _held(writer):
 
 
 def _let_through(writer, n):
-    """Let ``n`` more frames reach the sink and wait until they have."""
+    """Let `n` more frames reach the sink and wait until they have."""
     target = writer.frames_written + n
     for _ in range(n):
         writer.gate.release()

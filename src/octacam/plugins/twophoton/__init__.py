@@ -18,7 +18,7 @@ Wire protocol, host -> Arduino (little-endian):
   [0xCA]                            cancel
   [0x3F] '?'                        identify: "2PHOTON <version> <build>" + newline
 Arduino -> host, one byte: 'A' armed (waiting for ThorSync), 'T' triggered,
-'D' done. The banner's build is checked and flashed via :mod:`octacam.firmware`.
+'D' done. The banner's build is checked and flashed via `octacam.firmware`.
 """
 
 from __future__ import annotations
@@ -69,11 +69,11 @@ class ArmParams:
         """From a start slice, each field falling back to its default."""
         try:
             fps = int(payload.get("fps", default_fps))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             fps = default_fps
         try:
             duration_ms = int(payload.get("duration_ms", default_duration_ms))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             duration_ms = default_duration_ms
         fps = max(1, min(10_000, fps))
         # Within the wire field: a struct.error in arm() would skip the arm.
@@ -83,7 +83,8 @@ class ArmParams:
 
 class TwoPhotonLink(SerialLink):
     """The serial link to the 2-photon trigger: bare status bytes, plus the
-    newline-terminated banner in reply to identify."""
+    newline-terminated banner in reply to identify.
+    """
 
     name = "twophoton"
     banner_prefix = _EXPECTED_BANNER
@@ -94,8 +95,9 @@ class TwoPhotonLink(SerialLink):
         self._armed = threading.Event()  # set by the board's 'A'
 
     def arm(self, params: ArmParams) -> str:
-        """Send an arm: ``"ok"`` ('A' within ACK_TIMEOUT_S), ``"timeout"`` or
-        ``"write_failed"``."""
+        """Send an arm: `"ok"` ('A' within ACK_TIMEOUT_S), `"timeout"` or
+        `"write_failed"`.
+        """
         self._armed.clear()
         if not self._write(params.to_bytes()):
             return "write_failed"
@@ -123,7 +125,7 @@ class TwoPhotonLink(SerialLink):
                 self._buf.append(byte)  # the start of a banner line
 
 
-class TwoPhotonPlugin(SerialPlugin):
+class TwoPhotonPlugin(SerialPlugin[TwoPhotonLink]):
     """Arms the 2-photon trigger with the recording's fps and duration."""
 
     name = "twophoton"
@@ -139,7 +141,6 @@ class TwoPhotonPlugin(SerialPlugin):
     default_device = DEFAULT_DEVICE
     reconnect_path = "/api/twophoton/reconnect"
     state_topic = "twophoton_state"
-    _link: TwoPhotonLink
 
     def __init__(
         self,
@@ -163,7 +164,7 @@ class TwoPhotonPlugin(SerialPlugin):
         device = str(options.get("device") or DEFAULT_DEVICE)
         try:
             baud = int(options.get("baud", DEFAULT_BAUD))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             log.warning(
                 "twophoton plugin: invalid baud %r; using %d",
                 options.get("baud"),
@@ -172,13 +173,13 @@ class TwoPhotonPlugin(SerialPlugin):
             baud = DEFAULT_BAUD
         try:
             default_fps = int(options.get("default_fps", DEFAULT_FPS))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             default_fps = DEFAULT_FPS
         try:
             default_duration_ms = int(
                 options.get("default_duration_ms", DEFAULT_DURATION_MS)
             )
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             default_duration_ms = DEFAULT_DURATION_MS
         auto_flash = options.get("auto_flash", False)
         if isinstance(auto_flash, str):
@@ -193,7 +194,10 @@ class TwoPhotonPlugin(SerialPlugin):
 
     def busy_reason(self) -> str | None:
         if self.board_state in ("armed", "triggered"):
-            return "refusing to flash while the trigger is armed/running — stop the recording first"
+            return (
+                "refusing to flash while the trigger is armed/running \N{EM DASH} "
+                "stop the recording first"
+            )
         return None
 
     def _on_status(self, status: str) -> None:
@@ -214,19 +218,23 @@ class TwoPhotonPlugin(SerialPlugin):
     # -------------------------------------------------- recording lifecycle
 
     def default_start_params(self, fps: float, duration_s: float) -> dict:
-        """The arm slice for headless ``octacam record``, without which the board
-        is never armed and the cameras wait forever."""
+        """The arm slice for headless `octacam record`, without which the board
+        is never armed and the cameras wait forever.
+        """
         return {
-            "fps": int(round(fps)),
-            "duration_ms": max(1, int(round(duration_s * 1000))),
+            "fps": round(fps),
+            "duration_ms": max(1, round(duration_s * 1000)),
         }
 
     def on_recording_start(self, params: dict | None) -> None:
         """Arm the board when the start request holds a twophoton slice (the
-        tab's "Arm with recording"); a missing fps or duration takes its default."""
+        tab's "Arm with recording"); a missing fps or duration takes its default.
+        """
         if params is None:
             return
-        arm = ArmParams.from_payload(params, self._default_fps, self._default_duration_ms)
+        arm = ArmParams.from_payload(
+            params, self._default_fps, self._default_duration_ms
+        )
         if not self._link.is_open:
             log.warning(
                 "twophoton: link to %s is not open; recording will NOT be "
@@ -237,8 +245,10 @@ class TwoPhotonPlugin(SerialPlugin):
         if not self.firmware_ok:
             log.error(
                 "twophoton: firmware on %s (%r) is incompatible; refusing to "
-                "arm — reflash with `octacam flash` or the Flash firmware button",
-                self.device, self.banner,
+                "arm \N{EM DASH} reflash with `octacam flash` or the Flash firmware "
+                "button",
+                self.device,
+                self.banner,
             )
             return
         log.info("twophoton: arming at %d fps for %d ms", arm.fps, arm.duration_ms)
@@ -249,7 +259,8 @@ class TwoPhotonPlugin(SerialPlugin):
             self.report_error(f"arm write to {self.device} failed")
         elif result == "timeout":
             self.report_error(
-                f"no arm acknowledgement from {self.device} within {ACK_TIMEOUT_S:.1f}s; "
+                f"no arm acknowledgement from {self.device} within "
+                f"{ACK_TIMEOUT_S:.1f}s; "
                 "the board may not have armed (cameras could wait for a trigger "
                 "that never fires)"
             )

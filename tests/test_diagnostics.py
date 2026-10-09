@@ -33,7 +33,7 @@ def fake_system(tmp_path):
         camera.set_geometry(width=160, height=120)
         # A real readout takes time. Without it two fake grab threads spin at
         # ~160 kfps in pure Python and one can starve the other of the GIL for a
-        # whole measurement window (0 fps → a spurious TRANSFER bottleneck).
+        # whole measurement window (0 fps -> a spurious TRANSFER bottleneck).
         camera.backend.image_latency_s = 0.001
     yield system
     system.close()
@@ -147,12 +147,12 @@ def test_classify_achievable_is_none():
 
 def test_classify_transfer_bound_when_cameras_throttle_each_other():
     # Acquisition-limited AND the concurrent rate is well below the solo rate
-    # (cameras share more bus bandwidth than the link provides) → TRANSFER, not
+    # (cameras share more bus bandwidth than the link provides) -> TRANSFER, not
     # a per-camera ACQUISITION limit.
     ceilings = dg.Ceilings(
         grab_fps={"A": 50.0, "B": 50.0},
         encode_fps={"A": 500.0, "B": 500.0},
-        grab_solo_fps={"A": 100.0, "B": 100.0},  # 50 << 100*0.85 → contended
+        grab_solo_fps={"A": 100.0, "B": 100.0},  # 50 << 100*0.85 -> contended
     )
     achievable, bottleneck, recs = dg._classify(
         200.0, ceilings, _outcome(50.0, 200.0), throughput_total=400.0
@@ -165,7 +165,7 @@ def test_classify_transfer_bound_when_cameras_throttle_each_other():
 def test_classify_host_vs_transfer_split():
     # Both stages clear the target alone, but the system falls short. With no
     # solo evidence of contention it's HOST; with concurrent << solo it's TRANSFER.
-    base = dict(grab_fps={"S": 500.0}, encode_fps={"S": 500.0})
+    base = {"grab_fps": {"S": 500.0}, "encode_fps": {"S": 500.0}}
     host = dg.Ceilings(**base)
     _, b_host, _ = dg._classify(200.0, host, _outcome(150.0, 200.0, drop=0.05))
     assert b_host == dg.HOST
@@ -180,9 +180,7 @@ def test_ceilings_bus_contended_property():
         grab_fps={"S": 50.0}, encode_fps={}, grab_solo_fps={"S": 100.0}
     )
     assert contended.bus_contended
-    clear = dg.Ceilings(
-        grab_fps={"S": 95.0}, encode_fps={}, grab_solo_fps={"S": 100.0}
-    )
+    clear = dg.Ceilings(grab_fps={"S": 95.0}, encode_fps={}, grab_solo_fps={"S": 100.0})
     assert not clear.bus_contended  # 95 > 100 * CONTENTION_RATIO
     no_solo = dg.Ceilings(grab_fps={"S": 50.0}, encode_fps={})
     assert not no_solo.bus_contended  # inert without a solo measurement
@@ -192,7 +190,7 @@ def test_throughput_mbps():
     per_cam, total = dg._throughput_mbps(
         {"A": 100.0, "B": 50.0}, {"A": (1000, 1000), "B": (1000, 1000)}
     )
-    # 1e6 px (Mono8 = 1 B/px) × 100 fps / 1e6 = 100 MB/s.
+    # 1e6 px (Mono8 = 1 B/px) x 100 fps / 1e6 = 100 MB/s.
     assert per_cam["A"] == pytest.approx(100.0)
     assert per_cam["B"] == pytest.approx(50.0)
     assert total == pytest.approx(150.0)
@@ -219,7 +217,7 @@ def test_find_max_fps_hi_passes_returns_hi():
 def test_reconcile_stable_max_reports_achieved_not_target():
     # A trial passes at 97% of its target, so the winning *target* (64) can sit
     # above what was actually acquired (63). The reported max must be the achieved
-    # rate, never the target — otherwise it reads above the acquisition ceiling.
+    # rate, never the target -- otherwise it reads above the acquisition ceiling.
     confirm = _outcome(achieved=63.0, target=64.0)
     assert confirm.stable_passed
     fps, confirmed = dg._reconcile_stable_max(64.0, confirm, lo=30.0, ceiling_cap=90.0)
@@ -512,7 +510,7 @@ def test_diagnose_measures_solo_ceiling_and_throughput(fake_system):
         find_max=False,
         sink="null",
     )
-    # ≥2 cameras → the solo pass runs, and throughput is derived from the ceiling.
+    # >=2 cameras -> the solo pass runs, and throughput is derived from the ceiling.
     assert set(report.ceilings.grab_solo_fps) == set(FAKE_SERIALS)
     assert set(report.throughput_mbps) == set(FAKE_SERIALS)
     assert report.throughput_mbps_total > 0
@@ -559,7 +557,9 @@ def test_run_target_trial_aborts_when_writer_open_fails(fake_system, monkeypatch
         def close(self):
             closed.append(self)
 
-    monkeypatch.setattr(dg, "_make_writer", lambda vf, queue_size, *, profile: BadWriter())
+    monkeypatch.setattr(
+        dg, "_make_writer", lambda vf, queue_size, *, profile: BadWriter()
+    )
 
     formats = dict.fromkeys(FAKE_SERIALS, SimpleNamespace(extension="mkv"))
     with pytest.raises(RuntimeError, match="writer failed to open"):
@@ -604,7 +604,7 @@ def test_measure_grab_ceiling_arm_failure_drops_camera(fake_system, monkeypatch)
 
 def test_diagnose_notes_camera_missing_from_grab_ceiling(fake_system, monkeypatch):
     # When a camera is missing from the grab ceiling (it failed to arm), the
-    # runner must flag it — otherwise grab_min silently improves over the
+    # runner must flag it -- otherwise grab_min silently improves over the
     # survivors. Simulate the drop at the measure boundary so the full pipeline
     # (which shares the fake backend's arm path) still runs and diagnose completes.
     real = dg.measure_grab_ceiling
@@ -631,7 +631,7 @@ def test_diagnose_notes_camera_missing_from_grab_ceiling(fake_system, monkeypatc
 
 
 def test_diagnose_warns_on_high_machine_load(fake_system, monkeypatch):
-    # A machine already busy before the run skews results → a warning is emitted.
+    # A machine already busy before the run skews results -> a warning is emitted.
     monkeypatch.setattr(dg, "_probe_system_load", lambda: (95.0, 3.0))
     settings = RecordingSettings(fps=60.0, trigger_source="software")
     report = dg.diagnose(
@@ -706,7 +706,8 @@ def test_run_diagnostic_via_controller(fake_system):
 def test_benchmark_preview_rearm_failure_leaves_idle(fake_system, monkeypatch):
     """A camera dropping out during a benchmark can make the finally-block preview
     re-arm raise; the diagnostic thread must still leave the "diagnosing" state
-    (dropping the camera lock) rather than wedging the controller."""
+    (dropping the camera lock) rather than wedging the controller.
+    """
     settings = RecordingSettings(fps=60.0, trigger_source="software")
     controller = RecordingController(fake_system, settings, auto_preview=True)
 

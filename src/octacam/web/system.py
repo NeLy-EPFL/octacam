@@ -1,5 +1,6 @@
 """Routes about the session and the host: the descriptor, state, serial ports,
-NVENC and shutdown."""
+NVENC and shutdown.
+"""
 
 from collections.abc import Callable
 
@@ -31,7 +32,8 @@ def router(state: AppState, shutdown_callback: Callable[[], None]) -> APIRouter:
     @api.get("/api/serial/ports")
     def get_serial_ports():
         """Serial ports for the plugin tabs' picker; never opens one, so it is safe
-        while a board is armed."""
+        while a board is armed.
+        """
         from octacam import serial_ports
 
         return {
@@ -50,9 +52,10 @@ def router(state: AppState, shutdown_callback: Callable[[], None]) -> APIRouter:
 
     @api.get("/api/nvenc/capabilities")
     def get_nvenc_capabilities():
-        """NVENC capability and the detected session cap (what ``auto`` resolves
+        """NVENC capability and the detected session cap (what `auto` resolves
         to). The first call runs the cached probe, which loads the GPU, so the
-        client asks only once nvenc is selected."""
+        client asks only once nvenc is selected.
+        """
         detected = nvenc_max_sessions()
         return {
             "available": detected is not None and detected > 0,
@@ -62,7 +65,9 @@ def router(state: AppState, shutdown_callback: Callable[[], None]) -> APIRouter:
         }
 
     @api.post("/api/shutdown")
-    def shutdown(background_tasks: BackgroundTasks, body: ShutdownRequest | None = None):
+    def shutdown(
+        background_tasks: BackgroundTasks, body: ShutdownRequest | None = None
+    ):
         # Closing would abort the take. The callback runs after the 202 is sent, so
         # the client learns the request was accepted before the server dies.
         if controller.recording_active or controller.diagnosing:

@@ -61,7 +61,8 @@ def current_version() -> str:
 
 def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
     """The newest stable octacam version on PyPI, or None for no signal
-    (unpublished, offline, unparseable). Never raises."""
+    (unpublished, offline, unparseable). Never raises.
+    """
     req = urllib.request.Request(
         PYPI_SIMPLE_URL,
         headers={"Accept": _SIMPLE_ACCEPT, "User-Agent": "octacam-update-check"},
@@ -69,8 +70,11 @@ def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        e.close()  # it holds the response body open
+        return None
     # HTTPException: a connection dropped mid-body (IncompleteRead).
-    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+    except urllib.error.URLError, OSError, ValueError, http.client.HTTPException:
         return None
     versions = payload.get("versions") if isinstance(payload, dict) else None
     if not isinstance(versions, list):
@@ -80,7 +84,7 @@ def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
     for raw in versions:
         try:
             v = Version(raw)
-        except (InvalidVersion, TypeError):
+        except InvalidVersion, TypeError:
             continue
         if not v.is_prerelease:  # dev releases count as prereleases
             stable.append(v)
@@ -89,7 +93,8 @@ def latest_stable(timeout: float = _DEFAULT_TIMEOUT) -> str | None:
 
 def _read_direct_url() -> dict | None:
     """The installed dist's PEP 610 direct_url.json if it is a JSON object, else
-    None."""
+    None.
+    """
     try:
         text = distribution("octacam").read_text("direct_url.json")
     except PackageNotFoundError:
@@ -114,7 +119,8 @@ def _in_conda() -> bool:
 
 def detect_install_method() -> str:
     """How octacam was installed, best-effort and for advice only. The installs
-    that must not get a plain upgrade (dev, vcs, conda) are checked first."""
+    that must not get a plain upgrade (dev, vcs, conda) are checked first.
+    """
     direct = _read_direct_url()
     if direct:
         dir_info = direct.get("dir_info")
@@ -135,7 +141,8 @@ def detect_install_method() -> str:
 
 def advice_for(method: str) -> str:
     """The upgrade command to suggest for an install method; "" for a dev or VCS
-    checkout, whose source tree the user owns."""
+    checkout, whose source tree the user owns.
+    """
     return {
         "pip": "pip install --upgrade octacam",
         "uv-tool": "uv tool upgrade octacam",

@@ -5,7 +5,7 @@ The fake models the hardware failure modes the hexaview rig showed (see
 octacam.cameras.fake): a camera that misses given triggers, a camera that ignores
 its first triggers after acquisition start (a FLIR Grasshopper3 ignores two), and
 a camera whose frames carry a hardware-clock timestamp instead of the trigger's
-sequence number — so both the sequence and the timestamp paths are exercised.
+sequence number -- so both the sequence and the timestamp paths are exercised.
 """
 
 import json
@@ -86,7 +86,8 @@ def _cam(summary, name):
 
 class Board(Plugin):
     """A stand-in trigger board: emits a counted train by firing every camera's
-    trigger at the period, primes with sacrificial pulses, like the triggerbox."""
+    trigger at the period, primes with sacrificial pulses, like the triggerbox.
+    """
 
     name = "board"
     generates_trigger = True
@@ -154,7 +155,7 @@ def test_a_missed_pulse_is_found_from_hardware_timestamps(fake_system, tmp_path)
     for serial in FAKE_SERIALS:
         _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
     _backend(fake_system, "FAKE-0").miss_triggers = {7}
-    save_dir, summary, arrays, _ = _record(
+    _save_dir, summary, arrays, _ = _record(
         fake_system, tmp_path, trigger_source="software"
     )
     assert _cam(summary, "FAKE-0")["missed_pulse_indices"] == [7]
@@ -175,7 +176,7 @@ def test_priming_absorbs_the_triggers_a_camera_ignores_after_start(
         backend.hardware_period_ns = PERIOD_NS
         backend.ignore_first_triggers = 2
     board = Board(fake_system, count=50)
-    _save_dir, summary, arrays, _ = _record(
+    _save_dir, summary, _arrays, _ = _record(
         fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
     )
     assert board.primed == 4
@@ -256,7 +257,7 @@ def test_software_priming_with_a_real_fetch_leaves_the_first_pulse_intact(
     # As above, but a fetch that finds no image blocks for its whole timeout, as a
     # real SDK's does. The ignored triggers open a drain window (made long here
     # so counting starts inside it); were counting not to end it, the train's
-    # first trigger would wait out a drain fetch and be dropped as stale — pulse
+    # first trigger would wait out a drain fetch and be dropped as stale -- pulse
     # 0 missed at the start of every software take.
     monkeypatch.setattr(handoff, "DRAIN_WINDOW_S", 2.0)
     for serial in FAKE_SERIALS:
@@ -297,7 +298,7 @@ def test_a_late_first_image_cannot_shift_the_take(fake_system, tmp_path, delay_s
     # FAKE-1's first image of the record grab is held up (a USB stall) past its
     # trigger's short priming deadline: the next trigger fires and the late image
     # arrives in its place. Its camera timestamp shows it older than that trigger,
-    # so it is discarded instead of slipping the pairing — which left the last
+    # so it is discarded instead of slipping the pairing -- which left the last
     # priming image in the buffer to become pulse 0 of the take (reported clean).
     _backend(fake_system, "FAKE-1").latency_by_fire = {1: delay_s}
     save_dir, summary, _arrays, _ = _record(
@@ -358,7 +359,9 @@ def test_one_host_stall_at_the_start_does_not_lock_a_camera_out(fake_system, tmp
         return fire
 
     slow.trigger.claim = stalled
-    save_dir, summary, arrays, _ = _record(fake_system, tmp_path, trigger_source="software")
+    save_dir, summary, arrays, _ = _record(
+        fake_system, tmp_path, trigger_source="software"
+    )
     bad = _cam(summary, "FAKE-1")
     assert bad["frames"] == 50 and bad["missed_pulses"] <= 4, bad
     video = _frames(save_dir, "FAKE-1")[:, 0, 0]
@@ -383,10 +386,18 @@ def test_triggers_left_pending_through_a_wait_are_dropped_not_fired_late(
     real = ~arrays["FAKE-1/dropped"]
     pulses = arrays["FAKE-1/pulse_index"][real]
     arrival1 = arrays["FAKE-1/arrival_ns"][real]
-    arrival0 = dict(zip(arrays["FAKE-0/pulse_index"].tolist(),
-                        arrays["FAKE-0/arrival_ns"].tolist(), strict=True))
-    late = [int(p) for p, a in zip(pulses, arrival1, strict=True)
-            if abs(int(a) - arrival0[int(p)]) > 3 * PERIOD_NS]
+    arrival0 = dict(
+        zip(
+            arrays["FAKE-0/pulse_index"].tolist(),
+            arrays["FAKE-0/arrival_ns"].tolist(),
+            strict=True,
+        )
+    )
+    late = [
+        int(p)
+        for p, a in zip(pulses, arrival1, strict=True)
+        if abs(int(a) - arrival0[int(p)]) > 3 * PERIOD_NS
+    ]
     assert not late, late
 
 
@@ -446,14 +457,14 @@ def test_a_camera_with_no_timestamps_at_all_is_not_called_a_stray(
     _save_dir, summary, _arrays, _ = _record(
         fake_system, tmp_path, plugins=PluginManager([board]), trigger_source="managed"
     )
-    (warning,) = [w for w in summary["sync"]["warnings"] if "no hardware timestamp" in w]
+    (warning,) = [
+        w for w in summary["sync"]["warnings"] if "no hardware timestamp" in w
+    ]
     assert "so missed pulses cannot be detected" in warning, warning
     assert not summary["sync"]["ok"]
 
 
-def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(
-    fake_system, tmp_path
-):
+def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(fake_system, tmp_path):
     for serial in FAKE_SERIALS:
         _backend(fake_system, serial).hardware_period_ns = PERIOD_NS
     _backend(fake_system, "FAKE-1").miss_triggers = {3, 24}
@@ -473,13 +484,16 @@ def test_managed_train_fills_a_miss_and_stops_on_the_pulse_count(
     assert bad["missed_pulse_indices"] == [3, 24]
     assert bad["frames"] == _cam(summary, "FAKE-0")["frames"] == 25
     assert len(_frames(save_dir, "FAKE-1")) == 25
-    assert any("FAKE-1 missed 2 trigger pulse" in w for w in summary["sync"]["warnings"])
+    assert any(
+        "FAKE-1 missed 2 trigger pulse" in w for w in summary["sync"]["warnings"]
+    )
     assert summary["sync"]["ok"]  # filled: still aligned
 
 
 class SlowArmBoard(Board):
     """A board whose recording arm lands late (the triggerbox's USB-reset
-    recovery and re-arm take seconds) before its train starts."""
+    recovery and re-arm take seconds) before its train starts.
+    """
 
     def on_recording_start(self, params):
         time.sleep(1.0)
@@ -549,7 +563,7 @@ class HookSpy(Plugin):
 def test_a_low_fps_start_sequence_is_waited_out(
     fake_system, tmp_path, monkeypatch, source
 ):
-    # At a low fps priming takes several periods — at 1 fps a round alone is 8 s —
+    # At a low fps priming takes several periods -- at 1 fps a round alone is 8 s --
     # which outlasted the monitor's fixed waits: on_first_frame (and a teardown)
     # ran before the arm. Scaled down here: 5 fps, and waits that a round of
     # priming outlasts unless they allow for it.
@@ -741,7 +755,9 @@ def test_a_frame_the_writer_refuses_is_filled(fake_system, tmp_path):
 
         def refusing(frame, fill_before=0):
             calls["n"] += 1
-            return WriteResult.REFUSED if calls["n"] == 20 else write(frame, fill_before)
+            return (
+                WriteResult.REFUSED if calls["n"] == 20 else write(frame, fill_before)
+            )
 
         writer.write = refusing
         return ok
@@ -825,9 +841,7 @@ def test_a_late_image_is_credited_to_its_own_trigger(fake_system, tmp_path):
     np.testing.assert_array_equal(video[:, 0, 0], np.arange(50))
 
 
-def test_an_image_that_never_arrives_is_given_up_on(
-    fake_system, tmp_path, monkeypatch
-):
+def test_an_image_that_never_arrives_is_given_up_on(fake_system, tmp_path, monkeypatch):
     # No image ever answers trigger 10 (and the SDK says nothing). The hand-off
     # fires nothing until it gives up on it at its deadline; the pulses offered
     # meanwhile are missed and filled, and every later frame is still its pulse.
@@ -865,7 +879,7 @@ def _direct_camera(serial):
 
 def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
     # The last priming trigger's image is still on its way when counting starts.
-    # It must be discarded as a priming answer — not recorded as pulse 0, which
+    # It must be discarded as a priming answer -- not recorded as pulse 0, which
     # put every frame of the take a pulse late.
     backend, camera = _direct_camera("FAKE-P")
     path = tmp_path / "cam.raw"
@@ -878,8 +892,9 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
             camera.trigger_once()
             time.sleep(PERIOD_NS / 1e9)
         assert wait_until(
-            lambda: backend.trigger.pending == 0
-            and backend.trigger.fired_index is not None,
+            lambda: (
+                backend.trigger.pending == 0 and backend.trigger.fired_index is not None
+            ),
             interval=0.001,
         )
         assert take.primed_frames == 3
@@ -902,8 +917,8 @@ def test_a_priming_image_arriving_after_counting_starts_is_discarded(tmp_path):
 
 def test_a_buffered_priming_frame_is_a_straggler_at_low_fps(tmp_path):
     # At 10 fps a priming frame still buffered when counting starts arrives a
-    # whole period (100 ms) after the previous priming frame — past the fixed
-    # 50 ms straggler window — and became pulse 0 of the recording.
+    # whole period (100 ms) after the previous priming frame -- past the fixed
+    # 50 ms straggler window -- and became pulse 0 of the recording.
     period = 100_000_000
     backend, camera = _direct_camera("FAKE-S")
     backend.hardware_period_ns = period
@@ -1011,7 +1026,7 @@ def test_fills_are_time_stamped_when_their_pulse_was_due(fake_system, tmp_path):
 
 def test_fills_of_a_host_clocked_camera_are_host_time(fake_system, tmp_path):
     # A backend with no hardware timestamp (pycameleon) is stamped with host
-    # time; its fills must be too — not "0 minus a few periods" — and count as
+    # time; its fills must be too -- not "0 minus a few periods" -- and count as
     # host-clocked rows, so the summary says "host", not "mixed".
     backend = _backend(fake_system, "FAKE-1")
     backend.miss_triggers = {0, 25, 49}
@@ -1103,7 +1118,7 @@ def test_transient_writer_stalls_are_filled_however_many(fake_system, tmp_path):
     # Three separate 0.26 s encoder stalls, each refusing ~5 frames against a
     # queue of 8: every one is caught up on before the next, so the writer is
     # never judged overloaded, although more than a queue's worth is refused in
-    # all — every refused frame is filled and the video keeps every pulse.
+    # all -- every refused frame is filled and the video keeps every pulse.
     queue_size = 8
     camera = next(c for c in fake_system if c.serial_number == "FAKE-0")
     original = camera.start_record

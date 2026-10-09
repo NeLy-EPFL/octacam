@@ -1,7 +1,7 @@
 """Priority claiming in the backend cascade (CameraSystem._enumerate).
 
 Mocks several backends enumerating overlapping serials and asserts that each
-camera is claimed by the highest-priority tier that sees it, and never twice — so
+camera is claimed by the highest-priority tier that sees it, and never twice -- so
 a camera served by a vendor SDK is not also opened by the pycameleon floor.
 """
 
@@ -13,7 +13,7 @@ from octacam.cameras.system import CameraSystem
 def _fake_backends(monkeypatch, layout: dict[str, list[str]]):
     """Wire system's resolve/select to fake tiers.
 
-    ``layout`` maps backend name -> the serials that tier enumerates, in the
+    `layout` maps backend name -> the serials that tier enumerates, in the
     intended cascade priority order (dict insertion order). Each tier gets a
     distinct sentinel factory so the claiming tier is identifiable by identity.
     """
@@ -57,7 +57,7 @@ def test_highest_tier_claims_each_serial(monkeypatch):
     entries = _enumerate()
     claimed = {serial: factory for serial, _handle, factory in entries}
     # A/B belong to the vendor tier, C to the producer tier, D falls through to
-    # the floor — each claimed by the first (highest-priority) tier that saw it.
+    # the floor -- each claimed by the first (highest-priority) tier that saw it.
     assert claimed["A"] is factories["vendor"]
     assert claimed["B"] is factories["vendor"]
     assert claimed["C"] is factories["producer"]

@@ -4,12 +4,12 @@ A framework-free state machine on top of a CameraSystem:
 
     preview/idle -> waiting -> recording -> finishing -> preview/idle
 
-Each recording is a :class:`~octacam.take.Take`, which the controller admits and
+Each recording is a `Take`, which the controller admits and
 drives on a monitor thread: it waits for every camera's first frame (plugin
-``on_first_frame`` hooks fire then), counts down and tears down in a fixed
+`on_first_frame` hooks fire then), counts down and tears down in a fixed
 order: trigger off -> grab loops exit -> writers drain -> summary.
 
-``RecordingController._lock`` guards the state and settings, and snapshot(),
+`RecordingController._lock` guards the state and settings, and snapshot(),
 stop_recording() and the telemetry take it too. So nothing that can block runs
 under it: plugin hooks (serial writes awaiting an ack), node-map reads over USB
 and the NVENC probe all run off the lock, or one stalled device would wedge the
@@ -93,7 +93,9 @@ class RecordingController:
             self._settings.trigger_source == "external"
             and self.managed_trigger_available
         ):
-            self._settings = dataclasses.replace(self._settings, trigger_source="managed")
+            self._settings = dataclasses.replace(
+                self._settings, trigger_source="managed"
+            )
             log.info(
                 "trigger_source 'external' with a trigger-driving plugin loaded; "
                 "treating it as 'managed' (octacam drives the trigger)."
@@ -144,8 +146,9 @@ class RecordingController:
         self._notify("state", self.snapshot())
 
     def _event(self, level: str, message: str) -> None:
-        """Log an operator-facing message and send it to the listeners; ``level``
-        is ``"info"``, ``"warning"`` or ``"error"``."""
+        """Log an operator-facing message and send it to the listeners; `level`
+        is `"info"`, `"warning"` or `"error"`.
+        """
         getattr(log, level)(message)
         entry = {"time": time.time(), "level": level, "message": message}
         self.events.append(entry)
@@ -171,7 +174,7 @@ class RecordingController:
         """Swap the hardware-free placeholder for the real, opened system.
 
         The swap is atomic and the preview and telemetry loops re-read
-        ``camera_system`` every tick, so a reader sees the empty placeholder or
+        `camera_system` every tick, so a reader sees the empty placeholder or
         the real system, never a torn state.
         """
         with self._lock:
@@ -180,8 +183,9 @@ class RecordingController:
             self._init_error = None
 
     def fail_init(self, message: str) -> None:
-        """Record why the GUI's background camera init failed (``ready`` stays
-        False), for the web UI and the event log."""
+        """Record why the GUI's background camera init failed (`ready` stays
+        False), for the web UI and the event log.
+        """
         with self._lock:
             self._init_error = message
         self._event("error", message)
@@ -204,21 +208,24 @@ class RecordingController:
         """Device-touching operations are refused while recording, while a
         benchmark drives the cameras itself, and while a start claims them (a
         preview re-arm or grab-cycling write then would hand the cameras a fresh
-        trigger clock just before the recording's arm)."""
+        trigger clock just before the recording's arm).
+        """
         return self.recording_active or self.diagnosing or self._starting
 
     def _require_camera_control(
         self, refusal: str, *, recording_only: bool = False
     ) -> None:
-        """Raise ``RuntimeError(refusal)`` while camera control is locked, or, for
+        """Raise `RuntimeError(refusal)` while camera control is locked, or, for
         an operation only a recording conflicts with, while recording. Caller
-        holds the lock."""
+        holds the lock.
+        """
         if self.recording_active if recording_only else self._camera_locked:
             raise RuntimeError(refusal)
 
     def _busy_reason(self, *, benchmark: bool = False) -> str | None:
         """Why a recording (or a benchmark) cannot claim the cameras now, else
-        None. Caller holds the lock."""
+        None. Caller holds the lock.
+        """
         # (busy, the reason a recording is told, a benchmark's if it differs)
         reasons = (
             (self.recording_active, "Recording in progress", None),
@@ -229,7 +236,11 @@ class RecordingController:
             ),
             (self._reconfiguring, "Camera reconfiguration in progress", None),
             (self._tearing_down, "Previous recording is still finishing", None),
-            (self._starting, "Recording is already starting", "A recording is starting"),
+            (
+                self._starting,
+                "Recording is already starting",
+                "A recording is starting",
+            ),
         )
         for busy, reason, benchmark_reason in reasons:
             if busy:
@@ -241,9 +252,10 @@ class RecordingController:
             return dataclasses.replace(self._settings)
 
     def update_settings(self, /, **changes) -> RecordingSettings:
-        """Apply settings changes (:meth:`RecordingSettings.updated`). A change
+        """Apply settings changes (`RecordingSettings.updated`). A change
         that fails validation is a ValueError in any state; a valid one is
-        refused (RuntimeError) while a recording is active or starting."""
+        refused (RuntimeError) while a recording is active or starting.
+        """
         with self._lock:
             settings = self._settings.updated(**changes)
             if self.recording_active:
@@ -286,7 +298,7 @@ class RecordingController:
 
         A blank path opens at the save directory, and one that does not exist yet
         at its nearest existing ancestor. Hidden directories and recordings'
-        ``octacam_recording`` subfolders (never a place to record into) are left
+        `octacam_recording` subfolders (never a place to record into) are left
         out.
         """
         raw = (path_str or "").strip() or (self._settings.save_dir or "")
@@ -337,8 +349,9 @@ class RecordingController:
         return self._features_payload(index, camera)
 
     def _reconfigure(self, index: int, scope: str, apply) -> dict:
-        """Run ``apply(camera)`` on one camera or all, off the lock under
-        ``_reconfiguring``; return the touched cameras' refreshed features."""
+        """Run `apply(camera)` on one camera or all, off the lock under
+        `_reconfiguring`; return the touched cameras' refreshed features.
+        """
         with self._lock:
             self._require_camera_control(
                 "Camera parameters are locked while recording or benchmarking"
@@ -366,10 +379,15 @@ class RecordingController:
     ) -> dict:
         """Write one node-map feature on one camera or all. The whole feature
         list is returned: a write can change other nodes (a ROI resize moves the
-        offsets)."""
-        return self._reconfigure(index, scope, lambda camera: camera.set_feature(name, value))
+        offsets).
+        """
+        return self._reconfigure(
+            index, scope, lambda camera: camera.set_feature(name, value)
+        )
 
-    def reset_camera_feature(self, index: int, name: str, scope: str = "selected") -> dict:
+    def reset_camera_feature(
+        self, index: int, name: str, scope: str = "selected"
+    ) -> dict:
         """Reset one feature to its saved-config value (else its factory default)."""
         return self._reconfigure(
             index,
@@ -378,7 +396,7 @@ class RecordingController:
         )
 
     def _saved_params(self, camera) -> str:
-        """``camera``'s parameter file text in the config dir ("" without one)."""
+        """`camera`'s parameter file text in the config dir ("" without one)."""
         if self.config_dir is None:
             return ""
         path = self.config_dir / f"{camera.serial_number}.{camera.extension}"
@@ -389,17 +407,22 @@ class RecordingController:
 
     def execute_camera_command(self, index: int, name: str) -> dict:
         """Execute a command node on one camera; refreshes its feature list."""
-        return self._reconfigure(index, "selected", lambda camera: camera.execute_command(name))
+        return self._reconfigure(
+            index, "selected", lambda camera: camera.execute_command(name)
+        )
 
     def set_camera_center(
         self, index: int, axis: str, enabled: bool, scope: str = "selected"
     ) -> dict:
         """Toggle ROI auto-centering on an axis for one camera or all."""
-        return self._reconfigure(index, scope, lambda camera: camera.set_center(axis, enabled))
+        return self._reconfigure(
+            index, scope, lambda camera: camera.set_center(axis, enabled)
+        )
 
     def export_camera_params(self) -> dict[str, str]:
         """Snapshot every camera's parameter text (Basler .pfs / FLIR .txt);
-        rejected while recording/benchmarking."""
+        rejected while recording/benchmarking.
+        """
         with self._lock:
             self._require_camera_control(
                 "Cannot save camera parameters while recording or benchmarking"
@@ -408,7 +431,8 @@ class RecordingController:
 
     def set_camera_name(self, index: int, name: str) -> dict:
         """Rename one camera, in memory (a GUI save persists it). The name is
-        its video's filename, so it must be safe and unique across the rig."""
+        its video's filename, so it must be safe and unique across the rig.
+        """
         clean = safe_segment(name, "camera name")
         with self._lock:
             self._require_camera_control(
@@ -425,7 +449,8 @@ class RecordingController:
         self, index: int, scale_x: float, scale_y: float, rotation_deg: float
     ) -> dict:
         """Set one camera's display transform, which a "display"-form recording
-        bakes in, so what is recorded matches the View tab without a save."""
+        bakes in, so what is recorded matches the View tab without a save.
+        """
         with self._lock:
             self._require_camera_control(
                 "Camera transforms are locked while recording", recording_only=True
@@ -444,14 +469,15 @@ class RecordingController:
 
     @property
     def managed_trigger_available(self) -> bool:
-        """Whether a loaded plugin can drive the trigger (``managed`` is usable)."""
+        """Whether a loaded plugin can drive the trigger (`managed` is usable)."""
         return self.plugins.trigger_plugin() is not None
 
     def _effective_preview_mode(self) -> str:
         """The preview trigger mode: software | free_running | managed.
 
-        ``auto`` mirrors ``trigger_source``; external, or managed without a
-        driving plugin, free-runs."""
+        `auto` mirrors `trigger_source`; external, or managed without a
+        driving plugin, free-runs.
+        """
         pref = self._settings.preview_trigger_source
         if pref == "software":
             return "software"
@@ -466,7 +492,8 @@ class RecordingController:
 
     def _arm_preview_locked(self) -> str:
         """Arm the cameras for preview and return the mode; caller holds the lock
-        and then arms the plugin with :meth:`_dispatch_preview_arm`."""
+        and then arms the plugin with `_dispatch_preview_arm`.
+        """
         mode = self._effective_preview_mode()
         fps = self._settings.fps
         self.camera_system.stop_software_trigger()
@@ -479,7 +506,8 @@ class RecordingController:
 
     def _dispatch_preview_arm(self, mode: str | None) -> None:
         """Arm the driving plugin for a managed preview; any other mode (or None,
-        idle) cancels a preview arm that may be running. Off the lock."""
+        idle) cancels a preview arm that may be running. Off the lock.
+        """
         if mode == "managed":
             self.plugins.on_preview_start(self._preview_arm_params())
         else:
@@ -487,7 +515,8 @@ class RecordingController:
 
     def _preview_arm_params(self) -> dict:
         """The recording's arm parameters, so preview strobes as the recording
-        will (the plugin makes the preview arm indefinite)."""
+        will (the plugin makes the preview arm indefinite).
+        """
         return self.plugins.default_start_params(
             self._settings.fps, self._settings.duration_s
         )
@@ -554,8 +583,7 @@ class RecordingController:
             # flow, so every grab loop exits within a frame. `_starting` holds off
             # anything that could re-arm the cameras until the record grab runs.
             disarm_preview = (
-                self._state == "preview"
-                and self._effective_preview_mode() == "managed"
+                self._state == "preview" and self._effective_preview_mode() == "managed"
             )
             if disarm_preview:
                 self.camera_system.stop()
@@ -576,10 +604,11 @@ class RecordingController:
         pre_params: dict[str, str] | None,
         profiles: dict[str, DeliveryProfile | None],
     ) -> StartResult:
-        """Second half of :meth:`start_recording`, under the caller's
-        ``_starting`` gate: start the take's cameras under the lock, then its
-        start sequence off it. ``pre_params`` is the caller's parameter export,
-        or None."""
+        """Second half of `start_recording`, under the caller's
+        `_starting` gate: start the take's cameras under the lock, then its
+        start sequence off it. `pre_params` is the caller's parameter export,
+        or None.
+        """
         resume_mode: str | None = None
         with self._lock:
             take = self._take = Take(
@@ -615,9 +644,10 @@ class RecordingController:
         return StartResult(StartResult.OK)
 
     def _monitor_loop(self, take: Take) -> None:
-        """Drive ``take`` from its first frame to its files, then resume the
+        """Drive `take` from its first frame to its files, then resume the
         preview; on any exception still disarm the trigger plugin and go idle,
-        or the controller would stay recording forever."""
+        or the controller would stay recording forever.
+        """
         try:
             if take.wait_for_first_frames():
                 take.begin_countdown()
@@ -643,7 +673,8 @@ class RecordingController:
     def _finish_take(self, take: Take) -> None:
         """Advance the save dir, resume the preview and disarm the plugins. The
         state leaves the active set before this off-lock tail, which
-        ``_tearing_down`` covers."""
+        `_tearing_down` covers.
+        """
         with self._lock:
             self._tearing_down = True
         try:
@@ -664,14 +695,17 @@ class RecordingController:
             self.plugins.on_recording_stop(aborted)
             # After the recording's cancel, so the record arm is torn down first.
             self._dispatch_preview_arm(resume_mode)
-            self._event("info", "Recording aborted" if aborted else "Recording finished")
+            self._event(
+                "info", "Recording aborted" if aborted else "Recording finished"
+            )
         finally:
             with self._lock:
                 self._tearing_down = False
 
     def _resume_preview(self) -> str | None:
         """Arm preview (or go idle) after a recording or benchmark; caller holds
-        the lock. Returns the mode for :meth:`_dispatch_preview_arm` (None: idle)."""
+        the lock. Returns the mode for `_dispatch_preview_arm` (None: idle).
+        """
         if self._auto_preview:
             return self._arm_preview_locked()
         self._set_state("idle")
@@ -712,8 +746,9 @@ class RecordingController:
         find_max: bool = True,
         sink: str = "config",
     ) -> StartResult:
-        """Start a benchmark (:mod:`octacam.diagnostics`) on its own thread, in
-        place of the preview. The report is broadcast as ``"diagnostics"``."""
+        """Start a benchmark (`octacam.diagnostics`) on its own thread, in
+        place of the preview. The report is broadcast as `"diagnostics"`.
+        """
         with self._lock:
             busy = self._busy_reason(benchmark=True)
             if busy:
@@ -805,11 +840,17 @@ class RecordingController:
             take = self._take
             remaining_ms = None
             recording_id = None
-            if self._state == "recording" and take is not None and take.deadline is not None:
+            if (
+                self._state == "recording"
+                and take is not None
+                and take.deadline is not None
+            ):
                 remaining_ms = max(0, round((take.deadline - time.monotonic()) * 1000))
                 recording_id = self._recording_seq
         # The last take's writer failure stays shown until the next take.
-        failed = {t.serial for t in take.camera_takes if t.writer.failed} if take else set()
+        failed = (
+            {t.serial for t in take.camera_takes if t.writer.failed} if take else set()
+        )
         try:
             free_bytes = shutil.disk_usage(
                 next(
@@ -818,7 +859,7 @@ class RecordingController:
                     if p.exists()
                 )
             ).free
-        except (StopIteration, OSError):
+        except StopIteration, OSError:
             free_bytes = 0
         return {
             "state": self._state,
@@ -839,7 +880,8 @@ class RecordingController:
 
 def _camera_status(camera, writer_failed: bool) -> dict:
     """One camera's telemetry: the fps readout and its take's live counts (0
-    without one: the preview never shows a stale recording's)."""
+    without one: the preview never shows a stale recording's).
+    """
     take = camera.take
     return {
         "name": camera.name,

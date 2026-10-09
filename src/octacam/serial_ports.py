@@ -1,7 +1,7 @@
 """Serial-port discovery, naming and USB recovery for the Arduino plugins.
 
-Enumeration never opens a port and never raises, so ``octacam doctor`` is safe
-beside a live session; only :func:`probe_identity` opens one, on request.
+Enumeration never opens a port and never raises, so `octacam doctor` is safe
+beside a live session; only `probe_identity` opens one, on request.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class SerialPort:
 
     @property
     def vid_pid(self) -> str:
-        """``"2341:0070"``, with ``?`` for an unknown half."""
+        """`"2341:0070"`, with `?` for an unknown half."""
         v = f"{self.vid:04X}" if self.vid is not None else "?"
         p = f"{self.pid:04X}" if self.pid is not None else "?"
         return f"{v}:{p}"
@@ -78,7 +78,7 @@ class SerialPort:
 
 @dataclass(frozen=True)
 class SerialIdentity:
-    """What :func:`probe_identity` read; ``busy`` when another process holds the port."""
+    """What `probe_identity` read; `busy` when another process holds the port."""
 
     device: str
     banner: str | None
@@ -92,10 +92,11 @@ def classify_port(
     description: str | None = None,
     manufacturer: str | None = None,
 ) -> tuple[str, bool, bool]:
-    """``(board_name, likely_microcontroller, likely_arduino)`` for a USB VID/PID.
+    """`(board_name, likely_microcontroller, likely_arduino)` for a USB VID/PID.
 
     The description and manufacturer are a last resort: their text varies by
-    platform."""
+    platform.
+    """
     if vid is not None:
         if (vid, pid) in _ARDUINO_BOARDS:
             return _ARDUINO_BOARDS[(vid, pid)], True, True
@@ -117,8 +118,9 @@ def classify_port(
 
 
 def list_serial_ports() -> list[SerialPort]:
-    """The connected serial ports by device path; ``[]`` and a warning if
-    ``comports()`` raises (it does on some platforms)."""
+    """The connected serial ports by device path; `[]` and a warning if
+    `comports()` raises (it does on some platforms).
+    """
     try:
         infos = list(comports())
     except Exception as e:
@@ -157,8 +159,7 @@ def _is_busy_error(exc: Exception) -> bool:
         return True
     text = str(exc).lower()
     return any(
-        s in text
-        for s in ("busy", "in use", "access is denied", "permission denied")
+        s in text for s in ("busy", "in use", "access is denied", "permission denied")
     )
 
 
@@ -171,12 +172,15 @@ def probe_identity(
     """Send the identify byte to *device* and read one line back. Never raises.
 
     It writes to the board, so callers make it opt-in. A port another process
-    holds reads as ``busy``, except on Linux when the holder opened it without
-    ``O_EXCL``: the plugins do, so a port a live session holds is probed."""
+    holds reads as `busy`, except on Linux when the holder opened it without
+    `O_EXCL`: the plugins do, so a port a live session holds is probed.
+    """
     # Windows ports are always exclusive and do not take the kwarg.
     kwargs: dict[str, Any] = {"exclusive": True} if os.name == "posix" else {}
     try:
-        port = serial.Serial(device, baud, timeout=timeout, write_timeout=timeout, **kwargs)
+        port = serial.Serial(
+            device, baud, timeout=timeout, write_timeout=timeout, **kwargs
+        )
     except Exception as e:
         return SerialIdentity(device, banner=None, busy=_is_busy_error(e), error=str(e))
     try:
@@ -204,7 +208,8 @@ _USBDEVFS_RESET = (ord("U") << 8) | 20
 
 def _usb_device_dir(tty_device: str) -> str | None:
     """The sysfs dir of the USB device behind a tty (it holds busnum/devnum), or
-    None for a non-USB tty. Linux only."""
+    None for a non-USB tty. Linux only.
+    """
     name = os.path.basename(os.path.realpath(tty_device))
     start = f"/sys/class/tty/{name}/device"
     if not os.path.exists(start):
@@ -223,12 +228,13 @@ def _usb_device_dir(tty_device: str) -> str | None:
 
 
 def reset_usb_device(device: str) -> tuple[bool, str]:
-    """Reset the USB device behind *device* from the host: ``(ok, message)``.
+    """Reset the USB device behind *device* from the host: `(ok, message)`.
 
     Clears a wedged USB-CDC board (the Nano ESP32 can stall every transfer with
     EPIPE while staying enumerated) without an unplug; the tty path survives.
-    Never raises: ``(False, reason)`` off Linux, for a non-USB tty, or without
-    write access to the usbfs node. The caller must not hold the tty open."""
+    Never raises: `(False, reason)` off Linux, for a non-USB tty, or without
+    write access to the usbfs node. The caller must not hold the tty open.
+    """
     if not sys.platform.startswith("linux"):
         return False, "USB bus reset is only implemented on Linux"
     try:
@@ -278,11 +284,12 @@ def wait_for_device(device: str, timeout: float = 3.0) -> bool:
 
 
 def resolve_device(configured: str | None) -> tuple[str | None, str]:
-    """The port a plugin's configured ``device`` names: ``(device | None, reason)``.
+    """The port a plugin's configured `device` names: `(device | None, reason)`.
 
-    A concrete path is returned as is. ``"auto"`` (or empty) takes the one
+    A concrete path is returned as is. `"auto"` (or empty) takes the one
     microcontroller-class port, and with none or several returns None: it never
-    guesses."""
+    guesses.
+    """
     text = (configured or "").strip()
     if text and text.lower() != "auto":
         return text, f"using configured device {text}"
@@ -305,11 +312,16 @@ def resolve_device(configured: str | None) -> tuple[str | None, str]:
 
 def format_candidates(ports: list[SerialPort], limit: int = 8) -> str:
     """The detected ports in one line for an error message: the
-    microcontroller-class ones, else a count of the generic ones."""
+    microcontroller-class ones, else a count of the generic ones.
+    """
     mcus = [p for p in ports if p.likely_microcontroller]
     if mcus:
         items = [f"{p.device} ({p.board_name})" for p in mcus[:limit]]
-        suffix = f", … (+{len(mcus) - limit} more)" if len(mcus) > limit else ""
+        suffix = (
+            f", \N{HORIZONTAL ELLIPSIS} (+{len(mcus) - limit} more)"
+            if len(mcus) > limit
+            else ""
+        )
         return ", ".join(items) + suffix
     if ports:
         return (
@@ -320,8 +332,9 @@ def format_candidates(ports: list[SerialPort], limit: int = 8) -> str:
 
 
 def udev_rule_for(port: SerialPort, symlink: str = "arduino0") -> str:
-    """A udev rule pinning *port* to ``/dev/<symlink>``, keyed on VID/PID and
-    serial number so it survives re-enumeration."""
+    """A udev rule pinning *port* to `/dev/<symlink>`, keyed on VID/PID and
+    serial number so it survives re-enumeration.
+    """
     parts = ['SUBSYSTEM=="tty"']
     if port.vid is not None:
         parts.append(f'ATTRS{{idVendor}}=="{port.vid:04x}"')
@@ -335,7 +348,8 @@ def udev_rule_for(port: SerialPort, symlink: str = "arduino0") -> str:
 
 def explain_open_failure(device: str, exc: Exception) -> str:
     """A serial open error, plus the detected ports and the fix when *device* is
-    not among them (unplugged, or the wrong path)."""
+    not among them (unplugged, or the wrong path).
+    """
     base = f"failed to open {device}: {exc}"
     try:
         ports = list_serial_ports()
@@ -348,6 +362,6 @@ def explain_open_failure(device: str, exc: Exception) -> str:
     return (
         f"{base}\n  {device} is not among the connected serial ports "
         f"(detected: {format_candidates(ports)}).\n"
-        "  Fix: set [plugins.options].device to one of these (or \"auto\" for a "
+        '  Fix: set [plugins.options].device to one of these (or "auto" for a '
         "single board), or add a stable udev symlink (`octacam doctor` prints one)."
     )

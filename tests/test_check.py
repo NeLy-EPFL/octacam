@@ -22,10 +22,11 @@ def _found(paths):
 def _write(
     folder, cameras, *, schema=3, extra_summary=None, arrays_extra=None, nested=False
 ):
-    """A minimal recording folder: summary + timestamps.npz for ``cameras``
+    """A minimal recording folder: summary + timestamps.npz for `cameras`
     ({name: timestamps}), flat beside the videos as recordings made before the
-    ``octacam_recording`` subfolder keep them, or in that subfolder (``nested``).
-    Returns the recording folder either way."""
+    `octacam_recording` subfolder keep them, or in that subfolder (`nested`).
+    Returns the recording folder either way.
+    """
     info = folder / RECORDING_INFO_DIRNAME if nested else folder
     info.mkdir(parents=True, exist_ok=True)
     summary = {
@@ -161,7 +162,9 @@ def test_a_summary_or_subfolder_path_names_the_recording_folder(tmp_path):
 def test_the_newer_nested_take_is_checked_not_the_older_flat_one(tmp_path):
     # Recorded into again: the older flat take's files stay beside the new
     # subfolder, and only the new take's summary and timestamps are read.
-    rec = _write(tmp_path / "rec", {"top": _train(500, missed={100}), "bottom": _train(500)})
+    rec = _write(
+        tmp_path / "rec", {"top": _train(500, missed={100}), "bottom": _train(500)}
+    )
     _write(rec, {"top": _train(500), "bottom": _train(500)}, nested=True)
     assert _found([tmp_path]) == [rec]
     result = check_recording(rec)
@@ -183,8 +186,10 @@ def test_check_recordings_walks_a_mixed_tree(tmp_path):
     runner = CliRunner()
     as_json = runner.invoke(app, ["check", "--json", str(tmp_path)])
     assert as_json.exit_code == 0, as_json.output
-    folders = [Path(r["folder"]).relative_to(tmp_path).as_posix()
-               for r in json.loads(as_json.output)]
+    folders = [
+        Path(r["folder"]).relative_to(tmp_path).as_posix()
+        for r in json.loads(as_json.output)
+    ]
     assert folders == found
 
 
@@ -207,7 +212,7 @@ def test_cli_exits_nonzero_on_a_problem(tmp_path):
 
 
 def _cam4(name, frames, **fields):
-    """A schema-4 per-camera summary entry (clean unless ``fields`` say otherwise)."""
+    """A schema-4 per-camera summary entry (clean unless `fields` say otherwise)."""
     return {
         "name": name,
         "frames": frames,
@@ -227,7 +232,8 @@ def _cam4(name, frames, **fields):
 
 def _summary4(folder, cameras, *, fill=True, count=1000, sync=None, **extra):
     """A schema-4 recording folder holding only its summary (save_timestamps off,
-    the default)."""
+    the default).
+    """
     folder.mkdir(parents=True)
     summary = {
         "schema_version": 4,
@@ -462,8 +468,10 @@ def test_a_start_the_recorder_left_unchecked_is_not_re_derived(tmp_path):
         tmp_path / "unchecked",
         {"top": top, "bottom": bottom},
         schema=4,
-        extra_summary={"pulse_train": {"fill": True, "count": 2000},
-                       "sync": {"ok": True, "warnings": [], "notes": ["not compared"]}},
+        extra_summary={
+            "pulse_train": {"fill": True, "count": 2000},
+            "sync": {"ok": True, "warnings": [], "notes": ["not compared"]},
+        },
         arrays_extra={
             f"{name}/{key}": value
             for name in ("top", "bottom")
@@ -475,10 +483,19 @@ def test_a_start_the_recorder_left_unchecked_is_not_re_derived(tmp_path):
         },
     )
     for index in (0, 1):
-        _patch_summary(rec, index, **{**_cam4("x", 2000), "start_offset_pulses": None,
-                                      "name": ("top", "bottom")[index]})
+        _patch_summary(
+            rec,
+            index,
+            **{
+                **_cam4("x", 2000),
+                "start_offset_pulses": None,
+                "name": ("top", "bottom")[index],
+            },
+        )
     result = check_recording(rec)
-    assert not [p for p in result.problems if "offset" in p or "late" in p], result.problems
+    assert not [p for p in result.problems if "offset" in p or "late" in p], (
+        result.problems
+    )
 
 
 def test_recorded_and_rederived_start_offsets_share_a_sign(tmp_path):
@@ -509,7 +526,8 @@ def test_recorded_and_rederived_start_offsets_share_a_sign(tmp_path):
 def _host_deliveries(frames=1000, period=10_000_000, stall_every=200, stall=57_000_000):
     """Host delivery times of a camera that captured every pulse: ~2 ms after each
     exposure, and a 57 ms delivery stall every 200 frames that releases the frames
-    it held back in a burst."""
+    it held back in a burst.
+    """
     rng = np.random.default_rng(1)
     t0 = 1_758_000_000 * 10**9  # host wall clock (2025)
     out: list[int] = []
@@ -653,6 +671,8 @@ def test_a_fake_recording_checks_the_same_with_or_without_timestamps(
     assert bad.filled and bad.missed == [10, 30] and bad.missed_count == 2
     assert [c.start_offset for c in result.cameras] == [0, 0]
     assert result.warnings == [
-        "FAKE-1 missed 2 pulse(s) (10, 30), filled with the previous frame: "
-        "frames stay aligned"
+        (
+            "FAKE-1 missed 2 pulse(s) (10, 30), filled with the previous frame: "
+            "frames stay aligned"
+        )
     ]

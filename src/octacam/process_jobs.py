@@ -1,10 +1,10 @@
-"""Detached ``octacam process`` jobs: spawn, track, attach, pause, cancel; and
+"""Detached `octacam process` jobs: spawn, track, attach, pause, cancel; and
 the run side every process run uses (its reporter and the pause gate).
 
-``--detach`` re-execs ``octacam process`` in its own session, so it survives a
-dropped ``ssh``, with its output in a per-job ``log.txt``. The worker keeps a
-``status.json`` current and holds ``job.lock`` (an flock) for its lifetime: a
-lock that can be taken means a dead worker. ``octacam jobs`` only reads and
+`--detach` re-execs `octacam process` in its own session, so it survives a
+dropped `ssh`, with its output in a per-job `log.txt`. The worker keeps a
+`status.json` current and holds `job.lock` (an flock) for its lifetime: a
+lock that can be taken means a dead worker. `octacam jobs` only reads and
 tails those files; there is no daemon.
 """
 
@@ -68,7 +68,7 @@ _FOLLOW_INTERVAL_S = 0.5
 
 @dataclass
 class JobStatus:
-    """A detached job's public state, persisted as ``status.json``."""
+    """A detached job's public state, persisted as `status.json`."""
 
     job_id: str
     state: str = STARTING  # starting|running|done|failed|cancelled
@@ -141,30 +141,33 @@ def _now_iso() -> str:
 
 
 def write_status(jd: Path, status: JobStatus) -> None:
-    """Atomically write ``status.json``. Best-effort."""
+    """Atomically write `status.json`. Best-effort."""
     status.updated = _now_iso()
     try:
-        atomic_write_text(_status_path(jd), json.dumps(status.to_dict(), indent=2) + "\n")
+        atomic_write_text(
+            _status_path(jd), json.dumps(status.to_dict(), indent=2) + "\n"
+        )
     except OSError as e:
         log.debug("Could not write job status in %s (%s)", jd, e)
 
 
 def read_status(jd: Path) -> JobStatus | None:
-    """Read ``status.json``; missing/corrupt/partial returns None (never raises)."""
+    """Read `status.json`; missing/corrupt/partial returns None (never raises)."""
     try:
         raw = _status_path(jd).read_text()
     except OSError:
         return None
     try:
         data = json.loads(raw)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     return JobStatus.from_dict(data)
 
 
 def is_live(jd: Path) -> bool:
-    """True while the job's worker process is running (holds ``job.lock``); a
-    lock the filesystem cannot probe counts as held."""
+    """True while the job's worker process is running (holds `job.lock`); a
+    lock the filesystem cannot probe counts as held.
+    """
     try:
         return flock_held(_lock_path(jd)) is not False
     except OSError:
@@ -176,8 +179,9 @@ def is_manually_paused(jd: Path) -> bool:
 
 
 def _reconcile(jd: Path, status: JobStatus) -> JobStatus:
-    """Mark an unfinished status whose worker is gone ``failed``, in memory
-    only (a ``starting`` job gets :data:`_STALE_STARTING_AGE_S` of grace)."""
+    """Mark an unfinished status whose worker is gone `failed`, in memory
+    only (a `starting` job gets `_STALE_STARTING_AGE_S` of grace).
+    """
     if status.state in _TERMINAL or is_live(jd):
         return status
     try:
@@ -235,15 +239,18 @@ def spawn_detached(
     argv_tail: list[str],
     folders: list[Path],
     session_id: str | None = None,
-    log_level: str = "info",
+    verbose: bool = False,
 ) -> JobStatus:
-    """Re-exec ``octacam process <argv_tail>`` as a detached background job.
+    """Re-exec `octacam process <argv_tail>` as a detached background job, with
+    `--verbose` when `verbose`.
 
-    ``argv_tail`` must already carry absolute paths (the child runs from ``$HOME``
-    with no inherited cwd). Returns the initial :class:`JobStatus`. POSIX-only.
+    `argv_tail` must already carry absolute paths (the child runs from `$HOME`
+    with no inherited cwd). Returns the initial `JobStatus`. POSIX-only.
     """
     if os.name != "posix":
-        raise RuntimeError("Detached processing (--detach) is only supported on Linux/macOS.")
+        raise RuntimeError(
+            "Detached processing (--detach) is only supported on Linux/macOS."
+        )
     jd = _reserve_job_dir()
     status = JobStatus(
         job_id=jd.name,
@@ -259,15 +266,15 @@ def spawn_detached(
         sys.executable,
         "-m",
         "octacam",
-        "--log-level",
-        log_level,
         "process",
+        *(["--verbose"] if verbose else []),
         *argv_tail,
         "--_job-dir",
         str(jd),
     ]
     try:
-        log_fd = open(_log_path(jd), "ab")
+        # The detached child inherits the log file.
+        log_fd = open(_log_path(jd), "ab")  # noqa: SIM115
     except OSError as e:
         _cleanup_dir(jd)
         raise RuntimeError(f"Could not open the job log: {e}") from e
@@ -304,12 +311,15 @@ def spawn_detached(
 
 class NullReporter:
     """Where a run reports its progress. This one drops every report: no
-    detached job records the run, and nothing pauses it by hand."""
+    detached job records the run, and nothing pauses it by hand.
+    """
 
     def begin_phase(self, phase: str, total: int) -> None:
         pass
 
-    def item_started(self, index: int, total: int, path: str | os.PathLike[str]) -> None:
+    def item_started(
+        self, index: int, total: int, path: str | os.PathLike[str]
+    ) -> None:
         pass
 
     def item_done(self) -> None:
@@ -355,7 +365,9 @@ class JobReporter(NullReporter):
         log.info("Phase: %s (%d item(s))", phase, total)
         self._flush(force=True)
 
-    def item_started(self, index: int, total: int, path: str | os.PathLike[str]) -> None:
+    def item_started(
+        self, index: int, total: int, path: str | os.PathLike[str]
+    ) -> None:
         name = Path(path).name
         self._status.files_total = total
         self._status.current_file = name
@@ -381,7 +393,9 @@ class JobReporter(NullReporter):
         base = index - 1
 
         def _cb(prog: TranscodeProgress) -> None:
-            frac = min(1.0, prog.frame / prog.total_frames) if prog.total_frames else 0.0
+            frac = (
+                min(1.0, prog.frame / prog.total_frames) if prog.total_frames else 0.0
+            )
             self._set_percent(base + frac, total)
             self._flush()
 
@@ -410,7 +424,9 @@ class Worker:
         self._lock = lock_handle
         self.reporter = JobReporter(jd, status)
 
-    def finish(self, state: str, exit_code: int | None, error: str | None = None) -> None:
+    def finish(
+        self, state: str, exit_code: int | None, error: str | None = None
+    ) -> None:
         self.status.state = state
         self.status.exit_code = exit_code
         self.status.error = error
@@ -441,7 +457,7 @@ class JobLockError(RuntimeError):
 
 
 def worker_start(jd: Path) -> Worker:
-    """Attach the current process to ``jd`` as its worker: lock + mark running."""
+    """Attach the current process to `jd` as its worker: lock + mark running."""
     status = read_status(jd) or JobStatus(job_id=jd.name)
     status.pid = os.getpid()
     status.state = RUNNING
@@ -449,7 +465,8 @@ def worker_start(jd: Path) -> Worker:
         status.started = _now_iso()
     lock_handle = None
     try:
-        lock_handle = open(_lock_path(jd), "a+")
+        # The handle outlives this block: it holds the lock.
+        lock_handle = open(_lock_path(jd), "a+")  # noqa: SIM115
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
     except OSError as e:
         # Never run unlocked: every liveness check keys off this flock, so the
@@ -472,7 +489,8 @@ def worker_start(jd: Path) -> Worker:
 def worker(jd: Path | None) -> Iterator[NullReporter]:
     """The run's reporter. A detached job's run (*jd*) holds the job lock and
     ends as done, cancelled (a Ctrl-C, 130) or failed (the exit message, else
-    the exception). Raises JobLockError when the lock cannot be taken."""
+    the exception). Raises JobLockError when the lock cannot be taken.
+    """
     if jd is None:
         yield NullReporter()
         return
@@ -491,12 +509,15 @@ def worker(jd: Path | None) -> Iterator[NullReporter]:
     job.finish(DONE, 0)
 
 
-def pause_gate(reporter: NullReporter, *, unit: str, ignore_capture: bool = False) -> None:
+def pause_gate(
+    reporter: NullReporter, *, unit: str, ignore_capture: bool = False
+) -> None:
     """Block at a work-unit boundary while a gui/record holds the cameras or the
     job is paused by hand, polling every second.
 
     A cancel or Ctrl-C interrupts the sleep. The capture pause has no timeout,
-    so ``ignore_capture`` is the operator's only way past it."""
+    so `ignore_capture` is the operator's only way past it.
+    """
     announced = False
     while True:
         reasons = []
@@ -508,7 +529,11 @@ def pause_gate(reporter: NullReporter, *, unit: str, ignore_capture: bool = Fals
             break
         reason = "+".join(reasons)
         if not announced:
-            log.info("Paused before next %s — %s. Resumes automatically.", unit, reason)
+            log.info(
+                "Paused before next %s \N{EM DASH} %s. Resumes automatically.",
+                unit,
+                reason,
+            )
             announced = True
         reporter.set_paused(True, reason)
         time.sleep(1.0)
@@ -549,7 +574,9 @@ def latest_job() -> JobStatus | None:
     return jobs[0] if jobs else None
 
 
-def resolve_job(id_or_none: str | None, *, require_live: bool = False) -> JobStatus | None:
+def resolve_job(
+    id_or_none: str | None, *, require_live: bool = False
+) -> JobStatus | None:
     """Resolve an explicit job id, or the most recent (live) job when None."""
     if id_or_none is None:
         return latest_live_job() if require_live else latest_job()
@@ -614,8 +641,9 @@ def prune() -> None:
 
 def _is_finished(jd: Path) -> bool:
     """Whether a job directory is safe to remove: finished, or crashed past the
-    grace :func:`_reconcile` gives a ``starting`` job (whose child takes the
-    lock only after a full interpreter startup)."""
+    grace `_reconcile` gives a `starting` job (whose child takes the
+    lock only after a full interpreter startup).
+    """
     status = read_status(jd)
     if status is not None:
         return _reconcile(jd, status).state in _TERMINAL
@@ -630,7 +658,7 @@ def _is_finished(jd: Path) -> bool:
 
 
 def _partition() -> tuple[list[Path], list[Path]]:
-    """(live, finished) job directories, judged by :func:`_is_finished`."""
+    """(live, finished) job directories, judged by `_is_finished`."""
     live: list[Path] = []
     finished: list[Path] = []
     for jd in _job_dirs():
@@ -641,7 +669,7 @@ def _partition() -> tuple[list[Path], list[Path]]:
 def clear_finished() -> tuple[int, int]:
     """Remove every finished job directory regardless of age; return (removed, kept).
 
-    A live or still-arming job (see :func:`_is_finished`) is kept.
+    A live or still-arming job (see `_is_finished`) is kept.
     """
     live, finished = _partition()
     for jd in finished:
@@ -650,8 +678,9 @@ def clear_finished() -> tuple[int, int]:
 
 
 def job_dir_counts() -> tuple[int, int]:
-    """(live, finished) job-directory counts: what :func:`clear_finished` would
-    keep and remove."""
+    """(live, finished) job-directory counts: what `clear_finished` would
+    keep and remove.
+    """
     live, finished = _partition()
     return len(live), len(finished)
 
@@ -673,7 +702,7 @@ def _age(started: str) -> str:
         if dt.tzinfo is None:  # a hand-edited status: read as local time
             dt = dt.astimezone()
         secs = int((datetime.datetime.now().astimezone() - dt).total_seconds())
-    except (ValueError, TypeError, OverflowError, OSError):
+    except ValueError, TypeError, OverflowError, OSError:
         return "-"
     if secs < 60:
         return f"{secs}s"
@@ -713,7 +742,7 @@ def render_table(jobs: list[JobStatus], console: Console | None = None) -> None:
 
 
 class _LogFollower:
-    """Line-buffered tail of a job's ``log.txt`` (tolerant of truncation)."""
+    """Line-buffered tail of a job's `log.txt` (tolerant of truncation)."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -749,7 +778,7 @@ class _LogFollower:
         return parts
 
     def drain(self) -> list[str]:
-        """Remaining lines incl. any final partial — call once the job has ended."""
+        """Remaining lines incl. any final partial -- call once the job has ended."""
         out = self.lines()
         if self._partial:
             out.append(self._partial)
@@ -759,7 +788,8 @@ class _LogFollower:
 
 def _print_log_line(console: Console, line: str) -> None:
     """Replay one worker log line from its ANSI codes, never as rich markup
-    (``[transcode 1/6]`` would parse as a tag)."""
+    (`[transcode 1/6]` would parse as a tag).
+    """
     from rich.text import Text
 
     try:
@@ -795,7 +825,11 @@ def _bar_description(status: JobStatus) -> str:
     state = render_state(status)
     if state != status.state or not status.phase:  # paused, or between phases
         return state
-    return f"{status.phase}: {status.current_file}" if status.current_file else status.phase
+    return (
+        f"{status.phase}: {status.current_file}"
+        if status.current_file
+        else status.phase
+    )
 
 
 def _bar_counts(status: JobStatus) -> str:
@@ -818,7 +852,9 @@ def _print_final(status: JobStatus, console: Console) -> None:
     elif status.state == CANCELLED:
         console.print(f"[yellow]Job {status.job_id} was cancelled.[/]")
     else:
-        console.print(f"[red]Job {status.job_id} failed: {status.error or 'unknown error'}[/]")
+        console.print(
+            f"[red]Job {status.job_id} failed: {status.error or 'unknown error'}[/]"
+        )
 
 
 def _attach_exit_code(status: JobStatus) -> int:
@@ -837,7 +873,8 @@ def _attach_exit_code(status: JobStatus) -> int:
 
 def attach(status: JobStatus, console: Console | None = None) -> int:
     """Follow a job's log with a progress bar until it ends; return its exit
-    code (:func:`_attach_exit_code`). Ctrl-C detaches (0), never cancels."""
+    code (`_attach_exit_code`). Ctrl-C detaches (0), never cancels.
+    """
     from rich.console import Console
 
     if console is None:
@@ -845,7 +882,7 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
     jd = job_dir(status.job_id)
     console.print(
         f"[bold]Attached to job {status.job_id}[/] ({render_state(status)}). "
-        "Press Ctrl-C to stop watching — this does NOT cancel the job."
+        "Press Ctrl-C to stop watching \N{EM DASH} this does NOT cancel the job."
     )
     follower = _LogFollower(_log_path(jd))
     # Replay whatever the log already holds before starting the live bar.
@@ -861,7 +898,9 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
     detached = False
     final = fresh
     with _make_progress(console) as progress:
-        task = progress.add_task(_bar_description(fresh), total=100.0, counts=_bar_counts(fresh))
+        task = progress.add_task(
+            _bar_description(fresh), total=100.0, counts=_bar_counts(fresh)
+        )
         _update_bar(progress, task, fresh)
         try:
             while True:
@@ -884,7 +923,7 @@ def attach(status: JobStatus, console: Console | None = None) -> int:
             detached = True
     if detached:
         console.print(
-            f"\n[dim]Detached from job {status.job_id} — it keeps running. "
+            f"\n[dim]Detached from job {status.job_id} \N{EM DASH} it keeps running. "
             f"Reattach: octacam jobs attach {status.job_id}[/]"
         )
         return 0

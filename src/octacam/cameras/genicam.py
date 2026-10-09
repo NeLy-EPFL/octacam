@@ -1,15 +1,15 @@
-"""The GenICam layer the SFNC backends share.
+r"""The GenICam layer the SFNC backends share.
 
-:class:`GenApi` is one SDK's node access, under the one node-map walker and the
-typed accessors. :class:`GenICamBackend` reads and writes SFNC nodes by name
-through its typed seam (``get_node``/``set_node``), on which the trigger chain
-and the GenApi persistence TSV are built; :class:`NodeMapBackend` implements
-that seam and the Camera-tab browser over a :class:`GenApi`.
+`GenApi` is one SDK's node access, under the one node-map walker and the
+typed accessors. `GenICamBackend` reads and writes SFNC nodes by name
+through its typed seam (`get_node`/`set_node`), on which the trigger chain
+and the GenApi persistence TSV are built; `NodeMapBackend` implements
+that seam and the Camera-tab browser over a `GenApi`.
 
-The TSV is SpinView's ``#``-commented ``<Feature>\\t<Value>`` format, written by
-octacam from :data:`CONFIG_NODES` because the GS3's own ``StoreToBag`` keeps only
-~18 streamable nodes (not Gain, Exposure or the trigger chain). ``set_node`` must
-raise :class:`BackendError`, never a raw SDK exception: :func:`apply_config`'s
+The TSV is SpinView's `#`-commented `<Feature>\\t<Value>` format, written by
+octacam from `CONFIG_NODES` because the GS3's own `StoreToBag` keeps only
+~18 streamable nodes (not Gain, Exposure or the trigger chain). `set_node` must
+raise `BackendError`, never a raw SDK exception: `apply_config`'s
 best-effort skip rests on it, and a leak turns one refused value into a dead rig.
 """
 
@@ -17,7 +17,13 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from octacam.cameras.base import BackendError, CameraBackend, FeatureInfo, coerce_bool
+from octacam.cameras.base import (
+    BackendError,
+    CameraBackend,
+    FeatureInfo,
+    coerce_bool,
+    coerce_float,
+)
 
 log = logging.getLogger("octacam")
 
@@ -26,9 +32,10 @@ Bounds = tuple[Any, Any, Any, "str | None"]
 
 
 def _snap_int(value: object, node_min: Any, node_inc: Any) -> int:
-    """``value`` rounded onto the node's increment grid from its min (the
-    firmware rejects an off-grid write)."""
-    snapped = int(round(float(value)))  # type: ignore[arg-type]
+    """`value` rounded onto the node's increment grid from its min (the
+    firmware rejects an off-grid write).
+    """
+    snapped = round(coerce_float(value))
     if node_inc:
         base = node_min if node_min is not None else 0
         snapped = int(base + round((snapped - base) / node_inc) * node_inc)
@@ -39,14 +46,14 @@ class GenApi(ABC):
     """One SDK's GenApi node access.
 
     Node and node-map handles are opaque. The queries return None (or False)
-    when the SDK fails; ``write`` and ``execute`` raise :class:`BackendError`.
-    ``kind`` is a :class:`FeatureInfo` type, ``"category"`` included, or None
+    when the SDK fails; `write` and `execute` raise `BackendError`.
+    `kind` is a `FeatureInfo` type, `"category"` included, or None
     for a node the browser skips.
     """
 
     @abstractmethod
     def node(self, nodemap: Any, name: str) -> Any:
-        """The node called ``name``, or None."""
+        """The node called `name`, or None."""
 
     @abstractmethod
     def children(self, category: Any) -> list[Any]:
@@ -72,7 +79,7 @@ class GenApi(ABC):
 
     @abstractmethod
     def value(self, node: Any, kind: str) -> Any:
-        """The value read as ``kind`` (an enum's current symbolic)."""
+        """The value read as `kind` (an enum's current symbolic)."""
 
     @abstractmethod
     def bounds(self, node: Any, kind: str) -> Bounds: ...
@@ -83,14 +90,14 @@ class GenApi(ABC):
 
     @abstractmethod
     def write(self, node: Any, kind: str, value: Any) -> None:
-        """Write ``value`` as ``kind`` (an enum by its symbolic)."""
+        """Write `value` as `kind` (an enum by its symbolic)."""
 
     @abstractmethod
     def execute(self, node: Any) -> None: ...
 
     # ------------------------------------------------------ by name, typed
     def get(self, nodemap: Any, name: str, kind: str) -> Any:
-        """``name``'s value as ``kind``; None if absent or unreadable."""
+        """`name`'s value as `kind`; None if absent or unreadable."""
         node = self.node(nodemap, name)
         if node is None or not self.readable(node):
             return None
@@ -118,23 +125,29 @@ class GenApi(ABC):
         if readable and kind != "command":
             feature.value = self.value(node, kind)
         if kind in ("int", "float"):
-            feature.min, feature.max, feature.inc, feature.unit = self.bounds(node, kind)
+            feature.min, feature.max, feature.inc, feature.unit = self.bounds(
+                node, kind
+            )
         elif kind == "enum":
             feature.entries = [
-                {"value": s, "display": s, "available": a} for s, a in self.entries(node)
+                {"value": s, "display": s, "available": a}
+                for s, a in self.entries(node)
             ] or None
         return feature
 
     def walk(self, nodemap: Any) -> list[FeatureInfo]:
         """Every visible feature under Root, depth first, each once, labeled by
-        its category's display name ("Other" directly under Root)."""
+        its category's display name ("Other" directly under Root).
+        """
         out: list[FeatureInfo] = []
         root = self.node(nodemap, "Root")
         if root is not None:
             self._walk(root, "", out, set())
         return out
 
-    def _walk(self, category: Any, label: str, out: list[FeatureInfo], seen: set) -> None:
+    def _walk(
+        self, category: Any, label: str, out: list[FeatureInfo], seen: set
+    ) -> None:
         for node in self.children(category):
             try:  # one bad node must not abort the walk
                 if self.visibility(node) == "invisible":
@@ -167,7 +180,7 @@ class GenApi(ABC):
         return self.feature(node, kind)
 
     def write_feature(self, nodemap: Any, name: str, value: object) -> None:
-        """Write ``value`` coerced to the node's kind; an int snaps to its grid."""
+        """Write `value` coerced to the node's kind; an int snaps to its grid."""
         node, kind = self._feature_node(nodemap, name)
         if kind not in ("int", "float", "bool", "enum", "string"):
             raise BackendError(f"node {name} is not writable ({kind})")
@@ -177,7 +190,7 @@ class GenApi(ABC):
             node_min, _max, node_inc, _unit = self.bounds(node, kind)
             typed: Any = _snap_int(value, node_min, node_inc)
         elif kind == "float":
-            typed = float(value)  # type: ignore[arg-type]
+            typed = coerce_float(value)
         elif kind == "bool":
             typed = coerce_bool(value)
         else:
@@ -198,7 +211,8 @@ _FRAME_RATE_ENABLES = ("AcquisitionFrameRateEnable", "AcquisitionFrameRateEnable
 
 class GenICamBackend(CameraBackend):
     """A backend over SFNC nodes by name: the shared trigger chain and the TSV
-    persistence, written through ``get_node``/``set_node``."""
+    persistence, written through `get_node`/`set_node`.
+    """
 
     extension = "txt"
 
@@ -209,17 +223,19 @@ class GenICamBackend(CameraBackend):
 
     @abstractmethod
     def get_node(self, name: str, kind: str) -> Any:
-        """``name``'s value as ``kind``; None if absent or unreadable."""
+        """`name`'s value as `kind`; None if absent or unreadable."""
 
     @abstractmethod
     def set_node(self, name: str, kind: str, value: Any) -> None:
-        """Write ``value`` as ``kind``; BackendError if refused."""
+        """Write `value` as `kind`; BackendError if refused."""
 
     def _try_set(self, name: str, kind: str, value: Any) -> None:
         try:
             self.set_node(name, kind, value)
         except BackendError as e:
-            log.debug("Could not set %s = %s on camera %s: %s", name, value, self._serial, e)
+            log.debug(
+                "Could not set %s = %s on camera %s: %s", name, value, self._serial, e
+            )
 
     def _size(self, name: str) -> int:
         value = self.get_node(name, "int")
@@ -245,9 +261,10 @@ class GenICamBackend(CameraBackend):
         self._try_set("TriggerOverlap", "enum", "ReadOut")
 
     def _cap_frame_rate(self, fps: float | None) -> None:
-        """Best-effort free-run rate cap at ``fps``, so a free-run preview draws
+        """Best-effort free-run rate cap at `fps`, so a free-run preview draws
         an fps-matched recording's bandwidth; None removes it, as a triggered
-        mode needs (on Basler the cap applies even while triggered)."""
+        mode needs (on Basler the cap applies even while triggered).
+        """
         for name in _FRAME_RATE_ENABLES:
             self._try_set(name, "bool", fps is not None)
         if fps is not None:
@@ -267,14 +284,17 @@ class GenICamBackend(CameraBackend):
             elif self._original_trigger_source is not None:
                 self.set_node("TriggerSource", "enum", self._original_trigger_source)
         except BackendError as e:
-            log.warning("Failed to set trigger source on camera %s: %s", self._serial, e)
+            log.warning(
+                "Failed to set trigger source on camera %s: %s", self._serial, e
+            )
 
     def begin_software_trigger_preview(self) -> None:
         self._arm_frame_trigger("Software")
 
     def begin_freerun(self, fps: float | None = None) -> bool:
-        """TriggerMode Off, capped at ``fps`` when given; False if refused.
-        Arming a triggered mode later clears the cap."""
+        """TriggerMode Off, capped at `fps` when given; False if refused.
+        Arming a triggered mode later clears the cap.
+        """
         if not self.is_open():
             return False
         try:
@@ -303,11 +323,12 @@ class GenICamBackend(CameraBackend):
         )
 
 
-class NodeMapBackend(GenICamBackend):
-    """A GenICamBackend over a walked node map: ``_api`` is the SDK's
-    :class:`GenApi`, ``_nodemap`` the device node map while open, else None."""
+class NodeMapBackend[A: GenApi](GenICamBackend):
+    """A GenICamBackend over a walked node map: `_api` is the SDK's
+    `GenApi`, `_nodemap` the device node map while open, else None.
+    """
 
-    def __init__(self, serial: str, api: GenApi):
+    def __init__(self, serial: str, api: A):
         super().__init__(serial)
         self._api = api
         self._nodemap: Any = None
@@ -343,14 +364,16 @@ class NodeMapBackend(GenICamBackend):
 # Nodes octacam owns, never applied from a file: the link throughput (maxed at
 # open; the file's value would undo it), PixelFormat (Mono8 for the GRAY8 writer),
 # and transport and data-flash state the SDK manages.
-CONFIG_SKIP_NODES = frozenset({
-    "DeviceLinkThroughputLimit",
-    "PixelFormat",
-    "TLParamsLocked",
-    "ActivePageNumber",
-    "ActivePageOffset",
-    "ActivePageValue",
-})
+CONFIG_SKIP_NODES = frozenset(
+    {
+        "DeviceLinkThroughputLimit",
+        "PixelFormat",
+        "TLParamsLocked",
+        "ActivePageNumber",
+        "ActivePageOffset",
+        "ActivePageValue",
+    }
+)
 
 # The capture features octacam persists, with their GenApi types, in apply order:
 # from a GS3-U3-41C6NIR node-map walk at factory defaults, each value after the
@@ -404,7 +427,11 @@ CONFIG_NODES: tuple[tuple[str, str, str], ...] = (
     ("ImageFormatControl", "TestImageSelector", "enum"),
     ("ImageFormatControl", "TestPattern", "enum"),
     ("ImageFormatControl/PixelDefectControl", "pgrDefectPixelCorrectionEnable", "bool"),
-    ("ImageFormatControl/PixelDefectControl", "pgrDefectPixelCorrectionTestMode", "enum"),
+    (
+        "ImageFormatControl/PixelDefectControl",
+        "pgrDefectPixelCorrectionTestMode",
+        "enum",
+    ),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelCount", "int"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelIndex", "int"),
     ("ImageFormatControl/PixelDefectControl", "pgrCurrentCorrectedPixelOffsetX", "int"),
@@ -457,11 +484,11 @@ _LOUD_NODES = frozenset({"Width", "Height", "OffsetX", "OffsetY"})
 
 
 def _roi_offsets_last(
-    pairs: "list[tuple[str, str]]",
-) -> "list[tuple[str, str]]":
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
     """Move the ROI origins after every size node; the rest keeps file order.
 
-    :func:`dump_config` lists sizes first, but a vendor-exported or hand-edited
+    `dump_config` lists sizes first, but a vendor-exported or hand-edited
     file may not, and an origin written first clamps the size after it.
     """
     head = [(n, v) for n, v in pairs if n not in _ROI_OFFSET_NODES]
@@ -483,7 +510,7 @@ def _clear_roi_offsets(backend: GenICamBackend, names: set[str]) -> None:
 
 
 def parse_config(text: str) -> list[tuple[str, str]]:
-    """The TSV's ``(name, value)`` pairs in order, without comments and blanks."""
+    """The TSV's `(name, value)` pairs in order, without comments and blanks."""
     out: list[tuple[str, str]] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -505,12 +532,12 @@ def _parse_value(kind: str, text: str) -> Any:
 
 
 def apply_config(backend: GenICamBackend, text: str) -> None:
-    """Apply each ``name\\tvalue`` line, best-effort, in file order (selectors
+    r"""Apply each `name\\tvalue` line, best-effort, in file order (selectors
     and Auto-before-value rely on it), except the ROI origins: zeroed first and
-    applied last (see :func:`_clear_roi_offsets`). A refused or absent node is
-    logged and skipped; :data:`CONFIG_SKIP_NODES` are never applied, nor string
+    applied last (see `_clear_roi_offsets`). A refused or absent node is
+    logged and skipped; `CONFIG_SKIP_NODES` are never applied, nor string
     nodes (not capture parameters, e.g. DeviceUserID). A node not in
-    :data:`NODE_TYPE` is set as a symbolic enum.
+    `NODE_TYPE` is set as a symbolic enum.
     """
     serial = backend.serial_number
     pairs = parse_config(text)
@@ -530,7 +557,7 @@ def apply_config(backend: GenICamBackend, text: str) -> None:
         except BackendError as e:
             if name in _LOUD_NODES:
                 log.warning(
-                    "Camera %s rejected %s = %s (%s) — it keeps its current "
+                    "Camera %s rejected %s = %s (%s) \N{EM DASH} it keeps its current "
                     "geometry, so this recording may not be the configured size",
                     serial,
                     name,
@@ -555,7 +582,7 @@ def _render(kind: str, value: Any) -> str:
 
 
 def dump_config(backend: GenICamBackend, model: str | None = None) -> str:
-    """The camera's :data:`CONFIG_NODES` as TSV; unreadable nodes are omitted."""
+    """The camera's `CONFIG_NODES` as TSV; unreadable nodes are omitted."""
     serial = backend.serial_number
     device = " ".join(filter(None, (model, f"({serial})" if serial else "")))
     lines: list[str] = list(_HEADER)
@@ -574,12 +601,12 @@ def dump_config(backend: GenICamBackend, model: str | None = None) -> str:
 
 
 def normalize_trigger_source(text: str, original_source: str | None) -> str:
-    """Rewrite a dumped ``TriggerSource\\tSoftware`` to ``original_source``.
+    r"""Rewrite a dumped `TriggerSource\\tSoftware` to `original_source`.
 
     A software-trigger preview sets the camera's TriggerSource to Software; saved
     into the file, a later hardware-triggered recording would wait forever for a
     software trigger. A no-op without a hardware source to restore. Basler's
-    counterpart is :func:`octacam.cameras.basler._normalize_pfs_triggers`.
+    counterpart is `octacam.cameras.basler._normalize_pfs_triggers`.
     """
     if not original_source or original_source == "Software":
         return text

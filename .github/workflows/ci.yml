@@ -1,0 +1,69 @@
+# Lint, type-check, test and build the docs on every push to main and develop and
+# every pull request.
+#
+# The docs are only built here, as a check; docs.yml publishes them.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+      # The ruff in uv.lock, run without syncing the project and its camera SDKs.
+      - name: Ruff lint
+        run: uvx ruff@0.16.10 check
+      - name: Ruff format
+        run: uvx ruff@0.16.10 format --check
+      - name: uv.lock is in sync with pyproject.toml
+        run: uv lock --check
+      # Code, comments and strings are ASCII; Markdown is not held to it.
+      - name: ASCII only in Python
+        run: "! grep -rnP '[^\\x00-\\x7F]' --include='*.py' src tests arduino"
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - name: Sync
+        run: uv sync --locked
+      - name: Type check
+        run: uv run --locked pyrefly check
+      # No cameras on the runner: the suite uses the fake backend and pylon's
+      # emulator (tests/conftest.py sets PYLON_CAMEMU).
+      - name: Test
+        run: uv run --locked pytest --durations=20
+      # The browser tests of the web GUI, on their own: playwright's sync API
+      # leaves an event loop running that breaks later asyncio tests.
+      - name: Install Chromium
+        run: uv run --locked --group frontend playwright install --with-deps chromium
+      - name: Frontend tests
+        run: uv run --locked --group frontend pytest tests/test_frontend.py
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+      - name: Build (strict)
+        run: uv run --locked --only-group docs mkdocs build --strict

@@ -1,5 +1,6 @@
-"""Offline transcodes for ``octacam process``: one recording video re-encoded
-into an atomic partial output, with ffmpeg's progress reported as it runs."""
+"""Offline transcodes for `octacam process`: one recording video re-encoded
+into an atomic partial output, with ffmpeg's progress reported as it runs.
+"""
 
 import contextlib
 import fcntl
@@ -34,8 +35,9 @@ _RAW_PIXEL_FORMATS = {"Mono8": ("gray", 1)}
 
 @dataclass(frozen=True)
 class TranscodeProgress:
-    """One block of ffmpeg's ``-progress`` stream. ``total_frames`` is None when
-    unknown (an indeterminate bar); ``fps``/``speed`` are 0.0 until measured."""
+    """One block of ffmpeg's `-progress` stream. `total_frames` is None when
+    unknown (an indeterminate bar); `fps`/`speed` are 0.0 until measured.
+    """
 
     frame: int
     fps: float
@@ -61,11 +63,11 @@ def transcode_file(
     on_progress: ProgressCallback | None = None,
     raw_output: bool = False,
 ) -> Path:
-    """Re-encode one ``.raw``/``.mkv``/``.mp4`` to *output* (its extension picks
+    """Re-encode one `.raw`/`.mkv`/`.mp4` to *output* (its extension picks
     the container), never stream-copying: captures use a fast preset, and this
     offline pass is where a slow one pays off.
 
-    A ``.raw`` has no geometry: *width*/*height*/*fps* (from the recording
+    A `.raw` has no geometry: *width*/*height*/*fps* (from the recording
     summary) are required, and *frames* (else the file size) sizes the bar. An
     encoded input uses *width*/*height* only to make a gray output 4:2:0, and
     *frames* only for the bar.
@@ -109,10 +111,11 @@ _PARTIAL_IDLE_S = 6 * 3600
 
 
 def _partial_is_live(path: Path) -> bool:
-    """Whether a process still writes *path*: :func:`atomic_output` holds a
+    """Whether a process still writes *path*: `atomic_output` holds a
     flock on its temp while it owns it, so a lockable temp is an orphan. Where
     flock cannot tell (some network mounts), an idle-mtime test. Anything
-    uninspectable is live, so the sweep only ever errs toward keeping."""
+    uninspectable is live, so the sweep only ever errs toward keeping.
+    """
     try:
         held = flock_held(path, "r+")
     except OSError:
@@ -130,7 +133,9 @@ def _partial_is_recent(path: Path) -> bool:
 def _sweep_orphan_partials(output: Path, keep: Path) -> None:
     """Delete *output*'s temps whose writer is gone, never a live one or *keep*."""
     try:
-        stale_paths = list(output.parent.glob(partial_glob(output, extension_last=True)))
+        stale_paths = list(
+            output.parent.glob(partial_glob(output, extension_last=True))
+        )
     except OSError:
         return
     for stale in stale_paths:
@@ -149,12 +154,13 @@ def atomic_output(output: Path):
 
     Any exception, Ctrl-C included, deletes the temp, so a partial encode never
     appears at *output* or replaces it. The temp is created and flock-ed before
-    ffmpeg runs (every caller passes ``-y``), so a concurrent run can tell it
+    ffmpeg runs (every caller passes `-y`), so a concurrent run can tell it
     from an orphan.
     """
     tmp = partial_path(output, extension_last=True)
     try:
-        lock = open(tmp, "w")
+        # The handle outlives this block: it holds the lock.
+        lock = open(tmp, "w")  # noqa: SIM115
     except OSError:
         # Let the encode fail with the real error (read-only dir, ENOSPC).
         lock = None
@@ -192,10 +198,13 @@ def run_ffmpeg(
     only on failure.
 
     It owns the reporting flags (-nostdin, -hide_banner, -loglevel, -progress,
-    -stats, -nostats) and drops any in *args*: pass only inputs and outputs."""
+    -stats, -nostats) and drops any in *args*: pass only inputs and outputs.
+    """
     args = _reporting_args(args, raw_output)
     if raw_output:
-        returncode = subprocess.run(args, stdin=subprocess.DEVNULL).returncode
+        returncode = subprocess.run(
+            args, stdin=subprocess.DEVNULL, check=False
+        ).returncode
         if returncode != 0:
             raise RuntimeError(f"ffmpeg failed for {src} (exit code {returncode})")
         return
@@ -235,9 +244,10 @@ def run_ffmpeg(
 
 def _reporting_args(args: list[str], raw_output: bool) -> list[str]:
     """*args* with its reporting flags replaced by the output mode's: a quiet
-    ffmpeg writing ``-progress`` for octacam's bar, or with *raw_output*
-    ffmpeg's own ``-stats`` at info level. Both run off the tty (raw mode only
-    loses ffmpeg's 'q' key)."""
+    ffmpeg writing `-progress` for octacam's bar, or with *raw_output*
+    ffmpeg's own `-stats` at info level. Both run off the tty (raw mode only
+    loses ffmpeg's 'q' key).
+    """
     cleaned, _ = split_opts(
         args[1:],
         ("-loglevel", "-progress"),
@@ -274,8 +284,9 @@ def _to_float(value: str, default: float) -> float:
 def _parse_progress(
     stream, on_progress: ProgressCallback, total_frames: int | None
 ) -> None:
-    """Emit one TranscodeProgress per ``-progress`` block (closed by a
-    ``progress=`` line); a field ffmpeg reports as ``N/A`` keeps its value."""
+    """Emit one TranscodeProgress per `-progress` block (closed by a
+    `progress=` line); a field ffmpeg reports as `N/A` keeps its value.
+    """
     frame = 0
     fps = 0.0
     out_time_s = 0.0

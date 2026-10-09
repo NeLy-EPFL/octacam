@@ -1,9 +1,9 @@
 """Firmware fingerprinting and flashing for the serial plugins' Arduino boards.
 
 A sketch's identify banner ends with a short hash of its source
-(``TRIGGERBOX 2 a1b2c3d4``). :func:`sketch_fingerprint` hashes the sketch on disk
-the same way, so :func:`classify` sees any source drift, and :func:`flash` bakes
-the hash into ``fw_build_info.h`` in a throwaway copy of the sketch, never in the
+(`TRIGGERBOX 2 a1b2c3d4`). `sketch_fingerprint` hashes the sketch on disk
+the same way, so `classify` sees any source drift, and `flash` bakes
+the hash into `fw_build_info.h` in a throwaway copy of the sketch, never in the
 repo (a manual build reports the committed placeholder). Discovery and flashing
 never raise: a missing arduino-cli or core, or a compile error, is a message.
 """
@@ -21,7 +21,7 @@ import tempfile
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 log = logging.getLogger("octacam")
@@ -38,10 +38,11 @@ _DEFAULT_FLASH_TIMEOUT_S = 300.0
 
 @dataclass(frozen=True)
 class FirmwareSpec:
-    """What a plugin's board should run, and how to flash it. ``sketch_dir``
-    holds ``<sketch_dir.name>.ino``, as arduino-cli requires; None without a
+    """What a plugin's board should run, and how to flash it. `sketch_dir`
+    holds `<sketch_dir.name>.ino`, as arduino-cli requires; None without a
     source checkout (a wheel install), where a board is never classified by its
-    build or flashed."""
+    build or flashed.
+    """
 
     name: str
     sketch_dir: Path | None
@@ -58,14 +59,14 @@ class FirmwareSpec:
         return self.sketch_dir / f"{self.sketch_dir.name}.ino"
 
 
-class FirmwareState(str, Enum):
+class FirmwareState(StrEnum):
     """How the firmware on the board relates to the sketch on disk."""
 
-    CURRENT = "current"              # name + version + build all match: up to date
-    OUTDATED = "outdated"           # right name + version, different source (drift)
+    CURRENT = "current"  # name + version + build all match: up to date
+    OUTDATED = "outdated"  # right name + version, different source (drift)
     WRONG_VERSION = "wrong_version"  # right name, wrong protocol version
-    WRONG_BOARD = "wrong_board"      # a different firmware banner entirely
-    UNIDENTIFIED = "unidentified"    # no banner (blank board? wrong board? wedged link?)
+    WRONG_BOARD = "wrong_board"  # a different firmware banner entirely
+    UNIDENTIFIED = "unidentified"  # no banner (blank board? wrong board? wedged link?)
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,8 @@ class FirmwareCheck:
     def safe_to_auto_flash(self) -> bool:
         """Whether a reflash may skip the operator's confirmation: only for this
         board on stale firmware. A blank or foreign board never may, since a
-        flash overwrites whatever it runs."""
+        flash overwrites whatever it runs.
+        """
         return self.state in (FirmwareState.OUTDATED, FirmwareState.WRONG_VERSION)
 
     def to_dict(self) -> dict:
@@ -99,7 +101,7 @@ class FirmwareCheck:
 
 @dataclass
 class FlashResult:
-    """What :func:`flash` did."""
+    """What `flash` did."""
 
     ok: bool
     message: str
@@ -109,13 +111,16 @@ class FlashResult:
     def to_dict(self, log_tail: int = 8000) -> dict:
         log = self.log
         if log_tail and len(log) > log_tail:
-            log = "…\n" + log[-log_tail:]
+            log = "\N{HORIZONTAL ELLIPSIS}\n" + log[-log_tail:]
         return {"ok": self.ok, "message": self.message, "log": log, "build": self.build}
 
 
-def sketch_fingerprint(sketch_dir: Path, exclude: str = "fw_build_info.h", length: int = 8) -> str:
+def sketch_fingerprint(
+    sketch_dir: Path, exclude: str = "fw_build_info.h", length: int = 8
+) -> str:
     """A short hash of a sketch's source files: names and contents, CRLF read as
-    LF so checkouts agree, without the build header *exclude*."""
+    LF so checkouts agree, without the build header *exclude*.
+    """
     h = hashlib.sha256()
     files = sorted(
         p
@@ -132,7 +137,8 @@ def sketch_fingerprint(sketch_dir: Path, exclude: str = "fw_build_info.h", lengt
 
 def source_build(spec: FirmwareSpec) -> str | None:
     """The fingerprint of *spec*'s sketch on disk: the build a current board
-    reports. None without a source checkout or when the sketch cannot be read."""
+    reports. None without a source checkout or when the sketch cannot be read.
+    """
     if spec.sketch_dir is None:
         return None
     try:
@@ -143,8 +149,9 @@ def source_build(spec: FirmwareSpec) -> str | None:
 
 
 def parse_banner(banner: str | None) -> tuple[str | None, int | None, str | None]:
-    """``"TRIGGERBOX 2 a1b2c3d4"`` -> ``("TRIGGERBOX", 2, "a1b2c3d4")``; a missing
-    version or build is None, and the name is upper-cased."""
+    """`"TRIGGERBOX 2 a1b2c3d4"` -> `("TRIGGERBOX", 2, "a1b2c3d4")`; a missing
+    version or build is None, and the name is upper-cased.
+    """
     if not banner:
         return (None, None, None)
     parts = banner.split()
@@ -163,7 +170,9 @@ def parse_banner(banner: str | None) -> tuple[str | None, int | None, str | None
     return (name, version, build)
 
 
-def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> FirmwareCheck:
+def classify(
+    spec: FirmwareSpec, banner: str | None, needed_build: str
+) -> FirmwareCheck:
     """Compare a board's identify *banner* against *spec* and the source hash."""
     name, version, build = parse_banner(banner)
     nv = spec.protocol_version
@@ -175,7 +184,8 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
     if name is None:
         return check(
             FirmwareState.UNIDENTIFIED,
-            "the board sent no firmware identity — it may be blank (never flashed), "
+            "the board sent no firmware identity \N{EM DASH} it may be blank (never "
+            "flashed), "
             "a different board, or its link may be wedged",
         )
     if name == prefix:
@@ -198,9 +208,10 @@ def classify(spec: FirmwareSpec, banner: str | None, needed_build: str) -> Firmw
 
 
 def resolve_sketch_dir(sketch_name: str) -> Path | None:
-    """The ``arduino/<sketch_name>`` folder of a source checkout
-    (``OCTACAM_ARDUINO_DIR`` names the ``arduino`` dir instead), or None: the
-    wheel does not ship the sketches, and without one only flashing is lost."""
+    """The `arduino/<sketch_name>` folder of a source checkout
+    (`OCTACAM_ARDUINO_DIR` names the `arduino` dir instead), or None: the
+    wheel does not ship the sketches, and without one only flashing is lost.
+    """
     candidates: list[Path] = []
     env = os.environ.get(_ENV_ARDUINO_DIR)
     if env:
@@ -215,8 +226,9 @@ def resolve_sketch_dir(sketch_name: str) -> Path | None:
 
 
 def arduino_cli_path() -> str | None:
-    """The arduino-cli executable: ``OCTACAM_ARDUINO_CLI`` (a path or a name on
-    PATH), else PATH, else the usual install dirs; None if absent."""
+    """The arduino-cli executable: `OCTACAM_ARDUINO_CLI` (a path or a name on
+    PATH), else PATH, else the usual install dirs; None if absent.
+    """
     override = os.environ.get(_ENV_CLI)
     if override:
         if os.path.isfile(override) and os.access(override, os.X_OK):
@@ -229,8 +241,11 @@ def arduino_cli_path() -> str | None:
     # Path.home() raises without HOME and a passwd entry (docker --user).
     try:
         home = Path.home()
-        patterns += [str(home / "bin" / "arduino-cli"), str(home / ".local" / "bin" / "arduino-cli")]
-    except (RuntimeError, OSError):
+        patterns += [
+            str(home / "bin" / "arduino-cli"),
+            str(home / ".local" / "bin" / "arduino-cli"),
+        ]
+    except RuntimeError, OSError:
         pass
     for pat in patterns:
         # Newest version dir first, compared numerically (1.10 > 1.9); an
@@ -247,13 +262,18 @@ def arduino_cli_path() -> str | None:
 
 def core_installed(cli: str, fqbn: str, timeout: float = 20.0) -> bool | None:
     """Whether *fqbn*'s core is installed; None when arduino-cli cannot tell, so
-    an inconclusive check never blocks a flash."""
+    an inconclusive check never blocks a flash.
+    """
     core_id = ":".join(fqbn.split(":")[:2])  # arduino:esp32:nano_nora -> arduino:esp32
     try:
         proc = subprocess.run(
-            [cli, "core", "list"], capture_output=True, text=True, timeout=timeout
+            [cli, "core", "list"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     if proc.returncode != 0:
         return None
@@ -264,7 +284,7 @@ def core_installed(cli: str, fqbn: str, timeout: float = 20.0) -> bool | None:
 
 
 def preflight(spec: FirmwareSpec, cli: str | None) -> tuple[bool, str]:
-    """Check the toolchain can flash *spec*; ``(ok, actionable_message)``."""
+    """Check the toolchain can flash *spec*; `(ok, actionable_message)`."""
     if cli is None:
         return False, (
             "arduino-cli was not found. Install it (https://arduino.github.io/"
@@ -291,7 +311,7 @@ def preflight(spec: FirmwareSpec, cli: str | None) -> tuple[bool, str]:
 
 def _render_build_header(spec: FirmwareSpec, build: str) -> str:
     return (
-        "// Auto-generated by octacam firmware provisioning — do not edit.\n"
+        "// Auto-generated by octacam firmware provisioning \N{EM DASH} do not edit.\n"
         "// Overwrites the committed placeholder so the identify banner reports the\n"
         "// exact source octacam built and uploaded.\n"
         "#pragma once\n"
@@ -303,7 +323,8 @@ def _run_streaming(
     cmd: list[str], timeout: float, on_line: Callable[[str], None] | None
 ) -> tuple[int, str]:
     """Run *cmd*, streaming each line of its output (stderr merged) to
-    *on_line*: ``(returncode, log)``. A timeout kills it and is noted in the log."""
+    *on_line*: `(returncode, log)`. A timeout kills it and is noted in the log.
+    """
     lines: list[str] = []
     # A process group of its own, so a timeout also kills the compiler and the
     # uploader arduino-cli forked; a surviving uploader holds the serial port.
@@ -335,9 +356,10 @@ def _run_streaming(
         if posix:
             try:
                 import signal
+
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                 return
-            except (OSError, ProcessLookupError):
+            except OSError, ProcessLookupError:
                 pass
         proc.kill()
 
@@ -367,7 +389,8 @@ def flash(
 ) -> FlashResult:
     """Build a temp copy of *spec*'s sketch with *needed_build* baked in and
     upload it to *port*. Never raises. The caller must not hold the port open:
-    arduino-cli resets the board to upload."""
+    arduino-cli resets the board to upload.
+    """
     cli = cli or arduino_cli_path()
     ok, msg = preflight(spec, cli)
     if not ok:
@@ -388,9 +411,13 @@ def flash(
             _render_build_header(spec, needed_build)
         )
         cmd = [
-            cli, "compile",
-            "--fqbn", spec.fqbn,
-            "--upload", "--port", port,
+            cli,
+            "compile",
+            "--fqbn",
+            spec.fqbn,
+            "--upload",
+            "--port",
+            port,
             str(build_sketch),
         ]
         if on_line is not None:
@@ -418,7 +445,9 @@ def flash(
 
 # Boards still driven: a drifted source (OUTDATED) or an unread banner
 # (UNIDENTIFIED: a slow link, an old firmware) speaks the same protocol.
-_ARMABLE = frozenset({FirmwareState.CURRENT, FirmwareState.OUTDATED, FirmwareState.UNIDENTIFIED})
+_ARMABLE = frozenset(
+    {FirmwareState.CURRENT, FirmwareState.OUTDATED, FirmwareState.UNIDENTIFIED}
+)
 
 
 def arm_compatible(check: FirmwareCheck | None) -> bool:

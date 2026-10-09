@@ -1,9 +1,9 @@
 """Transfer step: atomic copy, integrity verification, file-granularity resume.
 
-These exercise the reliability guarantees of ``octacam.transfer`` and the CLI
-discovery helper that drives it — all with plain files in ``tmp_path``; no
-ffmpeg or real destination needed. ``transfer_folder`` copies into the exact
-``dest`` directory its caller resolved.
+These exercise the reliability guarantees of `octacam.transfer` and the CLI
+discovery helper that drives it -- all with plain files in `tmp_path`; no
+ffmpeg or real destination needed. `transfer_folder` copies into the exact
+`dest` directory its caller resolved.
 """
 
 from pathlib import Path
@@ -27,10 +27,11 @@ TEMP_GLOB = f".*{PARTIAL_INFIX}*"
 def _make_recording(
     folder: Path, files: dict[str, bytes], *, nested: bool = False
 ) -> Path:
-    """Create a recording dir with the given ``name -> bytes`` files + summary.
+    """Create a recording dir with the given `name -> bytes` files + summary.
 
     The summary sits flat beside the videos (a recording made before the
-    ``octacam_recording`` subfolder), or in that subfolder with ``nested``."""
+    `octacam_recording` subfolder), or in that subfolder with `nested`.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
         (folder / name).write_bytes(data)
@@ -88,7 +89,7 @@ def test_copy_includes_timestamps_when_present(tmp_path):
 
 
 def test_copy_without_timestamps_is_fine(tmp_path):
-    # No timestamps.npz (the default) → nothing extra, no error.
+    # No timestamps.npz (the default) -> nothing extra, no error.
     src = _make_recording(tmp_path / "rec", {"camera_LF.mp4": b"abc" * 1000})
     dest = tmp_path / "dest" / "rec"
     result = _transfer(src, dest=dest)
@@ -468,7 +469,7 @@ def test_discovery_hint(tmp_path):
     rec.mkdir(parents=True)
     (rec / RECORDING_SUMMARY_FILENAME).write_text("{}")
 
-    # Non-recursive at a non-recording parent → exit with a hint.
+    # Non-recursive at a non-recording parent -> exit with a hint.
     with pytest.raises(SystemExit):
         find_recording_dirs([tmp_path / "parent"], recursive=False)
     # Recursive discovers the nested recording.

@@ -1,6 +1,7 @@
 """The serial plugins' base: one link with a reader thread, and a plugin that
 opens the board, identifies it, recovers a wedged USB link and checks and
-flashes its firmware (triggerbox, twophoton and flywheel subclass both)."""
+flashes its firmware (triggerbox, twophoton and flywheel subclass both).
+"""
 
 from __future__ import annotations
 
@@ -23,9 +24,10 @@ log = logging.getLogger("octacam")
 
 class SerialLink:
     """A serial port plus a reader thread that hands every chunk it reads to
-    :meth:`_feed`, the subclass's token grammar. Callbacks run on the reader
-    thread; :meth:`identify` sends ``identify_query`` and waits for the line
-    starting with ``banner_prefix``."""
+    `_feed`, the subclass's token grammar. Callbacks run on the reader
+    thread; `identify` sends `identify_query` and waits for the line
+    starting with `banner_prefix`.
+    """
 
     name = "serial"  # log prefix and reader-thread name
     banner_prefix = ""
@@ -70,9 +72,10 @@ class SerialLink:
 
     def _mark_broken(self) -> None:
         """Drop the handle of a port that died under the reader: pyserial's
-        ``is_open`` stays True on a dead port, so the GUI would never offer a
+        `is_open` stays True on a dead port, so the GUI would never offer a
         reconnect. Takes only the write lock and notifies outside it, so a
-        close() joining the reader cannot deadlock against it."""
+        close() joining the reader cannot deadlock against it.
+        """
         with self._write_lock:
             s, self._serial = self._serial, None
             if s is not None:
@@ -89,7 +92,8 @@ class SerialLink:
 
     def _write(self, data: bytes) -> bool:
         """Write *data*; False when it did not reach the OS. A wedged USB-CDC
-        board fails with a bare OSError (EPIPE) that pyserial does not always wrap."""
+        board fails with a bare OSError (EPIPE) that pyserial does not always wrap.
+        """
         with self._write_lock:
             s = self._serial
             if s is None or not s.is_open:
@@ -119,7 +123,8 @@ class SerialLink:
 
     def _lines(self, chunk: bytes) -> Iterator[str]:
         """The non-empty lines *chunk* completes, stripped; a partial line waits
-        for the next chunk."""
+        for the next chunk.
+        """
         self._buf += chunk
         *lines, self._buf = self._buf.split(b"\n")
         for line in lines:
@@ -136,8 +141,9 @@ class SerialLink:
     @staticmethod
     def _read_chunk(s) -> bytes:
         """Block for one byte, then drain what is waiting: a token arrives within
-        USB latency (a fixed ``read(n)`` waits for n bytes or the 0.2 s port
-        timeout), and the reader still wakes every timeout to check for shutdown."""
+        USB latency (a fixed `read(n)` waits for n bytes or the 0.2 s port
+        timeout), and the reader still wakes every timeout to check for shutdown.
+        """
         chunk = s.read(1)
         waiting = s.in_waiting if chunk else 0
         if waiting:
@@ -153,7 +159,9 @@ class SerialLink:
                 chunk = self._read_chunk(s)
             except Exception:  # SerialException, or os.read on a port closed under us
                 if not self._reader_stop.is_set():
-                    log.debug("%s: read error in reader thread", self.name, exc_info=True)
+                    log.debug(
+                        "%s: read error in reader thread", self.name, exc_info=True
+                    )
                     self._mark_broken()
                 break
             if chunk:
@@ -163,13 +171,14 @@ class SerialLink:
         raise NotImplementedError
 
 
-class SerialPlugin(Plugin):
-    """A plugin driving one Arduino over a :class:`SerialLink`: open the
+class SerialPlugin[L: SerialLink](Plugin):
+    """A plugin driving one Arduino over a `SerialLink`: open the
     configured port, identify and classify the board, recover a wedged USB link,
     flash its firmware, and the reconnect / firmware / flash routes.
 
-    ``port_lock`` (re-entrant) is held across an open, a USB recovery and a
-    flash's close -> upload -> reopen, so nothing seizes the port mid-upload."""
+    `port_lock` (re-entrant) is held across an open, a USB recovery and a
+    flash's close -> upload -> reopen, so nothing seizes the port mid-upload.
+    """
 
     # The board's sketch (also read from the class by `octacam flash` and
     # doctor) and its default port.
@@ -177,7 +186,7 @@ class SerialPlugin(Plugin):
     default_device: ClassVar[str]
     reconnect_path: ClassVar[str]
     # The WS topic the board's run state is pushed on (and reported as
-    # ``arduino_state``); None for a board that reports none.
+    # `arduino_state`); None for a board that reports none.
     state_topic: ClassVar[str | None] = None
     # A healthy board always answers identify, so a silent one may sit on a
     # wedged USB-CDC link: an open (never a flash's reopen) tries one bus reset.
@@ -185,7 +194,7 @@ class SerialPlugin(Plugin):
 
     def __init__(
         self,
-        link: SerialLink,
+        link: L,
         *,
         device: str,
         baud: int,
@@ -219,7 +228,8 @@ class SerialPlugin(Plugin):
     def _open(self, *, recover: bool = True) -> str | None:
         """(Re)open the link and identify the board; the error message, or None.
         Never raises, so a missing board does not stop the GUI (reconnect
-        retries it)."""
+        retries it).
+        """
         with self.port_lock:
             self.banner = None
             self.firmware_ok = True
@@ -251,11 +261,15 @@ class SerialPlugin(Plugin):
     def _recover_usb(self, why: str) -> bool:
         """Close, reset the USB device and reopen; whether the link is open
         again. Holds the port lock throughout, so a flash cannot take the tty
-        in between."""
+        in between.
+        """
         with self.port_lock:
             device = self.device
             log.warning(
-                "%s: %s; attempting a USB bus reset on %s to recover", self.name, why, device
+                "%s: %s; attempting a USB bus reset on %s to recover",
+                self.name,
+                why,
+                device,
             )
             self._link.close()
             ok, msg = serial_ports.reset_usb_device(device)
@@ -278,7 +292,8 @@ class SerialPlugin(Plugin):
     def _identify(self) -> None:
         """Read and classify the board's banner. A board on an OUTDATED or
         UNIDENTIFIED build is still driven (a reflash is only offered), a foreign
-        or wrong-version one is not."""
+        or wrong-version one is not.
+        """
         banner = self.banner = self._link.identify()
         spec = self.firmware_spec
         reflash = f"reflash to {spec.banner_prefix} {spec.protocol_version}"
@@ -292,11 +307,18 @@ class SerialPlugin(Plugin):
                 and version in (None, spec.protocol_version)
             )
             if banner is None:
-                log.info("%s: no firmware identity from %s; proceeding", self.name, self.device)
+                log.info(
+                    "%s: no firmware identity from %s; proceeding",
+                    self.name,
+                    self.device,
+                )
             elif not self.firmware_ok:
                 log.warning(
                     "%s: %s reports firmware %r; %s (it is not driven until then)",
-                    self.name, self.device, banner, reflash,
+                    self.name,
+                    self.device,
+                    banner,
+                    reflash,
                 )
             return
         check = self.firmware_check = fw.classify(spec, banner, self.needed_build)
@@ -306,20 +328,28 @@ class SerialPlugin(Plugin):
             log.info("%s: %s firmware %s", self.name, self.device, check.detail)
         elif check.state is S.OUTDATED:
             log.warning(
-                "%s: %s is out of date — %s; run `octacam flash` (or the Flash "
+                "%s: %s is out of date \N{EM DASH} %s; run `octacam flash` (or the "
+                "Flash "
                 "firmware button) to upload the current build. It still works.",
-                self.name, self.device, check.detail,
+                self.name,
+                self.device,
+                check.detail,
             )
         elif check.state is S.UNIDENTIFIED:
             log.info(
                 "%s: %s sent no firmware identity (%s); proceeding",
-                self.name, self.device, check.detail,
+                self.name,
+                self.device,
+                check.detail,
             )
         else:  # WRONG_VERSION / WRONG_BOARD: not driven
             log.warning(
-                "%s: %s — %s; %s (it is not driven until then). Run `octacam "
+                "%s: %s \N{EM DASH} %s; %s (it is not driven until then). Run `octacam "
                 "flash` or use the Flash firmware button.",
-                self.name, self.device, check.detail, reflash,
+                self.name,
+                self.device,
+                check.detail,
+                reflash,
             )
 
     # ------------------------------------------------------------ status
@@ -348,16 +378,22 @@ class SerialPlugin(Plugin):
 
     def _push_state(self) -> None:
         """Push the run state, readiness and firmware to the board's tab: every
-        push carries them all, so no client polls."""
+        push carries them all, so no client polls.
+        """
         if self.state_topic is not None:
             self.broadcast(
                 self.state_topic,
-                {**self.link_status(), "state": self.board_state, "ready": self.is_ready()},
+                {
+                    **self.link_status(),
+                    "state": self.board_state,
+                    "ready": self.is_ready(),
+                },
             )
 
     def report_error(self, msg: str) -> None:
         """Log a link or arm failure and show it in the GUI: otherwise the
-        cameras just wait, with no visible cause."""
+        cameras just wait, with no visible cause.
+        """
         log.error("%s: %s", self.name, msg)
         self.last_error = msg
         self._push_state()
@@ -369,7 +405,7 @@ class SerialPlugin(Plugin):
         return None
 
     def firmware_provisioning(self) -> dict:
-        """The firmware picture for ``octacam flash`` and the GUI."""
+        """The firmware picture for `octacam flash` and the GUI."""
         spec = self.firmware_spec
         out: dict = {
             "plugin": self.name,
@@ -377,7 +413,8 @@ class SerialPlugin(Plugin):
             "firmware": self.banner,
             "firmware_ok": self.firmware_ok,
             "needed_build": self.needed_build,
-            "can_flash": self.needed_build is not None and fw.arduino_cli_path() is not None,
+            "can_flash": self.needed_build is not None
+            and fw.arduino_cli_path() is not None,
         }
         if self.firmware_check is not None:
             out.update(self.firmware_check.to_dict())
@@ -386,7 +423,9 @@ class SerialPlugin(Plugin):
             if self.needed_build is not None:
                 out["detail"] = "the board has not been probed"
             else:
-                why = "was not found" if spec.sketch_dir is None else "could not be read"
+                why = (
+                    "was not found" if spec.sketch_dir is None else "could not be read"
+                )
                 out["detail"] = (
                     f"the sketch source {why}, so the board's build can't be compared "
                     "or flashed"
@@ -400,7 +439,9 @@ class SerialPlugin(Plugin):
         out["auto_flash"] = self.auto_flash
         return out
 
-    def flash_firmware(self, on_line: Callable[[str], None] | None = None) -> fw.FlashResult:
+    def flash_firmware(
+        self, on_line: Callable[[str], None] | None = None
+    ) -> fw.FlashResult:
         """Upload the current firmware, then reopen and re-identify; never raises."""
         result = self._flash(on_line)
         if result.ok:
@@ -412,7 +453,8 @@ class SerialPlugin(Plugin):
 
     def _flash(self, on_line: Callable[[str], None] | None) -> fw.FlashResult:
         """Refused while busy or without the source. An upload whose reopen
-        fails drops the stale check, so the board does not still read as outdated."""
+        fails drops the stale check, so the board does not still read as outdated.
+        """
         busy = self.busy_reason()
         if busy is not None:
             return fw.FlashResult(False, busy)
@@ -427,26 +469,44 @@ class SerialPlugin(Plugin):
             if device is None:
                 return fw.FlashResult(False, reason)
             self._link.close()
-            log.info("firmware: flashing %s (build %s) to %s …",
-                     self.firmware_spec.name, self.needed_build, device)
-            result = fw.flash(self.firmware_spec, device, self.needed_build,
-                              cli=fw.arduino_cli_path(), on_line=on_line)
-            log.log(logging.INFO if result.ok else logging.ERROR, "firmware: %s", result.message)
+            log.info(
+                "firmware: flashing %s (build %s) to %s \N{HORIZONTAL ELLIPSIS}",
+                self.firmware_spec.name,
+                self.needed_build,
+                device,
+            )
+            result = fw.flash(
+                self.firmware_spec,
+                device,
+                self.needed_build,
+                cli=fw.arduino_cli_path(),
+                on_line=on_line,
+            )
+            log.log(
+                logging.INFO if result.ok else logging.ERROR,
+                "firmware: %s",
+                result.message,
+            )
             try:  # the board reboots after an upload
                 serial_ports.wait_for_device(device, 8.0)
             except Exception:
                 log.debug("firmware: wait_for_device raised", exc_info=True)
             reopen_err = self._open(recover=False)
             if reopen_err is not None:
-                log.warning("firmware: could not reopen %s after flashing: %s",
-                            device, reopen_err)
+                log.warning(
+                    "firmware: could not reopen %s after flashing: %s",
+                    device,
+                    reopen_err,
+                )
                 if result.ok:
                     self.firmware_check = None
                     result = fw.FlashResult(
                         True,
-                        f"{result.message} — but the port could not be reopened to "
+                        f"{result.message} \N{EM DASH} but the port could not be "
+                        "reopened to "
                         "confirm; replug or power-cycle the board",
-                        result.log, result.build,
+                        result.log,
+                        result.build,
                     )
             return result
 
@@ -454,14 +514,15 @@ class SerialPlugin(Plugin):
 
     def api_router(self) -> APIRouter:
         """The reconnect, firmware and flash routes; a subclass adds its own.
-        Sync handlers, so a tens-of-seconds flash runs on a worker thread."""
+        Sync handlers, so a tens-of-seconds flash runs on a worker thread.
+        """
         from fastapi import APIRouter, Body
 
         router = APIRouter()
 
         @router.post(self.reconnect_path)
         def reconnect(payload: dict = Body(default={})):
-            """Reopen the port, switching to ``{"device": ...}`` when given."""
+            """Reopen the port, switching to `{"device": ...}` when given."""
             device = payload.get("device") if isinstance(payload, dict) else None
             if isinstance(device, str) and device.strip():
                 self.configured_device = device.strip()

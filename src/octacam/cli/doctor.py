@@ -1,5 +1,6 @@
 """`octacam doctor`: it only enumerates and reads locks, never opens a camera
-(vendor SDKs open USB3 devices exclusively), so it is safe beside a live session."""
+(vendor SDKs open USB3 devices exclusively), so it is safe beside a live session.
+"""
 
 import json
 import logging
@@ -14,7 +15,9 @@ import typer
 
 import octacam
 from octacam.cli._common import (
+    Verbose,
     browser_skip_reason,
+    command,
     enumerate_backend,
     in_ssh_session,
     port_available,
@@ -31,10 +34,10 @@ log = logging.getLogger("octacam")
 
 # status -> (marker, rich style). "list" is a plain indented enumeration line.
 _MARKERS = {
-    "ok": ("✓", "green"),
-    "warn": ("⚠", "yellow"),
-    "error": ("✗", "red"),
-    "info": ("•", "cyan"),
+    "ok": ("\N{CHECK MARK}", "green"),
+    "warn": ("\N{WARNING SIGN}", "yellow"),
+    "error": ("\N{BALLOT X}", "red"),
+    "info": ("\N{BULLET}", "cyan"),
     "list": ("", ""),
 }
 
@@ -67,12 +70,15 @@ class _CameraScan:
     re-inits its System per call, ~2.4 s).
 
     Every SDK is imported on the calling thread first, so no two cold imports
-    race the import lock; the workers only scan."""
+    race the import lock; the workers only scan.
+    """
 
     def __init__(self, only_backend: str | None) -> None:
         from octacam.cameras.registry import BACKENDS, CASCADE, is_auto, select_backend
 
-        self.only = None if is_auto(only_backend) else (only_backend or "").strip().lower()
+        self.only = (
+            None if is_auto(only_backend) else (only_backend or "").strip().lower()
+        )
         # The backends _doctor_backends reports on (fake, being synthetic, only
         # when named): it calls get() for each, and a miss reads as a failed scan.
         display = [self.only] if self.only else [b for b in BACKENDS if b != "fake"]
@@ -99,11 +105,12 @@ class _CameraScan:
         self._errs: dict[str, Exception] = {}
 
     def run(
-        self, on_done: "Callable[[str, Exception | None], None] | None" = None
+        self, on_done: Callable[[str, Exception | None], None] | None = None
     ) -> None:
         """Enumerate every target once, concurrently, caching results and errors.
 
-        ``on_done(name, err)`` runs on the calling thread as each one finishes."""
+        `on_done(name, err)` runs on the calling thread as each one finishes.
+        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if not self.targets:
@@ -124,15 +131,16 @@ class _CameraScan:
                     on_done(name, err)
 
     def get(self, name: str) -> list[tuple[str, str | None]]:
-        """Cached ``[(serial, model), ...]`` for a scanned backend (any case);
-        re-raises its enumeration failure."""
+        """Cached `[(serial, model), ...]` for a scanned backend (any case);
+        re-raises its enumeration failure.
+        """
         key = name.strip().lower()
         if key in self._errs:
             raise self._errs[key]
         return self._cams[key]
 
     def cascade(self) -> list[tuple[str, str, str | None]]:
-        """:func:`cascade_assignment` from the scan; a failed tier is skipped."""
+        """`cascade_assignment` from the scan; a failed tier is skipped."""
         claimed: dict[str, tuple[str, str | None]] = {}
         order: list[str] = []
         for backend in self._cascade_order:
@@ -146,8 +154,9 @@ class _CameraScan:
         return [(s, claimed[s][0], claimed[s][1]) for s in order]
 
     def detected_serials(self, backend: str | None) -> set[str]:
-        """Serials to cross-check the config against: the cascade under ``auto``;
-        a backend the scan skipped is enumerated live (and may raise)."""
+        """Serials to cross-check the config against: the cascade under `auto`;
+        a backend the scan skipped is enumerated live (and may raise).
+        """
         from octacam.cameras.registry import is_auto
 
         if is_auto(backend):
@@ -160,7 +169,8 @@ class _CameraScan:
 
 def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
     """Run the scan behind a per-backend spinner on stderr, shown only on a
-    terminal and without ``--json``; the scan runs either way."""
+    terminal and without `--json`; the scan runs either way.
+    """
     from rich.progress import Progress, SpinnerColumn, TextColumn
 
     console = stderr_console()
@@ -173,11 +183,13 @@ def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
         disable=disable,
     ) as progress:
         tasks = {
-            name: progress.add_task(f"enumerating {name}…", total=1)
+            name: progress.add_task(
+                f"enumerating {name}\N{HORIZONTAL ELLIPSIS}", total=1
+            )
             for name in scan.targets
         }
 
-        def on_done(name: str, err: "Exception | None") -> None:
+        def on_done(name: str, err: Exception | None) -> None:
             if err is not None:
                 desc = f"{name}: enumeration failed"
             else:
@@ -189,7 +201,8 @@ def _run_scan_with_progress(scan: _CameraScan, quiet: bool) -> None:
 
 def _nvidia_gpus() -> list[str]:
     """Detected NVIDIA GPUs as "<name> (driver <ver>)", via nvidia-smi; empty
-    when there is none (so NVENC is unavailable)."""
+    when there is none (so NVENC is unavailable).
+    """
     if not shutil.which("nvidia-smi"):
         return []
     try:
@@ -200,10 +213,11 @@ def _nvidia_gpus() -> list[str]:
                 "--format=csv,noheader",
             ],
             capture_output=True,
+            check=False,
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return []
     if out.returncode != 0:
         return []
@@ -220,7 +234,7 @@ def _nvidia_gpus() -> list[str]:
 
 
 def _report_free_space(report: _Report, path: Path, label: str) -> None:
-    """Report free space on the filesystem holding ``path`` (or its nearest parent)."""
+    """Report free space on the filesystem holding `path` (or its nearest parent)."""
     probe = path
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -253,7 +267,11 @@ def _doctor_system(report: _Report) -> None:
             f"8-camera rig needs ~{need}",
         )
     elif soft < hard:
-        report.add("ok", f"open-file limit {soft}→{hard} (raised to hard at launch)")
+        report.add(
+            "ok",
+            f"open-file limit {soft}\N{RIGHTWARDS ARROW}{hard} (raised to hard at "
+            "launch)",
+        )
     else:
         report.add("ok", f"open-file limit {soft}")
     _doctor_updates(report)
@@ -261,14 +279,15 @@ def _doctor_system(report: _Report) -> None:
 
 def _doctor_updates(report: _Report) -> None:
     """Report whether a newer octacam release is available (advice only; a
-    failed check never fails the command)."""
+    failed check never fails the command).
+    """
     from octacam import updates
 
     notice = updates.check()
     if notice.update_available and notice.latest:
         msg = f"octacam {notice.latest} is available (you have {notice.current})"
         if notice.command:
-            msg += f" — update with: {notice.command}"
+            msg += f" \N{EM DASH} update with: {notice.command}"
         report.add("warn", msg)
     elif notice.latest:
         report.add("ok", f"octacam {notice.current} is the latest release")
@@ -276,9 +295,10 @@ def _doctor_updates(report: _Report) -> None:
         report.add("info", f"update check skipped ({notice.note})")
 
 
-def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
-    """One ``model: s1, s2, …`` line per model (first-seen order); a camera of
-    unknown model gets a bare serial line."""
+def _camera_lines(cams: list[tuple[str, str | None]]) -> list[str]:
+    """One `model: s1, s2, ...` line per model (first-seen order); a camera of
+    unknown model gets a bare serial line.
+    """
     groups: dict[str | None, list[str]] = {}
     for serial, model in cams:
         groups.setdefault(model, []).append(serial)
@@ -287,7 +307,7 @@ def _camera_lines(cams: "list[tuple[str, str | None]]") -> list[str]:
         if model:
             lines.append(f"{model}: {', '.join(serials)}")
         else:
-            lines.extend(serials)  # unknown model → bare serial per line
+            lines.extend(serials)  # unknown model -> bare serial per line
     return lines
 
 
@@ -300,11 +320,12 @@ _SUPERSPEED_MBPS = 5000
 
 
 def _usb_camera_links(
-    detected_serials: "set[str]", root: Path = Path("/sys/bus/usb/devices")
-) -> "list[tuple[str, str, int]]":
-    """``[(serial, product, speed_mbps), ...]`` for connected camera USB devices.
+    detected_serials: set[str], root: Path = Path("/sys/bus/usb/devices")
+) -> list[tuple[str, str, int]]:
+    """`[(serial, product, speed_mbps), ...]` for connected camera USB devices.
 
-    Read from sysfs, so no device is opened; ``[]`` without that sysfs layout."""
+    Read from sysfs, so no device is opened; `[]` without that sysfs layout.
+    """
 
     def _read(dev: Path, field: str) -> str:
         try:
@@ -322,7 +343,10 @@ def _usb_camera_links(
         serial = _read(dev, "serial")
         if not serial or serial in seen:
             continue
-        if _read(dev, "idVendor") not in _CAMERA_USB_VENDORS and serial not in detected_serials:
+        if (
+            _read(dev, "idVendor") not in _CAMERA_USB_VENDORS
+            and serial not in detected_serials
+        ):
             continue
         try:
             speed = int(float(_read(dev, "speed")))
@@ -357,7 +381,9 @@ def _doctor_backends(
         except Exception as e:
             report.add("warn", f"{name}: available, but enumeration failed ({e})")
             continue
-        report.add("ok", f"{name}: available — {len(cams)} camera(s) detected")
+        report.add(
+            "ok", f"{name}: available \N{EM DASH} {len(cams)} camera(s) detected"
+        )
         detected_serials.update(serial for serial, _model in cams)
         for line in _camera_lines(cams):
             report.add("list", line)
@@ -371,7 +397,8 @@ def _doctor_backends(
         report.add(
             "warn",
             f"{label} is linked at only {speed} Mb/s{usb2}, not USB 3 SuperSpeed "
-            f"({_SUPERSPEED_MBPS} Mb/s) — it will fail to open. A USB3 camera whose "
+            f"({_SUPERSPEED_MBPS} Mb/s) \N{EM DASH} it will fail to open. A USB3 "
+            "camera whose "
             "SuperSpeed link fails to train drops back to USB 2.0 even in a USB 3 "
             "port; check/replace its cable, reseat it, or try another USB 3 port.",
         )
@@ -391,7 +418,7 @@ def _doctor_backends(
             for (backend, model), serials in grouped.items():
                 joined = ", ".join(serials)
                 label = f"{model}: {joined}" if model else joined
-                report.add("list", f"{label} → {backend}")
+                report.add("list", f"{label} \N{RIGHTWARDS ARROW} {backend}")
 
 
 def _doctor_encoding(report: _Report) -> None:
@@ -416,7 +443,10 @@ def _doctor_encoding(report: _Report) -> None:
         "ok" if has_x264 else "error",
         "libx264 encoder present"
         if has_x264
-        else "libx264 encoder MISSING — the default record/transcode params need it",
+        else (
+            "libx264 encoder MISSING \N{EM DASH} the default record/transcode params "
+            "need it"
+        ),
     )
     system = shutil.which("ffmpeg")
     if system and os.path.realpath(system) != os.path.realpath(exe):
@@ -424,7 +454,8 @@ def _doctor_encoding(report: _Report) -> None:
         report.add(
             "info",
             f"system ffmpeg on PATH: {sysver or system} (unused; the resolved "
-            "binary takes precedence — colour-range flags can differ by version)",
+            "binary takes precedence \N{EM DASH} colour-range flags can differ by "
+            "version)",
         )
     report.add("info", f"default record params:    {DEFAULT_FFMPEG_PARAMS}")
     report.add("info", f"default transcode params: {DEFAULT_TRANSCODE_FFMPEG_PARAMS}")
@@ -432,7 +463,9 @@ def _doctor_encoding(report: _Report) -> None:
 
 
 def _doctor_gpu_encoding(report: _Report) -> None:
-    """Report GPU (NVIDIA NVENC) encode availability — the opt-in save_method="nvenc"."""
+    """Report GPU (NVIDIA NVENC) encode availability -- the opt-in
+    save_method="nvenc".
+    """
     from octacam.ffmpeg import ffmpeg_version, find_ffmpeg, probe_nvenc_max_sessions
     from octacam.writer import NVENC_H264_PARAMS
 
@@ -440,7 +473,7 @@ def _doctor_gpu_encoding(report: _Report) -> None:
     if not gpus:
         report.add(
             "info",
-            'no NVIDIA GPU detected (nvidia-smi) — GPU encoding unavailable; '
+            "no NVIDIA GPU detected (nvidia-smi) \N{EM DASH} GPU encoding unavailable; "
             'save_method="nvenc" would fall back to CPU (libx264)',
         )
         return
@@ -451,7 +484,8 @@ def _doctor_gpu_encoding(report: _Report) -> None:
     except RuntimeError:
         report.add(
             "warn",
-            'no ffmpeg with a working h264_nvenc encoder found — GPU encoding '
+            "no ffmpeg with a working h264_nvenc encoder found \N{EM DASH} GPU "
+            "encoding "
             "unavailable (the bundled imageio-ffmpeg has no NVENC, and a system "
             "ffmpeg's NVENC needs an API version the driver supports). Install a "
             'system ffmpeg built with NVENC; until then save_method="nvenc" '
@@ -474,7 +508,8 @@ def _doctor_gpu_encoding(report: _Report) -> None:
 
 
 def _doctor_config(report: _Report, config_dir: Path):
-    from octacam._compat import tomllib
+    import tomllib
+
     from octacam.config import (
         find_config_file,
         load_config_dir,
@@ -487,7 +522,8 @@ def _doctor_config(report: _Report, config_dir: Path):
     if not cfg_file.exists():
         report.add(
             "warn",
-            f"no {cfg_file.name} here — all detected cameras would be used, with defaults",
+            f"no {cfg_file.name} here \N{EM DASH} all detected cameras would be used, "
+            "with defaults",
         )
         return None
     try:
@@ -501,9 +537,16 @@ def _doctor_config(report: _Report, config_dir: Path):
         f"{cfg_file.name} loaded (backend={cfg.backend}, "
         f"{len(cfg.cameras)} camera(s) declared)",
     )
-    report.add("info", f"next recording → {resolve_save_path(cfg.record).save_dir}")
+    report.add(
+        "info",
+        f"next recording \N{RIGHTWARDS ARROW} {resolve_save_path(cfg.record).save_dir}",
+    )
     if cfg.transfer and cfg.transfer.directory:
-        report.add("info", f"transfer → {resolve_dir_template(cfg.transfer.directory)}")
+        report.add(
+            "info",
+            f"transfer \N{RIGHTWARDS ARROW} "
+            f"{resolve_dir_template(cfg.transfer.directory)}",
+        )
     else:
         report.add("info", "no [transfer] destination configured")
     return cfg
@@ -574,10 +617,10 @@ def _doctor_plugins(report: _Report, cfg) -> None:
     for info in infos:
         if info.available:
             suffix = f" ({info.summary})" if info.summary else ""
-            report.add("ok", f"{info.name} — available{suffix}")
+            report.add("ok", f"{info.name} \N{EM DASH} available{suffix}")
         else:
             suffix = f" ({info.detail})" if info.detail else ""
-            report.add("info", f"{info.name} — unavailable{suffix}")
+            report.add("info", f"{info.name} \N{EM DASH} unavailable{suffix}")
     if cfg is None:
         return
     for pc in cfg.plugins:
@@ -595,8 +638,9 @@ def _doctor_plugins(report: _Report, cfg) -> None:
 
 
 def _configured_device(pc) -> tuple[str | None, bool]:
-    """``(device, is_auto)`` a serial plugin's config resolves to, as the plugin
-    would: the ``device`` option, else the plugin's default port."""
+    """`(device, is_auto)` a serial plugin's config resolves to, as the plugin
+    would: the `device` option, else the plugin's default port.
+    """
     from octacam.plugins import canonical_name
 
     raw = pc.options.get("device")
@@ -610,7 +654,8 @@ def _configured_device(pc) -> tuple[str | None, bool]:
 
 def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
     """List serial devices and cross-check plugin ports. Passive unless
-    ``probe``, which reads each board's identity, skipping ports a session holds."""
+    `probe`, which reads each board's identity, skipping ports a session holds.
+    """
     from octacam import serial_ports as sp
 
     report.section("Serial devices")
@@ -627,8 +672,14 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
         report.add("info" if p.likely_arduino else "list", line)
     if generic:
         shown = ", ".join(p.device for p in generic[:4])
-        more = f", … (+{len(generic) - 4} more)" if len(generic) > 4 else ""
-        report.add("list", f"{len(generic)} other/generic serial port(s): {shown}{more}")
+        more = (
+            f", \N{HORIZONTAL ELLIPSIS} (+{len(generic) - 4} more)"
+            if len(generic) > 4
+            else ""
+        )
+        report.add(
+            "list", f"{len(generic)} other/generic serial port(s): {shown}{more}"
+        )
 
     _doctor_serial_vs_config(report, cfg, ports)
     if probe:
@@ -637,7 +688,8 @@ def _doctor_serial(report: _Report, cfg, probe: bool = False) -> None:
 
 def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
     """Cross-check each serial plugin's device against the detected ports: an
-    error when it is absent, info for a board no plugin uses."""
+    error when it is absent, info for a board no plugin uses.
+    """
     from octacam import serial_ports as sp
     from octacam.plugins import canonical_name
 
@@ -657,7 +709,9 @@ def _doctor_serial_vs_config(report: _Report, cfg, ports) -> None:
             if resolved is None:
                 report.add("error", f"plugin {name!r}: {reason}")
             else:
-                report.add("ok", f"plugin {name!r} device=auto → {reason}")
+                report.add(
+                    "ok", f"plugin {name!r} device=auto \N{RIGHTWARDS ARROW} {reason}"
+                )
                 used_real.add(os.path.realpath(resolved))
             continue
         if not device:
@@ -728,19 +782,22 @@ def _doctor_serial_probe(report: _Report, cfg, mcus) -> None:
         if needed is not None:
             check = fw.classify(spec, ident.banner, needed)
             if check.state is fw.FirmwareState.CURRENT:
-                report.add("ok", f"{p.device}: {name} firmware up to date (build {needed})")
+                report.add(
+                    "ok", f"{p.device}: {name} firmware up to date (build {needed})"
+                )
             elif check.needs_flash and check.state is not fw.FirmwareState.UNIDENTIFIED:
                 # (UNIDENTIFIED already got the "no identity reply" line.)
                 report.add(
                     "warn",
-                    f"{p.device}: {name} firmware needs flashing — {check.detail}; "
+                    f"{p.device}: {name} firmware needs flashing \N{EM DASH} "
+                    f"{check.detail}; "
                     "run `octacam flash`",
                 )
         elif ident.banner and not ident.banner.upper().startswith(spec.banner_prefix):
             report.add(
                 "warn",
                 f"{p.device}: expected {name} firmware (banner {spec.banner_prefix!r}) "
-                f"but got {ident.banner!r} — wrong board?",
+                f"but got {ident.banner!r} \N{EM DASH} wrong board?",
             )
 
 
@@ -760,7 +817,7 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     writable = os.access(cdir if cdir.exists() else cdir.parent, os.W_OK)
     report.add(
         "ok" if writable else "warn",
-        f"cache {cdir} — {len(existing)} recording(s)"
+        f"cache {cdir} \N{EM DASH} {len(existing)} recording(s)"
         + (f", {stale} stale (deleted)" if stale else ""),
     )
     try:
@@ -770,7 +827,8 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     if running:
         report.add(
             "warn",
-            f"{running} transcode(s) running here — CPU-heavy, may cause dropped "
+            f"{running} transcode(s) running here \N{EM DASH} CPU-heavy, may cause "
+            "dropped "
             "frames if you start recording now",
         )
     else:
@@ -780,7 +838,7 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
         if holder:
             report.add(
                 "warn",
-                f"another octacam holds this rig's lock (pid {holder}) — its "
+                f"another octacam holds this rig's lock (pid {holder}) \N{EM DASH} its "
                 "cameras are in use",
             )
         else:
@@ -790,10 +848,13 @@ def _doctor_runtime(report: _Report, config_dir: Path | None) -> None:
     if in_ssh_session():
         report.add(
             "info",
-            "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel",
+            "SSH session \N{EM DASH} the GUI won't auto-open a browser; use an ssh -L "
+            "tunnel",
         )
     elif browser_skip_reason(no_browser=False):  # past SSH, only no display is left
-        report.add("info", "no local display — the GUI won't auto-open a browser")
+        report.add(
+            "info", "no local display \N{EM DASH} the GUI won't auto-open a browser"
+        )
 
 
 def _render_doctor(report: _Report) -> None:
@@ -802,7 +863,9 @@ def _render_doctor(report: _Report) -> None:
 
     console = Console()
     console.print()
-    console.print(Text(f"octacam doctor — octacam {octacam.__version__}", style="bold"))
+    console.print(
+        Text(f"octacam doctor \N{EM DASH} octacam {octacam.__version__}", style="bold")
+    )
     for title, items in report.sections:
         console.print()
         console.print(Text(title, style="bold"))
@@ -845,6 +908,7 @@ def _emit_doctor_json(report: _Report) -> None:
     typer.echo(json.dumps(payload, indent=2))
 
 
+@command
 def doctor(
     config_dir: Annotated[
         Path | None,
@@ -888,11 +952,12 @@ def doctor(
             "be armed.",
         ),
     ] = False,
+    verbose: Verbose = False,
 ) -> None:
     """Diagnose the octacam install and, optionally, a rig config.
 
     Lists detected cameras and bundled plugins, and checks the encoding toolchain,
-    storage, recording cache, and runtime conflicts. Pass a CONFIG_DIR to also
+    storage, recording cache, and runtime conflicts. Pass a `config_dir` to also
     validate that rig. doctor never opens the cameras, so it is safe to run while
     a GUI or `record` session is live.
 

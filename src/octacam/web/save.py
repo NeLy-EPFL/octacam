@@ -41,7 +41,7 @@ class SaveConfigRequest(StrictModel):
     cameras: list[CameraDisplayParams] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _unique_names(self) -> "SaveConfigRequest":
+    def _unique_names(self) -> SaveConfigRequest:
         # Two cameras sharing a name would write to the same video file.
         names = [c.name for c in self.cameras if c.name]
         if len(names) != len(set(names)):

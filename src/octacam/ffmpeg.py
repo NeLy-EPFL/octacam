@@ -1,8 +1,8 @@
 """The ffmpeg toolchain: finding the binaries, probing what they can encode, and
 the argument policy every encode shares.
 
-Every ffmpeg launch but the capture pipe is built with :func:`quiet_argv`
-(``-nostdin``) and run with ``stdin=subprocess.DEVNULL``. With a terminal on
+Every ffmpeg launch but the capture pipe is built with `quiet_argv`
+(`-nostdin`) and run with `stdin=subprocess.DEVNULL`. With a terminal on
 stdin ffmpeg turns echo off to read keys and restores it only on a clean exit,
 so a killed ffmpeg, or concurrent ones racing to restore it, would leave the
 user's shell echo-off. The capture pipe is exempt: its stdin carries the frames.
@@ -29,7 +29,7 @@ _BUNDLED = "bundled imageio-ffmpeg"
 
 
 def quiet_argv(exe: str, *args: str) -> list[str]:
-    """``[exe, "-nostdin", *args]``; launch it with ``stdin=subprocess.DEVNULL``."""
+    """`[exe, "-nostdin", *args]`; launch it with `stdin=subprocess.DEVNULL`."""
     return [exe, "-nostdin", *args]
 
 
@@ -40,7 +40,8 @@ def _ffmpeg_candidates() -> Iterator[tuple[str, str]]:
     """(executable, origin) of every ffmpeg, most preferred first, realpath-deduped:
     $OCTACAM_FFMPEG, the bundled imageio binary, then $PATH's (where a working
     NVENC lives). Lazy: taking the first never runs the bundled binary's
-    validation behind an override."""
+    validation behind an override.
+    """
 
     def found() -> Iterator[tuple[str, str]]:
         env = os.environ.get("OCTACAM_FFMPEG")
@@ -75,8 +76,8 @@ def _realpath(exe: str) -> str:
 
 
 def find_ffmpeg(require_encoder: str | None = None) -> str:
-    """The preferred ffmpeg (see :func:`_ffmpeg_candidates`), or with
-    *require_encoder* the first that can run it (:func:`ffmpeg_encoder_works`).
+    """The preferred ffmpeg (see `_ffmpeg_candidates`), or with
+    *require_encoder* the first that can run it (`ffmpeg_encoder_works`).
     Raises RuntimeError when none qualifies, so a caller can fall back to the CPU.
     """
     if require_encoder is not None:
@@ -92,8 +93,9 @@ def find_ffmpeg(require_encoder: str | None = None) -> str:
 
 @functools.cache
 def _ffmpeg_for_encoder(encoder: str) -> str:
-    """The first candidate ffmpeg that runs ``encoder`` (cached); a failure
-    (RuntimeError) is not cached, so a later call searches again."""
+    """The first candidate ffmpeg that runs `encoder` (cached); a failure
+    (RuntimeError) is not cached, so a later call searches again.
+    """
     for exe, _origin in _ffmpeg_candidates():
         if ffmpeg_encoder_works(exe, encoder):
             return exe
@@ -105,7 +107,7 @@ def _ffmpeg_for_encoder(encoder: str) -> str:
 
 
 def find_ffprobe() -> str:
-    """$OCTACAM_FFPROBE, else the ffprobe beside :func:`find_ffmpeg`'s (so the
+    """$OCTACAM_FFPROBE, else the ffprobe beside `find_ffmpeg`'s (so the
     probe and the encode share a build), else $PATH's.
 
     imageio-ffmpeg bundles no ffprobe, so without a system ffmpeg this raises
@@ -133,7 +135,7 @@ def find_ffprobe() -> str:
 
 
 def ffmpeg_source(exe: str) -> str:
-    """Where *exe* sits in :func:`find_ffmpeg`'s search, for ``octacam doctor``."""
+    """Where *exe* sits in `find_ffmpeg`'s search, for `octacam doctor`."""
     key = _realpath(exe)
     origin = next(
         (o for candidate, o in _ffmpeg_candidates() if _realpath(candidate) == key),
@@ -153,15 +155,15 @@ def ffmpeg_query(exe: str, *args: str) -> str:
     try:
         out = subprocess.run(
             quiet_argv(exe, *args), stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, check=False, text=True, timeout=10,
         )  # fmt: skip
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return ""
     return (out.stdout or "") + (out.stderr or "")
 
 
 def ffmpeg_version(exe: str) -> str:
-    """The version token from ``ffmpeg -version`` (e.g. "7.0.2"), or ""."""
+    """The version token from `ffmpeg -version` (e.g. "7.0.2"), or ""."""
     for line in ffmpeg_query(exe, "-hide_banner", "-version").splitlines():
         line = line.strip()
         if line.startswith("ffmpeg version"):
@@ -174,7 +176,8 @@ def ffmpeg_version(exe: str) -> str:
 def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
     """Whether *exe* can run *encoder* on this machine (cached): a real one-frame
     encode, since an ffmpeg newer than the NVIDIA driver lists h264_nvenc yet
-    fails to run it."""
+    fails to run it.
+    """
     ok = False
     try:
         proc = subprocess.run(
@@ -186,6 +189,7 @@ def ffmpeg_encoder_works(exe: str, encoder: str) -> bool:
             ),
             stdin=subprocess.DEVNULL,
             capture_output=True,
+            check=False,
             timeout=30,
         )  # fmt: skip
         ok = proc.returncode == 0
@@ -203,7 +207,7 @@ def probe_nvenc_max_sessions(
     Counts which of *ceiling* overlapping encodes initialize (*ceiling* means at
     least that many; GeForce drivers allow 8 to 12). It loads the GPU briefly,
     and under-counts, but never disturbs, the sessions a live recording holds
-    (``octacam doctor`` runs it).
+    (`octacam doctor` runs it).
     """
     try:
         exe = find_ffmpeg(require_encoder=encoder)
@@ -237,8 +241,9 @@ def probe_nvenc_max_sessions(
 
 
 def nvenc_max_sessions(encoder: str = "h264_nvenc") -> int | None:
-    """:func:`probe_nvenc_max_sessions`, once per process. Call it before any
-    record session is open (the controller's off-lock warm-up does)."""
+    """`probe_nvenc_max_sessions`, once per process. Call it before any
+    record session is open (the controller's off-lock warm-up does).
+    """
     return _nvenc_session_cap(encoder)
 
 
@@ -261,9 +266,9 @@ _MONO_RULE_CODEC_OPTS = (*_ENCODER_OPTS, "-c", "-codec")
 def split_opts(
     tokens: list[str], names: tuple[str, ...], flags: tuple[str, ...] = ()
 ) -> tuple[list[str], list[str]]:
-    """Split ``tokens`` into the rest and the values of the ``names`` options.
+    """Split `tokens` into the rest and the values of the `names` options.
 
-    ``flags`` (options that take no value) are dropped too.
+    `flags` (options that take no value) are dropped too.
     """
     rest: list[str] = []
     values: list[str] = []
@@ -301,9 +306,10 @@ def pix_fmt_of(ffmpeg_params: str) -> str | None:
 
 
 def nvenc_encoder(ffmpeg_params: str) -> str | None:
-    """The ``*_nvenc`` encoder *ffmpeg_params* names, or None. Only these need
-    :func:`find_ffmpeg`'s capability search: the bundled ffmpeg lacks them and a
-    stale driver can fail to run them."""
+    """The `*_nvenc` encoder *ffmpeg_params* names, or None. Only these need
+    `find_ffmpeg`'s capability search: the bundled ffmpeg lacks them and a
+    stale driver can fail to run them.
+    """
     encoder = encoder_of(ffmpeg_params)
     return encoder if encoder and encoder.endswith("_nvenc") else None
 
@@ -317,20 +323,23 @@ _warned_pix_fmt: set[str] = set()
 
 def is_limited_range_yuv(pix_fmt: str) -> bool:
     """True for YUV formats that default to limited range (16-235 luma), which
-    would irreversibly squeeze full-range camera frames; ``gray`` and ``yuvj*``
-    are full range."""
+    would irreversibly squeeze full-range camera frames; `gray` and `yuvj*`
+    are full range.
+    """
     return pix_fmt.startswith("yuv") and not pix_fmt.startswith("yuvj")
 
 
 def color_range_args(pix_fmt: str) -> list[str]:
-    """``-color_range pc`` for limited-range YUV: only a tag (ffmpeg 7 converts no
-    pixels on it), so :func:`output_args` also adds ``scale=out_range=full``."""
+    """`-color_range pc` for limited-range YUV: only a tag (ffmpeg 7 converts no
+    pixels on it), so `output_args` also adds `scale=out_range=full`.
+    """
     return ["-color_range", "pc"] if is_limited_range_yuv(pix_fmt) else []
 
 
 def _full_range_vf(pix_fmt: str, vf: str = "") -> str:
-    """*vf* plus ``scale=out_range=full`` for limited-range YUV, so the gray→YUV
-    conversion keeps 0-255 luma."""
+    """*vf* plus `scale=out_range=full` for limited-range YUV, so the gray->YUV
+    conversion keeps 0-255 luma.
+    """
     if not is_limited_range_yuv(pix_fmt):
         return vf
     frag = "scale=out_range=full"
@@ -340,11 +349,11 @@ def _full_range_vf(pix_fmt: str, vf: str = "") -> str:
 def _playable_pix_fmt(
     tokens: list[str], frame_size: tuple[int, int] | None
 ) -> list[str]:
-    """Swap a libx264/libx265 4:0:0 (``gray``) output for full-range 4:2:0.
+    """Swap a libx264/libx265 4:0:0 (`gray`) output for full-range 4:2:0.
 
     NVIDIA's hardware decoder (VLC's default there) shows 4:0:0 H.264 as flat
     gray; full-range yuv420p decodes to the same pixels everywhere. This seam
-    fixes every config and snapshot still saying ``gray``. 4:2:0 cannot code an
+    fixes every config and snapshot still saying `gray`. 4:2:0 cannot code an
     odd side, so such a frame stays (or falls back to) 4:0:0; an unknown size is
     left as configured.
     """
@@ -380,7 +389,7 @@ def output_args(
     ffmpeg_params: str, frame_size: tuple[int, int] | None = None
 ) -> list[str]:
     """The output args every encode runs *ffmpeg_params* as: its pixel format
-    made playable (:func:`_playable_pix_fmt`) and full range, with the user's
+    made playable (`_playable_pix_fmt`) and full range, with the user's
     -vf merged ahead of the range conversion (ffmpeg takes only the last -vf).
 
     ffprobe reports 4:0:0 and 4:2:0 H.264 alike (yuvj420p); x264's log says

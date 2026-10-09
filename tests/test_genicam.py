@@ -1,5 +1,6 @@
 """The shared GenICam layer: the node-map walker and the typed accessors over a
-faked GenApi, and the trigger chain over a node map that records each write."""
+faked GenApi, and the trigger chain over a node map that records each write.
+"""
 
 import pytest
 
@@ -10,8 +11,19 @@ from octacam.cameras.genicam import GenApi, NodeMapBackend, _snap_int
 class N:
     """A fake node: its kind, value, metadata, and children for a category."""
 
-    def __init__(self, kind, value=None, *, display=None, children=(), bounds=None,
-                 entries=(), visibility="beginner", readable=True, writable=True):
+    def __init__(
+        self,
+        kind,
+        value=None,
+        *,
+        display=None,
+        children=(),
+        bounds=None,
+        entries=(),
+        visibility="beginner",
+        readable=True,
+        writable=True,
+    ):
         self.name = ""  # set by _nodemap
         self.kind = kind
         self.value = value
@@ -32,7 +44,7 @@ def _nodemap(**nodes):
 
 
 class DictGenApi(GenApi):
-    """A GenApi over ``{name: N}``; ``writes`` logs each (name, kind, value)."""
+    """A GenApi over `{name: N}`; `writes` logs each (name, kind, value)."""
 
     def __init__(self):
         self.writes = []
@@ -95,15 +107,27 @@ def _tree():
         Broken=N("broken"),
         Fire=N("command"),
     )
-    image = N("category", display="Image Format", children=[nodes["Width"], nodes["Hidden"]])
+    image = N(
+        "category", display="Image Format", children=[nodes["Width"], nodes["Hidden"]]
+    )
     hidden = N("category", visibility="invisible", children=[nodes["Fire"]])
-    nodes.update(_nodemap(
-        ImageFormatControl=image,
-        Secret=hidden,
-        Unnamed=N("category", children=[nodes["Gain"]]),
-    ))
-    root_children = [image, hidden, nodes["Unnamed"], nodes["Mode"], nodes["Width"],
-                     nodes["Weird"], nodes["Broken"], nodes["Fire"]]
+    nodes.update(
+        _nodemap(
+            ImageFormatControl=image,
+            Secret=hidden,
+            Unnamed=N("category", children=[nodes["Gain"]]),
+        )
+    )
+    root_children = [
+        image,
+        hidden,
+        nodes["Unnamed"],
+        nodes["Mode"],
+        nodes["Width"],
+        nodes["Weird"],
+        nodes["Broken"],
+        nodes["Fire"],
+    ]
     nodes["Root"] = N("category", children=root_children)
     return nodes
 
@@ -116,7 +140,13 @@ def test_the_walk_labels_each_feature_by_its_categorys_display_name():
     assert by_name["Gain"].category == "Unnamed"  # no display name: the name
     assert by_name["Mode"].category == "Other"  # directly under Root
     width = by_name["Width"]
-    assert (width.value, width.min, width.max, width.inc, width.unit) == (640, 16, 1920, 16, "px")
+    assert (width.value, width.min, width.max, width.inc, width.unit) == (
+        640,
+        16,
+        1920,
+        16,
+        "px",
+    )
     assert by_name["Gain"].display_name == "Gain (dB)"
     assert by_name["Mode"].entries == [
         {"value": "Off", "display": "Off", "available": True},
@@ -153,7 +183,10 @@ def test_write_feature_coerces_to_the_nodes_kind_and_snaps_an_int():
     api.write_feature(nodes, "Flag", "on")
     api.write_feature(nodes, "Mode", 1)
     assert api.writes == [
-        ("Width", "int", 656), ("Gain", "float", 2.5), ("Flag", "bool", True), ("Mode", "enum", "1"),
+        ("Width", "int", 656),
+        ("Gain", "float", 2.5),
+        ("Flag", "bool", True),
+        ("Mode", "enum", "1"),
     ]
     with pytest.raises(BackendError, match=r"not writable \(command\)"):
         api.write_feature(nodes, "Fire", 1)

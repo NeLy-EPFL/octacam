@@ -37,6 +37,9 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "README.md"            # the citing page includes its Citation and Use of AI
+      - "pyproject.toml"       # the docs group, and the version main publishes
+      - "uv.lock"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -55,15 +58,22 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0        # full history + the origin/gh-pages ref; a shallow
                                 # clone makes mike drop previously deployed versions
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+
+      # `mike deploy` builds without --strict, so the gate runs explicitly first:
+      # a broken link or a stale nav entry fails here instead of publishing.
+      # --only-group: the locked docs tools, without building octacam and its
+      # camera SDKs just to render Markdown.
+      - name: Build (strict)
+        run: uv run --locked --only-group docs mkdocs build --strict
 
       - name: Configure git identity for the mike commit
         run: |
@@ -76,14 +86,13 @@ jobs:
       - name: Fetch existing gh-pages
         run: git fetch origin gh-pages --depth=1 || true
 
-      # --no-project: don't build octacam + its camera deps just to render Markdown.
       - name: Deploy with mike
         env:
           REF: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
-          run_mike() { uv run --no-project --with mkdocs-material --with mike mike "$@"; }
+          run_mike() { uv run --locked --only-group docs mike "$@"; }
           pyproject_version() {
             sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml | head -1
           }

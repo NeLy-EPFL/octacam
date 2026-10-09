@@ -3,7 +3,7 @@
 A writer runs its sink on a thread behind a bounded queue, so write() never
 blocks the grab loop: it refuses a frame when the queue is full or the sink has
 failed. FfmpegVideoWriter pipes Mono8 frames into an ffmpeg child, which encodes
-outside the GIL; RawVideoWriter dumps them for ``octacam process`` to transcode
+outside the GIL; RawVideoWriter dumps them for `octacam process` to transcode
 (the geometry is in the recording summary).
 """
 
@@ -44,14 +44,19 @@ DEFAULT_PRESET = "ultrafast"
 # The config's ffmpeg_params: the encoder's output args, run through
 # ffmpeg.output_args (the 4:2:0/full-range policy) after the derived rawvideo
 # input args.
-DEFAULT_FFMPEG_PARAMS = f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} -pix_fmt {DEFAULT_PIX_FMT}"
+DEFAULT_FFMPEG_PARAMS = (
+    f"-c:v libx264 -preset {DEFAULT_PRESET} -crf {DEFAULT_CRF} "
+    f"-pix_fmt {DEFAULT_PIX_FMT}"
+)
 
 # GPU capture (record.save_method = "nvenc", or any *_nvenc encoder). NVENC
 # rejects 4:0:0, so yuv420p, which output_args keeps at 0-255 luma. NVENC
 # ignores -crf, and -cq 16 matches libx264's -crf 18; -bf 0 buffers no B-frames.
 # Cameras past the GPU's session limit fall back to libx264
 # (resolve_capture_formats).
-NVENC_H264_PARAMS = "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
+NVENC_H264_PARAMS = (
+    "-c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 16 -bf 0 -pix_fmt yuv420p"
+)
 
 
 def _write_all(file, frame) -> None:
@@ -65,7 +70,7 @@ def _write_all(file, frame) -> None:
 
 
 class WriteResult(Enum):
-    """What :meth:`AsyncFrameWriter.write` did with a frame."""
+    """What `AsyncFrameWriter.write` did with a frame."""
 
     WRITTEN = "written"  # queued, with its fills
     REFUSED = "refused"  # not queued: the caller owes it (and its fills) as fills
@@ -76,11 +81,11 @@ class AsyncFrameWriter:
     """Bounded-queue writer; subclasses implement _open_sink/_write_frame/_close_sink.
 
     write() takes ownership of the frame: the caller must not mutate it. Fills
-    keep one video frame per trigger pulse: ``write(frame, fill_before=n)``
+    keep one video frame per trigger pulse: `write(frame, fill_before=n)`
     first repeats the previous frame n times (*frame* itself if none was
-    written), and ``close(fill_after=n)`` appends n repeats. A fill rides on the
+    written), and `close(fill_after=n)` appends n repeats. A fill rides on the
     next queued item, never in a slot of its own, so it cannot be dropped alone
-    and leave the video short. ``profile`` (off for recordings, which then pay
+    and leave the video short. `profile` (off for recordings, which then pay
     nothing) times each sink write and tracks the queue's high-water depth for
     the benchmark's short trials.
     """
@@ -101,19 +106,20 @@ class AsyncFrameWriter:
         # up, and whether they ever outran a queue's worth.
         self._refused_run = 0
         self._overloaded = False
-        # With ``profile``: each frame's sink write time (ns) and the queue's
+        # With `profile`: each frame's sink write time (ns) and the queue's
         # high-water depth.
         self.encode_ns_samples: list[int] = []
         self.max_queue_depth = 0
 
     @property
     def max_queue_size(self) -> int:
-        """How many items the queue holds before :meth:`write` refuses one."""
+        """How many items the queue holds before `write` refuses one."""
         return self._max_queue_size
 
     def _backlog(self) -> int:
         """Frames accepted but not yet handed to the sink, fills included (the
-        queue's item count hides the fills that ride on each item)."""
+        queue's item count hides the fills that ride on each item).
+        """
         return max(0, self._accepted - self.frames_written)
 
     def open(self, filename: str, fps: float, frame_size: tuple[int, int]) -> bool:
@@ -129,7 +135,9 @@ class AsyncFrameWriter:
         try:
             self._open_sink(str(filename), fps, frame_size)
             self._queue = queue.Queue(maxsize=self._max_queue_size)
-            self._thread = threading.Thread(target=self._writer_loop, daemon=True)
+            self._thread = threading.Thread(
+                target=self._writer_loop, args=(self._queue,), daemon=True
+            )
             self._thread.start()
         except BaseException as e:
             # close() skips a writer whose thread never started, so the sink
@@ -144,7 +152,7 @@ class AsyncFrameWriter:
         return True
 
     def write(self, frame, fill_before: int = 0) -> WriteResult:
-        """Enqueue a frame, preceded by ``fill_before`` repeats of the previous one.
+        """Enqueue a frame, preceded by `fill_before` repeats of the previous one.
 
         A frame the queue cannot take is REFUSED (with its fill), until more
         than a queue's worth is refused before the sink catches up (its backlog
@@ -168,24 +176,29 @@ class AsyncFrameWriter:
         return result
 
     def _enqueue(self, frame, fill_before: int) -> bool:
+        frames = self._queue
+        if frames is None:  # not open
+            return False
         if self._profile:
-            self.max_queue_depth = max(self.max_queue_depth, self._queue.qsize())
+            self.max_queue_depth = max(self.max_queue_depth, frames.qsize())
         try:
-            self._queue.put_nowait((frame, fill_before))
+            frames.put_nowait((frame, fill_before))
         except queue.Full:
             return False
         self._accepted += fill_before + 1
         return True
 
     def close(self, fill_after: int = 0) -> None:
-        """Stop accepting frames, drain the queue, append ``fill_after`` repeats
-        of the last frame, and finalize the file."""
-        if self._thread is None:
+        """Stop accepting frames, drain the queue, append `fill_after` repeats
+        of the last frame, and finalize the file.
+        """
+        frames = self._queue
+        if self._thread is None or frames is None:
             return
         self._running = False
         if fill_after > 0:
-            self._queue.put((None, fill_after))  # blocking: a fill is never dropped
-        self._queue.put(_SENTINEL)  # queued frames are written first
+            frames.put((None, fill_after))  # blocking: a fill is never dropped
+        frames.put(_SENTINEL)  # queued frames are written first
         self._thread.join()
         self._thread = None
         self._queue = None
@@ -194,10 +207,10 @@ class AsyncFrameWriter:
         except Exception as e:
             log.error("Failed to finalize video: %s", e)
 
-    def _writer_loop(self) -> None:
+    def _writer_loop(self, frames: queue.Queue) -> None:
         last = None
         while True:
-            item = self._queue.get()
+            item = frames.get()
             if item is _SENTINEL:
                 break
             frame, fill = item
@@ -289,7 +302,13 @@ class FfmpegVideoWriter(AsyncFrameWriter):
         self._stderr_thread = threading.Thread(
             target=self._drain_stderr, args=(self._proc,), daemon=True
         )
-        self._stderr_thread.start()
+        try:
+            self._stderr_thread.start()
+        except BaseException:
+            # No thread drains stderr, which would close it: close it here.
+            if self._proc.stderr is not None:
+                self._proc.stderr.close()
+            raise
 
     def _drain_stderr(self, proc):
         with proc.stderr:
@@ -299,7 +318,10 @@ class FfmpegVideoWriter(AsyncFrameWriter):
                     self._stderr_tail.append(text)
 
     def _write_frame(self, frame):
-        _write_all(self._proc.stdin, frame)
+        proc = self._proc
+        if proc is None or proc.stdin is None:
+            raise BrokenPipeError("the ffmpeg sink is closed")
+        _write_all(proc.stdin, frame)
 
     def _on_sink_failure(self, exc):
         tail = self.error_tail
@@ -314,7 +336,8 @@ class FfmpegVideoWriter(AsyncFrameWriter):
         # Killed, not finalized: a graceful close would leave an empty video.
         proc, self._proc = self._proc, None
         if proc is not None:
-            proc.stdin.close()
+            if proc.stdin is not None:
+                proc.stdin.close()
             proc.kill()
             proc.wait()
 
@@ -324,8 +347,9 @@ class FfmpegVideoWriter(AsyncFrameWriter):
             return
         self._proc = None
         try:
-            proc.stdin.close()
-        except (BrokenPipeError, OSError):
+            if proc.stdin is not None:
+                proc.stdin.close()
+        except BrokenPipeError, OSError:
             pass
         # ffmpeg only flushes its buffers now, but a slow preset can take a
         # while, and an early kill would truncate the file.
@@ -352,15 +376,17 @@ class FfmpegVideoWriter(AsyncFrameWriter):
 
 
 class RawVideoWriter(AsyncFrameWriter):
-    """Dumps raw Mono8 frames for ``octacam process``, which reads their
-    geometry from the recording summary."""
+    """Dumps raw Mono8 frames for `octacam process`, which reads their
+    geometry from the recording summary.
+    """
 
     def __init__(self, max_queue_size: int = 20, *, profile: bool = False):
         super().__init__(max_queue_size, profile=profile)
         self._file = None
 
     def _open_sink(self, filename, fps, frame_size):
-        self._file = open(Path(filename), "wb", buffering=0)
+        # The sink stays open until close().
+        self._file = open(Path(filename), "wb", buffering=0)  # noqa: SIM115
 
     def _write_frame(self, frame):
         _write_all(self._file, frame)
@@ -407,7 +433,8 @@ FORMATS: dict[str, VideoFormat] = {
 
 def cpu_fallback_format(base: VideoFormat) -> VideoFormat:
     """A libx264 VideoFormat for a camera that gets no NVENC session, keeping
-    *base*'s container and ``-pix_fmt`` so a mixed GPU+CPU take is uniform."""
+    *base*'s container and `-pix_fmt` so a mixed GPU+CPU take is uniform.
+    """
     pix_fmt = pix_fmt_of(base.ffmpeg_params) or DEFAULT_PIX_FMT
     return VideoFormat(
         save_method="ffmpeg",
@@ -440,7 +467,7 @@ def resolve_capture_formats(
         find_ffmpeg(require_encoder=encoder)
     except RuntimeError as e:
         warnings.append(
-            f"GPU encoding ({encoder}) unavailable — {e} "
+            f"GPU encoding ({encoder}) unavailable \N{EM DASH} {e} "
             f"Recording all {num_cameras} camera(s) on CPU (libx264) instead."
         )
         return [cpu_fallback_format(base)] * num_cameras, warnings

@@ -1,16 +1,16 @@
 """Frame-rate benchmark: is the target fps achievable, what is the ceiling, and
 which stage limits it.
 
-It drives the real ``CameraBackend.retrieve`` and the real writers, but in loops
+It drives the real `CameraBackend.retrieve` and the real writers, but in loops
 of its own: it deliberately re-implements the grab loop rather than reuse the
-record loop (``CameraTake``), so the record path carries no instrumentation and
+record loop (`CameraTake`), so the record path carries no instrumentation and
 each ceiling is measured in isolation. Its only seams into the record path, the
-read-only ``Camera.backend`` and ``AsyncFrameWriter(profile=...)``, cost a
+read-only `Camera.backend` and `AsyncFrameWriter(profile=...)`, cost a
 recording nothing.
 
-- **Grab ceiling** per camera, all grabbing at once: ``trigger_once()`` +
-  ``retrieve()`` back to back, no writer. Trigger, exposure, transfer and copy
-  are one ``acquire`` stage (the SDK cannot time them apart). The **free-run**
+- **Grab ceiling** per camera, all grabbing at once: `trigger_once()` +
+  `retrieve()` back to back, no writer. Trigger, exposure, transfer and copy
+  are one `acquire` stage (the SDK cannot time them apart). The **free-run**
   ceiling overlaps exposure with readout as a hardware trigger does, so it is a
   hardware-triggered rig's ceiling, measured with no wiring.
 - **Encode ceiling** per camera: every real writer at once, fed synthetic frames
@@ -20,8 +20,8 @@ recording nothing.
   per-stage timing.
 
 The system ceiling is the slowest camera's (one timer triggers them all).
-:func:`_classify` names the bottleneck, and the max search bisects short trials
-toward a *stable* rate (:attr:`TrialOutcome.stable_passed`), confirmed over a
+`_classify` names the bottleneck, and the max search bisects short trials
+toward a *stable* rate (`TrialOutcome.stable_passed`), confirmed over a
 longer window.
 """
 
@@ -113,8 +113,9 @@ PHASE_DONE = "Done"
 class Progress:
     """One progress update in budgeted seconds: this step starts *elapsed_s*
     into a run budgeted at *total_s* and should take *step_s*. A front end eases
-    its bar toward ``elapsed_s + step_s`` in real time and never moves it back;
-    the run ends on a :data:`PHASE_DONE` update at ``total_s``."""
+    its bar toward `elapsed_s + step_s` in real time and never moves it back;
+    the run ends on a `PHASE_DONE` update at `total_s`.
+    """
 
     phase: str
     detail: str
@@ -139,8 +140,9 @@ ProgressCallback = Callable[["Progress"], None]
 
 
 def _finite(value: float | None, ndigits: int = 1) -> float | None:
-    """*value* rounded, or None for None, inf or nan: ``Infinity`` (a missing
-    ceiling) is invalid JSON that breaks the browser's ``JSON.parse``."""
+    """*value* rounded, or None for None, inf or nan: `Infinity` (a missing
+    ceiling) is invalid JSON that breaks the browser's `JSON.parse`.
+    """
     if value is None or not math.isfinite(value):
         return None
     return round(value, ndigits)
@@ -210,16 +212,18 @@ class CameraTrial:
 
 def _slowest(rates: str) -> property:
     """A property: the slowest camera's rate in the *rates* field, or inf when
-    none was measured."""
+    none was measured.
+    """
     return property(lambda self: min(getattr(self, rates).values(), default=math.inf))
 
 
 @dataclass
 class Ceilings:
-    """Isolated per-camera ceilings (fps): ``grab_fps`` software-triggered
-    (exposure and transfer in series), ``freerun_fps`` free-running (overlapped,
-    as under a hardware trigger), and ``grab_solo_fps`` with each camera grabbing
-    alone (≥2 cameras; see :attr:`bus_contended`)."""
+    """Isolated per-camera ceilings (fps): `grab_fps` software-triggered
+    (exposure and transfer in series), `freerun_fps` free-running (overlapped,
+    as under a hardware trigger), and `grab_solo_fps` with each camera grabbing
+    alone (>=2 cameras; see `bus_contended`).
+    """
 
     grab_fps: dict[str, float]
     encode_fps: dict[str, float]
@@ -234,11 +238,14 @@ class Ceilings:
     @property
     def bus_contended(self) -> bool:
         """Whether the cameras throttle each other's acquisition: the slowest
-        concurrent rate is under :data:`CONTENTION_RATIO` of the slowest solo
-        one. False without a solo pass."""
+        concurrent rate is under `CONTENTION_RATIO` of the slowest solo
+        one. False without a solo pass.
+        """
         solo = self.grab_solo_min
-        return bool(self.grab_solo_fps) and math.isfinite(solo) and (
-            self.grab_min < solo * CONTENTION_RATIO
+        return (
+            bool(self.grab_solo_fps)
+            and math.isfinite(solo)
+            and (self.grab_min < solo * CONTENTION_RATIO)
         )
 
     def to_dict(self) -> dict:
@@ -314,9 +321,7 @@ class DiagnosticReport:
             "measured_max_fps": _finite(self.measured_max_fps),
             "max_confirmed": self.max_confirmed,
             "hardware_max_fps": _finite(self.hardware_max_fps),
-            "throughput_mbps": {
-                s: _finite(v) for s, v in self.throughput_mbps.items()
-            },
+            "throughput_mbps": {s: _finite(v) for s, v in self.throughput_mbps.items()},
             "throughput_mbps_total": _finite(self.throughput_mbps_total),
             "freerun_trials": [t.to_dict() for t in self.freerun_trials],
             "system_cpu_percent": _finite(self.system_cpu_percent),
@@ -332,7 +337,7 @@ class DiagnosticReport:
 
 
 def _pct(sorted_vals: list[float], q: float) -> float:
-    """Linear-interpolated ``q``-th percentile of an already-sorted list."""
+    """Linear-interpolated `q`-th percentile of an already-sorted list."""
     if not sorted_vals:
         return 0.0
     if len(sorted_vals) == 1:
@@ -345,7 +350,7 @@ def _pct(sorted_vals: list[float], q: float) -> float:
 
 
 def _stage_timing(name: str, samples_ns: list[int]) -> StageTiming:
-    """Summarize a list of per-frame ns durations into a :class:`StageTiming`."""
+    """Summarize a list of per-frame ns durations into a `StageTiming`."""
     if not samples_ns:
         return StageTiming(name, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
     ms = sorted(s / 1e6 for s in samples_ns)
@@ -381,7 +386,8 @@ def _wait(seconds: float, cancel: threading.Event | None) -> None:
 
 def _baked_transform(camera: Camera, record_form: str) -> DisplayTransform | None:
     """The display transform a recording bakes into *camera*'s frames, if any (as
-    a ``CameraTake`` decides)."""
+    a `CameraTake` decides).
+    """
     if record_form == "display" and not camera.display_transform.is_identity:
         return camera.display_transform
     return None
@@ -389,14 +395,15 @@ def _baked_transform(camera: Camera, record_form: str) -> DisplayTransform | Non
 
 def _frame_size(camera: Camera, record_form: str) -> tuple[int, int]:
     """The (width, height) a recording writes for *camera*: a baked transform's
-    output size (a 90°/270° rotation transposes it), else the sensor's."""
+    output size (a 90 deg/270 deg rotation transposes it), else the sensor's.
+    """
     sensor = (camera.backend.width(), camera.backend.height())
     transform = _baked_transform(camera, record_form)
     return transform.output_size(*sensor) if transform else sensor
 
 
 class _NullWriter(AsyncFrameWriter):
-    """Discards frames: ``--sink null`` measures everything but the encoder."""
+    """Discards frames: `--sink null` measures everything but the encoder."""
 
     def _open_sink(self, filename, fps, frame_size) -> None:
         pass
@@ -411,7 +418,7 @@ class _NullWriter(AsyncFrameWriter):
 def _make_writer(
     video_format: VideoFormat | None, queue_size: int, *, profile: bool
 ) -> AsyncFrameWriter:
-    """A real writer for ``video_format``, or the null sink when it is None."""
+    """A real writer for `video_format`, or the null sink when it is None."""
     if video_format is None:
         return _NullWriter(queue_size, profile=profile)
     return video_format.create_writer(queue_size, profile=profile)
@@ -449,8 +456,9 @@ class _JitterProbe:
 
 
 def _cpu_percent_probe():
-    """This process, primed so its next ``cpu_percent()`` covers the trial; None
-    without psutil."""
+    """This process, primed so its next `cpu_percent()` covers the trial; None
+    without psutil.
+    """
     try:
         import psutil
     except ImportError:
@@ -474,7 +482,8 @@ def _measure_rate(
     """Each camera's delivered fps ({serial: fps}), all fetching back to back on
     their own threads (so bus and GIL contention count). A camera whose *arm* or
     grab raises is left out, for the caller to note: a slowest rate must not
-    silently rise to the rest's."""
+    silently rise to the rest's.
+    """
     results: dict[str, float] = {}
     stop = threading.Event()
 
@@ -540,7 +549,8 @@ def measure_grab_ceiling(
 ) -> dict[str, float]:
     """Max software-triggered acquisition fps per camera ({serial: fps}), all
     grabbing at once with no writer; every frame's array is materialized, as in a
-    recording. A camera that fails to arm is left out."""
+    recording. A camera that fails to arm is left out.
+    """
     return _measure_rate(
         cameras, _arm_software, _fetch_software, duration_s, warmup_s, cancel
     )
@@ -554,7 +564,8 @@ def measure_grab_ceiling_solo(
 ) -> dict[str, float]:
     """Each camera's acquisition ceiling grabbing alone, in turn; against the
     concurrent ceiling it shows transport contention
-    (:attr:`Ceilings.bus_contended`)."""
+    (`Ceilings.bus_contended`).
+    """
     solo: dict[str, float] = {}
     for camera in cameras:
         if _cancelled(cancel):
@@ -566,8 +577,9 @@ def measure_grab_ceiling_solo(
 def _throughput_mbps(
     grab_fps: dict[str, float], sizes: dict[str, tuple[int, int]]
 ) -> tuple[dict[str, float], float]:
-    """Per-camera and total MB/s at the concurrent grab ceiling: frame size × fps
-    at Mono8's 1 byte/pixel, since the SDK cannot time transfer apart."""
+    """Per-camera and total MB/s at the concurrent grab ceiling: frame size x fps
+    at Mono8's 1 byte/pixel, since the SDK cannot time transfer apart.
+    """
     per_cam: dict[str, float] = {}
     for serial, fps in grab_fps.items():
         width, height = sizes.get(serial, (0, 0))
@@ -578,7 +590,8 @@ def _throughput_mbps(
 def _probe_system_load() -> tuple[float | None, float | None]:
     """System-wide CPU% and 1-min load per core, each None when unavailable.
     Called before the benchmark loads the machine, so it measures other
-    processes."""
+    processes.
+    """
     cpu: float | None = None
     try:
         import psutil
@@ -589,7 +602,7 @@ def _probe_system_load() -> tuple[float | None, float | None]:
     load: float | None = None
     try:
         load = os.getloadavg()[0] / (os.cpu_count() or 1)
-    except (OSError, AttributeError):  # getloadavg is Unix-only
+    except OSError, AttributeError:  # getloadavg is Unix-only
         load = None
     return cpu, load
 
@@ -602,7 +615,8 @@ def measure_freerun_ceiling(
 ) -> dict[str, float]:
     """Max free-run fps per camera ({serial: fps}; continuous, untriggered): a
     hardware-triggered rig's acquisition ceiling. A camera that cannot free-run
-    is left out."""
+    is left out.
+    """
     return _measure_rate(
         cameras, _arm_freerun, _fetch_freerun, duration_s, warmup_s, cancel
     )
@@ -619,8 +633,9 @@ def measure_encode_ceiling(
 ) -> dict[str, float]:
     """Max encode fps per camera ({serial: fps}), every camera's writer at once,
     each fed one synthetic frame as fast as it accepts (a full queue yields to
-    the encoder). ``frames_written`` counts only encoded frames, so it gives the
-    drain rate however hard the producer pushes."""
+    the encoder). `frames_written` counts only encoded frames, so it gives the
+    drain rate however hard the producer pushes.
+    """
     results: dict[str, float] = {}
     with tempfile.TemporaryDirectory(prefix="octacam-bench-") as tmp:
         tmpdir = Path(tmp)
@@ -667,8 +682,9 @@ def measure_encode_ceiling(
 @dataclass
 class _CamAccum:
     """One camera's end-to-end trial counters, written by its grab thread.
-    :meth:`mark` snapshots them, so a window counts only what happened between
-    two marks."""
+    `mark` snapshots them, so a window counts only what happened between
+    two marks.
+    """
 
     camera: Camera
     writer: AsyncFrameWriter
@@ -735,7 +751,7 @@ class _CamAccum:
 def _trial_grab(
     accum: _CamAccum, stop: threading.Event, record_form: str, free_run: bool
 ) -> None:
-    """A trial's grab loop: retrieve → transform → write, each stage timed."""
+    """A trial's grab loop: retrieve -> transform -> write, each stage timed."""
     backend = accum.camera.backend
     transform = _baked_transform(accum.camera, record_form)
     retrieve = backend.retrieve_freerun if free_run else backend.retrieve
@@ -793,9 +809,10 @@ class TrialOutcome:
 
     @property
     def stable_passed(self) -> bool:
-        """The max search's bar: :attr:`passed` with headroom, i.e. the tighter
+        """The max search's bar: `passed` with headroom, i.e. the tighter
         drop budget and the queue-saturation guard (inert for the null sink,
-        whose queue never fills)."""
+        whose queue never fills).
+        """
         if not self.passed:
             return False
         guard = self.queue_size * QUEUE_SATURATION_FRACTION
@@ -818,8 +835,8 @@ def run_target_trial(
 ) -> TrialOutcome:
     """Run the instrumented pipeline at *target_fps* for *duration_s*.
 
-    One shared timer triggers every camera; each camera's thread runs retrieve →
-    transform → write into a profiled writer for its entry in *formats* (the null
+    One shared timer triggers every camera; each camera's thread runs retrieve ->
+    transform -> write into a profiled writer for its entry in *formats* (the null
     sink for None). Only the window after the warmup counts. With *free_run* the
     cameras clock themselves and *target_fps* is only the container rate: the
     free-run/external record path, encoder contention included.
@@ -925,7 +942,8 @@ def find_max_fps(
     iterations: int = 4,
 ) -> float:
     """Bisect for the highest fps *probe* passes, from a known-passing *lo* to an
-    upper bound *hi*; never below *lo*."""
+    upper bound *hi*; never below *lo*.
+    """
     best = lo
     if not probe(hi):
         low, high = lo, hi
@@ -946,7 +964,7 @@ def _reconcile_stable_max(
 ) -> tuple[float, bool]:
     """The stable max to report, and whether the confirmation trial held.
 
-    A trial passes at :data:`ACHIEVE_FRACTION` of its target, so the winning
+    A trial passes at `ACHIEVE_FRACTION` of its target, so the winning
     target can exceed the rate delivered, even the acquisition ceiling. Report
     the sustained achieved rate, capped at *ceiling_cap* = min(grab, encode): a
     rate neither stage sustains alone is not stable.
@@ -966,13 +984,13 @@ def _search_stable_max(
     progress: Callable[[str, float, float], None],
     cancel: threading.Event | None,
 ) -> tuple[float, bool | None]:
-    """Bisect short ``trial(fps, seconds)`` runs from *lo* (known stable) to 10%
+    """Bisect short `trial(fps, seconds)` runs from *lo* (known stable) to 10%
     over *cap* (the predicted max) for the highest stable rate, then retest it
     over *confirm_s*: a short probe can miss a queue that builds up over seconds.
 
     Returns the max to report and whether the confirmation held (None when
     cancelled before it ran). *progress* gets (detail, offset, budget) in seconds
-    into the search's budget of ``(1 + FIND_MAX_ITERATIONS)`` probes plus the
+    into the search's budget of `(1 + FIND_MAX_ITERATIONS)` probes plus the
     confirmation.
     """
     probe_slot = WARMUP_S + probe_s
@@ -1006,7 +1024,7 @@ def _classify(
     outcome: TrialOutcome,
     throughput_total: float = 0.0,
 ) -> tuple[bool, str, list[str]]:
-    """Return ``(achievable, bottleneck, recommendations)`` for the target fps."""
+    """Return `(achievable, bottleneck, recommendations)` for the target fps."""
     achievable = outcome.passed
     grab_min = ceilings.grab_min
     encode_min = ceilings.encode_min
@@ -1030,11 +1048,12 @@ def _classify(
         solo_min = ceilings.grab_solo_min
         rec = (
             "Transfer-bound: the cameras need more bus bandwidth than the link "
-            f"provides — each delivers ≈{solo_min:.0f} fps alone but only "
-            f"≈{grab_min:.0f} fps together"
+            f"provides \N{EM DASH} each delivers \N{ALMOST EQUAL TO}{solo_min:.0f} "
+            "fps alone but only "
+            f"\N{ALMOST EQUAL TO}{grab_min:.0f} fps together"
         )
         if throughput_total:
-            rec += f" (≈{throughput_total:.0f} MB/s aggregate)"
+            rec += f" (\N{ALMOST EQUAL TO}{throughput_total:.0f} MB/s aggregate)"
         rec += (
             f". A single USB3 host controller sustains only ~{USB3_BUS_MBPS:.0f} "
             "MB/s across its cameras; distribute the cameras across separate USB "
@@ -1044,37 +1063,46 @@ def _classify(
     elif bottleneck == ACQUISITION:
         rec = (
             "Acquisition-bound: the camera cannot deliver frames fast enough "
-            f"(≈{grab_min:.0f} fps software-trigger ceiling). Shorten the exposure, "
+            f"(\N{ALMOST EQUAL TO}{grab_min:.0f} fps software-trigger ceiling). "
+            "Shorten the exposure, "
             "raise DeviceLinkThroughputLimit, shrink the ROI, or use an external "
             "hardware trigger (which overlaps exposure with transfer)."
         )
         freerun_min = ceilings.freerun_min
         if ceilings.freerun_fps and freerun_min > grab_min * 1.05:
             rec += (
-                f" The measured free-run ceiling is ≈{freerun_min:.0f} fps/cam — an "
+                " The measured free-run ceiling is "
+                f"\N{ALMOST EQUAL TO}{freerun_min:.0f} fps/cam \N{EM DASH} an "
                 "external hardware trigger would reach roughly that, since it "
                 "overlaps exposure with transfer just like free-run does."
             )
         recs.append(rec)
     elif bottleneck == ENCODE:
         recs += [
-            "Encode-bound: the encoder cannot keep up "
-            f"(≈{encode_min:.0f} fps ceiling). Use a faster x264 preset "
-            "(ultrafast), lower the resolution, switch save_method to 'raw' and "
-            "transcode later, or run fewer cameras per host.",
+            (
+                "Encode-bound: the encoder cannot keep up "
+                f"(\N{ALMOST EQUAL TO}{encode_min:.0f} fps ceiling). Use a faster "
+                "x264 preset "
+                "(ultrafast), lower the resolution, switch save_method to 'raw' and "
+                "transcode later, or run fewer cameras per host."
+            ),
         ]
     elif bottleneck == HOST:
         recs += [
-            "Host-bound: each stage can sustain the target alone, but the full "
-            "system falls short under contention (shared USB bus / CPU / GIL). "
-            "Reduce the per-host camera count, lower resolution or fps, or split "
-            "cameras across USB controllers.",
+            (
+                "Host-bound: each stage can sustain the target alone, but the full "
+                "system falls short under contention (shared USB bus / CPU / GIL). "
+                "Reduce the per-host camera count, lower resolution or fps, or split "
+                "cameras across USB controllers."
+            ),
         ]
 
     if outcome.jitter_p99_ms is not None and outcome.jitter_p99_ms > 5.0:
         recs.append(
-            f"Scheduler jitter is high (p99 sleep overshoot {outcome.jitter_p99_ms:.1f} "
-            "ms) — other processes are contending for the CPU; close them or pin "
+            "Scheduler jitter is high (p99 sleep overshoot "
+            f"{outcome.jitter_p99_ms:.1f} "
+            "ms) \N{EM DASH} other processes are contending for the CPU; close them "
+            "or pin "
             "octacam to dedicated cores."
         )
     return achievable, bottleneck, recs
@@ -1086,16 +1114,23 @@ def _load_recommendations(
     """Advice when other processes were already loading the machine."""
     if system_cpu_percent is not None and system_cpu_percent > SYSTEM_CPU_WARN_PERCENT:
         return [
-            f"The machine was already ~{system_cpu_percent:.0f}% CPU-busy "
-            "before the benchmark started — other processes are competing for the "
-            "CPU, which skews these numbers and risks dropped frames in a real "
-            "recording. Close them and re-run."
+            (
+                f"The machine was already ~{system_cpu_percent:.0f}% CPU-busy "
+                "before the benchmark started \N{EM DASH} other processes are "
+                "competing for the "
+                "CPU, which skews these numbers and risks dropped frames in a real "
+                "recording. Close them and re-run."
+            )
         ]
     if load_per_core is not None and load_per_core > LOAD_PER_CORE_WARN:
         return [
-            f"System load is high ({load_per_core:.2f} per core) — other work "
-            "is competing for the CPU, which may skew these numbers and risk dropped "
-            "frames in a real recording. Close other processes and re-run."
+            (
+                f"System load is high ({load_per_core:.2f} per core) \N{EM DASH} "
+                "other work "
+                "is competing for the CPU, which may skew these numbers and risk "
+                "dropped "
+                "frames in a real recording. Close other processes and re-run."
+            )
         ]
     return []
 
@@ -1115,13 +1150,13 @@ def diagnose(
     progress_cb: ProgressCallback | None = None,
     cancel: threading.Event | None = None,
 ) -> DiagnosticReport:
-    """Benchmark an open :class:`CameraSystem` at *target_fps* (default: the
+    """Benchmark an open `CameraSystem` at *target_fps* (default: the
     settings').
 
-    *sink* ``"config"`` writes the settings' real format, ``"null"`` discards
+    *sink* `"config"` writes the settings' real format, `"null"` discards
     frames (acquisition and host only). *find_max* searches for the stable
     software-trigger max; *measure_freerun* adds the free-run ceiling.
-    *progress_cb* gets a :class:`Progress` per step. The caller owns the
+    *progress_cb* gets a `Progress` per step. The caller owns the
     cameras, open with their parameters loaded: this never opens or closes them
     and leaves every backend stopped.
     """
@@ -1159,7 +1194,7 @@ def diagnose(
     run_freerun = measure_freerun
     run_encode = video_format is not None
     run_search = find_max and not external
-    # Solo ceilings tell a transfer-bound rig from a host-bound one (≥2 cameras).
+    # Solo ceilings tell a transfer-bound rig from a host-bound one (>=2 cameras).
     run_solo = len(cameras) >= 2
     solo_warmup = 0.3
     solo_dur = max(1.0, duration_s / 2.0)
@@ -1235,7 +1270,7 @@ def diagnose(
                 "free-run ceiling is the external-trigger-equivalent acquisition rate "
                 "(free-run overlaps exposure with transfer the same way), so the "
                 "hardware max is derived from it. The software max-fps search is "
-                "skipped — the production rate is set by the external source."
+                "skipped \N{EM DASH} the production rate is set by the external source."
             )
         else:
             report.notes.append(
@@ -1262,7 +1297,9 @@ def diagnose(
 
     grab_solo_fps: dict[str, float] = {}
     if run_solo and not _cancelled(cancel):
-        emit(PHASE_ACQUIRE_SOLO, f"({len(cameras)}× {solo_dur:g}s)")
+        emit(
+            PHASE_ACQUIRE_SOLO, f"({len(cameras)}\N{MULTIPLICATION SIGN} {solo_dur:g}s)"
+        )
         grab_solo_fps = measure_grab_ceiling_solo(
             cameras, solo_dur, warmup_s=solo_warmup, cancel=cancel
         )
@@ -1330,9 +1367,7 @@ def diagnose(
         if fr.trials:
             # A shared external trigger cannot outrun the slowest camera's
             # written (not dropped) rate.
-            sustained = min(
-                t.achieved_fps * (1 - t.drop_rate) for t in fr.trials
-            )
+            sustained = min(t.achieved_fps * (1 - t.drop_rate) for t in fr.trials)
             if sustained > 0:
                 report.hardware_max_fps = sustained
 

@@ -94,7 +94,10 @@ def test_shutdown_refused_while_recording(shutdown_client):
 def test_shutdown_process_after_flag(shutdown_client):
     state = shutdown_client.app.state.app_state
     # Explicit true is recorded so cli.gui starts detached processing on exit.
-    assert shutdown_client.post("/api/shutdown", json={"process_after": True}).status_code == 202
+    assert (
+        shutdown_client.post("/api/shutdown", json={"process_after": True}).status_code
+        == 202
+    )
     assert state.process_after is True
     # An empty body (older clients / plain shutdown) leaves it false.
     shutdown_client.post("/api/shutdown")
@@ -111,7 +114,7 @@ def test_state_snapshot_has_recordings_made(client):
 
 def test_static_assets_served_no_cache(client):
     # The GUI's static assets are unversioned, so they are served with
-    # Cache-Control: no-cache and the browser revalidates on every reload —
+    # Cache-Control: no-cache and the browser revalidates on every reload --
     # development always sees up-to-date pages instead of a stale cached copy.
     for path in ("/", "/style.css", "/js/app.js"):
         response = client.get(path)
@@ -151,11 +154,15 @@ def test_deferred_startup_serves_then_fills_in(tmp_path):
     # The GUI serves against a hardware-free placeholder: /api/system reports
     # ready=False + no cameras, and a browser connecting during init gets the
     # not-ready descriptor over the socket, then a ready one once the real system
-    # is attached and broadcast — filling the grid without a reload.
+    # is attached and broadcast -- filling the grid without a reload.
     pending = CameraSystem.pending()
     assert len(pending) == 0
-    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
-    controller = RecordingController(pending, settings, config_dir=tmp_path, ready=False)
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec")
+    )
+    controller = RecordingController(
+        pending, settings, config_dir=tmp_path, ready=False
+    )
     app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
@@ -238,7 +245,9 @@ def test_system_and_settings_endpoints(client):
     assert client.put("/api/settings", json={"record_form": "bogus"}).status_code == 422
     # Preview trigger source + the managed recording source round-trip; bad values 422.
     pv = client.put("/api/settings", json={"preview_trigger_source": "free_running"})
-    assert pv.status_code == 200 and pv.json()["preview_trigger_source"] == "free_running"
+    assert (
+        pv.status_code == 200 and pv.json()["preview_trigger_source"] == "free_running"
+    )
     mg = client.put("/api/settings", json={"trigger_source": "managed"})
     assert mg.status_code == 200 and mg.json()["trigger_source"] == "managed"
     assert (
@@ -251,7 +260,9 @@ def test_system_and_settings_endpoints(client):
     ffmpeg = client.put("/api/settings", json={"ffmpeg_params": "-c:v ffv1"})
     assert ffmpeg.status_code == 200
     assert ffmpeg.json()["ffmpeg_params"] == "-c:v ffv1"
-    assert client.put("/api/settings", json={"ffmpeg_params": 'a "b'}).status_code == 422
+    assert (
+        client.put("/api/settings", json={"ffmpeg_params": 'a "b'}).status_code == 422
+    )
     assert client.put("/api/settings", json={"save_method": "vp9"}).status_code == 422
 
     # The GPU save method + its params/session-limit knobs round-trip; a negative
@@ -295,7 +306,9 @@ def test_system_and_settings_endpoints(client):
     wq = client.put("/api/settings", json={"writer_queue_size": 128})
     assert wq.status_code == 200 and wq.json()["writer_queue_size"] == 128
     assert client.put("/api/settings", json={"writer_queue_size": 0}).status_code == 422
-    assert client.put("/api/settings", json={"writer_queue_size": -1}).status_code == 422
+    assert (
+        client.put("/api/settings", json={"writer_queue_size": -1}).status_code == 422
+    )
     as_bool = client.put("/api/settings", json={"writer_queue_size": True})
     assert as_bool.status_code == 422
 
@@ -391,7 +404,7 @@ def test_process_params_are_live_settings(client):
 
 
 def _wait_for_presence(ws, tries=200):
-    """Return the client count from the next presence message on ``ws``.
+    """Return the client count from the next presence message on `ws`.
 
     The socket also carries preview frames, state, settings and telemetry, so
     skip past those until a presence message arrives.
@@ -456,7 +469,9 @@ def test_websocket_handshake_order(client):
                     break
         else:
             pytest.fail(f"the event backlog was never replayed: {order}")
-    handshake = [t for t in order if t in ("system", "state", "settings", "diagnostics")]
+    handshake = [
+        t for t in order if t in ("system", "state", "settings", "diagnostics")
+    ]
     assert handshake == ["system", "state", "settings", "diagnostics"], order
 
 
@@ -479,8 +494,22 @@ def test_websocket_preview_and_telemetry(client):
 
     assert got_state and got_settings
     assert len(frames) >= 4
-    (version, kind, camera_index, flags, number, ts, fps, dropped, cx, cy, cw, ch,
-     sw, sh) = FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
+    (
+        version,
+        kind,
+        camera_index,
+        flags,
+        _number,
+        _ts,
+        _fps,
+        _dropped,
+        cx,
+        cy,
+        cw,
+        ch,
+        sw,
+        sh,
+    ) = FRAME_HEADER.unpack(frames[0][: FRAME_HEADER.size])
     assert (version, kind) == (2, 1)
     assert camera_index in (0, 1)
     assert flags == 0  # not recording
@@ -502,7 +531,8 @@ def test_websocket_preview_and_telemetry(client):
 
 def test_plugin_contributions_wired_into_app(tmp_path):
     """A loaded plugin's router, status, and WS hooks reach the app, and the
-    plugin gets the controller and a broadcast that reaches the GUI clients."""
+    plugin gets the controller and a broadcast that reaches the GUI clients.
+    """
     from fastapi import APIRouter
 
     from octacam.plugins.base import Plugin, PluginManager
@@ -575,9 +605,9 @@ def test_plugin_contributions_wired_into_app(tmp_path):
                 # jog. Waited for inside the block: leaving it cancels the
                 # endpoint task, which can drop the not-yet-started hook.
                 ws.close()
-                assert wait_until(
-                    lambda: stub.disconnects == [client_id], timeout=5
-                ), stub.disconnects
+                assert wait_until(lambda: stub.disconnects == [client_id], timeout=5), (
+                    stub.disconnects
+                )
     finally:
         controller.close()
 
@@ -603,27 +633,30 @@ def test_plugin_ws_message_exception_does_not_kill_socket(tmp_path):
     controller.start_preview()
     app = create_app(controller, OctacamConfig())
     try:
-        with TestClient(app) as client:
-            with client.websocket_connect("/api/ws") as ws:
-                # A message the plugin blows up on: the socket must survive.
-                ws.send_text(json.dumps({"type": "jog", "n": "not-a-number"}))
-                # The socket is still live: telemetry/frames keep flowing.
-                got_state = False
-                for _ in range(60):
-                    message = ws.receive()
-                    if message.get("text"):
-                        payload = json.loads(message["text"])
-                        got_state |= payload["type"] in ("state", "telemetry")
-                    if got_state:
-                        break
-                assert got_state
+        with (
+            TestClient(app) as client,
+            client.websocket_connect("/api/ws") as ws,
+        ):
+            # A message the plugin blows up on: the socket must survive.
+            ws.send_text(json.dumps({"type": "jog", "n": "not-a-number"}))
+            # The socket is still live: telemetry/frames keep flowing.
+            got_state = False
+            for _ in range(60):
+                message = ws.receive()
+                if message.get("text"):
+                    payload = json.loads(message["text"])
+                    got_state |= payload["type"] in ("state", "telemetry")
+                if got_state:
+                    break
+            assert got_state
     finally:
         controller.close()
 
 
 def test_plugin_web_assets_served_and_advertised(tmp_path):
     """A plugin's co-located JS/CSS are mounted at /plugins/<name>/ (before the
-    SPA catch-all) and advertised in /api/system so app.js can import them."""
+    SPA catch-all) and advertised in /api/system so app.js can import them.
+    """
     from octacam.plugins.base import Plugin, PluginManager
 
     assets = tmp_path / "stub_assets"
@@ -655,7 +688,7 @@ def test_plugin_web_assets_served_and_advertised(tmp_path):
             }
             # The JS is served as a script, NOT the SPA's index.html. A
             # text/html response here would mean the "/" catch-all (html=True)
-            # shadowed the plugin mount — the browser would then refuse to run
+            # shadowed the plugin mount -- the browser would then refuse to run
             # it as a module. This guards the mount ordering in create_app.
             r = client.get("/plugins/stub/stub.js")
             assert r.status_code == 200
@@ -676,7 +709,9 @@ def test_plugin_with_a_missing_web_dir_gets_no_ui_and_a_warning(tmp_path, caplog
         web_dir = tmp_path / "not_built"
 
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
-    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec")
+    )
     controller = RecordingController(
         system, settings, PluginManager([StubWebPlugin()]), config_dir=tmp_path
     )
@@ -718,7 +753,9 @@ def test_recording_cycle_over_rest(client, tmp_path):
     assert len(videos) == 2
     # Per-frame timestamps are opt-in now; by default only the compact summary lands.
     assert not (save_dir / RECORDING_INFO_DIRNAME / "timestamps.npz").exists()
-    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
+    summary = json.loads(
+        (save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text()
+    )
     assert summary["record_form"] == "display"
     assert len(summary["cameras"]) == 2
     assert all(c["frames"] > 0 for c in summary["cameras"])
@@ -753,7 +790,9 @@ def test_recording_with_split_directory(client, tmp_path):
     # Videos land under base/relative, and the summary records the relative part
     # verbatim (what the transfer step mirrors onto the destination).
     assert len(sorted(save_dir.glob("*.mkv"))) == 2
-    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
+    summary = json.loads(
+        (save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text()
+    )
     assert summary["relative_directory"] == "day/001"
 
     # Both halves increment together; the base stays fixed.
@@ -805,7 +844,9 @@ def test_live_transform_is_baked_into_display_recording(client, tmp_path):
     state = _wait_for_take(client)
     assert state is not None and state["state"] == "preview"
 
-    summary = json.loads((save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text())
+    summary = json.loads(
+        (save_dir / RECORDING_INFO_DIRNAME / "recording_summary.json").read_text()
+    )
     cams = {c["serial"]: c for c in summary["cameras"]}
     rotated = cams["0815-0000"]
     plain = cams["0815-0001"]
@@ -848,8 +889,9 @@ def test_recording_stop_and_abort_end_a_running_take(client, tmp_path, route, ab
 
 
 def _next_message(ws, kind: str, timeout: float = 20.0) -> dict:
-    """The next text message of type ``kind`` on ``ws``, skipping everything
-    else. Telemetry arrives twice a second, so the deadline is always checked."""
+    """The next text message of type `kind` on `ws`, skipping everything
+    else. Telemetry arrives twice a second, so the deadline is always checked.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         message = ws.receive()
@@ -870,7 +912,9 @@ def test_a_write_to_every_camera_pushes_one_message_per_camera(client):
             json={"name": "ExposureTime", "value": 2000.0, "scope": "all"},
         )
         assert r.status_code == 200, r.text
-        indices = {_next_message(ws, "camera_features_dirty", 5)["index"] for _ in range(2)}
+        indices = {
+            _next_message(ws, "camera_features_dirty", 5)["index"] for _ in range(2)
+        }
     assert indices == {0, 1}
 
 
@@ -963,7 +1007,7 @@ def test_serial_ports_lists_the_detected_ports_without_opening_any(client, monke
 
 @contextlib.contextmanager
 def _fake_rig_client(tmp_path, serials):
-    """A client for a rig of fake cameras whose config lists ``serials``."""
+    """A client for a rig of fake cameras whose config lists `serials`."""
     system = CameraSystem(serials, backend="fake")
     settings = RecordingSettings(save_dir=str(tmp_path / "rec" / "001"))
     controller = RecordingController(system, settings, config_dir=tmp_path)
@@ -1187,29 +1231,44 @@ def test_camera_features_endpoint(client):
 
 
 def test_camera_feature_write_and_managed_reject(client):
-    r = client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 2500.0})
+    r = client.put(
+        "/api/cameras/0/features", json={"name": "ExposureTime", "value": 2500.0}
+    )
     assert r.status_code == 200, r.text
     by = {f["name"]: f for f in r.json()["updated"][0]["features"]}
     assert abs(by["ExposureTime"]["value"] - 2500.0) < 2.0
 
     # Managed node -> 422; unknown node -> 422; extra field -> 422.
-    assert client.put(
-        "/api/cameras/0/features", json={"name": "PixelFormat", "value": "Mono12"}
-    ).status_code == 422
-    assert client.put(
-        "/api/cameras/0/features", json={"name": "Bogus", "value": 1}
-    ).status_code == 422
-    assert client.put(
-        "/api/cameras/0/features", json={"name": "Gain", "value": 1, "x": 2}
-    ).status_code == 422
-    assert client.put(
-        "/api/cameras/99/features", json={"name": "Gain", "value": 1}
-    ).status_code == 404
+    assert (
+        client.put(
+            "/api/cameras/0/features", json={"name": "PixelFormat", "value": "Mono12"}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/cameras/0/features", json={"name": "Bogus", "value": 1}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/cameras/0/features", json={"name": "Gain", "value": 1, "x": 2}
+        ).status_code
+        == 422
+    )
+    assert (
+        client.put(
+            "/api/cameras/99/features", json={"name": "Gain", "value": 1}
+        ).status_code
+        == 404
+    )
 
 
 def test_camera_feature_scope_all(client):
     r = client.put(
-        "/api/cameras/0/features", json={"name": "ExposureTime", "value": 2000.0, "scope": "all"}
+        "/api/cameras/0/features",
+        json={"name": "ExposureTime", "value": 2000.0, "scope": "all"},
     )
     assert r.status_code == 200, r.text
     assert len(r.json()["updated"]) == 2  # both emulated cameras updated
@@ -1225,9 +1284,12 @@ def test_camera_center_endpoint(client):
     assert by["OffsetX"]["writable"] is False  # octacam owns it while centered
 
     # Bad axis -> 422.
-    assert client.put(
-        "/api/cameras/0/center", json={"axis": "z", "enabled": True}
-    ).status_code == 422
+    assert (
+        client.put(
+            "/api/cameras/0/center", json={"axis": "z", "enabled": True}
+        ).status_code
+        == 422
+    )
     # Turning it back off frees the offset.
     off = client.put("/api/cameras/0/center", json={"axis": "x", "enabled": False})
     off_by = {f["name"]: f for f in off.json()["updated"][0]["features"]}
@@ -1241,9 +1303,10 @@ def test_camera_command_endpoint(client):
     r = client.post("/api/cameras/0/commands", json={"name": commands[0]})
     assert r.status_code == 200, r.text
     # A non-existent command is a clean 422, not a 500.
-    assert client.post(
-        "/api/cameras/0/commands", json={"name": "NotACommand"}
-    ).status_code == 422
+    assert (
+        client.post("/api/cameras/0/commands", json={"name": "NotACommand"}).status_code
+        == 422
+    )
 
 
 def test_camera_feature_reset_prefers_config(client, tmp_path):
@@ -1257,10 +1320,15 @@ def test_camera_feature_reset_prefers_config(client, tmp_path):
     saved = baseline + 500.0
     client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
     client.post("/api/config/save", json={"target": "active", "save_display": False})
-    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
+    client.put(
+        "/api/cameras/0/features",
+        json={"name": "ExposureTime", "value": baseline + 1500.0},
+    )
     r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
     assert r.status_code == 200, r.text
-    restored = {f["name"]: f for f in r.json()["updated"][0]["features"]}["ExposureTime"]["value"]
+    restored = {f["name"]: f for f in r.json()["updated"][0]["features"]}[
+        "ExposureTime"
+    ]["value"]
     assert abs(restored - saved) < 2.0
 
 
@@ -1271,15 +1339,21 @@ def test_camera_feature_reset_reads_only_the_cameras_own_file(client, tmp_path):
     client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
     client.post("/api/config/save", json={"target": "active", "save_display": False})
     (tmp_path / "fictrac_camera_config.pfs").write_bytes(b"ExposureTime\t\xff\xfe\n")
-    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved + 1000.0})
-    r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime", "scope": "all"})
+    client.put(
+        "/api/cameras/0/features",
+        json={"name": "ExposureTime", "value": saved + 1000.0},
+    )
+    r = client.post(
+        "/api/cameras/0/features/reset", json={"name": "ExposureTime", "scope": "all"}
+    )
     assert r.status_code == 200, r.text
     assert abs(_exposure_in(r.json()["updated"][0]["features"]) - saved) < 2.0
 
 
 def _exposure(client) -> float:
     """Camera 0's ExposureTime as the Camera tab reads it (which caches it as
-    the first-seen value)."""
+    the first-seen value).
+    """
     return _exposure_in(client.get("/api/cameras/0/features").json()["features"])
 
 
@@ -1287,9 +1361,14 @@ def _exposure_in(features: list[dict]) -> float:
     return {f["name"]: f["value"] for f in features}["ExposureTime"]
 
 
-def test_camera_feature_reset_without_a_saved_file_restores_the_first_seen_value(client):
+def test_camera_feature_reset_without_a_saved_file_restores_the_first_seen_value(
+    client,
+):
     baseline = _exposure(client)
-    client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0})
+    client.put(
+        "/api/cameras/0/features",
+        json={"name": "ExposureTime", "value": baseline + 1500.0},
+    )
     r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
     assert r.status_code == 200, r.text
     assert abs(_exposure_in(r.json()["updated"][0]["features"]) - baseline) < 2.0
@@ -1297,11 +1376,15 @@ def test_camera_feature_reset_without_a_saved_file_restores_the_first_seen_value
 
 def test_camera_feature_reset_needs_a_config_dir(tmp_path):
     system = CameraSystem(EMULATED_SERIALS, backend="basler")
-    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec")
+    )
     controller = RecordingController(system, settings)
     try:
         with TestClient(create_app(controller, OctacamConfig())) as client:
-            r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+            r = client.post(
+                "/api/cameras/0/features/reset", json={"name": "ExposureTime"}
+            )
             assert r.status_code == 400
             assert r.json()["detail"] == "No config directory is set for this session"
     finally:
@@ -1314,21 +1397,32 @@ def test_camera_feature_reset_reads_the_file_the_camera_loads(tmp_path):
     system = CameraSystem(["FAKE-0"], backend="fake")
     system.cameras += CameraSystem(EMULATED_SERIALS[:1], backend="basler").cameras
     assert system.extensions == ("fake", "pfs")
-    settings = RecordingSettings(fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec"))
+    settings = RecordingSettings(
+        fps=50.0, duration_s=1.0, save_dir=str(tmp_path / "rec")
+    )
     controller = RecordingController(system, settings, config_dir=tmp_path)
     app = create_app(controller, OctacamConfig())
     try:
         with TestClient(app) as client:
             baseline = _exposure(client)
             saved = baseline + 500.0
-            client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": saved})
-            r = client.post("/api/config/save", json={"target": "active", "save_display": False})
-            assert r.json()["cameras_written"] == sorted(["FAKE-0", EMULATED_SERIALS[0]])
+            client.put(
+                "/api/cameras/0/features", json={"name": "ExposureTime", "value": saved}
+            )
+            r = client.post(
+                "/api/config/save", json={"target": "active", "save_display": False}
+            )
+            assert r.json()["cameras_written"] == sorted(
+                ["FAKE-0", EMULATED_SERIALS[0]]
+            )
             (tmp_path / "FAKE-0.pfs").write_text(f"ExposureTime\t{baseline + 3000.0}\n")
             client.put(
-                "/api/cameras/0/features", json={"name": "ExposureTime", "value": baseline + 1500.0}
+                "/api/cameras/0/features",
+                json={"name": "ExposureTime", "value": baseline + 1500.0},
             )
-            r = client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"})
+            r = client.post(
+                "/api/cameras/0/features/reset", json={"name": "ExposureTime"}
+            )
             assert r.status_code == 200, r.text
             assert abs(_exposure_in(r.json()["updated"][0]["features"]) - saved) < 2.0
     finally:
@@ -1341,7 +1435,10 @@ def test_camera_features_locked_while_recording(client):
     assert started.status_code == 202, started.text
     try:
         for call in (
-            client.put("/api/cameras/0/features", json={"name": "ExposureTime", "value": 3000.0}),
+            client.put(
+                "/api/cameras/0/features",
+                json={"name": "ExposureTime", "value": 3000.0},
+            ),
             client.put("/api/cameras/0/center", json={"axis": "x", "enabled": True}),
             client.post("/api/cameras/0/features/reset", json={"name": "ExposureTime"}),
         ):
@@ -1471,16 +1568,18 @@ def test_config_save_adopts_the_written_config_even_if_applying_it_fails(
     monkeypatch.setattr(controller.camera_system, "apply_display_config", busy)
     state = app.state.app_state
     try:
-        with TestClient(app) as client:
-            with pytest.raises(RuntimeError, match="camera busy"):  # an unmapped 500
-                client.post(
-                    "/api/config/save",
-                    json={
-                        "target": "active",
-                        "save_sensor": False,
-                        "cameras": [{"serial": EMULATED_SERIALS[0], "name": "left"}],
-                    },
-                )
+        with (
+            TestClient(app) as client,
+            pytest.raises(RuntimeError, match="camera busy"),  # an unmapped 500
+        ):
+            client.post(
+                "/api/config/save",
+                json={
+                    "target": "active",
+                    "save_sensor": False,
+                    "cameras": [{"serial": EMULATED_SERIALS[0], "name": "left"}],
+                },
+            )
         assert 'name = "left"' in (active / "octacam_config.toml").read_text()
         assert state.raw_config["cameras"][0]["name"] == "left"
         assert [c.name for c in state.config.cameras] == ["left"]
@@ -1497,7 +1596,8 @@ def test_config_saved_as_new_is_written_but_never_adopted(tmp_path):
     try:
         with TestClient(app) as client:
             r = client.post(
-                "/api/config/save", json={"target": "new", "name": "other", "cameras": cams}
+                "/api/config/save",
+                json={"target": "new", "name": "other", "cameras": cams},
             )
             assert r.status_code == 200, r.text
             other = tmp_path / "rigs" / "other"
@@ -1507,7 +1607,9 @@ def test_config_saved_as_new_is_written_but_never_adopted(tmp_path):
             assert state.raw_config is raw and state.config is config
             for camera in client.get("/api/system").json()["cameras"]:
                 assert camera["transform"]["rotation_deg"] == 0.0
-            assert all(c.display_transform.is_identity for c in controller.camera_system)
+            assert all(
+                c.display_transform.is_identity for c in controller.camera_system
+            )
     finally:
         controller.close()
 
@@ -1649,7 +1751,8 @@ def test_sender_skips_send_once_peer_disconnected():
 def test_client_is_ready_for_tracks_unsent_frames():
     """is_ready_for gates preview encoding on the client having drained the
     previous frame, so a backed-up client stops the rig re-encoding previews
-    it can't keep up with."""
+    it can't keep up with.
+    """
     from starlette.websockets import WebSocketState
 
     from octacam.web.hub import Client
@@ -1676,7 +1779,8 @@ def test_client_is_ready_for_tracks_unsent_frames():
 def test_preview_factor_policy():
     """Adaptive decimation: a client that sends nothing is unchanged; a normal
     tile may only go coarser than the 640 baseline; a focused tile may go
-    finer, bounded to a mid resolution while recording."""
+    finer, bounded to a mid resolution while recording.
+    """
     from octacam.web.preview import DEFAULT_VIEW, ViewSpec, _preview_factor
 
     L = 2048  # sensor long edge; baseline ceil(2048/640) = 4
@@ -1711,8 +1815,12 @@ def test_parse_views_is_tolerant():
         {
             "type": "view",
             "cameras": {
-                "0": {"want": True, "need": 512, "full": True,
-                      "crop": {"x": 10, "y": 20, "w": 300, "h": 400}},
+                "0": {
+                    "want": True,
+                    "need": 512,
+                    "full": True,
+                    "crop": {"x": 10, "y": 20, "w": 300, "h": 400},
+                },
                 "1": {"want": False},
                 "2": {"need": -5},  # invalid need -> treated as baseline (None)
                 "4": {"crop": {"x": 0, "y": 0, "w": 0, "h": 5}},  # bad crop -> None
@@ -1773,7 +1881,8 @@ def test_hub_publish_forwards_the_key_from_another_thread():
 def test_cap_variants_bounds_encode_count():
     """Beyond the per-camera cap, the priciest extra variants are demoted to the
     shared full-frame baseline (never cross-merged), so encode count stays
-    bounded and no client is dropped."""
+    bounded and no client is dropped.
+    """
     from octacam.web.preview import (
         MAX_PREVIEW_VARIANTS_PER_CAMERA,
         PREVIEW_MAX_DIM,
@@ -1783,11 +1892,11 @@ def test_cap_variants_bounds_encode_count():
     W = H = 2048
     baseline_f = math.ceil(W / PREVIEW_MAX_DIM)  # 4
     baseline_key = ((0, 0, W, H), baseline_f)
-    # Six distinct (crop, factor) variants — more than the cap of 4.
+    # Six distinct (crop, factor) variants -- more than the cap of 4.
     groups = {
         baseline_key: ["a"],
         ((0, 0, 400, 400), 1): ["b"],
-        ((0, 0, 2048, 2048), 1): ["c"],  # full res — priciest, must demote
+        ((0, 0, 2048, 2048), 1): ["c"],  # full res -- priciest, must demote
         ((0, 0, 1600, 1600), 1): ["d"],
         ((100, 100, 1200, 1200), 1): ["e"],
         ((0, 0, 800, 800), 1): ["f"],
@@ -1805,7 +1914,8 @@ def test_cap_variants_bounds_encode_count():
 def test_variants_groups_only_ready_wanting_clients_capped_per_camera():
     """The preview loop's grouping: a client with a frame still pending, or one
     that does not want the camera, costs no encode; however many distinct views
-    the ready ones ask for, one camera encodes at most the cap."""
+    the ready ones ask for, one camera encodes at most the cap.
+    """
     from starlette.websockets import WebSocketState
 
     from octacam.web.hub import Client
@@ -1837,7 +1947,8 @@ def test_variants_groups_only_ready_wanting_clients_capped_per_camera():
 def test_view_message_selects_resolution_and_pauses(client):
     """A `view` message maximizes one camera to full resolution and pauses the
     other: the server sends full-res frames for the focused camera and stops
-    sending the paused one."""
+    sending the paused one.
+    """
     import cv2
 
     cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
@@ -1882,7 +1993,8 @@ def test_view_message_selects_resolution_and_pauses(client):
 
 def test_view_message_server_side_crop(client):
     """A `view` message with a crop makes the server send only that sub-rectangle
-    (reported in the frame header) rather than the whole sensor."""
+    (reported in the frame header) rather than the whole sensor.
+    """
     import cv2
 
     cams = {c["index"]: c for c in client.get("/api/system").json()["cameras"]}
@@ -1965,7 +2077,7 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
     """_encode_camera takes everything it needs by value.
 
     It runs on an executor thread (one call per camera per tick), so it must
-    touch no shared state and no camera object — that is what lets the cameras
+    touch no shared state and no camera object -- that is what lets the cameras
     encode concurrently while cv2 has the GIL released.
     """
     from octacam.web.preview import FRAME_VERSION, EncodeJob, _encode_camera
@@ -1976,8 +2088,14 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
         ((0, 0, 32, 32), 1): ["client-b"],  # a distinct crop -> its own encode
     }
     job = EncodeJob(
-        camera=1, frame=frame, groups=groups, number=7, timestamp_ns=123456789,
-        fps=42.5, dropped=3, recording=True,
+        camera=1,
+        frame=frame,
+        groups=groups,
+        number=7,
+        timestamp_ns=123456789,
+        fps=42.5,
+        dropped=3,
+        recording=True,
     )
     messages = _encode_camera(job)
 
@@ -1987,7 +2105,7 @@ def test_encode_camera_is_pure_and_shares_one_header_per_camera():
         version, kind, cam, flags, count, ts, fps, dropped = fields[:8]
         assert (version, kind, cam, flags) == (FRAME_VERSION, 1, 1, 1)
         # The per-camera telemetry is shared verbatim across that camera's
-        # variants — computed once on the event loop, not re-read per variant.
+        # variants -- computed once on the event loop, not re-read per variant.
         assert (count, ts, dropped) == (7, 123456789, 3)
         assert abs(fps - 42.5) < 1e-3
         assert group and group[0] in ("client-a", "client-b")
@@ -2007,8 +2125,14 @@ def test_encode_camera_clamps_each_crop_to_the_popped_frame():
     frame = np.zeros((64, 64), np.uint8)
     groups = {((0, 0, 128, 128), 1): ["whole"], ((48, 40, 32, 32), 1): ["corner"]}
     job = EncodeJob(
-        camera=0, frame=frame, groups=groups, number=1, timestamp_ns=0,
-        fps=0.0, dropped=0, recording=False,
+        camera=0,
+        frame=frame,
+        groups=groups,
+        number=1,
+        timestamp_ns=0,
+        fps=0.0,
+        dropped=0,
+        recording=False,
     )
     encoded = {}
     for message, (name,) in _encode_camera(job):
@@ -2034,7 +2158,9 @@ def test_preview_frames_flag_a_recording(client):
             while time.monotonic() < deadline and not flags & 1:
                 message = ws.receive()
                 if message.get("bytes"):
-                    flags = FRAME_HEADER.unpack(message["bytes"][: FRAME_HEADER.size])[3]
+                    flags = FRAME_HEADER.unpack(message["bytes"][: FRAME_HEADER.size])[
+                        3
+                    ]
         assert flags & 1, "no preview frame carried the recording flag"
     finally:
         client.controller.stop_recording(abort=True)
@@ -2046,7 +2172,7 @@ def test_preview_tick_encodes_cameras_concurrently(client, monkeypatch):
     cv2.imencode releases the GIL, so per-camera dispatch makes a tick cost the
     slowest single camera instead of the sum. Re-serializing this (a single
     run_in_executor over all cameras) silently reintroduces a cost that grows
-    linearly with the rig size — at 2048x2048 it overruns the 33 ms tick outright.
+    linearly with the rig size -- at 2048x2048 it overruns the 33 ms tick outright.
     The encodes here are padded with a sleep so the overlap is observable:
     serialized, peak concurrency can never exceed 1.
     """
@@ -2081,4 +2207,3 @@ def test_preview_tick_encodes_cameras_concurrently(client, monkeypatch):
 
     assert seen_cameras == {0, 1}, seen_cameras
     assert peak == 2, f"cameras were encoded serially (peak concurrency {peak})"
-

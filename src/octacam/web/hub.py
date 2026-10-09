@@ -21,7 +21,8 @@ EVENT_BACKLOG_REPLAY = 50
 
 class Client:
     """One WebSocket's send state. Frames and texts are newest-only (a slow client
-    gets fewer updates, never a backlog); events queue."""
+    gets fewer updates, never a backlog); events queue.
+    """
 
     _next_id = itertools.count(1)
 
@@ -37,7 +38,7 @@ class Client:
         self.views: dict[int, ViewSpec] = {}
 
     def queue(self, type: str, text: str, key: Hashable = None) -> None:
-        """Keep the newest message per ``(type, key)``; every event queues (a log)."""
+        """Keep the newest message per `(type, key)`; every event queues (a log)."""
         if type == "event":
             self.events.append(text)
         else:
@@ -50,7 +51,8 @@ class Client:
 
     def is_ready_for(self, camera_index: int) -> bool:
         """True when no frame for this camera is pending; the preview loop encodes
-        only for ready clients, so a stalled client costs no CPU."""
+        only for ready clients, so a stalled client costs no CPU.
+        """
         return camera_index not in self.frames
 
     async def sender(self) -> None:
@@ -77,22 +79,23 @@ def to_json(type: str, payload: dict) -> str:
 
 
 class Hub:
-    """The connected clients. ``loop`` is the server's event loop, set by the
-    app's lifespan; until then nothing is published."""
+    """The connected clients. `loop` is the server's event loop, set by the
+    app's lifespan; until then nothing is published.
+    """
 
     def __init__(self) -> None:
         self.clients: set[Client] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
 
     def publish(self, type: str, payload: dict, key: Hashable = None) -> None:
-        """Queue a message for every client, from any thread (:meth:`Client.queue`)."""
+        """Queue a message for every client, from any thread (`Client.queue`)."""
         loop = self.loop
         if loop is None or loop.is_closed() or not self.clients:
             return
         loop.call_soon_threadsafe(self._queue, type, to_json(type, payload), key)
 
     def broadcast(self, type: str, payload: dict) -> None:
-        """:meth:`publish` from the event-loop thread, queued at once."""
+        """`publish` from the event-loop thread, queued at once."""
         self._queue(type, to_json(type, payload), None)
 
     def _queue(self, type: str, text: str, key: Hashable) -> None:
@@ -101,7 +104,8 @@ class Hub:
 
     def connect(self, client: Client) -> None:
         """Add a client and tell every one how many are connected (any of them can
-        drive the rig). Event-loop thread only, like :meth:`disconnect`."""
+        drive the rig). Event-loop thread only, like `disconnect`.
+        """
         self.clients.add(client)
         self.broadcast("presence", {"clients": len(self.clients)})
 

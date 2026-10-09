@@ -1,8 +1,8 @@
-"""FLIR / Teledyne Spinnaker backend: one :class:`FlirBackend` over a
-:class:`FlirBinding` of the SDK, either PySpin (here, the ``flir`` tier) or the
-C API over ctypes (:mod:`octacam.cameras.spinnaker_c`, the ``spinnaker`` tier).
+"""FLIR / Teledyne Spinnaker backend: one `FlirBackend` over a
+`FlirBinding` of the SDK, either PySpin (here, the `flir` tier) or the
+C API over ctypes (`octacam.cameras.spinnaker_c`, the `spinnaker` tier).
 
-Both share the ``.txt`` parameter files. Acquisition is Continuous, with the
+Both share the `.txt` parameter files. Acquisition is Continuous, with the
 stream's NewestOnly buffering for preview and OldestFirst for recording.
 """
 
@@ -45,9 +45,10 @@ INCOMPLETE_REPORT_INTERVAL_S = 10.0
 
 
 class IncompleteLog:
-    """A camera's discarded incomplete images: each is counted (``total``, for
+    """A camera's discarded incomplete images: each is counted (`total`, for
     the stream statistics) and a grab's are logged rate-limited, as warnings
-    only in a record grab."""
+    only in a record grab.
+    """
 
     def __init__(self, serial: str):
         self._serial = serial
@@ -75,21 +76,24 @@ class IncompleteLog:
                 level,
                 "Camera %s delivered an incomplete image; discarded (more in this "
                 "grab are totaled at most every %g s)",
-                self._serial, INCOMPLETE_REPORT_INTERVAL_S,
+                self._serial,
+                INCOMPLETE_REPORT_INTERVAL_S,
             )
         else:
             log.log(
                 level,
                 "Camera %s: %d incomplete images discarded in this grab (%d since "
                 "the last report)",
-                self._serial, self._grab, self._grab - self._logged,
+                self._serial,
+                self._grab,
+                self._grab - self._logged,
             )
         self._logged = self._grab
         self._logged_at = now
 
 
 def _quietly(fn: Callable[..., Any], *args: Any) -> None:
-    """``fn(*args)``, any failure ignored: a release on the way out."""
+    """`fn(*args)`, any failure ignored: a release on the way out."""
     try:
         fn(*args)
     except Exception:
@@ -98,12 +102,12 @@ def _quietly(fn: Callable[..., Any], *args: Any) -> None:
 
 class FlirBinding(GenApi):
     """One binding of the Spinnaker SDK: GenApi node access plus the System,
-    camera and image calls :class:`FlirBackend` makes. A failed call raises
-    :class:`BackendError`; the ``is_*`` and image queries never raise.
+    camera and image calls `FlirBackend` makes. A failed call raises
+    `BackendError`; the `is_*` and image queries never raise.
 
-    It holds the System from :meth:`enumerate` until :meth:`teardown`, and the
+    It holds the System from `enumerate` until `teardown`, and the
     camera handles it handed out until each is released: the System released
-    with one outstanding aborts the process (a libusb ``usbi_mutex_destroy``
+    with one outstanding aborts the process (a libusb `usbi_mutex_destroy`
     assertion, exit 134).
     """
 
@@ -160,7 +164,7 @@ class FlirBinding(GenApi):
     # -------------------------------------------------------------- images
     @abstractmethod
     def next_image(self, cam: Any, timeout_ms: int) -> Any:
-        """The next image within ``timeout_ms``, or None; it must be released."""
+        """The next image within `timeout_ms`, or None; it must be released."""
 
     @abstractmethod
     def image_incomplete(self, image: Any) -> bool:
@@ -173,7 +177,8 @@ class FlirBinding(GenApi):
     @abstractmethod
     def image_array(self, image: Any) -> np.ndarray:
         """An owned 2-D uint8 copy, safe after release; BackendError for a
-        frame that is not Mono8 (a Mono16 one has the same shape)."""
+        frame that is not Mono8 (a Mono16 one has the same shape).
+        """
 
     @abstractmethod
     def image_release(self, image: Any) -> None: ...
@@ -182,22 +187,31 @@ class FlirBinding(GenApi):
     def serial(self, cam: Any) -> str:
         """DeviceSerialNumber from the TL device node map, else the device id."""
         try:
-            serial = self.get(self.tl_device_nodemap(cam), "DeviceSerialNumber", "string")
+            serial = self.get(
+                self.tl_device_nodemap(cam), "DeviceSerialNumber", "string"
+            )
         except BackendError:
             serial = None
         return serial or self.device_id(cam)
 
     def model(self, cam: Any) -> str | None:
         """DeviceModelName, readable without Init, so doctor can label a camera
-        in a live session."""
+        in a live session.
+        """
         try:
-            return self.get(self.tl_device_nodemap(cam), "DeviceModelName", "string") or None
+            return (
+                self.get(self.tl_device_nodemap(cam), "DeviceModelName", "string")
+                or None
+            )
         except BackendError:
             return None
 
-    def enumerate(self, requested_serials: list[str] | None = None) -> list[tuple[str, Any]]:
-        """``[(serial, camera)]`` in :func:`select_serials` order, holding the
-        System until :meth:`teardown`; handles not handed out are released."""
+    def enumerate(
+        self, requested_serials: list[str] | None = None
+    ) -> list[tuple[str, Any]]:
+        """`[(serial, camera)]` in `select_serials` order, holding the
+        System until `teardown`; handles not handed out are released.
+        """
         # Release a previous enumeration's System (doctor enumerates twice):
         # released late, at exit, it aborts the process.
         if self._system is not None or self._cam_list is not None:
@@ -228,7 +242,8 @@ class FlirBinding(GenApi):
     def teardown(self) -> None:
         """Release every handle no close released, then the camera list and the
         System, last (released earlier, Spinnaker reports cameras in use).
-        Idempotent."""
+        Idempotent.
+        """
         for cam in list(self._outstanding.values()):
             _quietly(self._release, cam)
         self._outstanding.clear()
@@ -244,10 +259,8 @@ class FlirBinding(GenApi):
             self._system = None
 
 
-class FlirBackend(NodeMapBackend):
+class FlirBackend(NodeMapBackend[FlirBinding]):
     """One FLIR camera, driven through either Spinnaker binding."""
-
-    _api: FlirBinding
 
     def __init__(self, binding: FlirBinding, cam: Any):
         super().__init__(binding.serial(cam), binding)
@@ -277,7 +290,7 @@ class FlirBackend(NodeMapBackend):
         """Best-effort: raise DeviceLinkThroughputLimit to its max, once at open.
 
         FLIR ships it capped: on the GS3, 350.6 of 384.4 MB/s, an ~84 vs ~92 fps
-        transfer ceiling at 2048² Mono8 (measured ~82 -> ~90 fps at 100 µs).
+        transfer ceiling at 2048^2 Mono8 (measured ~82 -> ~90 fps at 100 us).
         """
         api = self._api
         node = api.node(self._nodemap, "DeviceLinkThroughputLimit")
@@ -290,12 +303,15 @@ class FlirBackend(NodeMapBackend):
             api.write(node, "int", int(top))
             log.debug(
                 "Camera %s: DeviceLinkThroughputLimit %d -> %d (max)",
-                self._serial, value, top,
+                self._serial,
+                value,
+                top,
             )
         except BackendError as e:
             log.debug(
                 "Could not raise DeviceLinkThroughputLimit on camera %s: %s",
-                self._serial, e,
+                self._serial,
+                e,
             )
 
     def close(self) -> None:
@@ -324,7 +340,8 @@ class FlirBackend(NodeMapBackend):
 
     def stream_statistics(self) -> dict[str, int]:
         """Spinnaker's transport counters (see STREAM_STATISTICS) plus the
-        incomplete images this backend discarded."""
+        incomplete images this backend discarded.
+        """
         out = {"IncompleteImagesDiscarded": self._incomplete.total}
         if self._stream_nodemap is not None:
             for name in STREAM_STATISTICS:
@@ -341,12 +358,14 @@ class FlirBackend(NodeMapBackend):
             log.debug("Could not set %s on camera %s: %s", name, self._serial, e)
 
     def _set_stream_buffers(self, buffers: int) -> None:
-        """Best-effort: a manual stream buffer count of ``buffers`` (≤ the max)."""
+        """Best-effort: a manual stream buffer count of `buffers` (<= the max)."""
         self._stream_set("StreamBufferCountMode", "enum", "Manual")
         node = self._api.node(self._stream_nodemap, "StreamBufferCountManual")
         top = None if node is None else self._api.bounds(node, "int")[1]
         self._stream_set(
-            "StreamBufferCountManual", "int", buffers if top is None else min(buffers, int(top))
+            "StreamBufferCountManual",
+            "int",
+            buffers if top is None else min(buffers, int(top)),
         )
 
     def _begin_acquisition(self, buffer_mode: str, buffers: int | None = None) -> None:
@@ -369,7 +388,10 @@ class FlirBackend(NodeMapBackend):
                         "(%s); retrying with %d. The pool shares the kernel's USB "
                         "memory with the other cameras: raise usbcore.usbfs_memory_mb "
                         "to keep the full pool, which absorbs longer host stalls.",
-                        self._serial, buffers, e, buffers // 2,
+                        self._serial,
+                        buffers,
+                        e,
+                        buffers // 2,
                     )
                     buffers //= 2
                     continue
@@ -437,7 +459,7 @@ class FlirBackend(NodeMapBackend):
             api.image_release(image)  # every image, or the SDK runs out of buffers
 
 
-# --- the PySpin binding (the ``flir`` tier) --------------------------------
+# --- the PySpin binding (the `flir` tier) --------------------------------
 
 PySpin: Any = None  # imported by _spin() on first use
 
@@ -451,7 +473,8 @@ def _spin() -> Any:
         except ImportError as e:
             raise BackendUnavailable(
                 "flir",
-                "PySpin (the Spinnaker SDK's Python binding) isn't importable — not "
+                "PySpin (the Spinnaker SDK's Python binding) isn't importable "
+                "\N{EM DASH} not "
                 "on PyPI and easily pruned by `uv sync`; reinstall the PySpin wheel "
                 "to restore this tier. FLIR cameras still work via the ctypes "
                 "`spinnaker` tier when libSpinnaker_C.so is present.",
@@ -461,7 +484,7 @@ def _spin() -> Any:
 
 
 def _safe(fn: Callable[[], Any]) -> Any:
-    """``fn()``, or None on any failure (a best-effort read)."""
+    """`fn()`, or None on any failure (a best-effort read)."""
     try:
         return fn()
     except Exception:
@@ -469,7 +492,7 @@ def _safe(fn: Callable[[], Any]) -> Any:
 
 
 def _sdk(fn: Callable[..., Any], *args: Any) -> Any:
-    """``fn(*args)``, a SpinnakerException raised as BackendError."""
+    """`fn(*args)`, a SpinnakerException raised as BackendError."""
     spin = _spin()
     try:
         return fn(*args)
@@ -479,8 +502,9 @@ def _sdk(fn: Callable[..., Any], *args: Any) -> Any:
 
 class PySpinBinding(FlirBinding):
     """The Spinnaker SDK through PySpin. Nodes are untyped INodes, cast to their
-    interface (``CIntegerPtr``...) per call. A CameraPtr is released when its
-    last reference drops, so ``_release`` has nothing to call."""
+    interface (`CIntegerPtr`...) per call. A CameraPtr is released when its
+    last reference drops, so `_release` has nothing to call.
+    """
 
     tier = "flir"
 
@@ -491,7 +515,9 @@ class PySpinBinding(FlirBinding):
     def children(self, category: Any) -> list[Any]:
         spin = _spin()
         nodes = _safe(lambda: spin.CCategoryPtr(category).GetFeatures()) or []
-        return [n for n in nodes if _safe(lambda n=n: spin.IsAvailable(n) and n.IsFeature())]
+        return [
+            n for n in nodes if _safe(lambda n=n: spin.IsAvailable(n) and n.IsFeature())
+        ]
 
     def kind(self, node: Any) -> str | None:
         spin = _spin()
@@ -513,7 +539,11 @@ class PySpinBinding(FlirBinding):
         return _safe(lambda: node.GetDisplayName())
 
     def tooltip(self, node: Any) -> str | None:
-        return _safe(lambda: node.GetToolTip()) or _safe(lambda: node.GetDescription()) or None
+        return (
+            _safe(lambda: node.GetToolTip())
+            or _safe(lambda: node.GetDescription())
+            or None
+        )
 
     def visibility(self, node: Any) -> str:
         spin = _spin()
@@ -572,8 +602,14 @@ class PySpinBinding(FlirBinding):
         typed = self._typed(node, kind)
         if kind == "enum":
             entry = _sdk(typed.GetEntryByName, value)
-            if entry is None or not spin.IsAvailable(entry) or not spin.IsReadable(entry):
-                raise BackendError(f"enumeration {self.name(node)} has no entry {value!r}")
+            if (
+                entry is None
+                or not spin.IsAvailable(entry)
+                or not spin.IsReadable(entry)
+            ):
+                raise BackendError(
+                    f"enumeration {self.name(node)} has no entry {value!r}"
+                )
             _sdk(typed.SetIntValue, entry.GetValue())
         else:
             cast = {"int": int, "float": float, "bool": bool, "string": str}[kind]
@@ -664,7 +700,7 @@ def ensure_available() -> None:
 
 
 def teardown() -> None:
-    """Release the PySpin session (:meth:`FlirBinding.teardown`)."""
+    """Release the PySpin session (`FlirBinding.teardown`)."""
     _binding.teardown()
 
 

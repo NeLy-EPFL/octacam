@@ -13,10 +13,12 @@ By default it binds to `http://127.0.0.1:8765` and opens your default browser.
 | Option | Purpose |
 | --- | --- |
 | `--host` | Bind address (default `127.0.0.1`). Keep the loopback default and reach it remotely over SSH — see below. |
-| `--port` | Port to bind (default `8765`). Change it if it clashes with other software. |
+| `--port` | Port to serve on. Left out, `8765`, or the next free port when another program holds it (the log says which); a port given is that port or an error. |
 | `--no-browser` | Don't open a browser automatically. |
 | `--plugin <name>` | Enable a [plugin](plugins.md) for this launch (repeatable). |
 | `--no-plugins` | Disable all plugins for this launch. |
+| `--set KEY=VALUE` | Override any config key for this launch by its dotted path (`--set record.fps=200`); repeatable. |
+| `-v`, `--verbose` | Debug messages, and a traceback on errors. |
 
 If the config directory is omitted it defaults to the current directory (`.`).
 

@@ -1,7 +1,8 @@
 """The GUI's one WebSocket: the connect handshake, incoming view and plugin
 messages, and the telemetry it streams. One socket carries everything (preview
-JPEGs, JSON, plugin messages), so the GUI works through a plain ``ssh -L``
-forward and stays under the browser's per-host connection limit."""
+JPEGs, JSON, plugin messages), so the GUI works through a plain `ssh -L`
+forward and stays under the browser's per-host connection limit.
+"""
 
 import asyncio
 import contextlib

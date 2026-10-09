@@ -1,6 +1,5 @@
 """Camera sensor-parameter read/set/save tests (pure-unit + emulator)."""
 
-
 import pytest
 
 from octacam.cameras import CameraSystem
@@ -199,7 +198,7 @@ def test_offset_editable_and_written_via_grab_cycle(previewing_system):
     cam.set_feature("Width", 512)
     by = {f["name"]: f for f in cam.list_features()}
     assert by["OffsetX"]["writable"] is True
-    # A write cycles the grab (like Width/Height), lands, and preview resumes —
+    # A write cycles the grab (like Width/Height), lands, and preview resumes --
     # a plain mid-grab write would be rejected by the SDK.
     cam.set_feature("OffsetX", 16)
     assert cam.backend.is_grabbing()

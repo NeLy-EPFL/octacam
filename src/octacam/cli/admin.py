@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 
-from octacam.cli._common import stderr_console
+from octacam.cli._common import Verbose, command, stderr_console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -25,15 +25,19 @@ _JobArg = Annotated[
 ]
 
 
-def jobs_list() -> None:
+@command
+def jobs_list(verbose: Verbose = False) -> None:
     """List detached processing jobs and their progress."""
     from octacam import process_jobs
 
     process_jobs.render_table(process_jobs.list_jobs())
 
 
-def jobs_attach(job_id: _JobArg = None) -> None:
-    """Follow a detached job's live log + progress (Ctrl-C detaches, does not cancel)."""
+@command
+def jobs_attach(job_id: _JobArg = None, verbose: Verbose = False) -> None:
+    """Follow a detached job's live log + progress (Ctrl-C detaches, does not
+    cancel).
+    """
     from octacam import process_jobs
 
     job = process_jobs.resolve_job(job_id)
@@ -45,29 +49,35 @@ def jobs_attach(job_id: _JobArg = None) -> None:
 def _control_live_job(
     job_id: str | None,
     verb: str,
-    action: "Callable[[JobStatus], bool]",
+    action: Callable[[JobStatus], bool],
     done: str,
     hint: str = "",
 ) -> None:
-    """Apply ``action`` to a live job (the latest when no id is given); exit on failure."""
+    """Apply `action` to a live job (the latest when no id is given); exit on
+    failure.
+    """
     from octacam import process_jobs
 
     job = process_jobs.resolve_job(job_id, require_live=True)
     if job is None:
-        sys.exit("No such live job." if job_id else f"No live processing jobs to {verb}.")
+        sys.exit(
+            "No such live job." if job_id else f"No live processing jobs to {verb}."
+        )
     if not action(job):
         sys.exit(f"Could not {verb} job {job.job_id}{hint}.")
     log.info(done, job.job_id)
 
 
-def jobs_pause(job_id: _JobArg = None) -> None:
+@command
+def jobs_pause(job_id: _JobArg = None, verbose: Verbose = False) -> None:
     """Pause a running detached job (it parks at its next file/folder boundary)."""
     from octacam import process_jobs
 
     _control_live_job(job_id, "pause", process_jobs.pause, "Requested pause of job %s.")
 
 
-def jobs_resume(job_id: _JobArg = None) -> None:
+@command
+def jobs_resume(job_id: _JobArg = None, verbose: Verbose = False) -> None:
     """Clear a manual pause (a gui/record auto-pause clears on its own)."""
     from octacam import process_jobs
 
@@ -76,7 +86,8 @@ def jobs_resume(job_id: _JobArg = None) -> None:
     )
 
 
-def jobs_cancel(job_id: _JobArg = None) -> None:
+@command
+def jobs_cancel(job_id: _JobArg = None, verbose: Verbose = False) -> None:
     """Cancel a running detached job (a clean stop; already-done work is kept)."""
     from octacam import process_jobs
 
@@ -90,7 +101,7 @@ def jobs_cancel(job_id: _JobArg = None) -> None:
 
 
 def _human_size(num_bytes: int) -> str:
-    """A short human-readable byte size (e.g. ``0 B``, ``7.0 KB``, ``2.1 MB``)."""
+    """A short human-readable byte size (e.g. `0 B`, `7.0 KB`, `2.1 MB`)."""
     size = float(num_bytes)
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
@@ -103,14 +114,18 @@ def _plural(n: int, singular: str, plural: str) -> str:
     return singular if n == 1 else plural
 
 
-def cache_path() -> None:
-    """Print the octacam cache directory (respects OCTACAM_CACHE_DIR / XDG_CACHE_HOME)."""
+@command
+def cache_path(verbose: Verbose = False) -> None:
+    """Print the octacam cache directory (respects OCTACAM_CACHE_DIR /
+    XDG_CACHE_HOME).
+    """
     from octacam import session_cache
 
     typer.echo(str(session_cache.cache_dir()))
 
 
-def cache_info() -> None:
+@command
+def cache_info(verbose: Verbose = False) -> None:
     """Show the cache location, size, and a breakdown of what is cached."""
     from octacam import process_jobs, session_cache
 
@@ -133,9 +148,10 @@ def cache_info() -> None:
     typer.echo(
         f"  jobs         {jobs_size:>8}   {live_jobs} live, {finished_jobs} finished"
     )
-    typer.echo(f"  markers      {'—':>8}   {live_markers} live")
+    typer.echo(f"  markers      {'\N{EM DASH}':>8}   {live_markers} live")
 
 
+@command
 def cache_clear(
     all_: Annotated[
         bool,
@@ -148,6 +164,7 @@ def cache_clear(
         bool,
         typer.Option("--yes", "-y", help="Clear without the confirmation prompt."),
     ] = False,
+    verbose: Verbose = False,
 ) -> None:
     """Clear cached state under the cache dir.
 
@@ -178,9 +195,7 @@ def cache_clear(
         targets.append("stale activity markers")
         typer.echo(f"Cache dir: {session_cache.cache_dir()}")
         typer.echo("Will clear: " + "; ".join(targets) + ".")
-        protected = _live_summary(
-            *_live_counts(session_cache, process_jobs)
-        )
+        protected = _live_summary(*_live_counts(session_cache, process_jobs))
         if protected:
             typer.echo(f"Protected (kept live): {protected}.")
         typer.confirm("Proceed?", abort=True)
@@ -200,7 +215,11 @@ def cache_clear(
         cleared.append(
             f"{removed_jobs} finished job {_plural(removed_jobs, 'log', 'logs')}"
         )
-    typer.echo("Cleared: " + ", ".join(cleared) + "." if cleared else "Nothing needed clearing.")
+    typer.echo(
+        "Cleared: " + ", ".join(cleared) + "."
+        if cleared
+        else "Nothing needed clearing."
+    )
 
     live_jobs, live_transcode, live_capture = _live_counts(session_cache, process_jobs)
     finished_jobs = process_jobs.job_dir_counts()[1]
@@ -231,8 +250,11 @@ def _live_summary(live_jobs: int, live_transcode: int, live_capture: int) -> str
         bits.append(f"{live_jobs} live {_plural(live_jobs, 'job', 'jobs')}")
     if live_transcode:
         bits.append(
-            f"{live_transcode} live {_plural(live_transcode, 'transcode', 'transcodes')}"
+            f"{live_transcode} live "
+            f"{_plural(live_transcode, 'transcode', 'transcodes')}"
         )
     if live_capture:
-        bits.append(f"{live_capture} live {_plural(live_capture, 'capture', 'captures')}")
+        bits.append(
+            f"{live_capture} live {_plural(live_capture, 'capture', 'captures')}"
+        )
     return ", ".join(bits)

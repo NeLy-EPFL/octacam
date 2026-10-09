@@ -1,8 +1,8 @@
-"""Camera backend selection and the ``auto`` cascade.
+"""Camera backend selection and the `auto` cascade.
 
-Each backend module declares a module-level :data:`SPEC` (a :class:`BackendSpec`)
+Each backend module declares a module-level `SPEC` (a `BackendSpec`)
 and is imported only when selected; a missing SDK raises
-:class:`BackendUnavailable`, not a raw ``ImportError``.
+`BackendUnavailable`, not a raw `ImportError`.
 """
 
 import importlib
@@ -18,8 +18,10 @@ _MODULES = {
     "basler": ("octacam.cameras.basler", "the 'pypylon' package is not installed"),
     "flir": (
         "octacam.cameras.flir",
-        "the Spinnaker SDK and its PySpin wheel must be installed "
-        "(they are not on PyPI; see the README)",
+        (
+            "the Spinnaker SDK and its PySpin wheel must be installed "
+            "(they are not on PyPI; see the README)"
+        ),
     ),
     "spinnaker": (
         "octacam.cameras.spinnaker_c",
@@ -34,9 +36,9 @@ _MODULES = {
 BACKENDS = tuple(_MODULES)
 
 # "auto": each camera is claimed by the first tier here that enumerates its
-# serial (CameraSystem._enumerate). Vendor SDKs first; ``spinnaker`` (the
+# serial (CameraSystem._enumerate). Vendor SDKs first; `spinnaker` (the
 # Spinnaker C API over ctypes) claims the FLIRs when PySpin is missing;
-# ``pycameleon`` (libusb, a core dependency) is the always-present floor.
+# `pycameleon` (libusb, a core dependency) is the always-present floor.
 CASCADE = ("basler", "flir", "spinnaker", "pycameleon")
 
 
@@ -55,15 +57,15 @@ class BackendUnavailable(RuntimeError):
 class BackendSpec:
     """What the registry reaches in one backend module.
 
-    ``enumerate(requested_serials)`` returns ``[(serial, handle), ...]`` in
-    :func:`select_serials` order, silently: a tier also sees serials another one
+    `enumerate(requested_serials)` returns `[(serial, handle), ...]` in
+    `select_serials` order, silently: a tier also sees serials another one
     owns, so only CameraSystem reports one nobody found. A None handle is a camera
-    present but unusable, claimed without being opened. ``factory`` builds the
+    present but unusable, claimed without being opened. `factory` builds the
     backend from a handle.
     """
 
     enumerate: Callable[..., list[tuple[str, Any]]]
-    factory: Callable[[Any], "CameraBackend"]
+    factory: Callable[[Any], CameraBackend]
     # Raises BackendUnavailable when the module imports but its SDK is missing.
     ensure_available: Callable[[], None] | None = None
     # The model name from a handle without opening the camera (for doctor).
@@ -74,7 +76,8 @@ class BackendSpec:
 
 def select_serials(detected, requested: list[str] | None) -> list[str]:
     """The serials an enumeration hands out, each once: the requested ones it
-    detected, in requested order, else every detected one, sorted."""
+    detected, in requested order, else every detected one, sorted.
+    """
     found = set(detected)
     if not requested:
         return sorted(found)
@@ -82,8 +85,9 @@ def select_serials(detected, requested: list[str] | None) -> list[str]:
 
 
 def select_backend(name: str) -> BackendSpec:
-    """The :class:`BackendSpec` of ``name`` (case-insensitive), its SDK
-    imported."""
+    """The `BackendSpec` of `name` (case-insensitive), its SDK
+    imported.
+    """
     key = name.strip().lower()
     if key not in _MODULES:
         raise BackendUnavailable(name, f"unknown backend (expected one of {BACKENDS})")
@@ -99,7 +103,7 @@ def select_backend(name: str) -> BackendSpec:
 
 
 def available_backends() -> list[str]:
-    """The :data:`CASCADE` tiers whose SDK imports here, in priority order."""
+    """The `CASCADE` tiers whose SDK imports here, in priority order."""
     out: list[str] = []
     for name in CASCADE:
         try:
@@ -111,13 +115,14 @@ def available_backends() -> list[str]:
 
 
 def is_auto(name: str | None) -> bool:
-    """Whether a backend selector means the cascade: ``auto``, ``all`` or empty."""
+    """Whether a backend selector means the cascade: `auto`, `all` or empty."""
     return (name or "").strip().lower() in ("auto", "all", "")
 
 
 def resolve_backend_names(name: str | None) -> list[str]:
-    """The cascade's :func:`available_backends` for :func:`is_auto`, else
-    ``[name]``."""
+    """The cascade's `available_backends` for `is_auto`, else
+    `[name]`.
+    """
     if is_auto(name):
         return available_backends()
     return [(name or "").strip().lower()]

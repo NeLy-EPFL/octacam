@@ -31,7 +31,8 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     """Write *text* to *path* through an fsynced sibling temp and a rename.
 
     The temp is created like any other file, so the result gets the umask's
-    permissions: a file another user or a share must read is never 0600."""
+    permissions: a file another user or a share must read is never 0600.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{_unique()}.tmp")
@@ -50,15 +51,17 @@ def atomic_write_text(path: str | Path, text: str) -> None:
 def partial_path(final: Path, *, extension_last: bool = False) -> Path:
     """A hidden, unique temp beside *final* (the same directory, so the rename
     onto it is atomic). *extension_last* keeps *final*'s suffix at the end, for
-    ffmpeg, which picks its muxer from it."""
+    ffmpeg, which picks its muxer from it.
+    """
     stem, suffix = (final.stem, final.suffix) if extension_last else (final.name, "")
     return final.with_name(f".{stem}{PARTIAL_INFIX}.{_unique()}{suffix}")
 
 
 def partial_glob(final: Path, *, extension_last: bool = False) -> str:
-    """A glob for every :func:`partial_path` of *final* (with *extension_last*,
-    the pid-less ``.<stem>.octacam-part<ext>`` too). Escaped: unescaped, a
-    camera ``cam[1]`` would match ``cam1``'s temps."""
+    """A glob for every `partial_path` of *final* (with *extension_last*,
+    the pid-less `.<stem>.octacam-part<ext>` too). Escaped: unescaped, a
+    camera `cam[1]` would match `cam1`'s temps.
+    """
     if extension_last:
         return f".{glob.escape(final.stem)}{PARTIAL_INFIX}*{glob.escape(final.suffix)}"
     return f".{glob.escape(final.name)}{PARTIAL_INFIX}.*"
@@ -72,7 +75,8 @@ def is_partial(path: Path) -> bool:
 def flock_held(path: Path, mode: str = "r") -> bool | None:
     """Whether another process holds an exclusive flock on *path*: True, False
     (the probe's own lock is released at once), or None when the filesystem
-    cannot tell. Raises OSError when *path* cannot be opened in *mode*."""
+    cannot tell. Raises OSError when *path* cannot be opened in *mode*.
+    """
     with open(path, mode) as handle:
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

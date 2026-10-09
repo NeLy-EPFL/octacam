@@ -18,15 +18,22 @@ import typer
 from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
+    Sets,
+    Verbose,
     browser_skip_reason,
     camera_open_error,
-    port_available,
+    command,
+    pick_port,
     resolve_config_arg,
     resolve_enabled,
     warn_if_transcoding,
+    with_sets,
 )
 
 log = logging.getLogger("octacam")
+
+#: The GUI's port when `--port` does not say; taken, the next free one.
+DEFAULT_PORT = 8765
 
 
 def _launch_browser(url: str) -> bool:
@@ -34,7 +41,8 @@ def _launch_browser(url: str) -> bool:
 
     $BROWSER wins; otherwise xdg-open/open, which honor the desktop's default,
     whereas webbrowser's hunt on Linux can "succeed" with a browser that never
-    shows a window. Everything else falls back to webbrowser."""
+    shows a window. Everything else falls back to webbrowser.
+    """
 
     def _via_webbrowser() -> bool:
         try:
@@ -67,7 +75,8 @@ def _launch_browser(url: str) -> bool:
 
 def _open_browser_when_ready(url: str, host: str, port: int) -> None:
     """Open the browser once the server accepts connections (on a daemon thread
-    beside uvicorn.run; opening earlier shows an error page)."""
+    beside uvicorn.run; opening earlier shows an error page).
+    """
     connect_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     deadline = time.monotonic() + 10.0
     try:
@@ -78,14 +87,19 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
             except OSError:
                 time.sleep(0.1)
         else:
-            log.warning("octacam GUI never became reachable — open %s manually.", url)
+            log.warning(
+                "octacam GUI never became reachable \N{EM DASH} open %s manually.", url
+            )
             return
         if not _launch_browser(url):
             log.warning(
-                "Couldn't open a browser automatically — open %s manually.", url
+                "Couldn't open a browser automatically \N{EM DASH} open %s manually.",
+                url,
             )
     except Exception:  # a helper thread must never die silently
-        log.warning("Failed to open a browser — open %s manually.", url, exc_info=True)
+        log.warning(
+            "Failed to open a browser \N{EM DASH} open %s manually.", url, exc_info=True
+        )
 
 
 def _print_transcode_hints(session_id: str) -> None:
@@ -109,7 +123,8 @@ def _print_transcode_hints(session_id: str) -> None:
 
 def _finish_gui_session(session_id: str, config_dir: Path, process_after: bool) -> None:
     """On GUI shutdown, start a detached `process` job for this session's
-    recordings when asked, else print the hints. Never raises."""
+    recordings when asked, else print the hints. Never raises.
+    """
     from octacam import process_jobs, session_cache
 
     if process_after:
@@ -135,22 +150,34 @@ def _finish_gui_session(session_id: str, config_dir: Path, process_after: bool) 
     _print_transcode_hints(session_id)
 
 
+@command
 def gui(
     config_dir: Annotated[
         Path,
-        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="The rig's config directory (`octacam_config.toml` and its camera "
+            "files), or a recording folder, whose config snapshot it uses.",
+        ),
     ] = Path("."),
     host: Annotated[
         str,
         typer.Option(
-            help="Bind address. Keep the loopback default and reach the GUI "
-            "remotely with: ssh -L 8765:127.0.0.1:8765 <rig-hostname>"
+            "--host",
+            help="Interface to bind. Keep the loopback default and reach the GUI "
+            "remotely with `ssh -L 8765:127.0.0.1:8765 <rig-hostname>`.",
         ),
     ] = "127.0.0.1",
     port: Annotated[
-        int,
-        typer.Option(help="Port to bind; override if it clashes with other software."),
-    ] = 8765,
+        int | None,
+        typer.Option(
+            "--port",
+            help=f"Port to serve on. Default: {DEFAULT_PORT}, or the next free port.",
+            show_default=False,
+        ),
+    ] = None,
     no_browser: Annotated[
         bool,
         typer.Option(
@@ -161,8 +188,10 @@ def gui(
     ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
+    sets: Sets = None,
+    verbose: Verbose = False,
 ) -> None:
-    """Launch the octacam web GUI for the cameras in CONFIG_DIR."""
+    """Launch the octacam web GUI for the cameras in `config_dir`."""
     import uvicorn
 
     from octacam import locks, session_cache
@@ -188,13 +217,9 @@ def gui(
             f"({config_dir}). Open its GUI in a browser, or stop it first."
         )
 
-    if not port_available(host, port):
-        sys.exit(
-            f"Port {port} is already in use on {host}. "
-            f"Choose a free one with --port (e.g. --port {port + 1})."
-        )
+    port = pick_port(host, port, DEFAULT_PORT)
 
-    config = load_config_dir(config_dir)
+    config = with_sets(load_config_dir(config_dir), sets)
     warn_if_transcoding()
 
     plugins = build_plugins(config, resolve_enabled(enabled_plugins, no_plugins))
@@ -222,7 +247,8 @@ def gui(
         """Open the cameras and arm the plugins in parallel, start preview, publish.
 
         A failure goes to the GUI (fail_init) and the log; the server keeps
-        running."""
+        running.
+        """
         from concurrent.futures import ThreadPoolExecutor
 
         def _publish() -> None:
@@ -278,7 +304,8 @@ def gui(
         )
         init_thread.start()
         log.info(
-            "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d <rig-hostname>)",
+            "octacam web GUI on http://%s:%d/ (remote: ssh -L %d:127.0.0.1:%d "
+            "<rig-hostname>)",
             host,
             port,
             port,
@@ -289,7 +316,9 @@ def gui(
         if skip:
             log.info("Not opening a browser automatically: %s.", skip)
         else:
-            log.info("Opening the web GUI in your default browser…")
+            log.info(
+                "Opening the web GUI in your default browser\N{HORIZONTAL ELLIPSIS}"
+            )
             threading.Thread(
                 target=_open_browser_when_ready,
                 args=(browser_url, host, port),
@@ -309,7 +338,10 @@ def gui(
             ws_ping_timeout=60.0,
         )
     finally:  # Ctrl+C, /api/shutdown and errors all land here
-        log.info("Shutting down — finalizing recordings and releasing cameras…")
+        log.info(
+            "Shutting down \N{EM DASH} finalizing recordings and releasing "
+            "cameras\N{HORIZONTAL ELLIPSIS}"
+        )
         # The join orders the init's attach/start_preview before close(); bounded
         # so a wedged SDK open cannot hang shutdown.
         stopping.set()

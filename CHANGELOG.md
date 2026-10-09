@@ -11,6 +11,19 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 
 ### Added
 
+- **`--set KEY=VALUE` on `gui` and `record`** overrides any config key for one
+  launch by its dotted path (`--set record.save_method=raw`), the same flag
+  deeperfly and spintrack take. The value is read as TOML, a list may drop its
+  brackets, `none` restores the default, and an unknown key is a usage error that
+  names the closest one. `--fps`, `--duration` and `--out` still win over it.
+- **Every command takes `-v`/`--verbose`**: debug logging and a full traceback.
+  Without it an unexpected error is one line, and Ctrl-C exits 130.
+- **`gui` takes the next free port** when 8765 is taken and `--port` is left out;
+  a port given with `--port` is still that port or an error.
+- A CLI reference generated from the commands (`docs/cli.md`, kept current by a
+  test), a Citing and credits page, `CITATION.cff`, and CI that runs ruff,
+  pyrefly, the tests and the strict docs build on every push.
+
 - **Every frame is assigned to the trigger pulse that exposed it; missed pulses
   are detected, filled and reported** — a hardware-triggered camera that misses
   a pulse delivers no frame for it and nothing in its frame stream said so, so a
@@ -49,6 +62,25 @@ Releases are tagged `vX.Y.Z`; install a specific one with
   reach every camera.
 
 ### Changed
+
+- **Breaking: `octacam record --output` is now `--out`** (`-o` is unchanged), as
+  in deeperfly and spintrack.
+- **Breaking: the root `-l`/`--log-level` option is gone**; logging is INFO, and
+  each command's `-v`/`--verbose` turns on DEBUG.
+- **Python 3.14 is the supported version** (was 3.10 and up;
+  `requires-python = ">=3.14,<3.15"`), so `uv tool install` picks a Python every
+  dependency ships wheels for. Every dependency is at its latest release
+  (numpy 2.5, OpenCV 5, FastAPI 0.143, Typer 0.27, pypylon 26.8, ...);
+  `uvicorn[standard]` replaces the separate `websockets`.
+- With 3.14 alone, annotations are lazy (PEP 649): the quotes around
+  `TYPE_CHECKING`-only names and `tests/test_typing_hygiene.py`, which enforced them
+  for 3.12-3.13, are gone.
+- `octacam --version` prints `octacam <version>`, and help is rendered from
+  Markdown. Help, README and docs name positional arguments in lowercase, as the
+  usage line prints them (`config_dir`).
+- Type checking moved from pyright to pyrefly, with no errors and no baseline;
+  ruff adds docstring (Google), bugbear and line-length rules, and the code is
+  formatted with `ruff format` and ASCII-only.
 
 - `PUT /api/settings` reports a bad value as one message naming the field, in any
   state (only a valid change answers 409 during a take). It no longer coerces
@@ -126,6 +158,13 @@ Releases are tagged `vX.Y.Z`; install a specific one with
 - **The `octacam.camera` module**: import from `octacam.cameras`.
 
 ### Fixed
+
+- **pypylon 26.8 answers an unknown node name with a placeholder** instead of an
+  error, which made a request for a missing feature or command a 500; it is a
+  clean "no such node" again.
+- File handles that leaked on error paths: a truncated `timestamps.npz` in
+  `octacam check`, an HTTP error in the update check, and ffmpeg's stderr pipe when
+  its reader thread failed to start.
 
 - **Saved configs, recording config snapshots and camera parameter files were
   owner-only (0600)**, and `octacam process` copied that mode onto the storage

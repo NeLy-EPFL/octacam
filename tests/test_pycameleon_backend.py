@@ -5,6 +5,7 @@ import threading
 import types
 
 import numpy as np
+import pytest
 
 from octacam.cameras._trigger_handoff import (
     DRAIN_POLL_MS,
@@ -98,11 +99,24 @@ class FakePyCam:
         return np.zeros((4, 4), dtype=np.uint8)
 
 
+_OPENED: list[PycameleonBackend] = []
+
+
 def _open_backend():
     cam = FakePyCam()
     backend = PycameleonBackend(cam)
     backend.open()
+    _OPENED.append(backend)
     return backend, cam
+
+
+@pytest.fixture(autouse=True)
+def _close_backends():
+    # A backend left open keeps its receive event loop, whose collection in a
+    # later test is an unraisable ResourceWarning there.
+    yield
+    while _OPENED:
+        _OPENED.pop().close()
 
 
 def test_serial_and_open_forces_mono8():
@@ -120,7 +134,7 @@ def test_read_feature_types_and_width_max():
     assert width.value == 1920 and isinstance(width.value, int)
     assert width.max == 1920  # filled from SFNC WidthMax
     assert width.min is None and width.inc is None and width.unit is None
-    assert width.writable is True  # open ⇒ geometry writable
+    assert width.writable is True  # open => geometry writable
     exposure = backend.read_feature("ExposureTime")
     assert exposure.value == 5000.0 and isinstance(exposure.value, float)
     assert exposure.max is None  # no bounds exposed for non-geometry nodes
@@ -137,9 +151,7 @@ def test_write_feature_routes_to_int_or_float():
 def test_params_round_trip_and_trigger_normalization():
     backend, _cam = _open_backend()
     # Native GenApi persistence TSV: tab-separated feature lines, applied in order.
-    backend.load_params(
-        "# GenApi persistence file\nExposureTime\t2222.0\nWidth\t640\n"
-    )
+    backend.load_params("# GenApi persistence file\nExposureTime\t2222.0\nWidth\t640\n")
     assert backend.read_feature("ExposureTime").value == 2222.0
     assert backend.read_feature("Width").value == 640
     # Preview forces TriggerSource=Software on the live device; a config saved now
@@ -158,12 +170,12 @@ def test_triggering_sets_software_and_defers_execute():
     assert cam._enum["TriggerSelector"] == "FrameStart"
     assert cam._enum["TriggerMode"] == "On"
     assert cam._enum["TriggerSource"] == "Software"
-    # TriggerOverlap=ReadOut lets triggers pipeline during readout — without it the
+    # TriggerOverlap=ReadOut lets triggers pipeline during readout -- without it the
     # FLIR ignores every other software trigger (~halved fps; measured 4.7->64 fps).
     assert cam._enum["TriggerOverlap"] == "ReadOut"
     backend.start_grab_preview()
     assert backend.is_grabbing()
-    # trigger_once only bumps the pending counter — it must NOT touch the device
+    # trigger_once only bumps the pending counter -- it must NOT touch the device
     # (the execute happens in retrieve, so it can't race a concurrent receive()).
     backend.trigger_once()
     assert cam.executed == []
@@ -187,7 +199,7 @@ def test_retrieve_executes_trigger_then_receives():
     array, timestamp = got
     # retrieve fires the software trigger and receives the frame back-to-back.
     assert cam.executed == ["TriggerSoftware"]
-    assert array.shape == (4, 4) and timestamp == 0  # 0 ⇒ host-time fallback
+    assert array.shape == (4, 4) and timestamp == 0  # 0 => host-time fallback
     # With no pending trigger, retrieve times out and returns None.
     assert backend.retrieve(1, lambda: True) is None
     backend.stop_grab()
@@ -206,6 +218,7 @@ def test_a_refused_software_trigger_is_not_awaited():
     cam = RefusingCam()
     backend = PycameleonBackend(cam)
     backend.open()
+    _OPENED.append(backend)
     backend.start_grab_preview()
     backend.trigger_once()
     assert backend.retrieve(100, lambda: True) is None
@@ -311,7 +324,6 @@ def test_a_drain_fetch_only_polls():
 
     def receive(timeout_ms):
         timeouts.append(timeout_ms)
-        return None  # no image
 
     backend._receive_bounded = receive
     backend.start_grab_preview()
@@ -337,7 +349,7 @@ def test_enumerate_sorts_then_filters(monkeypatch):
 
 
 def test_read_model_from_info_descriptor():
-    # doctor labels each camera with the model from info(); absent/broken → None.
+    # doctor labels each camera with the model from info(); absent/broken -> None.
     assert read_model(FakePyCam(model="Grasshopper3")) == "Grasshopper3"
     assert read_model(FakePyCam(model="")) is None
 
@@ -383,6 +395,7 @@ def test_a_rejected_payload_answers_its_software_trigger():
     cam = DeviceCam()
     backend = PycameleonBackend(cam)
     backend.open()
+    _OPENED.append(backend)
     backend.start_grab_preview()
     try:
         started = time.monotonic()

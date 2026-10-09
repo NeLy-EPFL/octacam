@@ -1,13 +1,14 @@
 """Vendor-neutral camera core.
 
-:class:`Camera` owns everything that does not touch an SDK: its parameters and
+`Camera` owns everything that does not touch an SDK: its parameters and
 node map, the preview grab loop, the display hand-off and its recordings, each a
-:class:`~octacam.cameras.take.CameraTake`. Each vendor implements the
-:class:`CameraBackend` seam and raises :class:`BackendError` for SDK failures,
-which ``Camera``'s setters turn into ``ValueError``.
+`CameraTake`. Each vendor implements the
+`CameraBackend` seam and raises `BackendError` for SDK failures,
+which `Camera`'s setters turn into `ValueError`.
 """
 
 import logging
+import numbers
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -56,16 +57,18 @@ OFFSET_FEATURES = {"OffsetX": "center_x", "OffsetY": "center_y"}
 # or recording: Mono8 (the GRAY8 writer), the link throughput (maxed at open on
 # FLIR), the trigger chain and AcquisitionMode (set by every grab path) and
 # TLParamsLocked (transport state).
-RUNTIME_MANAGED_FEATURES = frozenset({
-    "PixelFormat",
-    "DeviceLinkThroughputLimit",
-    "TLParamsLocked",
-    "TriggerSelector",
-    "TriggerMode",
-    "TriggerSource",
-    "TriggerOverlap",
-    "AcquisitionMode",
-})
+RUNTIME_MANAGED_FEATURES = frozenset(
+    {
+        "PixelFormat",
+        "DeviceLinkThroughputLimit",
+        "TLParamsLocked",
+        "TriggerSelector",
+        "TriggerMode",
+        "TriggerSource",
+        "TriggerOverlap",
+        "AcquisitionMode",
+    }
+)
 
 
 class BackendError(Exception):
@@ -76,12 +79,12 @@ class BackendError(Exception):
 class FeatureInfo:
     """One node of the device node map, for the Camera tab's browser.
 
-    ``type`` is the widget kind: int, float, bool, enum (``entries`` of
-    ``{"value", "display", "available"}``), string, command or category.
-    ``value`` is None for command and category nodes; for an enum it is the
-    current symbolic. ``category`` comes only from a node-map walk: a
+    `type` is the widget kind: int, float, bool, enum (`entries` of
+    `{"value", "display", "available"}`), string, command or category.
+    `value` is None for command and category nodes; for an enum it is the
+    current symbolic. `category` comes only from a node-map walk: a
     single-node read leaves it blank, and the client keeps its grouping.
-    ``managed`` marks a node octacam drives (:data:`RUNTIME_MANAGED_FEATURES`).
+    `managed` marks a node octacam drives (`RUNTIME_MANAGED_FEATURES`).
     """
 
     name: str
@@ -125,12 +128,12 @@ Frame = tuple[np.ndarray | None, int]
 
 
 class CameraBackend(ABC):
-    """One physical camera behind its SDK, as :class:`Camera` drives it.
+    """One physical camera behind its SDK, as `Camera` drives it.
 
-    Device methods raise :class:`BackendError` on SDK failure. The retrieve
+    Device methods raise `BackendError` on SDK failure. The retrieve
     methods never raise: None on a device error or a stop race, since an
-    exception would kill the grab thread and orphan its writer. ``trigger`` is
-    the camera's software-trigger hand-off; its grab flag is ``is_grabbing``.
+    exception would kill the grab thread and orphan its writer. `trigger` is
+    the camera's software-trigger hand-off; its grab flag is `is_grabbing`.
     """
 
     extension: ClassVar[str]  # the parameter-file suffix, no dot
@@ -147,8 +150,9 @@ class CameraBackend(ABC):
         return self.trigger.grabbing
 
     def trigger_once(self) -> None:
-        """Offer one software trigger. No device call: ``retrieve`` fires it on
-        the camera's own thread (see :mod:`octacam.cameras._trigger_handoff`)."""
+        """Offer one software trigger. No device call: `retrieve` fires it on
+        the camera's own thread (see `octacam.cameras._trigger_handoff`).
+        """
         self.trigger.offer()
 
     def configure_trigger_period(self, period_s: float | None) -> None:
@@ -160,12 +164,14 @@ class CameraBackend(ABC):
     @property
     def last_trigger_index(self) -> int | None:
         """The trigger the latest retrieved image answers (see
-        :attr:`SoftwareTrigger.last_index`)."""
+        `SoftwareTrigger.last_index`).
+        """
         return self.trigger.last_index
 
     def grab_locked_features(self) -> frozenset[str]:
         """Nodes writable only while not grabbing; Camera writes them through a
-        preview grab cycle."""
+        preview grab cycle.
+        """
         return GEOMETRY_FEATURES
 
     def stream_statistics(self) -> dict[str, int]:
@@ -176,7 +182,8 @@ class CameraBackend(ABC):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         """One software-triggered frame: fire a claimed trigger, then fetch at
-        most one image, which answers the oldest outstanding trigger."""
+        most one image, which answers the oldest outstanding trigger.
+        """
         fire = self.trigger.claim(timeout_ms)
         if fire is None or not self.trigger.grabbing:
             return None
@@ -191,7 +198,8 @@ class CameraBackend(ABC):
         self, timeout_ms: int, wants_array: Callable[[], bool]
     ) -> Frame | None:
         """One frame the camera made on its own clock (free run, or a hardware
-        trigger): the un-gated fetch."""
+        trigger): the un-gated fetch.
+        """
         if not self.trigger.grabbing:
             return None
         return self._fetch(timeout_ms, wants_array, answers_trigger=False)
@@ -210,10 +218,11 @@ class CameraBackend(ABC):
     def _fetch(
         self, timeout_ms: int, wants_array: Callable[[], bool], answers_trigger: bool
     ) -> Frame | None:
-        """At most one image within ``timeout_ms``, its array only if
-        ``wants_array()``; None on a timeout or an unusable image. With
-        ``answers_trigger``, any image the SDK hands over, incomplete too, is
-        reported to ``trigger.answered`` (with its timestamp if that counts ns)."""
+        """At most one image within `timeout_ms`, its array only if
+        `wants_array()`; None on a timeout or an unusable image. With
+        `answers_trigger`, any image the SDK hands over, incomplete too, is
+        reported to `trigger.answered` (with its timestamp if that counts ns).
+        """
 
     @abstractmethod
     def open(self) -> None: ...
@@ -227,7 +236,7 @@ class CameraBackend(ABC):
     def height(self) -> int: ...
 
     # The node map (Camera tab), by GenApi node name; the backend coerces
-    # ``value`` to the node's type.
+    # `value` to the node's type.
     @abstractmethod
     def list_features(self) -> list[FeatureInfo]: ...
     @abstractmethod
@@ -254,8 +263,8 @@ class CameraBackend(ABC):
     @abstractmethod
     def begin_software_trigger_preview(self) -> None: ...
 
-    # Free run: uncapped with ``fps=None`` (the benchmark's ceiling), else capped
-    # at ``fps`` (free-run preview). False when the backend cannot arm it.
+    # Free run: uncapped with `fps=None` (the benchmark's ceiling), else capped
+    # at `fps` (free-run preview). False when the backend cannot arm it.
     @abstractmethod
     def begin_freerun(self, fps: float | None = None) -> bool: ...
 
@@ -290,6 +299,13 @@ def coerce_bool(value: object) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def coerce_float(value: object) -> float:
+    """A config/feature value as float: a number or numeric text, else TypeError."""
+    if isinstance(value, (numbers.Real, str)):
+        return float(value)
+    raise TypeError(f"not a number: {value!r}")
 
 
 class LatestFrame:
@@ -327,8 +343,9 @@ class LatestFrame:
             return frame
 
     def refresh_fps(self, timestamps: Sequence[int]) -> None:
-        """Set :attr:`fps` from the last FPS_WINDOW intervals of ``timestamps``
-        (ns), the series a pushed frame ends."""
+        """Set `fps` from the last FPS_WINDOW intervals of `timestamps`
+        (ns), the series a pushed frame ends.
+        """
         last = len(timestamps) - 1
         start = max(0, last - FPS_WINDOW)
         span = timestamps[last] - timestamps[start] if last > 0 else 0
@@ -338,7 +355,7 @@ class LatestFrame:
 class Camera:
     """Vendor-neutral camera: parameters, node map, preview and recordings.
 
-    All device access goes through ``self._backend`` (a :class:`CameraBackend`).
+    All device access goes through `self._backend` (a `CameraBackend`).
     """
 
     def __init__(self, backend: CameraBackend):
@@ -370,13 +387,15 @@ class Camera:
     @property
     def backend(self) -> CameraBackend:
         """The backend, for the diagnostics engine's own grab loops; never use it
-        to bypass the recording state machine."""
+        to bypass the recording state machine.
+        """
         return self._backend
 
     @property
     def extension(self) -> str:
         """The backend's parameter-file suffix (no dot): a mixed rig keeps each
-        camera's params in its native format."""
+        camera's params in its native format.
+        """
         return type(self._backend).extension
 
     def open(self) -> None:
@@ -418,12 +437,15 @@ class Camera:
             }
 
     def trigger_window_us(self) -> tuple[float, float | None]:
-        """``(trigger delay, exposure)`` in µs: the exposure a trigger opens, for
+        """`(trigger delay, exposure)` in us: the exposure a trigger opens, for
         a strobe sized to cover it. A delay the camera lacks reads 0, an
-        unreadable exposure None."""
+        unreadable exposure None.
+        """
         with self._param_lock:
             try:
-                exposure: float | None = float(self._backend.read_feature("ExposureTime").value)  # type: ignore[arg-type]
+                exposure: float | None = coerce_float(
+                    self._backend.read_feature("ExposureTime").value
+                )
             except Exception:
                 exposure = None
             try:
@@ -436,7 +458,8 @@ class Camera:
         self, *, width: int | None = None, height: int | None = None
     ) -> None:
         """Set Width/Height with the preview grab cycled around the write (the
-        SDK refuses it mid-grab); the preview restarts even on a rejected value."""
+        SDK refuses it mid-grab); the preview restarts even on a rejected value.
+        """
         with self._param_lock:
             was_grabbing = self._backend.is_grabbing()
             if was_grabbing:
@@ -476,14 +499,19 @@ class Camera:
 
     # ------------------------------------------------- full device node map
 
-    def _annotate(self, feature: FeatureInfo, grab_locked: frozenset[str]) -> FeatureInfo:
+    def _annotate(
+        self, feature: FeatureInfo, grab_locked: frozenset[str]
+    ) -> FeatureInfo:
         """Apply octacam's policy to one backend feature: managed nodes and an
         auto-centered offset are read-only, a grab-locked node is editable while
-        open (set_feature cycles the grab)."""
+        open (set_feature cycles the grab).
+        """
         if feature.name in RUNTIME_MANAGED_FEATURES:
             feature.managed = True
             feature.writable = False
-        elif feature.name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[feature.name]):
+        elif feature.name in OFFSET_FEATURES and getattr(
+            self, OFFSET_FEATURES[feature.name]
+        ):
             feature.writable = False  # octacam derives it; UI shows locked
         elif feature.name in grab_locked:
             feature.writable = self._backend.is_open()
@@ -506,7 +534,7 @@ class Camera:
         return self._annotate(feature, grab_locked).as_dict()
 
     def _centered_offset(self, node_name: str) -> int | None:
-        """The offset that centers the ROI on ``node_name``'s axis, or None."""
+        """The offset that centers the ROI on `node_name`'s axis, or None."""
         try:
             info = self._backend.read_feature(node_name)
         except BackendError:
@@ -537,11 +565,14 @@ class Camera:
             try:
                 self._backend.write_feature(node_name, target)
             except BackendError as e:
-                log.debug("Could not center %s on %s: %s", node_name, self.serial_number, e)
+                log.debug(
+                    "Could not center %s on %s: %s", node_name, self.serial_number, e
+                )
 
     def _run_stopped(self, fn: Callable[[], None]) -> None:
-        """Run ``fn`` with the preview grab stopped (caller holds ``_param_lock``);
-        the preview restarts even if ``fn`` raises."""
+        """Run `fn` with the preview grab stopped (caller holds `_param_lock`);
+        the preview restarts even if `fn` raises.
+        """
         was_grabbing = self._backend.is_grabbing()
         if was_grabbing:
             self.stop()
@@ -554,6 +585,7 @@ class Camera:
 
     def _write_feature_stopped(self, name: str, value: object) -> None:
         """Write a node the backend locks mid-grab, cycling the preview around it."""
+
         def _write() -> None:
             try:
                 self._backend.write_feature(name, value)
@@ -563,8 +595,9 @@ class Camera:
         self._run_stopped(_write)
 
     def set_center(self, axis: str, enabled: bool) -> dict:
-        """Toggle ROI auto-centering on axis ``"x"`` or ``"y"``; enabling
-        re-centers now."""
+        """Toggle ROI auto-centering on axis `"x"` or `"y"`; enabling
+        re-centers now.
+        """
         if axis not in ("x", "y"):
             raise ValueError(f"Unknown center axis: {axis}")
         with self._param_lock:
@@ -578,16 +611,17 @@ class Camera:
 
     def set_feature(self, name: str, value: object) -> None:
         """Write one node, cycling the grab for a grab-locked one; managed nodes
-        and auto-centered offsets are refused."""
+        and auto-centered offsets are refused.
+        """
         if name in RUNTIME_MANAGED_FEATURES:
             raise ValueError(f"{name} is managed by octacam and cannot be edited")
         if name in OFFSET_FEATURES and getattr(self, OFFSET_FEATURES[name]):
             raise ValueError(f"{name} is auto-centered; disable centering to set it")
         if name == "Width":
-            self.set_geometry(width=int(float(value)))  # type: ignore[arg-type]
+            self.set_geometry(width=int(coerce_float(value)))
             return
         if name == "Height":
-            self.set_geometry(height=int(float(value)))  # type: ignore[arg-type]
+            self.set_geometry(height=int(coerce_float(value)))
             return
         with self._param_lock:
             if name in self._backend.grab_locked_features():
@@ -600,7 +634,8 @@ class Camera:
 
     def reset_feature(self, name: str, config_str: str) -> None:
         """Reset a node to its saved-config value, else its first-seen value (see
-        ``_default_cache``); with neither it is left as is."""
+        `_default_cache`); with neither it is left as is.
+        """
         if name in RUNTIME_MANAGED_FEATURES:
             raise ValueError(f"{name} is managed by octacam and cannot be reset")
         value: object | None = None
@@ -625,7 +660,8 @@ class Camera:
 
     def enable_frame_trigger(self) -> None:
         """Arm the FrameStart trigger: a headless recording needs it, since the
-        config files ship TriggerMode Off."""
+        config files ship TriggerMode Off.
+        """
         self._backend.enable_frame_trigger()
 
     def set_trigger_source(self, use_software_trigger: bool) -> None:
@@ -639,10 +675,10 @@ class Camera:
     def start_preview(self, mode: str = "software", fps: float | None = None) -> None:
         """Start preview, clocked as the recording will be.
 
-        ``"software"``: the controller's software trigger, through the hand-off.
-        ``"free_running"``: free run capped at ``fps``, drawing an fps-matched
+        `"software"`: the controller's software trigger, through the hand-off.
+        `"free_running"`: free run capped at `fps`, drawing an fps-matched
         recording's bandwidth (stands in for an external trigger octacam cannot
-        drive). ``"managed"``: hardware-trigger mode, clocked by a trigger plugin.
+        drive). `"managed"`: hardware-trigger mode, clocked by a trigger plugin.
         """
         self._stop_flag.clear()
         if not self._backend.is_open():
@@ -660,7 +696,9 @@ class Camera:
             self._backend.begin_software_trigger_preview()
         self.take = None
         self.preview_timestamps.clear()
-        self._backend.configure_trigger_period(None)  # no recording counts preview triggers
+        self._backend.configure_trigger_period(
+            None
+        )  # no recording counts preview triggers
         self._backend.start_grab_preview()
         self._thread = threading.Thread(
             target=self._preview_loop, args=(mode,), daemon=True
@@ -678,10 +716,11 @@ class Camera:
         queue_size: int = WRITER_QUEUE_SIZE,
         hold: bool = False,
     ) -> bool:
-        """Record into ``save_path`` as a fresh :attr:`take` counted against
-        ``clock`` (``record_form`` and ``hold`` as for
-        :class:`~octacam.cameras.take.CameraTake`); True iff its record loop was
-        launched."""
+        """Record into `save_path` as a fresh `take` counted against
+        `clock` (`record_form` and `hold` as for
+        `CameraTake`); True iff its record loop was
+        launched.
+        """
         self.take = CameraTake(
             self,
             clock,
@@ -695,8 +734,9 @@ class Camera:
         return self.take.start(save_path, fps)
 
     def stop(self, fill_to: int | None = None) -> None:
-        """Stop the grab loop. ``fill_to`` (a completed train's count) pads a
-        recording camera that missed the last pulses, so it ends aligned."""
+        """Stop the grab loop. `fill_to` (a completed train's count) pads a
+        recording camera that missed the last pulses, so it ends aligned.
+        """
         self._stop_flag.set()
         if self.take is not None:
             self.take.stop(fill_to)

@@ -1,23 +1,28 @@
 """octacam_config.toml parsing, the save-path and safe-name rules, and the live
-:class:`RecordingSettings` a config seeds.
+`RecordingSettings` a config seeds.
 
 The config is tolerant per field: a malformed section or field is warned about
-and falls back to its default (``_lenient_validate``). A file that does not
-parse at all raises :class:`ConfigError`, since stock defaults would silently
+and falls back to its default (`_lenient_validate`). A file that does not
+parse at all raises `ConfigError`, since stock defaults would silently
 run the wrong rig. The live settings are strict instead:
-:meth:`RecordingSettings.updated` rejects a bad value.
+`RecordingSettings.updated` rejects a bad value.
 """
 
 import dataclasses
 import datetime
+import difflib
 import logging
 import os
 import re
 import shlex
 import time
+import tomllib
+import types
+import typing
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal, NamedTuple, TypeVar
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import (
     AfterValidator,
@@ -30,9 +35,9 @@ from pydantic import (
     ValidationError,
     field_validator,
 )
+from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError
 
-from octacam._compat import tomllib
 from octacam.recording_format import (
     RECORDING_INFO_DIRNAME,
     RECORDING_SUMMARY_FILENAME,
@@ -48,15 +53,14 @@ from octacam.writer import (
 
 log = logging.getLogger("octacam")
 
-_ModelT = TypeVar("_ModelT", bound=BaseModel)
-_DefaultT = TypeVar("_DefaultT")
-
 
 def _scalar_str(value: object) -> str:
     """Coerce a TOML scalar to a string, rejecting bool/array/table: an unquoted
-    serial number or date-like save directory parses as an int or a date."""
+    serial number or date-like save directory parses as an int or a date.
+    """
     if isinstance(value, bool):
-        raise ValueError("expected a string, got a boolean")
+        # pydantic reports a ValueError, not a TypeError, as a validation error.
+        raise ValueError("expected a string, got a boolean")  # noqa: TRY004
     if isinstance(value, str):
         return value
     if isinstance(value, (int, float, datetime.date, datetime.datetime)):
@@ -112,9 +116,10 @@ class CameraConfig(BaseModel):
 
 
 class RecordConfig(BaseModel):
-    """The ``[record]`` section: how and where recordings are captured.
-    ``directory``/``relative_directory`` take strftime ``%``-codes, expanded at
-    record start (:func:`resolve_save_path`)."""
+    """The `[record]` section: how and where recordings are captured.
+    `directory`/`relative_directory` take strftime `%`-codes, expanded at
+    record start (`resolve_save_path`).
+    """
 
     fps: float = 100.0
     duration: float = 5.0
@@ -140,18 +145,18 @@ class RecordConfig(BaseModel):
 
 
 class TranscodeConfig(BaseModel):
-    """The ``[transcode]`` section: encoder args for `octacam process`."""
+    """The `[transcode]` section: encoder args for `octacam process`."""
 
     ffmpeg_params: _ScalarFfmpegArgs = DEFAULT_TRANSCODE_FFMPEG_PARAMS
 
 
 class VisualizationConfig(BaseModel):
-    """One ``[[visualization]]`` entry: a composite grid video ``octacam
-    process`` builds in each recording folder.
+    """One `[[visualization]]` entry: a composite grid video `octacam
+    process` builds in each recording folder.
 
-    ``layout`` is a 2D list of camera names, rows of equal length, ``""`` a black
-    cell. An empty ``ffmpeg_params`` uses ``[transcode].ffmpeg_params``.
-    For example, a 3×3 grid on an 8-camera rig::
+    `layout` is a 2D list of camera names, rows of equal length, `""` a black
+    cell. An empty `ffmpeg_params` uses `[transcode].ffmpeg_params`.
+    For example, a 3x3 grid on an 8-camera rig::
 
         [[visualization]]
         name = "grid.mp4"
@@ -177,11 +182,11 @@ class VisualizationConfig(BaseModel):
 
 
 class TransferConfig(BaseModel):
-    """The ``[transfer]`` section: where `octacam process` mirrors recordings.
+    """The `[transfer]` section: where `octacam process` mirrors recordings.
 
-    A recording goes to ``directory``/<its summary's ``relative_directory``>;
-    ``directory`` takes strftime ``%``-codes like ``record.directory``.
-    ``checksum`` verifies each copy's content (false: its size only).
+    A recording goes to `directory`/<its summary's `relative_directory`>;
+    `directory` takes strftime `%`-codes like `record.directory`.
+    `checksum` verifies each copy's content (false: its size only).
     """
 
     directory: ScalarStr = ""
@@ -189,7 +194,7 @@ class TransferConfig(BaseModel):
 
 
 class GuiConfig(BaseModel):
-    """The ``[gui]`` section: pure web-UI render settings (rig-tunable)."""
+    """The `[gui]` section: pure web-UI render settings (rig-tunable)."""
 
     display_refresh_interval_ms: int = 33
     # The rig's default theme; a browser's own choice overrides it.
@@ -228,15 +233,16 @@ _TRAILING_NUMBER_RE = re.compile(r"\d{3}")
 
 
 def duration_to_seconds(duration: float, unit: str, fps: float) -> float:
-    """A record ``duration`` in its ``unit`` (``"frames"`` at ``fps``) as seconds."""
+    """A record `duration` in its `unit` (`"frames"` at `fps`) as seconds."""
     if unit == "frames":
         return duration / fps if fps > 0 else 0.0
     return duration * _DURATION_UNIT_SECONDS.get(unit, 1.0)
 
 
 def _apply_template(text: str, when: time.struct_time) -> str:
-    """Expand strftime ``%``-codes in a path template; a bad code is warned
-    about and the text kept."""
+    """Expand strftime `%`-codes in a path template; a bad code is warned
+    about and the text kept.
+    """
     try:
         return time.strftime(text, when)
     except ValueError as e:
@@ -245,13 +251,14 @@ def _apply_template(text: str, when: time.struct_time) -> str:
 
 
 def normalize_dir(text: str) -> str:
-    """Strip, expand ``~``, make absolute, use forward slashes."""
+    """Strip, expand `~`, make absolute, use forward slashes."""
     return str(Path(text.strip()).expanduser().absolute()).replace("\\", "/")
 
 
 def compose_save_dir(base: str, relative: str) -> str:
-    """``base``/``relative``, normalized; an absolute ``relative`` discards the
-    base."""
+    """`base`/`relative`, normalized; an absolute `relative` discards the
+    base.
+    """
     return normalize_dir(os.path.join(base, relative) if relative else base)
 
 
@@ -265,12 +272,12 @@ def increment_trailing_number(text: str) -> str:
 
 
 def resolve_dir_template(template: str) -> str:
-    """Resolve a directory template (strftime ``%``-codes) to an absolute path."""
+    """Resolve a directory template (strftime `%`-codes) to an absolute path."""
     return normalize_dir(_apply_template(template, time.localtime()))
 
 
 class SavePath(NamedTuple):
-    """Where a recording goes: ``save_dir`` is ``directory``/``relative``."""
+    """Where a recording goes: `save_dir` is `directory`/`relative`."""
 
     save_dir: str
     directory: str
@@ -279,8 +286,9 @@ class SavePath(NamedTuple):
 
 
 def resolve_save_path(record: RecordConfig) -> SavePath:
-    """``record.directory``/``relative_directory``, both expanded now, at one
-    moment."""
+    """`record.directory`/`relative_directory`, both expanded now, at one
+    moment.
+    """
     when = time.localtime()
     base = _apply_template(record.directory, when)
     relative = _apply_template(record.relative_directory, when)
@@ -294,9 +302,10 @@ def resolve_save_path(record: RecordConfig) -> SavePath:
 
 @dataclass
 class RecordingSettings:
-    """The live Record and Process settings (the ``[record]`` fields as
-    :class:`RecordConfig` documents them); :meth:`updated` checks the
-    constraints declared here."""
+    """The live Record and Process settings (the `[record]` fields as
+    `RecordConfig` documents them); `updated` checks the
+    constraints declared here.
+    """
 
     fps: PositiveFloat = 100.0
     duration_s: PositiveFloat = 20.0
@@ -323,10 +332,11 @@ class RecordingSettings:
     @classmethod
     def from_config(
         cls, config: OctacamConfig, *, fps: float | None = None
-    ) -> "RecordingSettings":
-        """The settings ``config`` loads as (its tolerance stands: nothing is
-        re-checked), with the save dirs resolved now. ``fps`` overrides the
-        config's, before a frame-count duration converts at it."""
+    ) -> RecordingSettings:
+        """The settings `config` loads as (its tolerance stands: nothing is
+        re-checked), with the save dirs resolved now. `fps` overrides the
+        config's, before a frame-count duration converts at it.
+        """
         record, transfer = config.record, config.transfer
         fps = record.fps if fps is None else fps
         path = resolve_save_path(record)
@@ -351,11 +361,12 @@ class RecordingSettings:
         )
 
     def record_config_values(self) -> dict:
-        """The settings as ``[record]`` keys, the inverse of :meth:`from_config`
-        with ``duration_s`` for ``duration``/``duration_unit``
+        """The settings as `[record]` keys, the inverse of `from_config`
+        with `duration_s` for `duration`/`duration_unit`
         (config_writer.with_record_settings). The save path is left out: a
         snapshot keeps the config's templates so a relaunch resolves a fresh
-        folder, and the path a recording used is in its summary."""
+        folder, and the path a recording used is in its summary.
+        """
         return {
             "fps": self.fps,
             "duration_s": self.duration_s,
@@ -370,10 +381,11 @@ class RecordingSettings:
             "save_timestamps": self.save_frame_timestamps,
         }
 
-    def updated(self, /, **changes) -> "RecordingSettings":
-        """A copy with ``changes`` validated and applied, else ValueError naming
-        each bad field. A ``record_directory`` or ``relative_directory`` edit
-        recomposes save_dir from the split; a lone ``save_dir`` clears it."""
+    def updated(self, /, **changes) -> RecordingSettings:
+        """A copy with `changes` validated and applied, else ValueError naming
+        each bad field. A `record_directory` or `relative_directory` edit
+        recomposes save_dir from the split; a lone `save_dir` clears it.
+        """
         unknown = changes.keys() - _SETTINGS_FIELDS
         if unknown:
             raise ValueError(f"Unknown settings: {sorted(unknown)}")
@@ -404,9 +416,10 @@ class RecordingSettings:
             return video_format
         return dataclasses.replace(video_format, ffmpeg_params=params)
 
-    def with_save_dir(self, path: str) -> "RecordingSettings":
-        """An explicit save dir (``--output``, a lone GUI edit). It clears the
-        split, or the transfer and next_take would recompose the old path."""
+    def with_save_dir(self, path: str) -> RecordingSettings:
+        """An explicit save dir (`--output`, a lone GUI edit). It clears the
+        split, or the transfer and next_take would recompose the old path.
+        """
         return dataclasses.replace(
             self,
             save_dir=normalize_dir(path),
@@ -414,9 +427,10 @@ class RecordingSettings:
             relative_directory="",
         )
 
-    def next_take(self) -> "RecordingSettings":
+    def next_take(self) -> RecordingSettings:
         """The next recording's folder: the relative part's trailing number
-        bumped, else save_dir's."""
+        bumped, else save_dir's.
+        """
         if not self.relative_directory.strip():
             return dataclasses.replace(
                 self, save_dir=increment_trailing_number(self.save_dir)
@@ -434,8 +448,9 @@ class RecordingSettings:
 
     def relative_save_dir(self) -> str:
         """The recording folder relative to the base directory: the explicit
-        ``relative_directory``, else save_dir relative to the base, else (no
-        base, or a folder outside it such as an --output override) its name."""
+        `relative_directory`, else save_dir relative to the base, else (no
+        base, or a folder outside it such as an --output override) its name.
+        """
         if self.relative_directory.strip():
             return self.relative_directory
         if self.record_directory:
@@ -458,10 +473,11 @@ _SETTINGS_FIELDS = frozenset(f.name for f in dataclasses.fields(RecordingSetting
 
 
 def _parse_visualization(src: object) -> list[VisualizationConfig]:
-    """Parse the optional ``[[visualization]]`` array.
+    """Parse the optional `[[visualization]]` array.
 
     An entry without a valid layout, or reusing an earlier entry's output name,
-    is warned about and skipped; another invalid field keeps its default."""
+    is warned about and skipped; another invalid field keeps its default.
+    """
     if src is None:
         return []
     if not isinstance(src, list):
@@ -489,7 +505,8 @@ def _parse_visualization(src: object) -> list[VisualizationConfig]:
 
 def _validate_visualization_cameras(config: OctacamConfig) -> None:
     """Warn about layout cells naming no configured camera (they render black).
-    Without a camera list, the names are not known here."""
+    Without a camera list, the names are not known here.
+    """
     if not config.visualization or not config.cameras:
         return
     known = {c.name for c in config.cameras if c.name}
@@ -504,7 +521,8 @@ def _validate_visualization_cameras(config: OctacamConfig) -> None:
     )
     if unknown:
         log.warning(
-            "A [[visualization]] layout references unknown camera(s) %s — those "
+            "A [[visualization]] layout references unknown camera(s) %s \N{EM DASH} "
+            "those "
             "cells will render black. Known cameras: %s",
             ", ".join(repr(u) for u in unknown),
             ", ".join(sorted(known)) or "(none)",
@@ -512,7 +530,7 @@ def _validate_visualization_cameras(config: OctacamConfig) -> None:
 
 
 def _parse_backend(value: object) -> str:
-    """Parse the optional top-level ``backend`` key (else ``"auto"``)."""
+    """Parse the optional top-level `backend` key (else `"auto"`)."""
     if value is None:
         return "auto"
     try:
@@ -528,14 +546,15 @@ def _parse_backend(value: object) -> str:
     return name
 
 
-def _lenient_validate(
-    model_cls: type[_ModelT], data: dict, context: str, fallback: _DefaultT
-) -> _ModelT | _DefaultT:
-    """Validate ``data`` against ``model_cls``, warning about and dropping each
+def _lenient_validate[ModelT: BaseModel, DefaultT](
+    model_cls: type[ModelT], data: dict, context: str, fallback: DefaultT
+) -> ModelT | DefaultT:
+    """Validate `data` against `model_cls`, warning about and dropping each
     invalid field so its default applies.
 
-    ``fallback`` when that cannot help: a required field is missing or invalid,
-    or an error names no field."""
+    `fallback` when that cannot help: a required field is missing or invalid,
+    or an error names no field.
+    """
     data = dict(data)
     fields = model_cls.model_fields
     while True:
@@ -545,7 +564,9 @@ def _lenient_validate(
             for err in exc.errors():
                 key = err["loc"][0] if err["loc"] else None
                 if isinstance(key, str) and key in fields and fields[key].is_required():
-                    log.warning('Ignoring %s: invalid "%s" (%s)', context, key, err["msg"])
+                    log.warning(
+                        'Ignoring %s: invalid "%s" (%s)', context, key, err["msg"]
+                    )
                     return fallback
             removable = {
                 err["loc"][0]
@@ -567,9 +588,10 @@ def _lenient_validate(
 
 
 def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
-    """Parse the optional ``plugins`` array: bare names or ``[[plugins]]``
-    tables with ``name`` and ``options``. Malformed or duplicate entries are
-    warned about and skipped."""
+    """Parse the optional `plugins` array: bare names or `[[plugins]]`
+    tables with `name` and `options`. Malformed or duplicate entries are
+    warned about and skipped.
+    """
     if plugins_src is None:
         return []
     if not isinstance(plugins_src, list):
@@ -608,8 +630,9 @@ def _parse_plugins(plugins_src: object) -> list[PluginConfig]:
 
 
 def is_safe_segment(name: str) -> bool:
-    """Whether ``name`` is one path segment, usable as a filename stem or folder
-    name: non-empty, no separator, no ``.``/``..``."""
+    """Whether `name` is one path segment, usable as a filename stem or folder
+    name: non-empty, no separator, no `.`/`..`.
+    """
     return (
         name not in ("", ".", "..")
         and "/" not in name
@@ -619,8 +642,9 @@ def is_safe_segment(name: str) -> bool:
 
 
 def safe_segment(name: str, what: str) -> str:
-    """``name`` stripped, or ``ValueError("Invalid <what>: ...")`` unless that is
-    a safe path segment (:func:`is_safe_segment`)."""
+    """`name` stripped, or `ValueError("Invalid <what>: ...")` unless that is
+    a safe path segment (`is_safe_segment`).
+    """
     clean = (name or "").strip()
     if not is_safe_segment(clean):
         raise ValueError(f"Invalid {what}: {name!r}")
@@ -643,13 +667,15 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
             serial_number = _scalar_str(src["serial_number"])
         except ValueError:
             log.warning(
-                'Ignoring the %dth entry of "cameras" as its "serial_number" is not a scalar',
+                'Ignoring the %dth entry of "cameras" as its "serial_number" is not a '
+                "scalar",
                 index,
             )
             continue
         if serial_number in used_serial_numbers:
             log.warning(
-                'Ignoring the %dth entry of "cameras" as its "serial_number" is not unique',
+                'Ignoring the %dth entry of "cameras" as its "serial_number" is not '
+                "unique",
                 index,
             )
             continue
@@ -685,11 +711,12 @@ def _parse_cameras(cameras_src: list) -> list[CameraConfig]:
     return cameras
 
 
-def _parse_section(
-    data: dict, key: str, model_cls: type[_ModelT], default: _DefaultT
-) -> _ModelT | _DefaultT:
-    """Parse the optional table ``[key]`` leniently; ``default`` when it is absent
-    or not a table."""
+def _parse_section[ModelT: BaseModel, DefaultT](
+    data: dict, key: str, model_cls: type[ModelT], default: DefaultT
+) -> ModelT | DefaultT:
+    """Parse the optional table `[key]` leniently; `default` when it is absent
+    or not a table.
+    """
     src = data.get(key)
     if src is None:
         return default
@@ -703,9 +730,118 @@ class ConfigError(Exception):
     """An octacam_config.toml that exists but cannot be parsed at all."""
 
 
+# ---------------------------------------------------------------------------
+# Command-line overrides (`--set KEY=VALUE`)
+# ---------------------------------------------------------------------------
+
+_OVERRIDE = re.compile(r"([A-Za-z_][\w.]*)=(.*)", re.DOTALL)
+
+
+def apply_overrides(config: OctacamConfig, overrides: Sequence[str]) -> OctacamConfig:
+    """A copy of `config` with `KEY=VALUE` overrides applied, validated as a whole.
+
+    A key is a dotted path into the config: `record.fps`, `backend`. A value is
+    read as TOML (`80`, `true`, `[0, 180, 0]`); a list may drop its brackets
+    (`0,180,0`), `none` restores a key's default, and a key that takes only text
+    takes the value verbatim. Unlike the file, the command line is strict: an
+    unknown key or a bad value raises `ConfigError`, naming it.
+    """
+    data = config.model_dump()
+    for item in overrides:
+        match = _OVERRIDE.fullmatch(item)
+        if match is None:
+            raise ConfigError(f"{item!r} is not KEY=VALUE")
+        key, raw = match.groups()
+        field = _override_field(key)
+        *tables, name = key.split(".")
+        owner = data
+        for table in tables:
+            if owner.get(table) is None:  # an optional table the file leaves out
+                owner[table] = {}
+            owner = owner[table]
+        owner[name] = _override_value(field, raw)
+    try:
+        updated = OctacamConfig.model_validate(data)
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in exc.errors()
+        )
+        raise ConfigError(problems) from None
+    if updated.backend.lower() not in _BACKENDS:
+        raise ConfigError(f"backend: {updated.backend!r} is not one of {_BACKENDS}")
+    updated.backend = updated.backend.lower()
+    return updated
+
+
+def _bare_type(annotation: object) -> object:
+    """`annotation` without `Annotated` metadata or `| None`."""
+    if typing.get_origin(annotation) is Annotated:
+        return _bare_type(typing.get_args(annotation)[0])
+    if isinstance(annotation, types.UnionType) or typing.get_origin(annotation) is (
+        typing.Union
+    ):
+        args = [a for a in typing.get_args(annotation) if a is not type(None)]
+        if len(args) == 1:
+            return _bare_type(args[0])
+    return annotation
+
+
+def _override_keys(
+    model: type[BaseModel] = OctacamConfig, prefix: str = ""
+) -> list[str]:
+    """Every dotted key `--set` can address, for naming the one a typo meant."""
+    keys = []
+    for name, field in model.model_fields.items():
+        bare = _bare_type(field.annotation)
+        if isinstance(bare, type) and issubclass(bare, BaseModel):
+            keys += _override_keys(bare, f"{prefix}{name}.")
+        else:
+            keys.append(f"{prefix}{name}")
+    return keys
+
+
+def _is_table(annotation: object) -> typing.TypeGuard[type[BaseModel]]:
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _override_field(key: str) -> FieldInfo:
+    """The field a dotted key names; `ConfigError` naming the closest key if none."""
+    parts = key.split(".")
+    fields: dict[str, FieldInfo] = OctacamConfig.model_fields
+    for depth, part in enumerate(parts, start=1):
+        field = fields.get(part)
+        if field is None:
+            close = difflib.get_close_matches(key, _override_keys(), n=1)
+            hint = f" (did you mean {close[0]!r}?)" if close else ""
+            raise ConfigError(f"unknown key {key!r}{hint}")
+        model = _bare_type(field.annotation)
+        if depth == len(parts):
+            if _is_table(model):
+                raise ConfigError(f"{key!r} is a table: set one of its keys")
+            return field
+        fields = model.model_fields if _is_table(model) else {}
+    raise AssertionError("a key has at least one part")
+
+
+def _override_value(field: FieldInfo, raw: str) -> object:
+    """An override's value, typed by its field: see `apply_overrides`."""
+    if raw.strip().lower() in ("none", "null"):
+        return field.get_default(call_default_factory=True)
+    bare = _bare_type(field.annotation)
+    if bare is str or typing.get_origin(bare) is Literal:
+        return raw
+    for text in (raw, f"[{raw}]"):
+        try:
+            return tomllib.loads(f"v = {text}")["v"]
+        except tomllib.TOMLDecodeError:
+            pass
+    return raw
+
+
 def parse_record_section(data: dict) -> RecordConfig:
-    """The ``[record]`` section of a raw parsed config, as :func:`parse_config`
-    reads it (invalid fields fall back to their defaults)."""
+    """The `[record]` section of a raw parsed config, as `parse_config`
+    reads it (invalid fields fall back to their defaults).
+    """
     return _parse_section(data, "record", RecordConfig, RecordConfig())
 
 
@@ -762,11 +898,12 @@ def find_config_file(config_dir: str | Path) -> Path:
 def resolve_config_dir(config_dir: str | Path) -> Path:
     """The config directory *config_dir* names, allowing a recording folder.
 
-    A recording's ``octacam_recording`` subfolder is a config directory, used
+    A recording's `octacam_recording` subfolder is a config directory, used
     when the folder has no config of its own, or only an older flat take's
     snapshot (a flat summary beside it) the subfolder superseded
-    (:func:`octacam.recording_format.recording_info_dir`). A rig config directory that
-    was recorded into has no flat summary and keeps its own config."""
+    (`octacam.recording_format.recording_info_dir`). A rig config directory that
+    was recorded into has no flat summary and keeps its own config.
+    """
     config_dir = Path(config_dir)
     nested = config_dir / RECORDING_INFO_DIRNAME
     if not find_config_file(nested).exists():

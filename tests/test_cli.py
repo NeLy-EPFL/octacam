@@ -9,8 +9,10 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
+import typer
 from helpers import wait_until
 from typer.testing import CliRunner
 
@@ -49,7 +51,7 @@ def test_help_lists_commands():
 
 def test_no_args_prints_help():
     result = runner.invoke(app, [])
-    assert result.exit_code == 0
+    assert result.exit_code == 2  # Click's code for a command line with no command
     assert "Usage" in result.output
 
 
@@ -65,7 +67,7 @@ def test_record_help_has_day_to_day_overrides():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
     # Only the day-to-day overrides remain (fps/duration/output).
-    for opt in ("--fps", "--duration", "--output"):
+    for opt in ("--fps", "--duration", "--out"):
         assert opt in result.output
     # The identity fields that used to feed the save-directory template were
     # removed as redundant, as were the old encoding/form enum options.
@@ -75,9 +77,18 @@ def test_record_help_has_day_to_day_overrides():
     assert "--record-form" not in result.output
 
 
-def test_invalid_log_level_rejected():
-    result = runner.invoke(app, ["--log-level", "bogus", "doctor"])
-    assert result.exit_code != 0
+def test_every_command_takes_verbose():
+    def commands(group, prefix=()):
+        for name, cmd in group.commands.items():
+            if hasattr(cmd, "commands"):
+                yield from commands(cmd, (*prefix, name))
+            else:
+                yield (*prefix, name)
+
+    for path in commands(typer.main.get_command(app)):
+        result = runner.invoke(app, [*path, "--help"])
+        assert result.exit_code == 0, (path, result.output)
+        assert "--verbose" in result.output, path
 
 
 def test_gui_rejects_missing_config_dir():
@@ -101,6 +112,20 @@ def test_port_available_detects_bound_socket():
         assert port_available("127.0.0.1", port) is False
     # ...and it is free again once the listener closes.
     assert port_available("127.0.0.1", port) is True
+
+
+def test_pick_port_takes_the_next_free_one_after_a_taken_default():
+    from octacam.cli._common import pick_port
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        taken = sock.getsockname()[1]
+        assert pick_port("127.0.0.1", None, taken) > taken
+        # A port asked for is that port or an error.
+        with pytest.raises(SystemExit):
+            pick_port("127.0.0.1", taken, 8765)
 
 
 def test_gui_exits_when_port_already_in_use(tmp_path):
@@ -150,7 +175,7 @@ def test_gui_exits_when_another_instance_holds_the_config(tmp_path):
 )
 def test_gui_reports_cameras_in_use(tmp_path, monkeypatch, error_type, expected):
     # The GUI serves the page before opening the cameras, so a camera-open
-    # failure (e.g. another octacam holds them — SDKs open USB3 devices
+    # failure (e.g. another octacam holds them -- SDKs open USB3 devices
     # exclusively) does not exit the process. It is surfaced in the GUI: the
     # background init calls controller.fail_init with a clean message (not a raw
     # SDK traceback), the server stays up, and the browser shows the reason.
@@ -207,9 +232,9 @@ def _fake_camera_system(cam):
         # Mirrors the real CameraSystem's incomplete-rig introspection: `record`
         # reports opened-vs-configured and gates on a shortfall, so a fake missing
         # these looks like a rig that failed that check.
-        requested_serial_numbers: list[str] = []
+        requested_serial_numbers: ClassVar[list[str]] = []
         incomplete = False
-        missing: dict[str, str] = {}
+        missing: ClassVar[dict[str, str]] = {}
 
         def __init__(self):
             self._cams = [cam]
@@ -283,7 +308,7 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["gui", str(tmp_path), "--port", "0", "--no-browser"])
     assert result.exit_code != 0  # the RuntimeError propagates after cleanup
-    # Teardown ran despite the failure — the background init thread never started
+    # Teardown ran despite the failure -- the background init thread never started
     # (create_app raised first), so nothing was armed to leak.
     assert "controller.close" in _FACADE_CALLS
     assert "teardown_all" in _FACADE_CALLS
@@ -292,7 +317,7 @@ def test_gui_tears_down_when_create_app_raises(tmp_path, monkeypatch):
 def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
     # A Ctrl-C/exception during join() must trigger controller.close() (which
     # aborts+joins the daemon monitor so metadata/timestamps are written, then
-    # closes cameras once) — never a bare system.close() that races the monitor.
+    # closes cameras once) -- never a bare system.close() that races the monitor.
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
     _FACADE_CALLS.clear()
@@ -334,11 +359,14 @@ def test_record_finally_closes_via_controller_not_system(tmp_path, monkeypatch):
 
 def _patch_one_camera_record(monkeypatch, tmp_path, events):
     """Stub `record`'s hardware and controller; each step appends to *events*,
-    with whether the capture marker was live then."""
+    with whether the capture marker was live then.
+    """
     from octacam import session_cache
     from octacam.config import CameraConfig, OctacamConfig, RecordConfig
 
-    cam = SimpleNamespace(serial_number="s1", name="cam1", take=SimpleNamespace(frames=1))
+    cam = SimpleNamespace(
+        serial_number="s1", name="cam1", take=SimpleNamespace(frames=1)
+    )
     config = OctacamConfig(
         cameras=[CameraConfig(serial_number="s1", name="cam1")],
         backend="fake",
@@ -404,7 +432,8 @@ def test_record_tears_down_when_the_capture_marker_fails(tmp_path, monkeypatch):
     _patch_one_camera_record(monkeypatch, tmp_path, events)
     monkeypatch.setattr("octacam.session_cache.mark_capture_active", broken_marker)
     result = runner.invoke(app, ["record", str(tmp_path)])
-    assert isinstance(result.exception, RuntimeError)
+    assert result.exit_code == 1
+    assert "error: no home directory" in result.output
     assert events == [("close", False), ("teardown_all", False)]
 
 
@@ -423,14 +452,40 @@ def test_record_applies_its_fps_duration_and_output_overrides(tmp_path, monkeypa
     result = runner.invoke(
         app,
         ["record", str(tmp_path), "--fps", "50", "--duration", "2"]
-        + ["--output", str(output)],
+        + ["--out", str(output)],
     )
     assert result.exit_code == 0, result.output
     (settings,) = seen
     assert (settings.fps, settings.duration_s) == (50.0, 2.0)
-    # An explicit --output clears the config's split save path.
+    # An explicit --out clears the config's split save path.
     assert settings.save_dir == str(output)
     assert (settings.record_directory, settings.relative_directory) == ("", "")
+
+
+def test_record_set_overrides_a_config_key_and_yields_to_named_options(
+    tmp_path, monkeypatch
+):
+    import octacam.controller
+
+    _patch_one_camera_record(monkeypatch, tmp_path, [])
+    seen = []
+
+    class Capture(octacam.controller.RecordingController):
+        def __init__(self, _system, settings, *_a, **_k):
+            seen.append(settings)
+
+    monkeypatch.setattr("octacam.controller.RecordingController", Capture)
+    args = ["record", str(tmp_path), "--set", "record.fps=40"]
+    result = runner.invoke(app, [*args, "--set", "record.duration=3"])
+    assert result.exit_code == 0, result.output
+    result = runner.invoke(app, [*args, "--fps", "50"])
+    assert result.exit_code == 0, result.output
+    assert (seen[0].fps, seen[0].duration_s) == (40.0, 3.0)
+    assert seen[1].fps == 50.0
+    # A key that does not exist is a usage error naming the closest one.
+    result = runner.invoke(app, ["record", str(tmp_path), "--set", "record.fsp=40"])
+    assert result.exit_code == 2
+    assert "record.fps" in result.output
 
 
 def test_browser_skip_reason(monkeypatch):
@@ -471,7 +526,10 @@ def test_doctor_runtime_reports_why_the_browser_stays_closed(monkeypatch):
     assert browser_lines() == [
         (
             "info",
-            "SSH session — the GUI won't auto-open a browser; use an ssh -L tunnel",
+            (
+                "SSH session \N{EM DASH} the GUI won't auto-open a browser; use an "
+                "ssh -L tunnel"
+            ),
         )
     ]
 
@@ -480,7 +538,7 @@ def test_doctor_runtime_reports_why_the_browser_stays_closed(monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     assert browser_lines() == [
-        ("info", "no local display — the GUI won't auto-open a browser")
+        ("info", "no local display \N{EM DASH} the GUI won't auto-open a browser")
     ]
 
     monkeypatch.setenv("DISPLAY", ":0")
@@ -540,7 +598,7 @@ def test_transcode_requires_paths():
 def test_record_help_drops_encoding_options():
     result = runner.invoke(app, ["record", "--help"])
     assert result.exit_code == 0
-    for kept in ("--fps", "--duration", "--output"):
+    for kept in ("--fps", "--duration", "--out"):
         assert kept in result.output
     for gone in ("--crf", "--preset", "--codec", "--save-frame-timestamps"):
         assert gone not in result.output
@@ -628,7 +686,8 @@ def emulated_rig(monkeypatch):
 
     The FLIR tiers report not installed, pycameleon finds no camera, pylon
     enumerates its emulator alone, and no USB link or serial port is read, so a
-    report never depends on what is plugged into the machine running the tests."""
+    report never depends on what is plugged into the machine running the tests.
+    """
     from octacam.cameras import basler, pycameleon, registry
 
     select_backend = registry.select_backend
@@ -652,10 +711,10 @@ def emulated_rig(monkeypatch):
     monkeypatch.setattr("octacam.cameras.select_backend", select_installed)
     monkeypatch.setattr(basler, "tl_factory", Emulator)
     monkeypatch.setattr(
-        pycameleon, "pycameleon", SimpleNamespace(enumerate_cameras=lambda: [])
+        pycameleon, "pycameleon", SimpleNamespace(enumerate_cameras=list)
     )
     monkeypatch.setattr("octacam.cli.doctor._usb_camera_links", lambda detected: [])
-    monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: [])
+    monkeypatch.setattr("octacam.serial_ports.list_serial_ports", list)
 
 
 def test_doctor_lists_cameras_plugins_and_toolchain(emulated_rig):
@@ -673,9 +732,9 @@ def test_doctor_lists_cameras_plugins_and_toolchain(emulated_rig):
 def test_doctor_json_is_machine_readable(emulated_rig):
     import json
 
-    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     assert payload["octacam_version"] == octacam.__version__
     titles = [s["title"] for s in payload["sections"]]
     assert "Camera backends" in titles and "Encoding toolchain" in titles
@@ -686,7 +745,7 @@ def test_doctor_help_documents_config_dir():
     result = runner.invoke(app, ["doctor", "-h"])
     assert result.exit_code == 0
     assert "Usage" in result.output
-    assert "CONFIG_DIR" in result.output
+    assert "config_dir" in result.output
 
 
 def test_doctor_flags_undetected_camera_and_exits_nonzero(emulated_rig, tmp_path):
@@ -695,7 +754,7 @@ def test_doctor_flags_undetected_camera_and_exits_nonzero(emulated_rig, tmp_path
     (tmp_path / "octacam_config.toml").write_text(
         '[[cameras]]\nserial_number = "99999999"\nname = "ghost"\n'
     )
-    result = runner.invoke(app, ["--log-level", "error", "doctor", str(tmp_path)])
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
     assert result.exit_code == 1, result.output
     assert "declared but NOT detected" in result.output
     assert "99999999" in result.output
@@ -706,7 +765,8 @@ def _count_enumerations(monkeypatch):
 
     doctor now enumerates the backends via a single parallel _CameraScan; this
     seam lets a test assert the scan never re-enumerates a backend (the whole
-    point of the dedup — the old code enumerated the cascade ~3× per run)."""
+    point of the dedup -- the old code enumerated the cascade ~3x per run).
+    """
     import collections
 
     from octacam.cli import doctor
@@ -723,11 +783,11 @@ def _count_enumerations(monkeypatch):
 
 
 def test_doctor_enumerates_each_backend_at_most_once(emulated_rig, monkeypatch):
-    # The dedup invariant: one parallel scan, so no backend is enumerated twice —
+    # The dedup invariant: one parallel scan, so no backend is enumerated twice --
     # even though the report has three consumers (the tier list, the cascade line,
     # and the cameras-vs-config cross-check). basler is always present (emulated).
     counter = _count_enumerations(monkeypatch)
-    result = runner.invoke(app, ["--log-level", "error", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert counter["basler"] == 1
     assert max(counter.values()) <= 1, dict(counter)
@@ -737,7 +797,7 @@ def test_doctor_backend_filter_scans_only_that_backend(emulated_rig, monkeypatch
     # `--backend X` must scan only X (no full-cascade sweep), so the other tiers
     # are never touched.
     counter = _count_enumerations(monkeypatch)
-    result = runner.invoke(app, ["--log-level", "error", "doctor", "--backend", "basler"])
+    result = runner.invoke(app, ["doctor", "--backend", "basler"])
     assert result.exit_code == 0, result.output
     assert set(counter) == {"basler"}, dict(counter)
 
@@ -746,7 +806,7 @@ def test_doctor_backend_filter_is_case_insensitive(emulated_rig):
     # --backend is normalized like select_backend/_enumerate_backend, so an
     # upper/mixed-case tier name still resolves to its cached scan (regression:
     # the scan cache is keyed by the lowercased name).
-    result = runner.invoke(app, ["--log-level", "error", "doctor", "--backend", "BASLER"])
+    result = runner.invoke(app, ["doctor", "--backend", "BASLER"])
     assert result.exit_code == 0, result.output
     assert "BASLER: available" in result.output
     assert "enumeration failed" not in result.output
@@ -755,10 +815,10 @@ def test_doctor_backend_filter_is_case_insensitive(emulated_rig):
 def test_doctor_json_has_no_progress_noise(emulated_rig):
     # The scan's live spinner renders on stderr and is suppressed for --json / when
     # output is not a terminal, so machine-readable output is never corrupted.
-    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
-    assert "enumerating" not in result.output
-    json.loads(result.output)  # still valid JSON
+    assert "enumerating" not in result.stdout
+    json.loads(result.stdout)  # still valid JSON
 
 
 def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
@@ -771,7 +831,11 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
         lines = output.splitlines()
         start = next(i for i, ln in enumerate(lines) if ln.strip() == "Camera backends")
         end = next(
-            (i for i in range(start + 1, len(lines)) if lines[i].strip() == "Encoding toolchain"),
+            (
+                i
+                for i in range(start + 1, len(lines))
+                if lines[i].strip() == "Encoding toolchain"
+            ),
             len(lines),
         )
         return "\n".join(lines[start:end])
@@ -786,9 +850,9 @@ def test_doctor_report_order_is_deterministic(emulated_rig, monkeypatch):
 
     monkeypatch.setattr("octacam.cli.doctor.enumerate_backend", enumerate_slowly)
     slow[:] = ["basler"]
-    first = runner.invoke(app, ["--log-level", "error", "doctor"])
+    first = runner.invoke(app, ["doctor"])
     slow[:] = ["pycameleon"]
-    second = runner.invoke(app, ["--log-level", "error", "doctor"])
+    second = runner.invoke(app, ["doctor"])
     assert first.exit_code == 0 and second.exit_code == 0
     assert backends_section(first.output) == backends_section(second.output)
 
@@ -816,14 +880,30 @@ def test_usb_camera_links_reads_speeds_and_filters_non_cameras(tmp_path):
         for k, v in fields.items():
             (d / k).write_text(v)
 
-    mkdev("basler-bad", serial="40018619", idVendor="2676",
-          product="acA1920-150um", speed="480")
-    mkdev("basler-ok", serial="40018631", idVendor="2676",
-          product="acA1920-150um", speed="5000")
-    mkdev("flir-bad", serial="010AA673", idVendor="1e10",
-          product="Grasshopper3", speed="480")
-    mkdev("generic-detected", serial="GEN1", idVendor="ffff",
-          product="Cam", speed="480")  # unknown vendor, but octacam detected it
+    mkdev(
+        "basler-bad",
+        serial="40018619",
+        idVendor="2676",
+        product="acA1920-150um",
+        speed="480",
+    )
+    mkdev(
+        "basler-ok",
+        serial="40018631",
+        idVendor="2676",
+        product="acA1920-150um",
+        speed="5000",
+    )
+    mkdev(
+        "flir-bad",
+        serial="010AA673",
+        idVendor="1e10",
+        product="Grasshopper3",
+        speed="480",
+    )
+    mkdev(
+        "generic-detected", serial="GEN1", idVendor="ffff", product="Cam", speed="480"
+    )  # unknown vendor, but octacam detected it
     mkdev("keyboard", serial="KB1", idVendor="046d", speed="12")  # non-camera vendor
     mkdev("hub", idVendor="1d6b", speed="480")  # no serial node -> skipped
 
@@ -839,13 +919,14 @@ def test_usb_camera_links_reads_speeds_and_filters_non_cameras(tmp_path):
 
 def test_doctor_warns_on_usb2_linked_camera(monkeypatch):
     # doctor never opens a camera, so a USB3 camera that fell back to USB 2.0 must
-    # be surfaced from its sysfs link speed — the gap the user hit (the GUI warned,
+    # be surfaced from its sysfs link speed -- the gap the user hit (the GUI warned,
     # doctor was silent). The warning names the camera, the speed, and the fix.
     from octacam.cli import doctor
     from octacam.cli.doctor import _doctor_backends, _Report
 
     monkeypatch.setattr(
-        doctor, "_usb_camera_links",
+        doctor,
+        "_usb_camera_links",
         lambda _detected: [("40018619", "acA1920-150um", 480)],
     )
 
@@ -885,15 +966,15 @@ def test_doctor_backends_reads_auto_as_the_cascade(monkeypatch):
         _doctor_backends(report, only_backend=selector, scan=_FakeScan())
         texts = [t for _title, items in report.sections for _s, t in items]
         assert not any("'auto'" in t or "'ALL'" in t for t in texts), texts
-        assert "S1 → basler" in " ".join(texts), texts
+        assert "S1 \N{RIGHTWARDS ARROW} basler" in " ".join(texts), texts
 
 
 def test_enumerate_backend_resolves_model_via_backend_read_model(monkeypatch):
     # End-to-end of the asymmetry fix: the REAL _enumerate_backend generic path
     # must resolve the backend's read_model through its registry spec and
     # map each enumerated handle to its model. Driven through pycameleon (always
-    # available) with fake handles, so the whole glue runs — not a monkeypatched
-    # stand-in. A regressed read_model lookup / handle→model mapping fails here.
+    # available) with fake handles, so the whole glue runs -- not a monkeypatched
+    # stand-in. A regressed read_model lookup / handle->model mapping fails here.
     import types
 
     import octacam.cameras.pycameleon as pcmod
@@ -922,7 +1003,7 @@ def test_doctor_groups_cameras_by_model_including_non_basler(emulated_rig, monke
     # The grouping half of the change: same-model cameras (including a non-basler
     # tier's, now that every backend surfaces a model) render as a single grouped
     # line. This stubs _enumerate_backend, so it covers _camera_lines + doctor
-    # rendering only — the read_model wiring is covered by the test above.
+    # rendering only -- the read_model wiring is covered by the test above.
     monkeypatch.setattr(
         "octacam.cli.doctor.enumerate_backend",
         lambda name: [
@@ -931,19 +1012,17 @@ def test_doctor_groups_cameras_by_model_including_non_basler(emulated_rig, monke
             ("40018619", "acA1920-150um"),
         ],
     )
-    result = runner.invoke(
-        app, ["--log-level", "error", "doctor", "--backend", "pycameleon"]
-    )
+    result = runner.invoke(app, ["doctor", "--backend", "pycameleon"])
     assert result.exit_code == 0, result.output
     assert "GS3-U3-41C6NIR: 17475185, 17475187" in result.output
     assert "acA1920-150um: 40018619" in result.output
 
 
 def test_doctor_omits_free_gui_port_line(emulated_rig):
-    # The "GUI port is free" happy-path line was pruned — the port is reported only
+    # The "GUI port is free" happy-path line was pruned -- the port is reported only
     # when in use. Port 8765 is normally free under test, so the old code would
     # have printed this line; its absence proves the removal (not a vacuous check).
-    result = runner.invoke(app, ["--log-level", "error", "doctor"])
+    result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "GUI port 8765 is free" not in result.output
 
@@ -957,9 +1036,13 @@ def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
     import octacam.ffmpeg as ff
     from octacam.cli.doctor import _doctor_gpu_encoding, _Report
 
-    monkeypatch.setattr("octacam.cli.doctor._nvidia_gpus", lambda: ["FakeGPU (driver 999)"])
+    monkeypatch.setattr(
+        "octacam.cli.doctor._nvidia_gpus", lambda: ["FakeGPU (driver 999)"]
+    )
     monkeypatch.setattr(ff, "ffmpeg_version", lambda exe: "n7.1")
-    monkeypatch.setattr(ff, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(
+        ff, "find_ffmpeg", lambda require_encoder=None: "/usr/bin/ffmpeg"
+    )
     monkeypatch.setattr(ff, "probe_nvenc_max_sessions", lambda: None)
 
     report = _Report()
@@ -968,28 +1051,51 @@ def test_doctor_gpu_encoding_drops_save_method_hint(monkeypatch):
     texts = [text for _status, text in report.sections[-1][1]]
     assert any("NVIDIA GPU: FakeGPU" in t for t in texts)  # took the GPU-present path
     assert any("NVENC record params" in t for t in texts)  # reached the section's end
-    assert not any("enable per rig" in t for t in texts)  # …yet the hint is gone
+    assert not any("enable per rig" in t for t in texts)  # ...yet the hint is gone
 
 
 # --- doctor: serial / Arduino devices ---------------------------------------
 
 
-def _fake_serial_port(device, *, vid=0x2341, pid=0x0070, sn="SN123", arduino=True,
-                      mcu=True, board="Arduino Nano ESP32"):
+def _fake_serial_port(
+    device,
+    *,
+    vid=0x2341,
+    pid=0x0070,
+    sn="SN123",
+    arduino=True,
+    mcu=True,
+    board="Arduino Nano ESP32",
+):
     from octacam.serial_ports import SerialPort
 
     return SerialPort(
-        device=device, description="", manufacturer="Arduino", product=None,
-        vid=vid, pid=pid, serial_number=sn, hwid="", board_name=board,
-        likely_microcontroller=mcu, likely_arduino=arduino,
+        device=device,
+        description="",
+        manufacturer="Arduino",
+        product=None,
+        vid=vid,
+        pid=pid,
+        serial_number=sn,
+        hwid="",
+        board_name=board,
+        likely_microcontroller=mcu,
+        likely_arduino=arduino,
     )
 
 
 def test_doctor_lists_serial_devices(emulated_rig, monkeypatch):
     ports = [
         _fake_serial_port("/dev/ttyACM0"),
-        _fake_serial_port("/dev/ttyS0", vid=None, pid=None, sn=None,
-                          arduino=False, mcu=False, board="generic serial"),
+        _fake_serial_port(
+            "/dev/ttyS0",
+            vid=None,
+            pid=None,
+            sn=None,
+            arduino=False,
+            mcu=False,
+            board="generic serial",
+        ),
     ]
     monkeypatch.setattr("octacam.serial_ports.list_serial_ports", lambda: ports)
     result = runner.invoke(app, ["doctor"])
@@ -1001,7 +1107,9 @@ def test_doctor_lists_serial_devices(emulated_rig, monkeypatch):
     assert "other/generic serial port" in result.output
 
 
-def test_doctor_serial_flags_missing_configured_device(emulated_rig, monkeypatch, tmp_path):
+def test_doctor_serial_flags_missing_configured_device(
+    emulated_rig, monkeypatch, tmp_path
+):
     monkeypatch.setattr(
         "octacam.serial_ports.list_serial_ports",
         lambda: [_fake_serial_port("/dev/ttyACM0")],
@@ -1009,7 +1117,7 @@ def test_doctor_serial_flags_missing_configured_device(emulated_rig, monkeypatch
     (tmp_path / "octacam_config.toml").write_text(
         '[[plugins]]\nname = "triggerbox"\n[plugins.options]\ndevice = "/dev/ttyACM9"\n'
     )
-    result = runner.invoke(app, ["--log-level", "error", "doctor", str(tmp_path)])
+    result = runner.invoke(app, ["doctor", str(tmp_path)])
     assert result.exit_code == 1, result.output
     # Collapse whitespace: Rich wraps the console at 80 cols, so the phrase can
     # span a line break depending on the (variable-length) plugin name.
@@ -1024,9 +1132,9 @@ def test_doctor_serial_section_in_json(emulated_rig, monkeypatch):
         "octacam.serial_ports.list_serial_ports",
         lambda: [_fake_serial_port("/dev/ttyACM0")],
     )
-    result = runner.invoke(app, ["--log-level", "error", "doctor", "--json"])
+    result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
+    payload = json.loads(result.stdout)
     titles = [s["title"] for s in payload["sections"]]
     assert "Serial devices" in titles
 
@@ -1061,7 +1169,9 @@ def test_doctor_probe_serial_skips_busy_port(emulated_rig, monkeypatch):
     result = runner.invoke(app, ["doctor", "--probe-serial"])
     assert result.exit_code == 0, result.output
     # The plugins never lock their port, so the holder is not an octacam session.
-    assert "port in use (held exclusively by another process)" in " ".join(result.output.split())
+    assert "port in use (held exclusively by another process)" in " ".join(
+        result.output.split()
+    )
 
 
 def test_build_config_doc_includes_plugins():
@@ -1069,7 +1179,11 @@ def test_build_config_doc_includes_plugins():
     from octacam.config import RecordConfig
 
     doc = _build_config_doc(
-        "fake", RecordConfig(), [], [], None,
+        "fake",
+        RecordConfig(),
+        [],
+        [],
+        None,
         [{"name": "triggerbox", "options": {"device": "/dev/ttyACM0"}}],
     )
     assert doc["plugins"] == [
@@ -1079,7 +1193,11 @@ def test_build_config_doc_includes_plugins():
 
 @pytest.mark.parametrize(
     ("name", "device"),
-    [("triggerbox", "/dev/ttyACM0"), ("twophoton", "/dev/arduinoCams"), ("flywheel", "/dev/ttyACM0")],
+    [
+        ("triggerbox", "/dev/ttyACM0"),
+        ("twophoton", "/dev/arduinoCams"),
+        ("flywheel", "/dev/ttyACM0"),
+    ],
 )
 def test_config_wizard_offers_the_plugins_default_device_without_a_port(
     monkeypatch, name, device
@@ -1108,19 +1226,19 @@ def test_config_wizard_offers_the_plugins_default_device_without_a_port(
 
 # Grids are opt-in, so a recording whose grid path should run needs this in its
 # embedded config snapshot; `visualization=False` gives the bare default rig.
-_VIZ_TOML = '''[[visualization]]
+_VIZ_TOML = """[[visualization]]
 name = "grid.mp4"
 layout = [["camera_LF", ""]]
-'''
+"""
 
 
 def _make_recording(folder, *, with_outputs, extra_toml="", visualization=True):
     """A recording folder with one camera's source .mkv and its summary.
 
-    When *with_outputs*, also drop a finished ``camera_LF.mp4`` and ``grid.mp4``
-    so ``octacam process``'s skip-on-exists path is exercised. *extra_toml*, if
-    given, is written as the embedded ``octacam_config.toml`` snapshot; unless
-    *visualization* is off, a ``[[visualization]]`` entry is appended to it so the
+    When *with_outputs*, also drop a finished `camera_LF.mp4` and `grid.mp4`
+    so `octacam process`'s skip-on-exists path is exercised. *extra_toml*, if
+    given, is written as the embedded `octacam_config.toml` snapshot; unless
+    *visualization* is off, a `[[visualization]]` entry is appended to it so the
     grid step has something to build.
     """
     from octacam.recording_format import RECORDING_SUMMARY_FILENAME
@@ -1175,7 +1293,7 @@ def test_process_skips_existing_transcode_and_grid(tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer"])
     assert result.exit_code == 0, result.output
-    # Neither the transcoder nor the grid builder ran — both outputs pre-existed.
+    # Neither the transcoder nor the grid builder ran -- both outputs pre-existed.
     assert calls == {"transcode": 0, "grid": 0}
     # And the existing outputs are left byte-for-byte untouched.
     assert (folder / "camera_LF.mp4").read_bytes() == before_mp4
@@ -1193,7 +1311,7 @@ def test_process_redoes_outputs_left_over_from_an_earlier_take(
 ):
     # Recording into a folder again (confirming the overwrite) replaces only the
     # files the new take writes, so the previous take's mp4/grid stay behind.
-    # They must not pass as this recording's finished outputs — that is how a
+    # They must not pass as this recording's finished outputs -- that is how a
     # video from a different take ended up transferred as if it were this one's.
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True)
@@ -1228,12 +1346,16 @@ def test_process_dry_run_lists_leftover_outputs_as_work(
     _make_recording(folder, with_outputs=True)
     _age(folder / "camera_LF.mp4", 10)
     _age(folder / "grid.mp4", 20)
-    _forbid(monkeypatch, "octacam.process.transcode_file", "octacam.process.build_grid_video")
+    _forbid(
+        monkeypatch,
+        "octacam.process.transcode_file",
+        "octacam.process.build_grid_video",
+    )
 
     result = runner.invoke(app, ["process", str(folder), "--no-transfer", "--dry-run"])
 
     assert result.exit_code == 0, result.output
-    # The leftovers are work to redo, not work already done — and the grid is
+    # The leftovers are work to redo, not work already done -- and the grid is
     # listed as waiting for the video that will be re-transcoded.
     assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log.messages
     assert "[dry-run] Grid: 1 to build, 0 already exist" in process_log.messages
@@ -1344,7 +1466,10 @@ def test_process_reads_each_recordings_config_once(tmp_path, monkeypatch, proces
     result = runner.invoke(app, ["process", str(folder)])
     assert result.exit_code == 0, result.output
     assert [m for m in process_log.messages if "has no embedded config" in m] == [
-        f"{folder} has no embedded config and no --config given; using built-in defaults"
+        (
+            f"{folder} has no embedded config and no --config given; using built-in "
+            "defaults"
+        )
     ]
 
 
@@ -1353,11 +1478,12 @@ def test_process_reads_each_recordings_config_once(tmp_path, monkeypatch, proces
 
 @pytest.fixture
 def process_log(monkeypatch, caplog):
-    """caplog at INFO for a CLI invocation.
+    """Caplog at INFO for a CLI invocation.
 
     The CLI callback would install a rich handler that wraps lines to the
-    terminal width and stops propagation, so it is left out."""
-    monkeypatch.setattr("octacam.cli._setup_logging", lambda level: None)
+    terminal width and stops propagation, so it is left out.
+    """
+    monkeypatch.setattr("octacam.cli._setup_logging", lambda: None)
     caplog.set_level(logging.INFO, logger="octacam")
     return caplog
 
@@ -1400,7 +1526,10 @@ def test_process_dry_run_plans_every_step_without_running_any(
     assert not dest_root.exists()
     source = folder / "camera_LF.mkv"
     dest = dest_root / folder.name
-    assert f"[dry-run] transcode: {source} → camera_LF.mp4" in process_log.messages
+    assert (
+        f"[dry-run] transcode: {source} \N{RIGHTWARDS ARROW} camera_LF.mp4"
+        in process_log.messages
+    )
     assert f"[dry-run] would delete source: {source}" in process_log.messages
     assert any(
         m.startswith(f"[dry-run] grid: {folder / 'grid.mp4'}")
@@ -1408,7 +1537,7 @@ def test_process_dry_run_plans_every_step_without_running_any(
     )
     for name in ("camera_LF.mp4", "grid.mp4"):
         assert (
-            f"[dry-run] transfer: {folder / name} → {dest / name}"
+            f"[dry-run] transfer: {folder / name} \N{RIGHTWARDS ARROW} {dest / name}"
             in process_log.messages
         )
     assert "[dry-run] Transcode: 1 to transcode, 0 already done" in process_log.messages
@@ -1472,7 +1601,11 @@ def test_process_dry_run_lists_no_work_for_a_finished_recording(
     dest_root = tmp_path / "dest"
     folder = tmp_path / "rec"
     _make_recording(folder, with_outputs=True, extra_toml=_transfer_toml(dest_root))
-    _forbid(monkeypatch, "octacam.process.transcode_file", "octacam.process.build_grid_video")
+    _forbid(
+        monkeypatch,
+        "octacam.process.transcode_file",
+        "octacam.process.build_grid_video",
+    )
     finish = runner.invoke(app, ["process", str(folder)])
     assert finish.exit_code == 0, finish.output
     process_log.clear()
@@ -1514,8 +1647,15 @@ def test_progress_bar_shows_one_task_per_file_copy_and_verify():
     bar = FileProgressBar()
     on_progress = bar.transfer_callback()
     seen = []
-    for index, phase, done in [(1, "copy", 50), (1, "copy", 100), (1, "verify", 100), (2, "copy", 10)]:
-        on_progress(TransferProgress(index, 2, f"cam{index}.mp4", done, 100, 1.0, phase))
+    for index, phase, done in [
+        (1, "copy", 50),
+        (1, "copy", 100),
+        (1, "verify", 100),
+        (2, "copy", 10),
+    ]:
+        on_progress(
+            TransferProgress(index, 2, f"cam{index}.mp4", done, 100, 1.0, phase)
+        )
         (task,) = bar._progress.tasks  # only the current file's task is kept
         seen.append((task.description, task.completed, task.total))
     assert seen == [
@@ -1533,7 +1673,7 @@ def test_config_help_documents_scaffolding():
     result = runner.invoke(app, ["config", "-h"])
     assert result.exit_code == 0
     assert "Usage" in result.output
-    assert "CONFIG_DIR" in result.output
+    assert "config_dir" in result.output
     assert "--backend" in result.output
 
 
@@ -1589,7 +1729,7 @@ def test_config_wizard_auto_detects_across_backends_without_backend_prompt(
         lambda name: [("BAS-1", "acA1300"), ("FLIR-1", None)],
     )
     target = tmp_path / "mixed-rig"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "n\n\n\n\n\n\n\n\n\nn\nn" + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--no-snapshot-params"], input=inputs
     )
@@ -1609,26 +1749,7 @@ def test_config_wizard_writes_roundtrippable_config(tmp_path):
 
     target = tmp_path / "rig1"
     inputs = (
-        "\n".join(
-            [
-                "y",  # name these cameras now?
-                "cam_a",  # FAKE-0 name
-                "cam_b",  # FAKE-1 name
-                "y",  # add a visualization grid?
-                "",  # fps -> default
-                "",  # duration -> default
-                "",  # duration unit -> default
-                "",  # trigger source -> default
-                "",  # preview trigger source -> default
-                "/data/rig1",  # save directory
-                "%y%m%d/001",  # relative directory template
-                "",  # save method -> default
-                "y",  # configure a transfer destination?
-                "/mnt/nas",  # transfer directory
-                "",  # checksum -> default (yes)
-                "n",  # enable a serial/trigger plugin? no
-            ]
-        )
+        "y\ncam_a\ncam_b\ny\n\n\n\n\n\n/data/rig1\n%y%m%d/001\n\ny\n/mnt/nas\n\nn"
         + "\n"
     )
     result = runner.invoke(
@@ -1668,7 +1789,7 @@ def test_config_wizard_no_snapshot_params_skips_parameter_files(tmp_path):
     # --no-snapshot-params keeps the wizard enumeration-only: it writes the
     # config but never opens a camera, so no per-camera parameter file appears.
     target = tmp_path / "rig-noparams"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "n\n\n\n\n\n\n\n\n\nn\nn" + "\n"
     result = runner.invoke(
         app,
         ["config", str(target), "--backend", "fake", "--no-snapshot-params"],
@@ -1689,7 +1810,7 @@ def test_config_wizard_skips_params_when_cameras_busy(tmp_path, monkeypatch):
 
     monkeypatch.setattr("octacam.cameras.system.CameraSystem", busy)
     target = tmp_path / "rig-busy"
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "n\n\n\n\n\n\n\n\n\nn\nn" + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake"], input=inputs
     )
@@ -1733,25 +1854,7 @@ def test_config_wizard_aborts_without_overwriting(tmp_path):
     target.mkdir()
     sentinel = "# do not touch\n"
     (target / "octacam_config.toml").write_text(sentinel)
-    inputs = (
-        "\n".join(
-            [
-                "n",  # name cameras? no
-                "",  # fps
-                "",  # duration
-                "",  # unit
-                "",  # trigger
-                "",  # preview trigger
-                "",  # directory
-                "",  # relative directory
-                "",  # save method
-                "n",  # transfer? no
-                "n",  # enable a serial/trigger plugin? no
-                "n",  # overwrite existing? no
-            ]
-        )
-        + "\n"
-    )
+    inputs = "n\n\n\n\n\n\n\n\n\nn\nn\nn" + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake"], input=inputs
     )
@@ -1765,7 +1868,7 @@ def test_config_wizard_force_overwrites(tmp_path):
     target = tmp_path / "existing"
     target.mkdir()
     (target / "octacam_config.toml").write_text("# stale\n")
-    inputs = "\n".join(["n", "", "", "", "", "", "", "", "", "n", "n"]) + "\n"
+    inputs = "n\n\n\n\n\n\n\n\n\nn\nn" + "\n"
     result = runner.invoke(
         app, ["config", str(target), "--backend", "fake", "--force"], input=inputs
     )
@@ -1782,7 +1885,7 @@ def test_config_rejects_unknown_backend(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# doctor's update-available line (octacam.updates), monkeypatched — no network.
+# doctor's update-available line (octacam.updates), monkeypatched -- no network.
 
 
 def _doctor_update_line(monkeypatch, notice):
@@ -1829,15 +1932,16 @@ def test_doctor_update_line_skipped_for_dev_install(monkeypatch):
 # --- recording layout: summary/snapshot in an octacam_recording subfolder -----
 #
 # A recording keeps its summary, timestamps, config snapshot and camera
-# parameter files in an ``octacam_recording`` subfolder; one made before that
+# parameter files in an `octacam_recording` subfolder; one made before that
 # keeps them flat beside the videos. Both must be found everywhere, and the
 # subfolder must never pass for a recording of its own.
 
 
 def _layout_recording(folder, *, nested, toml=None):
     """A recording folder in either layout: a summary and, when *toml* is
-    given, a config snapshot, both flat or in the ``octacam_recording``
-    subfolder (*nested*). Returns the directory holding them."""
+    given, a config snapshot, both flat or in the `octacam_recording`
+    subfolder (*nested*). Returns the directory holding them.
+    """
     from octacam.recording_format import (
         RECORDING_INFO_DIRNAME,
         RECORDING_SUMMARY_FILENAME,
@@ -1908,11 +2012,11 @@ def test_config_for_recording_reads_the_snapshot_in_either_layout(tmp_path, nest
     from octacam.process import config_for_recording
 
     rec = tmp_path / "rec"
-    _layout_recording(rec, nested=nested, toml='[record]\nfps = 42\n')
+    _layout_recording(rec, nested=nested, toml="[record]\nfps = 42\n")
     # The fallback must not be consulted when the recording has its own snapshot.
     fallback = tmp_path / "rig"
     fallback.mkdir()
-    (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
+    (fallback / "octacam_config.toml").write_text("[record]\nfps = 7\n")
     assert config_for_recording(rec, fallback).record.fps == 42
 
 
@@ -1920,8 +2024,8 @@ def test_config_for_recording_nested_snapshot_beats_an_older_flat_one(tmp_path):
     from octacam.process import config_for_recording
 
     rec = tmp_path / "rec"
-    _layout_recording(rec, nested=False, toml='[record]\nfps = 11\n')
-    _layout_recording(rec, nested=True, toml='[record]\nfps = 22\n')
+    _layout_recording(rec, nested=False, toml="[record]\nfps = 11\n")
+    _layout_recording(rec, nested=True, toml="[record]\nfps = 22\n")
     assert config_for_recording(rec, None).record.fps == 22
 
 
@@ -1932,7 +2036,7 @@ def test_config_for_recording_without_snapshot_falls_back(tmp_path):
     _layout_recording(rec, nested=True)
     fallback = tmp_path / "rig"
     fallback.mkdir()
-    (fallback / "octacam_config.toml").write_text('[record]\nfps = 7\n')
+    (fallback / "octacam_config.toml").write_text("[record]\nfps = 7\n")
     assert config_for_recording(rec, fallback).record.fps == 7
 
 
@@ -1963,8 +2067,14 @@ def test_process_no_transcode_finds_nested_recording_and_its_transfer_dest(
 
     monkeypatch.setattr("octacam.process.transfer_folder", fake_transfer)
     result = runner.invoke(
-        app, ["--log-level", "error", "process", "-r", str(tmp_path / "data"),
-              "--no-transcode", "--no-grid"],
+        app,
+        [
+            "process",
+            "-r",
+            str(tmp_path / "data"),
+            "--no-transcode",
+            "--no-grid",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert seen["folder"] == rec
@@ -2006,7 +2116,7 @@ def test_gui_relaunches_from_a_recording_folders_snapshot(tmp_path, monkeypatch)
         raise locks.RigInUse("1")
 
     monkeypatch.setattr("octacam.locks.instance_lock", refuse)
-    result = runner.invoke(app, ["--log-level", "error", "gui", str(rec), "--no-browser"])
+    result = runner.invoke(app, ["gui", str(rec), "--no-browser"])
     assert result.exit_code != 0
     assert seen == [(rec / RECORDING_INFO_DIRNAME).resolve()]
 
@@ -2026,14 +2136,18 @@ def test_record_and_benchmark_load_a_recording_folders_snapshot(
         raise SystemExit("stop")
 
     monkeypatch.setattr("octacam.config.load_config_dir", stop)
-    result = runner.invoke(app, ["--log-level", "error", command, str(rec)])
+    result = runner.invoke(app, [command, str(rec)])
     assert result.exit_code != 0
     assert seen == [rec / RECORDING_INFO_DIRNAME]
 
 
 @pytest.mark.parametrize(
     "argv",
-    [["doctor", "{rec}"], ["flash", "{rec}"], ["process", "{rec}", "--config", "{rec}"]],
+    [
+        ["doctor", "{rec}"],
+        ["flash", "{rec}"],
+        ["process", "{rec}", "--config", "{rec}"],
+    ],
     ids=["doctor", "flash", "process-config"],
 )
 def test_other_config_dir_commands_resolve_a_recording_folder(
@@ -2053,7 +2167,7 @@ def test_other_config_dir_commands_resolve_a_recording_folder(
 
     monkeypatch.setattr("octacam.config.resolve_config_dir", spy)
     args = [a.format(rec=rec) for a in argv]
-    result = runner.invoke(app, ["--log-level", "error", *args])
+    result = runner.invoke(app, [*args])
     assert result.exit_code != 0
     assert seen == [rec / "octacam_recording"]
 
@@ -2100,8 +2214,9 @@ def _current_triggerbox_build():
 
 @pytest.fixture
 def fake_triggerbox(monkeypatch):
-    """The triggerbox link, faked at the class: the board answers ``banner`` and
-    ``devices`` lists every port the plugin opened."""
+    """The triggerbox link, faked at the class: the board answers `banner` and
+    `devices` lists every port the plugin opened.
+    """
     from octacam.plugins.triggerbox.protocol import TriggerboxLink
 
     board = SimpleNamespace(open=False, banner="TRIGGERBOX 2 oldbuild", devices=[])
@@ -2111,9 +2226,13 @@ def fake_triggerbox(monkeypatch):
         board.open = True
 
     monkeypatch.setattr(TriggerboxLink, "open", open_)
-    monkeypatch.setattr(TriggerboxLink, "close", lambda self: setattr(board, "open", False))
+    monkeypatch.setattr(
+        TriggerboxLink, "close", lambda self: setattr(board, "open", False)
+    )
     monkeypatch.setattr(TriggerboxLink, "is_open", property(lambda self: board.open))
-    monkeypatch.setattr(TriggerboxLink, "identify", lambda self, timeout=0.5: board.banner)
+    monkeypatch.setattr(
+        TriggerboxLink, "identify", lambda self, timeout=0.5: board.banner
+    )
     monkeypatch.setattr(TriggerboxLink, "send_cancel", lambda self: None)
     return board
 
@@ -2128,11 +2247,17 @@ def test_flash_reports_a_stale_board_and_flashes_it_unless_checking(
 ):
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox",
-         "--device", "/dev/ttyFAKE7", *flags],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/ttyFAKE7",
+            *flags,
+        ],
     )
     assert result.exit_code == exit_code, result.output
-    assert "triggerbox — /dev/ttyFAKE7" in result.output
+    assert "triggerbox \N{EM DASH} /dev/ttyFAKE7" in result.output
     assert "needs flashing" in result.output
     assert ("uploaded build" in result.output) is flashed
     # --device reaches the plugin; a flash closes and reopens the port.
@@ -2142,8 +2267,15 @@ def test_flash_reports_a_stale_board_and_flashes_it_unless_checking(
 def test_flash_names_a_missing_arduino_cli(fake_triggerbox, monkeypatch):
     monkeypatch.setattr("octacam.firmware.arduino_cli_path", lambda: None)
     result = runner.invoke(
-        app, ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
-              "--yes"],
+        app,
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+            "--yes",
+        ],
     )
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())
@@ -2156,8 +2288,14 @@ def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
     fake_triggerbox.banner = None
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
-         "--yes"],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+            "--yes",
+        ],
     )
     assert result.exit_code == 0, result.output
     flat = " ".join(result.output.split())
@@ -2168,7 +2306,14 @@ def test_flash_yes_still_warns_of_an_unidentified_board(fake_triggerbox):
 def test_flash_leaves_a_current_board_alone(fake_triggerbox):
     fake_triggerbox.banner = f"TRIGGERBOX 2 {_current_triggerbox_build()}"
     result = runner.invoke(
-        app, ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x"]
+        app,
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "up to date" in result.output
@@ -2178,7 +2323,13 @@ def test_flash_warns_before_overwriting_an_unidentified_board(fake_triggerbox):
     fake_triggerbox.banner = None
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x"],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+        ],
         input="n\n",
     )
     assert result.exit_code == 1, result.output
@@ -2196,25 +2347,35 @@ def no_sketch(monkeypatch):
     from octacam.plugins.triggerbox.plugin import TriggerboxPlugin
 
     monkeypatch.setattr(
-        TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
+        TriggerboxPlugin,
+        "firmware",
+        replace(TriggerboxPlugin.firmware, sketch_dir=None),
     )
 
 
-@pytest.mark.parametrize("flags", [[], ["--yes"], ["--check"]], ids=["ask", "yes", "check"])
+@pytest.mark.parametrize(
+    "flags", [[], ["--yes"], ["--check"]], ids=["ask", "yes", "check"]
+)
 def test_flash_without_the_sketch_never_calls_a_board_up_to_date(
     fake_triggerbox, no_sketch, flags
 ):
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
-         *flags],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+            *flags,
+        ],
     )
     # A flash can't happen; --check fails only on a board known to be out of date.
     assert result.exit_code == (0 if flags == ["--check"] else 1), result.output
     flat = " ".join(result.output.split())
     assert "board firmware: TRIGGERBOX 2 oldbuild" in flat
     assert "source build: (not available)" in flat
-    assert "? unknown — the sketch source was not found" in flat
+    assert "? unknown \N{EM DASH} the sketch source was not found" in flat
     assert "up to date" not in flat
     assert ("Flash it manually with arduino-cli" in flat) is (flags != ["--check"])
     assert "uploaded build" not in flat
@@ -2229,13 +2390,20 @@ def test_flash_without_the_sketch_names_a_foreign_board_incompatible(
     fake_triggerbox.banner = banner
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox", "--device", "/dev/x",
-         *flags],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/dev/x",
+            *flags,
+        ],
     )
     assert result.exit_code == 1, result.output
     flat = " ".join(result.output.split())
     assert (
-        "✗ incompatible firmware — the board does not run TRIGGERBOX v2 firmware "
+        "\N{BALLOT X} incompatible firmware \N{EM DASH} the board does not run "
+        "TRIGGERBOX v2 firmware "
         "(arming is disabled); the sketch source was not found"
     ) in flat
     assert "? unknown" not in flat
@@ -2253,15 +2421,20 @@ def test_flash_names_no_missing_source_for_an_unprobed_board():
     plugin = SimpleNamespace(name="triggerbox", is_ready=lambda: True)
     assert _flash_one(console, plugin, prov, assume_yes=True, check_only=False) == 1
     out = console.export_text()
-    assert "? unknown — the board has not been probed" in out
+    assert "? unknown \N{EM DASH} the board has not been probed" in out
     assert "OCTACAM_ARDUINO_DIR" not in out
 
 
 def test_flash_reports_a_board_that_does_not_open():
     result = runner.invoke(
         app,
-        ["--log-level", "error", "flash", "--plugin", "triggerbox",
-         "--device", "/nonexistent/ttyACM0"],
+        [
+            "flash",
+            "--plugin",
+            "triggerbox",
+            "--device",
+            "/nonexistent/ttyACM0",
+        ],
     )
     assert result.exit_code == 1, result.output
     assert "could not open the board" in result.output
@@ -2271,7 +2444,7 @@ def test_flash_reports_a_board_that_does_not_open():
 def test_flash_without_a_flashable_plugin(tmp_path, plugin, exit_code):
     (tmp_path / "octacam_config.toml").write_text("")
     args = ["--plugin", plugin] if plugin else [str(tmp_path)]
-    result = runner.invoke(app, ["--log-level", "error", "flash", *args])
+    result = runner.invoke(app, ["flash", *args])
     assert result.exit_code == exit_code, result.output
     assert "No firmware-flashable serial plugin" in result.output
 
@@ -2306,20 +2479,23 @@ def test_doctor_probe_without_the_sketch_checks_the_banner_name(
 
     # A wheel install: no source build to compare, only the board's name.
     monkeypatch.setattr(
-        TriggerboxPlugin, "firmware", replace(TriggerboxPlugin.firmware, sketch_dir=None)
+        TriggerboxPlugin,
+        "firmware",
+        replace(TriggerboxPlugin.firmware, sketch_dir=None),
     )
     flat = _doctor_probe_triggerbox(monkeypatch, tmp_path, banner)
     assert ("wrong board?" in flat) is foreign
     if foreign:
         assert (
             "/dev/ttyACM0: expected triggerbox firmware (banner 'TRIGGERBOX') but "
-            "got 'FLYWHEEL 1 abc' — wrong board?"
+            "got 'FLYWHEEL 1 abc' \N{EM DASH} wrong board?"
         ) in flat
 
 
 def _doctor_probe_triggerbox(monkeypatch, tmp_path, banner) -> str:
-    """``doctor --probe-serial``'s output, whitespace-collapsed, for a rig whose
-    triggerbox board on its default port answers ``banner``."""
+    """`doctor --probe-serial`'s output, whitespace-collapsed, for a rig whose
+    triggerbox board on its default port answers `banner`.
+    """
     from octacam.serial_ports import SerialIdentity
 
     monkeypatch.setattr(
@@ -2332,9 +2508,7 @@ def _doctor_probe_triggerbox(monkeypatch, tmp_path, banner) -> str:
     )
     # No device option: the plugin's default port, /dev/ttyACM0.
     (tmp_path / "octacam_config.toml").write_text('[[plugins]]\nname = "triggerbox"\n')
-    result = runner.invoke(
-        app, ["--log-level", "error", "doctor", "--probe-serial", str(tmp_path)]
-    )
+    result = runner.invoke(app, ["doctor", "--probe-serial", str(tmp_path)])
     return " ".join(result.output.split())
 
 
@@ -2343,7 +2517,8 @@ def _doctor_probe_triggerbox(monkeypatch, tmp_path, banner) -> str:
 
 class _StaleBoardPlugin(SerialPlugin):
     """A serial plugin whose board runs an old build of its own sketch (or, with
-    ``state="unidentified"``, sent no banner)."""
+    `state="unidentified"`, sent no banner).
+    """
 
     name = "triggerbox"
     firmware = FirmwareSpec(
@@ -2430,7 +2605,10 @@ def test_record_preflight_yes_never_prompts_or_flashes_a_blank_board(
     preflight_firmware(PluginManager([plugin]), assume_yes=True)
     assert plugin.flashed == (1 if state == "outdated" else 0)
     if state == "unidentified":
-        assert "run `octacam flash` to reflash. Continuing WITHOUT reflashing" in caplog.text
+        assert (
+            "run `octacam flash` to reflash. Continuing WITHOUT reflashing"
+            in caplog.text
+        )
 
 
 # --- record closes the cameras on every exit before the controller owns them --
@@ -2484,7 +2662,7 @@ def test_record_closes_the_cameras_when_it_exits_before_recording(
         monkeypatch.setattr(CameraSystem, failure, fail)
     # Called directly: CliRunner's streams are never a tty, so it cannot prompt.
     with pytest.raises((SystemExit, RuntimeError)):  # typer.Exit is a RuntimeError
-        record(rig, output=save_dir)
+        record(rig, out=save_dir)
     assert len(closed) == 1
 
 
@@ -2511,7 +2689,11 @@ def test_for_config_opens_the_rig_named_and_configured(tmp_path):
 
 @pytest.mark.parametrize(
     ("serial", "failure"),
-    [("NOT-PRESENT", None), ("FAKE-0", "load_config"), ("FAKE-0", "apply_display_config")],
+    [
+        ("NOT-PRESENT", None),
+        ("FAKE-0", "load_config"),
+        ("FAKE-0", "apply_display_config"),
+    ],
     ids=["no-camera", "load", "display"],
 )
 def test_benchmark_closes_the_cameras_when_it_exits_before_measuring(
@@ -2533,7 +2715,7 @@ def test_benchmark_closes_the_cameras_when_it_exits_before_measuring(
             raise RuntimeError(failure)
 
         monkeypatch.setattr(CameraSystem, failure, fail)
-    result = runner.invoke(app, ["--log-level", "error", "benchmark", str(tmp_path)])
+    result = runner.invoke(app, ["benchmark", str(tmp_path)])
     assert result.exit_code != 0
     assert len(closed) == 1
 
@@ -2564,9 +2746,7 @@ def test_benchmark_passes_its_options_to_diagnose(
         raise SystemExit("stop")
 
     monkeypatch.setattr("octacam.diagnostics.diagnose", diagnose)
-    result = runner.invoke(
-        app, ["--log-level", "error", "benchmark", str(tmp_path), *extra]
-    )
+    result = runner.invoke(app, ["benchmark", str(tmp_path), *extra])
     assert result.exit_code != 0
     assert type(seen["sink"]) is str and seen["sink"] == sink
     assert type(seen["record_form"]) is str and seen["record_form"] == record_form

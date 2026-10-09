@@ -12,7 +12,7 @@
     auto_flash = false        # headless: reflash a stale board without asking
 
 It fires the armed loop command at the recording's first frame, runs one on
-demand (``POST /api/serial/command``), and steps the motor while a GUI jog
+demand (`POST /api/serial/command`), and steps the motor while a GUI jog
 button is held.
 """
 
@@ -34,7 +34,7 @@ DEFAULT_DEVICE = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
 
 # A jog writes one half-step command per tick, so its interval is bounded by an
-# 8-byte write at the baud rate (~0.7 ms at 115200); 65535 µs is the field's max.
+# 8-byte write at the baud rate (~0.7 ms at 115200); 65535 us is the field's max.
 JOG_MIN_INTERVAL_US = 1000
 JOG_MAX_INTERVAL_US = 65535
 JOG_DEFAULT_INTERVAL_US = 2000
@@ -83,18 +83,20 @@ class Command:
     @classmethod
     def parse(cls, payload) -> Command | None:
         """The Command a dict of its fields describes, or None when a field is
-        missing, not an integer, or outside its wire range."""
+        missing, not an integer, or outside its wire range.
+        """
         try:
             command = cls(**{field: int(payload[field]) for field in COMMAND_FIELDS})
             command.to_bytes()  # struct.error for an out-of-range field
-        except (KeyError, TypeError, ValueError, struct.error):
+        except KeyError, TypeError, ValueError, struct.error:
             return None
         return command
 
 
 def _command_from_options(options: dict) -> Command | None:
-    """The rig's loop command (``options.command``), or None. A missing field
-    keeps its default; an invalid table is warned about and ignored."""
+    """The rig's loop command (`options.command`), or None. A missing field
+    keeps its default; an invalid table is warned about and ignored.
+    """
     raw = options.get("command")
     if raw is None:
         return None
@@ -110,7 +112,8 @@ def _command_from_options(options: dict) -> Command | None:
 class FlywheelLink(SerialLink):
     """The serial link to the stepper. Commands come from the monitor thread
     (first frame) and web threads (jog); the base serializes the writes. Its
-    only reply is the banner line the identify sentinel triggers."""
+    only reply is the banner line the identify sentinel triggers.
+    """
 
     name = "flywheel"
     banner_prefix = _EXPECTED_BANNER
@@ -125,11 +128,12 @@ class FlywheelLink(SerialLink):
 
 
 def _clamp_jog_interval_us(value) -> int:
-    """A jog interval clamped to the supported µs range; the default for a
-    missing or non-numeric one."""
+    """A jog interval clamped to the supported us range; the default for a
+    missing or non-numeric one.
+    """
     try:
         us = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return JOG_DEFAULT_INTERVAL_US
     return max(JOG_MIN_INTERVAL_US, min(JOG_MAX_INTERVAL_US, us))
 
@@ -139,7 +143,7 @@ class JogClock:
 
     A thread writes one half-step command per tick, so the step rate comes from
     a clock, not from the (jittery) WebSocket messages; stopping releases the
-    coils (``n_steps = 0``). ``start`` and ``stop`` never block on the serial
+    coils (`n_steps = 0`). `start` and `stop` never block on the serial
     link: a new start bumps a generation counter instead of joining the old
     thread, which then skips its coil release (the new thread owns the coils).
     """
@@ -171,9 +175,10 @@ class JogClock:
             self._thread.start()
 
     def stop(self, join: bool = False) -> bool:
-        """Stop the jog; its thread releases the coils. ``join=True`` (teardown)
+        """Stop the jog; its thread releases the coils. `join=True` (teardown)
         waits for that release and returns False when the thread did not exit
-        in time (a wedged write): the caller must then release the coils."""
+        in time (a wedged write): the caller must then release the coils.
+        """
         with self._lock:
             thread = self._thread
             if thread is None:
@@ -219,7 +224,7 @@ class JogClock:
                     self._write(release)
 
 
-class FlywheelPlugin(SerialPlugin):
+class FlywheelPlugin(SerialPlugin[FlywheelLink]):
     name = "flywheel"
     web_dir = Path(__file__).parent / "web"
     firmware = fw.FirmwareSpec(
@@ -232,7 +237,6 @@ class FlywheelPlugin(SerialPlugin):
     )
     default_device = DEFAULT_DEVICE
     reconnect_path = "/api/serial/reconnect"
-    _link: FlywheelLink
 
     def __init__(
         self,
@@ -263,7 +267,7 @@ class FlywheelPlugin(SerialPlugin):
         device = str(options.get("device", DEFAULT_DEVICE))
         try:
             baud = int(options.get("baud", DEFAULT_BAUD))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             log.warning(
                 "Flywheel plugin: invalid baud %r; using %d",
                 options.get("baud"),
@@ -288,7 +292,10 @@ class FlywheelPlugin(SerialPlugin):
     def busy_reason(self) -> str | None:
         # The board's reset would drop the coil state.
         if self._jog_owner is not None:
-            return "refusing to flash while the motor is jogging — release it first"
+            return (
+                "refusing to flash while the motor is jogging \N{EM DASH} release it "
+                "first"
+            )
         return None
 
     def _on_link_broken(self) -> None:
@@ -316,16 +323,18 @@ class FlywheelPlugin(SerialPlugin):
 
     def snapshot_options(self, params: dict | None) -> dict | None:
         """The loop command a recording armed, as config options; None when it
-        armed none or the configured one."""
+        armed none or the configured one.
+        """
         command = self._command_from(params)
         if command is None or command == self._command:
             return None
         return {"command": asdict(command)}
 
     def default_start_params(self, fps: float, duration_s: float) -> dict | None:
-        """The configured loop for headless ``octacam record`` (and a relaunch
+        """The configured loop for headless `octacam record` (and a relaunch
         from a recording's snapshot); None without one, so the CLI never spins an
-        unconfigured motor."""
+        unconfigured motor.
+        """
         if self._command is None:
             return None
         return asdict(self._command)
@@ -363,9 +372,10 @@ class FlywheelPlugin(SerialPlugin):
         return router
 
     def on_ws_message(self, message: dict, client_id: int) -> bool:
-        """Hold-to-jog: ``{"type": "jog", "action": "start", "direction": -1|1,
-        "interval_us": N}`` starts the clock and any other jog action stops it,
-        one of each per hold. Only the client that started a jog stops it."""
+        """Hold-to-jog: `{"type": "jog", "action": "start", "direction": -1|1,
+        "interval_us": N}` starts the clock and any other jog action stops it,
+        one of each per hold. Only the client that started a jog stops it.
+        """
         if message.get("type") != "jog":
             return False
         if message.get("action") == "start":

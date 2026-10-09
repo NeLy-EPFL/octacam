@@ -1,8 +1,9 @@
 """The web GUI's FastAPI app: the per-area routers (system, record, cameras,
 save, ws), the static and plugin mounts, and the lifespan's background loops.
 
-The HTTP handlers are sync ``def``: FastAPI runs them in its thread pool, so
-blocking SDK, serial and filesystem calls never stall the WebSocket's loop."""
+The HTTP handlers are sync `def`: FastAPI runs them in its thread pool, so
+blocking SDK, serial and filesystem calls never stall the WebSocket's loop.
+"""
 
 import asyncio
 import contextlib
@@ -32,8 +33,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 
 class _NoCacheStaticFiles(StaticFiles):
-    """Static files with ``Cache-Control: no-cache``: the assets are unversioned,
-    so a reload must revalidate (ETags still make an unchanged file a cheap 304)."""
+    """Static files with `Cache-Control: no-cache`: the assets are unversioned,
+    so a reload must revalidate (ETags still make an unchanged file a cheap 304).
+    """
 
     async def get_response(self, path: str, scope) -> Response:
         response = await super().get_response(path, scope)
@@ -42,8 +44,9 @@ class _NoCacheStaticFiles(StaticFiles):
 
 
 def _default_shutdown() -> None:
-    """SIGINT ourselves: uvicorn shuts down gracefully, then cli.gui's ``finally``
-    releases the hardware."""
+    """SIGINT ourselves: uvicorn shuts down gracefully, then cli.gui's `finally`
+    releases the hardware.
+    """
     os.kill(os.getpid(), signal.SIGINT)
 
 
@@ -52,8 +55,9 @@ def create_app(
     config: OctacamConfig,
     shutdown_callback: Callable[[], None] = _default_shutdown,
 ) -> FastAPI:
-    """The GUI's app for ``controller``, serving the plugins it was built with
-    and saving to its config dir."""
+    """The GUI's app for `controller`, serving the plugins it was built with
+    and saving to its config dir.
+    """
     config_dir = str(controller.config_dir or "")
     hub = Hub()
     plugins = controller.plugins
@@ -124,6 +128,8 @@ def create_app(
         )
 
     if STATIC_DIR.is_dir():
-        app.mount("/", _NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static")
+        app.mount(
+            "/", _NoCacheStaticFiles(directory=STATIC_DIR, html=True), name="static"
+        )
 
     return app

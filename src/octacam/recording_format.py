@@ -2,9 +2,9 @@
 timestamps schema.
 
 A recording folder holds its videos; everything else (summary, timestamps,
-config snapshot, camera parameter files) goes in its ``octacam_recording``
+config snapshot, camera parameter files) goes in its `octacam_recording`
 subfolder. Older recordings keep those flat beside the videos and are read
-forever: every reader goes through :func:`recording_info_dir`.
+forever: every reader goes through `recording_info_dir`.
 """
 
 from __future__ import annotations
@@ -28,9 +28,9 @@ RECORDING_SUMMARY_FILENAME = "recording_summary.json"
 # Every camera's per-frame series (opt-in: record.save_timestamps).
 TIMESTAMPS_FILENAME = "timestamps.npz"
 # The rig config with the live settings, beside each camera's parameter file
-# (``<serial>.<ext>``): a config directory a session can relaunch from.
+# (`<serial>.<ext>`): a config directory a session can relaunch from.
 CONFIG_SNAPSHOT_FILENAME = "octacam_config.toml"
-# Every backend's parameter-file suffix (``CameraBackend.extension``), here so
+# Every backend's parameter-file suffix (`CameraBackend.extension`), here so
 # the transfer step needs no SDK import; tests/test_backends.py keeps it in step.
 PARAM_FILE_EXTENSIONS = ("pfs", "txt", "fake")
 RECORDING_INFO_DIRNAME = "octacam_recording"
@@ -45,7 +45,7 @@ SUMMARY_INDEX_LIMIT = 1000
 
 
 def recording_info_dir(folder: str | Path) -> Path:
-    """The directory holding *folder*'s metadata: the ``octacam_recording``
+    """The directory holding *folder*'s metadata: the `octacam_recording`
     subfolder, or *folder* for an older flat recording.
 
     The summary decides, and the subfolder's wins over a flat one (an older take
@@ -66,8 +66,9 @@ def recording_summary_path(folder: str | Path) -> Path:
 
 
 def is_recording_dir(folder: str | Path) -> bool:
-    """Whether *folder* has a summary (either layout); an ``octacam_recording``
-    subfolder is never a recording folder itself."""
+    """Whether *folder* has a summary (either layout); an `octacam_recording`
+    subfolder is never a recording folder itself.
+    """
     folder = Path(folder)
     if folder.name == RECORDING_INFO_DIRNAME:
         return False
@@ -76,8 +77,9 @@ def is_recording_dir(folder: str | Path) -> bool:
 
 def recording_folder(path: str | Path) -> Path:
     """The recording folder *path* names: a summary file or an
-    ``octacam_recording`` subfolder stands for the folder around it, anything
-    else for itself (pure path arithmetic)."""
+    `octacam_recording` subfolder stands for the folder around it, anything
+    else for itself (pure path arithmetic).
+    """
     path = Path(path)
     if path.name == RECORDING_SUMMARY_FILENAME:
         path = path.parent
@@ -86,8 +88,9 @@ def recording_folder(path: str | Path) -> Path:
 
 def walk_folders(root: Path) -> list[Path]:
     """*root* and every directory beneath it, sorted, never entering an
-    ``octacam_recording`` subfolder (metadata: never a recording, never loose
-    videos) or a symlinked directory."""
+    `octacam_recording` subfolder (metadata: never a recording, never loose
+    videos) or a symlinked directory.
+    """
     found = []
     for directory, subdirs, _files in os.walk(root):
         subdirs[:] = [d for d in subdirs if d != RECORDING_INFO_DIRNAME]
@@ -96,8 +99,9 @@ def walk_folders(root: Path) -> list[Path]:
 
 
 def find_recordings(paths, recursive: bool) -> list[Path]:
-    """The recording folders *paths* name (see :func:`recording_folder`), and
-    with *recursive* every one beneath them; deduplicated in the order found."""
+    """The recording folders *paths* name (see `recording_folder`), and
+    with *recursive* every one beneath them; deduplicated in the order found.
+    """
     found: dict[Path, Path] = {}
     for raw in paths:
         folder = recording_folder(raw)
@@ -113,16 +117,19 @@ def find_recordings(paths, recursive: bool) -> list[Path]:
 
 def read_summary(folder: str | Path) -> dict:
     """*folder*'s summary (either layout). Raises OSError when it cannot be read
-    and ValueError when it is not a JSON object."""
+    and ValueError when it is not a JSON object.
+    """
     summary = json.loads(recording_summary_path(folder).read_text())
     if not isinstance(summary, dict):
-        raise ValueError("not a JSON object")
+        # Callers catch ValueError, as the docstring promises.
+        raise ValueError("not a JSON object")  # noqa: TRY004
     return summary
 
 
 def write_summary(folder: str | Path, summary: dict) -> Path:
-    """Write *summary* into *folder*'s ``octacam_recording`` subfolder (writers
-    always use it); return its path."""
+    """Write *summary* into *folder*'s `octacam_recording` subfolder (writers
+    always use it); return its path.
+    """
     path = Path(folder) / RECORDING_INFO_DIRNAME / RECORDING_SUMMARY_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=2) + "\n")
@@ -130,11 +137,13 @@ def write_summary(folder: str | Path, summary: dict) -> Path:
 
 
 def write_timestamps(folder: str | Path, arrays: dict[str, np.ndarray]) -> Path:
-    """Write :func:`build_timestamps_arrays` output into *folder*'s
-    ``octacam_recording`` subfolder; return its path."""
+    """Write `build_timestamps_arrays` output into *folder*'s
+    `octacam_recording` subfolder; return its path.
+    """
     path = Path(folder) / RECORDING_INFO_DIRNAME / TIMESTAMPS_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(path, **arrays)
+    # The keys are array names, never `allow_pickle`; the numpy stubs cannot tell.
+    np.savez_compressed(path, **arrays)  # pyrefly: ignore[bad-argument-type]
     return path
 
 
@@ -142,7 +151,8 @@ _DROPPED_FRAMES_NOTE = (
     "Every frame is assigned to the trigger pulse that exposed it, from the "
     "camera's hardware timestamps (or, under a software trigger, the trigger's "
     "sequence number). `missed_pulses` lists pulses the camera delivered no frame "
-    "for (a missed trigger, or a frame lost in transport — `stream` shows the "
+    "for (a missed trigger, or a frame lost in transport \N{EM DASH} `stream` shows "
+    "the "
     "SDK's own loss counters) and `writer_dropped` counts frames the writer queue "
     "could not accept. On an octacam-driven train (software/managed) both are "
     "filled with the previous frame, so video frame k is pulse k in every camera "
@@ -158,7 +168,7 @@ _DROPPED_FRAMES_NOTE = (
 _TIMESTAMP_NOTE = (
     "Per-camera `timestamp_source` records where each camera's per-frame "
     "timestamps came from. `hardware` = the camera/SDK timestamp (a free-running "
-    "counter with a per-camera epoch — precise for relative timing, but NOT "
+    "counter with a per-camera epoch \N{EM DASH} precise for relative timing, but NOT "
     "wall-clock and NOT aligned across cameras). `host` = host `time.time_ns()` "
     "(UTC wall clock; used when the backend supplies none). The full per-frame "
     f"series is written to {TIMESTAMPS_FILENAME} when save_timestamps is on."
@@ -166,8 +176,9 @@ _TIMESTAMP_NOTE = (
 
 
 def _timestamp_source(frames: int, host_fallback_count: int) -> str | None:
-    """``"hardware"``, ``"host"`` (a backend without timestamps, e.g.
-    pycameleon) or ``"mixed"`` (stray zero timestamps); None without frames."""
+    """`"hardware"`, `"host"` (a backend without timestamps, e.g.
+    pycameleon) or `"mixed"` (stray zero timestamps); None without frames.
+    """
     if frames <= 0:
         return None
     if host_fallback_count <= 0:
@@ -193,12 +204,13 @@ def build_recording_summary(
 ) -> dict:
     """The recording_summary.json payload, from each camera's stats (no I/O).
 
-    ``transform_applied`` is true only when the transform was baked into the
-    video (display form and a non-identity transform)."""
+    `transform_applied` is true only when the transform was baked into the
+    video (display form and a non-identity transform).
+    """
     extension = settings.video_format().extension
     start_iso = (
         datetime.datetime.fromtimestamp(
-            start_wall_ns / 1e9, tz=datetime.timezone.utc
+            start_wall_ns / 1e9, tz=datetime.UTC
         ).isoformat()
         if start_wall_ns
         else None
@@ -234,9 +246,9 @@ def build_recording_summary(
                 "timestamp_glitches": camera.timestamp_glitches,
                 "unclocked_frames": camera.unclocked_frames,
                 "stream": camera.stream,
-                "start_offset_pulses": (sync or {}).get("start_offsets", {}).get(
-                    camera.name
-                ),
+                "start_offset_pulses": (sync or {})
+                .get("start_offsets", {})
+                .get(camera.name),
                 "start_timestamp_ns": camera.start_timestamp_ns,
                 "timestamp_source": _timestamp_source(
                     camera.frames, camera.host_fallback_count
@@ -290,14 +302,15 @@ def build_recording_summary(
 
 
 def build_timestamps_arrays(cameras: list[CameraStats]) -> dict[str, np.ndarray]:
-    """The ``timestamps.npz`` arrays, from each camera's stats (no I/O).
+    """The `timestamps.npz` arrays, from each camera's stats (no I/O).
 
-    Per camera, one entry per video frame: ``"<name>/timestamp_ns"`` (int64; a
-    fill carries the time its pulse was due), ``"<name>/dropped"`` (bool: a
-    fill), ``"<name>/missed"`` (bool: of those, a pulse the camera never
-    delivered), ``"<name>/pulse_index"`` (int64) and ``"<name>/arrival_ns"``
+    Per camera, one entry per video frame: `"<name>/timestamp_ns"` (int64; a
+    fill carries the time its pulse was due), `"<name>/dropped"` (bool: a
+    fill), `"<name>/missed"` (bool: of those, a pulse the camera never
+    delivered), `"<name>/pulse_index"` (int64) and `"<name>/arrival_ns"`
     (int64: host wall-clock delivery, 0 for a fill). A camera's series are
-    truncated to their shortest."""
+    truncated to their shortest.
+    """
     arrays: dict[str, np.ndarray] = {}
     for camera in cameras:
         series = {

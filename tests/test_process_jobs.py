@@ -64,7 +64,12 @@ def test_status_round_trip(cache_dir):
     pj.write_status(jd, s)
     r = pj.read_status(jd)
     assert r is not None
-    assert (r.state, r.phase, r.percent, r.folders) == ("running", "transcode", 42.0, ["/a"])
+    assert (r.state, r.phase, r.percent, r.folders) == (
+        "running",
+        "transcode",
+        42.0,
+        ["/a"],
+    )
 
 
 def test_read_status_tolerant(cache_dir):
@@ -83,7 +88,8 @@ def test_is_live_via_flock(cache_dir):
     assert pj.is_live(jd) is False  # no lock file
     import fcntl
 
-    handle = open(pj._lock_path(jd), "a+")
+    # Held open: the job reads as live while it is.
+    handle = open(pj._lock_path(jd), "a+")  # noqa: SIM115
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     try:
         assert pj.is_live(jd) is True
@@ -114,8 +120,12 @@ def test_starting_grace_not_yet_failed(cache_dir, monkeypatch):
 
 
 def test_resolve_and_latest(cache_dir):
-    pj.write_status(pj.job_dir("a"), _job("a", state="done", started="2026-01-01T00:00:00+00:00"))
-    pj.write_status(pj.job_dir("b"), _job("b", state="running", started="2026-01-02T00:00:00+00:00"))
+    pj.write_status(
+        pj.job_dir("a"), _job("a", state="done", started="2026-01-01T00:00:00+00:00")
+    )
+    pj.write_status(
+        pj.job_dir("b"), _job("b", state="running", started="2026-01-02T00:00:00+00:00")
+    )
     assert pj.resolve_job("a").job_id == "a"
     assert pj.resolve_job("missing") is None
     # latest overall is b; latest *live* is b (a is terminal), require_live filters a.
@@ -146,7 +156,8 @@ def test_cancel_signals_only_when_live(cache_dir, monkeypatch):
     jd.mkdir(parents=True)
     import fcntl
 
-    handle = open(pj._lock_path(jd), "a+")
+    # Held open: the job reads as live while it is.
+    handle = open(pj._lock_path(jd), "a+")  # noqa: SIM115
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     try:
         assert pj.cancel(_job("live", pid=4242)) is True
@@ -167,7 +178,9 @@ def test_pause_resume_flag(cache_dir):
 # --------------------------------------------------------------- spawn (mocked)
 
 
-def test_spawn_detached_writes_starting_and_builds_cmd(cache_dir, tmp_path, monkeypatch):
+def test_spawn_detached_writes_starting_and_builds_cmd(
+    cache_dir, tmp_path, monkeypatch
+):
     captured = {}
 
     class FakeProc:
@@ -236,7 +249,7 @@ def test_attach_follows_running_job_to_completion(cache_dir, monkeypatch, capsys
     pj.write_status(jd, _job("follow", state="running", phase="transcode", pid=1))
     pj._log_path(jd).write_text("[transcode 1/1] cam0.mkv\n")
     # Hold the lock so the job reads as live until we flip it to done.
-    handle = open(pj._lock_path(jd), "a+")
+    handle = open(pj._lock_path(jd), "a+")  # noqa: SIM115
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
 
     def flip_to_done(_):
@@ -261,9 +274,7 @@ def _run_worker(job_id, folder, *extra):
     jd = pj.job_dir(job_id)
     jd.mkdir(parents=True, exist_ok=True)
     pj.write_status(jd, _job(job_id, folders=[str(folder)]))
-    result = runner.invoke(
-        app, ["process", str(folder), "--_job-dir", str(jd), *extra]
-    )
+    result = runner.invoke(app, ["process", str(folder), "--_job-dir", str(jd), *extra])
     return jd, result
 
 
@@ -326,7 +337,7 @@ def test_attach_ctrl_c_detaches_without_cancel(cache_dir, monkeypatch, capsys):
     jd = pj.job_dir("run")
     jd.mkdir(parents=True)
     pj.write_status(jd, _job("run", state="running", pid=1))
-    pj._log_path(jd).write_text("working…\n")
+    pj._log_path(jd).write_text("working\N{HORIZONTAL ELLIPSIS}\n")
     monkeypatch.setattr(pj, "is_live", lambda d: True)  # keep the follow loop going
 
     def raise_ki(_):
@@ -361,6 +372,7 @@ def test_python_dash_m_octacam_runs():
     r = subprocess.run(
         [sys.executable, "-m", "octacam", "--version"],
         capture_output=True,
+        check=False,
         text=True,
         timeout=60,
     )
@@ -374,7 +386,7 @@ def test_python_dash_m_octacam_runs():
 def test_worker_start_refuses_when_the_lock_cannot_be_taken(cache_dir, monkeypatch):
     """An unmanageable job is worse than no job.
 
-    Every liveness check keys off job.lock — is_live(), _reconcile(),
+    Every liveness check keys off job.lock -- is_live(), _reconcile(),
     resolve_job(require_live=True), _is_finished(). A worker that ran without it
     was invisible to all of them at once: `jobs list` reported it FAILED while
     ffmpeg burned CPU, pause/resume/cancel all refused it (leaving `kill` as the
@@ -394,7 +406,8 @@ def test_worker_start_refuses_when_the_lock_cannot_be_taken(cache_dir, monkeypat
 
 def test_worker_start_records_the_failure_for_jobs_list(cache_dir, monkeypatch):
     """The refusal is written to status.json, so `octacam jobs list` explains it
-    instead of showing a bare 'worker exited without finishing'."""
+    instead of showing a bare 'worker exited without finishing'.
+    """
     jd = pj.jobs_dir() / "20260101T000000-2"
     jd.mkdir(parents=True)
     monkeypatch.setattr(
@@ -426,7 +439,12 @@ def test_worker_start_succeeds_normally(cache_dir):
     [
         (None, pj.DONE, 0, None),
         (KeyboardInterrupt(), pj.CANCELLED, 130, None),
-        (SystemExit("2 file(s) failed to transcode"), pj.FAILED, 1, "2 file(s) failed to transcode"),
+        (
+            SystemExit("2 file(s) failed to transcode"),
+            pj.FAILED,
+            1,
+            "2 file(s) failed to transcode",
+        ),
         (SystemExit(3), pj.FAILED, 1, "process failed"),
         (RuntimeError("boom"), pj.FAILED, 1, "RuntimeError('boom')"),
     ],
@@ -436,12 +454,14 @@ def test_worker_records_how_the_run_ended(cache_dir, raised, state, exit_code, e
     jd = pj.jobs_dir() / "20260101T000000-4"
     jd.mkdir(parents=True)
     pj.pause(_job(jd.name))
-    with pytest.raises(type(raised)) if raised else contextlib.nullcontext():
-        with pj.worker(jd) as reporter:
-            assert isinstance(reporter, pj.JobReporter)
-            assert pj.is_live(jd)
-            if raised:
-                raise raised
+    with (
+        pytest.raises(type(raised)) if raised else contextlib.nullcontext(),
+        pj.worker(jd) as reporter,
+    ):
+        assert isinstance(reporter, pj.JobReporter)
+        assert pj.is_live(jd)
+        if raised:
+            raise raised
     status = pj.read_status(jd)
     assert (status.state, status.exit_code, status.error) == (state, exit_code, error)
     assert not pj.is_live(jd)  # the lock is released
@@ -461,7 +481,7 @@ def test_age_survives_a_naive_timestamp():
 
     `datetime.now().astimezone()` is aware; a status.json from an older octacam
     (or a hand-edited one) can hold a naive stamp, and aware - naive raises
-    TypeError — from a line that sat *outside* the guard, so every job's row died
+    TypeError -- from a line that sat *outside* the guard, so every job's row died
     with it, not just the odd one.
     """
     assert pj._age("2026-09-18T10:00:00") != "-"
@@ -472,7 +492,8 @@ def test_age_survives_a_naive_timestamp():
 
 def test_attach_exit_code_reflects_the_job_outcome():
     """`octacam jobs attach` used to exit 0 for a failed job, so a script could
-    not tell (`octacam jobs attach X && deploy` ran on a failure)."""
+    not tell (`octacam jobs attach X && deploy` ran on a failure).
+    """
     assert pj._attach_exit_code(_job(state=pj.DONE)) == 0
     assert pj._attach_exit_code(_job(state=pj.FAILED)) == 1
     assert pj._attach_exit_code(_job(state=pj.FAILED, exit_code=3)) == 3

@@ -1,7 +1,8 @@
 """Unit tests for octacam.serial_ports (enumeration, classification, helpers).
 
 Enumeration and probing are monkeypatched so these run identically with or
-without a real board plugged in."""
+without a real board plugged in.
+"""
 
 from types import SimpleNamespace
 
@@ -120,7 +121,7 @@ def test_resolve_device_auto_single(monkeypatch):
 
 
 def test_resolve_device_auto_none(monkeypatch):
-    monkeypatch.setattr(sp, "list_serial_ports", lambda: [])
+    monkeypatch.setattr(sp, "list_serial_ports", list)
     device, reason = sp.resolve_device("auto")
     assert device is None
     assert "no microcontroller-class" in reason
@@ -177,9 +178,7 @@ def test_probe_identity_busy_on_open_error(monkeypatch):
 
 
 def test_probe_identity_no_reply(monkeypatch):
-    monkeypatch.setattr(
-        sp.serial, "Serial", lambda *a, **k: _FakeSerial(reply=b"")
-    )
+    monkeypatch.setattr(sp.serial, "Serial", lambda *a, **k: _FakeSerial(reply=b""))
     ident = sp.probe_identity("/dev/ttyACM0")
     assert ident.banner is None
     assert ident.busy is False
@@ -189,9 +188,22 @@ def test_probe_identity_no_reply(monkeypatch):
 
 
 def test_format_candidates_prefers_microcontrollers():
-    ports = [_sp("/dev/ttyACM0"), sp.SerialPort(
-        "/dev/ttyS0", "", None, None, None, None, None, "", "generic serial", False, False
-    )]
+    ports = [
+        _sp("/dev/ttyACM0"),
+        sp.SerialPort(
+            "/dev/ttyS0",
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "",
+            "generic serial",
+            False,
+            False,
+        ),
+    ]
     text = sp.format_candidates(ports)
     assert "/dev/ttyACM0" in text
     assert "/dev/ttyS0" not in text  # generic port not offered as a candidate
@@ -199,7 +211,17 @@ def test_format_candidates_prefers_microcontrollers():
 
 def test_format_candidates_no_microcontroller_ports():
     generic = sp.SerialPort(
-        "/dev/ttyS0", "", None, None, None, None, None, "", "generic serial", False, False
+        "/dev/ttyS0",
+        "",
+        None,
+        None,
+        None,
+        None,
+        None,
+        "",
+        "generic serial",
+        False,
+        False,
     )
     assert "generic port(s) present" in sp.format_candidates([generic])
     assert sp.format_candidates([]) == "no serial ports detected"
@@ -223,7 +245,7 @@ def test_explain_open_failure_device_absent(monkeypatch):
 
 def test_explain_open_failure_device_present(monkeypatch):
     monkeypatch.setattr(sp, "list_serial_ports", lambda: [_sp("/dev/ttyACM0")])
-    # The device exists, so the failure is permissions/busy — no candidate list.
+    # The device exists, so the failure is permissions/busy -- no candidate list.
     msg = sp.explain_open_failure("/dev/ttyACM0", OSError("permission denied"))
     assert msg == "failed to open /dev/ttyACM0: permission denied"
 

@@ -12,11 +12,15 @@ import typer
 from octacam.cli._common import (
     EnabledPlugins,
     NoPlugins,
+    Sets,
+    Verbose,
+    command,
     open_rig,
     resolve_config_arg,
     resolve_enabled,
     stderr_console,
     warn_if_transcoding,
+    with_sets,
 )
 from octacam.cli.flash import preflight_firmware
 
@@ -25,7 +29,8 @@ log = logging.getLogger("octacam")
 
 def _confirm_gate(question: str, *, force: bool, forced: str, headless: str) -> None:
     """Ask *question* on a terminal and exit 1 unless it is confirmed; under
-    --force, or with no terminal to ask on, warn (*forced* / *headless*) and go on."""
+    --force, or with no terminal to ask on, warn (*forced* / *headless*) and go on.
+    """
     if force:
         log.warning(forced)
     elif sys.stdin.isatty() and sys.stderr.isatty():
@@ -37,7 +42,8 @@ def _confirm_gate(question: str, *, force: bool, forced: str, headless: str) -> 
 
 def _drive_record_progress(controller, duration_s: float) -> None:
     """Show progress until the recording is no longer active: a bar on a TTY,
-    else a log heartbeat every 2 s. The caller then joins the monitor."""
+    else a log heartbeat every 2 s. The caller then joins the monitor.
+    """
     poll = 0.1
     if not sys.stderr.isatty():
         next_beat = 0.0
@@ -60,7 +66,9 @@ def _drive_record_progress(controller, duration_s: float) -> None:
         console=stderr_console(),
         transient=True,
     ) as progress:
-        task = progress.add_task("Waiting for the first frame…", total=duration_s)
+        task = progress.add_task(
+            "Waiting for the first frame\N{HORIZONTAL ELLIPSIS}", total=duration_s
+        )
         while controller.recording_active:
             snap = controller.snapshot()
             state = snap["state"]
@@ -68,44 +76,60 @@ def _drive_record_progress(controller, duration_s: float) -> None:
             if state == "recording" and snap.get("remaining_ms") is not None:
                 elapsed = max(0.0, duration_s - snap["remaining_ms"] / 1000.0)
                 progress.update(
-                    task, completed=elapsed, description=f"Recording — {frames} frames"
+                    task,
+                    completed=elapsed,
+                    description=f"Recording \N{EM DASH} {frames} frames",
                 )
             elif state == "waiting":
                 progress.update(
                     task,
-                    description="Waiting for the first frame / external trigger…",
+                    description=(
+                        "Waiting for the first frame / external trigger"
+                        "\N{HORIZONTAL ELLIPSIS}"
+                    ),
                 )
             elif state == "finishing":
-                progress.update(task, description=f"Finishing — {frames} frames")
+                progress.update(
+                    task, description=f"Finishing \N{EM DASH} {frames} frames"
+                )
             time.sleep(poll)
         progress.update(task, completed=duration_s)
 
 
+@command
 def record(
     config_dir: Annotated[
         Path,
-        typer.Argument(exists=True, file_okay=False, dir_okay=True),
+        typer.Argument(
+            exists=True,
+            file_okay=False,
+            dir_okay=True,
+            help="The rig's config directory (`octacam_config.toml` and its camera "
+            "files), or a recording folder, whose config snapshot it uses.",
+        ),
     ] = Path("."),
     fps: Annotated[
         float | None,
-        typer.Option("--fps", "-f", help=r"Frame rate \[default: from config]."),
+        typer.Option(
+            "--fps", "-f", help="Frame rate (default: the config's `record.fps`)."
+        ),
     ] = None,
     duration: Annotated[
         float | None,
         typer.Option(
             "--duration",
             "-d",
-            help=r"Recording duration in seconds \[default: from config's "
-            "duration/duration_unit].",
+            help="Recording duration in seconds (default: the config's "
+            "`record.duration` and `record.duration_unit`).",
         ),
     ] = None,
-    output: Annotated[
+    out: Annotated[
         Path | None,
         typer.Option(
-            "--output",
+            "--out",
             "-o",
-            help="Save directory, overriding the templated directory/"
-            "relative_directory from config.",
+            help="Save directory, overriding the config's templated "
+            "`record.directory` and `record.relative_directory`.",
         ),
     ] = None,
     yes: Annotated[
@@ -129,12 +153,15 @@ def record(
     ] = False,
     enabled_plugins: EnabledPlugins = None,
     no_plugins: NoPlugins = False,
+    sets: Sets = None,
+    verbose: Verbose = False,
 ) -> None:
-    r"""Record videos headlessly from the cameras in CONFIG_DIR.
+    """Record videos headlessly from the cameras in `config_dir`.
 
     Encoding, save method, transform, and the save-directory template all come
-    from the config's \[record] section; the options here override only the
-    day-to-day values (fps and duration, or an explicit --output save directory).
+    from the config's [record] section. `--set` overrides any config key for this
+    take; `--fps`, `--duration` and `--out` cover the day-to-day ones and win over
+    `--set`.
     """
     from octacam import session_cache
     from octacam.config import RecordingSettings, load_config_dir
@@ -142,15 +169,15 @@ def record(
     from octacam.plugins import build_plugins
 
     config_dir = resolve_config_arg(config_dir)
-    config = load_config_dir(config_dir)
+    config = with_sets(load_config_dir(config_dir), sets)
 
     settings = RecordingSettings.from_config(config, fps=fps)
     if duration is not None:
         settings.duration_s = duration
-    if output is not None:
+    if out is not None:
         # Bypasses the template; the summary's relative_directory falls back to
         # the folder name.
-        settings = settings.with_save_dir(str(output))
+        settings = settings.with_save_dir(str(out))
 
     warn_if_transcoding()
 
@@ -171,7 +198,9 @@ def record(
                 "configured cameras opened. Record anyway?",
                 force=force,
                 forced="Recording with an incomplete rig (--force).",
-                headless="Recording with an incomplete rig (pass --force to silence this).",
+                headless=(
+                    "Recording with an incomplete rig (pass --force to silence this)."
+                ),
             )
         if Path(settings.save_dir).exists():
             _confirm_gate(
@@ -218,7 +247,9 @@ def record(
             )
             # No GUI posts plugin_params here: without a start slice triggerbox
             # never arms and its cameras wait forever for a trigger.
-            plugin_params = plugins.default_start_params(settings.fps, settings.duration_s)
+            plugin_params = plugins.default_start_params(
+                settings.fps, settings.duration_s
+            )
             result = controller.start_recording(
                 confirm_overwrite=True, plugin_params=plugin_params or None
             )

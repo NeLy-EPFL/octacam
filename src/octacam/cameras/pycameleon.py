@@ -1,10 +1,10 @@
 """pycameleon backend: USB3 Vision over libusb, the cascade's always-present floor.
 
-pycameleon (a PyO3 binding of the Rust ``cameleon`` crate) needs no vendor SDK,
+pycameleon (a PyO3 binding of the Rust `cameleon` crate) needs no vendor SDK,
 so it is a core dependency. It exposes node values only (no bounds, units or
 writability) and no frame timestamp, so its frames are host-clocked. It borrows
-the camera exclusively: ``execute`` on one thread while ``receive`` runs on
-another raises "Already borrowed", so every device call holds ``_lock``.
+the camera exclusively: `execute` on one thread while `receive` runs on
+another raises "Already borrowed", so every device call holds `_lock`.
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 
-from octacam.cameras.base import BackendError, FeatureInfo, Frame
+from octacam.cameras.base import BackendError, FeatureInfo, Frame, coerce_float
 from octacam.cameras.genicam import GenICamBackend
 from octacam.cameras.registry import BackendSpec, BackendUnavailable, select_serials
 
@@ -183,7 +183,7 @@ class PycameleonBackend(GenICamBackend):
         if name not in _CURATED:
             raise BackendError(f"{name} is not editable on this backend")
         kind = _CURATED[name][0]
-        number = float(value)  # type: ignore[arg-type]
+        number = coerce_float(value)
         self.set_node(name, kind, int(number) if kind == "int" else number)
 
     def execute_command(self, name: str) -> None:
@@ -219,8 +219,12 @@ class PycameleonBackend(GenICamBackend):
                 self._receiver = None
 
     def _streaming(self) -> bool:
-        """A live grab with a receiver (caller holds ``_lock``)."""
-        return self.trigger.grabbing and self._receiver is not None and self._cam is not None
+        """A live grab with a receiver (caller holds `_lock`)."""
+        return (
+            self.trigger.grabbing
+            and self._receiver is not None
+            and self._cam is not None
+        )
 
     def retrieve(
         self, timeout_ms: int, wants_array: Callable[[], bool]
@@ -257,7 +261,7 @@ class PycameleonBackend(GenICamBackend):
         return self._frame(array, wants_array, answers_trigger)
 
     def _receive(self, timeout_ms: int, answers_trigger: bool):
-        """The next payload under ``_lock``, or None (timed out, or rejected)."""
+        """The next payload under `_lock`, or None (timed out, or rejected)."""
         with self._lock:
             if not self._streaming():
                 return None
@@ -274,7 +278,7 @@ class PycameleonBackend(GenICamBackend):
     def _frame(
         self, array, wants_array: Callable[[], bool], answers_trigger: bool
     ) -> Frame | None:
-        """A received payload as an owned frame, off ``_lock``."""
+        """A received payload as an owned frame, off `_lock`."""
         if array is None:
             return None  # timed out; the grab loop re-checks the stop flag
         if answers_trigger:
@@ -283,11 +287,11 @@ class PycameleonBackend(GenICamBackend):
         return (out, 0)
 
     def _receive_bounded(self, timeout_ms: int):
-        """The next frame, or None after ``timeout_ms``.
+        """The next frame, or None after `timeout_ms`.
 
-        pycameleon's ``receive()`` has no timeout: a lost frame or an unplug
-        would park the grab thread in it forever, holding ``_lock`` and wedging
-        stop and close. Grab thread only, under ``_lock``, so the reused event
+        pycameleon's `receive()` has no timeout: a lost frame or an unplug
+        would park the grab thread in it forever, holding `_lock` and wedging
+        stop and close. Grab thread only, under `_lock`, so the reused event
         loop is single-threaded.
         """
         loop = self._recv_loop
@@ -301,7 +305,7 @@ class PycameleonBackend(GenICamBackend):
             return loop.run_until_complete(
                 asyncio.wait_for(_await_frame(), max(timeout_ms, 0) / 1000.0)
             )
-        except (TimeoutError, asyncio.TimeoutError):  # distinct before Python 3.11
+        except TimeoutError:  # distinct before Python 3.11
             return None
 
 
@@ -316,7 +320,7 @@ def _read_serial(cam) -> str:
 
 
 def read_model(cam) -> str | None:
-    """Best-effort model name from ``info()``, read without opening (for doctor)."""
+    """Best-effort model name from `info()`, read without opening (for doctor)."""
     try:
         info = cam.info()
         model = info.get("model_name") if isinstance(info, dict) else None
@@ -326,7 +330,7 @@ def read_model(cam) -> str | None:
 
 
 def enumerate_pycameleon(requested_serials: list[str] | None = None):
-    """``[(serial, PyCameleonCamera)]`` in :func:`select_serials` order."""
+    """`[(serial, PyCameleonCamera)]` in `select_serials` order."""
     p = _pycameleon()
     cams = p.enumerate_cameras()
     if not cams:

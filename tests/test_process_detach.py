@@ -1,5 +1,6 @@
 """CLI surface for detached processing: `process --detach`, `octacam jobs`, pause,
-and the gui shutdown-and-process hand-off."""
+and the gui shutdown-and-process hand-off.
+"""
 
 from pathlib import Path
 
@@ -85,21 +86,31 @@ def test_jobs_attach_no_jobs(cache_dir):
 
 
 def test_jobs_cancel_delegates(cache_dir, monkeypatch):
-    pj.write_status(pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1))
+    pj.write_status(
+        pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1)
+    )
     monkeypatch.setattr(pj, "is_live", lambda jd: True)  # make it "live" for resolve
     called = {}
-    monkeypatch.setattr(pj, "cancel", lambda job: called.setdefault("id", job.job_id) or True)
+    monkeypatch.setattr(
+        pj, "cancel", lambda job: called.setdefault("id", job.job_id) or True
+    )
     result = runner.invoke(app, ["jobs", "cancel", "live"])
     assert result.exit_code == 0
     assert called["id"] == "live"
 
 
 def test_jobs_pause_resume_delegate(cache_dir, monkeypatch):
-    pj.write_status(pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1))
+    pj.write_status(
+        pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1)
+    )
     monkeypatch.setattr(pj, "is_live", lambda jd: True)
     seen = []
-    monkeypatch.setattr(pj, "pause", lambda job: seen.append(("pause", job.job_id)) or True)
-    monkeypatch.setattr(pj, "resume", lambda job: seen.append(("resume", job.job_id)) or True)
+    monkeypatch.setattr(
+        pj, "pause", lambda job: seen.append(("pause", job.job_id)) or True
+    )
+    monkeypatch.setattr(
+        pj, "resume", lambda job: seen.append(("resume", job.job_id)) or True
+    )
     assert runner.invoke(app, ["jobs", "pause", "live"]).exit_code == 0
     assert runner.invoke(app, ["jobs", "resume", "live"]).exit_code == 0
     assert seen == [("pause", "live"), ("resume", "live")]
@@ -121,7 +132,9 @@ def test_jobs_control_failures(cache_dir, monkeypatch, verb, message):
     assert unknown.exit_code == 1
     assert "No such live job." in unknown.output
 
-    pj.write_status(pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1))
+    pj.write_status(
+        pj.job_dir("live"), pj.JobStatus(job_id="live", state="running", pid=1)
+    )
     monkeypatch.setattr(pj, "is_live", lambda jd: True)
     monkeypatch.setattr(pj, verb, lambda job: False)
     refused = runner.invoke(app, ["jobs", verb, "live"])
@@ -217,7 +230,9 @@ def test_finish_gui_session_spawns_when_process_after(cache_dir, tmp_path, monke
 def test_finish_gui_session_prints_hints_when_not(cache_dir, monkeypatch):
     called = {"spawn": False, "hints": False}
     monkeypatch.setattr(pj, "spawn_detached", lambda **kw: called.update(spawn=True))
-    monkeypatch.setattr(gui, "_print_transcode_hints", lambda sid: called.update(hints=True))
+    monkeypatch.setattr(
+        gui, "_print_transcode_hints", lambda sid: called.update(hints=True)
+    )
     gui._finish_gui_session("sess1", Path("/cfg"), process_after=False)
     assert called == {"spawn": False, "hints": True}
 
@@ -227,7 +242,9 @@ def test_finish_gui_session_noop_without_recordings(cache_dir, monkeypatch):
 
     monkeypatch.setattr(session_cache, "session_folders", lambda sid: [])
     monkeypatch.setattr(
-        pj, "spawn_detached", lambda **kw: pytest.fail("must not spawn with no recordings")
+        pj,
+        "spawn_detached",
+        lambda **kw: pytest.fail("must not spawn with no recordings"),
     )
     # Must not raise.
     gui._finish_gui_session("sess1", Path("/cfg"), process_after=True)
