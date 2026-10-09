@@ -374,7 +374,7 @@
   <span class="md-ellipsis">
     
   
-    User Guide
+    Guide
   
 
     
@@ -390,7 +390,7 @@
             <span class="md-nav__icon md-icon"></span>
             
   
-    User Guide
+    Guide
   
 
           </label>
@@ -639,34 +639,6 @@
   
   
     <li class="md-nav__item">
-      <a href="../configuration/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Configuration
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
       <a href="../backends/" class="md-nav__link">
         
   
@@ -716,93 +688,6 @@
 
               
             
-          </ul>
-        </nav>
-      
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    
-    
-    
-    
-      
-        
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
-      
-        
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
-        
-          
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Reference
-  
-
-    
-  </span>
-  
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_5">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    Reference
-  
-
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../reference/cli/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    CLI reference
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
               
                 
   
@@ -834,6 +719,87 @@
           </ul>
         </nav>
       
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../citing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Citing and credits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -1016,7 +982,7 @@ options override only the day-to-day values:</p>
 <td>Duration in seconds (default: from config's <code>duration</code>/<code>duration_unit</code>).</td>
 </tr>
 <tr>
-<td><code>--output</code>, <code>-o</code></td>
+<td><code>--out</code>, <code>-o</code></td>
 <td>Save directory, overriding the templated location.</td>
 </tr>
 <tr>
@@ -1030,6 +996,14 @@ options override only the day-to-day values:</p>
 <tr>
 <td><code>--no-plugins</code></td>
 <td>Disable all plugins for this run.</td>
+</tr>
+<tr>
+<td><code>--set KEY=VALUE</code></td>
+<td>Override any config key for this take by its dotted path (<code>--set record.save_method=raw</code>); repeatable. <code>--fps</code>, <code>--duration</code> and <code>--out</code> win over it.</td>
+</tr>
+<tr>
+<td><code>-v</code>, <code>--verbose</code></td>
+<td>Debug messages, and a traceback on errors.</td>
 </tr>
 </tbody>
 </table>
@@ -1190,10 +1164,11 @@ series, one entry per <strong>video</strong> frame, keyed by camera name:</p>
 </tbody>
 </table>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"001-bhv/octacam_recording/timestamps.npz"</span><span class="p">)</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">ts</span> <span class="o">=</span> <span class="n">d</span><span class="p">[</span><span class="s2">"cam0/timestamp_ns"</span><span class="p">]</span>          <span class="c1"># nanoseconds</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">real</span> <span class="o">=</span> <span class="o">~</span><span class="n">d</span><span class="p">[</span><span class="s2">"cam0/dropped"</span><span class="p">]</span>            <span class="c1"># frames that are images of their own pulse</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">gaps_ms</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">ts</span><span class="p">[</span><span class="n">real</span><span class="p">])</span> <span class="o">/</span> <span class="mf">1e6</span>    <span class="c1"># inter-frame gaps between real frames</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="n">d</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="s2">"001-bhv/octacam_recording/timestamps.npz"</span><span class="p">)</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="n">ts</span> <span class="o">=</span> <span class="n">d</span><span class="p">[</span><span class="s2">"cam0/timestamp_ns"</span><span class="p">]</span>  <span class="c1"># nanoseconds</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="n">real</span> <span class="o">=</span> <span class="o">~</span><span class="n">d</span><span class="p">[</span><span class="s2">"cam0/dropped"</span><span class="p">]</span>  <span class="c1"># frames that are images of their own pulse</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="n">gaps_ms</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">diff</span><span class="p">(</span><span class="n">ts</span><span class="p">[</span><span class="n">real</span><span class="p">])</span> <span class="o">/</span> <span class="mf">1e6</span>  <span class="c1"># inter-frame gaps between real frames</span>
 </code></pre></div>
 <p>Where each camera's timestamps came from — hardware (the camera/SDK clock) or
 host wall-clock fallback — is recorded per camera as <code>timestamp_source</code> in
