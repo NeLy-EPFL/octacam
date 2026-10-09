@@ -43,6 +43,9 @@ jobs:
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
+      # The grid tests probe videos with ffprobe, which imageio-ffmpeg does not ship.
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Sync
         run: uv sync --locked
       - name: Type check
